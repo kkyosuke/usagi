@@ -33,8 +33,6 @@ v2 TUI の Home サイドバーで新規 session を作成（`+ new session` →
 - shell の `ui.creating_session: Option<PendingToken>`（`mod.rs:544`）は dispatch（`mod.rs:1618`）でセットされ drain（`mod.rs:1099`）で take されるが、**描画にも投影にも一切使われていない**（`removing_session` と非対称。`removing_session` は `project_controller_sessions` `mod.rs:1338` で `ProjectedSession.removing` に投影されるが、`creating_session` に対応する投影が無い）。
 - `HomeProjection::from_state`（`workspace.rs:235-289`）と `home.rows()`（`workspace.rs:372-381`）は `Root → session* → NewSession` だけを作り、pending 作成 skeleton 行を挿入しない。`home_row_lines_at`（`workspace.rs:1215-1290`）にも create skeleton 分岐が無い（`create_draft` inline 入力と `removing` のみ）。
 
-経緯: inline 作成仕様（#361）→ CreateSession modal（#315/#1055）→ inline へ revert（#1089）と作成 UI が変遷する中で、当初 inline 仕様にあった作成 skeleton wave の描画が落ちた。削除 wave（#1078）は別途 `removing` として実装されているため生き残った。
-
 # 実装方針（削除 wave と対称に shell 経路で）
 
 作成 skeleton は shell state `ui.creating_session` を情報源にする（lifecycle が正しい: dispatch でセット、`drain_session_completions` が完了時に take＝daemon が新 row を投影する瞬間にクリアされ、skeleton→実 row の atomic swap になる）。reducer の `state.pending` は legacy 経路では成功時に OperationResult が飛ばず clear されないため情報源に使わない。

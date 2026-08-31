@@ -282,7 +282,16 @@ fn mode_data_dir(base: &Path, mode: RuntimeMode) -> PathBuf {
 /// `<project_root>/.usagi/local`.
 #[must_use]
 pub fn project_data_dir(project_root: impl AsRef<Path>) -> PathBuf {
-    channel_data_dir(project_root.as_ref().join(STATE_DIR))
+    project_data_dir_for(project_root, runtime_mode())
+}
+
+/// Resolve the runtime-state directory for a project in an explicit mode.
+///
+/// Callers that already own a runtime channel (notably cross-process tests)
+/// use this instead of consulting the ambient process environment again.
+#[must_use]
+pub fn project_data_dir_for(project_root: impl AsRef<Path>, mode: RuntimeMode) -> PathBuf {
+    mode_data_dir(&project_root.as_ref().join(STATE_DIR), mode)
 }
 
 /// Resolve the workspace-scoped daemon fence node for `workspace_root`:
@@ -511,6 +520,14 @@ mod tests {
         let _guard = crate::test_support::process_env_guard();
         let expected = channel_data_dir("/project/.usagi");
         assert_eq!(project_data_dir("/project"), expected);
+        assert_eq!(
+            project_data_dir_for("/project", RuntimeMode::Local),
+            PathBuf::from("/project/.usagi/local")
+        );
+        assert_eq!(
+            project_data_dir_for("/project", RuntimeMode::Production),
+            PathBuf::from("/project/.usagi")
+        );
     }
 
     #[test]

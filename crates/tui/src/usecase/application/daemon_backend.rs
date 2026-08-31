@@ -534,10 +534,17 @@ impl DaemonBackend {
     /// covers both effect completions and cadence-driven observations.
     #[must_use]
     pub fn drain_events(&mut self) -> Vec<AppEvent> {
+        self.drain_events_bounded(usize::MAX)
+    }
+
+    /// Drain at most `limit` completions. Production frame loops use this
+    /// bounded form so a producer flood cannot starve input and painting.
+    #[must_use]
+    pub fn drain_events_bounded(&mut self, limit: usize) -> Vec<AppEvent> {
         let completions = self.completions();
         self.decisions.poll(&completions);
         self.overlay.poll(&completions);
-        self.completions_rx.try_iter().collect()
+        self.completions_rx.try_iter().take(limit).collect()
     }
 
     fn completions(&self) -> Completions {
@@ -837,6 +844,7 @@ mod tests {
     fn intent() -> SessionCreateIntent {
         SessionCreateIntent {
             name: "feature".to_owned(),
+            base_ref: None,
             profile: None,
             model: None,
             role_id: None,

@@ -46,6 +46,16 @@ pub enum DaemonRequest {
     /// standby. The old active drives the process-local admission barrier;
     /// clients only supply the durable operation identity.
     Rollover { operation_id: String },
+    /// Observe or explicitly release one workspace held by the live daemon.
+    /// This control surface is unbound because neither operation reads a
+    /// caller-selected workspace resource.
+    Tenant {
+        action: TenantAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        #[serde(default)]
+        force: bool,
+    },
     /// Revisioned daemon-owned PR inventory. Events are only hints; clients
     /// always converge by reading this snapshot.
     Pr {
@@ -99,10 +109,37 @@ pub enum DaemonRequest {
     /// Read the safe Agent runtime and interrupted-source inventory for one
     /// workspace. Root and managed-session records share this response.
     AgentInventory { workspace: WorkspaceId },
+    /// Read the same runtime inventory together with daemon-authoritative
+    /// per-session dispatch status. Process-level cross-project views use this
+    /// instead of treating a coarse live PTY as proof that dispatch is running.
+    AgentWorkspaceObservation { workspace: WorkspaceId },
+    /// Diagnose launch-time hook/MCP integration revisions against the invoking
+    /// binary without exposing rendered configuration or provider identity.
+    DiagnoseAgents {
+        workspace: WorkspaceId,
+        expected: Vec<crate::domain::agent::AgentIntegrationRevision>,
+    },
+    /// Stop only daemon-owned Agents whose launch-time integration is older
+    /// than the invoking binary. A reported running phase requires `force`;
+    /// generic terminals are never part of this operation.
+    RestartAgents {
+        workspace: WorkspaceId,
+        expected: Vec<crate::domain::agent::AgentIntegrationRevision>,
+        runtimes: Vec<crate::domain::id::AgentRuntimeRef>,
+        force: bool,
+    },
     /// Resume exactly one interrupted runtime selected from `AgentInventory`.
     ResumeAgent {
         operation_id: String,
         target: AgentResumeTarget,
+    },
+    /// Repair-only exact resume. The old revision still fences the retained
+    /// source, while the active daemon re-resolves hooks/MCP with its current
+    /// profile revision.
+    ResumeAgentWithCurrentIntegration {
+        operation_id: String,
+        target: AgentResumeTarget,
+        expected_revision: u32,
     },
     /// Immediately dispatch a prompt to one durable Agent.  Session creation
     /// and Agent launch remain daemon-owned; this request only names the
@@ -142,6 +179,30 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
+}
+
+/// Operations on the live daemon's in-memory tenant registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantAction {
+    Inventory,
+    Retire,
+}
+
+/// Safe, bounded status data for one workspace currently held by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantSummary {
+    pub root: String,
+    pub sessions: usize,
+    /// Runtime records which may still name a live process. Ownership-unknown
+    /// records are included so status never reports a false zero.
+    pub live_runtimes: usize,
+}
+
+/// The source-of-truth live tenant inventory, ordered by canonical root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantInventory {
+    pub tenants: Vec<TenantSummary>,
 }
 
 /// Opaque authentication presented by a daemon-provisioned MCP child.
@@ -229,6 +290,7 @@ pub enum DispatchToolAction {
     AgentComplete,
     AgentFail,
     AgentInbox,
+    AgentInboxAck,
     UserDecisionRequest,
     UserDecisionGet,
     UserDecisionList,
@@ -478,12 +540,8 @@ pub struct DispatchIntent {
 pub enum SessionAction {
     Create,
     Remove,
-    /// Explicitly starts a new Agent runtime for retained provider-native
-    /// conversation metadata. Startup/reconnect paths never issue this action.
-    ResumeAgent,
-    /// Explicitly validate and adopt legacy `state.json` sessions. This action
-    /// is never part of daemon startup or a normal session refresh.
-    RecoverLegacy,
+    /// Inspect or remove Git resources absent from daemon lifecycle state.
+    Clean,
     List,
     Status,
     Overview,
@@ -913,9 +971,9 @@ impl<S: Read + Write> IpcClient<S> {
             workspace: Some(workspace),
         });
         write_json_frame(&mut stream, &hello, 1_048_576)
-            .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+            .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?;
         match read_json_frame::<Bootstrap>(&mut stream, 1_048_576)
-            .map_err(|error| ClientError::Unavailable(error.to_string()))?
+            .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?
         {
             Some(Bootstrap::ServerHello(hello)) => {
                 if hello.connection_nonce != expected_nonce {
@@ -1011,6 +1069,25 @@ impl<S: Read + Write> IpcClient<S> {
     }
 }
 
+/// Describe a transport failure in terms an operator can act on.
+///
+/// A [`DeadlineStream`] reports an expired budget the way the OS does: the
+/// receive timeout surfaces as `WouldBlock` — `EAGAIN`, whose std rendering is
+/// "Resource temporarily unavailable (os error 35)" — and other paths as
+/// `TimedOut`. Passing either through verbatim names neither the daemon nor the
+/// deadline, so a lifecycle command could report `Unavailable: OwnershipUnknown:
+/// Unavailable: Resource temporarily unavailable (os error 35)` for the ordinary
+/// case of a daemon too busy to finish the handshake, leaving the operator with
+/// nothing to act on.
+fn transport_failure(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+            "the daemon did not answer within this connection's deadline".to_owned()
+        }
+        _ => error.to_string(),
+    }
+}
+
 fn verify_owner_binding(
     hello: &ServerHello,
     owner: &ExpectedOwner<'_>,
@@ -1056,10 +1133,10 @@ impl<S: Read + Write> DaemonClient for IpcClient<S> {
             },
         };
         write_json_frame(&mut self.stream, &envelope, 1_048_576)
-            .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+            .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?;
         loop {
             let response = read_json_frame::<Envelope>(&mut self.stream, 1_048_576)
-                .map_err(|error| ClientError::Unavailable(error.to_string()))?
+                .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?
                 .ok_or_else(|| {
                     ClientError::Unavailable("daemon closed while awaiting response".into())
                 })?;
@@ -1580,6 +1657,12 @@ impl RetryEligibility {
             | DaemonRequest::PrBatch { .. }
             | DaemonRequest::Metrics { .. }
             | DaemonRequest::AgentInventory { .. }
+            | DaemonRequest::AgentWorkspaceObservation { .. }
+            | DaemonRequest::DiagnoseAgents { .. }
+            | DaemonRequest::Tenant {
+                action: TenantAction::Inventory,
+                ..
+            }
             // Resolving a durable input operation only reads the daemon's
             // ledger, so a lost response is safely re-read on a fresh
             // connection. Every other terminal action stays fail-closed below.
@@ -1624,8 +1707,14 @@ impl RetryEligibility {
             DaemonRequest::Rollover { .. }
             | DaemonRequest::Agent { .. }
             | DaemonRequest::ResumeAgent { .. }
+            | DaemonRequest::ResumeAgentWithCurrentIntegration { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
             DaemonRequest::PrDismiss { .. }
+            | DaemonRequest::Tenant {
+                action: TenantAction::Retire,
+                ..
+            }
+            | DaemonRequest::RestartAgents { .. }
             | DaemonRequest::Terminal { .. }
             | DaemonRequest::CodexSessionCapture { .. }
             | DaemonRequest::AgentPhaseReport { .. }
@@ -1656,13 +1745,10 @@ const fn session_action_is_read_only(action: SessionAction) -> bool {
 
 const fn session_action_is_durable_operation(action: SessionAction) -> bool {
     // The IPC contract documents durable, `OperationId`-keyed replay for these
-    // lifecycle mutations (create/remove/resume across daemon restarts). Other
+    // lifecycle mutations (create/remove across daemon restarts). Other
     // mutating actions stay fail-closed until their server-backed durable
     // contract is proven.
-    matches!(
-        action,
-        SessionAction::Create | SessionAction::Remove | SessionAction::ResumeAgent
-    )
+    matches!(action, SessionAction::Create | SessionAction::Remove)
 }
 
 const fn supervisor_action_is_read_only(action: SupervisorToolAction) -> bool {
@@ -2574,6 +2660,27 @@ mod tests {
         ));
     }
 
+    /// A deadline-bounded connection reports an expired budget the way the OS
+    /// does. On the receive timeout that is `EAGAIN`, whose std rendering —
+    /// "Resource temporarily unavailable (os error 35)" — names neither the
+    /// daemon nor the deadline, so an operator cannot tell a busy daemon from a
+    /// broken socket.
+    #[test]
+    fn an_expired_connection_deadline_reads_as_a_deadline_not_an_errno() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            let message = transport_failure(&io::Error::from(kind));
+            assert_eq!(
+                message,
+                "the daemon did not answer within this connection's deadline"
+            );
+            assert!(!message.contains("os error"), "{message}");
+        }
+        // Every other transport failure already says what happened, so it keeps
+        // its own wording: only the deadline was ambiguous.
+        let refused = io::Error::new(io::ErrorKind::ConnectionRefused, "no listener");
+        assert_eq!(transport_failure(&refused), "no listener");
+    }
+
     #[test]
     fn request_maps_transport_failures_to_unavailable() {
         let protocol = ProtocolVersion {
@@ -2945,6 +3052,11 @@ mod deadline_and_retry_tests {
         use RetryEligibility::{DurableOperation, NoCrossConnectionEvidence, ReadOnly};
         let session_payload = || serde_json::json!({});
         let read_only = [
+            DaemonRequest::Tenant {
+                action: TenantAction::Inventory,
+                root: None,
+                force: false,
+            },
             DaemonRequest::Pr {
                 action: PrAction::Snapshot,
                 payload: PrRequest {
@@ -2958,6 +3070,9 @@ mod deadline_and_retry_tests {
             DaemonRequest::AgentInventory {
                 workspace: WorkspaceId::new(),
             },
+            DaemonRequest::AgentWorkspaceObservation {
+                workspace: WorkspaceId::new(),
+            },
             DaemonRequest::Session {
                 action: SessionAction::List,
                 operation_id: String::new(),
@@ -2965,6 +3080,12 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::AgentList,
+                operation_id: String::new(),
+                payload: session_payload(),
+                caller_context: None,
+            },
+            DaemonRequest::DispatchTool {
+                action: DispatchToolAction::AgentInbox,
                 operation_id: String::new(),
                 payload: session_payload(),
                 caller_context: None,
@@ -3026,6 +3147,11 @@ mod deadline_and_retry_tests {
         }
 
         let ineligible = [
+            DaemonRequest::Tenant {
+                action: TenantAction::Retire,
+                root: Some("/workspace".into()),
+                force: true,
+            },
             DaemonRequest::Session {
                 action: SessionAction::Prompt,
                 operation_id: "op".into(),
@@ -3033,6 +3159,12 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::AgentComplete,
+                operation_id: "op".into(),
+                payload: session_payload(),
+                caller_context: None,
+            },
+            DaemonRequest::DispatchTool {
+                action: DispatchToolAction::AgentInboxAck,
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,

@@ -1,14 +1,14 @@
- USAGI > atlas            switch   closeup  [ ♛ Director ]
+             switch   closeup  [ ⌂ Shell ]  [ ♛ Director ]
 
-󰤇 alpha  ·                          │ alpha
+󰤇 alpha                             │ alpha
 | now            ↑2 ↓0 + 15 -  3    │
 |  —                               │
-  beta  ·                           │        (\(\
+  beta                              │        (\(\
   now            ↑0 ↓1 +  4 - 40    │        (='-')
    —                               │       o(_(")(")
   + new session                     │
-  (\(\                              │No tabs stirring yet. …
+  (\(\                              │a: agent / t: terminal…
   (o.o)?                            │
  o(_(")(")                          │
 
-[switch] ↑↓ select / Enter closeup   [Switch] preview pane
+[switch] ←→ project / ↑↓ select / E… [Switch] preview pane

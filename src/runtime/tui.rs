@@ -1,6 +1,6 @@
 //! TUI 面へ実端末と filesystem を接続する composition adapter。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -20,7 +20,10 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
+use usagi_core::domain::agent::{
+    AgentIntegrationDiagnosis, AgentIntegrationRevision, AgentInventory, AgentProfileId,
+    AgentResumeTarget, ProviderResumeProjection, ProviderResumeReason,
+};
 use usagi_core::domain::id::{SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
@@ -822,16 +825,91 @@ impl BackendOverlayPort for ProductionOverlayPort {
     }
 }
 
-struct ProductionWorkspaceCommands;
+struct ProductionWorkspaceCommands {
+    workspace: WorkspaceId,
+    root: PathBuf,
+}
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
-    fn execute(&mut self, _: WorkspaceId, command: overview::Command, completions: Completions) {
-        completions.emit(
-            usagi_tui::usecase::application::controller::AppEvent::Backend(BackendEvent::Notice(
-                Notice::new(format!("{} is not available", command.name())),
-            )),
-        );
+    fn execute(
+        &mut self,
+        workspace: WorkspaceId,
+        command: overview::Command,
+        completions: Completions,
+    ) {
+        let overview::Command::Clean { arguments } = command else {
+            completions.emit(
+                usagi_tui::usecase::application::controller::AppEvent::Backend(
+                    BackendEvent::Notice(Notice::new(format!(
+                        "{} is not available",
+                        command.name()
+                    ))),
+                ),
+            );
+            return;
+        };
+        let Ok(clean) = overview::parse_clean(&arguments) else {
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                "invalid clean arguments",
+            ))));
+            return;
+        };
+        let expected = self.workspace;
+        let root = self.root.clone();
+        if workspace != expected {
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                "clean target is no longer active",
+            ))));
+            return;
+        }
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let mut client = crate::runtime::daemon::policy_client_for_selected_workspace(
+                    ClientPolicy::tui(),
+                    &root,
+                )
+                .map_err(|error| format!("daemon unavailable: {error}"))?;
+                let reply = client
+                    .request(DaemonRequest::Session {
+                        action: SessionAction::Clean,
+                        operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                        payload: serde_json::json!({
+                            "apply": clean.apply,
+                            "force": clean.force,
+                        }),
+                    })
+                    .map_err(daemon_error_reason)?;
+                let body = match reply {
+                    DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+                };
+                let candidates = body
+                    .get("candidates")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len)
+                    .ok_or_else(|| "daemon returned an invalid clean result".to_owned())?;
+                let removed = body
+                    .get("removed")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| "daemon returned an invalid clean result".to_owned())?;
+                let protected = body
+                    .get("protected")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| "daemon returned an invalid clean result".to_owned())?;
+                Ok(if clean.apply {
+                    format!("Cleaned {removed} orphan resource(s); {protected} protected")
+                } else if candidates == 0 {
+                    "No orphan session resources found".to_owned()
+                } else {
+                    format!(
+                        "Found {candidates} orphan resource(s); run clean --apply to remove safe candidates"
+                    )
+                })
+            })();
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                result.unwrap_or_else(|error| format!("Clean failed: {error}")),
+            ))));
+        });
     }
 }
 
@@ -900,7 +978,10 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             Box::new(host.clone()),
             Box::new(host),
             Box::new(store),
-            Box::new(ProductionWorkspaceCommands),
+            Box::new(ProductionWorkspaceCommands {
+                workspace: snapshot.workspace_id,
+                root: snapshot.workspace.path.clone(),
+            }),
         )
         .with_decisions(Box::new(ProductionDecisionPort {
             daemon: DaemonDecisionCommandPort,
@@ -953,6 +1034,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
                     .with_restore_connection(restore_publisher),
             ),
             restore_connection: Box::new(restore_connection),
+            garden_inventory: Box::new(DaemonGardenInventoryPort),
             agent_tab_intents: Box::new(UserAgentTabIntentPort::new()),
             external_terminal: Box::new(PlatformExternalTerminalPort {
                 reaper: self.helper_reaper.clone(),
@@ -1112,8 +1194,8 @@ impl MetricsPort for DaemonMetricsPort {
 /// connection that attached it, so attach, poll and input must share it.
 /// Native-terminal launcher kept independent from daemon terminal streaming.
 ///
-/// This mirrors v1's detached platform launcher: `terminal new` must still
-/// work while an embedded terminal's daemon port is owned by a launch worker.
+/// `terminal new` must remain available while an embedded terminal's daemon
+/// port is owned by a launch worker.
 struct PlatformExternalTerminalPort {
     reaper: PlatformChildReaper,
 }
@@ -1890,6 +1972,59 @@ fn agent_inventory_request(workspace: WorkspaceId) -> DaemonRequest {
     DaemonRequest::AgentInventory { workspace }
 }
 
+/// Read one workspace's safe Agent inventory over a per-request daemon client.
+///
+/// The workspace is the request's own argument rather than the connection's
+/// binding: a daemon answers it from the records of whichever workspace was
+/// named, which is what lets the Garden observe the *other* open projects
+/// without a resident controller for each of them.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=daemon_terminal_decode_and_reconnect_contract
+fn fetch_agent_inventory(
+    workspace: WorkspaceId,
+) -> Result<usagi_core::domain::agent::AgentInventory, String> {
+    let mut client =
+        crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
+            .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+    match client
+        .request(agent_inventory_request(workspace))
+        .map_err(|_| "Agent resume inventory is unavailable".to_owned())?
+    {
+        DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => serde_json::from_value(body)
+            .map_err(|_| "daemon returned an invalid Agent inventory".to_owned()),
+    }
+}
+
+/// The Garden's read-only lane over the other open projects.
+///
+/// It holds no connection of its own between rounds: one round is a handful of
+/// per-request clients, which is why an observation that finds no daemon costs
+/// nothing but the failed connect it already backs off from.
+struct DaemonGardenInventoryPort;
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=cli_tui_pty
+impl presentation::GardenInventoryPort for DaemonGardenInventoryPort {
+    fn inventory(
+        &mut self,
+        workspace: WorkspaceId,
+    ) -> Result<usagi_core::domain::agent::AgentWorkspaceObservation, String> {
+        let mut client =
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        match client
+            .request(
+                usagi_core::usecase::client::DaemonRequest::AgentWorkspaceObservation { workspace },
+            )
+            .map_err(|_| "Agent workspace observation is unavailable".to_owned())?
+        {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                serde_json::from_value(body).map_err(|_| {
+                    "daemon returned an invalid Agent workspace observation".to_owned()
+                })
+            }
+        }
+    }
+}
+
 fn exact_agent_resume_request(
     operation_id: usagi_core::domain::id::OperationId,
     target: usagi_core::domain::agent::AgentResumeTarget,
@@ -2062,43 +2197,35 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=structured_codex_identity_enables_one_explicit_new_runtime_resume
     fn resume(
         &mut self,
-        _workspace: WorkspaceId,
+        workspace: WorkspaceId,
         session: usagi_core::domain::id::SessionId,
         operation_id: usagi_core::domain::id::OperationId,
     ) -> Result<AgentPaneAdmission, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        match client
-            .request(DaemonRequest::Session {
-                action: SessionAction::ResumeAgent,
-                operation_id: operation_id.to_string(),
-                payload: serde_json::json!({"session_id": session}),
-            })
-            .map_err(|_| "provider resume failed; inspect session status".to_owned())?
-        {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
-                decode_agent_admission(&body, "provider resume")
-            }
+        let inventory = self.resume_inventory(workspace)?;
+        let mut targets = inventory.resumable.into_iter().filter_map(|item| {
+            item.available
+                .then_some(item.target)
+                .flatten()
+                .filter(|target| target.session_id == Some(session))
+        });
+        let target = targets
+            .next()
+            .ok_or_else(|| "no exact Agent resume target is available".to_owned())?;
+        if targets.next().is_some() {
+            return Err("multiple exact Agent resume targets are available".to_owned());
         }
+        let resumed = self.resume_exact(target, operation_id)?;
+        Ok(AgentPaneAdmission {
+            terminal: resumed.terminal,
+            continuation: resumed.continuation,
+        })
     }
 
     fn resume_inventory(
         &mut self,
         workspace: WorkspaceId,
     ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        match client
-            .request(agent_inventory_request(workspace))
-            .map_err(|_| "Agent resume inventory is unavailable".to_owned())?
-        {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
-                serde_json::from_value(body)
-                    .map_err(|_| "daemon returned an invalid Agent inventory".to_owned())
-            }
-        }
+        fetch_agent_inventory(workspace)
     }
 
     fn resume_exact(
@@ -3189,10 +3316,17 @@ impl SessionCommandPort for DaemonSessionCommandPort {
         command: SessionCommand,
     ) -> Result<SessionCommandResult, String> {
         let (action, payload) = match command {
-            SessionCommand::Create { name, role_id } => (
-                SessionAction::Create,
-                serde_json::json!({"name": name, "role": role_id}),
-            ),
+            SessionCommand::Create {
+                name,
+                role_id,
+                base_ref,
+            } => {
+                let mut payload = serde_json::json!({"name": name, "role": role_id});
+                if let Some(base_ref) = base_ref {
+                    payload["base_ref"] = serde_json::json!(base_ref);
+                }
+                (SessionAction::Create, payload)
+            }
             SessionCommand::List => (SessionAction::List, serde_json::json!({})),
             SessionCommand::Overview => (SessionAction::Overview, serde_json::json!({})),
             SessionCommand::Resume { .. } => {
@@ -3325,6 +3459,19 @@ impl LifecycleRequestError {
         }
     }
 
+    /// Whether the daemon could not be reached at all, as opposed to answering.
+    ///
+    /// Only this case is worth keeping an entry screen open for: the same
+    /// workspace becomes openable again once a daemon answers, so the switcher
+    /// shows the reason and stays up. A decode failure or a typed error means the
+    /// daemon *did* answer, and waiting does not change the outcome.
+    fn is_daemon_unreachable(&self) -> bool {
+        match self {
+            Self::Connect(error) | Self::Request(error) => error.is_transport_failure(),
+            Self::Decode(_) => false,
+        }
+    }
+
     /// The workspace-fence refusal behind this failure, if the daemon answered
     /// that it does not serve the workspace this client declared.
     fn workspace_refusal(&self) -> Option<&usagi_core::infrastructure::ipc::ProtocolError> {
@@ -3381,6 +3528,14 @@ fn workspace_open_error(error: LifecycleRequestError, opened: &Path) -> std::io:
             ),
         );
     }
+    // An unreachable daemon is tagged so entry screens can keep the TUI up and
+    // show the reason instead of collapsing to the shell
+    // (`usagi_tui::usecase::application::open_failure_notice`). A daemon that
+    // answered — with a decode failure or a typed error — is not this case: the
+    // workspace is not openable for a reason waiting will not fix.
+    if error.is_daemon_unreachable() {
+        return std::io::Error::new(std::io::ErrorKind::NotConnected, error.reason());
+    }
     io_error(error.reason())
 }
 
@@ -3436,6 +3591,10 @@ impl PersistentSettingsPort {
 }
 
 impl SettingsPort for PersistentSettingsPort {
+    fn background_operations(&self) -> bool {
+        true
+    }
+
     fn select_workspace(&mut self, workspace_root: &Path) -> std::io::Result<()> {
         self.workspace = Some(WorkspaceSettingsStore::new(workspace_root));
         Ok(())
@@ -3652,12 +3811,17 @@ fn terminal_copy_key(input: &LiveInput) -> Option<Key> {
             && !key.modifiers.hyper
             && !key.modifiers.meta
     };
+    // `adapt_key` canonicalizes a shifted ASCII letter to uppercase. Linux's
+    // native copy chord includes Shift, while terminals that already resolve
+    // the character can still supply lowercase. Keep the character spelling
+    // protocol-independent without relaxing the platform modifier contract.
+    let copy_character = matches!(key.code, KeyCode::Char('c' | 'C'));
     #[cfg(target_os = "macos")]
-    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(false, false, true);
+    let matches_copy = copy_character && only(false, false, true);
     #[cfg(target_os = "windows")]
-    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(true, false, false);
+    let matches_copy = copy_character && only(true, false, false);
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(true, true, false);
+    let matches_copy = copy_character && only(true, true, false);
 
     #[cfg(target_os = "windows")]
     let fallback = vec![3];
@@ -3706,7 +3870,7 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     }
     // Ctrl-A / Ctrl-E become semantic caret keys. A focused text field reads
     // them as emacs line-start / line-end; the reducer's navigation branch maps
-    // `LineStart` back to the reserved `+ new session` action (IME-safe #287),
+    // `LineStart` back to the reserved `+ new session` action (IME-safe),
     // and `key_to_terminal_bytes` still forwards U+0001 / U+0005 to a focused
     // shell. `Home` / `End` carry the same split without the control modifier.
     if (key.modifiers.control && key.code == KeyCode::Char('a'))
@@ -3814,6 +3978,7 @@ fn load_workspace_state(
 struct FsWorkspaceLoader {
     storage: Storage,
     create_completion: Option<mpsc::Receiver<WorkspaceCreateCompletion>>,
+    registry_refresh_completion: Option<mpsc::Receiver<std::io::Result<Vec<Workspace>>>>,
 }
 
 impl FsWorkspaceLoader {
@@ -3821,6 +3986,7 @@ impl FsWorkspaceLoader {
         Self {
             storage,
             create_completion: None,
+            registry_refresh_completion: None,
         }
     }
 
@@ -3835,28 +4001,11 @@ impl FsWorkspaceLoader {
             .initialize(&LocalSettings::from(&defaults))
             .map_err(io_error)
     }
-}
 
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_screen_graph_workspace_loader_contract
-impl WorkspaceLoader for FsWorkspaceLoader {
-    fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
-        validate_workspace_directory(path)?;
-        // Declare the workspace being opened before anything else touches the
-        // daemon: a daemon that serves another workspace then refuses this
-        // connection instead of answering with its own sessions, and a cold start
-        // binds the workspace being opened rather than this process's directory.
-        // The refusal lands before any registry write or recent-list update, so a
-        // workspace that cannot be shown is not recorded as opened either.
-        let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
-        let lifecycle =
-            request_lifecycle_snapshot().map_err(|error| workspace_open_error(error, &opened))?;
-        let workspace =
-            workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
-        // New workspaces copy Global's Agent / Issue / Memory defaults. For a
-        // pre-existing registration from before workspace settings existed,
-        // the first open performs the same one-time initialization. The store
-        // never overwrites an existing workspace file.
-        self.initialize_workspace_settings(&workspace.path)?;
+    fn runtime_snapshot(
+        workspace: Workspace,
+        lifecycle: LifecycleSnapshot,
+    ) -> std::io::Result<WorkspaceSnapshot> {
         let mut state = load_workspace_state(&workspace.path)?;
         let workspace_id = lifecycle.workspace_id;
         // Identities align with the listed rows (`project` lists the same set),
@@ -3875,6 +4024,116 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             lifecycle.agent_resumes,
             session_lifecycles,
         ))
+    }
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_screen_graph_workspace_loader_contract
+impl WorkspaceLoader for FsWorkspaceLoader {
+    fn background_operations(&self) -> bool {
+        true
+    }
+
+    fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
+        let path = resolve_workspace_path(path)?;
+        let previous = crate::runtime::daemon::opened_workspace();
+        // Declare the workspace being opened before anything else touches the
+        // daemon: a running multi-tenant daemon selects or adopts this exact
+        // workspace instead of answering with another tenant's sessions, and a
+        // cold start binds the workspace being opened rather than this process's directory.
+        // The refusal lands before any registry write or recent-list update, so a
+        // workspace that cannot be shown is not recorded as opened either.
+        let opened = crate::runtime::daemon::declare_opened_workspace(&path)?;
+        let result = (|| {
+            let lifecycle = request_lifecycle_snapshot()
+                .map_err(|error| workspace_open_error(error, &opened))?;
+            let workspace =
+                workspace_usecase::open(&self.storage, &path, Utc::now()).map_err(io_error)?;
+            // New workspaces copy Global's Agent / Issue / Memory defaults. For a
+            // pre-existing registration from before workspace settings existed,
+            // the first open performs the same one-time initialization. The store
+            // never overwrites an existing workspace file.
+            self.initialize_workspace_settings(&workspace.path)?;
+            Self::runtime_snapshot(workspace, lifecycle)
+        })();
+        if result.is_err()
+            && let Some(previous) = previous
+        {
+            let _ = crate::runtime::daemon::declare_opened_workspace(&previous);
+        }
+        result
+    }
+
+    fn refresh(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
+        validate_workspace_directory(path)?;
+        let previous = crate::runtime::daemon::opened_workspace();
+        let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
+        let result = (|| {
+            let lifecycle = request_lifecycle_snapshot()
+                .map_err(|error| workspace_open_error(error, &opened))?;
+            let workspace = self
+                .storage
+                .load_workspaces()
+                .map_err(io_error)?
+                .into_iter()
+                .find(|workspace| workspace.path == path)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("workspace is no longer registered: {}", path.display()),
+                    )
+                })?;
+            Self::runtime_snapshot(workspace, lifecycle)
+        })();
+        // Refresh is observational: selecting an inactive Garden cache must not
+        // change which workspace subsequent production ports belong to.
+        if let Some(previous) = previous {
+            let _ = crate::runtime::daemon::declare_opened_workspace(&previous);
+        }
+        result
+    }
+
+    fn record_unite(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
+        workspace_usecase::touch_unite(&self.storage, paths, Utc::now()).map_err(io_error)
+    }
+
+    fn dispatch_registry_refresh(&mut self) -> std::io::Result<bool> {
+        if self.registry_refresh_completion.is_some() {
+            return Ok(false);
+        }
+        let storage_dir = self.storage.dir().to_path_buf();
+        let (completion_tx, completion_rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("workspace-registry-refresh".to_owned())
+            .spawn(move || {
+                let result = Storage::new(storage_dir)
+                    .load_workspaces()
+                    .map_err(io_error);
+                let _ = completion_tx.send(result);
+            })
+            .map_err(io_error)?;
+        self.registry_refresh_completion = Some(completion_rx);
+        Ok(true)
+    }
+
+    fn take_registry_refresh(&mut self) -> Option<std::io::Result<Vec<Workspace>>> {
+        let receiver = self.registry_refresh_completion.as_ref()?;
+        match receiver.try_recv() {
+            Ok(completion) => {
+                self.registry_refresh_completion = None;
+                Some(completion)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.registry_refresh_completion = None;
+                Some(Err(io_error(
+                    "workspace registry refresh stopped unexpectedly",
+                )))
+            }
+        }
+    }
+
+    fn activate_prepared(&mut self, path: &Path) -> std::io::Result<()> {
+        crate::runtime::daemon::declare_opened_workspace(path).map(|_| ())
     }
 
     fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
@@ -3919,16 +4178,18 @@ impl WorkspaceLoader for FsWorkspaceLoader {
                                 (workspace_usecase::NewWorkspaceKind::Existing, path)
                             }
                         };
+                    let probe = probe_path(target);
+                    let resolved_existing = (kind == workspace_usecase::NewWorkspaceKind::Existing
+                        && probe == workspace_usecase::WorkspaceProbe::Directory)
+                        .then(|| resolve_workspace_path(target))
+                        .transpose()?;
+                    let registry_target = resolved_existing.as_deref().unwrap_or(target);
                     let registered = workspace_usecase::is_registered(
                         &loader.storage.load_workspaces().map_err(io_error)?,
-                        target,
+                        registry_target,
                     );
-                    workspace_usecase::preflight_new_workspace(
-                        kind,
-                        registered,
-                        probe_path(target),
-                    )
-                    .map_err(|error| io_error(error.message()))?;
+                    workspace_usecase::preflight_new_workspace(kind, registered, probe)
+                        .map_err(|error| io_error(error.message()))?;
 
                     let path = match &effect.request {
                         NewRequest::Clone {
@@ -3950,10 +4211,13 @@ impl WorkspaceLoader for FsWorkspaceLoader {
                             git_clone(&SystemGit, parent, repository, directory, branch.as_deref())
                                 .map_err(io_error)?
                         }
-                        NewRequest::Existing { path, name } => {
-                            workspace_usecase::register(&loader.storage, path, name, Utc::now())
+                        NewRequest::Existing { name, .. } => {
+                            let path = resolved_existing.ok_or_else(|| {
+                                io_error("existing workspace path could not be resolved")
+                            })?;
+                            workspace_usecase::register(&loader.storage, &path, name, Utc::now())
                                 .map_err(io_error)?;
-                            path.clone()
+                            path
                         }
                     };
                     // Both modes finish through the same snapshot path as Open.
@@ -4066,7 +4330,11 @@ fn run_in_terminal(
 }
 
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
-fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()> {
+fn launch_screen_graph(
+    out: &mut dyn Write,
+    start: Start,
+    notice: Option<String>,
+) -> std::io::Result<()> {
     let now = Utc::now();
     // Capture once before raw mode and retain it across Config reopens and
     // workspace leave/entry transitions for this process.
@@ -4079,13 +4347,16 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let mut backend_factory = ProductionBackendFactory::default();
         let mut splash = presentation::StartupSplash::new();
         run_in_terminal(|terminal| {
-            if start == Start::Welcome {
+            // A graph opened to carry a notice is already the user's second
+            // frame: they asked for a workspace and are being told why it is not
+            // on screen, so the splash would only delay that answer.
+            if start == Start::Welcome && notice.is_none() {
                 splash.play(terminal)?;
             }
             // The graph resolves "leave this workspace" into its own Welcome
             // screen, so it only returns when the process is ending. The
             // splash therefore plays once per launch, not once per Welcome.
-            presentation::run_screen_graph_with_backend(
+            presentation::run_screen_graph_with_backend_and_notice(
                 terminal,
                 workspaces,
                 recent,
@@ -4095,6 +4366,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                 &mut settings,
                 &mut backend_factory,
                 available_models,
+                notice,
             )
         })?;
     } else {
@@ -4242,20 +4514,68 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     // Direct entry and its later Welcome graph share one immutable snapshot.
     let available_models = available_agent_models();
     let mut loader = FsWorkspaceLoader::open_default()?;
-    let snapshot = loader.open(path)?;
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let mut settings = PersistentSettingsPort::open()?;
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    if interactive {
         let mut backend_factory = ProductionBackendFactory::default();
         run_in_terminal(|terminal| {
+            let snapshot = match presentation::open_workspace_responsive(
+                terminal,
+                &mut loader,
+                path,
+                "Opening workspace…",
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        let (workspaces, recent) =
+                            load_screen_graph_data(&loader.storage, Start::Welcome)?;
+                        return presentation::run_screen_graph_with_backend_and_notice(
+                            terminal,
+                            workspaces,
+                            recent,
+                            Utc::now(),
+                            Start::Welcome,
+                            &mut loader,
+                            &mut settings,
+                            &mut backend_factory,
+                            available_models,
+                            Some("Workspace opening was cancelled.".to_owned()),
+                        );
+                    }
+                    let Some(notice) = application::open_failure_notice(&error) else {
+                        return Err(error);
+                    };
+                    let (workspaces, recent) =
+                        load_screen_graph_data(&loader.storage, Start::Welcome)?;
+                    return presentation::run_screen_graph_with_backend_and_notice(
+                        terminal,
+                        workspaces,
+                        recent,
+                        Utc::now(),
+                        Start::Welcome,
+                        &mut loader,
+                        &mut settings,
+                        &mut backend_factory,
+                        available_models,
+                        Some(notice),
+                    );
+                }
+            };
+            // `open` may register a directly addressed workspace, so read the
+            // deck registry only after that operation has committed.
+            let registry = loader.storage.load_workspaces().map_err(io_error)?;
             // A direct workspace entry has no Welcome behind it, so leaving
             // continues into the entry screens in this same process rather
             // than ending it: `usagi <path>` switches workspaces too (#556).
             // The workspace's ports are already dropped by the time the
             // controller returns, so the switcher starts with no connection
             // to the workspace that was left.
-            match presentation::run_workspace_controller_with_backend_and_config(
+            match presentation::run_workspace_deck_with_backend_and_config(
                 terminal,
                 snapshot,
+                &registry,
+                &mut loader,
                 &mut backend_factory,
                 &mut settings,
                 available_models,
@@ -4281,6 +4601,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             }
         })?;
     } else {
+        let snapshot = loader.open(path)?;
         for line in presentation::render_home_snapshot(0, 0, &snapshot) {
             writeln!(out, "{line}")?;
         }
@@ -4306,11 +4627,13 @@ fn with_daemon_ready(
     if let EntryScreen::Workspace { path } = entry {
         // A path that cannot be declared is reported by `launch_workspace` as the
         // workspace error it is, not as an unavailable daemon.
-        if crate::runtime::daemon::declare_opened_workspace(path).is_ok()
-            && let Err(error) = crate::runtime::daemon::ensure_ready()
-        {
-            writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
-            return Ok(());
+        if crate::runtime::daemon::declare_opened_workspace(path).is_ok() {
+            // Best effort. Warming a cold start before the screen appears is
+            // worth doing, but an unready daemon is not a reason to refuse the
+            // entry: `launch_workspace` owns that decision and falls into the
+            // switcher carrying the reason, rather than returning the user to
+            // the shell. Reporting here as well would only duplicate the notice.
+            let _ = crate::runtime::daemon::ensure_ready();
         }
     }
     launch_ready(out, info, entry)
@@ -4318,8 +4641,8 @@ fn with_daemon_ready(
 
 fn launch_ready(out: &mut dyn Write, info: &AppInfo, entry: &EntryScreen) -> std::io::Result<()> {
     match entry {
-        EntryScreen::Welcome => launch_screen_graph(out, Start::Welcome),
-        EntryScreen::Config => launch_screen_graph(out, Start::Config),
+        EntryScreen::Welcome => launch_screen_graph(out, Start::Welcome, None),
+        EntryScreen::Config => launch_screen_graph(out, Start::Config, None),
         EntryScreen::Workspace { path } => launch_workspace(out, path),
         EntryScreen::Doctor => {
             let report = doctor::diagnose(&mut RuntimeDoctorPort);
@@ -4346,6 +4669,507 @@ pub(crate) fn launch(
     }
 }
 
+/// Runs the Doctor TUI, or performs a headless repair and post-repair diagnosis.
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
+pub(crate) fn launch_doctor(
+    out: &mut dyn Write,
+    info: &AppInfo,
+    fix: bool,
+    restart_agents: bool,
+    force: bool,
+) -> std::io::Result<()> {
+    if fix {
+        return repair_doctor(out, info, restart_agents, force);
+    }
+    launch(out, info, &EntryScreen::Doctor)
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn repair_doctor(
+    out: &mut dyn Write,
+    info: &AppInfo,
+    restart_agents: bool,
+    force: bool,
+) -> std::io::Result<()> {
+    let expected = current_agent_integrations();
+    // Deliberately inspect/stop on the published owner before build policy may
+    // roll it over: only that process owns the old PTY handles.
+    let (mut owner, expected_build, published_build) = open_doctor_owner()?;
+    let workspace = doctor_workspace_id(&mut *owner)?;
+    writeln!(
+        out,
+        "doctor fix: client build={} {}, daemon build={} {}",
+        expected_build.version,
+        expected_build.artifact,
+        published_build.version,
+        published_build.artifact,
+    )?;
+    writeln!(
+        out,
+        "doctor fix: expected Agent integrations {}",
+        expected
+            .iter()
+            .map(|item| format!("{}={}", item.profile_id, item.revision))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )?;
+    let before = match doctor_agent_diagnosis(&mut *owner, workspace, &expected) {
+        Ok(diagnosis) => diagnosis,
+        Err(DoctorDiagnosisError::Unsupported) => {
+            return repair_legacy_doctor(
+                out,
+                info,
+                owner,
+                workspace,
+                restart_agents,
+                force,
+                &expected,
+            );
+        }
+        Err(DoctorDiagnosisError::Client(error)) => {
+            return Err(std::io::Error::other(error.to_string()));
+        }
+    };
+    let Some(plan) = prepare_outdated_agent_repair(
+        out,
+        &mut *owner,
+        workspace,
+        &expected,
+        &before,
+        restart_agents,
+        force,
+    )?
+    else {
+        return Ok(());
+    };
+    drop(owner);
+
+    let mut current = current_daemon_client(out, info)?;
+    writeln!(out, "doctor fix: daemon build is current")?;
+    for (target, revision) in plan.targets.iter().cloned() {
+        resume_doctor_agent(&mut *current, target, revision)?;
+    }
+    let after = doctor_agent_diagnosis(&mut *current, workspace, &expected)
+        .map_err(doctor_diagnosis_io_error)?;
+    let inventory = doctor_agent_inventory(&mut *current, workspace)?;
+    let live = inventory
+        .runtimes
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.state,
+                usagi_core::domain::agent::AgentRuntimeInventoryState::Live
+            )
+        })
+        .count();
+    let draining = wait_for_draining_daemons();
+    writeln!(
+        out,
+        "doctor fix: interrupted {}, resumed {}, outdated after repair {}, old MCP child claims after repair {}, live Agent(s) {live}, draining daemon(s) {draining}",
+        plan.interrupted,
+        plan.targets.len(),
+        after.outdated.len(),
+        after.outdated_mcp_children,
+    )?;
+    if !after.outdated.is_empty() {
+        return Err(std::io::Error::other(
+            "Agent integration repair did not converge",
+        ));
+    }
+    if after.outdated_mcp_children != 0 || draining != 0 {
+        return Err(std::io::Error::other(
+            "repair completed but an old MCP child claim or draining daemon remains",
+        ));
+    }
+    Ok(())
+}
+
+struct DoctorStopPlan {
+    targets: Vec<(AgentResumeTarget, u32)>,
+    interrupted: u64,
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn open_doctor_owner() -> std::io::Result<(
+    Box<dyn DaemonClient>,
+    usagi_core::infrastructure::ipc::BuildIdentity,
+    usagi_core::infrastructure::ipc::BuildIdentity,
+)> {
+    let expected = crate::runtime::daemon::current_build();
+    match crate::runtime::daemon::diagnostic_client(ClientPolicy::cli()) {
+        Ok(client) => {
+            let published = client.server_build().clone();
+            Ok((Box::new(client), expected, published))
+        }
+        Err(_) if !crate::runtime::daemon::has_published_daemon() => {
+            let client = crate::runtime::daemon::policy_client(ClientPolicy::cli())
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            Ok((Box::new(client), expected.clone(), expected))
+        }
+        Err(error) => Err(std::io::Error::other(error.to_string())),
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn prepare_outdated_agent_repair(
+    out: &mut dyn Write,
+    owner: &mut dyn DaemonClient,
+    workspace: WorkspaceId,
+    expected: &[AgentIntegrationRevision],
+    diagnosis: &AgentIntegrationDiagnosis,
+    restart_agents: bool,
+    force: bool,
+) -> std::io::Result<Option<DoctorStopPlan>> {
+    writeln!(
+        out,
+        "doctor fix: {} outdated Agent integration(s), {} old MCP child claim(s)",
+        diagnosis.outdated.len(),
+        diagnosis.outdated_mcp_children,
+    )?;
+    for item in &diagnosis.outdated {
+        writeln!(
+            out,
+            "  - runtime={} session={} profile={} revision={}→{} phase={} exact-resume={}",
+            item.runtime.agent_runtime_id,
+            item.runtime
+                .session_id
+                .map_or_else(|| ":root".to_owned(), |id| id.to_string()),
+            item.profile_id,
+            item.actual_revision,
+            item.expected_revision,
+            item.phase.as_token(),
+            if item.resume_available { "yes" } else { "no" },
+        )?;
+    }
+    if !restart_agents && !diagnosis.outdated.is_empty() {
+        writeln!(
+            out,
+            "doctor fix: rerun with --restart-agents to confirm Agent restart"
+        )?;
+        writeln!(
+            out,
+            "doctor fix: daemon rollover deferred so the published owner keeps authority to stop those Agents"
+        )?;
+        return Ok(None);
+    }
+    if diagnosis.outdated.is_empty() {
+        return Ok(Some(DoctorStopPlan {
+            targets: Vec::new(),
+            interrupted: 0,
+        }));
+    }
+    let revision_by_runtime = diagnosis
+        .outdated
+        .iter()
+        .map(|item| (item.runtime.agent_runtime_id, item.expected_revision))
+        .collect::<BTreeMap<_, _>>();
+    let body = doctor_reply_body(
+        owner
+            .request(DaemonRequest::RestartAgents {
+                workspace,
+                expected: expected.to_vec(),
+                runtimes: diagnosis
+                    .outdated
+                    .iter()
+                    .map(|item| item.runtime.clone())
+                    .collect(),
+                force,
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    );
+    let interrupted = body
+        .get("interrupted")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    let inventory: AgentInventory = serde_json::from_value(
+        body.get("inventory")
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("daemon returned no repair inventory"))?,
+    )
+    .map_err(|_| std::io::Error::other("daemon returned an invalid repair inventory"))?;
+    let targets = inventory
+        .resumable
+        .into_iter()
+        .filter_map(|item| {
+            let revision = revision_by_runtime.get(&item.runtime_id).copied()?;
+            item.target.map(|target| (target, revision))
+        })
+        .collect::<Vec<_>>();
+    if targets.len() != revision_by_runtime.len() {
+        return Err(std::io::Error::other(format!(
+            "daemon interrupted {} outdated Agent(s), but exact resume metadata exists for only {}",
+            revision_by_runtime.len(),
+            targets.len(),
+        )));
+    }
+    Ok(Some(DoctorStopPlan {
+        targets,
+        interrupted,
+    }))
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn repair_legacy_doctor(
+    out: &mut dyn Write,
+    info: &AppInfo,
+    mut owner: Box<dyn DaemonClient>,
+    workspace: WorkspaceId,
+    restart_agents: bool,
+    force: bool,
+    expected: &[AgentIntegrationRevision],
+) -> std::io::Result<()> {
+    let inventory = doctor_agent_inventory(&mut *owner, workspace)?;
+    let live = inventory
+        .runtimes
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.state,
+                usagi_core::domain::agent::AgentRuntimeInventoryState::Reserved
+                    | usagi_core::domain::agent::AgentRuntimeInventoryState::Live
+            )
+        })
+        .collect::<Vec<_>>();
+    let live_runtime_ids = live
+        .iter()
+        .map(|item| item.runtime.agent_runtime_id)
+        .collect::<BTreeSet<_>>();
+    writeln!(
+        out,
+        "doctor fix: daemon predates integration diagnosis; {} live Agent runtime(s) require conservative repair",
+        live.len()
+    )?;
+    for item in &live {
+        writeln!(
+            out,
+            "  - runtime={} session={} state={:?}",
+            item.runtime.agent_runtime_id,
+            item.runtime
+                .session_id
+                .map_or_else(|| ":root".to_owned(), |id| id.to_string()),
+            item.state,
+        )?;
+    }
+    if !live.is_empty() && !restart_agents {
+        writeln!(
+            out,
+            "doctor fix: rerun with --restart-agents --force; legacy repair may also discard generic terminals"
+        )?;
+        return Ok(());
+    }
+    if !live.is_empty() && !force {
+        return Err(std::io::Error::other(
+            "legacy daemon cannot stop Agents selectively; --force is required and may discard generic terminals",
+        ));
+    }
+    drop(owner);
+    crate::runtime::daemon::replace_running_daemon(out, ClientPolicy::cli(), force, info)?
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut current = crate::runtime::daemon::policy_client(ClientPolicy::cli())
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let inventory = doctor_agent_inventory(&mut current, workspace)?;
+    let claude_revision = expected
+        .iter()
+        .find(|item| item.profile_id.as_str() == "claude")
+        .map(|item| item.revision);
+    let codex_revision = expected
+        .iter()
+        .find(|item| item.profile_id.as_str() == "codex")
+        .map(|item| item.revision);
+    let targets = inventory
+        .resumable
+        .into_iter()
+        .filter_map(|item| {
+            if !live_runtime_ids.contains(&item.runtime_id) {
+                return None;
+            }
+            let target = item.target?;
+            let revision = match item.provider? {
+                usagi_core::domain::agent::ProviderKind::Claude => claude_revision,
+                // `codex` and `sakana-ai` intentionally share one adapter
+                // integration revision.
+                usagi_core::domain::agent::ProviderKind::Codex => codex_revision,
+            }?;
+            Some((target, revision))
+        })
+        .collect::<Vec<_>>();
+    if targets.len() != live_runtime_ids.len() {
+        return Err(std::io::Error::other(format!(
+            "legacy restart stopped {} Agent(s), but exact provider resume metadata exists for only {}",
+            live_runtime_ids.len(),
+            targets.len(),
+        )));
+    }
+    for (target, revision) in targets.iter().cloned() {
+        resume_doctor_agent(&mut current, target, revision)?;
+    }
+    let after = doctor_agent_diagnosis(&mut current, workspace, expected)
+        .map_err(doctor_diagnosis_io_error)?;
+    let draining = wait_for_draining_daemons();
+    writeln!(
+        out,
+        "doctor fix: legacy daemon replaced, resumed {}, outdated after repair {}, old MCP child claims after repair {}, draining daemon(s) {draining}",
+        targets.len(),
+        after.outdated.len(),
+        after.outdated_mcp_children,
+    )?;
+    if !after.outdated.is_empty() || after.outdated_mcp_children != 0 || draining != 0 {
+        return Err(std::io::Error::other(
+            "legacy integration repair did not converge",
+        ));
+    }
+    Ok(())
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn wait_for_draining_daemons() -> usize {
+    for attempt in 0..20 {
+        crate::runtime::daemon::invalidate_routes();
+        let draining = crate::runtime::daemon::trusted_generations()
+            .map(|generations| {
+                generations
+                    .iter()
+                    .filter(|generation| {
+                        generation.role == usagi_core::infrastructure::ipc::GenerationRole::Draining
+                    })
+                    .count()
+            })
+            .unwrap_or_default();
+        if draining == 0 || attempt == 19 {
+            return draining;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    unreachable!("bounded draining diagnosis always returns")
+}
+
+fn current_agent_integrations() -> Vec<AgentIntegrationRevision> {
+    use usagi_core::domain::settings::DefaultModel;
+
+    [
+        (
+            DefaultModel::Claude,
+            usagi_daemon::usecase::claude::PROFILE_REVISION,
+        ),
+        (
+            DefaultModel::OpenAi,
+            usagi_daemon::usecase::codex::PROFILE_REVISION,
+        ),
+        (
+            DefaultModel::SakanaAi,
+            usagi_daemon::usecase::codex::PROFILE_REVISION,
+        ),
+    ]
+    .into_iter()
+    .map(|(model, revision)| AgentIntegrationRevision {
+        profile_id: AgentProfileId::new(model.profile_id())
+            .expect("code-defined profile ID is canonical"),
+        revision,
+    })
+    .collect()
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn current_daemon_client(
+    out: &mut dyn Write,
+    info: &AppInfo,
+) -> std::io::Result<Box<dyn DaemonClient>> {
+    match crate::runtime::daemon::policy_client(ClientPolicy::cli()) {
+        Ok(client) => Ok(Box::new(client)),
+        Err(ClientError::RolloverRequired(_)) => {
+            crate::runtime::daemon::replace_running_daemon(out, ClientPolicy::cli(), false, info)?
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            crate::runtime::daemon::policy_client(ClientPolicy::cli())
+                .map(|client| Box::new(client) as Box<dyn DaemonClient>)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        }
+        Err(error) => Err(std::io::Error::other(error.to_string())),
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn doctor_agent_diagnosis(
+    client: &mut dyn DaemonClient,
+    workspace: WorkspaceId,
+    expected: &[AgentIntegrationRevision],
+) -> Result<AgentIntegrationDiagnosis, DoctorDiagnosisError> {
+    let reply = client
+        .request(DaemonRequest::DiagnoseAgents {
+            workspace,
+            expected: expected.to_vec(),
+        })
+        .map_err(|error| match error {
+            ClientError::Protocol(ref protocol)
+                if protocol.code == usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument =>
+            {
+                DoctorDiagnosisError::Unsupported
+            }
+            other => DoctorDiagnosisError::Client(other),
+        })?;
+    serde_json::from_value(doctor_reply_body(reply)).map_err(|_| DoctorDiagnosisError::Unsupported)
+}
+
+enum DoctorDiagnosisError {
+    Unsupported,
+    Client(ClientError),
+}
+
+fn doctor_diagnosis_io_error(error: DoctorDiagnosisError) -> std::io::Error {
+    match error {
+        DoctorDiagnosisError::Unsupported => {
+            std::io::Error::other("current daemon does not support Agent integration diagnosis")
+        }
+        DoctorDiagnosisError::Client(error) => std::io::Error::other(error.to_string()),
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn doctor_workspace_id(client: &mut dyn DaemonClient) -> std::io::Result<WorkspaceId> {
+    let reply = client
+        .request(DaemonRequest::Session {
+            action: SessionAction::List,
+            operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+            payload: serde_json::json!({}),
+        })
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let snapshot = lifecycle_snapshot(&doctor_reply_body(reply)).map_err(std::io::Error::other)?;
+    Ok(snapshot.workspace_id)
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn doctor_agent_inventory(
+    client: &mut dyn DaemonClient,
+    workspace: WorkspaceId,
+) -> std::io::Result<AgentInventory> {
+    let reply = client
+        .request(DaemonRequest::AgentInventory { workspace })
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    serde_json::from_value(doctor_reply_body(reply))
+        .map_err(|_| std::io::Error::other("daemon returned an invalid Agent inventory"))
+}
+
+fn doctor_reply_body(reply: DaemonReply) -> serde_json::Value {
+    match reply {
+        DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn resume_doctor_agent(
+    client: &mut dyn DaemonClient,
+    target: AgentResumeTarget,
+    expected_revision: u32,
+) -> std::io::Result<()> {
+    client
+        .request(DaemonRequest::ResumeAgentWithCurrentIntegration {
+            operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+            target,
+            expected_revision,
+        })
+        .map(|_| ())
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
@@ -4355,7 +5179,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use usagi_core::usecase::client::{ClientPolicy, PrSnapshot, TerminalLaneBudget};
+    use usagi_core::usecase::client::{ClientError, ClientPolicy, PrSnapshot, TerminalLaneBudget};
 
     /// The lane clock counts whole milliseconds, so a deadline armed for `n` ms
     /// can elapse a fraction under `n`. Lane-budget assertions allow that much.
@@ -4364,21 +5188,23 @@ mod tests {
     use super::{
         AGENT_LAUNCH_UNCORRELATED, AgentLaunchIntent, AppEvent, AppKey, BackendTargetStorePort,
         Completions, DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonReply, DaemonRequest,
-        DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort, FsWorkspaceLoader, Geometry,
-        LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
-        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, RoleEditorScope,
-        SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
-        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
-        TerminalSubscription, VersionProbeResult, agent_inventory_request, agent_launch_request,
-        classify_terminal_input, correlate_agent_launch, created_session_hook, daemon_error_reason,
-        decision_cadence, decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        DaemonRestoreConnectionPort, DoctorDiagnosisError, EnvScope, EnvironmentStorePort,
+        FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError,
+        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
+        RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget,
+        TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult, agent_inventory_request,
+        agent_launch_request, classify_terminal_input, correlate_agent_launch,
+        created_session_hook, current_agent_integrations, daemon_error_reason, decision_cadence,
+        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
-        exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
-        pr_snapshot_events, probe_path, provider_resume_projection,
-        reduced_motion_from_environment, reply_geometry, session_cadence, session_snapshot_result,
-        terminal_copy_key, terminal_inventory_matches_scope, validate_workspace_directory,
-        version_detail, version_result_from_observation, workspace_open_error,
+        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
+        provider_resume_projection, reduced_motion_from_environment, reply_geometry,
+        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
+        version_result_from_observation, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -4524,6 +5350,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn doctor_repair_catalog_and_reply_decoder_are_deterministic() {
+        let integrations = current_agent_integrations();
+        assert_eq!(
+            integrations
+                .iter()
+                .map(|integration| (integration.profile_id.as_str(), integration.revision))
+                .collect::<Vec<_>>(),
+            [("claude", 4), ("codex", 3), ("sakana-ai", 3)]
+        );
+        assert_eq!(
+            doctor_reply_body(DaemonReply::Ok(serde_json::json!({"ok": true}))),
+            serde_json::json!({"ok": true})
+        );
+        assert_eq!(
+            doctor_reply_body(DaemonReply::Accepted {
+                operation_id: "operation".to_owned(),
+                revision: 1,
+                body: serde_json::json!({"accepted": true}),
+            }),
+            serde_json::json!({"accepted": true})
+        );
+        assert!(
+            doctor_diagnosis_io_error(DoctorDiagnosisError::Unsupported)
+                .to_string()
+                .contains("does not support")
+        );
+        assert_eq!(
+            doctor_diagnosis_io_error(DoctorDiagnosisError::Client(ClientError::Unavailable(
+                "offline".to_owned(),
+            )))
+            .to_string(),
+            "Unavailable: offline"
+        );
+    }
+
     /// The contract of Home's three background observation lanes (#551).
     ///
     /// Each lane's cadence must sit inside the pump's bounded window — that is
@@ -4573,7 +5435,6 @@ mod tests {
     use usagi_core::infrastructure::paths::project_data_dir;
     use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
     use usagi_core::infrastructure::store::workspace::Storage;
-    use usagi_core::usecase::client::ClientError;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
     use usagi_tui::presentation::views::workspace::ProjectedSession;
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
@@ -6976,6 +7837,40 @@ mod tests {
     }
 
     #[test]
+    fn shifted_lowercase_crossterm_x_reaches_forced_session_removal() {
+        use crossterm::event::{
+            KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
+        };
+
+        let input = LiveInput::Key(crate::tui_input::adapt_key(CrosstermKeyEvent::new(
+            CrosstermKeyCode::Char('x'),
+            KeyModifiers::SHIFT,
+        )));
+        let key = classify_terminal_input(
+            &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
+            Duration::ZERO,
+            &input,
+        )
+        .expect("Shift+x is a management key");
+        assert_eq!(key, Key::Char('X'));
+
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let event = usagi_tui::presentation::app_event_from_key(key)
+            .expect("the shifted key reaches the Home reducer");
+        assert_eq!(
+            update(&mut state, event),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+                force_delete_branch: true,
+            }]
+        );
+    }
+
+    #[test]
     fn terminal_adapter_maps_global_chords_after_classifier_resolution() {
         let cases = [
             (live_key(KeyCode::Char('c'), control()), Key::Quit),
@@ -7035,12 +7930,17 @@ mod tests {
     fn terminal_adapter_projects_resolved_live_and_pointer_inputs() {
         let cases = [
             (
-                LiveInput::WheelUp { column: 0, row: 0 },
+                LiveInput::WheelUp {
+                    column: 0,
+                    row: 0,
+                    notches: 1,
+                },
                 Key::Live(
                     usagi_tui::usecase::terminal_input::LiveTerminalAction::Wheel {
                         up: true,
                         column: 0,
                         row: 0,
+                        notches: 1,
                     },
                 ),
             ),
@@ -7143,11 +8043,33 @@ mod tests {
             }
         };
 
-        assert_eq!(
-            terminal_copy_key(&live_key(KeyCode::Char('c'), modifiers)),
-            Some(Key::TerminalCopy { fallback })
-        );
+        for character in ['c', 'C'] {
+            assert_eq!(
+                terminal_copy_key(&live_key(KeyCode::Char(character), modifiers)),
+                Some(Key::TerminalCopy {
+                    fallback: fallback.clone(),
+                })
+            );
+        }
         assert_eq!(terminal_copy_key(&LiveInput::Text("c".into())), None);
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    #[test]
+    fn linux_terminal_copy_survives_crossterm_shifted_character_normalization() {
+        use crossterm::event::{
+            KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
+        };
+
+        let input = LiveInput::Key(crate::tui_input::adapt_key(CrosstermKeyEvent::new(
+            CrosstermKeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+
+        assert_eq!(
+            terminal_copy_key(&input),
+            Some(Key::TerminalCopy { fallback: vec![] })
+        );
     }
 
     #[test]
@@ -7314,11 +8236,55 @@ mod tests {
     #[test]
     fn workspace_directory_validation_projects_metadata_errors() {
         let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("workspace");
+        std::fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            resolve_workspace_path(&directory).unwrap(),
+            std::fs::canonicalize(&directory).unwrap()
+        );
         let missing = temporary.path().join("missing");
         assert_eq!(
             validate_workspace_directory(&missing).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn workspace_registry_refresh_observes_an_external_store_update() {
+        let temporary = tempfile::tempdir().unwrap();
+        let storage = Storage::new(temporary.path());
+        let alpha = Workspace::new("alpha", "/alpha");
+        storage
+            .save_workspaces(std::slice::from_ref(&alpha))
+            .unwrap();
+        let mut loader = FsWorkspaceLoader::new(Storage::new(temporary.path()));
+
+        assert!(loader.dispatch_registry_refresh().unwrap());
+        assert!(!loader.dispatch_registry_refresh().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let first = loop {
+            if let Some(result) = loader.take_registry_refresh() {
+                break result.unwrap();
+            }
+            assert!(Instant::now() < deadline, "registry refresh did not finish");
+            std::thread::yield_now();
+        };
+        assert_eq!(first, vec![alpha.clone()]);
+
+        let beta = Workspace::new("beta", "/beta");
+        storage
+            .save_workspaces(&[alpha.clone(), beta.clone()])
+            .unwrap();
+        assert!(loader.dispatch_registry_refresh().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let second = loop {
+            if let Some(result) = loader.take_registry_refresh() {
+                break result.unwrap();
+            }
+            assert!(Instant::now() < deadline, "registry refresh did not finish");
+            std::thread::yield_now();
+        };
+        assert_eq!(second, vec![alpha, beta]);
     }
 
     #[test]
@@ -7631,6 +8597,7 @@ mod tests {
             storage: Storage::new(temporary.path()),
             workspace: None,
         };
+        assert!(first.background_operations());
         let settings = Settings {
             modal_selection_mode: ModalSelectionMode::Prompt,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
@@ -7672,10 +8639,6 @@ mod tests {
         let concurrent = Settings {
             theme: Theme::Light,
             default_model: usagi_core::domain::settings::DefaultModel::SakanaAi,
-            local_llm: usagi_core::domain::settings::LocalLlm {
-                enabled: true,
-                model: "qwen2.5-coder:3b".to_owned(),
-            },
             env: [(
                 "GH_TOKEN".to_owned(),
                 "op://Private/GitHub/token".to_owned(),
@@ -7698,7 +8661,6 @@ mod tests {
             usagi_core::domain::settings::DefaultModel::Claude
         );
         assert!(!saved.issue_enabled);
-        assert_eq!(saved.local_llm, concurrent.local_llm);
         assert_eq!(saved.env, concurrent.env);
     }
 
@@ -7826,6 +8788,7 @@ mod tests {
         // editor and another Config writer update the local document.
         let mut draft = port.read(SettingsScope::Workspace).unwrap();
         draft.default_model = usagi_core::domain::settings::DefaultModel::Claude;
+        draft.default_branch = Some("refs/remotes/origin/main".to_owned());
         draft.memory_enabled = false;
         let concurrent = LocalSettings {
             default_model: Some(usagi_core::domain::settings::DefaultModel::SakanaAi),
@@ -7847,6 +8810,10 @@ mod tests {
             Some(usagi_core::domain::settings::DefaultModel::Claude)
         );
         assert_eq!(raw.memory_enabled, Some(false));
+        assert_eq!(
+            raw.default_branch.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
 
         let mut reopened = PersistentSettingsPort {
             storage: Storage::new(&global_dir),
@@ -7859,6 +8826,10 @@ mod tests {
             usagi_core::domain::settings::DefaultModel::Claude
         );
         assert!(!effective.memory_enabled);
+        assert_eq!(
+            effective.default_branch.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
         assert_eq!(effective.env, concurrent.env);
     }
 
@@ -7915,13 +8886,10 @@ mod tests {
             modal_selection_mode: ModalSelectionMode::Prompt,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
+            default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: false,
             memory_enabled: false,
             team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,
-            local_llm: usagi_core::domain::settings::LocalLlm {
-                enabled: true,
-                model: "qwen2.5-coder:3b".to_owned(),
-            },
             env: usagi_core::domain::settings::EnvBindings::new(),
         };
         let storage = Storage::new(&global_dir);

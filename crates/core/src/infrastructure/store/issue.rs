@@ -25,9 +25,7 @@ use crate::infrastructure::persistence::markdown_store::{
 };
 use crate::infrastructure::persistence::store_lock::StoreLock;
 use crate::infrastructure::store::MutationOutcome;
-use crate::infrastructure::store::issue_number_sequence::{
-    ExistingIssueFloors, IssueNumberSequence,
-};
+use crate::infrastructure::store::issue_number_sequence::IssueNumberSequence;
 
 const ISSUES_DIR_NAME: &str = "issues";
 
@@ -245,6 +243,41 @@ impl IssueStore {
         self.inner.scan()
     }
 
+    /// Validate every Markdown source as one unambiguous issue identity.
+    ///
+    /// This is stricter than lenient listing: every source must parse, its
+    /// filename number must match its frontmatter number, and no number may be
+    /// claimed by more than one file. It is intended for repository policy
+    /// checks and other immutable source snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unreadable or unparseable source, a filename /
+    /// frontmatter mismatch, a prefixless source, or a duplicate number.
+    pub fn validate_source_set(&self) -> Result<()> {
+        let mut claims = BTreeMap::<u32, Vec<PathBuf>>::new();
+        for path in self.issue_files()? {
+            let issue = self
+                .inner
+                .read_existing_path(&path)
+                .with_context(|| format!("failed to validate issue source {}", path.display()))?;
+            let filename_number = number_from_filename(&path);
+            if filename_number != Some(issue.number) {
+                return Err(MismatchedIssueNumber {
+                    filename_number,
+                    declared_number: issue.number,
+                    file: path,
+                }
+                .into());
+            }
+            claims.entry(issue.number).or_default().push(path);
+        }
+        if let Some((number, files)) = claims.into_iter().find(|(_, files)| files.len() > 1) {
+            return Err(AmbiguousIssueNumber { number, files }.into());
+        }
+        Ok(())
+    }
+
     /// Like [`scan`](Self::scan), but logs unreadable/unparseable issue files and
     /// skips them so one corrupt sibling cannot break listings or cache rebuilds.
     ///
@@ -382,7 +415,7 @@ impl IssueStore {
     ///
     /// A worktree has its own checked-out `.usagi/issues` directory, so its
     /// local maximum alone cannot safely allocate a number while another
-    /// worktree is creating an issue. The v1-compatible authority below Git's
+    /// worktree is creating an issue. The authority below Git's
     /// common directory serializes every reservation. Its high-water sequence,
     /// durable journal, retired v2 sequence, and every workspace source maximum
     /// are folded without ever reusing a gap.
@@ -397,8 +430,8 @@ impl IssueStore {
             IssueNumberSequence::new(&self.repo_root, &initial_workspace_root, self.dir())?;
         let worktree_root = sequence.worktree_root().to_path_buf();
         let workspace_root = workspace_root(&worktree_root);
-        sequence.reserve_with_floors(|| {
-            self.existing_issue_floors(
+        sequence.reserve_with_max(|| {
+            self.max_existing_issue_number(
                 &workspace_root,
                 &worktree_root,
                 &sequence.registered_worktrees()?,
@@ -672,42 +705,38 @@ impl IssueStore {
         Ok(issue)
     }
 
-    /// Highest filename claims seen by fixed v2.
+    /// Highest filename claim across every discoverable issue store.
     ///
-    /// No source maximum is marked v1-visible: two old-v1 callers sharing the
-    /// Git-common authority can derive different workspace roots (for example,
-    /// an external linked worktree). Only their shared sequence and journal are
-    /// universal. Fixed v2 also discovers tracked, untracked, and ignored
-    /// arbitrary nested issue stores across every registered worktree. This
+    /// The scan includes tracked, untracked, and ignored arbitrary nested issue
+    /// stores across every registered worktree. This
     /// deliberately does not acquire sibling store locks: doing so under the
     /// authority lock would introduce a cross-worktree deadlock.
-    fn existing_issue_floors(
+    fn max_existing_issue_number(
         &self,
         workspace_root: &Path,
         worktree_root: &Path,
         registered_worktrees: &[PathBuf],
         materialized_issue_roots: &[PathBuf],
-    ) -> Result<ExistingIssueFloors> {
+    ) -> Result<u32> {
         let mut session_parents = BTreeSet::from([workspace_root.to_path_buf()]);
         session_parents.extend(registered_worktrees.iter().cloned());
-        let mut v1_roots = BTreeSet::new();
+        let mut roots = BTreeSet::new();
         for root in session_parents {
-            v1_roots.insert(root.clone());
-            insert_session_roots(&mut v1_roots, &root)?;
+            roots.insert(root.clone());
+            insert_session_roots(&mut roots, &root)?;
         }
 
-        let mut all_roots = v1_roots.clone();
-        all_roots.insert(worktree_root.to_path_buf());
-        all_roots.insert(self.repo_root.clone());
-        all_roots.extend(registered_worktrees.iter().cloned());
-        all_roots.extend(materialized_issue_roots.iter().cloned());
+        roots.insert(worktree_root.to_path_buf());
+        roots.insert(self.repo_root.clone());
+        roots.extend(registered_worktrees.iter().cloned());
+        roots.extend(materialized_issue_roots.iter().cloned());
 
         let mut all = 0;
-        for root in all_roots {
+        for root in roots {
             let maximum = Self::new(&root).max_claimed_number()?;
             all = all.max(maximum);
         }
-        Ok(ExistingIssueFloors { all, v1_visible: 0 })
+        Ok(all)
     }
 }
 
@@ -894,6 +923,42 @@ mod tests {
         let store = IssueStore::new(tmp.path());
         assert!(store.scan().unwrap().is_empty());
         assert_eq!(store.max_number().unwrap(), 0);
+    }
+
+    #[test]
+    fn source_set_validation_rejects_corrupt_and_ambiguous_identities() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.validate_source_set().unwrap();
+
+        store.write(&issue(7, "Canonical")).unwrap();
+        store.validate_source_set().unwrap();
+
+        let sibling = store.dir().join("007-sibling.md");
+        fs::write(&sibling, issue(7, "Sibling").to_markdown()).unwrap();
+        let error = store.validate_source_set().unwrap_err();
+        let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+        assert_eq!(ambiguity.number, 7);
+        assert_eq!(ambiguity.files.len(), 2);
+        fs::remove_file(&sibling).unwrap();
+
+        let prefixless = store.dir().join("manual.md");
+        fs::write(&prefixless, issue(8, "Moved").to_markdown()).unwrap();
+        let error = store.validate_source_set().unwrap_err();
+        let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
+        assert_eq!(mismatch.filename_number, None);
+        assert_eq!(mismatch.declared_number, 8);
+        fs::remove_file(&prefixless).unwrap();
+
+        let corrupt = store.dir().join("008-corrupt.md");
+        fs::write(&corrupt, "not issue frontmatter\n").unwrap();
+        let error = store.validate_source_set().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to validate issue source")
+        );
+        assert!(error.to_string().contains("008-corrupt.md"));
     }
 
     #[test]
@@ -2203,68 +2268,6 @@ mod tests {
     }
 
     #[test]
-    fn source_only_floor_is_not_assumed_visible_to_every_old_v1_worktree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("workspace");
-        fs::create_dir(&root).unwrap();
-        git(&root, &["init", "-q", "-b", "main"]);
-        git(&root, &["config", "user.email", "test@example.com"]);
-        git(&root, &["config", "user.name", "Test"]);
-        fs::write(root.join("README.md"), "workspace\n").unwrap();
-        git(&root, &["add", "README.md"]);
-        git(&root, &["commit", "-q", "-m", "init"]);
-
-        let external = tmp.path().join("external-linked");
-        git(
-            &root,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "test-stale-v1-source-visibility",
-                external.to_str().unwrap(),
-            ],
-        );
-        let store = IssueStore::new(&root);
-        let nested_store = IssueStore::new(root.join("tools/nested"));
-        fs::create_dir_all(nested_store.dir()).unwrap();
-        let source = nested_store.dir().join("800-nested-only.md");
-        fs::write(&source, issue(800, "Nested-only floor").to_markdown()).unwrap();
-
-        let authority = root.join(".git/usagi/issue-numbers");
-        fs::create_dir_all(&authority).unwrap();
-        let sequence = authority.join("sequence.json");
-        fs::write(&sequence, r#"{"version":1,"last_reserved":500}"#).unwrap();
-        let common_legacy = root.join(".git/usagi-issue-sequence/next");
-        fs::create_dir_all(common_legacy.parent().unwrap()).unwrap();
-        fs::write(&common_legacy, "migrated-to-usagi-issue-numbers:500\n").unwrap();
-        fs::write(authority.join("legacy-v2-migrated"), "500\n").unwrap();
-        let nested_legacy = nested_store.dir().join("usagi-issue-sequence/next");
-        fs::create_dir_all(nested_legacy.parent().unwrap()).unwrap();
-        fs::write(&nested_legacy, "600\n").unwrap();
-        fs::write(root.join(".git/info/exclude"), "tools/nested/.usagi/\n").unwrap();
-        let source_before = fs::read(&source).unwrap();
-        let sequence_before = fs::read(&sequence).unwrap();
-        let common_before = fs::read(&common_legacy).unwrap();
-        let nested_before = fs::read(&nested_legacy).unwrap();
-
-        let error = store.reserve_next_number().unwrap_err();
-        assert!(error.to_string().contains("neither live legacy v2 nor v1"));
-        assert_eq!(fs::read(&source).unwrap(), source_before);
-        assert_eq!(fs::read(&sequence).unwrap(), sequence_before);
-        assert_eq!(fs::read(&common_legacy).unwrap(), common_before);
-        assert_eq!(fs::read(&nested_legacy).unwrap(), nested_before);
-        assert!(!authority.join("reservations").exists());
-        assert!(!external.join(".usagi").exists());
-
-        fs::write(&nested_legacy, "800\n").unwrap();
-        assert_eq!(store.reserve_next_number().unwrap(), 801);
-        assert_eq!(fs::read(&source).unwrap(), source_before);
-        assert!(authority.join("reservations/0000000801.reserved").is_file());
-    }
-
-    #[test]
     fn nested_source_floor_fences_its_missing_legacy_authority_in_production_path() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -2405,7 +2408,7 @@ mod tests {
 
         let store = IssueStore::new(root);
         let error = store
-            .existing_issue_floors(root, root, &[], &[])
+            .max_existing_issue_number(root, root, &[], &[])
             .unwrap_err();
         assert!(error.to_string().contains("session entry is a symlink"));
         assert_eq!(fs::read(&sequence).unwrap(), sequence_before);
@@ -2435,7 +2438,7 @@ mod tests {
         symlink("missing-sessions", &dangling_sessions).unwrap();
         let dangling_store = IssueStore::new(dangling_root);
         let error = dangling_store
-            .existing_issue_floors(dangling_root, dangling_root, &[], &[])
+            .max_existing_issue_number(dangling_root, dangling_root, &[], &[])
             .unwrap_err();
         assert!(error.to_string().contains("failed to read sessions"));
         assert_eq!(
@@ -2451,7 +2454,7 @@ mod tests {
         fs::set_permissions(&unreadable_sessions, fs::Permissions::from_mode(0o000)).unwrap();
         let unreadable_store = IssueStore::new(unreadable_root);
         let error = unreadable_store
-            .existing_issue_floors(unreadable_root, unreadable_root, &[], &[])
+            .max_existing_issue_number(unreadable_root, unreadable_root, &[], &[])
             .unwrap_err();
         fs::set_permissions(&unreadable_sessions, original).unwrap();
         assert!(error.to_string().contains("failed to read sessions"));

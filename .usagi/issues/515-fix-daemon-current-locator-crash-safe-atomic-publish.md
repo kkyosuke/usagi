@@ -5,9 +5,9 @@ status: done
 priority: high
 labels: [review, v2, daemon, ipc, recovery, security, durability]
 dependson: []
-related: [216, 341, 507, 513, 514]
+related: [216, 341, 507, 513]
 created_at: 2026-07-22T00:07:06.965391+00:00
-updated_at: 2026-07-23T00:41:37+00:00
+updated_at: 2026-08-25T22:25:22.499116+00:00
 ---
 
 ## 問題・影響

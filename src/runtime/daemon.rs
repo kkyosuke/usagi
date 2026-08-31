@@ -1,7 +1,6 @@
 //! daemon 面へ Unix process / socket / signal を接続する composition adapter。
 
-#![coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final,planned_stop_retires_generation_endpoint_and_allows_safe_autostart
-
+mod tenant_control;
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,14 +9,13 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
@@ -26,6 +24,7 @@ use usagi_core::domain::agent::prompt::{PromptScope, launch_system_prompt};
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{ConnectionId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
+use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::DefaultModel;
 use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
 use usagi_core::infrastructure::daemon::{
@@ -40,7 +39,8 @@ use usagi_core::infrastructure::ipc::{
     build_artifact_decision, build_rollover_trigger,
 };
 use usagi_core::infrastructure::paths;
-use usagi_core::infrastructure::store::dispatch::DispatchStore;
+use usagi_core::infrastructure::persistence::json_file;
+use usagi_core::infrastructure::store::dispatch::{DispatchStore, INBOX_PAGE_MAX, InboxCursor};
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
@@ -118,8 +118,8 @@ use usagi_daemon::usecase::pr_projection::{
     PrProjection, PrProjectionQueue, pr_projection_counters,
 };
 use usagi_daemon::usecase::replacement::{
-    LiveResources, ResourceCensus, RolloverRequester, SeamlessRefusal, TransitionMode,
-    manual_operation_id, seamless_refusal,
+    LiveResources, ResourceCensus, RetainedGenerationControl, RolloverRequester, SeamlessRefusal,
+    TransitionMode, manual_operation_id, seamless_refusal,
 };
 use usagi_daemon::usecase::resources::allocator::{CapacityPolicy, ResourceAllocator};
 use usagi_daemon::usecase::resources::durable::{
@@ -147,7 +147,7 @@ use usagi_daemon::usecase::session_teardown::{
 use usagi_daemon::usecase::shutdown::{BackgroundWorker, ShutdownRequest};
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
-    DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
+    DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime, bounded_supervisor_query,
 };
 use usagi_daemon::usecase::tenant::{
     DEFAULT_TENANT_LIMIT, OpenedTenant, TenantRegistry, TenantRuntimeOpener, WorkspaceFenceFactory,
@@ -182,6 +182,7 @@ struct TrustedLoginShell {
     workspace_root: PathBuf,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_terminal_profile_contract
 impl TrustedLoginShell {
     /// The workspace whose configured bindings this launch inherits.
     fn launch_workspace_root(
@@ -204,6 +205,7 @@ impl TrustedLoginShell {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_terminal_profile_contract
 impl TerminalProfileResolver for TrustedLoginShell {
     fn resolve(
         &mut self,
@@ -268,6 +270,7 @@ fn terminal_environment() -> BTreeMap<String, String> {
 #[derive(Default)]
 struct SpawnedChildren(Mutex<BTreeMap<u32, ChildIdentity>>);
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=an_observed_child_stays_provable_until_its_release_is_dropped
 impl SpawnedChildren {
     /// Observe a freshly spawned child and record it as this process's own.
     ///
@@ -356,6 +359,7 @@ fn is_same_child(recorded: &ChildIdentity, start_identity: &str, process_group: 
 /// The store-side view of [`SpawnedChildren`]: it can only ask, never record.
 struct ObservedChildren(Arc<SpawnedChildren>);
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=an_observed_child_stays_provable_until_its_release_is_dropped
 impl IdentityAuthority for ObservedChildren {
     fn verified(&self, process: &ProcessIdentity) -> Option<ChildIdentity> {
         self.0
@@ -394,6 +398,7 @@ impl LogicalClock for SystemLogicalClock {
 /// The pools keep the per-kind limits the coordinators enforce in memory, so the
 /// allocator refuses exactly what a single process would have refused — except
 /// that it also counts the generations that are still draining.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=restart_hydrates_file_snapshot_before_dispatch_admission_and_preserves_ledger
 fn open_runtime_state(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -414,6 +419,7 @@ fn open_runtime_state(
 
 /// Reads this generation's shard and every retained one, migrating the legacy
 /// whole-snapshot stores on the first start that finds them.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=restart_hydrates_file_snapshot_before_dispatch_admission_and_preserves_ledger
 fn hydrate_runtime_state(
     state: &ShardedRuntimeState,
     what: &str,
@@ -452,6 +458,7 @@ struct DurableResourceCensus {
     data_dir: PathBuf,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=shipping_retention_limits_are_wired_into_root_composition
 impl ResourceCensus for DurableResourceCensus {
     fn live(&self) -> std::io::Result<LiveResources> {
         let archive = ShardArchiveFiles::new(&self.data_dir)?;
@@ -463,12 +470,161 @@ impl ResourceCensus for DurableResourceCensus {
     }
 }
 
+/// How long a forced cold transition lets SIGTERM drain a generation before it
+/// escalates.
+///
+/// A daemon that owns Agent runtimes and generic terminals closes and reaps
+/// every PTY child before it exits, which routinely outlasts a few hundred
+/// milliseconds. The window used to be five seconds of SIGTERM and nothing
+/// else, so a busy daemon was reported as "did not stop" while it was still
+/// draining normally — and the operator was left with no escape hatch at all.
+const FORCED_SHUTDOWN_TERM_GRACE: Duration = Duration::from_secs(30);
+/// How long the same transition waits after SIGKILL before reporting failure.
+///
+/// SIGKILL cannot be caught, so this only has to cover the kernel tearing the
+/// process down. Surviving it means the pid is wedged in the kernel, which is a
+/// host problem rather than something another retry can fix.
+const FORCED_SHUTDOWN_KILL_GRACE: Duration = Duration::from_secs(5);
+/// How often a forced cold transition re-reads the registry while waiting.
+const FORCED_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
+
+/// Exact process control for all non-retired generations in this data home.
+///
+/// `daemon.json` follows the active generation across a handoff, but a draining
+/// predecessor legitimately remains alive with its PTYs and the singleton lock.
+/// Cold lifecycle transitions therefore use the generation registry rather
+/// than assuming the lifecycle record names every process that must stop.
+struct RegistryGenerationControl {
+    data_dir: PathBuf,
+    /// How long SIGTERM is given to drain a generation before the transition
+    /// escalates. Injected so a test can prove the escalation without waiting
+    /// out the production grace.
+    term_grace: Duration,
+    /// How long SIGKILL is given before the transition reports failure.
+    kill_grace: Duration,
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=forced_transition_stops_a_live_draining_generation_before_stale_cleanup,a_forced_transition_escalates_to_sigkill_when_sigterm_is_ignored
+impl RegistryGenerationControl {
+    fn production(data_dir: PathBuf) -> Self {
+        Self {
+            data_dir,
+            term_grace: FORCED_SHUTDOWN_TERM_GRACE,
+            kill_grace: FORCED_SHUTDOWN_KILL_GRACE,
+        }
+    }
+
+    fn retained(&self) -> std::io::Result<Vec<ProcessIdentity>> {
+        Ok(read_registry_document(&self.data_dir)
+            .map_err(std::io::Error::other)?
+            .into_iter()
+            .flat_map(|document| document.generations)
+            .filter(|entry| entry.role != GenerationRole::Retired)
+            .map(|entry| entry.process)
+            .collect())
+    }
+
+    fn exactly_alive(process: &ProcessIdentity) -> std::io::Result<bool> {
+        if process.start_identity.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "retained daemon generation has no process identity",
+            ));
+        }
+        match process_start_identity(process.pid) {
+            Ok(identity) => Ok(identity == process.start_identity),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn record(process: &ProcessIdentity) -> DaemonRecord {
+        DaemonRecord {
+            pid: process.pid,
+            process_start_identity: Some(process.start_identity.clone()),
+            started_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Signal every live retained generation once with `signal`, then wait up to
+    /// `grace` for them to go away. Reports whether none is left.
+    ///
+    /// Running out of grace is not an error here: the caller decides whether it
+    /// escalates to a stronger signal or is the final failure. Only a *refused*
+    /// signal against a still-live process is an error, because that one says
+    /// the transition cannot proceed at all.
+    fn signal_until_gone(&self, signal: libc::c_int, grace: Duration) -> std::io::Result<bool> {
+        let deadline = Instant::now() + grace;
+        let mut signalled = BTreeSet::new();
+        loop {
+            let mut live = false;
+            // Re-read on every pass so a handoff that was already committing
+            // while shutdown began cannot leave its newly retained successor
+            // outside the fixed snapshot we signal.
+            for process in self.retained()? {
+                if !Self::exactly_alive(&process)? {
+                    continue;
+                }
+                live = true;
+                let identity = (process.pid, process.start_identity.clone());
+                if signalled.insert(identity)
+                    && let Err(error) = signal_exact_process(&Self::record(&process), signal)
+                    && Self::exactly_alive(&process)?
+                {
+                    return Err(error);
+                }
+            }
+            if !live {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(FORCED_SHUTDOWN_POLL);
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=forced_transition_stops_a_live_draining_generation_before_stale_cleanup
+impl RetainedGenerationControl for RegistryGenerationControl {
+    fn has_live(&self) -> std::io::Result<bool> {
+        for process in self.retained()? {
+            if Self::exactly_alive(&process)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn shutdown_all(&self) -> std::io::Result<()> {
+        // SIGTERM asks, SIGKILL insists. `--force` is the operator's escape
+        // hatch, so it has to end with the generation actually gone: reporting
+        // a timeout while leaving the process running is the one outcome that
+        // strands the operator, because every later lifecycle command then
+        // refuses on that same still-live generation. Escalation keeps the
+        // exact process-identity fence, so a recycled pid is never what gets
+        // killed.
+        if self.signal_until_gone(libc::SIGTERM, self.term_grace)? {
+            return Ok(());
+        }
+        if self.signal_until_gone(libc::SIGKILL, self.kill_grace)? {
+            return Ok(());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "retained daemon generations survived SIGKILL; a daemon pid is wedged \
+             in the kernel and the host has to be checked",
+        ))
+    }
+}
+
 /// Why this build cannot hand authority to a live successor, read from the
 /// durable generation registry.
 ///
 /// An unreadable or unparsable registry is reported as such rather than treated
 /// as absent, so an operator sees the difference between "no daemon ever
 /// registered a generation" and "the registry cannot be trusted".
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefusal> {
     match usagi_daemon::infrastructure::generation_registry::read_registry_document(data_dir) {
         Ok(document) => {
@@ -499,6 +655,7 @@ const fn transition_mode(force: bool) -> TransitionMode {
 /// within retention; a durable on-disk output journal is intentionally deferred
 /// with daemon-crash PTY FD continuation (out of scope for this issue).
 struct DiscardJournal;
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 impl OutputJournal for DiscardJournal {
     fn append(&mut self, _output: &Output) -> Result<(), ()> {
         Ok(())
@@ -523,6 +680,7 @@ struct RootCodexProvisioner {
     sandbox_cache_dir: Option<PathBuf>,
     sandbox_passthrough: bool,
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_root_codex_launch_stays_in_the_repository_and_uses_the_daemon_mcp
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
         &mut self,
@@ -541,7 +699,7 @@ impl CodexProvisioner for RootCodexProvisioner {
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         let mut arguments = tools
             .as_ref()
-            .map(|tools| codex_integration_arguments(&self.mcp_command, tools.model()))
+            .map(|_| codex_integration_arguments(&self.mcp_command))
             .transpose()
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
             .unwrap_or_default();
@@ -561,47 +719,65 @@ impl CodexProvisioner for RootCodexProvisioner {
             ),
             arguments,
         );
-        if mode == SandboxMode::Root {
-            let sandbox_roots =
-                root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
-                    .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
-            validate_claude_sandbox_policy(&SandboxPolicyInputs {
-                mode,
-                program: self.program,
-                workspace_root: &workspace_root,
-                launch_roots: &sandbox_roots,
+        let session_git = if mode == SandboxMode::Session {
+            session_git_policy(&workspace_root, &working_directory)
+                .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
+        } else {
+            None
+        };
+        let mut sandbox_roots = if mode == SandboxMode::Root {
+            root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
+                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?
+        } else {
+            let mut roots = claude_writable_roots(mode, &working_directory);
+            roots.extend(
+                session_git
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|policy| policy.writable_roots.iter().cloned()),
+            );
+            roots
+        };
+        sandbox_roots.sort();
+        sandbox_roots.dedup();
+        validate_claude_sandbox_policy(&SandboxPolicyInputs {
+            mode,
+            program: self.program,
+            workspace_root: &workspace_root,
+            launch_roots: &sandbox_roots,
+            tmpdir: self.sandbox_tmpdir.as_deref(),
+            home: self.sandbox_home.as_deref(),
+            cache_dir: self.sandbox_cache_dir.as_deref(),
+            backend: self.sandbox_backend.as_deref(),
+            passthrough: self.sandbox_passthrough,
+        })
+        .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+        let protected_root = workspace_root
+            .canonicalize()
+            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+        let launcher = claude_sandbox_launcher(
+            &self.mcp_command,
+            mode,
+            &protected_root,
+            &SandboxLauncherPaths {
+                backend: self.sandbox_backend.as_deref(),
                 tmpdir: self.sandbox_tmpdir.as_deref(),
                 home: self.sandbox_home.as_deref(),
                 cache_dir: self.sandbox_cache_dir.as_deref(),
-                backend: self.sandbox_backend.as_deref(),
-                passthrough: self.sandbox_passthrough,
-            })
-            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
-            let protected_root = workspace_root
-                .canonicalize()
-                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
-            let launcher = claude_sandbox_launcher(
-                &self.mcp_command,
-                mode,
-                &protected_root,
-                &SandboxLauncherPaths {
-                    backend: self.sandbox_backend.as_deref(),
-                    tmpdir: self.sandbox_tmpdir.as_deref(),
-                    home: self.sandbox_home.as_deref(),
-                    cache_dir: self.sandbox_cache_dir.as_deref(),
-                },
-                &sandbox_roots,
-            )
-            .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
-            spawn.set_sandbox_launcher(launcher);
+            },
+            &sandbox_roots,
+        )
+        .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+        spawn.set_sandbox_launcher(launcher);
+        if mode == SandboxMode::Root {
             insert_root_git_environment(&mut spawn);
-            if self.sandbox_passthrough {
-                spawn.insert_daemon_environment(
-                    EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
-                        .expect("literal environment variable name is valid"),
-                    "1".to_owned(),
-                );
-            }
+        }
+        if self.sandbox_passthrough {
+            spawn.insert_daemon_environment(
+                EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
+                    .expect("literal environment variable name is valid"),
+                "1".to_owned(),
+            );
         }
         Ok(CodexProvision {
             working_directory,
@@ -618,6 +794,7 @@ const CLAUDE_PROGRAM: &str = "claude";
 /// Ensure the launched agent's private state directory exists before a root
 /// sandbox starts. Linux `--bind-try` cannot make a missing bind source writable,
 /// so the daemon creates and validates the provider-specific directory first.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_scope_grants_only_the_state_directory_of_the_agent_it_launches
 fn root_agent_writable_roots(
     home: Option<&Path>,
     program: &str,
@@ -653,10 +830,12 @@ fn root_agent_writable_roots(
 /// and deletion, so a live helper is never removed here.
 const CODEX_ARG0_REPAIR_LIMIT: usize = 4_096;
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=repairs_reused_codex_arg0_files_before_launch
 fn repair_codex_arg0_permissions(state_root: &Path) -> std::io::Result<usize> {
     repair_codex_arg0_permissions_with_limit(state_root, CODEX_ARG0_REPAIR_LIMIT)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=repairs_reused_codex_arg0_files_before_launch
 fn repair_codex_arg0_permissions_with_limit(
     state_root: &Path,
     limit: usize,
@@ -734,6 +913,7 @@ struct RootClaudeProvisioner {
     /// 同じ opt-in を伝え、backend の無い環境でも live 起動経路を通す。release ビルドでは常に false。
     sandbox_passthrough: bool,
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_root_claude_keeps_the_repository_read_only_and_gets_the_guard_hook
 impl RootClaudeProvisioner {
     /// The policy paths this launch may carry. Both scopes carry the same
     /// universal areas: the agent CLI keeps its scratchpad, state and credential
@@ -751,6 +931,7 @@ impl RootClaudeProvisioner {
         }
     }
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_root_claude_keeps_the_repository_read_only_and_gets_the_guard_hook
 impl ClaudeProvisioner for RootClaudeProvisioner {
     fn provision(
         &mut self,
@@ -761,7 +942,19 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
         // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
         let mode = sandbox_mode(context);
-        let launch_roots = claude_writable_roots(mode, &working_directory);
+        let session_git = if mode == SandboxMode::Session {
+            session_git_policy(&workspace_root, &working_directory)
+                .map_err(|()| ClaudeProvisionFailure::InvalidSandboxPolicy)?
+        } else {
+            None
+        };
+        let mut launch_roots = claude_writable_roots(mode, &working_directory);
+        launch_roots.extend(
+            session_git
+                .as_ref()
+                .into_iter()
+                .flat_map(|policy| policy.writable_roots.iter().cloned()),
+        );
         let paths = self.launcher_paths();
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
@@ -801,7 +994,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         let mut arguments = tools
             .as_ref()
-            .map(|tools| claude_mcp_arguments(&self.mcp_command, tools.model()))
+            .map(|_| claude_mcp_arguments(&self.mcp_command))
             .transpose()
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
             .unwrap_or_default();
@@ -855,15 +1048,129 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 }
 
 /// The launch-specific writable roots handed to `usagi claude-sandbox`.
-/// A session launch receives exactly its own worktree. A root coordinator receives
-/// no repository-local writable root. Daemon bootstrap is delegated to the
-/// out-of-sandbox bootstrap broker.
+///
+/// A managed session receives its own checkout. The caller adds the narrow Git
+/// metadata roots resolved by [`session_git_policy`]; a root coordinator
+/// receives no repository-local writable root.
 fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<PathBuf> {
     if mode == SandboxMode::Session {
         vec![working_directory.to_path_buf()]
     } else {
         Vec::new()
     }
+}
+
+/// Resolve the optional Git administrative authority for a managed workspace.
+/// Absence means a non-Git workspace; a present but malformed marker is an
+/// admission failure rather than a silently weakened Git launch.
+fn session_git_common_dir(workspace_root: &Path) -> Result<Option<PathBuf>, ()> {
+    match std::fs::symlink_metadata(workspace_root.join(".git")) {
+        Ok(_) => git_common_dir(workspace_root).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+/// Git authority granted to one linked session worktree.
+struct SessionGitPolicy {
+    writable_roots: Vec<PathBuf>,
+}
+
+/// Resolve the narrow Git metadata set a linked session worktree needs for a
+/// normal `git add` / `git commit` transaction.
+///
+/// Linked worktrees keep their index, `HEAD`, commit message and `HEAD` reflog
+/// in a worktree-private administrative directory, but new objects and branch
+/// refs live in the repository's common directory. Granting only the checkout
+/// therefore makes file edits work while every commit fails with `EPERM`.
+/// Granting the whole common directory would also expose `main`, remotes and
+/// repository configuration, so the session receives only its private admin
+/// directory, the shared content-addressed object store, and the `usagi/*`
+/// branch ref / reflog namespaces. The mutable `.git` pointer is not authority:
+/// both its common directory and its private-admin backlink must match the
+/// daemon-selected workspace/worktree pair before any external path is granted.
+fn session_git_policy(
+    workspace_root: &Path,
+    worktree: &Path,
+) -> Result<Option<SessionGitPolicy>, ()> {
+    let marker = worktree.join(".git");
+    let marker_metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return match std::fs::symlink_metadata(workspace_root.join(".git")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                _ => Err(()),
+            };
+        }
+        Err(_) => return Err(()),
+    };
+    // A standalone repository needs no external Git grant: its administrative
+    // directory is already contained by the writable checkout. Accept it only
+    // when the selected session directory is the registered workspace itself;
+    // a nested or foreign repository must not become additional authority.
+    if !marker_metadata.file_type().is_file() {
+        let workspace_root = workspace_root.canonicalize().map_err(|_| ())?;
+        let worktree = worktree.canonicalize().map_err(|_| ())?;
+        return if marker_metadata.file_type().is_dir() && worktree == workspace_root {
+            Ok(None)
+        } else {
+            Err(())
+        };
+    }
+    let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
+    let common = session_git_common_dir(worktree)?.ok_or(())?;
+    let expected_common = session_git_common_dir(workspace_root)?.ok_or(())?;
+    if common != expected_common {
+        return Err(());
+    }
+    let worktrees = common.join("worktrees").canonicalize().map_err(|_| ())?;
+    if git_dir.parent() != Some(worktrees.as_path()) {
+        return Err(());
+    }
+    let backlink = read_git_indirection(&git_dir.join("gitdir"), None, &git_dir)?;
+    if backlink != marker.canonicalize().map_err(|_| ())? {
+        return Err(());
+    }
+
+    let writable_roots = vec![
+        git_dir,
+        common.join("objects"),
+        common.join("refs/heads/usagi"),
+        common.join("logs/refs/heads/usagi"),
+    ];
+    for root in &writable_roots {
+        validate_owned_directory(root).map_err(|_| ())?;
+    }
+    Ok(Some(SessionGitPolicy { writable_roots }))
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
+fn read_git_indirection(
+    path: &Path,
+    prefix: Option<&str>,
+    relative_to: &Path,
+) -> Result<PathBuf, ()> {
+    let metadata = std::fs::metadata(path).map_err(|_| ())?;
+    if metadata.len() > 16 * 1024 {
+        return Err(());
+    }
+    let value = std::fs::read_to_string(path).map_err(|_| ())?;
+    let value = value.trim();
+    let value = match prefix {
+        Some(prefix) => value
+            .strip_prefix(prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        None => (!value.is_empty()).then_some(value),
+    }
+    .ok_or(())?;
+    let path = PathBuf::from(value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        relative_to.join(path)
+    };
+    path.canonicalize().map_err(|_| ())
 }
 
 /// Root providers may run the small read-only Git allowlist accepted by
@@ -901,6 +1208,7 @@ fn insert_root_git_environment(spawn: &mut SpawnProvision) {
 ///
 /// `program` names the agent CLI this launch execs, so the check covers the same
 /// `$HOME` state root the launcher will grant it.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_keeps_checkout_and_git_common_dir_byte_identical
 fn validate_root_git_common_dir_policy(
     workspace_root: &Path,
     program: &str,
@@ -912,15 +1220,13 @@ fn validate_root_git_common_dir_policy(
     let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
     writable.extend(tmpdir.map(Path::to_path_buf));
     if let Some(home) = home {
-        writable.extend(
-            [
-                claude_sandbox::agent_state_directory(program),
-                claude_sandbox::agent_config_prefix(program),
-            ]
-            .into_iter()
-            .flatten()
-            .map(|granted| home.join(granted)),
-        );
+        writable
+            .extend(claude_sandbox::agent_state_directory(program).map(|state| home.join(state)));
+        if claude_sandbox::agent_config_prefix(program)
+            .is_some_and(|prefix| lexical_prefix_overlaps_path(&home.join(prefix), &common))
+        {
+            return Err(());
+        }
         if cfg!(target_os = "macos") {
             writable.push(home.join("Library/Keychains"));
         }
@@ -939,43 +1245,30 @@ fn validate_root_git_common_dir_policy(
     (!overlaps).then_some(()).ok_or(())
 }
 
-fn git_common_dir(workspace_root: &Path) -> Result<PathBuf, ()> {
-    fn read_path(path: &Path, prefix: Option<&str>) -> Result<PathBuf, ()> {
-        let metadata = std::fs::metadata(path).map_err(|_| ())?;
-        if metadata.len() > 16 * 1024 {
-            return Err(());
-        }
-        let value = std::fs::read_to_string(path).map_err(|_| ())?;
-        let value = prefix.map_or(value.trim(), |prefix| {
-            value.trim().strip_prefix(prefix).map_or("", str::trim)
-        });
-        (!value.is_empty()).then(|| PathBuf::from(value)).ok_or(())
-    }
+/// Whether the lexical file family beginning at `prefix` intersects `path`'s
+/// subtree. Non-UTF-8 paths cannot be represented in the launcher argv and are
+/// therefore treated as an overlap (fail closed).
+fn lexical_prefix_overlaps_path(prefix: &Path, path: &Path) -> bool {
+    let Some((prefix_text, path_text)) = prefix.to_str().zip(path.to_str()) else {
+        return true;
+    };
+    path_text.starts_with(prefix_text) || prefix.starts_with(path)
+}
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_keeps_checkout_and_git_common_dir_byte_identical
+fn git_common_dir(workspace_root: &Path) -> Result<PathBuf, ()> {
     let marker = workspace_root.join(".git");
     let marker_path = marker.canonicalize().map_err(|_| ())?;
     let git_dir = if marker_path.is_dir() {
         marker_path
     } else {
-        let path = read_path(&marker_path, Some("gitdir:"))?;
-        let path = if path.is_absolute() {
-            path
-        } else {
-            workspace_root.join(path)
-        };
-        path.canonicalize().map_err(|_| ())?
+        read_git_indirection(&marker_path, Some("gitdir:"), workspace_root)?
     };
     let common_marker = git_dir.join("commondir");
     if !common_marker.exists() {
         return Ok(git_dir);
     }
-    let path = read_path(&common_marker, None)?;
-    let path = if path.is_absolute() {
-        path
-    } else {
-        git_dir.join(path)
-    };
-    path.canonicalize().map_err(|_| ())
+    read_git_indirection(&common_marker, None, &git_dir)
 }
 
 /// Policy paths are daemon-owned inputs.  Validate their identity before user
@@ -1009,6 +1302,7 @@ struct SandboxPolicyInputs<'a> {
 
 /// launcher へ host path を渡す前に通す policy gate。writable root 集合・`$HOME` 配下の
 /// state root・（root mode では）Git common dir を、保護対象 workspace と突き合わせる。
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 fn validate_claude_sandbox_policy(
     policy: &SandboxPolicyInputs<'_>,
 ) -> Result<(), ClaudeSandboxPolicyError> {
@@ -1060,22 +1354,28 @@ fn validate_claude_sandbox_policy(
     }
     if let Some(home) = home {
         validate_owned_directory(home)?;
-        // gate は launcher の grant を写す: state directory（subtree）と、その隣に置かれる
-        // global config の path prefix（`~/.claude.json*`）の両方を見る。
-        for granted in [
-            claude_sandbox::agent_state_directory(program),
-            claude_sandbox::agent_config_prefix(program),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let granted = home.join(granted);
+        // State is a path subtree, whereas the global config is a lexical file
+        // family (`~/.claude.json*`). Keep those overlap rules distinct.
+        if let Some(state) = claude_sandbox::agent_state_directory(program) {
+            let granted = home.join(state);
             let granted = granted.canonicalize().unwrap_or(granted);
             if protected_workspace.starts_with(&granted)
                 || (mode == SandboxMode::Root && granted.starts_with(&protected_workspace))
             {
                 return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
             }
+        }
+        if claude_sandbox::agent_config_prefix(program).is_some_and(|prefix| {
+            let granted = home.join(prefix);
+            let protected_in_family = lexical_prefix_overlaps_path(&granted, &protected_workspace);
+            protected_in_family
+                && (protected_workspace
+                    .to_str()
+                    .zip(granted.to_str())
+                    .is_none_or(|(protected, granted)| protected.starts_with(granted))
+                    || mode == SandboxMode::Root)
+        }) {
+            return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
         }
         if cfg!(target_os = "macos") {
             let keychains = home.join("Library/Keychains");
@@ -1101,6 +1401,7 @@ fn validate_claude_sandbox_policy(
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_cold_starts_through_the_out_of_sandbox_broker
 fn validate_sandbox_backend(path: &Path) -> Result<(), ClaudeSandboxPolicyError> {
     if !path.is_absolute() || path == Path::new("/") {
         return Err(ClaudeSandboxPolicyError::InvalidBackend);
@@ -1120,6 +1421,7 @@ fn validate_sandbox_backend(path: &Path) -> Result<(), ClaudeSandboxPolicyError>
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 fn validate_owned_directory(path: &Path) -> Result<(), ClaudeSandboxPolicyError> {
     if !path.is_absolute() || path == Path::new("/") {
         return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
@@ -1139,6 +1441,7 @@ fn validate_owned_directory(path: &Path) -> Result<(), ClaudeSandboxPolicyError>
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 fn path_has_symlink_component(path: &Path) -> bool {
     path.ancestors().any(|component| {
         std::fs::symlink_metadata(component).map_or(true, |metadata| {
@@ -1147,6 +1450,7 @@ fn path_has_symlink_component(path: &Path) -> bool {
     })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_policy_accepts_the_per_user_cache_root
 fn is_macos_system_firmlink(path: &Path) -> bool {
     cfg!(target_os = "macos") && matches!(path.to_str(), Some("/var" | "/tmp" | "/etc"))
 }
@@ -1214,6 +1518,7 @@ struct SandboxLauncherPaths<'a> {
 /// `usagi claude-sandbox --mode <mode> [--writable-root <path>]… --`, the ephemeral
 /// instruction that makes the spawned child the launcher instead of the bare
 /// product.  Host paths stay out of the durable launch snapshot.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 fn claude_sandbox_launcher(
     usagi: &Path,
     mode: SandboxMode,
@@ -1253,6 +1558,7 @@ fn claude_sandbox_launcher(
 /// `--settings <json>`: the scoped hook wiring Claude loads for this launch.
 /// The payload is passed inline so no host path or rendered product payload has
 /// to be materialized on disk.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn claude_settings_arguments(usagi: &Path) -> Result<Vec<String>, ()> {
     let usagi = usagi.to_str().ok_or(())?;
     Ok(vec!["--settings".to_owned(), scoped_settings_json(usagi)])
@@ -1282,6 +1588,7 @@ fn claude_prompt_arguments(prompt: String) -> Vec<String> {
 
 /// The configured environment for a launch in `workspace_root`, or nothing when
 /// no reader is wired (tests that exercise only the MCP / sandbox wiring).
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_fixture_is_injected_without_cli_credentials
 fn configured_environment(
     environment: Option<&Arc<SharedUserEnvironment>>,
     workspace_root: &Path,
@@ -1295,6 +1602,7 @@ fn configured_environment(
 /// The durable allowlist for a launch: the MCP names plus the configured
 /// variable names. Only names are durable — values and secrets stay in the
 /// ephemeral spawn provision.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_fixture_is_injected_without_cli_credentials
 fn launch_allowlist(
     context: &ProvisionContext,
     user: &BTreeMap<String, String>,
@@ -1338,6 +1646,7 @@ fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<Environment
 /// re-applying the mode lands it on the very directory the daemon is using.
 /// Both values come from the one [`paths::DataHome`] pair, never from separate
 /// derivations that could disagree.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_fixture_is_injected_without_cli_credentials
 fn mcp_environment(
     context: &ProvisionContext,
     data_home: &paths::DataHome,
@@ -1377,26 +1686,36 @@ fn mcp_environment(
 /// Product-specific MCP and structured-hook launch arguments. They stay ephemeral in
 /// [`SpawnProvision`] so the durable launch plan never stores configuration
 /// paths or rendered product payloads.
-fn codex_integration_arguments(
-    command: &Path,
-    local_llm_model: Option<&str>,
-) -> Result<Vec<String>, ()> {
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
+fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
-    let hook_command = format!("{} codex-session-capture", shell_quote(command));
-    let hook_command = serde_json::to_string(&hook_command).map_err(|_| ())?;
-    let mut arguments = codex_product_mcp_arguments(command, local_llm_model);
-    arguments.extend([
-        // SessionStart is Codex's documented structured lifecycle channel. It
-        // sends a JSON object containing the current `session_id` on stdin.
-        // Restrict capture to a newly-created provider conversation: explicit
-        // resume already carries its validated durable provider identity.
-        "-c".into(),
-        r"features.hooks = true".into(),
-        "-c".into(),
-        format!(
-            r#"hooks.SessionStart = [{{ matcher = "^startup$", hooks = [{{ type = "command", command = {hook_command}, timeout = 10 }}] }}]"#
-        ),
-    ]);
+    let capture_command = format!("{} codex-session-capture", shell_quote(command));
+    let capture_command = serde_json::to_string(&capture_command).map_err(|_| ())?;
+    let mut arguments = codex_product_mcp_arguments(command);
+    arguments.extend(["-c".into(), r"features.hooks = true".into()]);
+    for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
+        // Codex exposes PermissionRequest for the same user-attention boundary
+        // that Claude exposes as Notification. Each provider therefore reports
+        // `waiting` without pretending it supports the other's native event.
+        if event == "Notification" {
+            continue;
+        }
+        let phase_command = format!("{} agent-phase {}", shell_quote(command), phase.as_token());
+        let phase_command = serde_json::to_string(&phase_command).map_err(|_| ())?;
+        let timeout = if event == "SessionEnd" { 3 } else { 10 };
+        let groups = if event == "SessionStart" {
+            // Only a new conversation may establish provider resume identity;
+            // phase reporting also applies to resume/clear/compact starts.
+            format!(
+                r#"[{{ matcher = "^startup$", hooks = [{{ type = "command", command = {capture_command}, timeout = 10 }}] }}, {{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
+            )
+        } else {
+            format!(
+                r#"[{{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
+            )
+        };
+        arguments.extend(["-c".into(), format!("hooks.{event} = {groups}")]);
+    }
     Ok(arguments)
 }
 
@@ -1447,24 +1766,15 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
-fn claude_mcp_arguments(command: &Path, local_llm_model: Option<&str>) -> Result<Vec<String>, ()> {
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_disabled_family_leaves_both_the_registry_and_the_agent_prompt
+fn claude_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
-    Ok(claude_product_mcp_arguments(command, local_llm_model))
+    Ok(claude_product_mcp_arguments(command))
 }
 
-/// What the MCP server this launch injects will expose: the tool families it
-/// registers and the local-LLM model it wires beside itself.
+/// What the MCP server this launch injects will expose.
 struct ConfiguredMcpTools {
     families: McpToolFamilies,
-    local_llm_model: Option<String>,
-}
-
-impl ConfiguredMcpTools {
-    /// The model as the MCP wiring needs it. `Some` exactly when
-    /// `families.local_llm` is set, because both come from one accessor.
-    fn model(&self) -> Option<&str> {
-        self.local_llm_model.as_deref()
-    }
 }
 
 /// Resolve the effective MCP tool configuration for one launch.
@@ -1484,6 +1794,7 @@ impl ConfiguredMcpTools {
 /// Unreadable settings fail the launch, exactly as they fail `usagi mcp` before
 /// its serve loop starts. Falling back to the defaults here would launch an agent
 /// whose prompt advertises tools its own MCP server could not register.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_disabled_family_leaves_both_the_registry_and_the_agent_prompt
 fn configured_mcp_tools(
     data_home: &paths::DataHome,
     workspace_root: &Path,
@@ -1494,7 +1805,6 @@ fn configured_mcp_tools(
         let effective = global.with_local(&local);
         Ok(ConfiguredMcpTools {
             families: McpToolFamilies::from_settings(&effective),
-            local_llm_model: effective.wired_local_llm_model().map(str::to_owned),
         })
     };
     resolve().map_err(|error| {
@@ -1556,6 +1866,7 @@ impl Default for SystemAgentReadiness {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 impl AgentReadinessProbe for SystemAgentReadiness {
     fn observe(&self, product: &str) -> AgentReadiness {
         // Which products exist, and which status command proves each one usable,
@@ -1571,6 +1882,7 @@ impl AgentReadinessProbe for SystemAgentReadiness {
 }
 
 impl SystemAgentReadiness {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
     fn ready_command(&self, product: &str, program: &str, arguments: &[&str]) -> AgentReadiness {
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
@@ -1647,6 +1959,7 @@ fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness 
         | ChildObservation::ObservationFailed => AgentReadiness::Unavailable,
     }
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(
     workspaces: &Workspaces,
     context: &ProvisionContext,
@@ -1679,6 +1992,7 @@ fn working_directories(
 /// current definition from the registered workspace catalog. The instruction
 /// remains in this ephemeral provision path and is never copied into a launch
 /// request, durable snapshot, dispatch record, response, or log.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn effective_role_instruction(
     workspaces: &Workspaces,
     data_home: &paths::DataHome,
@@ -1741,6 +2055,7 @@ struct TenantWorkspaces {
     initial: PathBuf,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 impl TenantWorkspaces {
     /// The canonical spelling of a declared root, or the typed refusal for a
     /// root that cannot be resolved on this machine.
@@ -1788,7 +2103,35 @@ impl TenantWorkspaces {
 /// its own workspace. It is not one: it belongs to the workspace that created
 /// it, which must already be adopted for the worktree to exist.
 fn adoptable_workspace_root(path: &Path) -> Option<PathBuf> {
-    (!is_session_worktree_path(path) && path.join(".git").exists()).then(|| path.to_path_buf())
+    (path.is_absolute() && !is_session_worktree_path(path) && path.join(".git").exists())
+        .then(|| path.to_path_buf())
+}
+
+/// The workspace a bound declaration may open implicitly.
+///
+/// A running daemon's handshake and a client's cold-start preflight share this
+/// decision, so daemon liveness cannot change the meaning of the same cwd.
+fn implicit_bound_workspace(daemon_dir: &Path, declared: &Path) -> Option<PathBuf> {
+    workspace_state::owner(daemon_dir, declared)
+        .ok()
+        .flatten()
+        .map(|known| known.root().to_path_buf())
+        .or_else(|| adoptable_workspace_root(declared))
+}
+
+fn unopened_bound_workspace_refusal(
+    declared: &Path,
+    served: &[String],
+) -> usagi_core::infrastructure::ipc::ProtocolError {
+    usagi_core::infrastructure::ipc::workspace_refusal_serving(
+        &format!(
+            "this daemon has not opened {}; run this from a repository root \
+             to open it, or open it explicitly with `usagi open {}`",
+            paths::wire_workspace_root(declared),
+            paths::wire_workspace_root(declared)
+        ),
+        served,
+    )
 }
 
 /// Whether `path` is at or below a `\.usagi/sessions/<name>` worktree.
@@ -1802,6 +2145,7 @@ fn is_session_worktree_path(path: &Path) -> bool {
         .any(|pair| pair[0] == *".usagi" && pair[1] == *"sessions")
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
     fn resolve(
         &self,
@@ -1862,22 +2206,8 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
                 //    MCP client start working in a fresh clone without opening it
                 //    in the TUI first — and only the path itself is ever
                 //    considered, never an ancestor ([`adoptable_workspace_root`]).
-                let opening = workspace_state::owner(&self.daemon_dir, &declared)
-                    .ok()
-                    .flatten()
-                    .map(|known| known.root().to_path_buf())
-                    .or_else(|| adoptable_workspace_root(&declared))
-                    .ok_or_else(|| {
-                        usagi_core::infrastructure::ipc::workspace_refusal_serving(
-                            &format!(
-                                "this daemon has not opened {}; run this from a repository root \
-                                 to open it, or open it explicitly with `usagi open {}`",
-                                paths::wire_workspace_root(&declared),
-                                paths::wire_workspace_root(&declared)
-                            ),
-                            &self.served(),
-                        )
-                    })?;
+                let opening = implicit_bound_workspace(&self.daemon_dir, &declared)
+                    .ok_or_else(|| unopened_bound_workspace_refusal(&declared, &self.served()))?;
                 self.tenants.adopt(&opening).map_err(|error| {
                     usagi_core::infrastructure::ipc::workspace_refusal_serving(
                         &error.to_string(),
@@ -1895,6 +2225,7 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
 /// The handshake has already adopted or refused; this is the lookup of what it
 /// settled on. A miss means the workspace was retired between the two steps, and
 /// the connection is closed rather than served another workspace's state.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn connection_workspace(
     workspaces: &Workspaces,
     initial: &usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
@@ -1927,6 +2258,7 @@ struct ConnectionWorkspace {
     workspaces: Workspaces,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 impl ConnectionWorkspace {
     /// The lifecycle runtime of the workspace this connection is bound to.
     fn sessions(&self) -> &SharedSessionRuntime {
@@ -1942,6 +2274,7 @@ impl ConnectionWorkspace {
 /// The #268 scope resolver, adapted to the Agent owner's product-neutral
 /// `(workspace, session)` input by deriving the available session's worktree.
 struct SharedScopeResolver(Workspaces);
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 impl SessionScopeResolver for SharedScopeResolver {
     fn resolve_available_scope(
         &self,
@@ -1991,6 +2324,7 @@ impl SessionScopeResolver for SharedScopeResolver {
 /// resolver, generic terminal requests already carry a worktree ID, so the
 /// runtime verifies that exact identity before admitting a PTY spawn.
 struct SharedTerminalScopeResolver(Workspaces);
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
 impl TerminalScopeResolver for SharedTerminalScopeResolver {
     fn resolve_available_scope(
         &self,
@@ -2058,6 +2392,7 @@ type SharedSupervisorRuntime = Arc<Mutex<SupervisorRuntime>>;
 struct AgentDecisionWaker<'a> {
     agent: &'a SharedAgentRuntime,
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 impl DecisionWaker for AgentDecisionWaker<'_> {
     fn wake(&mut self, wake: &DecisionWake) -> anyhow::Result<()> {
         let prompt = format!(
@@ -2106,6 +2441,7 @@ impl DecisionWaker for AgentDecisionWaker<'_> {
 }
 
 struct DeferredDecisionWaker;
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 impl DecisionWaker for DeferredDecisionWaker {
     fn wake(&mut self, _: &DecisionWake) -> anyhow::Result<()> {
         anyhow::bail!("parent agent wake is deferred until the agent owner is available")
@@ -2118,6 +2454,7 @@ struct SharedAgent {
     runtime: SharedAgentRuntime,
     disconnected: SyncSender<ConnectionId>,
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 impl AgentTerminalActor for SharedAgent {
     fn handle(
         &mut self,
@@ -2188,6 +2525,7 @@ struct TerminalPipelineMetrics {
     backpressured_bytes: AtomicU64,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=metrics_snapshot_is_served_through_the_daemon_endpoint
 impl TerminalPipelineMetrics {
     fn observe_backpressure(&self, bytes: usize) {
         self.backpressured_bytes
@@ -2249,6 +2587,7 @@ impl AgentPty {
         )
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_restart_rolls_over_two_real_pty_children_without_provider_resume
 impl PtySpawner for AgentPty {
     fn spawn(
         &mut self,
@@ -2359,6 +2698,7 @@ fn provisioned_agent_command(
     (program, argv)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final
 fn send_agent_observation(
     sender: &SyncSender<AgentPtyObservation>,
     observation: AgentPtyObservation,
@@ -2374,6 +2714,7 @@ fn send_agent_observation(
         Err(TrySendError::Disconnected(_)) => Err(()),
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final
 impl PtyWriter for AgentPty {
     fn select_terminal(&mut self, terminal: &TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
@@ -2448,6 +2789,7 @@ impl DaemonPty {
         )
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respawn
 impl GenericPtySpawner for DaemonPty {
     fn spawn(
         &mut self,
@@ -2513,8 +2855,32 @@ impl GenericPtySpawner for DaemonPty {
         });
         Ok(identity)
     }
+
+    fn terminate_reap(
+        &mut self,
+        terminal: &TerminalRef,
+    ) -> Result<(), usagi_daemon::usecase::generic_terminal::GenericTerminateReapError> {
+        use usagi_daemon::usecase::generic_terminal::GenericTerminateReapError;
+
+        let key = terminal.terminal_id.as_str();
+        let pty = Arc::clone(
+            &self
+                .terminals
+                .get(&key)
+                .filter(|entry| entry.terminal.fences(terminal))
+                .ok_or(GenericTerminateReapError)?
+                .pty,
+        );
+        pty.lock()
+            .map_err(|_| GenericTerminateReapError)?
+            .terminate_reap()
+            .map_err(|_| GenericTerminateReapError)?;
+        release_owned_pty(&mut self.terminals, &mut self.selected, terminal);
+        Ok(())
+    }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respawn
 fn send_pty_observation(
     sender: &SyncSender<PtyObservation>,
     observation: PtyObservation,
@@ -2530,6 +2896,7 @@ fn send_pty_observation(
         Err(TrySendError::Disconnected(_)) => Err(()),
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 impl PtyWriter for DaemonPty {
     fn select_terminal(&mut self, terminal: &usagi_core::domain::id::TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
@@ -2611,6 +2978,11 @@ type SharedPrInventory = Arc<Mutex<OutputPrProjector<FencedPrInventory<PrInvento
 const PR_REFRESH_TICK: Duration = Duration::from_millis(250);
 const PR_REFRESH_FRESHNESS_MS: u64 = 60_000;
 const PR_REFRESH_PER_TICK: usize = 2;
+/// `gh pr view` returns a compact JSON document. This cap leaves room for a
+/// large check rollup while preventing a broken provider from retaining
+/// unbounded diagnostics in either pipe.
+const PR_PROVIDER_OUTPUT_LIMIT: usize = 256 * 1024;
+const PR_PROVIDER_TERMINATE_GRACE: Duration = Duration::from_millis(100);
 /// How often a serving daemon re-checks that it is still the authority for its
 /// data directory. One second is short enough that an abandoned daemon exits
 /// promptly and long enough that the two `stat`s are free.
@@ -2669,6 +3041,7 @@ struct DecisionWaiters {
     waiting: Mutex<BTreeMap<usagi_core::domain::id::UserDecisionId, Vec<DecisionWaiter>>>,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 impl DecisionWaiters {
     fn subscribe(
         self: &Arc<Self>,
@@ -2766,6 +3139,7 @@ struct ProductionRefreshClock {
     started: Instant,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 impl RefreshClock for ProductionRefreshClock {
     fn now_ms(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -2775,6 +3149,7 @@ impl RefreshClock for ProductionRefreshClock {
 #[derive(Clone, Copy)]
 struct GhProcess;
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 impl GhProcessPort for GhProcess {
     type Error = std::io::Error;
 
@@ -2784,34 +3159,32 @@ impl GhProcessPort for GhProcess {
         argv: &[String],
         timeout_ms: u64,
     ) -> Result<String, Self::Error> {
-        let mut child = Command::new(program)
-            .args(argv)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                let mut output = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    stdout.read_to_string(&mut output)?;
-                }
-                return status
-                    .success()
-                    .then_some(output)
-                    .ok_or_else(|| std::io::Error::other("PR provider failed"));
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "PR provider timed out",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let arguments = argv.iter().map(String::as_str).collect::<Vec<_>>();
+        gh_process_result(observe(
+            program,
+            &arguments,
+            ChildPolicy {
+                timeout: Duration::from_millis(timeout_ms),
+                terminate_grace: PR_PROVIDER_TERMINATE_GRACE,
+                output_limit: PR_PROVIDER_OUTPUT_LIMIT,
+            },
+        ))
+    }
+}
+
+fn gh_process_result(observation: ChildObservation) -> std::io::Result<String> {
+    match observation {
+        ChildObservation::Success(output) => Ok(output),
+        ChildObservation::TimedOut => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "PR provider timed out",
+        )),
+        ChildObservation::SpawnFailed
+        | ChildObservation::ExitFailure
+        | ChildObservation::OutputTooLarge
+        | ChildObservation::InvalidOutput
+        | ChildObservation::EmptyOutput
+        | ChildObservation::ObservationFailed => Err(std::io::Error::other("PR provider failed")),
     }
 }
 
@@ -2820,6 +3193,7 @@ struct ProcessResourceSampler {
     previous: Option<(Instant, u64)>,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=dispatch_metrics_reads_the_process_resource_sample
 impl ProcessResourceSampler {
     fn snapshot(&mut self) -> (u32, u64) {
         let now = Instant::now();
@@ -2843,6 +3217,7 @@ impl ProcessResourceSampler {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=dispatch_metrics_reads_the_process_resource_sample
 fn process_resource_usage() -> Option<(u64, u64)> {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) } != 0 {
@@ -2865,6 +3240,7 @@ fn process_resource_usage() -> Option<(u64, u64)> {
 
 type SharedMetricsBroker = Arc<Mutex<MetricsBroker>>;
 type SharedProcessResourceSampler = Arc<Mutex<ProcessResourceSampler>>;
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
 impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
     fn handle(
         &mut self,
@@ -2915,6 +3291,7 @@ impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
 /// worker retains the accepted reader, writer, and retirement descriptor until
 /// the mutex is acquired. One daemon-owned consumer bounds the contention and
 /// lets the connection worker close all three descriptors immediately.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=drawer_close_reopen_continues_input_on_the_same_daemon_connection
 fn start_connection_cleanup_worker(
     agent: SharedAgentRuntime,
     terminal: SharedTerminalRuntime,
@@ -2967,6 +3344,7 @@ struct DaemonBackgroundWorkers {
     terminal_observations: Option<SyncSender<PtyObservation>>,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=lifecycle_owner_closes_sources_and_joins_every_critical_worker
 impl DaemonBackgroundWorkers {
     fn new(shutdown: Arc<ShutdownRequest>, projection: Arc<PrProjectionQueue>) -> Self {
         Self {
@@ -3018,6 +3396,7 @@ impl Drop for DaemonBackgroundWorkers {
 // workspace, build, owner record, custody probe, shutdown); bundling them would only
 // hide the composition wiring.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn spawn_ipc_server(
     listener: SecureUnixListener,
     generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
@@ -3254,6 +3633,7 @@ fn spawn_ipc_server(
         server,
         data_dir.to_path_buf(),
         initial,
+        tenants,
         workspaces,
         resolver,
         teardown,
@@ -3283,6 +3663,7 @@ fn spawn_ipc_server(
 /// Removes Agent records whose managed session was already retired by an
 /// older daemon. This startup pass repairs the historical state where session
 /// teardown removed the lifecycle row without closing its Agent owner.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn reconcile_removed_session_agents(
     daemon_dir: &Path,
     agent: &SharedAgentRuntime,
@@ -3317,6 +3698,7 @@ fn reconcile_removed_session_agents(
 /// retained: a collection could never unblock it, so pretending it is joinable
 /// would park retirement. Production accept loops fail closed before spawning
 /// in that case; the error branch remains defensive for injected callers.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
 fn retain_client_worker(
     workers: &ClientWorkers,
     unblock: std::io::Result<AcceptedStream>,
@@ -3340,6 +3722,7 @@ fn retain_client_worker(
 
 /// Reap completed workers before deciding whether another accepted connection
 /// can acquire daemon-owned descriptors and a thread.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 fn client_connection_capacity_available(workers: &ClientWorkers, limit: usize) -> bool {
     let report = workers.reap_finished();
     if !report.is_clean() {
@@ -3380,6 +3763,7 @@ fn client_connection_limit_from_nofile(soft_limit: u64) -> usize {
         .clamp(1, CLIENT_CONNECTION_LIMIT_CEILING)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 fn client_connection_limit() -> usize {
     let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
     // SAFETY: `limit` points to writable storage for one `rlimit`, and the
@@ -3396,6 +3780,7 @@ fn client_connection_limit() -> usize {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn bind_ipc_listener(
     data_dir: &Path,
 ) -> std::io::Result<(
@@ -3417,6 +3802,7 @@ fn bind_ipc_listener(
 /// Starts the only production PR refresh worker. Remote calls happen outside
 /// the shared inventory lock, so snapshot and terminal paths continue to make
 /// progress while `gh` is slow.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn start_pr_refresh_worker(
     pr_inventory: SharedPrInventory,
     daemon_dir: PathBuf,
@@ -3449,6 +3835,7 @@ fn start_pr_refresh_worker(
 ///
 /// `None` when any of them cannot be read: pruning on a partial view is exactly
 /// the deletion this guards against.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn known_sessions(daemon_dir: &Path) -> Option<std::collections::BTreeSet<SessionId>> {
     let mut known = std::collections::BTreeSet::new();
     for state in usagi_core::infrastructure::workspace_state::adopted(daemon_dir).ok()? {
@@ -3471,6 +3858,7 @@ fn known_sessions(daemon_dir: &Path) -> Option<std::collections::BTreeSet<Sessio
     Some(known)
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn spawn_pr_refresh_worker<R, C>(
     pr_inventory: SharedPrInventory,
     daemon_dir: Option<PathBuf>,
@@ -3537,6 +3925,7 @@ where
 /// owns the unbounded `git worktree remove` plus `remove_dir_all` afterwards.
 /// Its work list is derived from durable state, so it also resumes a teardown
 /// that a previous daemon was interrupted in.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn start_session_teardown_worker(
     workspaces: Workspaces,
     agent: SharedAgentRuntime,
@@ -3566,6 +3955,7 @@ struct WorkspacesTeardown {
     workspaces: Workspaces,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 impl TeardownJournal for WorkspacesTeardown {
     fn pending(&self) -> Vec<PendingTeardown> {
         self.workspaces
@@ -3598,6 +3988,7 @@ struct AgentAndWorktreeTeardown<E> {
     worktree: E,
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 impl<E: TeardownEffect> TeardownEffect for AgentAndWorktreeTeardown<E> {
     fn tear_down(&self, teardown: &PendingTeardown) -> Result<(), String> {
         self.agent
@@ -3609,6 +4000,7 @@ impl<E: TeardownEffect> TeardownEffect for AgentAndWorktreeTeardown<E> {
     }
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn spawn_session_teardown_worker<J, E>(
     journal: J,
     effect: E,
@@ -3689,6 +4081,7 @@ struct DaemonWorkspaceActivity {
     agent: SharedAgentRuntime,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
     for DaemonWorkspaceActivity
 {
@@ -3698,7 +4091,7 @@ impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
         runtime: &SharedSessionRuntime,
     ) -> bool {
         let running_terminal = self.terminal.lock().map_or(true, |terminal| {
-            terminal.has_running_in_workspace(workspace)
+            terminal.retirement_blocker_count_in_workspace(workspace) != 0
         });
         let running_agent = self
             .agent
@@ -3711,6 +4104,7 @@ impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn start_tenant_retire_worker(
     tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
     activity: DaemonWorkspaceActivity,
@@ -3725,6 +4119,7 @@ fn start_tenant_retire_worker(
     )
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn spawn_tenant_retire_worker<A>(
     tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
     activity: A,
@@ -3757,6 +4152,7 @@ where
         })
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_collection_pass_removes_the_shard_of_a_generation_nothing_retains
 fn start_custody_worker(
     probe: FsCustodyProbe,
     owner: DaemonRecord,
@@ -3767,6 +4163,7 @@ fn start_custody_worker(
     spawn_custody_worker(probe, owner, data_dir, gate, shutdown, CUSTODY_TICK)
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=a_collection_pass_removes_the_shard_of_a_generation_nothing_retains
 fn spawn_custody_worker<P>(
     probe: P,
     owner: DaemonRecord,
@@ -3841,6 +4238,7 @@ const DRAINING_COLLECTION_TICK: Duration = Duration::from_millis(250);
 /// Starts the only production retention collector. Launch and exit already
 /// collect on the spot; this worker covers an idle daemon, where the age budget
 /// and the minimum visibility TTL are the only things still moving.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_retention_collector_ticks_until_shutdown_and_stops_when_already_down
 fn start_retention_gc_worker(
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
@@ -3872,6 +4270,7 @@ fn start_retention_gc_worker(
 
 /// The worker loop, with the collection step injected so a test can drive it
 /// without a daemon, a PTY, or a store.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=the_retention_collector_ticks_until_shutdown_and_stops_when_already_down
 fn spawn_retention_gc_worker<C>(
     mut collect: C,
     shutdown: Arc<ShutdownRequest>,
@@ -3896,6 +4295,7 @@ where
 
 /// Starts the worker that ends this process after a handoff once its owner shard
 /// and global allocator have no claim left.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_draining_collector_retries_observations_and_never_outlives_shutdown
 fn start_draining_collection_worker(
     durable: ShardedRuntimeState,
     registry: GenerationRegistry,
@@ -3936,6 +4336,7 @@ fn start_draining_collection_worker(
 /// local gate had irreversibly retired). The shutdown request wakes the serve
 /// thread, which joins the accept loop and every late-registered client worker
 /// before it unlinks the endpoint and exits the process.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=the_draining_collector_retries_observations_and_never_outlives_shutdown
 fn spawn_draining_collection_worker<C>(
     mut collect: C,
     shutdown: Arc<ShutdownRequest>,
@@ -3973,6 +4374,7 @@ struct FsCustodyProbe {
     record: FsRecordFile,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_collection_pass_removes_the_shard_of_a_generation_nothing_retains
 impl CustodyProbe for FsCustodyProbe {
     fn locked_inode(&self) -> std::io::Result<NodeIdentity> {
         self.locked.ok_or_else(|| {
@@ -4014,6 +4416,7 @@ fn node_identity(metadata: &std::fs::Metadata) -> NodeIdentity {
 /// Keeps decision deadlines progressing even when no subsequent MCP/TUI
 /// request arrives. Every action is idempotent, so a daemon restart simply
 /// resumes from the JSON store.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn start_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
     waiters: Arc<DecisionWaiters>,
@@ -4024,6 +4427,7 @@ fn start_decision_maintenance(
 
 /// The loop, with the tick injected so a test can drive it without waiting out
 /// the production cadence.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn spawn_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
     waiters: Arc<DecisionWaiters>,
@@ -4050,6 +4454,7 @@ fn spawn_decision_maintenance(
         })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=repairs_reused_codex_arg0_files_before_launch
 fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
     // Repair only stale directory modes before the Agent owner mutex exists.
     // Codex performs the lock-aware deletion itself after startup.
@@ -4071,6 +4476,7 @@ fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
 }
 
 #[allow(clippy::too_many_arguments)] // Composition injects each Agent dependency separately.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn open_agent_runtime(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -4190,6 +4596,7 @@ fn open_agent_runtime(
     }))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final
 fn start_agent_observer(
     agent: std::sync::Weak<SharedAgentState>,
     observations: Receiver<AgentPtyObservation>,
@@ -4268,6 +4675,7 @@ fn start_agent_observer(
 /// It owns every scan and every durable inventory write that PTY output causes.
 /// The queue's `recv` parks on a condvar and returns `None` once the queue is
 /// closed and drained, so this thread has no timer and no polling.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn start_pr_projection_worker(
     pr_inventory: SharedPrInventory,
     projection: Arc<PrProjectionQueue>,
@@ -4302,6 +4710,7 @@ fn start_pr_projection_worker(
     )
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=planned_critical_worker_shutdown_joins_without_a_health_failure
 fn spawn_critical_worker<R, F>(
     name: &str,
     worker: BackgroundWorker,
@@ -4331,6 +4740,7 @@ where
         })
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 fn open_session_runtime(
     repo_root: PathBuf,
     state_dir: &Path,
@@ -4352,6 +4762,7 @@ fn open_session_runtime(
 /// Reads the root selected by the durable session store, rather than the
 /// daemon process's startup directory. This keeps terminal profile resolution
 /// aligned with restored managed-session state after a restart.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn trusted_repository_root(sessions: &SharedSessionRuntime) -> std::io::Result<PathBuf> {
     sessions
         .lock()
@@ -4360,6 +4771,7 @@ fn trusted_repository_root(sessions: &SharedSessionRuntime) -> std::io::Result<P
 }
 
 #[allow(clippy::too_many_arguments)] // Composition injects each terminal dependency separately.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
 fn new_terminal_runtime(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -4398,6 +4810,7 @@ fn new_terminal_runtime(
     Ok(Arc::new(Mutex::new(runtime)))
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
 fn start_terminal_observer<S, Q>(
     terminal: std::sync::Weak<Mutex<GenericTerminalRuntime<TrustedLoginShell, S, DaemonPty, Q>>>,
     observations: Receiver<PtyObservation>,
@@ -4460,11 +4873,13 @@ where
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Composition owns the independently injected daemon services.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn start_ipc_accept_loop(
     listener: SecureUnixListener,
     server: usagi_core::infrastructure::ipc::ServerProtocol,
     data_dir: PathBuf,
     initial: usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
+    tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
     workspaces: Workspaces,
     resolver: Arc<TenantWorkspaces>,
     teardown: Arc<TeardownSignal>,
@@ -4568,10 +4983,12 @@ fn start_ipc_accept_loop(
                         // belongs to that workspace, while requests that name a
                         // workspace resolve through the registry.
                         let connection_initial = initial.clone();
+                        let connection_tenants = Arc::clone(&tenants);
                         let connection_workspaces = Arc::clone(&workspaces);
                         let connection_resolver = Arc::clone(&resolver);
                         let teardown = Arc::clone(&teardown);
                         let terminal = Arc::clone(&terminal);
+                        let tenant_terminal = Arc::clone(&terminal);
                         let visibility = visibility.clone();
                         let retention = retention.clone();
                         let agent_owner = Arc::clone(&agent);
@@ -4730,18 +5147,19 @@ fn start_ipc_accept_loop(
                                             );
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
-                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, peer_process, request_id, &body, hello),
+                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, peer_process, request_id, &body, hello),
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
+                                        Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
-                                        Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process.2, request_id, &body, hello),
-                                        Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process.2, request_id, &body, hello),
+                                        Some("agent" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
+                                        Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
+                                        Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
                                         Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, wait: DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation } }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
-                                            let caller = authenticated_supervisor_caller(&agent_launch, &client, &body);
+                                            let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                         },
                                         Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
@@ -4933,6 +5351,7 @@ struct DispatchToolContext<'a> {
     wait: DecisionWaitContext<'a>,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 fn dispatch_dispatch_tool(
     context: &DispatchToolContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -4955,6 +5374,7 @@ fn dispatch_dispatch_tool(
                 | DispatchToolAction::AgentComplete
                 | DispatchToolAction::AgentFail
                 | DispatchToolAction::AgentInbox
+                | DispatchToolAction::AgentInboxAck
         )
     }) {
         dispatch_agent_tool(
@@ -4979,6 +5399,7 @@ fn dispatch_dispatch_tool(
 }
 
 #[allow(clippy::too_many_lines)] // One handler keeps authentication and durable routing atomic.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 fn dispatch_agent_tool(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
@@ -5024,9 +5445,17 @@ fn dispatch_agent_tool(
     #[derive(Deserialize)]
     struct InboxPayload {
         #[serde(default)]
+        cursor: Option<u64>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
         since: Option<DateTime<Utc>>,
         #[serde(default)]
         unread_only: bool,
+    }
+    #[derive(Deserialize)]
+    struct InboxAckPayload {
+        cursor: u64,
     }
 
     let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
@@ -5076,14 +5505,21 @@ fn dispatch_agent_tool(
         let mut runtime = agent.lock().map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
         })?;
-        let caller = runtime
-            .mcp_dispatch_caller(&credential.credential)
+        let authenticated = runtime
+            .mcp_dispatch_context(&credential.credential)
             .ok_or_else(|| {
                 ProtocolError::new(
                     ErrorCode::OwnershipUnknown,
                     "agent caller provenance is unknown",
                 )
             })?;
+        if authenticated.workspace_id != workspace {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent caller does not belong to this workspace",
+            ));
+        }
+        let caller = authenticated.caller;
         let store = runtime.dispatch_store();
         let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {
             let mut runs = store
@@ -5149,11 +5585,12 @@ fn dispatch_agent_tool(
                 let session_name = input.session.name;
                 let requested_role = input.session.role;
                 drop(runtime);
-                authorize_delegation(
+                let _delegation_permit = authorize_delegation(
                     bound,
                     agent,
                     Some(&caller),
                     Some(&serde_json::json!(requested_role)),
+                    &operation_id,
                 )
                 .map_err(|error| {
                     ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
@@ -5167,7 +5604,11 @@ fn dispatch_agent_tool(
                     .handle(
                         usagi_core::usecase::client::SessionAction::Create,
                         &operation_id,
-                        &serde_json::json!({"name": session_name, "role": requested_role}),
+                        &serde_json::json!({
+                            "name": session_name,
+                            "role": requested_role,
+                            "parent_session_id": caller.session_id,
+                        }),
                     )
                     .map_err(|error| {
                         let code = if matches!(error, SessionRuntimeError::RoleConflict(..)) {
@@ -5177,11 +5618,24 @@ fn dispatch_agent_tool(
                         };
                         ProtocolError::new(code, error.safe_message())
                     })?;
-                let session_id =
-                    session_id_by_name(&created.body, &session_name).ok_or_else(|| {
+                let (session_id, parent_session_id) =
+                    session_lineage_by_name(&created.body, &session_name).ok_or_else(|| {
                         ProtocolError::new(
                             ErrorCode::Unavailable,
                             "created session is not available",
+                        )
+                    })?;
+                agent
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                    })?
+                    .dispatch_store()
+                    .record_session_parent(workspace, session_id, parent_session_id)
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "session parentage is unavailable",
                         )
                     })?;
                 let scope = bound.scope_resolver();
@@ -5349,18 +5803,44 @@ fn dispatch_agent_tool(
                 let input = serde_json::from_value::<InboxPayload>(payload).map_err(|_| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent_inbox payload")
                 })?;
-                let messages = store
-                    .inbox(&caller)
-                    .map_err(|_| {
-                        ProtocolError::new(ErrorCode::Unavailable, "dispatch inbox is unavailable")
-                    })?
-                    .into_iter()
-                    .filter(|message| !input.unread_only || !message.read)
-                    .filter(|message| input.since.is_none_or(|since| message.created_at > since))
-                    .collect::<Vec<_>>();
+                let page = store
+                    .inbox_page(
+                        &caller,
+                        input
+                            .cursor
+                            .map(|next_sequence| InboxCursor { next_sequence }),
+                        input.limit.unwrap_or(INBOX_PAGE_MAX),
+                        input.unread_only,
+                        input.since,
+                    )
+                    .map_err(|error| map_inbox_query_error(&error))?;
                 Ok((
                     ResponseOutcome::Ok,
-                    serde_json::json!({"messages": messages}),
+                    serde_json::json!({
+                        "messages": page.messages,
+                        "next_cursor": page.next_cursor.next_sequence,
+                        "has_more": page.has_more,
+                    }),
+                ))
+            }
+            DispatchToolAction::AgentInboxAck => {
+                let input = serde_json::from_value::<InboxAckPayload>(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid agent_inbox_ack payload",
+                    )
+                })?;
+                let cursor = store
+                    .ack_inbox(
+                        &caller,
+                        InboxCursor {
+                            next_sequence: input.cursor,
+                        },
+                    )
+                    .map_err(|error| map_inbox_query_error(&error))?;
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"acked_cursor": cursor.next_sequence}),
                 ))
             }
             _ => Err(ProtocolError::new(
@@ -5380,6 +5860,7 @@ fn dispatch_agent_tool(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn project_reported_pr(
     inventory: &SharedPrInventory,
     session: Option<SessionId>,
@@ -5398,7 +5879,22 @@ fn project_reported_pr(
     Ok(())
 }
 
+fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    let message = error.to_string();
+    if message.starts_with("dispatch inbox cursor")
+        || message.starts_with("dispatch inbox ACK cursor")
+        || message.starts_with("dispatch inbox page limit")
+    {
+        ProtocolError::new(ErrorCode::InvalidArgument, message)
+    } else {
+        ProtocolError::new(ErrorCode::Unavailable, "dispatch inbox is unavailable")
+    }
+}
+
 #[allow(clippy::too_many_lines)]
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn dispatch_supervisor_tool(
     runtime: &SharedSupervisorRuntime,
     caller: Result<String, usagi_core::infrastructure::ipc::ProtocolError>,
@@ -5524,7 +6020,7 @@ fn dispatch_supervisor_tool(
                             "invalid supervisor_get payload",
                         )
                     })?;
-                    serde_json::to_value(
+                    let value = serde_json::to_value(
                         runtime
                             .get(&caller, input.supervisor_run_id)
                             .map_err(supervisor_error)?
@@ -5540,7 +6036,8 @@ fn dispatch_supervisor_tool(
                             ErrorCode::Internal,
                             "supervisor response encoding failed",
                         )
-                    })
+                    })?;
+                    bounded_supervisor_query(value).map_err(supervisor_error)
                 }
                 SupervisorToolAction::List => {
                     let input: ListPayload = serde_json::from_value(payload).map_err(|_| {
@@ -5570,13 +6067,18 @@ fn dispatch_supervisor_tool(
                                 "invalid supervisor_list cursor",
                             )
                         })?;
-                    let runs = runtime
-                        .list(&caller, input.state)
-                        .map_err(supervisor_error)?;
-                    let page: Vec<_> = runs.iter().skip(offset).take(input.limit).collect();
-                    let next_cursor = (offset + page.len() < runs.len())
-                        .then(|| (offset + page.len()).to_string());
-                    Ok(serde_json::json!({"runs": page, "next_cursor": next_cursor}))
+                    let value = serde_json::to_value(
+                        runtime
+                            .list_page(&caller, input.state, offset, input.limit)
+                            .map_err(supervisor_error)?,
+                    )
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Internal,
+                            "supervisor response encoding failed",
+                        )
+                    })?;
+                    bounded_supervisor_query(value).map_err(supervisor_error)
                 }
                 SupervisorToolAction::Cancel => {
                     let input: CancelPayload = serde_json::from_value(payload).map_err(|_| {
@@ -5643,7 +6145,10 @@ fn dispatch_supervisor_tool(
                             input.limit,
                         )
                         .map_err(supervisor_error)?;
-                    Ok(serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}))
+                    bounded_supervisor_query(
+                        serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}),
+                    )
+                    .map_err(supervisor_error)
                 }
             }
         });
@@ -5658,8 +6163,10 @@ fn dispatch_supervisor_tool(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn authenticated_supervisor_caller(
     agent: &SharedAgentRuntime,
+    bound: &ConnectionWorkspace,
     client: &usagi_core::domain::id::ClientId,
     body: &serde_json::Value,
 ) -> Result<String, usagi_core::infrastructure::ipc::ProtocolError> {
@@ -5678,19 +6185,40 @@ fn authenticated_supervisor_caller(
                 "supervisor caller provenance is unknown",
             )
         })?;
-    let caller = agent
+    let workspace = bound
+        .sessions()
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable"))?
+        .snapshot()
+        .map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+        })?
+        .get("workspace_id")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+        })?;
+    let authenticated = agent
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
-        .mcp_dispatch_caller(&credential.credential)
+        .mcp_dispatch_context(&credential.credential)
         .ok_or_else(|| {
             ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
                 "supervisor caller provenance is unknown",
             )
         })?;
-    Ok(supervisor_caller_descriptor(client, &caller))
+    if authenticated.workspace_id != workspace {
+        return Err(ProtocolError::new(
+            ErrorCode::OwnershipUnknown,
+            "supervisor caller does not belong to this workspace",
+        ));
+    }
+    Ok(supervisor_caller_descriptor(client, &authenticated.caller))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn supervisor_caller_descriptor(
     client: &usagi_core::domain::id::ClientId,
     caller: &usagi_core::domain::agent::CallerRef,
@@ -5704,11 +6232,14 @@ fn supervisor_caller_descriptor(
     )
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     let message = error.to_string();
     drop(error);
-    let code = if message.contains("reused") {
+    let code = if message.contains("capacity is exhausted") {
+        ErrorCode::ResourceExhausted
+    } else if message.contains("reused") {
         ErrorCode::IdempotencyConflict
     } else if message.contains("does not exist") {
         ErrorCode::OwnershipUnknown
@@ -5720,6 +6251,7 @@ fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::Pr
 
 /// PR events are deliberately only hints; the IPC request always returns this
 /// durable snapshot so reconnects and dropped events converge without replay.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn dispatch_pr_snapshot(
     inventory: &SharedPrInventory,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -5787,6 +6319,7 @@ enum UserDecisionDispatchError {
     Cancelled,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 impl From<usagi_core::domain::user_decision::UserDecisionError> for UserDecisionDispatchError {
     fn from(error: usagi_core::domain::user_decision::UserDecisionError) -> Self {
         Self::Decision(error)
@@ -5794,6 +6327,7 @@ impl From<usagi_core::domain::user_decision::UserDecisionError> for UserDecision
 }
 
 #[allow(clippy::too_many_lines)] // The complete wire-to-store error mapping is one atomic routing contract.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn dispatch_user_decision(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
@@ -5903,12 +6437,21 @@ fn dispatch_user_decision(
                 "decision caller provenance is unknown",
             )
         })?;
-        let run_id = runtime.mcp_caller(&credential.credential).ok_or_else(|| {
-            ProtocolError::new(
+        let authenticated = runtime
+            .mcp_dispatch_context(&credential.credential)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "decision caller provenance is unknown",
+                )
+            })?;
+        if authenticated.workspace_id != workspace {
+            return Err(ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
-                "decision caller provenance is unknown",
-            )
-        })?;
+                "decision caller does not belong to this workspace",
+            ));
+        }
+        let run_id = authenticated.run_id;
         let dispatch = runtime.dispatch_store();
         let run = dispatch
             .runs()
@@ -5984,7 +6527,12 @@ fn dispatch_user_decision(
                             prompt: input.prompt,
                             options: input.options,
                             allow_freeform: input.allow_freeform,
-                            expires_at: input.expires_at,
+                            // An omitted deadline is finite by default so an
+                            // abandoned synchronous waiter cannot occupy a
+                            // pending slot forever.
+                            expires_at: input
+                                .expires_at
+                                .or_else(|| now.checked_add_signed(chrono::Duration::hours(24))),
                             idempotency_key: input.idempotency_key,
                             status: UserDecisionStatus::Pending,
                             answer: None,
@@ -6053,6 +6601,14 @@ fn dispatch_user_decision(
                     ErrorCode::IdempotencyConflict,
                     "decision idempotency key conflicts",
                 ),
+                UserDecisionDispatchError::Decision(UserDecisionError::IdempotencyExpired) => (
+                    ErrorCode::IdempotencyExpired,
+                    "decision idempotency result is no longer retained; use a new key for a new request",
+                ),
+                UserDecisionDispatchError::Decision(UserDecisionError::InvalidRequest) => (
+                    ErrorCode::InvalidArgument,
+                    "decision request must be bounded and offer at least one answer path",
+                ),
                 UserDecisionDispatchError::Decision(UserDecisionError::InvalidOption) => {
                     (ErrorCode::InvalidArgument, "decision option is not allowed")
                 }
@@ -6074,6 +6630,11 @@ fn dispatch_user_decision(
                     "the unanswered decision backlog is full for this workspace or daemon; \
                      answer some before asking another",
                 ),
+                UserDecisionDispatchError::Decision(UserDecisionError::CapacityReached) => (
+                    ErrorCode::ResourceExhausted,
+                    "the user decision store is full of pending or undelivered records; \
+                     complete some before retrying",
+                ),
                 UserDecisionDispatchError::Cancelled => {
                     (ErrorCode::Cancelled, "decision wait was cancelled")
                 }
@@ -6094,6 +6655,7 @@ fn dispatch_user_decision(
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn wait_for_user_decision(
     decisions: &UserDecisionStore,
     waiters: &Arc<DecisionWaiters>,
@@ -6151,6 +6713,7 @@ fn wait_for_user_decision(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn consume_user_decision_events(
     decisions: &UserDecisionStore,
 ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
@@ -6180,6 +6743,7 @@ fn consume_user_decision_events(
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn dispatch_dispatch(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
@@ -6252,18 +6816,53 @@ fn dispatch_dispatch(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn session_id_by_name(snapshot: &serde_json::Value, name: &str) -> Option<SessionId> {
-    snapshot
+    session_lineage_by_name(snapshot, name).map(|(session_id, _)| session_id)
+}
+
+fn session_lineage_by_name(
+    snapshot: &serde_json::Value,
+    name: &str,
+) -> Option<(SessionId, Option<SessionId>)> {
+    let session = snapshot
         .get("sessions")?
         .as_array()?
         .iter()
         .find(|session| {
             session.get("name").and_then(serde_json::Value::as_str) == Some(name)
                 && session.get("lifecycle").and_then(serde_json::Value::as_str) == Some("available")
-        })
-        .and_then(|session| serde_json::from_value(session.get("session_id")?.clone()).ok())
+        })?;
+    let session_id = serde_json::from_value(session.get("session_id")?.clone()).ok()?;
+    let parent_session_id = session
+        .get("parent_session_id")
+        .filter(|parent| !parent.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .ok()?;
+    Some((session_id, parent_session_id))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_into_an_existing_session_does_not_reparent_it
+fn record_session_lineage(
+    agent: &SharedAgentRuntime,
+    workspace_id: WorkspaceId,
+    snapshot: &serde_json::Value,
+    name: &str,
+) -> Result<SessionId, SessionRuntimeError> {
+    let (session_id, parent_session_id) =
+        session_lineage_by_name(snapshot, name).ok_or(SessionRuntimeError::Storage)?;
+    agent
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .dispatch_store()
+        .record_session_parent(workspace_id, session_id, parent_session_id)
+        .map_err(|_| SessionRuntimeError::Storage)?;
+    Ok(session_id)
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 fn dispatch_rollover(
     data_dir: &Path,
     fence: &GenerationFence,
@@ -6318,6 +6917,7 @@ fn dispatch_rollover(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=metrics_snapshot_is_served_through_the_daemon_endpoint
 fn dispatch_metrics(
     metrics: &SharedMetricsBroker,
     process_metrics: &SharedProcessResourceSampler,
@@ -6405,6 +7005,7 @@ fn dispatch_metrics(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 fn dispatch_session(
     bound: &ConnectionWorkspace,
     teardown: &TeardownSignal,
@@ -6437,9 +7038,10 @@ fn dispatch_session(
         &operation_id,
         &payload,
     );
-    session_response_envelope(action, &payload, result, request_id, hello)
+    session_response_envelope(action, result, request_id, hello)
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
     body.get("caller_context")
         .and_then(|context| context.get("credential"))
@@ -6451,8 +7053,10 @@ fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
         })
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn dispatch_mcp_child_claim(
     agent: &SharedAgentRuntime,
+    bound: &ConnectionWorkspace,
     peer_process: (u32, u32, u32),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
@@ -6461,24 +7065,57 @@ fn dispatch_mcp_child_claim(
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
     use usagi_core::usecase::client::DaemonRequest;
 
-    let result = matches!(
-        serde_json::from_value::<DaemonRequest>(body.clone()),
-        Ok(DaemonRequest::McpChildClaim)
-    )
-    .then_some(())
-    .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidArgument, "invalid MCP child claim"))
-    .and_then(|()| {
-        agent
-            .lock()
-            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
-            .claim_mcp_child(peer_process.0, peer_process.1, peer_process.2)
-    });
+    let result = (|| {
+        if !matches!(
+            serde_json::from_value::<DaemonRequest>(body.clone()),
+            Ok(DaemonRequest::McpChildClaim)
+        ) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid MCP child claim",
+            ));
+        }
+        let (credential, session_id) = {
+            let mut runtime = agent.lock().map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+            })?;
+            let credential =
+                runtime.claim_mcp_child(peer_process.0, peer_process.1, peer_process.2)?;
+            let session_id = runtime.caller_session(&credential);
+            (credential, session_id)
+        };
+        let store_root = if let Some(session_id) = session_id {
+            bound
+                .sessions()
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::Unavailable,
+                        "MCP caller session scope is unavailable",
+                    )
+                })?
+                .session_scope_by_id(session_id)
+                .map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::Unavailable,
+                        "MCP caller session scope is unavailable",
+                    )
+                })?
+                .path
+        } else {
+            bound.tenant.root().to_path_buf()
+        };
+        Ok((credential, store_root))
+    })();
     match result {
-        Ok(credential) => envelope(
+        Ok((credential, store_root)) => envelope(
             hello,
             request_id,
             ResponseOutcome::Ok,
-            serde_json::json!({ "credential": credential }),
+            serde_json::json!({
+                "credential": credential,
+                "store_root": paths::wire_workspace_root(&store_root),
+            }),
         ),
         Err(error) => envelope(
             hello,
@@ -6489,9 +7126,9 @@ fn dispatch_mcp_child_claim(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 fn session_response_envelope(
     action: usagi_core::usecase::client::SessionAction,
-    payload: &serde_json::Value,
     result: Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -6500,13 +7137,7 @@ fn session_response_envelope(
     use usagi_core::usecase::client::SessionAction;
     match result {
         Ok(reply) => {
-            let recovery_apply =
-                payload.get("apply").and_then(serde_json::Value::as_bool) == Some(true);
-            let outcome = if matches!(
-                action,
-                SessionAction::Create | SessionAction::Remove | SessionAction::ResumeAgent
-            ) || (action == SessionAction::RecoverLegacy && recovery_apply)
-            {
+            let outcome = if matches!(action, SessionAction::Create | SessionAction::Remove) {
                 ResponseOutcome::Accepted {
                     operation_id: usagi_core::infrastructure::ipc::OperationId(
                         reply.operation_id.clone(),
@@ -6525,9 +7156,7 @@ fn session_response_envelope(
             if let Some(kind) = match action {
                 SessionAction::Create => Some("session.created"),
                 SessionAction::Remove => Some("session.removed"),
-                SessionAction::ResumeAgent => Some("agent.resumed"),
-                SessionAction::RecoverLegacy if recovery_apply => Some("session.legacy_recovered"),
-                SessionAction::RecoverLegacy
+                SessionAction::Clean
                 | SessionAction::List
                 | SessionAction::Status
                 | SessionAction::Overview
@@ -6602,6 +7231,7 @@ fn session_response_envelope(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn exact_merged_pr_head(
     inventory: Option<usagi_core::usecase::client::PrSnapshot>,
     branch_head: Option<String>,
@@ -6632,7 +7262,163 @@ fn best_effort_merged_pr_head(
     exact_merged_pr_head(snapshot, branch_head)
 }
 
+/// Reconcile the daemon-owned lifecycle set with Git's managed namespace.
+///
+/// This runs inside the daemon that already owns the workspace fence. Every
+/// deletion re-reads lifecycle state immediately before touching Git, so a
+/// resource that became linked after inventory cannot be removed.
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions
 #[allow(clippy::too_many_lines)]
+fn clean_orphan_session_resources(
+    bound: &ConnectionWorkspace,
+    apply: bool,
+    force: bool,
+) -> Result<serde_json::Value, SessionRuntimeError> {
+    use usagi_core::infrastructure::git::{delete_branch, remove_worktree};
+    use usagi_core::usecase::clean::{
+        CleanCandidate, CleanInventory, DaemonWorkspaceData, observe_repository, plan,
+    };
+
+    let lifecycle = || -> Result<(PathBuf, BTreeSet<String>), SessionRuntimeError> {
+        let sessions = bound
+            .sessions()
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        let root = sessions.repository_root().to_path_buf();
+        let snapshot = sessions
+            .snapshot()
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        let items = snapshot
+            .get("sessions")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(SessionRuntimeError::Storage)?;
+        let names = items
+            .iter()
+            .map(|item| {
+                item.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or(SessionRuntimeError::Storage)
+            })
+            .collect::<Result<_, _>>()?;
+        Ok((root, names))
+    };
+    let (root, names) = lifecycle()?;
+    let repository = observe_repository(&SystemGit, &root)
+        .map_err(|error| {
+            SessionRuntimeError::DurableFailure(format!(
+                "could not inspect orphan session resources: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            SessionRuntimeError::DurableFailure(
+                "could not inspect orphan session resources: workspace is not a Git repository"
+                    .into(),
+            )
+        })?;
+    let candidates = plan(&CleanInventory {
+        daemon_data: vec![DaemonWorkspaceData {
+            root: root.clone(),
+            dir: PathBuf::new(),
+            root_exists: true,
+            sessions: Some(names),
+        }],
+        repositories: vec![repository],
+        ..CleanInventory::default()
+    });
+    let git_candidates = candidates
+        .into_iter()
+        .filter(|candidate| {
+            matches!(
+                candidate,
+                CleanCandidate::Worktree { .. } | CleanCandidate::Branch { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    let described = git_candidates
+        .iter()
+        .map(|candidate| match candidate {
+            CleanCandidate::Worktree {
+                path,
+                requires_force,
+                ..
+            } => serde_json::json!({
+                "kind": "worktree",
+                "name": path.file_name().and_then(|name| name.to_str()),
+                "path": path,
+                "protected": requires_force,
+            }),
+            CleanCandidate::Branch {
+                name,
+                requires_force,
+                ..
+            } => serde_json::json!({
+                "kind": "branch",
+                "name": name,
+                "protected": requires_force,
+            }),
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>();
+    if !apply {
+        return Ok(serde_json::json!({
+            "mode": "dry_run",
+            "candidates": described,
+            "removed": 0,
+            "protected": git_candidates.iter().filter(|item| item.requires_force()).count(),
+        }));
+    }
+
+    let mut removed = 0usize;
+    let mut protected = 0usize;
+    for candidate in &git_candidates {
+        if candidate.requires_force() && !force {
+            protected += 1;
+            continue;
+        }
+        let name = match candidate {
+            CleanCandidate::Worktree { path, .. } => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(SessionRuntimeError::InvalidRequest)?,
+            CleanCandidate::Branch { name, .. } => name
+                .strip_prefix("usagi/")
+                .ok_or(SessionRuntimeError::InvalidRequest)?,
+            _ => unreachable!(),
+        };
+        let (_, current) = lifecycle()?;
+        if current.contains(name) {
+            return Err(SessionRuntimeError::DurableFailure(format!(
+                "orphan cleanup stopped because session \"{name}\" became active"
+            )));
+        }
+        let result = match candidate {
+            CleanCandidate::Worktree { path, .. } => {
+                remove_worktree(&SystemGit, &root, path, candidate.requires_force() && force)
+            }
+            CleanCandidate::Branch { name, .. } => {
+                delete_branch(&SystemGit, &root, name, candidate.requires_force() && force)
+            }
+            _ => unreachable!(),
+        };
+        result.map_err(|error| {
+            SessionRuntimeError::DurableFailure(format!(
+                "could not clean orphan session resource \"{name}\": {error}"
+            ))
+        })?;
+        removed += 1;
+    }
+    Ok(serde_json::json!({
+        "mode": "apply",
+        "candidates": described,
+        "removed": removed,
+        "protected": protected,
+    }))
+}
+
+#[allow(clippy::too_many_lines)]
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn dispatch_session_action(
     bound: &ConnectionWorkspace,
     teardown: &TeardownSignal,
@@ -6699,59 +7485,6 @@ fn dispatch_session_action(
     };
 
     match action {
-        SessionAction::ResumeAgent => {
-            let exact_target = payload
-                .get("target")
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|_| SessionRuntimeError::InvalidRequest)?;
-            let (name, id) = if let Some(id) = exact_target
-                .as_ref()
-                .and_then(|target: &usagi_core::domain::agent::AgentResumeTarget| target.session_id)
-            {
-                (None, id)
-            } else {
-                let supplied_id = payload
-                    .get("session_id")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| SessionRuntimeError::InvalidRequest)?;
-                if let Some(id) = supplied_id {
-                    (None, id)
-                } else {
-                    let name = string("name")?;
-                    (Some(name), named_session(name)?)
-                }
-            };
-            let target = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .session_scope_by_id(id)?;
-            let resolver = bound.scope_resolver();
-            let admission = resume_agent_after_preflight(
-                agent,
-                operation_id,
-                exact_target.as_ref(),
-                target.workspace_id,
-                Some(id),
-                &resolver,
-            )
-            .map_err(|error| SessionRuntimeError::AgentFailure {
-                code: error.code,
-                message: error.message,
-            })?;
-            reply(serde_json::json!({
-                "name": name,
-                "session_id": id,
-                "terminal": admission.terminal,
-                "continuation": admission.continuation,
-                "resume_relation": admission.resume_relation,
-                "completed": admission.completed,
-            }))
-        }
         SessionAction::List | SessionAction::Status | SessionAction::Overview => {
             let mut status = bound
                 .sessions()
@@ -6761,8 +7494,6 @@ fn dispatch_session_action(
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
             let store = runtime.dispatch_store();
             let agents = store.agents().map_err(|_| SessionRuntimeError::Storage)?;
-            let bindings = store.bindings().map_err(|_| SessionRuntimeError::Storage)?;
-            let runs = store.runs().map_err(|_| SessionRuntimeError::Storage)?;
             if let Some(items) = status
                 .body
                 .get_mut("sessions")
@@ -6783,22 +7514,12 @@ fn dispatch_session_action(
                             .filter(|agent| agent.session_id == Some(id))
                             .max_by_key(|agent| agent.current_run.is_some());
                         item["agent_status"] = serde_json::json!(member.map(|agent| agent.status));
-                        let parent_session = bindings
-                            .iter()
-                            .filter(|binding| binding.worker.session_id == Some(id))
-                            // Multiple agents may hand work off inside one session, but
-                            // that does not create a new organizational level. Only a
-                            // cross-session dispatch owns a parent/child relationship.
-                            .filter(|binding| {
-                                binding.caller.session_id != binding.worker.session_id
-                            })
-                            .max_by_key(|binding| {
-                                runs.iter()
-                                    .find(|run| run.run_id == binding.run_id)
-                                    .map(|run| run.started_at)
-                            })
-                            .and_then(|binding| binding.caller.session_id);
-                        item["parent_session_id"] = serde_json::json!(parent_session);
+                        // Parentage is immutable lifecycle metadata captured when
+                        // the session is created. A later dispatch into an existing
+                        // session must never reorganize it.
+                        if item.get("parent_session_id").is_none() {
+                            item["parent_session_id"] = serde_json::Value::Null;
+                        }
                     }
                 }
                 let names = items
@@ -7021,18 +7742,32 @@ fn dispatch_session_action(
             payload,
         )?),
         SessionAction::DelegateIssue => {
-            let caller = payload
+            let authenticated = payload
                 .get("_caller_credential")
                 .and_then(serde_json::Value::as_str)
                 .map(|credential| {
                     agent
                         .lock()
                         .map_err(|_| SessionRuntimeError::Storage)?
-                        .mcp_dispatch_caller(credential)
+                        .mcp_dispatch_context(credential)
                         .ok_or(SessionRuntimeError::ScopeUnavailable)
                 })
                 .transpose()?;
-            authorize_delegation(bound, agent, caller.as_ref(), payload.get("role"))?;
+            let workspace = bound_workspace()?;
+            if authenticated
+                .as_ref()
+                .is_some_and(|context| context.workspace_id != workspace)
+            {
+                return Err(SessionRuntimeError::ScopeUnavailable);
+            }
+            let caller = authenticated.map(|context| context.caller);
+            let _delegation_permit = authorize_delegation(
+                bound,
+                agent,
+                caller.as_ref(),
+                payload.get("role"),
+                operation_id,
+            )?;
             let (name, prompt) = {
                 let number = payload
                     .get("number")
@@ -7073,19 +7808,26 @@ fn dispatch_session_action(
                 .handle(
                     SessionAction::Create,
                     operation_id,
-                    &serde_json::json!({"name": name, "role": requested_role}),
+                    &serde_json::json!({
+                        "name": name,
+                        "role": requested_role,
+                        "parent_session_id": caller.as_ref().and_then(|caller| caller.session_id),
+                    }),
                 )?;
-            let id = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .session_id(&name)?;
-            let workspace = bound_workspace()?;
+            let id = record_session_lineage(agent, workspace, &created.body, &name)?;
             let delivery = if let Some(caller) = caller {
                 let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
                 runtime
                     .dispatch_store()
-                    .queue_delegated_prompt(workspace, Some(id), prompt, chrono::Utc::now(), caller)
+                    .queue_delegated_prompt(
+                        workspace,
+                        Some(id),
+                        prompt,
+                        chrono::Utc::now(),
+                        caller,
+                        usagi_core::domain::id::OperationId::parse(operation_id)
+                            .map_err(|_| SessionRuntimeError::InvalidRequest)?,
+                    )
                     .map_err(|_| SessionRuntimeError::Storage)?;
                 usagi_daemon::usecase::agent_ipc::PromptDelivery {
                     delivered_to: "queue",
@@ -7107,7 +7849,25 @@ fn dispatch_session_action(
         // readers (session list, terminal poll, user-decision list) on the
         // daemon. The fast durable transitions still run under the lock.
         SessionAction::Create => {
-            perform_create(bound.sessions(), &SystemGit, operation_id, payload)
+            let parent_session_id = payload
+                .get("_caller_credential")
+                .and_then(serde_json::Value::as_str)
+                .map(|credential| {
+                    agent
+                        .lock()
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                        .mcp_dispatch_caller(credential)
+                        .map(|caller| caller.session_id)
+                        .ok_or(SessionRuntimeError::ScopeUnavailable)
+                })
+                .transpose()?
+                .flatten();
+            let mut create_payload = payload.clone();
+            create_payload["parent_session_id"] = serde_json::json!(parent_session_id);
+            let created =
+                perform_create(bound.sessions(), &SystemGit, operation_id, &create_payload)?;
+            record_session_lineage(agent, bound_workspace()?, &created.body, string("name")?)?;
+            Ok(created)
         }
         // Remove goes further: it answers as soon as the session is durably
         // `Deleting` and hands the unbounded worktree teardown to the daemon's
@@ -7130,7 +7890,20 @@ fn dispatch_session_action(
                 merged_head_oid,
             )
         }
-        _ => bound
+        SessionAction::Clean => {
+            let flag = |name| match payload.get(name) {
+                None => Ok(false),
+                Some(serde_json::Value::Bool(value)) => Ok(*value),
+                Some(_) => Err(SessionRuntimeError::InvalidRequest),
+            };
+            let apply = flag("apply")?;
+            let force = flag("force")?;
+            if force && !apply {
+                return Err(SessionRuntimeError::InvalidRequest);
+            }
+            reply(clean_orphan_session_resources(bound, apply, force)?)
+        }
+        SessionAction::Setup => bound
             .sessions()
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?
@@ -7146,6 +7919,7 @@ fn dispatch_session_action(
 /// would reject every such selector — after the worktree already existed. The
 /// tool schema no longer advertises that branch and this is the daemon-side half
 /// of the same rule.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_publishes_and_accepts_only_a_new_agent_selector
 fn new_agent_selector(
     selector: Option<&serde_json::Value>,
 ) -> Result<
@@ -7176,15 +7950,42 @@ fn new_agent_selector(
 }
 
 /// Applies configured company-role authority before any delegated side effect.
-/// Catalogs without a `delegation` block keep version-1 compatibility; once a
-/// block is present the daemon, rather than the prompt, owns every decision.
+/// Catalogs without a `delegation` block keep their established permissive
+/// behavior; once a block is present the daemon owns every decision.
+struct DelegationPermit {
+    store: Option<usagi_core::infrastructure::store::dispatch::DispatchStore>,
+    operation_id: Option<usagi_core::domain::id::OperationId>,
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_issue_counts_queued_children_against_concurrency
+impl DelegationPermit {
+    const fn inert() -> Self {
+        Self {
+            store: None,
+            operation_id: None,
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_issue_counts_queued_children_against_concurrency
+impl Drop for DelegationPermit {
+    fn drop(&mut self) {
+        if let (Some(store), Some(operation_id)) = (&self.store, self.operation_id) {
+            let _ = store.release_delegation(operation_id);
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_issue_counts_queued_children_against_concurrency
 fn authorize_delegation(
     bound: &ConnectionWorkspace,
     agent: &SharedAgentRuntime,
     caller: Option<&usagi_core::domain::agent::CallerRef>,
     requested_role: Option<&serde_json::Value>,
-) -> Result<(), SessionRuntimeError> {
+    operation_id: &str,
+) -> Result<DelegationPermit, SessionRuntimeError> {
     use usagi_core::domain::role::{RoleId, RoleScope};
+    use usagi_core::infrastructure::store::dispatch::DelegationReservationOutcome;
 
     let requested = requested_role
         .filter(|value| !value.is_null())
@@ -7207,7 +8008,7 @@ fn authorize_delegation(
                 "authenticated caller is required by the delegation policy".into(),
             ));
         }
-        return Ok(());
+        return Ok(DelegationPermit::inert());
     };
     let parent_role = match caller.session_id {
         Some(id) => sessions.session_role(id)?,
@@ -7223,7 +8024,7 @@ fn authorize_delegation(
         .and_then(|role| catalog.roles.get(role))
         .and_then(|definition| definition.delegation.as_ref())
     else {
-        return Ok(());
+        return Ok(DelegationPermit::inert());
     };
     if !policy.enabled {
         return Err(SessionRuntimeError::InvalidRole(
@@ -7242,15 +8043,6 @@ fn authorize_delegation(
 
     let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
     let store = runtime.dispatch_store();
-    let usage = store
-        .delegation_usage(caller)
-        .map_err(|_| SessionRuntimeError::Storage)?;
-    if usage >= policy.max_concurrency {
-        return Err(SessionRuntimeError::InvalidRole(format!(
-            "delegation concurrency limit ({}) reached",
-            policy.max_concurrency
-        )));
-    }
     let depth = store
         .delegation_depth(caller)
         .map_err(|_| SessionRuntimeError::Storage)?;
@@ -7260,7 +8052,39 @@ fn authorize_delegation(
             policy.max_depth
         )));
     }
-    Ok(())
+    let operation_id = usagi_core::domain::id::OperationId::parse(operation_id)
+        .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+    match store
+        .reserve_delegation(caller, operation_id, policy.max_concurrency)
+        .map_err(|_| SessionRuntimeError::Storage)?
+    {
+        DelegationReservationOutcome::Reserved => Ok(DelegationPermit {
+            store: Some(store.clone()),
+            operation_id: Some(operation_id),
+        }),
+        DelegationReservationOutcome::AlreadyAdmitted => Ok(DelegationPermit::inert()),
+        DelegationReservationOutcome::LimitReached => {
+            Err(SessionRuntimeError::InvalidRole(format!(
+                "delegation concurrency limit ({}) reached",
+                policy.max_concurrency
+            )))
+        }
+        DelegationReservationOutcome::InProgress => Err(SessionRuntimeError::InvalidRole(
+            "delegation operation is already in progress".into(),
+        )),
+    }
+}
+
+fn required_payload_string<'a>(
+    payload: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str, SessionRuntimeError> {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(SessionRuntimeError::InvalidRequest)
 }
 
 /// Creates a triage session for a brief and dispatches a fresh worker into it,
@@ -7275,6 +8099,7 @@ fn authorize_delegation(
 /// a restart. A dispatch whose spawn outcome is *unknown* is deliberately not
 /// rolled back: the worktree may already hold a running worker, so the caller
 /// gets the session and run identity to reconcile instead.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn delegate_brief(
     bound: &ConnectionWorkspace,
     teardown: &TeardownSignal,
@@ -7284,15 +8109,7 @@ fn delegate_brief(
 ) -> Result<serde_json::Value, SessionRuntimeError> {
     use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
 
-    let string = |key: &str| {
-        payload
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or(SessionRuntimeError::InvalidRequest)
-    };
-    let brief = string("brief")?;
+    let brief = required_payload_string(payload, "brief")?;
     let suffix = operation_id
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -7307,11 +8124,11 @@ fn delegate_brief(
     );
     let (runtime, model) = new_agent_selector(payload.get("agent"))?;
 
-    let credential = string("_caller_credential")?;
+    let credential = required_payload_string(payload, "_caller_credential")?;
     let (workspace, caller, repository_root) = {
         let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
-        let caller = runtime
-            .mcp_dispatch_caller(credential)
+        let authenticated = runtime
+            .mcp_dispatch_context(credential)
             .ok_or(SessionRuntimeError::ScopeUnavailable)?;
         let sessions = bound
             .sessions()
@@ -7324,9 +8141,22 @@ fn delegate_brief(
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok())
             .ok_or(SessionRuntimeError::Storage)?;
-        (workspace, caller, sessions.repository_root().to_path_buf())
+        if authenticated.workspace_id != workspace {
+            return Err(SessionRuntimeError::ScopeUnavailable);
+        }
+        (
+            workspace,
+            authenticated.caller,
+            sessions.repository_root().to_path_buf(),
+        )
     };
-    authorize_delegation(bound, agent, Some(&caller), payload.get("role"))?;
+    let _delegation_permit = authorize_delegation(
+        bound,
+        agent,
+        Some(&caller),
+        payload.get("role"),
+        operation_id,
+    )?;
     // Machine-local runtime/model policy belongs to the workspace root and is
     // not copied into managed worktrees. Decide every read-only refusal here;
     // `dispatch` still re-reads the same trusted root and stays the authority.
@@ -7343,13 +8173,13 @@ fn delegate_brief(
         bound.sessions(),
         &SystemGit,
         operation_id,
-        &serde_json::json!({"name": name, "role": payload.get("role").cloned()}),
+        &serde_json::json!({
+            "name": name,
+            "role": payload.get("role").cloned(),
+            "parent_session_id": caller.session_id,
+        }),
     )?;
-    let id = bound
-        .sessions()
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .session_id(&name)?;
+    let id = record_session_lineage(agent, workspace, &created.body, &name)?;
     let scope = bound.scope_resolver();
     let dispatch_intent = DispatchIntent {
         workspace,
@@ -7390,6 +8220,7 @@ fn delegate_brief(
 /// admitted it is durable: the daemon's teardown worker finishes it, and a
 /// daemon that dies first resumes it from the `Deleting` record on the next
 /// start.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_failed_delegation_reports_its_reconcile_state_on_the_wire
 fn compensate_delegation(
     sessions: &SharedSessionRuntime,
     teardown: &TeardownSignal,
@@ -7436,6 +8267,7 @@ fn compensate_delegation(
 /// A reservation in the dispatch store — even one a restart already failed — is
 /// not an orphan: that operation reached the dispatch side, which owns its
 /// outcome. Only a create with nothing at all behind it is rolled back.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_failed_delegation_reports_its_reconcile_state_on_the_wire
 fn reconcile_orphan_delegations(
     bound: &ConnectionWorkspace,
     dispatch: &DispatchStore,
@@ -7470,9 +8302,22 @@ fn reconcile_orphan_delegations(
 enum AgentDispatchRequest {
     Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
     Inventory(WorkspaceId),
+    WorkspaceObservation(WorkspaceId),
+    Diagnose(
+        WorkspaceId,
+        Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
+    ),
+    Restart(
+        WorkspaceId,
+        Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
+        Vec<usagi_core::domain::id::AgentRuntimeRef>,
+        bool,
+    ),
     Resume(String, usagi_core::domain::agent::AgentResumeTarget),
+    RepairResume(String, usagi_core::domain::agent::AgentResumeTarget, u32),
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn admit_agent_dispatch_request(
     agent: &SharedAgentRuntime,
     scope: &dyn SessionScopeResolver,
@@ -7492,7 +8337,15 @@ fn admit_agent_dispatch_request(
             AgentDispatchRequest::Resume(operation_id, target) => {
                 owner.prepare_resume_readiness(operation_id, target)
             }
-            AgentDispatchRequest::Inventory(_) => unreachable!("inventory is read-only"),
+            AgentDispatchRequest::RepairResume(operation_id, target, revision) => {
+                owner.prepare_current_integration_resume_readiness(operation_id, target, *revision)
+            }
+            AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::WorkspaceObservation(_)
+            | AgentDispatchRequest::Diagnose(_, _)
+            | AgentDispatchRequest::Restart(_, _, _, _) => {
+                unreachable!("handled before readiness")
+            }
         })?;
     run_agent_readiness(agent, preflight.as_ref())?;
     agent
@@ -7505,10 +8358,88 @@ fn admit_agent_dispatch_request(
             AgentDispatchRequest::Resume(operation_id, target) => {
                 owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
             }
-            AgentDispatchRequest::Inventory(_) => unreachable!("inventory is read-only"),
+            AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
+                .resume_with_current_integration_after_readiness(
+                    operation_id,
+                    target,
+                    *revision,
+                    scope,
+                    preflight.as_ref(),
+                ),
+            AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::WorkspaceObservation(_)
+            | AgentDispatchRequest::Diagnose(_, _)
+            | AgentDispatchRequest::Restart(_, _, _, _) => {
+                unreachable!("handled before readiness")
+            }
         })
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+fn dispatch_agent_maintenance(
+    agent: &SharedAgentRuntime,
+    request: &AgentDispatchRequest,
+) -> Option<Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError>> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    match request {
+        AgentDispatchRequest::Inventory(workspace) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .map(|agent| {
+                    serde_json::to_value(agent.inventory(*workspace))
+                        .expect("safe Agent inventory is serializable")
+                }),
+        ),
+        AgentDispatchRequest::WorkspaceObservation(workspace) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|agent| agent.workspace_observation(*workspace))
+                .map(|observation| {
+                    serde_json::to_value(observation)
+                        .expect("safe Agent workspace observation is serializable")
+                }),
+        ),
+        AgentDispatchRequest::Diagnose(workspace, expected) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|agent| agent.diagnose_integrations(*workspace, expected))
+                .map(|diagnosis| {
+                    serde_json::to_value(diagnosis).expect("safe Agent diagnosis is serializable")
+                }),
+        ),
+        AgentDispatchRequest::Restart(workspace, expected, runtimes, force) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|mut agent| {
+                    let (interrupted, diagnosis) =
+                        agent.interrupt_outdated_agents(*workspace, expected, runtimes, *force)?;
+                    Ok(serde_json::json!({
+                        "interrupted": interrupted,
+                        "diagnosis": diagnosis,
+                        "inventory": agent.inventory(*workspace)
+                    }))
+                }),
+        ),
+        AgentDispatchRequest::Launch(..)
+        | AgentDispatchRequest::Resume(..)
+        | AgentDispatchRequest::RepairResume(..) => None,
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn dispatch_agent(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
@@ -7516,7 +8447,7 @@ fn dispatch_agent(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::infrastructure::ipc::ResponseOutcome;
     use usagi_core::usecase::client::DaemonRequest;
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
@@ -7528,28 +8459,43 @@ fn dispatch_agent(
             DaemonRequest::AgentInventory { workspace } => {
                 Some(AgentDispatchRequest::Inventory(workspace))
             }
+            DaemonRequest::AgentWorkspaceObservation { workspace } => {
+                Some(AgentDispatchRequest::WorkspaceObservation(workspace))
+            }
+            DaemonRequest::DiagnoseAgents {
+                workspace,
+                expected,
+            } => Some(AgentDispatchRequest::Diagnose(workspace, expected)),
+            DaemonRequest::RestartAgents {
+                workspace,
+                expected,
+                runtimes,
+                force,
+            } => Some(AgentDispatchRequest::Restart(
+                workspace, expected, runtimes, force,
+            )),
             DaemonRequest::ResumeAgent {
                 operation_id,
                 target,
             } => Some(AgentDispatchRequest::Resume(operation_id, target)),
+            DaemonRequest::ResumeAgentWithCurrentIntegration {
+                operation_id,
+                target,
+                expected_revision,
+            } => Some(AgentDispatchRequest::RepairResume(
+                operation_id,
+                target,
+                expected_revision,
+            )),
             _ => None,
         });
     let Some(request) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
     let scope = bound.scope_resolver();
-    if let AgentDispatchRequest::Inventory(workspace) = &request {
-        let result = agent
-            .lock()
-            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"));
+    if let Some(result) = dispatch_agent_maintenance(agent, &request) {
         return match result {
-            Ok(agent) => envelope(
-                hello,
-                request_id,
-                ResponseOutcome::Ok,
-                serde_json::to_value(agent.inventory(*workspace))
-                    .expect("safe Agent inventory is serializable"),
-            ),
+            Ok(body) => envelope(hello, request_id, ResponseOutcome::Ok, body),
             Err(error) => envelope(
                 hello,
                 request_id,
@@ -7602,6 +8548,7 @@ fn dispatch_agent(
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn run_agent_readiness(
     agent: &SharedAgentRuntime,
     preflight: Option<&AgentReadinessPreflight>,
@@ -7618,6 +8565,7 @@ fn run_agent_readiness(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn dispatch_agent_after_preflight(
     agent: &SharedAgentRuntime,
     operation_id: &str,
@@ -7640,46 +8588,10 @@ fn dispatch_agent_after_preflight(
         .dispatch_after_readiness(operation_id, intent, session, scope, preflight.as_ref())
 }
 
-fn resume_agent_after_preflight(
-    agent: &SharedAgentRuntime,
-    operation_id: &str,
-    target: Option<&usagi_core::domain::agent::AgentResumeTarget>,
-    workspace: WorkspaceId,
-    session: Option<SessionId>,
-    scope: &dyn SessionScopeResolver,
-) -> Result<
-    usagi_daemon::usecase::agent_ipc::AgentAdmission,
-    usagi_core::infrastructure::ipc::ProtocolError,
-> {
-    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
-    let preflight = agent
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
-        .and_then(|owner| match target {
-            Some(target) => owner.prepare_resume_readiness(operation_id, target),
-            None => owner.prepare_legacy_resume_readiness(operation_id, workspace, session),
-        })?;
-    run_agent_readiness(agent, preflight.as_ref())?;
-    agent
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
-        .and_then(|mut owner| match target {
-            Some(target) => {
-                owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
-            }
-            None => owner.resume_legacy_after_readiness(
-                operation_id,
-                workspace,
-                session,
-                scope,
-                preflight.as_ref(),
-            ),
-        })
-}
-
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
-    process_group: u32,
+    peer_process: (u32, u32, u32),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -7706,7 +8618,7 @@ fn dispatch_codex_session_capture(
                 .as_ref()
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
-                .or_else(|| agent.hook_credential(process_group))
+                .or_else(|| agent.hook_credential(peer_process.0, peer_process.1, peer_process.2))
                 .map(str::to_owned)
                 .ok_or_else(|| {
                     ProtocolError::new(
@@ -7737,9 +8649,10 @@ fn dispatch_codex_session_capture(
 /// Unlike the generic fallback dispatch, a body which is not a well formed phase
 /// report is refused here: an agent-originated report must fail closed instead
 /// of being echoed back as a success.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_agent_phase_report_without_a_live_credential_fails_closed
 fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
-    process_group: u32,
+    peer_process: (u32, u32, u32),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -7767,7 +8680,7 @@ fn dispatch_agent_phase_report(
                 .as_ref()
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
-                .or_else(|| agent.hook_credential(process_group))
+                .or_else(|| agent.hook_credential(peer_process.0, peer_process.1, peer_process.2))
                 .map(str::to_owned)
                 .ok_or_else(|| {
                     ProtocolError::new(
@@ -7873,6 +8786,7 @@ fn wait_private_lock_after_flock_barrier(path: &Path) {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=private_lock_refuses_unsafe_metadata_and_paths
 fn private_lock_error(label: &str, detail: &str) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::PermissionDenied,
@@ -7912,6 +8826,7 @@ fn verify_private_lock_metadata(
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=private_lock_refuses_unsafe_metadata_and_paths
 fn open_private_lock(
     path: &Path,
     label: &str,
@@ -7985,6 +8900,7 @@ fn open_private_lock(
     Ok(file)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=private_lock_refuses_unsafe_metadata_and_paths
 fn verify_private_lock_path(path: &Path, file: &std::fs::File, label: &str) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
@@ -8096,6 +9012,7 @@ fn take_record_write_failpoint(path: &Path) -> bool {
     })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_legacy_store_is_migrated_once_and_retired_in_place
 impl FsRecordFile {
     fn transaction<T>(&self, operation: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
         let parent = self.path.parent().ok_or_else(|| {
@@ -8245,6 +9162,7 @@ impl FsRecordFile {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_legacy_store_is_migrated_once_and_retired_in_place
 impl RecordFile for FsRecordFile {
     fn read(&self) -> std::io::Result<Option<String>> {
         self.transaction(|| self.read_unlocked())
@@ -8280,12 +9198,14 @@ impl RecordFile for FsRecordFile {
 
 struct ExactProcessControl;
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 impl ProcessIdentitySource for ExactProcessControl {
     fn process_start_identity(&self, pid: u32) -> std::io::Result<String> {
         process_start_identity(pid)
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 impl LivenessProbe for ExactProcessControl {
     fn observe(&self, record: &DaemonRecord) -> DaemonProcessObservation {
         let Some(expected) = record
@@ -8307,6 +9227,7 @@ impl LivenessProbe for ExactProcessControl {
 }
 
 struct SigtermTerminator;
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 impl Terminator for SigtermTerminator {
     fn terminate(&self, record: &DaemonRecord) -> std::io::Result<()> {
         // The record boundary already rejects a pid that cannot name a process,
@@ -8324,7 +9245,8 @@ impl Terminator for SigtermTerminator {
 }
 
 #[cfg(target_os = "linux")]
-fn process_start_identity(pid: u32) -> std::io::Result<String> {
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
+pub(crate) fn process_start_identity(pid: u32) -> std::io::Result<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let close = stat.rfind(')').ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid /proc stat")
@@ -8345,7 +9267,8 @@ fn process_start_identity(pid: u32) -> std::io::Result<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn process_start_identity(pid: u32) -> std::io::Result<String> {
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
+pub(crate) fn process_start_identity(pid: u32) -> std::io::Result<String> {
     let pid = libc::pid_t::try_from(pid).map_err(|_| std::io::Error::other("pid out of range"))?;
     // SAFETY: `info` is initialized and the buffer pointer/length describe the
     // exact `proc_bsdinfo` allocation for the duration of `proc_pidinfo`.
@@ -8405,7 +9328,11 @@ impl Drop for PidFd {
 }
 
 #[cfg(target_os = "linux")]
-fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::Result<()> {
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
+pub(crate) fn signal_exact_process(
+    record: &DaemonRecord,
+    signal: libc::c_int,
+) -> std::io::Result<()> {
     let expected = record
         .process_start_identity
         .as_deref()
@@ -8451,7 +9378,11 @@ fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::
 }
 
 #[cfg(target_os = "macos")]
-fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::Result<()> {
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
+pub(crate) fn signal_exact_process(
+    record: &DaemonRecord,
+    signal: libc::c_int,
+) -> std::io::Result<()> {
     let expected = record
         .process_start_identity
         .as_deref()
@@ -8507,6 +9438,7 @@ struct IpcReady<'a> {
     listener: RefCell<Option<SecureUnixListener>>,
     cleanup: RefCell<Option<EndpointCleanup>>,
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 impl<'a> IpcReady<'a> {
     /// Bind the production endpoint seam for one `serve` process.
     fn new(
@@ -8618,6 +9550,7 @@ impl<'a> IpcReady<'a> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 impl DaemonReady for IpcReady<'_> {
     fn recover_stale_endpoint(&self) -> std::io::Result<()> {
         // The instance lock excludes another *active* daemon, not every daemon:
@@ -8702,6 +9635,7 @@ impl DaemonReady for IpcReady<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 impl StaleDaemonCleanup for IpcReady<'_> {
     fn cleanup_if(
         &self,
@@ -8763,6 +9697,7 @@ impl OwnedCurrentLocator<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_started_daemon_registers_its_generation_and_retires_it_on_stop
 impl CurrentLocator for OwnedCurrentLocator<'_> {
     fn read(&self) -> std::io::Result<LocatorObservation> {
         self.file().read()
@@ -8804,6 +9739,7 @@ struct RegistryAuthority<'a> {
 }
 
 impl RegistryAuthority<'_> {
+    #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_started_daemon_registers_its_generation_and_retires_it_on_stop
     fn registry(&self) -> std::io::Result<GenerationRegistry> {
         Ok(GenerationRegistry::new(
             GenerationRegistryFile::new(self.data_dir)?,
@@ -8812,6 +9748,7 @@ impl RegistryAuthority<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_started_daemon_registers_its_generation_and_retires_it_on_stop
 impl GenerationAuthority for RegistryAuthority<'_> {
     fn claim(&self) -> std::io::Result<()> {
         let bound = self.ready.bound_endpoint().ok_or_else(|| {
@@ -8872,6 +9809,7 @@ impl GenerationAuthority for RegistryAuthority<'_> {
 /// unreadable registry names nothing, which is the safe direction for a *sweep*
 /// — it reclaims what it can prove is residue and the registry's own recovery
 /// still fails the authority closed.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_collection_pass_removes_the_shard_of_a_generation_nothing_retains
 fn live_generation_endpoints(data_dir: &Path) -> BTreeSet<String> {
     let Ok(Some(document)) = read_registry_document(data_dir) else {
         return BTreeSet::new();
@@ -8921,6 +9859,7 @@ struct StandbyIpc<'a> {
     gate: RefCell<Option<AdmissionGate>>,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl<'a> StandbyIpc<'a> {
     /// Bind the standby endpoint seam for one `serve --standby` process.
     fn new(
@@ -8965,7 +9904,7 @@ impl<'a> StandbyIpc<'a> {
     /// that initializes it is by definition the one that owns it.
     fn hydrate(&self) -> std::io::Result<(PathBuf, u64)> {
         let store = usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(
-            &adopted_workspace_state_dir(&self.data_dir.join("daemon"), &self.workspace_root)?,
+            &standby_workspace_state_dir(&self.data_dir.join("daemon"), &self.workspace_root)?,
         );
         let (root, state) = store
             .load_with_workspace()
@@ -8980,6 +9919,7 @@ impl<'a> StandbyIpc<'a> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl StandbyEndpoint for StandbyIpc<'_> {
     fn bind(&self) -> std::io::Result<()> {
         // Hydrate first: a standby that cannot read the state it would serve has
@@ -9074,6 +10014,7 @@ impl StandbyEndpoint for StandbyIpc<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl Drop for StandbyIpc<'_> {
     fn drop(&mut self) {
         // A panic unwinds past the state machine's own stand-down, and a socket
@@ -9095,6 +10036,7 @@ impl Drop for StandbyIpc<'_> {
 /// session runtime, a terminal runtime, an Agent runtime, a supervisor and a
 /// PR projector, and a standby owns none of them. Every admitted connection here
 /// gets a handshake and then a typed refusal.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 fn spawn_standby_ipc_server(
     listener: SecureUnixListener,
     protocol: usagi_core::infrastructure::ipc::ServerProtocol,
@@ -9187,6 +10129,7 @@ fn spawn_standby_ipc_server(
         })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 fn spawn_standby_client_worker(
     stream: std::os::unix::net::UnixStream,
     completion: AcceptedStream,
@@ -9323,6 +10266,7 @@ struct PreHandshakeDeadlineStream {
     deadline: Instant,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 impl PreHandshakeDeadlineStream {
     fn new(stream: std::os::unix::net::UnixStream, deadline: Instant) -> Self {
         Self { stream, deadline }
@@ -9364,6 +10308,7 @@ impl PreHandshakeDeadlineStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 impl Read for PreHandshakeDeadlineStream {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         self.stream.set_read_timeout(Some(self.remaining()?))?;
@@ -9371,6 +10316,7 @@ impl Read for PreHandshakeDeadlineStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 impl Write for PreHandshakeDeadlineStream {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.stream.set_write_timeout(Some(self.remaining()?))?;
@@ -9430,6 +10376,7 @@ impl AcceptedStream {
     /// Observes a peer close without consuming bytes that may belong to a later
     /// request. The retained duplicate is already owned for retirement, so this
     /// adds no descriptor to a waiting decision.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
     fn peer_disconnected(&self) -> bool {
         if self.retired.load(Ordering::Acquire) {
             return true;
@@ -9494,12 +10441,14 @@ impl AcceptedStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
 impl DecisionWaitCancellation for AcceptedStream {
     fn is_cancelled(&self) -> bool {
         self.peer_disconnected()
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
 impl ConnectionShutdown for AcceptedStream {
     fn shutdown(&self) -> std::io::Result<()> {
         // Published before the syscall, so a worker that wakes for any reason —
@@ -9597,6 +10546,7 @@ impl RetiringReader {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_retired_reader_stops_without_any_socket_wakeup
 impl Read for RetiringReader {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         loop {
@@ -9618,6 +10568,7 @@ impl Read for RetiringReader {
 /// the retained join handle is next reaped.
 struct ShutdownAcceptedStreamOnDrop(Option<AcceptedStream>);
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
 impl Drop for ShutdownAcceptedStreamOnDrop {
     fn drop(&mut self) {
         if let Some(stream) = &self.0 {
@@ -9645,6 +10596,7 @@ impl Drop for ShutdownAcceptedStreamOnDrop {
 /// (`crates/daemon/tests/generation_authority.rs`). Both mean "this generation
 /// may not do this; re-resolve the authority", and both are effect zero, so the
 /// two roles stay one contract for a client rather than two.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 fn standby_reply(
     gate: &AdmissionGate,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -9693,6 +10645,7 @@ struct StandbyRegistryAuthority<'a> {
     registered: RefCell<Option<usagi_core::domain::id::DaemonGeneration>>,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl<'a> StandbyRegistryAuthority<'a> {
     /// Bind the standby registry seam against the endpoint that process bound.
     fn new(data_dir: &'a Path, endpoint: &'a StandbyIpc<'a>, pid: u32) -> Self {
@@ -9741,6 +10694,7 @@ impl<'a> StandbyRegistryAuthority<'a> {
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl StandbyAuthority for StandbyRegistryAuthority<'_> {
     fn preflight(&self) -> std::io::Result<()> {
         self.active_generation().map(|_| ())
@@ -9803,6 +10757,7 @@ impl StandbyAuthority for StandbyRegistryAuthority<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl Drop for StandbyRegistryAuthority<'_> {
     fn drop(&mut self) {
         // Dropped before the endpoint it registered (declaration order in the
@@ -9825,6 +10780,7 @@ struct UnixStandbyProbe<'a> {
     build: BuildIdentity,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds
 impl StandbyProbe for UnixStandbyProbe<'_> {
     fn hello(
         &self,
@@ -9896,6 +10852,7 @@ impl StandbyProbe for UnixStandbyProbe<'_> {
 /// retires every generation, and the standby it retired must exit rather than
 /// keep a socket a future rollover might trust.
 #[allow(clippy::too_many_arguments)] // Promotion carries the exact process, endpoint, runtime root, and both shutdown domains.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds
 fn start_standby_custody_worker(
     data_dir: PathBuf,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -9960,6 +10917,7 @@ fn start_standby_custody_worker(
 /// Replace the readiness-only standby accept loop with the full active runtime
 /// on the same bound socket and generation after the durable handoff commits.
 #[allow(clippy::too_many_arguments)] // Each handoff fence is passed explicitly; bundling would hide identity or listener ownership.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds
 fn promote_standby_generation(
     data_dir: &Path,
     workspace_root: &Path,
@@ -10014,6 +10972,7 @@ fn promote_standby_generation(
 /// not describe its start time two ways, or a comparison against the registry
 /// would fail for a process that is plainly alive. Only the process group, which
 /// the daemon record has no field for, is read through the child probe.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 fn own_process_identity(pid: u32) -> std::io::Result<ProcessIdentity> {
     Ok(ProcessIdentity {
         pid,
@@ -10027,6 +10986,7 @@ fn own_process_identity(pid: u32) -> std::io::Result<ProcessIdentity> {
 /// An identity that does not match is `Unknown` rather than `Gone`: the PID is
 /// live, so nothing about the recorded owner has been proved either way. Only an
 /// absent process is `Gone`, and only `Gone` lets recovery retire an authority.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 fn observe_generation_process(process: &ProcessIdentity) -> ProcessObservation {
     if process.start_identity.is_empty() {
         return ProcessObservation::Unknown;
@@ -10076,6 +11036,7 @@ impl Drop for SignalShutdown {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_stop_request_retires_the_broker_and_removes_its_endpoint
 impl ShutdownSignal for SignalShutdown {
     #[cfg(unix)]
     fn prepare(&self) -> std::io::Result<()> {
@@ -10162,6 +11123,7 @@ impl ShutdownSignal for SignalShutdown {
 struct ServeLauncher {
     exe: PathBuf,
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl ServeLauncher {
     fn launch_standby(&self) -> std::io::Result<u32> {
         let mut command = std::process::Command::new(&self.exe);
@@ -10175,6 +11137,7 @@ impl ServeLauncher {
         command.spawn().map(|child| child.id())
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl DaemonLauncher for ServeLauncher {
     fn launch(&self) -> std::io::Result<()> {
         let mut command = std::process::Command::new(&self.exe);
@@ -10230,10 +11193,20 @@ const BROKER_IDLE_TIMEOUT: Duration = Duration::from_hours(1);
 /// attempt against the daemon endpoint each time.
 const BROKER_IDLE_POLL: Duration = Duration::from_secs(60);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct BootstrapBrokerAddress {
     socket: PathBuf,
     lock: PathBuf,
+    record: PathBuf,
+}
+
+/// Exact process identity published by a bootstrap broker for fixture and
+/// operator cleanup. The identity fences PID reuse; the private, digest-scoped
+/// path fences the workspace and executable this broker serves.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct BootstrapBrokerRecord {
+    pid: u32,
+    process_start_identity: String,
 }
 
 fn bootstrap_broker_address(
@@ -10259,29 +11232,53 @@ fn bootstrap_broker_address(
     BootstrapBrokerAddress {
         socket: daemon_dir.join(format!("bootstrap-broker-{key}.sock")),
         lock: daemon_dir.join(format!("bootstrap-broker-{key}.lock")),
+        record: daemon_dir.join(format!("bootstrap-broker-{key}.json")),
     }
 }
 
-fn broker_workspace(workspace: &ClientWorkspace) -> std::io::Result<PathBuf> {
-    let root = match workspace {
-        ClientWorkspace::Bound { root } | ClientWorkspace::Selected { root }
-            if !root.is_empty() =>
-        {
-            root
+/// Resolves the workspace a client may use to cold-start a daemon before any
+/// lifecycle child, workspace fence, or project-local `.usagi` path exists.
+fn cold_start_workspace(
+    daemon_dir: &Path,
+    workspace: &ClientWorkspace,
+    opened: Option<&Path>,
+    ambient_cwd: Option<&Path>,
+) -> Result<PathBuf, usagi_core::infrastructure::ipc::ProtocolError> {
+    if let Some(opened) = opened {
+        return paths::canonical_workspace_root(opened).map_err(|_| {
+            usagi_core::infrastructure::ipc::workspace_refusal(
+                "the selected workspace does not resolve on this machine",
+                &paths::wire_workspace_root(opened),
+            )
+        });
+    }
+    match workspace {
+        ClientWorkspace::Selected { root } => TenantWorkspaces::canonical(root),
+        ClientWorkspace::Bound { root } => {
+            // Match the running resolver: a teardown may already have removed
+            // an Agent worktree, but its declared spelling can still belong to
+            // a durably adopted workspace.
+            let declared =
+                paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root));
+            implicit_bound_workspace(daemon_dir, &declared)
+                .ok_or_else(|| unopened_bound_workspace_refusal(&declared, &[]))
         }
-        ClientWorkspace::Bound { .. }
-        | ClientWorkspace::Selected { .. }
-        | ClientWorkspace::Unbound => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "daemon bootstrap broker requires a canonical workspace",
-            ));
-        }
-    };
-    paths::canonical_workspace_root(root)
-        .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        ClientWorkspace::Unbound => ambient_cwd
+            .ok_or_else(|| {
+                usagi_core::infrastructure::ipc::workspace_refusal_serving(
+                    "a cold start requires a resolvable working directory",
+                    &[],
+                )
+            })
+            .and_then(|cwd| {
+                let declared = TenantWorkspaces::canonical(&paths::wire_workspace_root(cwd))?;
+                implicit_bound_workspace(daemon_dir, &declared)
+                    .ok_or_else(|| unopened_bound_workspace_refusal(&declared, &[]))
+            }),
+    }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn request_bootstrap_broker(address: &BootstrapBrokerAddress, request: u8) -> std::io::Result<()> {
     let mut stream = std::os::unix::net::UnixStream::connect(&address.socket)?;
     let timeout = if request == BROKER_START {
@@ -10299,14 +11296,10 @@ fn request_bootstrap_broker(address: &BootstrapBrokerAddress, request: u8) -> st
         .ok_or_else(|| std::io::Error::other("daemon bootstrap broker refused the request"))
 }
 
-fn request_broker_start(
-    data_dir: &Path,
-    workspace: &ClientWorkspace,
-    exe: &Path,
-) -> std::io::Result<()> {
-    let workspace = broker_workspace(workspace)?;
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
+fn request_broker_start(data_dir: &Path, workspace: &Path, exe: &Path) -> std::io::Result<()> {
     let exe = exe.canonicalize()?;
-    let address = bootstrap_broker_address(data_dir, &workspace, &exe);
+    let address = bootstrap_broker_address(data_dir, workspace, &exe);
     request_bootstrap_broker(&address, BROKER_START)?;
     for _ in 0..BROKER_READINESS_ATTEMPTS {
         if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
@@ -10319,6 +11312,7 @@ fn request_broker_start(
     ))
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn spawn_bootstrap_broker(exe: &Path, data_dir: &Path, workspace: &Path) -> std::io::Result<()> {
     let workspace = paths::canonical_workspace_root(workspace)
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
@@ -10353,6 +11347,7 @@ fn spawn_bootstrap_broker(exe: &Path, data_dir: &Path, workspace: &Path) -> std:
     ))
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn reap_child(mut child: std::process::Child) {
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -10372,6 +11367,7 @@ fn bootstrap_serve_command(exe: &Path, workspace: &Path) -> std::process::Comman
     command
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn launch_broker_daemon(exe: &Path, workspace: &Path, data_dir: &Path) -> std::io::Result<()> {
     if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
         return Ok(());
@@ -10446,6 +11442,19 @@ const fn broker_may_retire(idle_for: Duration, timeout: Duration, daemon_live: b
     !daemon_live && idle_for.as_secs() >= timeout.as_secs()
 }
 
+/// Whether a broker's published endpoint is still a socket on disk.
+///
+/// A broker whose endpoint was removed underneath it is *unreachable* rather
+/// than idle: no client can connect to it, and neither can the retirement
+/// request its own idle watch sends. Presence is enough to tell the two apart,
+/// because the per-address instance lock already keeps a second broker from
+/// publishing over this one.
+fn broker_endpoint_present(socket: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    std::fs::symlink_metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket())
+}
+
 /// How long a broker tolerates being unused before retiring itself.
 #[derive(Debug, Clone, Copy)]
 struct BrokerIdlePolicy {
@@ -10453,6 +11462,7 @@ struct BrokerIdlePolicy {
     poll: Duration,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive
 impl BrokerIdlePolicy {
     const fn production() -> Self {
         Self {
@@ -10484,6 +11494,7 @@ impl BrokerActivity {
         }
     }
 
+    #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive
     fn touch(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.last = Instant::now();
@@ -10491,11 +11502,27 @@ impl BrokerActivity {
     }
 
     /// Stop the idle watch and let it be joined without waiting out a poll.
+    #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive
     fn stop(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.stopped = true;
         }
         self.signal.notify_all();
+    }
+
+    /// Wait for the next idle poll unless shutdown was already requested.
+    ///
+    /// The predicate is checked while holding the same mutex that [`Self::stop`]
+    /// updates. This closes the stop-before-wait window: a notification may be
+    /// coalesced or arrive before this method locks, but the state transition
+    /// itself cannot be missed.
+    fn wait_for_poll(&self, poll: Duration) -> Option<Duration> {
+        let state = self.state.lock().ok()?;
+        let (state, _) = self
+            .signal
+            .wait_timeout_while(state, poll, |state| !state.stopped)
+            .ok()?;
+        (!state.stopped).then(|| state.last.elapsed())
     }
 }
 
@@ -10505,6 +11532,7 @@ impl BrokerActivity {
 /// than by killing the loop from outside: the accept loop stays blocked (so a
 /// cold start pays no polling latency), and the endpoint is torn down by the
 /// same path an operator's `usagi daemon stop` takes.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive,an_unreachable_broker_endpoint_is_not_mistaken_for_an_idle_one
 fn spawn_broker_idle_watch(
     activity: &Arc<BrokerActivity>,
     address: BootstrapBrokerAddress,
@@ -10515,28 +11543,36 @@ fn spawn_broker_idle_watch(
     let data_dir = data_dir.to_path_buf();
     std::thread::spawn(move || {
         loop {
-            let Ok(state) = activity.state.lock() else {
+            let Some(idle_for) = activity.wait_for_poll(idle.poll) else {
                 return;
             };
-            let Ok((state, _)) = activity.signal.wait_timeout(state, idle.poll) else {
-                return;
-            };
-            if state.stopped {
-                return;
+            // An endpoint that is gone can never be reached again — not by a
+            // client, and not by the retirement request below. Leaving the
+            // broker running then means blocking in `accept` forever on a
+            // socket nobody can connect to, which is how brokers outlived by
+            // weeks the temporary homes that owned them. Exiting is the whole
+            // cleanup: the directory that held the socket and the record file
+            // is already gone.
+            if !broker_endpoint_present(&address.socket) {
+                std::process::exit(0);
             }
-            let idle_for = state.last.elapsed();
-            // The daemon probe is IO, so the lock is released before it runs.
-            drop(state);
             let daemon_live =
                 usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir).is_ok();
-            if broker_may_retire(idle_for, idle.timeout, daemon_live) {
-                let _ = request_bootstrap_broker(&address, BROKER_STOP);
+            if broker_may_retire(idle_for, idle.timeout, daemon_live)
+                && request_bootstrap_broker(&address, BROKER_STOP).is_ok()
+            {
                 return;
             }
+            // Either the broker is still needed, or a daemon appeared between
+            // the probe and the request and vetoed the retirement. Keep
+            // watching. Returning on a *refused* retirement left a broker that
+            // could never retire afterwards, however long the daemon it exists
+            // to outlive had been gone.
         }
     })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn serve_bootstrap_broker(
     data_dir: &Path,
     workspace: &Path,
@@ -10551,14 +11587,15 @@ fn serve_bootstrap_broker(
     ensure_private_dir_all(data_dir)?;
     let daemon_dir = data_dir.join("daemon");
     ensure_private_dir(&daemon_dir)?;
+    let address = bootstrap_broker_address(data_dir, &workspace, &exe);
     let lock = FileInstanceLock {
-        path: bootstrap_broker_address(data_dir, &workspace, &exe).lock,
+        path: address.lock.clone(),
         held: RefCell::new(None),
     };
     if !lock.acquire()? {
         return Ok(());
     }
-    let socket = bootstrap_broker_address(data_dir, &workspace, &exe).socket;
+    let socket = address.socket.clone();
     match std::fs::symlink_metadata(&socket) {
         Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(&socket)?,
         Ok(_) => {
@@ -10576,13 +11613,18 @@ fn serve_bootstrap_broker(
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
+    let pid = std::process::id();
+    let record = BootstrapBrokerRecord {
+        pid,
+        process_start_identity: process_start_identity(pid)?,
+    };
+    if let Err(error) = json_file::write_atomic(&daemon_dir, &address.record, &record) {
+        drop(listener);
+        let _ = std::fs::remove_file(&socket);
+        return Err(std::io::Error::other(error.to_string()));
+    }
     let activity = Arc::new(BrokerActivity::started());
-    let watch = spawn_broker_idle_watch(
-        &activity,
-        bootstrap_broker_address(data_dir, &workspace, &exe),
-        data_dir,
-        idle,
-    );
+    let watch = spawn_broker_idle_watch(&activity, address.clone(), data_dir, idle);
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
             continue;
@@ -10621,7 +11663,8 @@ fn serve_bootstrap_broker(
     activity.stop();
     let _ = watch.join();
     drop(listener);
-    let _ = std::fs::remove_file(socket);
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&address.record);
     Ok(())
 }
 
@@ -10630,6 +11673,7 @@ struct IpcRolloverRequester<'a> {
     launcher: &'a ServeLauncher,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl IpcRolloverRequester<'_> {
     fn committed(&self, operation: &OperationId, standby_pid: u32) -> bool {
         read_registry_document(self.data_dir)
@@ -10679,6 +11723,7 @@ impl IpcRolloverRequester<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl RolloverRequester for IpcRolloverRequester<'_> {
     fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
         let pid = self.launcher.launch_standby()?;
@@ -10686,11 +11731,16 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
             Self::stop_standby(pid);
             return Err(error);
         }
-        let result = policy_client(ClientPolicy::cli()).and_then(|mut client| {
-            client.request(DaemonRequest::Rollover {
-                operation_id: operation.0.clone(),
-            })
-        });
+        // Rollover is a machine-wide lifecycle request. Binding this control
+        // connection to the command's cwd would make an otherwise ready
+        // successor impossible to commit when `daemon restart` is run outside
+        // an adopted workspace.
+        let result = existing_policy_client(ClientPolicy::cli(), ClientWorkspace::Unbound)
+            .and_then(|mut client| {
+                client.request(DaemonRequest::Rollover {
+                    operation_id: operation.0.clone(),
+                })
+            });
         match result {
             Ok(_) => Ok(format!(
                 "daemon authority handed off (operation {})",
@@ -10707,6 +11757,7 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
 }
 
 struct RealSleeper;
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=reports_a_timeout_when_started_daemon_never_becomes_ready
 impl Sleeper for RealSleeper {
     fn sleep(&self) {
         std::thread::sleep(Duration::from_millis(50));
@@ -10724,6 +11775,7 @@ impl FileInstanceLock {
     ///
     /// `None` means this lock was never acquired (or its descriptor cannot be
     /// inspected), which leaves custody undecidable instead of lost.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_live_registered_authority_is_repaired_rather_than_displaced
     fn locked_inode(&self) -> Option<NodeIdentity> {
         let held = self.held.borrow();
         let metadata = held.as_ref()?.metadata().ok()?;
@@ -10769,6 +11821,7 @@ struct FileWorkspaceFences {
     pid: u32,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=workspace_fence_refuses_through_a_symlinked_or_relative_spelling
 impl WorkspaceFenceFactory for FileWorkspaceFences {
     fn fence_for(&self, workspace_root: &Path) -> Box<dyn WorkspaceFence + Send> {
         Box::new(FileWorkspaceFence {
@@ -10788,6 +11841,7 @@ struct SystemTenantOpener {
     generation: usagi_core::domain::id::DaemonGeneration,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=opening_a_second_workspace_adopts_it_without_disturbing_the_first
 impl TenantRuntimeOpener for SystemTenantOpener {
     type Runtime = SharedSessionRuntime;
 
@@ -10814,6 +11868,7 @@ impl TenantRuntimeOpener for SystemTenantOpener {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=workspace_fence_refuses_through_a_symlinked_or_relative_spelling
 impl WorkspaceFence for FileWorkspaceFence {
     fn acquire(&self) -> std::io::Result<WorkspaceFenceOutcome> {
         const POLL: Duration = Duration::from_millis(20);
@@ -10857,6 +11912,7 @@ impl WorkspaceFence for FileWorkspaceFence {
 }
 
 /// Replace the fence node's contents with this owner's pid line.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=workspace_fence_refuses_when_the_owner_hint_is_unreadable
 fn write_owner_hint(file: &std::fs::File, pid: u32) -> std::io::Result<()> {
     use std::io::{Seek, SeekFrom};
     file.set_len(0)?;
@@ -10867,6 +11923,7 @@ fn write_owner_hint(file: &std::fs::File, pid: u32) -> std::io::Result<()> {
 }
 
 /// Read the owner pid published by the daemon currently holding the fence.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=workspace_fence_refuses_when_the_owner_hint_is_unreadable
 fn read_owner_hint(file: &std::fs::File) -> Option<u32> {
     use std::io::Read;
     // The hint is one short decimal line; a longer node is not ours to trust.
@@ -10875,6 +11932,7 @@ fn read_owner_hint(file: &std::fs::File) -> Option<u32> {
     contents.trim().parse().ok()
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_second_active_daemon_is_refused_without_disturbing_the_registry
 impl InstanceLock for FileInstanceLock {
     fn acquire(&self) -> std::io::Result<bool> {
         const TIMEOUT: Duration = Duration::from_secs(2);
@@ -10905,6 +11963,7 @@ impl InstanceLock for FileInstanceLock {
 }
 
 /// `usagi daemon` の実行時資源を組み立てて daemon presentation へ渡す。
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 pub(crate) fn run(
     out: &mut dyn Write,
     command: CliDaemonCommand,
@@ -10935,6 +11994,7 @@ pub(crate) fn run(
 /// Config intentionally runs without starting the daemon, so its settings
 /// adapter cannot rely on bootstrap lock acquisition to establish the private
 /// directory invariant first.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap
 pub(crate) fn prepare_private_data_dir() -> std::io::Result<PathBuf> {
     let data_dir =
         paths::data_dir().map_err(|error| std::io::Error::other(format!("{error:#}")))?;
@@ -10942,8 +12002,9 @@ pub(crate) fn prepare_private_data_dir() -> std::io::Result<PathBuf> {
     Ok(data_dir)
 }
 
-fn run_broker_lifecycle_command(command: CliDaemonCommand) -> Option<std::io::Result<()>> {
-    if command == CliDaemonCommand::BootstrapBroker {
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
+fn run_broker_lifecycle_command(command: &CliDaemonCommand) -> Option<std::io::Result<()>> {
+    if command == &CliDaemonCommand::BootstrapBroker {
         return Some((|| {
             let data_dir =
                 paths::data_dir().map_err(|error| std::io::Error::other(format!("{error:#}")))?;
@@ -10963,6 +12024,7 @@ fn run_broker_lifecycle_command(command: CliDaemonCommand) -> Option<std::io::Re
 /// panic in an IPC, PTY, or observer worker. The hook records every thread's
 /// panic before the thread unwinds; [`run`] then catches a main-thread panic at
 /// the outer daemon boundary and terminates the process with an ordinary error.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_is_reported_as_daemon_health_danger
 fn install_panic_logger() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -10970,6 +12032,7 @@ fn install_panic_logger() {
         previous(info);
     }));
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_is_reported_as_daemon_health_danger
 fn format_panic(info: &PanicHookInfo<'_>) -> String {
     let payload = if let Some(message) = info.payload().downcast_ref::<&str>() {
         (*message).to_owned()
@@ -11004,6 +12067,7 @@ const SERVICE_SUPERVISOR: &str = "no";
 /// resolved instead of the supervisor's default directory. Other platforms have
 /// no supported supervisor; the detached `start` path and client bootstrap keep
 /// working there.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 fn install_service(
     executable: &std::path::Path,
     data_home: &paths::DataHome,
@@ -11025,6 +12089,7 @@ fn install_service(
 }
 
 /// Remove the platform's supervisor definition installed by [`install_service`].
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 fn uninstall_service() -> std::io::Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -11049,17 +12114,37 @@ fn unsupported_service() -> std::io::Error {
 }
 
 #[allow(clippy::too_many_lines)] // Composition wires the closed lifecycle verbs and their IO ports.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 fn run_inner(
     out: &mut dyn Write,
     command: CliDaemonCommand,
     info: &AppInfo,
     operation: Option<usagi_core::infrastructure::ipc::OperationId>,
 ) -> std::io::Result<()> {
-    if let Some(result) = run_broker_lifecycle_command(command) {
+    if let Some(result) = run_broker_lifecycle_command(&command) {
         return result;
     }
     let data_dir = prepare_private_data_dir()?;
     let daemon_dir = data_dir.join("daemon");
+    if let CliDaemonCommand::Retire { path, force } = command {
+        let root = paths::canonical_workspace_root(&path)
+            .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+        let root = paths::wire_workspace_root(&root);
+        let mut client = existing_policy_client(ClientPolicy::cli(), ClientWorkspace::Unbound)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        client
+            .request(DaemonRequest::Tenant {
+                action: usagi_core::usecase::client::TenantAction::Retire,
+                root: Some(root.clone()),
+                force,
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        return writeln!(
+            out,
+            "{}: retired workspace tenant ({root})",
+            info.describe()
+        );
+    }
     let command = match command {
         CliDaemonCommand::InstallService => {
             // The supervised service must resolve the same data home *and* the
@@ -11110,6 +12195,7 @@ fn run_inner(
         CliDaemonCommand::Start => PresentationDaemonCommand::Start,
         CliDaemonCommand::BootstrapBroker => unreachable!("handled before daemon state setup"),
         CliDaemonCommand::Status => PresentationDaemonCommand::Status,
+        CliDaemonCommand::Retire { .. } => unreachable!("handled before lifecycle setup"),
         CliDaemonCommand::Stop { force } => PresentationDaemonCommand::Stop(transition_mode(force)),
         // A manual restart is a forced replacement of the artifact that is
         // already running, so it carries exactly the operation id the build
@@ -11159,6 +12245,7 @@ fn run_inner(
     let census = DurableResourceCensus {
         data_dir: data_dir.clone(),
     };
+    let generations = RegistryGenerationControl::production(data_dir.clone());
     let authority = RegistryAuthority {
         data_dir: &data_dir,
         ready: &ready,
@@ -11190,6 +12277,7 @@ fn run_inner(
         workspace: &workspace,
         pid,
         census: &census,
+        generations: &generations,
         seamless: observed_seamless_refusal(&data_dir),
         rollover: &rollover,
     };
@@ -11197,11 +12285,44 @@ fn run_inner(
     // has no command to end. Retirement follows the stop rather than preceding
     // it, so a refused stop keeps the broker that a later cold start needs.
     let stopping = matches!(command, PresentationDaemonCommand::Stop(_));
+    let reporting = matches!(command, PresentationDaemonCommand::Status);
     let outcome = usagi_daemon::presentation::run(out, command, info, &env);
     if stopping && outcome.is_ok() {
         retire_bootstrap_broker(&data_dir, &workspace_root, &launcher.exe);
     }
+    if reporting && outcome.is_ok() {
+        append_live_tenant_inventory(out);
+    }
     outcome
+}
+
+/// Append live-only tenant state. An absent daemon or stale lifecycle record
+/// deliberately leaves the presentation layer's existing status text intact.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
+fn append_live_tenant_inventory(out: &mut dyn Write) {
+    use usagi_core::usecase::client::{DaemonReply, TenantAction, TenantInventory};
+
+    let Ok(mut client) = existing_policy_client(ClientPolicy::cli(), ClientWorkspace::Unbound)
+    else {
+        return;
+    };
+    let Ok(DaemonReply::Ok(value)) = client.request(DaemonRequest::Tenant {
+        action: TenantAction::Inventory,
+        root: None,
+        force: false,
+    }) else {
+        return;
+    };
+    let Ok(inventory) = serde_json::from_value::<TenantInventory>(value) else {
+        return;
+    };
+    for tenant in inventory.tenants {
+        let _ = writeln!(
+            out,
+            "  tenant: {} (sessions: {}, live/unknown runtimes: {})",
+            tenant.root, tenant.sessions, tenant.live_runtimes
+        );
+    }
 }
 
 /// Ask the broker for `workspace` and `exe` to close its endpoint.
@@ -11209,6 +12330,7 @@ fn run_inner(
 /// Best effort by construction: there may be no broker (nothing started one, or
 /// it already retired), and a daemon that is going away anyway must not fail a
 /// stop because a helper could not be reached.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=planned_stop_retires_generation_endpoint_and_allows_safe_autostart
 fn retire_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) {
     let Ok(exe) = exe.canonicalize() else {
         return;
@@ -11229,6 +12351,7 @@ fn retire_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) {
 /// again. Starting from a subdirectory or a session worktree therefore cannot
 /// fence a workspace the runtime will not own. Canonicalization collapses
 /// spelling differences before any of that comparison happens.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bound_workspace_root_predicts_the_root_open_binds
 fn bound_workspace_root(daemon_dir: &Path, candidate: &Path) -> std::io::Result<PathBuf> {
     // A data directory written before workspace state subtrees existed keeps its
     // lifecycle document beside the locator. Moving it is the first thing any
@@ -11257,18 +12380,34 @@ fn bound_workspace_root(daemon_dir: &Path, candidate: &Path) -> std::io::Result<
         .map_err(|error| std::io::Error::other(format!("{error:?}")))
 }
 
-/// The state subtree of an already adopted `workspace_root`, without creating
+/// The state subtree a standby uses as its initial workspace, without creating
 /// one.
 ///
 /// A standby hydrates read-only — every write belongs to the active generation —
-/// so an unadopted workspace is reported as uninitialized rather than adopted
-/// here.
-fn adopted_workspace_state_dir(
+/// so it never adopts the command's current directory. If that directory is
+/// already inside an adopted workspace, that workspace remains the preferred
+/// initial tenant. Otherwise a deterministic existing subtree is used: daemon
+/// replacement is machine-wide and must not depend on which unrelated directory
+/// the operator happened to run `daemon restart` from.
+fn standby_workspace_state_dir(
     daemon_dir: &Path,
     workspace_root: &Path,
 ) -> std::io::Result<PathBuf> {
-    workspace_state::owner(daemon_dir, workspace_root)
-        .map_err(|error| std::io::Error::other(format!("{error:#}")))?
+    let adopted = workspace_state::adopted(daemon_dir)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    let initialized = adopted
+        .iter()
+        .filter_map(|state| match lifecycle_state_initialized(state.dir()) {
+            Ok(true) => Some(Ok(state)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    initialized
+        .iter()
+        .filter(|state| workspace_root.starts_with(state.root()))
+        .max_by_key(|state| state.root().components().count())
+        .or_else(|| initialized.first())
         .map(|state| state.dir().to_path_buf())
         .ok_or_else(|| {
             std::io::Error::new(
@@ -11276,6 +12415,27 @@ fn adopted_workspace_state_dir(
                 "durable runtime state is not initialized; a standby hydrates it read-only",
             )
         })
+}
+
+/// Whether an adopted subtree has the lifecycle document a read-only standby
+/// can hydrate.
+///
+/// `workspace_state::resolve` records `root.json` before the tenant opener
+/// initializes `sessions.json`. A failed open may therefore leave an adopted
+/// but uninitialized subtree behind. Absence is a candidate miss; every other
+/// node or metadata failure is corruption and remains fail-closed.
+fn lifecycle_state_initialized(state_dir: &Path) -> std::io::Result<bool> {
+    let path = usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(state_dir)
+        .state_path();
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("lifecycle state is not a regular file: {}", path.display()),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// The workspace this process opened, once a surface has selected one.
@@ -11303,6 +12463,7 @@ static OPENED_WORKSPACE: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// it would therefore either be refused by the fence for a root nothing can
 /// compare, or — worse, and what used to happen — be answered by a daemon that
 /// owns a different workspace.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=open_registers_and_renders_an_explicit_or_current_workspace
 pub(crate) fn declare_opened_workspace(root: &Path) -> std::io::Result<PathBuf> {
     let canonical = paths::canonical_workspace_root(root)
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
@@ -11321,7 +12482,7 @@ pub(crate) fn declare_opened_workspace(root: &Path) -> std::io::Result<PathBuf> 
     Ok(canonical)
 }
 
-fn opened_workspace() -> Option<PathBuf> {
+pub(crate) fn opened_workspace() -> Option<PathBuf> {
     OPENED_WORKSPACE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -11370,14 +12531,16 @@ fn client_workspace() -> ClientWorkspace {
 }
 
 /// Connect to the daemon for this binary's isolated runtime channel. Every
-/// channel reuses an exact artifact. A different known artifact returns one
-/// deterministic rollover trigger. Development consumes it with a cold
-/// restart; other channels preserve the old daemon for a future safe handoff.
+/// channel reuses an exact artifact. A different known artifact is reused when
+/// its protocol handshake is compatible. Development may first request one
+/// planned replacement; installed/local clients never churn a live daemon as a
+/// side effect of connecting.
 ///
 /// The returned lane is deadline-armed by construction: there is no way to
 /// obtain an unbounded daemon socket from this module. `connect_budget_ms`
 /// bounds bootstrap, connect and handshake; each later request re-arms the lane
 /// with its own budget through [`rearm_lane`].
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_daemon_request_autostarts_without_manual_daemon_start
 pub(crate) fn client(
     policy: ClientPolicy,
     connect_budget_ms: u64,
@@ -11385,6 +12548,7 @@ pub(crate) fn client(
     client_for(policy, &client_workspace(), connect_budget_ms)
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_daemon_request_autostarts_without_manual_daemon_start
 fn client_for(
     policy: ClientPolicy,
     workspace: &ClientWorkspace,
@@ -11437,12 +12601,24 @@ pub(crate) fn lane_socket(client: &LaneClient) -> &std::os::unix::net::UnixStrea
 // LLVM counts the deadline-stream instantiation as uncovered for branches the
 // UnixStream instantiation already exercises through the integration suite.
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=cli_tui_pty
+#[allow(clippy::too_many_lines)] // Lock, broker, lifecycle start, and rollover share one workspace snapshot.
 fn bootstrap_client<S: Read + Write>(
     workspace: &ClientWorkspace,
     connect: impl Fn(&Path, &BuildIdentity) -> std::io::Result<IpcClient<S>>,
 ) -> Result<IpcClient<S>, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let opened = opened_workspace();
+    let ambient_cwd = std::env::current_dir().ok();
+    let launch_workspace = || {
+        cold_start_workspace(
+            &data_dir.join("daemon"),
+            workspace,
+            opened.as_deref(),
+            ambient_cwd.as_deref(),
+        )
+        .map_err(ClientError::Protocol)
+    };
     let exe =
         std::env::current_exe().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let expected_build = current_build();
@@ -11450,7 +12626,8 @@ fn bootstrap_client<S: Read + Write>(
         match acquire_bootstrap_lock_io_within(&data_dir, PrivateLockWait::BOOTSTRAP) {
             Ok(lock) => lock,
             Err(lock_error) if lock_error.kind() == std::io::ErrorKind::PermissionDenied => {
-                if request_broker_start(&data_dir, workspace, &exe).is_err() {
+                let broker_workspace = launch_workspace()?;
+                if request_broker_start(&data_dir, &broker_workspace, &exe).is_err() {
                     return Err(map_bootstrap_lock_error(&lock_error));
                 }
                 for _ in 0..40 {
@@ -11461,6 +12638,12 @@ fn bootstrap_client<S: Read + Write>(
                             false,
                         ) {
                             BuildArtifactDecision::Reuse => Ok(client),
+                            BuildArtifactDecision::ForceReplace
+                            | BuildArtifactDecision::RolloverTrigger
+                                if !should_attempt_automatic_replacement(paths::runtime_mode()) =>
+                            {
+                                Ok(client)
+                            }
                             BuildArtifactDecision::ForceReplace
                             | BuildArtifactDecision::RolloverTrigger => {
                                 Err(ClientError::RolloverRequired(
@@ -11489,7 +12672,10 @@ fn bootstrap_client<S: Read + Write>(
     let channel = runtime_channel();
     let connection = bootstrap::connect_or_start(
         || connect(&data_dir, &expected_build),
-        || run_lifecycle(&exe, "start"),
+        || {
+            let workspace = launch_workspace().map_err(std::io::Error::other)?;
+            run_lifecycle(&exe, "start", &workspace)
+        },
         || recover_stale_client_endpoint(&data_dir),
         &expected_build,
         channel,
@@ -11497,12 +12683,11 @@ fn bootstrap_client<S: Read + Write>(
         IpcClient::server_build,
     );
     let connection = match connection {
-        Err(bootstrap::BootstrapError::RolloverRequired(trigger))
-            if paths::runtime_mode() == paths::RuntimeMode::Development =>
-        {
+        Err(bootstrap::BootstrapError::RolloverRequired(trigger)) => {
             // Keyed by the artifact this daemon advertises, so a client whose own
             // build no longer exists on disk asks once instead of once per lane.
-            let may_attempt = ATTEMPTED_REPLACEMENTS.claim(&trigger.running_artifact);
+            let may_attempt = should_attempt_automatic_replacement(paths::runtime_mode())
+                && ATTEMPTED_REPLACEMENTS.claim(&trigger.running_artifact);
             match bootstrap::replace_or_reuse(
                 || connect(&data_dir, &expected_build),
                 // Planned, never forced. A rebuild is not a reason to destroy the
@@ -11510,13 +12695,16 @@ fn bootstrap_client<S: Read + Write>(
                 // census picks a cold transition only when nothing is live, and a
                 // seamless rollover keeps the old PTY masters alive otherwise
                 // (#507 / #559).
-                || run_lifecycle_with(&exe, &["daemon", "restart"], "restart"),
+                || {
+                    let workspace = launch_workspace().map_err(std::io::Error::other)?;
+                    run_lifecycle_with(&exe, &["daemon", "restart"], "restart", &workspace)
+                },
                 &expected_build,
                 IpcClient::server_build,
                 may_attempt,
             ) {
-                Ok(bootstrap::DevelopmentConnection::Replaced(stream)) => Ok(stream),
-                Ok(bootstrap::DevelopmentConnection::Reused { stream, reason }) => {
+                Ok(bootstrap::BuildMismatchConnection::Replaced(stream)) => Ok(stream),
+                Ok(bootstrap::BuildMismatchConnection::Reused { stream, reason }) => {
                     if let Some(entry) = reused_build_mismatch_record(&trigger, &reason) {
                         ErrorLog::record(&entry);
                     }
@@ -11548,7 +12736,11 @@ static ATTEMPTED_REPLACEMENTS: bootstrap::OncePerArtifact = bootstrap::OncePerAr
 /// standing mismatch costs one log line instead of one per bootstrapped lane.
 static LOGGED_MISMATCHES: bootstrap::OncePerArtifact = bootstrap::OncePerArtifact::new();
 
-/// The log entry for a development client that keeps talking to a daemon built
+const fn should_attempt_automatic_replacement(mode: paths::RuntimeMode) -> bool {
+    matches!(mode, paths::RuntimeMode::Development)
+}
+
+/// The log entry for a compatible client that keeps talking to a daemon built
 /// from another artifact, or `None` when this process already recorded that same
 /// standing mismatch.
 ///
@@ -11558,12 +12750,13 @@ static LOGGED_MISMATCHES: bootstrap::OncePerArtifact = bootstrap::OncePerArtifac
 /// bootstrapped lane observes the same mismatch, hence one entry per daemon
 /// artifact rather than one per connection. Only the artifact identities and the
 /// non-sensitive reason are recorded.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_reused_development_mismatch_is_recorded_once_per_daemon_artifact
 fn reused_build_mismatch_record(trigger: &BuildRolloverTrigger, reason: &str) -> Option<String> {
     LOGGED_MISMATCHES
         .claim(&trigger.running_artifact)
         .then(|| {
             format!(
-                "development client reused the daemon build {} instead of replacing it with {}: {reason}",
+                "client reused the compatible daemon build {} instead of replacing it with {}: {reason}",
                 trigger.running_artifact, trigger.expected_artifact
             )
         })
@@ -11597,6 +12790,7 @@ impl MonotonicClock for SystemClock {
 /// so a stalled daemon cannot block a surface past its policy budget.
 pub(crate) struct DeadlineUnixStream(std::os::unix::net::UnixStream);
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query
 impl Read for DeadlineUnixStream {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -11604,6 +12798,7 @@ impl Read for DeadlineUnixStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query
 impl Write for DeadlineUnixStream {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -11615,6 +12810,7 @@ impl Write for DeadlineUnixStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query
 impl DeadlineConnection for DeadlineUnixStream {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
     fn set_read_deadline(&mut self, timeout: std::time::Duration) -> std::io::Result<()> {
@@ -11676,8 +12872,36 @@ fn connect_deadline_client(
 /// this so a hung daemon cannot block a surface indefinitely.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=mcp_e2e
 pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
+    policy_client_for(policy, client_workspace())
+}
+
+/// Connects a resilient client that declares the workspace selected by a TUI
+/// surface, independently of the process-wide opened workspace.
+///
+/// # Errors
+///
+/// Returns an error when `root` cannot be resolved to a canonical workspace or
+/// when the daemon cannot be bootstrapped and connected within `policy`.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
+pub(crate) fn policy_client_for_selected_workspace(
+    policy: ClientPolicy,
+    root: &Path,
+) -> Result<impl DaemonClient, ClientError> {
+    let root = paths::canonical_workspace_root(root)
+        .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    policy_client_for(
+        policy,
+        ClientWorkspace::Selected {
+            root: paths::wire_workspace_root(root),
+        },
+    )
+}
+
+fn policy_client_for(
+    policy: ClientPolicy,
+    workspace: ClientWorkspace,
+) -> Result<impl DaemonClient, ClientError> {
     let clock = SystemClock::new();
-    let workspace = client_workspace();
     let initial = bootstrap_client(&workspace, |data_dir, build| {
         connect_deadline_client(
             data_dir,
@@ -11688,8 +12912,7 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
             policy.timeout_ms,
         )
     })?;
-    let data_dir =
-        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let data_dir = paths::data_dir().map_err(client_unavailable)?;
     let build = current_build();
     // Reconnects target the already-running daemon; the initial bootstrap above
     // owns cold-start and rollover, so a plain connect that fails simply exhausts
@@ -11706,6 +12929,76 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
         .map_err(|error| ClientError::Unavailable(error.to_string()))
     };
     Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
+}
+
+fn client_unavailable(error: anyhow::Error) -> ClientError {
+    let message = error.to_string();
+    drop(error);
+    ClientError::Unavailable(message)
+}
+
+/// Connect a resilient per-request client to the already-running generation
+/// without applying bootstrap's artifact replacement decision.
+///
+/// The rollover controller is itself consuming that decision: asking its
+/// control connection to reject the incumbent build would return
+/// `RolloverRequired` before it could send the request that performs the
+/// rollover.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
+fn existing_policy_client(
+    policy: ClientPolicy,
+    workspace: ClientWorkspace,
+) -> Result<impl DaemonClient, ClientError> {
+    let clock = SystemClock::new();
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let build = current_build();
+    let initial = connect_client(
+        &data_dir,
+        policy,
+        build.clone(),
+        workspace.clone(),
+        |stream| deadline_transport(clock, stream, policy.timeout_ms),
+    )
+    .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let reconnect = move |clock: SystemClock, budget_ms: u64| {
+        connect_client(
+            &data_dir,
+            policy,
+            build.clone(),
+            workspace.clone(),
+            |stream| deadline_transport(clock, stream, budget_ms),
+        )
+        .map_err(|error| ClientError::Unavailable(error.to_string()))
+    };
+    Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
+}
+
+/// Connects to the currently published daemon without applying the build
+/// replacement policy. Doctor uses this narrow lane to ask an older compatible
+/// daemon to stop the Agent processes it still owns before rollover transfers
+/// control to the current binary.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+pub(crate) fn diagnostic_client(policy: ClientPolicy) -> Result<LaneClient, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    connect_deadline_client(
+        &data_dir,
+        policy,
+        current_build(),
+        client_workspace(),
+        SystemClock::new(),
+        policy.timeout_ms,
+    )
+    .map_err(|error| ClientError::Unavailable(error.to_string()))
+}
+
+/// Whether a daemon current locator is published. Doctor uses this only to
+/// distinguish a normal cold start from a failed connection to an existing
+/// owner; it is not process-liveness or signal authority.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+pub(crate) fn has_published_daemon() -> bool {
+    paths::data_dir().is_ok_and(|data_dir| data_dir.join("daemon").join("current.json").is_file())
 }
 
 /// A workspace-bound daemon client for a background observation lane.
@@ -11759,6 +13052,7 @@ pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient,
 /// The directory is bound to the first caller's data directory. That is the same
 /// directory every other lane in this process uses ([`paths::data_dir`] is
 /// process-stable), so there is no second authority to disagree with.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 fn route_cache(data_dir: &Path) -> &'static Mutex<usagi_core::usecase::owner_routing::RouteCache> {
     static CACHE: OnceLock<Mutex<usagi_core::usecase::owner_routing::RouteCache>> = OnceLock::new();
     CACHE.get_or_init(|| {
@@ -11778,7 +13072,8 @@ fn route_cache(data_dir: &Path) -> &'static Mutex<usagi_core::usecase::owner_rou
 /// generation. That is the evidence this turns into a re-read, which keeps the
 /// read off the per-request path without letting the snapshot outlive a
 /// generation change indefinitely.
-fn invalidate_routes() {
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
+pub(crate) fn invalidate_routes() {
     let Ok(data_dir) = paths::data_dir() else {
         return;
     };
@@ -11794,6 +13089,7 @@ fn invalidate_routes() {
 /// registered, already retired, or forged — is a typed `stale_target`; it is
 /// never answered with the active endpoint, because the active generation would
 /// happily serve a *different* terminal that merely shares a name.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 fn owner_endpoint(
     generation: usagi_core::domain::id::DaemonGeneration,
 ) -> Result<usagi_core::usecase::owner_routing::TrustedEndpoint, ClientError> {
@@ -11813,6 +13109,7 @@ fn owner_endpoint(
 /// taking only the active one's would read the draining generation's terminals
 /// as absent. Absence is what collects a tab, so the fan-out is what keeps a
 /// terminal whose owner is merely busy from being reaped.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 pub(crate) fn trusted_generations()
 -> Result<Vec<usagi_core::usecase::owner_routing::TrustedEndpoint>, ClientError> {
     let data_dir =
@@ -11831,6 +13128,7 @@ pub(crate) struct OwnerLane {
     pub(crate) role: usagi_core::infrastructure::ipc::GenerationRole,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=owner_addressed_requests_route_to_their_reference_and_the_rest_are_refused
 impl OwnerLane {
     /// Whether this lane reached the generation that currently holds `current`.
     pub(crate) fn is_active(&self) -> bool {
@@ -11865,6 +13163,7 @@ impl OwnerLane {
 /// typed refusal the reference deserves.
 ///
 /// [`connect_generation`]: usagi_daemon::infrastructure::unix_transport::connect_generation
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 pub(crate) fn owner_client(
     policy: ClientPolicy,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -11904,6 +13203,7 @@ pub(crate) fn owner_client(
 /// the socket is re-derived and re-verified as that generation's own private
 /// endpoint by `connect_generation` — plus the generation the peer names, which
 /// [`owner_client`] checks for both roles alike.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_draining_generation_refuses_control_and_still_serves_its_own_terminals
 fn connect_draining(
     policy: ClientPolicy,
     endpoint: &usagi_core::usecase::owner_routing::TrustedEndpoint,
@@ -11932,6 +13232,7 @@ fn connect_draining(
 /// identities; the replacement it keys is then carried out on exactly the path
 /// `usagi daemon restart` takes, so a build/update swap can never reach a
 /// `stop` → fresh `start` the manual verb is guarded against.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 pub(crate) fn replace_running_daemon(
     out: &mut dyn Write,
     policy: ClientPolicy,
@@ -11954,6 +13255,7 @@ pub(crate) fn replace_running_daemon(
 /// Requests intentional replacement of the currently running daemon artifact.
 /// This only creates the deterministic trigger; it never sends a stop signal or
 /// spawns a second daemon. [`replace_running_daemon`] consumes it.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 fn request_replacement(policy: ClientPolicy) -> Result<BuildRolloverTrigger, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
@@ -11985,7 +13287,11 @@ fn request_replacement(policy: ClientPolicy) -> Result<BuildRolloverTrigger, Cli
 }
 
 fn runtime_channel() -> &'static str {
-    match paths::runtime_mode() {
+    runtime_channel_for(paths::runtime_mode())
+}
+
+const fn runtime_channel_for(mode: paths::RuntimeMode) -> &'static str {
+    match mode {
         paths::RuntimeMode::Production => "production",
         paths::RuntimeMode::Development => "development",
         paths::RuntimeMode::Local => "local",
@@ -12009,6 +13315,7 @@ fn recover_stale_client_endpoint(data_dir: &Path) -> std::io::Result<bootstrap::
     recover_stale_client_endpoint_with(data_dir, InstanceLock::acquire, || {})
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle
 fn recover_stale_client_endpoint_with(
     data_dir: &Path,
     acquire: impl FnOnce(&FileInstanceLock) -> std::io::Result<bool>,
@@ -12072,7 +13379,7 @@ fn recover_stale_client_endpoint_with(
     }
 }
 
-fn current_build() -> BuildIdentity {
+pub(crate) fn current_build() -> BuildIdentity {
     // The artifact identity is a compile-time constant baked in by `build.rs`
     // from this binary's source/tree, profile, and target. It is therefore
     // immutable for the process lifetime and never re-read from disk, so an
@@ -12091,6 +13398,7 @@ fn current_build() -> BuildIdentity {
 /// socket in the transport the caller's lane runs over; it is applied only after
 /// the peer's process-start identity, record and generation have been observed,
 /// so the fence is identical for every lane.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 fn connect_client<S: Read + Write>(
     data_dir: &Path,
     policy: ClientPolicy,
@@ -12146,12 +13454,19 @@ fn lifecycle_command(exe: &Path, args: &[&str], opened: Option<PathBuf>) -> std:
     child
 }
 
-fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
-    run_lifecycle_with(exe, &["daemon", command], command)
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
+fn run_lifecycle(exe: &Path, command: &str, workspace: &Path) -> std::io::Result<()> {
+    run_lifecycle_with(exe, &["daemon", command], command, workspace)
 }
 
-fn run_lifecycle_with(exe: &Path, args: &[&str], command: &str) -> std::io::Result<()> {
-    let status = lifecycle_command(exe, args, opened_workspace()).status()?;
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
+fn run_lifecycle_with(
+    exe: &Path,
+    args: &[&str],
+    command: &str,
+    workspace: &Path,
+) -> std::io::Result<()> {
+    let status = lifecycle_command(exe, args, Some(workspace.to_path_buf())).status()?;
     status
         .success()
         .then_some(())
@@ -12178,6 +13493,7 @@ fn acquire_bootstrap_lock_within(
         .map_err(|error| map_bootstrap_lock_error(&error))
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=active_owner_is_waited_for_without_starting_a_duplicate
 fn acquire_bootstrap_lock_io_within(
     data_dir: &Path,
     wait: PrivateLockWait,
@@ -12213,6 +13529,7 @@ fn map_bootstrap_lock_error(error: &std::io::Error) -> ClientError {
 /// workspace switchers that must keep working from any directory. The
 /// workspace-bound connections those screens make afterwards carry their own
 /// declaration and are fenced there.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_daemon_request_autostarts_without_manual_daemon_start
 pub(crate) fn ensure_ready() -> Result<(), ClientError> {
     client_for(
         ClientPolicy::tui(),
@@ -12224,8 +13541,11 @@ pub(crate) fn ensure_ready() -> Result<(), ClientError> {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=module_unit_contract
+
     use super::*;
     use std::cell::Cell;
+    use std::process::Command;
     use std::sync::atomic::AtomicUsize;
 
     use usagi_daemon::usecase::generic_terminal::TerminalStoreSnapshot;
@@ -13173,6 +14493,13 @@ mod tests {
             bound_workspace_root(&daemon, &workspace.path().join(".")).unwrap(),
             paths::canonical_workspace_root(workspace.path()).unwrap()
         );
+        assert_eq!(
+            standby_workspace_state_dir(&daemon, workspace.path())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound,
+            "a standby never initializes the first durable workspace"
+        );
 
         // A startup directory that no longer resolves is a startup failure, not a
         // fence that silently keys some other path.
@@ -13707,7 +15034,7 @@ mod tests {
         std::fs::write(&container, "").unwrap();
         for error in [
             bound_workspace_root(&daemon, workspace.path()).unwrap_err(),
-            adopted_workspace_state_dir(&daemon, &canonical).unwrap_err(),
+            standby_workspace_state_dir(&daemon, &canonical).unwrap_err(),
         ] {
             assert!(error.to_string().contains("could not"), "{error}");
         }
@@ -13750,16 +15077,77 @@ mod tests {
         // daemon started there fences what it will actually own rather than
         // adopting the subdirectory as a second workspace.
         assert_eq!(
-            adopted_workspace_state_dir(&daemon, &canonical).unwrap(),
+            standby_workspace_state_dir(&daemon, &canonical).unwrap(),
             state_dir
         );
         let unadopted = tempfile::tempdir_in("/tmp").unwrap();
-        let error = adopted_workspace_state_dir(
-            &daemon,
-            &paths::canonical_workspace_root(unadopted.path()).unwrap(),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            standby_workspace_state_dir(
+                &daemon,
+                &paths::canonical_workspace_root(unadopted.path()).unwrap(),
+            )
+            .unwrap(),
+            state_dir,
+            "a machine-wide restart falls back to durable state instead of its cwd"
+        );
+    }
+
+    #[test]
+    fn standby_workspace_selection_skips_partial_adoptions_and_rejects_corruption() {
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = temporary.path().join("data/daemon");
+        ensure_private_dir_all(&daemon).unwrap();
+
+        // `resolve` publishes root.json before the tenant opener initializes
+        // sessions.json. A failed open can leave exactly this partial subtree,
+        // and it must not shadow an initialized workspace during replacement.
+        let partial_root = temporary.path().join("a-partial");
+        let initialized_root = temporary.path().join("z-initialized");
+        std::fs::create_dir_all(&partial_root).unwrap();
+        std::fs::create_dir_all(&initialized_root).unwrap();
+        let partial_root = paths::canonical_workspace_root(&partial_root).unwrap();
+        let initialized_root = paths::canonical_workspace_root(&initialized_root).unwrap();
+        workspace_state::resolve(&daemon, &partial_root).unwrap();
+        let initialized = workspace_state::resolve(&daemon, &initialized_root).unwrap();
+        drop(
+            open_session_runtime(
+                initialized_root,
+                initialized.dir(),
+                temporary.path(),
+                usagi_core::domain::id::DaemonGeneration::new(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            standby_workspace_state_dir(&daemon, &partial_root).unwrap(),
+            initialized.dir(),
+            "an absent sessions.json is skipped even when the cwd names that subtree"
+        );
+
+        // A present node with the wrong type is corruption, not another miss
+        // that may be hidden by selecting a different workspace.
+        let corrupt_root = temporary.path().join("0-corrupt");
+        std::fs::create_dir_all(&corrupt_root).unwrap();
+        let corrupt_root = paths::canonical_workspace_root(&corrupt_root).unwrap();
+        let corrupt = workspace_state::resolve(&daemon, &corrupt_root).unwrap();
+        std::fs::create_dir(corrupt.dir().join("sessions.json")).unwrap();
+        assert_eq!(
+            standby_workspace_state_dir(&daemon, temporary.path())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        // Metadata failures other than absence also remain errors. A plain file
+        // used as the state directory produces NotADirectory on every Unix host.
+        let not_directory = temporary.path().join("not-directory");
+        std::fs::write(&not_directory, "not a directory").unwrap();
+        assert_ne!(
+            lifecycle_state_initialized(&not_directory)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]
@@ -14254,6 +15642,147 @@ mod tests {
     }
 
     #[test]
+    fn forced_transition_stops_a_live_draining_generation_before_stale_cleanup() {
+        use usagi_daemon::usecase::authority::registry::{GenerationEntry, RegistryFile};
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let mut draining = Command::new("sleep").arg("30").spawn().unwrap();
+        let draining_process = ProcessIdentity {
+            pid: draining.id(),
+            start_identity: process_start_identity(draining.id()).unwrap(),
+            process_group: process_group(draining.id()).unwrap(),
+        };
+        let mut retired = Command::new("sleep").arg("30").spawn().unwrap();
+        let retired_process = ProcessIdentity {
+            pid: retired.id(),
+            start_identity: process_start_identity(retired.id()).unwrap(),
+            process_group: process_group(retired.id()).unwrap(),
+        };
+        let entry = |role, process: ProcessIdentity| GenerationEntry {
+            generation: DaemonGeneration::new(),
+            role,
+            endpoint: format!("generations/{}/daemon.sock", process.pid),
+            process,
+            expected_build: current_build(),
+            verified_build: Some(current_build()),
+            revision: 1,
+        };
+        let document = RegistryDocument {
+            revision: 1,
+            generations: vec![
+                entry(GenerationRole::Draining, draining_process),
+                entry(GenerationRole::Retired, retired_process),
+            ],
+            ..RegistryDocument::default()
+        };
+        assert!(
+            GenerationRegistryFile::new(data)
+                .unwrap()
+                .compare_and_write(None, &serde_json::to_string(&document).unwrap())
+                .unwrap()
+        );
+        let control = RegistryGenerationControl::production(data.to_path_buf());
+        assert!(control.has_live().unwrap());
+
+        // Reap concurrently: an unreaped fixture child remains visible as a
+        // zombie, while a real daemon generation is reaped by its process owner.
+        let draining_waiter = std::thread::spawn(move || draining.wait().unwrap());
+        control.shutdown_all().unwrap();
+        assert!(!draining_waiter.join().unwrap().success());
+        assert!(!control.has_live().unwrap());
+        assert!(
+            retired.try_wait().unwrap().is_none(),
+            "retired generations must never be signalled"
+        );
+        retired.kill().unwrap();
+        retired.wait().unwrap();
+    }
+
+    /// `--force` is the operator's escape hatch, so it has to end with the
+    /// generation actually gone. A daemon draining Agent runtimes and PTYs can
+    /// outlast any fixed SIGTERM window, and one that never exits outlasts every
+    /// window — so the transition escalates rather than reporting a timeout
+    /// while leaving the process running and every later command refusing on it.
+    #[test]
+    fn a_forced_transition_escalates_to_sigkill_when_sigterm_is_ignored() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        use usagi_daemon::usecase::authority::registry::{GenerationEntry, RegistryFile};
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let program = data.join("deaf-to-sigterm");
+        // The marker is written *after* the trap is installed, so the test can
+        // wait for the child to actually be deaf before signalling it. Spawning
+        // and signalling straight away races the shell's own startup, and the
+        // run where SIGTERM lands first would read as "escalation not needed".
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ntrap '' TERM\n: > \"$1\"\nwhile :; do sleep 1; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let deaf_marker = data.join("deaf.ready");
+        let mut deaf = Command::new(&program).arg(&deaf_marker).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !deaf_marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the fixture child never installed its SIGTERM trap"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let process = ProcessIdentity {
+            pid: deaf.id(),
+            start_identity: process_start_identity(deaf.id()).unwrap(),
+            process_group: process_group(deaf.id()).unwrap(),
+        };
+        let document = RegistryDocument {
+            revision: 1,
+            generations: vec![GenerationEntry {
+                generation: DaemonGeneration::new(),
+                role: GenerationRole::Active,
+                endpoint: format!("generations/{}/daemon.sock", process.pid),
+                process,
+                expected_build: current_build(),
+                verified_build: Some(current_build()),
+                revision: 1,
+            }],
+            ..RegistryDocument::default()
+        };
+        assert!(
+            GenerationRegistryFile::new(data)
+                .unwrap()
+                .compare_and_write(None, &serde_json::to_string(&document).unwrap())
+                .unwrap()
+        );
+        let control = RegistryGenerationControl {
+            data_dir: data.to_path_buf(),
+            // The escalation is what is under test, not the length of the
+            // production grace, so this waits only long enough to prove SIGTERM
+            // was given its turn first.
+            term_grace: Duration::from_millis(300),
+            kill_grace: Duration::from_secs(5),
+        };
+        assert!(control.has_live().unwrap());
+
+        // Reap concurrently: a killed fixture child stays visible as a zombie
+        // until someone waits on it, and the exact-identity probe would keep
+        // reading that zombie as live.
+        let waiter = std::thread::spawn(move || deaf.wait().unwrap());
+        control.shutdown_all().unwrap();
+        let status = waiter.join().unwrap();
+        assert!(!status.success());
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "a generation that ignores SIGTERM has to be escalated, not reported as a timeout"
+        );
+        assert!(!control.has_live().unwrap());
+    }
+
+    #[test]
     fn publishing_current_before_binding_is_refused() {
         let directory = tempfile::tempdir_in("/tmp").unwrap();
         let info = daemon_test_info();
@@ -14301,6 +15830,14 @@ mod tests {
         assert!(!daemon.join("current.json").exists());
         // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
         unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn unavailable_client_errors_preserve_the_safe_reason() {
+        assert!(matches!(
+            client_unavailable(anyhow::anyhow!("data directory unavailable")),
+            ClientError::Unavailable(message) if message == "data directory unavailable"
+        ));
     }
 
     #[test]
@@ -14474,7 +16011,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reused_development_mismatch_is_recorded_once_per_daemon_artifact() {
+    fn a_reused_build_mismatch_is_recorded_once_per_daemon_artifact() {
         let running = test_build("a");
         let expected = test_build("b");
         let trigger = build_rollover_trigger(&running, &expected, "development", false).unwrap();
@@ -14490,6 +16027,19 @@ mod tests {
             reused_build_mismatch_record(&trigger, "live runtime preserved"),
             None
         );
+    }
+
+    #[test]
+    fn only_development_attempts_automatic_build_replacement() {
+        assert!(should_attempt_automatic_replacement(
+            paths::RuntimeMode::Development
+        ));
+        assert!(!should_attempt_automatic_replacement(
+            paths::RuntimeMode::Production
+        ));
+        assert!(!should_attempt_automatic_replacement(
+            paths::RuntimeMode::Local
+        ));
     }
 
     /// A known artifact identity whose source digest is distinguished by `seed`.
@@ -15262,6 +16812,121 @@ mod tests {
         }
     }
 
+    fn run_gh_shell(script: String, timeout_ms: u64) -> std::io::Result<String> {
+        GhProcess.run("/bin/sh", &["-c".into(), script], timeout_ms)
+    }
+
+    fn repeated_gh_output(bytes: usize, stderr: bool) -> String {
+        const CHUNK_BYTES: usize = 4 * 1024;
+        let chunk = "x".repeat(CHUNK_BYTES);
+        let full_chunks = bytes / CHUNK_BYTES;
+        let remainder = bytes % CHUNK_BYTES;
+        format!(
+            "{}chunk='{chunk}'; i=0; while [ \"$i\" -lt {full_chunks} ]; do printf '%s' \"$chunk\"; i=$((i + 1)); done; printf '%.*s' {remainder} \"$chunk\"",
+            if stderr { "exec 1>&2; " } else { "" }
+        )
+    }
+
+    #[test]
+    fn gh_process_normalizes_every_unsafe_observation_without_raw_output() {
+        assert_eq!(
+            gh_process_result(ChildObservation::Success("public-json".into())).unwrap(),
+            "public-json"
+        );
+        let timeout = gh_process_result(ChildObservation::TimedOut).unwrap_err();
+        assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(timeout.to_string(), "PR provider timed out");
+
+        for observation in [
+            ChildObservation::SpawnFailed,
+            ChildObservation::ExitFailure,
+            ChildObservation::OutputTooLarge,
+            ChildObservation::InvalidOutput,
+            ChildObservation::EmptyOutput,
+            ChildObservation::ObservationFailed,
+        ] {
+            let error = gh_process_result(observation).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert_eq!(error.to_string(), "PR provider failed");
+        }
+    }
+
+    #[test]
+    fn gh_process_enforces_each_stream_limit_and_safe_failures() {
+        let stdout =
+            run_gh_shell(repeated_gh_output(PR_PROVIDER_OUTPUT_LIMIT, false), 5_000).unwrap();
+        assert_eq!(stdout.len(), PR_PROVIDER_OUTPUT_LIMIT);
+        assert!(
+            run_gh_shell(
+                repeated_gh_output(PR_PROVIDER_OUTPUT_LIMIT + 1, false),
+                5_000
+            )
+            .is_err()
+        );
+
+        let stderr =
+            run_gh_shell(repeated_gh_output(PR_PROVIDER_OUTPUT_LIMIT, true), 5_000).unwrap();
+        assert_eq!(stderr.len(), PR_PROVIDER_OUTPUT_LIMIT);
+        assert!(
+            run_gh_shell(
+                repeated_gh_output(PR_PROVIDER_OUTPUT_LIMIT + 1, true),
+                5_000
+            )
+            .is_err()
+        );
+
+        assert!(run_gh_shell("printf '\\377'".into(), 5_000).is_err());
+        assert!(run_gh_shell("printf secret; exit 7".into(), 5_000).is_err());
+
+        let started = Instant::now();
+        assert!(
+            run_gh_shell(
+                "trap '' TERM; while :; do printf oversized; done".into(),
+                5_000
+            )
+            .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let timeout = run_gh_shell("trap '' TERM; while :; do :; done".into(), 30).unwrap_err();
+        assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn gh_process_cleans_a_descendant_holding_its_capture_pipe() {
+        let fixture = tempfile::tempdir().unwrap();
+        let pid_file = fixture.path().join("descendant-pid");
+        let argv = vec![
+            "-c".into(),
+            "(trap '' TERM; while :; do :; done) & descendant=$!; printf '%s' \"$descendant\" > \"$1\"; printf done"
+                .into(),
+            "usagi-gh-fixture".into(),
+            pid_file.to_string_lossy().into_owned(),
+        ];
+        let started = Instant::now();
+        assert_eq!(GhProcess.run("/bin/sh", &argv, 5_000).unwrap(), "done");
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let pid = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            // SAFETY: signal 0 observes only whether the fixture descendant remains.
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture descendant {pid} was not cleaned up"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn structured_pr_report_enters_the_worker_session_inventory_idempotently() {
         let directory = tempfile::tempdir().unwrap();
@@ -15507,6 +17172,7 @@ mod tests {
                 session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                 force: false,
                 delete_branch: false,
+                branch_name: None,
                 force_delete_branch: false,
                 merged_head_oid: None,
             });
@@ -15586,6 +17252,7 @@ mod tests {
                 session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                 force: false,
                 delete_branch: false,
+                branch_name: None,
                 force_delete_branch: false,
                 merged_head_oid: None,
             },
@@ -16511,7 +18178,6 @@ mod tests {
         for action in [SessionAction::Create, SessionAction::Remove] {
             let response = session_response_envelope(
                 action,
-                &serde_json::json!({"name":"one"}),
                 Err(SessionRuntimeError::DurableFailure(
                     "durable session failure".into(),
                 )),
@@ -16601,8 +18267,9 @@ mod tests {
     fn product_mcp_arguments_start_usagi_mcp_from_the_daemon_binary() {
         let command = Path::new("/opt/usagi/bin/usagi");
 
+        let codex = codex_integration_arguments(command).unwrap();
         assert_eq!(
-            codex_integration_arguments(command, None).unwrap(),
+            &codex[..10],
             [
                 "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
@@ -16614,12 +18281,41 @@ mod tests {
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
                 "-c",
                 "features.hooks = true",
-                "-c",
-                "hooks.SessionStart = [{ matcher = \"^startup$\", hooks = [{ type = \"command\", command = \"'/opt/usagi/bin/usagi' codex-session-capture\", timeout = 10 }] }]",
             ]
         );
+        assert_eq!(codex.len(), 24);
+        for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
+            if event == "Notification" {
+                assert!(
+                    !codex
+                        .iter()
+                        .any(|argument| argument.starts_with("hooks.Notification"))
+                );
+                continue;
+            }
+            let assignment = codex
+                .iter()
+                .find(|argument| argument.starts_with(&format!("hooks.{event} = ")))
+                .unwrap_or_else(|| panic!("missing Codex {event} hook"));
+            assert!(
+                assignment.contains(&format!("agent-phase {}", phase.as_token())),
+                "{assignment}"
+            );
+        }
+        let session_start = codex
+            .iter()
+            .find(|argument| argument.starts_with("hooks.SessionStart = "))
+            .unwrap();
+        assert!(session_start.contains("matcher = \"^startup$\""));
+        assert!(session_start.contains("codex-session-capture"));
+        assert!(session_start.contains("agent-phase ready"));
+        let session_end = codex
+            .iter()
+            .find(|argument| argument.starts_with("hooks.SessionEnd = "))
+            .unwrap();
+        assert!(session_end.contains("timeout = 3"));
         assert_eq!(
-            claude_mcp_arguments(command, None).unwrap(),
+            claude_mcp_arguments(command).unwrap(),
             [
                 "--mcp-config",
                 r#"{"mcpServers":{"usagi":{"args":["mcp"],"command":"/opt/usagi/bin/usagi"}}}"#,
@@ -16630,81 +18326,35 @@ mod tests {
     }
 
     #[test]
-    fn product_mcp_arguments_append_local_llm_and_keep_payloads_parseable() {
-        let command = Path::new("/opt/usagi/bin/usagi");
-        let model = "qwen2.5-coder:7b";
-
-        let codex = codex_integration_arguments(command, Some(model)).unwrap();
-        let usagi_position = codex
-            .iter()
-            .position(|value| value.starts_with("mcp_servers.usagi.command"))
-            .unwrap();
-        let local_position = codex
-            .iter()
-            .position(|value| value.starts_with("mcp_servers.usagi-llm.command"))
-            .unwrap();
-        assert!(usagi_position < local_position);
-        for assignment in codex
-            .iter()
-            .filter(|value| value.starts_with("mcp_servers.") || value.starts_with("features."))
-        {
-            toml::from_str::<toml::Value>(assignment).unwrap();
-        }
-
-        let claude = claude_mcp_arguments(command, Some(model)).unwrap();
-        let config: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();
-        assert_eq!(
-            config["mcpServers"]
-                .as_object()
-                .unwrap()
-                .keys()
-                .collect::<Vec<_>>(),
-            ["usagi", "usagi-llm"]
-        );
-        assert_eq!(
-            config["mcpServers"]["usagi-llm"]["args"],
-            serde_json::json!(["llm-mcp", "--model", model])
-        );
-        assert_eq!(&claude[3..], ["mcp__usagi", "mcp__usagi-llm"]);
-    }
-
-    #[test]
-    fn local_llm_setting_is_sanitized_before_daemon_provisioning() {
-        use usagi_core::domain::settings::{LocalLlm, Settings};
-
+    fn removed_local_llm_setting_is_ignored_before_daemon_provisioning() {
         let base = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // Production selects the base itself, so its settings file is the base's.
         let data_home = paths::DataHome::new(base.path(), paths::RuntimeMode::Production);
         let storage = Storage::new(data_home.selected());
         let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
-        assert_eq!(tools.model(), None);
-        // Both stores default to enabled, so a workspace with no files gets both
-        // families and no delegation server.
         assert_eq!(
             tools.families,
             McpToolFamilies {
                 issue: true,
                 memory: true,
-                local_llm: false,
             }
         );
 
-        storage
-            .save_settings(&Settings {
-                local_llm: LocalLlm {
-                    enabled: true,
-                    model: "x\"], owned = \"pwned'; #".to_owned(),
-                },
-                ..Settings::default()
-            })
-            .unwrap();
+        std::fs::create_dir_all(storage.dir()).unwrap();
+        std::fs::write(
+            storage.dir().join("settings.json"),
+            r#"{"local_llm":{"enabled":true,"model":"qwen2.5-coder:7b"}}"#,
+        )
+        .unwrap();
         let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
         assert_eq!(
-            tools.model(),
-            Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
+            tools.families,
+            McpToolFamilies {
+                issue: true,
+                memory: true,
+            }
         );
-        assert!(tools.families.local_llm);
     }
 
     #[test]
@@ -16730,7 +18380,6 @@ mod tests {
             McpToolFamilies {
                 issue: false,
                 memory: true,
-                local_llm: false,
             }
         );
 
@@ -16785,7 +18434,6 @@ mod tests {
         let families = McpToolFamilies {
             issue: false,
             memory: true,
-            local_llm: true,
         };
         let expected = launch_system_prompt(PromptScope::Session, Some(families), None);
         assert_eq!(
@@ -16885,9 +18533,58 @@ instructions = "{instructions}"
     }
 
     #[test]
+    fn pure_daemon_helpers_keep_their_decisions_measured() {
+        assert!(matches!(transition_mode(false), TransitionMode::Planned));
+        assert!(matches!(transition_mode(true), TransitionMode::Cold));
+
+        let mut context = provision_context(None);
+        assert_eq!(mcp_environment_allowlist(&context).len(), 3);
+        context.inject_mcp = false;
+        assert!(mcp_environment_allowlist(&context).is_empty());
+
+        let text = "quote \" slash \\ backspace \u{0008} tab \t newline \n formfeed \u{000c} return \r null \u{0000}";
+        let assignment = format!("value={}", toml_basic_string(text));
+        let parsed: toml::Value = toml::from_str(&assignment).unwrap();
+        assert_eq!(parsed["value"].as_str(), Some(text));
+
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let snapshot = serde_json::json!({
+            "sessions": [{
+                "session_id": session,
+                "worktree_id": worktree,
+                "lifecycle": "available"
+            }]
+        });
+        assert_eq!(available_worktree(&snapshot, session), Some(worktree));
+        assert_eq!(available_worktree(&snapshot, SessionId::new()), None);
+
+        let payload = serde_json::json!({"value": "  present  ", "blank": " ", "number": 1});
+        assert_eq!(
+            required_payload_string(&payload, "value").unwrap(),
+            "present"
+        );
+        assert!(required_payload_string(&payload, "missing").is_err());
+        assert!(required_payload_string(&payload, "blank").is_err());
+        assert!(required_payload_string(&payload, "number").is_err());
+
+        for (mode, expected) in [
+            (paths::RuntimeMode::Production, "production"),
+            (paths::RuntimeMode::Development, "development"),
+            (paths::RuntimeMode::Local, "local"),
+        ] {
+            assert_eq!(runtime_channel_for(mode), expected);
+        }
+        assert_eq!(
+            runtime_channel(),
+            runtime_channel_for(paths::runtime_mode())
+        );
+    }
+
+    #[test]
     fn integration_and_system_prompt_precede_resume_and_durable_prompt() {
         let mut codex_arguments =
-            codex_integration_arguments(Path::new("/opt/usagi/bin/usagi"), None).unwrap();
+            codex_integration_arguments(Path::new("/opt/usagi/bin/usagi")).unwrap();
         codex_arguments.extend(codex_system_prompt_arguments(
             SandboxMode::Session,
             None,
@@ -17109,7 +18806,7 @@ instructions = "{instructions}"
     /// the sandbox — the directory *above* the data home.
     #[test]
     fn the_agent_child_data_home_follows_the_runtime_mode_in_every_channel() {
-        use usagi_core::domain::settings::{LocalLlm, Settings};
+        use usagi_core::domain::settings::Settings;
 
         let context = provision_context(Some(SessionId::new()));
         for mode in [
@@ -17161,18 +18858,15 @@ instructions = "{instructions}"
             std::fs::create_dir_all(&selected).unwrap();
             Storage::new(&selected)
                 .save_settings(&Settings {
-                    local_llm: LocalLlm {
-                        enabled: true,
-                        model: usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL.to_owned(),
-                    },
+                    issue_enabled: false,
                     ..Settings::default()
                 })
                 .unwrap();
-            assert_eq!(
-                configured_mcp_tools(&data_home, home.path())
+            assert!(
+                !configured_mcp_tools(&data_home, home.path())
                     .unwrap()
-                    .model(),
-                Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
+                    .families
+                    .issue
             );
 
             // 3. Root sandbox scope: daemon bootstrap is brokered out of process,
@@ -17258,6 +18952,37 @@ instructions = "{instructions}"
         }
     }
 
+    /// A broker whose endpoint was removed underneath it can never be reached
+    /// again — not by a client, and not by the retirement request its own idle
+    /// watch sends. That state has to be told apart from a broker that is merely
+    /// idle, because only the first one has to leave without being asked.
+    #[test]
+    fn an_unreachable_broker_endpoint_is_not_mistaken_for_an_idle_one() {
+        // `/tmp` keeps the path inside the platform limit for a socket name.
+        let fixture = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = fixture.path().join("broker.sock");
+        assert!(
+            !broker_endpoint_present(&socket),
+            "a path that was never bound is not an endpoint"
+        );
+
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(broker_endpoint_present(&socket));
+
+        // A regular file at the same path is not the endpoint either: only a
+        // socket can carry the retirement request.
+        drop(listener);
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::write(&socket, b"").unwrap();
+        assert!(!broker_endpoint_present(&socket));
+
+        std::fs::remove_file(&socket).unwrap();
+        assert!(
+            !broker_endpoint_present(&socket),
+            "a removed endpoint leaves the broker unreachable"
+        );
+    }
+
     #[test]
     fn bootstrap_broker_launches_only_serve_in_its_fixed_workspace() {
         let command = bootstrap_serve_command(Path::new("/opt/usagi"), Path::new("/repo"));
@@ -17289,38 +19014,98 @@ instructions = "{instructions}"
     }
 
     #[test]
-    fn bootstrap_broker_requires_a_named_workspace() {
+    fn cold_start_uses_the_running_handshakes_implicit_workspace_rule() {
+        use usagi_core::infrastructure::ipc::{
+            ClientWorkspace, ErrorCode, SideEffect, is_workspace_mismatch,
+        };
+
         let directory = tempfile::tempdir_in("/tmp").unwrap();
-        let canonical = directory.path().canonicalize().unwrap();
-        for workspace in [
-            ClientWorkspace::Bound {
-                root: paths::wire_workspace_root(&canonical),
-            },
-            ClientWorkspace::Selected {
-                root: paths::wire_workspace_root(&canonical),
-            },
-        ] {
-            assert_eq!(broker_workspace(&workspace).unwrap(), canonical);
-        }
+        let daemon = directory.path().join("data/daemon");
+        let plain = directory.path().join("plain");
+        let repository = directory.path().join("repository");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        let plain = plain.canonicalize().unwrap();
+        let repository = repository.canonicalize().unwrap();
+        let bound = |path: &Path| ClientWorkspace::Bound {
+            root: paths::wire_workspace_root(path),
+        };
+
+        let refusal = cold_start_workspace(&daemon, &bound(&plain), None, None).unwrap_err();
+        assert!(is_workspace_mismatch(&refusal));
+        assert_eq!(refusal.code, ErrorCode::PermissionDenied);
+        assert_eq!(refusal.side_effect, SideEffect::None);
+        assert!(refusal.message.contains("repository root"));
+        assert!(!plain.join(".usagi").exists());
+        assert!(
+            cold_start_workspace(
+                &daemon,
+                &ClientWorkspace::Bound {
+                    root: String::new(),
+                },
+                None,
+                None,
+            )
+            .is_err()
+        );
+
         assert_eq!(
-            broker_workspace(&ClientWorkspace::Unbound)
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::InvalidInput
+            cold_start_workspace(&daemon, &bound(&repository), None, None).unwrap(),
+            repository
+        );
+        let worktree = directory.path().join(".usagi/sessions/worker");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let worktree = worktree.canonicalize().unwrap();
+        assert!(cold_start_workspace(&daemon, &bound(&worktree), None, None).is_err());
+
+        let selected = ClientWorkspace::Selected {
+            root: paths::wire_workspace_root(&plain),
+        };
+        assert_eq!(
+            cold_start_workspace(&daemon, &selected, None, None).unwrap(),
+            plain
         );
         assert_eq!(
-            broker_workspace(&ClientWorkspace::Bound {
-                root: String::new(),
-            })
-            .unwrap_err()
-            .kind(),
-            std::io::ErrorKind::InvalidInput
+            cold_start_workspace(&daemon, &ClientWorkspace::Unbound, Some(&plain), None).unwrap(),
+            plain
+        );
+        let missing_opened = directory.path().join("missing-opened");
+        let refusal = cold_start_workspace(
+            &daemon,
+            &ClientWorkspace::Unbound,
+            Some(&missing_opened),
+            None,
+        )
+        .unwrap_err();
+        assert!(is_workspace_mismatch(&refusal));
+        assert!(refusal.message.contains("does not resolve"));
+        assert_eq!(
+            cold_start_workspace(&daemon, &ClientWorkspace::Unbound, None, Some(&repository))
+                .unwrap(),
+            repository
+        );
+        assert!(
+            cold_start_workspace(&daemon, &ClientWorkspace::Unbound, None, Some(&plain)).is_err()
+        );
+        assert!(cold_start_workspace(&daemon, &ClientWorkspace::Unbound, None, None).is_err());
+
+        workspace_state::resolve(&daemon, &plain).unwrap();
+        let child = plain.join("nested");
+        std::fs::create_dir(&child).unwrap();
+        assert_eq!(
+            cold_start_workspace(&daemon, &bound(&child), None, None).unwrap(),
+            plain
+        );
+        let removed_child = plain.join("removed-session");
+        assert_eq!(
+            cold_start_workspace(&daemon, &bound(&removed_child), None, None).unwrap(),
+            plain
         );
     }
 
     #[test]
     fn ordinary_daemon_start_does_not_use_a_workspace_fixed_broker() {
-        assert!(run_broker_lifecycle_command(CliDaemonCommand::Start).is_none());
+        assert!(run_broker_lifecycle_command(&CliDaemonCommand::Start).is_none());
     }
 
     /// One broker serving a throwaway workspace, plus everything a test needs to
@@ -17348,7 +19133,9 @@ instructions = "{instructions}"
             result
         });
         for _ in 0..500 {
-            if std::os::unix::net::UnixStream::connect(&address.socket).is_ok() {
+            if address.record.is_file()
+                && std::os::unix::net::UnixStream::connect(&address.socket).is_ok()
+            {
                 return BrokerFixture {
                     workspace_dir,
                     _data_parent: data_parent,
@@ -17372,6 +19159,13 @@ instructions = "{instructions}"
             timeout: Duration::from_secs(3600),
             poll: Duration::from_secs(3600),
         });
+        let record: BootstrapBrokerRecord =
+            json_file::read(&fixture.address.record).unwrap().unwrap();
+        assert_eq!(record.pid, std::process::id());
+        assert_eq!(
+            record.process_start_identity,
+            process_start_identity(record.pid).unwrap()
+        );
 
         // Retirement is acknowledged, so a caller learns the endpoint is going
         // rather than having to infer it from a closed connection.
@@ -17379,11 +19173,42 @@ instructions = "{instructions}"
 
         fixture.server.join().unwrap().unwrap();
         assert!(!fixture.address.socket.exists());
+        assert!(!fixture.address.record.exists());
+        let replacement_lock = FileInstanceLock {
+            path: fixture.address.lock.clone(),
+            held: RefCell::new(None),
+        };
+        assert!(
+            replacement_lock.acquire().unwrap(),
+            "a retired broker still held its instance lock"
+        );
         assert!(
             std::os::unix::net::UnixStream::connect(&fixture.address.socket).is_err(),
             "a retired broker still answered"
         );
         fixture.workspace_dir.close().unwrap();
+    }
+
+    /// A condition-variable notification is not durable, so this regression
+    /// repeatedly puts `stop` before the waiter. The state predicate must make
+    /// every wait return immediately even though no later notification exists.
+    #[test]
+    fn broker_stop_before_wait_cannot_lose_shutdown() {
+        for _ in 0..128 {
+            let activity = Arc::new(BrokerActivity::started());
+            activity.stop();
+            let waiter = Arc::clone(&activity);
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let _ = finished_tx.send(waiter.wait_for_poll(Duration::from_secs(3600)));
+            });
+
+            assert_eq!(
+                finished_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                None
+            );
+            thread.join().unwrap();
+        }
     }
 
     /// With no daemon to outlive and no request to serve, the broker is holding
@@ -17548,10 +19373,15 @@ instructions = "{instructions}"
     fn root_git_common_dir_must_not_overlap_sandbox_writable_state() {
         std::fs::create_dir_all("target").unwrap();
         let safe = tempfile::tempdir_in("target").unwrap();
+        assert_eq!(session_git_common_dir(safe.path()), Ok(None));
         std::fs::create_dir(safe.path().join(".git")).unwrap();
         assert_eq!(
             git_common_dir(safe.path()).unwrap(),
             safe.path().join(".git").canonicalize().unwrap()
+        );
+        assert_eq!(
+            session_git_common_dir(safe.path()),
+            Ok(Some(safe.path().join(".git").canonicalize().unwrap()))
         );
         assert!(
             validate_root_git_common_dir_policy(
@@ -17578,6 +19408,10 @@ instructions = "{instructions}"
             git_common_dir(linked.path()).unwrap(),
             common.path().canonicalize().unwrap()
         );
+        assert_eq!(
+            session_git_common_dir(linked.path()),
+            Ok(Some(common.path().canonicalize().unwrap()))
+        );
         assert!(
             validate_root_git_common_dir_policy(
                 linked.path(),
@@ -17588,6 +19422,9 @@ instructions = "{instructions}"
             )
             .is_err()
         );
+
+        let not_a_directory = tempfile::NamedTempFile::new_in("target").unwrap();
+        assert_eq!(session_git_common_dir(not_a_directory.path()), Err(()));
 
         // The `$HOME` state root covered by this check is the launched agent's own
         // (`~/.codex` for Codex), so a Git common directory under it is refused for
@@ -17617,6 +19454,143 @@ instructions = "{instructions}"
                 if allowed { "accept" } else { "refuse" }
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One Git authority contract, including every fail-closed edge.
+    fn session_git_policy_anchors_authority_to_the_registered_worktree() {
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let common = fixture.path().join("repo/.git");
+        let git_dir = common.join("worktrees/session");
+        let worktree = fixture.path().join("repo/.usagi/sessions/session");
+        for path in [
+            &git_dir,
+            &common.join("objects"),
+            &common.join("refs/heads/usagi"),
+            &common.join("logs/refs/heads/usagi"),
+            &worktree,
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            git_dir.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
+
+        let policy = session_git_policy(&fixture.path().join("repo"), &worktree)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            policy.writable_roots,
+            [
+                git_dir.canonicalize().unwrap(),
+                common.join("objects").canonicalize().unwrap(),
+                common.join("refs/heads/usagi").canonicalize().unwrap(),
+                common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+            ]
+        );
+        assert!(
+            !policy
+                .writable_roots
+                .contains(&common.canonicalize().unwrap())
+        );
+        assert!(
+            !policy
+                .writable_roots
+                .contains(&common.join("refs/heads/main"))
+        );
+        assert!(!policy.writable_roots.contains(&common.join("config")));
+
+        let standalone = tempfile::tempdir_in("target").unwrap();
+        std::fs::create_dir(standalone.path().join(".git")).unwrap();
+        assert!(
+            session_git_policy(standalone.path(), standalone.path())
+                .unwrap()
+                .is_none(),
+            "a standalone workspace needs no grant outside its writable root"
+        );
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), standalone.path()).is_err(),
+            "a foreign standalone repository is not session authority"
+        );
+
+        let plain_workspace = tempfile::tempdir_in("target").unwrap();
+        let plain_session = plain_workspace.path().join(".usagi/sessions/plain");
+        std::fs::create_dir_all(&plain_session).unwrap();
+        assert!(
+            session_git_policy(plain_workspace.path(), &plain_session)
+                .unwrap()
+                .is_none()
+        );
+
+        let missing_marker = fixture.path().join("repo/.usagi/sessions/missing");
+        std::fs::create_dir_all(&missing_marker).unwrap();
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), &missing_marker).is_err(),
+            "a Git workspace cannot silently admit a session without its marker"
+        );
+        let not_a_directory = fixture.path().join("repo/not-a-directory");
+        std::fs::write(&not_a_directory, "fixture").unwrap();
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), &not_a_directory).is_err(),
+            "metadata errors other than absence remain admission failures"
+        );
+
+        let indirect = common.join("indirect/session");
+        std::fs::create_dir_all(&indirect).unwrap();
+        std::fs::write(indirect.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            indirect.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", indirect.display()),
+        )
+        .unwrap();
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), &worktree).is_err(),
+            "the private admin directory must be a direct worktrees child"
+        );
+
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            git_dir.join("gitdir"),
+            format!("{}\n", standalone.path().join(".git").display()),
+        )
+        .unwrap();
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), &worktree).is_err(),
+            "the private admin backlink must name the selected marker"
+        );
+
+        let foreign = fixture.path().join("foreign/.git/worktrees/session");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            foreign.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", foreign.display()),
+        )
+        .unwrap();
+        assert!(session_git_policy(&fixture.path().join("repo"), &worktree).is_err());
     }
 
     #[test]
@@ -17700,12 +19674,12 @@ instructions = "{instructions}"
             .as_array()
             .unwrap();
         assert_eq!(
-            pre_tool_use[1]["command"],
-            serde_json::json!("'/opt/usagi/bin/usagi' guard-workspace")
+            pre_tool_use[1]["args"],
+            serde_json::json!(["guard-workspace"])
         );
         assert_eq!(
-            settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
-            serde_json::json!("'/opt/usagi/bin/usagi' agent-phase ready")
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["args"],
+            serde_json::json!(["agent-phase", "ready"])
         );
     }
 
@@ -17902,6 +19876,35 @@ instructions = "{instructions}"
                 "{program} state root against a workspace inside ~/.codex"
             );
         }
+
+        let prefix_workspace = home.join(".claude.json-repository");
+        std::fs::create_dir_all(prefix_workspace.join(".git")).unwrap();
+        for mode in [SandboxMode::Session, SandboxMode::Root] {
+            assert_eq!(
+                validate_claude_sandbox_policy(&SandboxPolicyInputs {
+                    mode,
+                    program: CLAUDE_PROGRAM,
+                    workspace_root: &prefix_workspace,
+                    launch_roots: &[],
+                    tmpdir: None,
+                    home: Some(&home),
+                    cache_dir: None,
+                    backend: Some(&backend),
+                    passthrough: false,
+                }),
+                Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
+                "the lexical ~/.claude.json* grant must not cover a repository"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let non_utf8 = PathBuf::from(OsString::from_vec(vec![b'/', 0xff]));
+            assert!(lexical_prefix_overlaps_path(&non_utf8, &workspace_root));
+        }
     }
 
     #[test]
@@ -17925,9 +19928,16 @@ instructions = "{instructions}"
         assert_eq!(launcher.prefix.last().unwrap(), "--");
 
         let arguments = claude_settings_arguments(usagi).unwrap();
-        assert!(arguments[1].contains("guard-workspace"));
+        let settings: serde_json::Value = serde_json::from_str(&arguments[1]).unwrap();
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][1]["args"],
+            serde_json::json!(["guard-workspace"])
+        );
         // Lifecycle phase reporting stays wired for a root coordinator.
-        assert!(arguments[1].contains("agent-phase running"));
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][0]["args"],
+            serde_json::json!(["agent-phase", "running"])
+        );
     }
 
     #[derive(Clone)]
@@ -18792,6 +20802,7 @@ instructions = "{instructions}"
                 _: &Path,
                 _: &Path,
                 _: &str,
+                _: Option<&str>,
             ) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -18827,6 +20838,86 @@ instructions = "{instructions}"
         let runtime = runtime.lock().unwrap();
         let session_id = runtime.session_id("one").unwrap();
         assert!(runtime.session_scope_by_id(session_id).is_ok());
+    }
+
+    #[test]
+    fn root_dispatch_admission_does_not_reparent_existing_session() {
+        use usagi_core::domain::agent::{
+            Agent, AgentStatus, CallerRef, DispatchBinding, DispatchRun, RunStatus, WorkerRef,
+        };
+        use usagi_core::domain::id::{AgentId, OperationId as DispatchOperationId};
+        use usagi_core::infrastructure::store::dispatch::{
+            AgentAdmissionReservation, CredentialProvenance,
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temporary.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let agent_id = AgentId::new();
+        let worker = Agent {
+            agent_id,
+            session_id: Some(session),
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: usagi_core::domain::agent::ModelSelector::new("test").unwrap(),
+            status: AgentStatus::Starting,
+            current_run: None,
+        };
+        dispatch.upsert_agent(workspace, worker.clone()).unwrap();
+        let initial_parent = SessionId::new();
+        dispatch
+            .record_session_parent(workspace, session, Some(initial_parent))
+            .unwrap();
+        dispatch
+            .upsert_binding(DispatchBinding {
+                run_id: DispatchOperationId::new(),
+                caller: CallerRef {
+                    session_id: Some(SessionId::new()),
+                    agent_id: AgentId::new(),
+                },
+                worker: WorkerRef {
+                    session_id: Some(session),
+                    agent_id,
+                },
+            })
+            .unwrap();
+
+        let conflicting = DispatchOperationId::new();
+        dispatch
+            .reserve_admission(
+                worker,
+                DispatchRun {
+                    run_id: conflicting,
+                    agent_id,
+                    prompt: "dispatch without reparenting".into(),
+                    started_at: chrono::Utc::now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: conflicting,
+                    caller: CallerRef {
+                        session_id: Some(SessionId::new()),
+                        agent_id: AgentId::new(),
+                    },
+                    worker: WorkerRef {
+                        session_id: Some(session),
+                        agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: conflicting,
+                    semantic_key: "dispatch-existing".into(),
+                    credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .unwrap();
+        assert!(dispatch.run(conflicting).unwrap().is_some());
+        assert!(dispatch.admission(conflicting).unwrap().is_some());
+        assert_eq!(
+            dispatch.session_parent(workspace, session).unwrap(),
+            Some(initial_parent)
+        );
     }
 
     /// A delegation builds its worktree before it can dispatch into it, so a
@@ -19051,7 +21142,6 @@ instructions = "{instructions}"
         let envelope_for = |reconcile: DelegationReconcile, code: ErrorCode| {
             session_response_envelope(
                 usagi_core::usecase::client::SessionAction::DelegateBrief,
-                &serde_json::json!({}),
                 Err(SessionRuntimeError::Delegation(DelegationFailure {
                     code,
                     message: "dispatch runtime executable is unavailable".into(),
@@ -19147,6 +21237,7 @@ instructions = "{instructions}"
             _: &Path,
             _: &Path,
             _: &str,
+            _: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -20109,6 +22200,17 @@ instructions = "{instructions}"
         assert_eq!(cancelled, ResponseOutcome::Ok);
     }
 
+    #[test]
+    fn supervisor_query_capacity_maps_to_typed_backpressure() {
+        assert_eq!(
+            supervisor_error(anyhow::anyhow!(
+                "supervisor query response capacity is exhausted"
+            ))
+            .code,
+            usagi_core::infrastructure::ipc::ErrorCode::ResourceExhausted
+        );
+    }
+
     fn fence_in(role: GenerationRole) -> GenerationFence {
         GenerationFence {
             gate: AdmissionGate::new(DaemonGeneration::new(), role),
@@ -20492,5 +22594,28 @@ instructions = "{instructions}"
         worker.join().unwrap();
 
         assert_eq!(*cleaned.lock().unwrap(), vec![first, second]);
+    }
+
+    #[test]
+    fn inbox_query_errors_preserve_client_faults_and_hide_store_failures() {
+        use usagi_core::infrastructure::ipc::ErrorCode;
+
+        let invalid = map_inbox_query_error(&anyhow::anyhow!(
+            "dispatch inbox cursor expired: earliest retained sequence is 7"
+        ));
+        assert_eq!(invalid.code, ErrorCode::InvalidArgument);
+        assert!(invalid.message.contains("earliest retained sequence is 7"));
+        for message in [
+            "dispatch inbox ACK cursor is outside the published sequence range",
+            "dispatch inbox page limit must be 1..=100",
+        ] {
+            assert_eq!(
+                map_inbox_query_error(&anyhow::anyhow!(message)).code,
+                ErrorCode::InvalidArgument
+            );
+        }
+        let unavailable = map_inbox_query_error(&anyhow::anyhow!("disk secret"));
+        assert_eq!(unavailable.code, ErrorCode::Unavailable);
+        assert_eq!(unavailable.message, "dispatch inbox is unavailable");
     }
 }

@@ -22,41 +22,6 @@ pub use env::{
 
 use serde::{Deserialize, Serialize};
 
-/// Local models that may be exposed through the optional `usagi-llm` MCP
-/// server.
-///
-/// This closed vocabulary is the trust boundary for the model token eventually
-/// passed to `usagi llm-mcp --model`. A hand-edited settings file cannot add a
-/// new argv/config token.
-pub const LOCAL_LLM_MODELS: [&str; 4] = [
-    "qwen2.5-coder:7b",
-    "qwen2.5-coder:3b",
-    "qwen2.5-coder:1.5b",
-    "qwen2.5:7b",
-];
-
-/// The model used when the stored local-LLM model is absent or untrusted.
-pub const DEFAULT_LOCAL_LLM_MODEL: &str = LOCAL_LLM_MODELS[0];
-
-/// Trusted configuration for the optional local-LLM MCP server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LocalLlm {
-    /// Whether Claude and Codex launches receive the `usagi-llm` MCP server.
-    pub enabled: bool,
-    /// The allowlisted model served by `usagi llm-mcp`.
-    pub model: String,
-}
-
-impl Default for LocalLlm {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            model: DEFAULT_LOCAL_LLM_MODEL.to_owned(),
-        }
-    }
-}
-
 /// UI color theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -418,14 +383,16 @@ pub struct Settings {
     pub pr_auto_open: PrAutoOpen,
     /// The provider used for Agent panes when no profile is selected explicitly.
     pub default_model: DefaultModel,
+    /// Fully-qualified Git ref selected by default when creating a session.
+    /// `None` follows the workspace's current checkout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
     /// Whether issue-backed MCP tools are available to agents.
     pub issue_enabled: bool,
     /// Whether durable-memory MCP tools are available to agents.
     pub memory_enabled: bool,
     /// Built-in role catalog used for new and resumed Agent work.
     pub team_template: TeamTemplate,
-    /// Optional local LLM exposed only through daemon-owned Agent provisioning.
-    pub local_llm: LocalLlm,
     /// Environment bindings injected into every workspace's Agent and terminal
     /// children. The key is the variable name, the value a literal or a
     /// `op://…` secret reference; a workspace adds to or overrides them through
@@ -440,10 +407,10 @@ impl Default for Settings {
             modal_selection_mode: ModalSelectionMode::default(),
             pr_auto_open: PrAutoOpen::default(),
             default_model: DefaultModel::default(),
+            default_branch: None,
             issue_enabled: true,
             memory_enabled: true,
             team_template: TeamTemplate::default(),
-            local_llm: LocalLlm::default(),
             // No environment is injected unless it is configured explicitly.
             env: EnvBindings::new(),
         }
@@ -451,16 +418,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Coerce values loaded from the editable settings file into their trusted
-    /// vocabulary before they can reach daemon-owned process configuration.
-    #[must_use]
-    pub fn sanitized(mut self) -> Self {
-        if !LOCAL_LLM_MODELS.contains(&self.local_llm.model.as_str()) {
-            DEFAULT_LOCAL_LLM_MODEL.clone_into(&mut self.local_llm.model);
-        }
-        self
-    }
-
     /// Replace the fields owned by the Config surface, keeping settings owned
     /// by dedicated editors and runtime integrations.
     ///
@@ -480,8 +437,9 @@ impl Settings {
         self
     }
 
-    /// Apply workspace-owned Agent, Team, Issue, Memory, and environment values over
-    /// this global baseline. Theme and modal interaction always remain global.
+    /// Apply workspace-owned Agent, Base branch, Team, Issue, Memory, and
+    /// environment values over this global baseline. Theme and modal interaction
+    /// always remain global.
     ///
     /// Environment bindings accumulate rather than replace: the workspace map is
     /// layered on top of the global one, so a same-named binding takes the
@@ -490,6 +448,9 @@ impl Settings {
     pub fn with_local(mut self, local: &LocalSettings) -> Self {
         if let Some(model) = local.default_model {
             self.default_model = model;
+        }
+        if let Some(branch) = &local.default_branch {
+            self.default_branch = Some(branch.clone());
         }
         if let Some(enabled) = local.issue_enabled {
             self.issue_enabled = enabled;
@@ -506,19 +467,6 @@ impl Settings {
         self
     }
 
-    /// The trusted local-LLM model this configuration wires, or `None` when the
-    /// delegation server is not wired at all.
-    ///
-    /// Reading the flag and the model through one accessor keeps "the server is
-    /// wired" and "a model was chosen" from disagreeing. The value is already
-    /// sanitized to the closed allowlist by `Storage::load_settings`.
-    #[must_use]
-    pub fn wired_local_llm_model(&self) -> Option<&str> {
-        self.local_llm
-            .enabled
-            .then_some(self.local_llm.model.as_str())
-    }
-
     /// The bindings usable for injection, with invalid names and blank values
     /// dropped.
     pub fn env_bindings(&self) -> impl Iterator<Item = (&str, &str)> {
@@ -526,7 +474,7 @@ impl Settings {
     }
 }
 
-/// Per-workspace Agent, Team, Issue, and Memory settings stored in
+/// Per-workspace Agent, Base branch, Team, Issue, and Memory settings stored in
 /// `<workspace>/.usagi/settings.json` (or the development-mode-specific `dev`
 /// directory).
 ///
@@ -538,6 +486,9 @@ impl Settings {
 pub struct LocalSettings {
     #[serde(deserialize_with = "deserialize_local_default_model")]
     pub default_model: Option<DefaultModel>,
+    /// Workspace-specific session base ref. Absence follows the current checkout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
     pub issue_enabled: Option<bool>,
     pub memory_enabled: Option<bool>,
     /// Workspace override for the built-in team template.
@@ -549,8 +500,8 @@ pub struct LocalSettings {
 }
 
 impl LocalSettings {
-    /// Replace the Agent, Team, Issue, and Memory choices with `settings`, keeping this
-    /// workspace's own environment bindings.
+    /// Replace the Agent, Base branch, Team, Issue, and Memory choices with
+    /// `settings`, keeping this workspace's own environment bindings.
     ///
     /// The Config surface edits a merged [`Settings`] view, which carries the
     /// *inherited* environment; writing that view back verbatim would copy every
@@ -559,6 +510,7 @@ impl LocalSettings {
     #[must_use]
     pub fn with_config(mut self, settings: &Settings) -> Self {
         self.default_model = Some(settings.default_model);
+        self.default_branch.clone_from(&settings.default_branch);
         self.issue_enabled = Some(settings.issue_enabled);
         self.memory_enabled = Some(settings.memory_enabled);
         self.team_template = Some(settings.team_template);
@@ -601,11 +553,13 @@ where
 {
     let token = Option::<String>::deserialize(deserializer)?;
     Ok(match token.as_deref() {
-        Some("none") => Some(TeamTemplate::None),
         Some("hierarchical") => Some(TeamTemplate::Hierarchical),
         Some("flat") => Some(TeamTemplate::Flat),
         Some("pipeline") => Some(TeamTemplate::Pipeline),
-        _ => None,
+        // `none` and unknown future values both disable delegation instead of
+        // inheriting a potentially more permissive global template.
+        Some(_) => Some(TeamTemplate::None),
+        None => None,
     })
 }
 

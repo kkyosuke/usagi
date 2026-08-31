@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, daemon, session, lifecycle, idempotency, correctness]
 dependson: []
-related: [268, 543]
+related: [268]
 created_at: 2026-08-02T22:57:15.800325+00:00
 updated_at: 2026-08-02T23:53:28.898452+00:00
 ---

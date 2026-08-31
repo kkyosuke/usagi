@@ -13,7 +13,7 @@ use usagi_core::usecase::claude_sandbox::{
 use usagi_core::usecase::client::{ClientError, ClientPolicy, DaemonClient, DaemonReply};
 use usagi_tui::usecase::application::EntryScreen;
 
-use super::{daemon, tui};
+use super::{clean, daemon, tui};
 
 // 各 `RunOutcome` を実行面へ接続するだけの routing match。arm が増えて 100 行を超えるが、
 // 分割しても routing の一覧性が下がるだけなので too_many_lines を許容する。
@@ -38,12 +38,34 @@ enum Action {
     LaunchDaemon,
     RequestDaemonReplacement,
     LaunchMcp,
+    Clean,
     CaptureCodexSession,
     ReportAgentPhase,
     GuardWorkspace,
     ClaudeSandbox,
     DaemonRequest,
     SelfUpdate,
+}
+
+/// How an MCP stdio process reaches the daemon.
+///
+/// A daemon-provisioned child receives the trusted workspace root in its
+/// environment. The daemon that issued that value is necessarily already
+/// running, and the child must claim its live parent runtime on that exact
+/// daemon, so it only attaches. A manually started `usagi mcp` has no injected
+/// root and retains cold-start authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpDaemonRoute {
+    Attached,
+    Bootstrap,
+}
+
+fn mcp_daemon_route(workspace_root: Option<&std::ffi::OsStr>) -> McpDaemonRoute {
+    if workspace_root.is_some_and(|root| !root.is_empty()) {
+        McpDaemonRoute::Attached
+    } else {
+        McpDaemonRoute::Bootstrap
+    }
 }
 
 impl From<&RunOutcome> for Action {
@@ -53,10 +75,11 @@ impl From<&RunOutcome> for Action {
             RunOutcome::LaunchTui(TuiRequest::Welcome) => Self::LaunchWelcome,
             RunOutcome::LaunchTui(TuiRequest::Workspace { .. }) => Self::LaunchWorkspace,
             RunOutcome::LaunchTui(TuiRequest::Config) => Self::LaunchConfig,
-            RunOutcome::LaunchTui(TuiRequest::Doctor) => Self::LaunchDoctor,
+            RunOutcome::LaunchTui(TuiRequest::Doctor { .. }) => Self::LaunchDoctor,
             RunOutcome::LaunchDaemon(_) => Self::LaunchDaemon,
             RunOutcome::RequestDaemonReplacement { .. } => Self::RequestDaemonReplacement,
             RunOutcome::LaunchMcp => Self::LaunchMcp,
+            RunOutcome::Clean { .. } => Self::Clean,
             RunOutcome::CaptureCodexSession => Self::CaptureCodexSession,
             RunOutcome::ReportAgentPhase { .. } => Self::ReportAgentPhase,
             RunOutcome::GuardWorkspace => Self::GuardWorkspace,
@@ -74,9 +97,9 @@ mod action_io {
 
     use super::{
         Action, AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
-        LauncherPolicyInputs, RunOutcome, TuiRequest, Write, claude_sandbox, daemon,
-        execute_self_update, exit_code, guard_workspace, tui, write_client_error,
-        write_daemon_outcome,
+        LauncherPolicyInputs, McpDaemonRoute, RunOutcome, TuiRequest, Write, claude_sandbox, clean,
+        daemon, execute_self_update, exit_code, guard_workspace, mcp_daemon_route, tui,
+        write_client_error, write_daemon_outcome,
     };
 
     #[allow(clippy::too_many_lines)]
@@ -99,9 +122,15 @@ mod action_io {
             (Action::LaunchConfig, RunOutcome::LaunchTui(TuiRequest::Config)) => {
                 tui::launch(out, info, &EntryScreen::Config).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchDoctor, RunOutcome::LaunchTui(TuiRequest::Doctor)) => {
-                tui::launch(out, info, &EntryScreen::Doctor).map(|()| ExitCode::SUCCESS)
-            }
+            (
+                Action::LaunchDoctor,
+                RunOutcome::LaunchTui(TuiRequest::Doctor {
+                    fix,
+                    restart_agents,
+                    force,
+                }),
+            ) => tui::launch_doctor(out, info, fix, restart_agents, force)
+                .map(|()| ExitCode::SUCCESS),
             (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
             }
@@ -116,26 +145,62 @@ mod action_io {
             }
             (Action::LaunchMcp, RunOutcome::LaunchMcp) => {
                 let stdin = std::io::stdin();
-                match daemon::policy_client(ClientPolicy::mcp()) {
+                let workspace_root =
+                    std::env::var_os(usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV);
+                let client: Result<Box<dyn DaemonClient>, _> =
+                    match mcp_daemon_route(workspace_root.as_deref()) {
+                        // This child was provisioned by the daemon whose live
+                        // Agent runtime it must claim. It runs in a sandbox that
+                        // deliberately cannot write the data home's
+                        // `bootstrap.lock`; cold-starting here would both fail
+                        // that sandbox boundary and target a daemon that cannot
+                        // know the parent runtime being claimed.
+                        McpDaemonRoute::Attached => daemon::attached_client(ClientPolicy::mcp())
+                            .map(|client| Box::new(client) as Box<dyn DaemonClient>),
+                        // A manually started MCP server remains a user entry
+                        // surface and therefore keeps daemon autostart.
+                        McpDaemonRoute::Bootstrap => daemon::policy_client(ClientPolicy::mcp())
+                            .map(|client| Box::new(client) as Box<dyn DaemonClient>),
+                    };
+                match client {
                     Ok(mut client) => {
-                        let credential = match client
+                        let (credential, store_root) = match client
                             .request(usagi_core::usecase::client::DaemonRequest::McpChildClaim)
                         {
-                            Ok(DaemonReply::Ok(body)) => body
-                                .get("credential")
-                                .and_then(serde_json::Value::as_str)
-                                .filter(|value| !value.is_empty())
-                                .map(str::to_owned),
-                            _ => None,
+                            Ok(DaemonReply::Ok(body)) => (
+                                body.get("credential")
+                                    .and_then(serde_json::Value::as_str)
+                                    .filter(|value| !value.is_empty())
+                                    .map(str::to_owned),
+                                body.get("store_root")
+                                    .and_then(serde_json::Value::as_str)
+                                    .filter(|value| !value.is_empty())
+                                    .map(std::path::PathBuf::from),
+                            ),
+                            _ => (None, None),
                         };
                         if let Some(credential) = credential {
-                            usagi_cli::mcp::serve_with_client_and_caller(
-                                stdin.lock(),
-                                out,
-                                info.version,
-                                &mut client,
-                                &credential,
-                            )
+                            if let Some(store_root) = store_root {
+                                usagi_cli::mcp::serve_with_client_and_caller_at(
+                                    stdin.lock(),
+                                    out,
+                                    info.version,
+                                    &mut *client,
+                                    &credential,
+                                    &store_root,
+                                )
+                            } else {
+                                // A compatible older daemon returns only the
+                                // credential. Preserve that inter-version path
+                                // until an explicit daemon restart upgrades it.
+                                usagi_cli::mcp::serve_with_client_and_caller(
+                                    stdin.lock(),
+                                    out,
+                                    info.version,
+                                    &mut *client,
+                                    &credential,
+                                )
+                            }
                         } else {
                             // Manual MCP remains useful for unprivileged store and
                             // observation tools; caller-scoped mutation stays absent.
@@ -143,7 +208,7 @@ mod action_io {
                                 stdin.lock(),
                                 out,
                                 info.version,
-                                &mut client,
+                                &mut *client,
                             )
                         }
                         .map(|()| ExitCode::SUCCESS)
@@ -153,6 +218,9 @@ mod action_io {
                         Ok(ExitCode::FAILURE)
                     }
                 }
+            }
+            (Action::Clean, RunOutcome::Clean { apply, force }) => {
+                clean::run(out, err, apply, force)
             }
             (Action::CaptureCodexSession, RunOutcome::CaptureCodexSession) => {
                 let stdin = std::io::stdin();
@@ -269,6 +337,11 @@ fn execute_self_update(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> std::io::Result<ExitCode> {
+    // The installer inherits the process streams so progress and failures stay
+    // visible while network and verification work is running. Flush the CLI's
+    // preamble first so it cannot appear after the child output.
+    out.flush()?;
+    err.flush()?;
     execute_self_update_with(request, out, err, &mut |script, select_version| {
         use std::process::{Command, Stdio};
 
@@ -278,8 +351,8 @@ fn execute_self_update(
             .arg("--")
             .current_dir("/")
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
         if select_version {
             command.arg("--select-version");
         }
@@ -293,7 +366,12 @@ fn execute_self_update(
             let _ = child.wait();
             return Err(error);
         }
-        child.wait_with_output()
+        let status = child.wait()?;
+        Ok(std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
     })
 }
 
@@ -316,7 +394,6 @@ fn execute_self_update_with(
     out.write_all(&result.stdout)?;
     err.write_all(&result.stderr)?;
     if result.status.success() {
-        writeln!(out, "usagi was updated; restart it to use the new binary.")?;
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(exit_code(result.status.code().unwrap_or(1)))
@@ -353,6 +430,31 @@ fn claude_sandbox(
         writeln!(err, "claude-sandbox: {reason:?}")?;
         return Ok(ExitCode::FAILURE);
     }
+    let linux_home_entries = if platform == Platform::Linux
+        && command
+            .first()
+            .and_then(|program| claude_sandbox::agent_config_prefix(program))
+            .is_some()
+    {
+        let Some(home) = policy.home.as_deref() else {
+            writeln!(
+                err,
+                "claude-sandbox: Linux HOME entry inventory がありません"
+            )?;
+            return Ok(ExitCode::FAILURE);
+        };
+        if let Ok(entries) = linux_home_entry_inventory(home) {
+            Some(entries)
+        } else {
+            writeln!(
+                err,
+                "claude-sandbox: Linux HOME entry inventory を取得できません"
+            )?;
+            return Ok(ExitCode::FAILURE);
+        }
+    } else {
+        None
+    };
     let request = SandboxRequest {
         platform,
         mode,
@@ -361,6 +463,7 @@ fn claude_sandbox(
         launch_roots: policy.writable_roots,
         tmpdir: policy.tmpdir,
         home: policy.home,
+        linux_home_entries,
         cache_dir: policy.cache_dir,
         // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
         // 配布バイナリはこの環境変数を見ても拘束を外さない。
@@ -379,6 +482,14 @@ fn claude_sandbox(
             Ok(ExitCode::FAILURE)
         }
     }
+}
+
+fn linux_home_entry_inventory(home: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut entries = std::fs::read_dir(home)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort();
+    Ok(entries)
 }
 
 /// launcher が exec 直前に検証する policy path 一式。同じ `Option<PathBuf>` が並ぶため、
@@ -637,12 +748,37 @@ mod tests {
     use usagi_core::usecase::client::{ClientError, DaemonReply, DaemonRequest};
 
     use super::{
-        Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, execute_self_update_with,
-        exit_code, process_outcome, validate_launcher_policy_inputs, write_client_error,
-        write_daemon_outcome,
+        Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
+        execute_self_update_with, exit_code, linux_home_entry_inventory, mcp_daemon_route,
+        process_outcome, validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
+
+    #[test]
+    fn daemon_provisioned_mcp_attaches_while_manual_mcp_keeps_bootstrap_authority() {
+        assert_eq!(mcp_daemon_route(None), McpDaemonRoute::Bootstrap);
+        assert_eq!(
+            mcp_daemon_route(Some(std::ffi::OsStr::new(""))),
+            McpDaemonRoute::Bootstrap
+        );
+        assert_eq!(
+            mcp_daemon_route(Some(std::ffi::OsStr::new("/workspace"))),
+            McpDaemonRoute::Attached
+        );
+    }
+
+    #[test]
+    fn linux_home_inventory_is_sorted_and_reports_an_unreadable_source() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("z"), "z").unwrap();
+        std::fs::create_dir(home.path().join("a")).unwrap();
+        assert_eq!(
+            linux_home_entry_inventory(home.path()).unwrap(),
+            [home.path().join("a"), home.path().join("z")]
+        );
+        assert!(linux_home_entry_inventory(&home.path().join("missing")).is_err());
+    }
 
     #[test]
     fn launcher_policy_rejects_root_and_symlink_inputs() {
@@ -795,26 +931,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct FailOnSecondWrite {
-        writes: usize,
-    }
-
-    impl Write for FailOnSecondWrite {
-        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.writes += 1;
-            if self.writes == 2 {
-                Err(io::Error::other("second write failed"))
-            } else {
-                Ok(buffer.len())
-            }
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn process_exit_codes_are_bounded_to_the_platform_representation() {
         assert_eq!(exit_code(0), std::process::ExitCode::SUCCESS);
@@ -847,7 +963,11 @@ mod tests {
             Action::LaunchConfig,
         );
         assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Doctor),
+            RunOutcome::LaunchTui(TuiRequest::Doctor {
+                fix: false,
+                restart_agents: false,
+                force: false,
+            }),
             Action::LaunchDoctor,
         );
         assert_route(
@@ -859,6 +979,13 @@ mod tests {
             Action::RequestDaemonReplacement,
         );
         assert_route(RunOutcome::LaunchMcp, Action::LaunchMcp);
+        assert_route(
+            RunOutcome::Clean {
+                apply: false,
+                force: false,
+            },
+            Action::Clean,
+        );
         assert_route(RunOutcome::CaptureCodexSession, Action::CaptureCodexSession);
         assert_route(
             RunOutcome::ReportAgentPhase {
@@ -955,10 +1082,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, std::process::ExitCode::SUCCESS);
-        assert_eq!(
-            out,
-            b"installed\nusagi was updated; restart it to use the new binary.\n"
-        );
+        assert_eq!(out, b"installed\n");
         assert_eq!(err, b"warning\n");
 
         let status =
@@ -988,17 +1112,6 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(stderr_error.kind(), io::ErrorKind::Other);
-
-        let mut completion_writer = FailOnSecondWrite::default();
-        completion_writer.flush().unwrap();
-        let completion_error = execute_self_update_with(
-            &request,
-            &mut completion_writer,
-            &mut Vec::new(),
-            &mut |_, _| Ok(process_output(0, b"output", b"")),
-        )
-        .unwrap_err();
-        assert_eq!(completion_error.to_string(), "second write failed");
 
         #[cfg(unix)]
         {

@@ -5,7 +5,7 @@ status: done
 priority: low
 labels: [review, v2, test, coverage, tooling]
 dependson: []
-related: [484]
+related: []
 created_at: 2026-08-02T23:07:31.947688+00:00
 updated_at: 2026-08-03T01:12:01.268298+00:00
 ---

@@ -92,7 +92,7 @@ where
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            start().map_err(BootstrapError::Start)?;
+            start().map_err(start_error)?;
             let stream = wait_for_stream!(connect);
             require_expected_build(build_of(&stream), expected_build)?;
             Ok(stream)
@@ -100,7 +100,7 @@ where
         Err(error) if can_attempt_stale_recovery(error.kind()) => {
             match recover_stale().map_err(BootstrapError::Recovery)? {
                 StaleRecovery::Recovered => {
-                    start().map_err(BootstrapError::Start)?;
+                    start().map_err(start_error)?;
                     let stream = wait_for_stream!(connect);
                     require_expected_build(build_of(&stream), expected_build)?;
                     Ok(stream)
@@ -134,15 +134,15 @@ where
     R: FnMut() -> io::Result<()>,
     B: Fn(&S) -> &BuildIdentity,
 {
-    restart().map_err(BootstrapError::Restart)?;
+    restart().map_err(restart_error)?;
     let stream = wait_for_stream!(connect);
     require_expected_build(build_of(&stream), expected_build)?;
     Ok(stream)
 }
 
-/// What development's build-mismatch ladder settled on.
+/// What the build-mismatch ladder settled on.
 #[derive(Debug)]
-pub(crate) enum DevelopmentConnection<S> {
+pub(crate) enum BuildMismatchConnection<S> {
     /// The daemon now advertises this client's exact artifact.
     Replaced(S),
     /// The mismatch stands and the reachable daemon is reused as it is, because
@@ -152,7 +152,7 @@ pub(crate) enum DevelopmentConnection<S> {
     Reused { stream: S, reason: String },
 }
 
-/// Development's build-mismatch ladder: ask for one *planned* replacement, then
+/// Build-mismatch ladder: optionally ask for one *planned* replacement, then
 /// keep the mismatched daemon rather than destroy what it owns.
 ///
 /// The replacement is planned, never forced. The daemon's own census then
@@ -162,10 +162,10 @@ pub(crate) enum DevelopmentConnection<S> {
 /// artifact, which is exactly what a rebuilt on-disk executable produces — falls
 /// back to reusing the reachable daemon.
 ///
-/// Development prefers that over both alternatives on purpose. A forced cold
-/// transition kills the Agent conversations another client is holding (the very
-/// reason [`crate::runtime::daemon`]'s planned replacement guard exists), and a
-/// hard refusal would wedge every control request of a client whose own build no
+/// Reuse is preferred over both unsafe alternatives. A forced cold transition
+/// kills the Agent conversations another client is holding (the very reason
+/// [`crate::runtime::daemon`]'s planned replacement guard exists), and a hard
+/// refusal would wedge every control request of a client whose own build no
 /// longer exists on disk.
 // Every rung is exercised through the fake endpoint below. LLVM nevertheless
 // counts the separately generated production `IpcClient` instantiation as
@@ -177,7 +177,7 @@ pub(crate) fn replace_or_reuse<S, C, R, B>(
     expected_build: &BuildIdentity,
     build_of: B,
     may_attempt: bool,
-) -> Result<DevelopmentConnection<S>, BootstrapError>
+) -> Result<BuildMismatchConnection<S>, BootstrapError>
 where
     C: FnMut() -> io::Result<S>,
     R: FnMut() -> io::Result<()>,
@@ -185,7 +185,7 @@ where
 {
     let reason = if may_attempt {
         match restart_and_connect(&mut connect, restart, expected_build, &build_of) {
-            Ok(stream) => return Ok(DevelopmentConnection::Replaced(stream)),
+            Ok(stream) => return Ok(BuildMismatchConnection::Replaced(stream)),
             // A daemon serving another workspace is a definitive answer about
             // this endpoint, not a build mismatch to work around: there is
             // nothing here this client may reuse.
@@ -195,13 +195,13 @@ where
             Err(error) => error.to_string(),
         }
     } else {
-        "this daemon build was already asked to be replaced".to_owned()
+        "automatic replacement is disabled or was already attempted".to_owned()
     };
     let stream = connect().map_err(|error| match workspace_refusal(&error) {
         Some(refusal) => BootstrapError::WorkspaceMismatch(refusal),
         None => BootstrapError::Connect(error),
     })?;
-    Ok(DevelopmentConnection::Reused { stream, reason })
+    Ok(BuildMismatchConnection::Reused { stream, reason })
 }
 
 /// The daemon artifacts one action of this process has already been spent on.
@@ -258,6 +258,20 @@ fn workspace_refusal(error: &io::Error) -> Option<ProtocolError> {
         ClientError::Protocol(refusal) if is_workspace_mismatch(refusal) => Some(refusal.clone()),
         _ => None,
     }
+}
+
+fn start_error(error: io::Error) -> BootstrapError {
+    workspace_refusal(&error).map_or(
+        BootstrapError::Start(error),
+        BootstrapError::WorkspaceMismatch,
+    )
+}
+
+fn restart_error(error: io::Error) -> BootstrapError {
+    workspace_refusal(&error).map_or(
+        BootstrapError::Restart(error),
+        BootstrapError::WorkspaceMismatch,
+    )
 }
 
 /// A safe, classified bootstrap failure. No variant permits local lifecycle or
@@ -354,7 +368,7 @@ fn wait_for_ready(connect: &mut dyn FnMut() -> io::Result<()>) -> Result<(), Boo
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapError, DevelopmentConnection, StaleRecovery, connect_or_start, replace_or_reuse,
+        BootstrapError, BuildMismatchConnection, StaleRecovery, connect_or_start, replace_or_reuse,
         restart_and_connect, workspace_refusal,
     };
     use std::cell::Cell;
@@ -911,10 +925,34 @@ mod tests {
             refusal.message
         );
 
+        // A cold-start preflight runs only after endpoint absence is known. Its
+        // typed refusal must survive the lifecycle callback's io boundary.
+        let preflight = connect_or_start(
+            || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::NotFound)),
+            || Err(io::Error::other(ClientError::Protocol(refusal.clone()))),
+            recovery_error,
+            &expected,
+            "local",
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(workspace_mismatch(preflight).unwrap(), refusal);
+
         // An explicit cold replacement is refused for the same reason.
         let restart_error =
             restart_and_connect(refused, || Ok(()), &expected, endpoint_build).unwrap_err();
         assert!(workspace_mismatch(restart_error).is_some());
+        let reconnect = || Ok(endpoint("unused", "current"));
+        assert_eq!(reconnect().unwrap().name, "unused");
+        let restart_preflight = restart_and_connect(
+            reconnect,
+            || Err(io::Error::other(ClientError::Protocol(refusal.clone()))),
+            &expected,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(workspace_mismatch(restart_preflight).unwrap(), refusal);
 
         // Only this refusal is reclassified. Every other typed client failure
         // keeps its existing connect handling, so the fence cannot swallow an
@@ -942,12 +980,12 @@ mod tests {
         );
     }
 
-    /// The endpoint a development ladder settled on, and whether the mismatch
-    /// survived it.
-    fn settled(outcome: DevelopmentConnection<Endpoint>) -> (&'static str, Option<String>) {
+    /// The endpoint a build-mismatch ladder settled on, and whether the
+    /// mismatch survived it.
+    fn settled(outcome: BuildMismatchConnection<Endpoint>) -> (&'static str, Option<String>) {
         match outcome {
-            DevelopmentConnection::Replaced(stream) => (stream.name, None),
-            DevelopmentConnection::Reused { stream, reason } => (stream.name, Some(reason)),
+            BuildMismatchConnection::Replaced(stream) => (stream.name, None),
+            BuildMismatchConnection::Reused { stream, reason } => (stream.name, Some(reason)),
         }
     }
 
@@ -1023,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn an_already_attempted_artifact_is_reused_without_asking_again() {
+    fn a_mismatch_without_an_automatic_attempt_is_reused_without_asking() {
         let expected = build("current");
         let restarts = Cell::new(0);
         let outcome = replace_or_reuse(
@@ -1038,10 +1076,11 @@ mod tests {
         assert_eq!(name, "standing-mismatch");
         assert_eq!(
             reason.as_deref(),
-            Some("this daemon build was already asked to be replaced")
+            Some("automatic replacement is disabled or was already attempted")
         );
-        // Every later lane of this process reuses in place: nothing is restarted,
-        // so a mismatch cannot churn one generation per bootstrap.
+        // Production/local and every later development lane reuse in place:
+        // nothing is restarted, so a mismatch cannot churn one generation per
+        // bootstrap.
         assert_eq!(restarts.get(), 0);
     }
 

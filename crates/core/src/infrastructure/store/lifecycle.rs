@@ -199,6 +199,7 @@ mod tests {
                 LifecycleEvent::ReserveCreate {
                     name: "one".into(),
                     role_id: None,
+                    parent_session_id: None,
                     operation,
                 },
                 now(),
@@ -233,6 +234,7 @@ mod tests {
                     LifecycleEvent::ReserveCreate {
                         name: "one".into(),
                         role_id: None,
+                        parent_session_id: None,
                         operation
                     },
                     now()
@@ -261,6 +263,7 @@ mod tests {
                     LifecycleEvent::ReserveCreate {
                         name: "one".into(),
                         role_id: None,
+                        parent_session_id: None,
                         operation,
                     },
                     now(),

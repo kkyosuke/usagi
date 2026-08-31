@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, pr, ux]
 dependson: [346]
-related: [175, 198]
+related: []
 created_at: 2026-07-17T23:45:09.406330+00:00
 updated_at: 2026-07-18T01:04:32.136149+00:00
 ---
@@ -31,7 +31,6 @@ daemon の PR snapshot/subscription を TUI の sidebar と `p` PR modal に投�
 ## 依存関係
 
 - #346 に依存する（#345 を経由して durable inventory を得る）。
-- #198 / #175 は旧 TUI の既存挙動の回帰確認用 related issue で、実装のデータ正本ではない。
 
 ## 受け入れ条件
 

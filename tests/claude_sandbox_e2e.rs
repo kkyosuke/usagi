@@ -24,6 +24,16 @@ fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
     let protected = fixture_root()
         .canonicalize()
         .expect("canonical protected root");
+    run_in_session_with_roots(&protected, own, &[], script, arguments)
+}
+
+fn run_in_session_with_roots(
+    protected: &Path,
+    own: &Path,
+    additional_roots: &[PathBuf],
+    script: &str,
+    arguments: &[&Path],
+) -> Output {
     let own = own.canonicalize().expect("canonical writable root");
     let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
     command
@@ -31,6 +41,9 @@ fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
         .arg(protected)
         .arg("--writable-root")
         .arg(&own);
+    for root in additional_roots {
+        command.arg("--writable-root").arg(root);
+    }
     #[cfg(target_os = "macos")]
     command.arg("--backend").arg(
         PathBuf::from("/usr/bin/sandbox-exec")
@@ -44,6 +57,21 @@ fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
         .current_dir(own)
         .output()
         .expect("shipping launcher starts")
+}
+
+fn git(repo: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {}: {}",
+        arguments.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn run_in_root(root: &Path, script: &str) -> Output {
@@ -289,6 +317,71 @@ fn session_scope_preserves_sibling_issue_and_daemon_authority_for_path_alias_mat
     let _ = fs::remove_dir_all(&fixture);
 }
 
+#[test]
+fn session_scope_can_commit_without_granting_the_main_ref() {
+    let protected = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("claude-sandbox-session-git");
+    let _ = fs::remove_dir_all(&protected);
+    fs::create_dir_all(protected.join(".usagi/sessions")).unwrap();
+    git(&protected, &["init", "--quiet"]);
+    git(&protected, &["config", "user.name", "fixture"]);
+    git(
+        &protected,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(protected.join("tracked"), "base\n").unwrap();
+    git(&protected, &["add", "tracked"]);
+    git(&protected, &["commit", "--quiet", "-m", "base"]);
+    let main_before = git(&protected, &["rev-parse", "HEAD"]);
+    let worktree = protected.join(".usagi/sessions/commit");
+    git(
+        &protected,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "usagi/sandbox-commit",
+            worktree.to_str().unwrap(),
+        ],
+    );
+
+    let git_dir = PathBuf::from(git(&worktree, &["rev-parse", "--git-dir"]))
+        .canonicalize()
+        .unwrap();
+    let common = PathBuf::from(git(&worktree, &["rev-parse", "--git-common-dir"]))
+        .canonicalize()
+        .unwrap();
+    let roots = [
+        git_dir,
+        common.join("objects").canonicalize().unwrap(),
+        common.join("refs/heads/usagi").canonicalize().unwrap(),
+        common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+    ];
+    let protected = protected.canonicalize().unwrap();
+    let output = run_in_session_with_roots(
+        &protected,
+        &worktree,
+        &roots,
+        "printf committed > tracked && git add tracked && git commit --quiet -m sandbox",
+        &[],
+    );
+    if !output.status.success() && sandbox_backend_unavailable(&output) {
+        let _ = fs::remove_dir_all(&protected);
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "sandboxed commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(git(&worktree, &["rev-parse", "HEAD"]), main_before);
+    assert_eq!(git(&protected, &["rev-parse", "HEAD"]), main_before);
+
+    let _ = fs::remove_dir_all(&protected);
+}
+
 /// A root coordinator must be able to write the state its own CLI needs — Codex
 /// keeps `state_5.sqlite` under `~/.codex`, and a launcher that granted only
 /// `~/.claude` made `usagi` unable to start Codex at the workspace root at all
@@ -338,6 +431,63 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
         );
         fs::remove_file(granted).unwrap();
     }
+
+    let _ = fs::remove_dir_all(&fixture);
+}
+
+#[test]
+fn claude_global_config_atomic_save_preserves_other_existing_home_entries() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("claude-global-config-prefix");
+    let _ = fs::remove_dir_all(&fixture);
+    let repo = fixture.join("repo");
+    let home = fixture.join("home");
+    let bin = fixture.join("bin");
+    for path in [&repo, &home.join(".claude"), &bin] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let config = home.join(".claude.json");
+    let guard = home.join("existing-guard");
+    fs::write(&config, "old\n").unwrap();
+    fs::write(&guard, ORIGINAL).unwrap();
+    let program = bin.join("claude");
+    fs::write(
+        &program,
+        "#!/bin/sh\ncp \"$1/.claude.json\" \"$1/.claude.json.backup.1\" || exit 1\n: > \"$1/.claude.json.lock\" || exit 1\nprintf 'trusted\\n' > \"$1/.claude.json.tmp.$$\" || exit 1\nmv \"$1/.claude.json.tmp.$$\" \"$1/.claude.json\" || exit 1\nrm \"$1/.claude.json.lock\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+
+    let saved = run_agent_in_root(&repo, &home, &program);
+    if !saved.status.success() && sandbox_backend_unavailable(&saved) {
+        let _ = fs::remove_dir_all(&fixture);
+        return;
+    }
+    assert!(
+        saved.status.success(),
+        "atomic config save must succeed: {}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert_eq!(fs::read(&config).unwrap(), b"trusted\n");
+    assert_eq!(
+        fs::read(home.join(".claude.json.backup.1")).unwrap(),
+        b"old\n"
+    );
+    assert!(!home.join(".claude.json.lock").exists());
+
+    fs::write(
+        &program,
+        "#!/bin/sh\nprintf attack > \"$1/existing-guard\"\n",
+    )
+    .unwrap();
+    let refused = run_agent_in_root(&repo, &home, &program);
+    assert!(!refused.status.success());
+    assert_unchanged(&guard);
 
     let _ = fs::remove_dir_all(&fixture);
 }
@@ -430,6 +580,9 @@ fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
 
 #[test]
 fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
+    // Keep the Unix socket path below `SUN_LEN`. The sandbox always grants
+    // `/tmp` and `/var/tmp`, so putting the protected repository below either
+    // directory would make a universal writable root its ancestor.
     let fixture = PathBuf::from(std::env::var_os("HOME").expect("test HOME"))
         .join(".codex")
         .join(format!("ub{}", std::process::id()));

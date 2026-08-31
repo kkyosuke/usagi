@@ -13,7 +13,7 @@ updated_at: 2026-07-20T00:50:10.891462+00:00
 ## 背景 / 不具合
 
 `user_decision_get` が成功を返すのに回答 modal が出ない不具合の TUI 層。triage の全体像は
-[document/proposals/09-user-decision-mcp.md](../../document/proposals/09-user-decision-mcp.md#実装状況と未接続点triage)。
+[document/proposals/09-user-decision-mcp.md](../../document/proposals/09-user-decision-mcp.md#実装時の接続経緯)。
 daemon 側の配送は #378。本 issue は **TUI 本番接続と自動表示**を担当する。
 
 ### 確認された根本原因（この層）

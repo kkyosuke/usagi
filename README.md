@@ -21,8 +21,8 @@
 
 </div>
 
-> この README はフルリライト中の **v2** を説明する。現在 GitHub Releases で配布している
-> バイナリは [v1](v1/README.md) であり、v2 はリポジトリルートからソースで実行する。
+> この README は現在の `usagi` を説明する。GitHub Releases とリポジトリルートは
+> 同じ実装を提供する。
 
 ## usagi でやりたいこと
 
@@ -44,10 +44,16 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 最近使った workspace を **Recent** から直接開き、**New** で既存リポジトリの登録または clone、
 **Config** で全体設定の編集ができる。
 
-workspace を開くと Home へ移り、左側に session、右側に選択した session の Preview / Terminal /
-Diff / Notes と live pane を表示する。
+workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
+選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。`+ Open` は左右の余白を
+含めてクリックでき、登録済み workspace の複数選択に加えて `Tab` から既存ディレクトリを直接追加できる。overlay を
+開いている間は別の usagi が追加した workspace も自動で一覧へ反映される。Session Garden では開いている全 project の
+session をまとめて見渡せる。workspace root の
+shell は header の `[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。Session Garden はうさぎを左へ寄せ、
+右の `Notifications` に `Agent completed.` や入力待ちなど、現在の状態を短い文で表示する。
 
 ```text
+ 1 usagi   2 api   3 web   + Open
 ┌─ sessions ───────────┬─ Preview / Terminal / Diff / Notes ──────┐
 │   feature-login      │                                          │
 │   12m ago  #42  +18  │  Session info, terminal, and diff        │
@@ -59,19 +65,34 @@ Diff / Notes と live pane を表示する。
 
 Home の基本操作は次のとおり。
 
+session がない workspace を開いた直後は session 行を選択しない。`+ new session` は `↑` / `↓` で明示選択してから
+`Enter` / `t` で開くか、`Ctrl-A` で直接開く。
+
 | 操作 | 動作 |
 |---|---|
 | `↑` / `↓`、`j` / `k` | session を選ぶ |
-| `←` / `→`、`h` / `l` | Preview / Terminal / Diff / Notes を切り替える |
-| `Enter` / `t` | 選択した session の Closeup を開く |
+| `←` / `→` | Switch で前 / 次の project tab へ移動する |
+| `Enter` / `t` | 選択した session の Closeup、または明示選択した `+ new session` の作成を開く |
+| `Ctrl-A` | Switch で新規 session の作成を直接開く |
 | `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
+| `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
+| `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
+| `Ctrl-O` → `0` | 全 project tab の switcher を開く（`x` は tab の detach） |
+| `Ctrl-O t` | workspace root の Shell drawer を開閉する |
+| `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
 
+直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
 live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。TUI を離れる操作は
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
+
+generic terminal の `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。
+`Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、再度開くと新しい terminal になる。Director は画面の
+右側を高さ一杯に使い、workspace Shell と同時に開ける。選択 session の Agent は両 drawer の背面でも
+可視領域へ resize して出力を更新し続ける。
 
 ## 必要なもの
 
@@ -96,7 +117,8 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 ```
 
 `~/.usagi/bin` が `PATH` に無い場合は installer が追記方法を案内する。導入済みなら `usagi update` で
-最新版へ、`usagi update -v` で選んだ release へ更新できる（反映には再起動が必要）。
+最新版へ、`usagi update -v` で選んだ release へ更新できる。更新後の CLI は次回起動から使われる。
+起動中の TUI は終了して開き直し、稼働中 daemon の build が古い場合は `usagi doctor --fix` で入れ替える。
 
 対象は macOS（amd64 / arm64）と Linux（amd64）である。v2 の daemon IPC と PTY 管理は Unix transport を
 使うため Windows は対象外で、installer もこの 3 つ以外は失敗する。
@@ -119,8 +141,6 @@ cargo install --path . --locked
 > 置く（開発中の実行が本番の状態を触らないようにするため）。公開 release の artifact は
 > `~/.usagi` 自体を使う。詳細は [artifact の既定 mode](document/05-daemon.md#artifact-の既定-mode) を参照する。
 
-退避された v1 の仕様は [v1 の README](v1/README.md) を参照する。
-
 ### Tab 補完
 
 `usagi completion <shell>` は、CLI 定義から補完スクリプトを標準出力へ生成する。
@@ -142,7 +162,8 @@ usagi open /path/to/project
 ```
 
 引数を省略するとカレントディレクトリを開く。次回からは `usagi` の Welcome にある Open / Recent
-から選べる。新しいリポジトリを clone したい場合は Welcome の New を使う。
+から選べる。Home の `+ Open` では `Tab` を押して既存ディレクトリのパスを入力しても登録・open できる。
+新しいリポジトリを clone したい場合は Welcome の New を使う。
 
 ### 2. session を作る
 
@@ -157,9 +178,13 @@ CLI から daemon へ直接依頼することもできる。
 ```bash
 usagi session create feature-login
 usagi session create review-auth --role reviewer
+usagi session create remote-fix --base refs/remotes/origin/main
 ```
 
 session は対象リポジトリの `.usagi/sessions/<name>/` に独立した worktree として作られる。
+Home の作成欄では `local:main` / `remote:origin/(default)` / `remote:origin/main` のように
+出所を区別した base branch を `↑↓` で選ぶ。`(default)` はその remote の既定 branch を表す。
+CLI の `--base` は同じ対象を fully-qualified ref で指定する。
 role は作業種別ごとの追加指示を選ぶ stable ID で、権限や sandbox を変更するものではない。
 詳細は [session role](document/10-session-roles.md)を参照する。
 
@@ -176,6 +201,7 @@ agent -m claude
 agent -m codex
 agent -m sakana.ai
 terminal
+terminal new     # 外部ターミナルを開き、modal を閉じて Closeup へ戻る
 ```
 
 daemon 再起動などで Agent が中断した場合は、自動的に別の会話へ接続せず、保持された provider conversation を
@@ -184,14 +210,17 @@ daemon 再起動などで Agent が中断した場合は、自動的に別の会
 ### 4. 状態と PR を確認する
 
 session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。Switch の `p`、
-Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックで PR 一覧を開き、`d` で diff、
+Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開き、`d` で diff、
 `n` で session の scratchpad を開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
-検知した PR を選択した一覧を自動で開く。PR を選んで Enter を押すと既定のブラウザで開く。
+検知した PR を選択した一覧を自動で開く。PR 一覧は repository 見出しの下へ番号・状態・title をまとめ、
+上部の All / Open / Closed / Merged を `←→`、PR を `↑↓` で選ぶ。枠外のクリックで閉じ、PR を選んで
+Enter を押すと既定のブラウザで開く。
 
 ## AI エージェントとの連携
 
 daemon から起動した Agent には usagi の stdio MCP server が組み込まれる。Agent は作業中の session から、
-次のような操作を行える。
+次のような操作を行える。MCP child の cwd が provider によって変わっても、issue / memory の保存先は
+daemon が認証したその session の worktree に固定される。
 
 | 系統 | 用途 |
 |---|---|
@@ -213,6 +242,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 |---|---|
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
+| Base branch | workspace で新しい session を作るときの既定 branch |
 | Team | Enterで構造図付きカードを開き、`none` / 階層型 / フラット / パイプラインから session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
@@ -232,12 +262,20 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi open [path]` | workspace を登録して直接開く |
 | `usagi config` | Global Config を開く |
 | `usagi doctor` | 必要ツールの診断画面を開く |
+| `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、daemon だけが古い場合は seamless restart する |
+| `usagi doctor --fix --restart-agents` | 古い integration の Agent を一覧化・停止し、provider session ID を使って現在の設定で再開する。Running の Agent は拒否する |
+| `usagi doctor --fix --restart-agents --force` | Running（tool / prompt 実行中）の Agent も明示的に中断して再開する |
+| `usagi clean [--dry-run\|--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch を検出・削除する |
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
 | `usagi session ...` | daemon-owned session を作成・削除・resume する |
 | `usagi daemon start\|status\|stop\|restart` | daemon lifecycle を操作する |
 | `usagi daemon install-service` | daemon を OS の service として登録する（macOS は LaunchAgent、Linux は systemd user unit） |
+
+`usagi clean` は dry-run で候補だけを表示する。`--apply` は欠損 path の workspace 登録、欠損 workspace の
+daemon data、lifecycle に存在しない `usagi/*` branch と `.usagi/sessions/*` worktree を削除する。dirty worktree と
+未マージ branch は `--apply --force` を明示した場合だけ削除し、daemon が使用中の workspace はスキップする。
 
 `restart` は live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、
 安全な handoff の前提が欠ける場合だけ拒否する。`stop` は live Agent や terminal があると拒否する。
@@ -282,21 +320,8 @@ toolchain は `rust-toolchain.toml` に固定されている。リポジトリ�
 | 実行 | `cargo run -- [args]` |
 
 変更中・commit 前・CI で必要な gate は異なる。coverage 100% を含む品質基準、ブランチ、コミット、PR、
-リリースの規約は [開発規約](document/06-conventions.md)を正本とする。v2 の仕様ドキュメント全体は
+リリースの規約は [開発規約](document/06-conventions.md)を正本とする。仕様ドキュメント全体は
 [document/README.md](document/README.md)から参照できる。
-
-## v1
-
-旧実装は [v1/](v1/README.md) に、仕様書を含む独立した Cargo プロジェクトとして退避している。
-ルート workspace のビルド対象には含まれない。
-
-```bash
-cd v1
-cargo build --release
-```
-
-v1 のコマンド、画面、データ構造、orchestration を参照するときは
-[v1 ドキュメント](v1/document/README.md)を使う。退避版は v1 実装のスナップショットであり更新しない。
 
 ## License
 

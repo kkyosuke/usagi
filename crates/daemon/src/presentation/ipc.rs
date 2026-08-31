@@ -201,7 +201,13 @@ pub fn dispatch(
             .filter(|kind| {
                 matches!(
                     *kind,
-                    "rollover" | "session" | "agent" | "resume_agent" | "dispatch"
+                    "rollover"
+                        | "session"
+                        | "agent"
+                        | "restart_agents"
+                        | "resume_agent"
+                        | "resume_agent_with_current_integration"
+                        | "dispatch"
                 )
             })
             .and_then(|_| body.get("operation_id"))
@@ -1944,7 +1950,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_admits_agent_launch_with_its_producer_operation() {
+    fn dispatch_admits_every_mutating_agent_request_with_its_producer_operation() {
         let hello = handshake(
             &mut Cursor::new({
                 let mut bytes = Vec::new();
@@ -1956,17 +1962,25 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let reply = dispatch(
-            usagi_core::infrastructure::ipc::RequestId("r".into()),
-            json!({"kind": "agent", "operation_id": "operation"}),
-            &hello,
-        );
-        assert!(matches!(
-            reply.kind,
-            EnvelopeKind::Response {
-                outcome: ResponseOutcome::Accepted { operation_id: OperationId(ref value), operation_revision: 1 },
-                ..
-            } if value == "operation"
-        ));
+        for kind in [
+            "agent",
+            "restart_agents",
+            "resume_agent",
+            "resume_agent_with_current_integration",
+            "dispatch",
+        ] {
+            let reply = dispatch(
+                usagi_core::infrastructure::ipc::RequestId("r".into()),
+                json!({"kind": kind, "operation_id": "operation"}),
+                &hello,
+            );
+            assert!(matches!(
+                reply.kind,
+                EnvelopeKind::Response {
+                    outcome: ResponseOutcome::Accepted { operation_id: OperationId(ref value), operation_revision: 1 },
+                    ..
+                } if value == "operation"
+            ));
+        }
     }
 }

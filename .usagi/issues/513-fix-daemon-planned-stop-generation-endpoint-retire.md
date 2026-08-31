@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, daemon, lifecycle, ipc, safety]
 dependson: []
-related: [216, 341, 171, 209, 507, 515]
+related: [216, 341, 209, 507, 515]
 created_at: 2026-07-21T21:37:42.453841+00:00
 updated_at: 2026-07-22T01:07:13+00:00
 ---

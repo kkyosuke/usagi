@@ -1,6 +1,7 @@
 //! MCP tool の共通インターフェース。
 
 use std::fmt;
+use std::path::Path;
 
 use serde_json::Value;
 use usagi_core::usecase::client::{DispatchToolAction, SessionAction, SupervisorToolAction};
@@ -97,8 +98,8 @@ impl ToolDescriptor {
     /// # Errors
     ///
     /// Returns the adapter's validation, execution, or capability error.
-    pub fn call_store(&self, arguments: &Value) -> Result<String, ToolError> {
-        self.tool.call(&arguments.to_string())
+    pub fn call_store(&self, arguments: &Value, store_root: &Path) -> Result<String, ToolError> {
+        self.tool.call(&arguments.to_string(), store_root)
     }
 
     /// Validates runtime arguments with the exact schema advertised for this call.
@@ -160,6 +161,7 @@ fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), Stri
     {
         return Err(format!("{path} must be at most {maximum}"));
     }
+    validate_collection_limits(value, schema, path)?;
     if let Some(object) = value.as_object() {
         let properties = schema.get("properties").and_then(Value::as_object);
         if let Some(required) = schema.get("required").and_then(Value::as_array) {
@@ -192,6 +194,56 @@ fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_collection_limits(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    if let Some(maximum) = schema.get("x-maxUtf8Bytes").and_then(Value::as_u64)
+        && value
+            .as_str()
+            .is_some_and(|text| text.len() as u64 > maximum)
+    {
+        return Err(format!("{path} must contain at most {maximum} UTF-8 bytes"));
+    }
+    let limits = value
+        .as_str()
+        .map(|string| {
+            (
+                string.chars().count() as u64,
+                "minLength",
+                "maxLength",
+                "is shorter than the minimum length",
+                "exceeds the maximum length",
+            )
+        })
+        .or_else(|| {
+            value.as_array().map(|array| {
+                (
+                    array.len() as u64,
+                    "minItems",
+                    "maxItems",
+                    "has fewer than the minimum items",
+                    "exceeds the maximum items",
+                )
+            })
+        });
+    let Some((length, minimum, maximum, below, above)) = limits else {
+        return Ok(());
+    };
+    if schema
+        .get(minimum)
+        .and_then(Value::as_u64)
+        .is_some_and(|bound| length < bound)
+    {
+        return Err(format!("{path} {below}"));
+    }
+    if schema
+        .get(maximum)
+        .and_then(Value::as_u64)
+        .is_some_and(|bound| length > bound)
+    {
+        return Err(format!("{path} {above}"));
+    }
+    Ok(())
+}
+
 /// Rejects schema vocabulary that the runtime validator does not implement.
 ///
 /// # Errors
@@ -215,6 +267,11 @@ pub fn validate_schema_definition(schema: &Value) -> Result<(), String> {
                     | "items"
                     | "minimum"
                     | "maximum"
+                    | "minLength"
+                    | "maxLength"
+                    | "minItems"
+                    | "maxItems"
+                    | "x-maxUtf8Bytes"
                     | "default"
                     | "deprecated"
             ) {
@@ -257,6 +314,19 @@ pub fn validate_schema_definition(schema: &Value) -> Result<(), String> {
             || object
                 .get("maximum")
                 .is_some_and(|value| !value.is_number())
+            || [
+                "minLength",
+                "maxLength",
+                "minItems",
+                "maxItems",
+                "x-maxUtf8Bytes",
+            ]
+            .into_iter()
+            .any(|keyword| {
+                object
+                    .get(keyword)
+                    .is_some_and(|value| value.as_u64().is_none())
+            })
             || object
                 .get("deprecated")
                 .is_some_and(|value| !value.is_boolean())
@@ -309,7 +379,7 @@ pub trait Tool {
     /// # Errors
     ///
     /// 実行に失敗した場合や未実装の場合、`ToolError` を返す。
-    fn call(&self, _params: &str) -> Result<String, ToolError> {
+    fn call(&self, _params: &str, _store_root: &Path) -> Result<String, ToolError> {
         Err(ToolError::Unimplemented(self.name()))
     }
 }
@@ -384,6 +454,10 @@ mod tests {
             (json!(null), json!({"type":"unsupported"})),
             (json!(-1), json!({"type":"integer","minimum":0})),
             (json!(2), json!({"type":"integer","maximum":1})),
+            (json!(""), json!({"type":"string","minLength":1})),
+            (json!("long"), json!({"type":"string","maxLength":3})),
+            (json!([]), json!({"type":"array","minItems":1})),
+            (json!([1, 2]), json!({"type":"array","maxItems":1})),
             (
                 json!({"extra":true}),
                 json!({"type":"object","additionalProperties":false}),
@@ -442,6 +516,10 @@ mod tests {
             json!({"oneOf":[{"pattern":"x"}]}),
             json!({"minimum":"zero"}),
             json!({"maximum":"one"}),
+            json!({"minLength":-1}),
+            json!({"maxLength":"one"}),
+            json!({"minItems":1.5}),
+            json!({"maxItems":null}),
             json!({"deprecated":"yes"}),
         ];
         for schema in malformed {

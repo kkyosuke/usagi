@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, tui, ux, render, correctness]
 dependson: []
-related: [578, 600]
+related: [578]
 created_at: 2026-07-31T06:00:00+00:00
 updated_at: 2026-08-01T00:41:45.061176+00:00
 ---

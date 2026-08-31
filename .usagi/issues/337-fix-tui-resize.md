@@ -26,7 +26,6 @@ TUI は crossterm のイベントストリームを使わず console ベース�
 
 - `io/term_reader.rs` の `TermKeyReader::next_key` は、resize で発生する EINTR 由来の偽 `Key::CtrlC` を検出すると**読み捨てて再ブロック**する（「次の実キーで再描画される」前提）。ブロッキング読みの画面は次のキーまで再描画されない。
 - `home/event/mod.rs` の `event_loop` は毎パス `term.size()` を読むが、**`skip_paint` 判定にサイズ変化が入っていない**ため、静かな選択（Overview）ではアイドルティックが来ても再描画をスキップする。
-- `io/screen.rs` の `FramePainter`（#65 の再描画コアレス、#152 の列単位差分）は**直前フレーム `prev` を差分基準として保持し続ける**。resize すると端末側の表示は再フロー・切り詰めで実態が変わるのに `prev` は無効化されないため、次の描画でも「変化していない行」がスキップされ、崩れが画面に残る。
 - `home/terminal/pane.rs`（没入）も独自の `prev` を持ち、resize 時に PTY はリサイズするが `prev` を破棄しない。
 
 ## 対応方針
@@ -42,6 +41,3 @@ resize 検知時に**全画面クリア＋フル再描画（差分キャッシ�
 テストは注入済みの seam（純ロジック関数・`FramePainter` のユニットテスト・スクリプト化 `KeyReader`）で追加し、カバレッジ 100% を維持する（`term_reader.rs` / `signals.rs` / `pane.rs` は実 IO のため計測対象外）。
 
 ## 関連
-
-- #65 再描画コアレス（`FramePainter` 差分描画）
-- #152 左右ペインの列単位差分

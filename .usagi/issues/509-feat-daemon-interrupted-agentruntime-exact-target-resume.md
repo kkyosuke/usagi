@@ -32,7 +32,7 @@ interrupted runtime ごとに client-safe な `AgentResumeTarget` を projection
 
 resumable inventory は root と managed session、同一 scope の複数 history を別 item として返し、resume available / unavailable と provider ID を含まない safe reason を持つ。並び順は durable timestamp + stable ID 等で deterministic にする。
 
-CLI / TUI / MCP は同じ exact-target wire contract の薄い client とし、provider ID や cwd を組み立てない。legacy session-scoped request を互換提供する場合、daemon が eligible target を厳密に 1 件だけ解決できる時に限り exact request へ変換し、0 件 / 複数件は typed failure にする。「最新」や provider 種別からの暗黙選択は禁止する。
+CLI / TUI / MCP は同じ exact-target wire contract の薄い client とし、provider ID や cwd を組み立てない。resume request は daemon が発行した exact target を必須とし、「最新」や provider 種別からの暗黙選択は禁止する。
 
 Claude は daemon-generated UUID を exact target の内部 metadata として使用する。Codex は [#504](./504-feat-daemon-codex-structured-capture-wiring.md) の正式 structured capture がある runtime だけ available とし、未実装 / capture failure では unavailable を返す。`--last`、transcript / state DB の探索、session-wide identity inference へ fallback しない。
 

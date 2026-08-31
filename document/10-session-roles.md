@@ -56,13 +56,17 @@ default は各 layer で指定された scope だけを上書きする。
 | workspace | `<registered-workspace-root>/.usagi/roles.toml` | global を上書き |
 
 `roles.toml` は `version = 1` を持つ。選択したテンプレートを土台に差分定義を重ねられるため、テンプレート選択と
-catalog 編集は両立する。`none` を選び両ファイルも無い場合は role 無しの互換モードとなる。
+catalog 編集は両立する。`none` を選び両ファイルも無い場合は role を適用しない。
 
 role は組織上の責務を prompt として与える。階層型チームで Director が小さいタスクを Worker へ直接 dispatch
-する場合は 2 層、大きいタスクを Manager へ dispatch し、その Manager が Worker を dispatch する場合は
-3 層になる。dispatch binding が実行ごとの親子関係を保持するため、完了報告は Worker → Manager → Director と
-一段ずつ返る。`delegation` block を定義した role は daemon admission で `enabled`、`child_roles`、`max_depth`、
-`max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない version-1 role は互換性のため従来動作を維持する。
+する場合は 2 層、大きいタスクを Manager へ dispatch し、その Manager が Worker session を作る場合は
+3 層になる。session の親は作成時の authenticated caller session として lifecycle state に固定し、既存 session
+への dispatch では変更しない。dispatch binding は実行ごとの immediate caller を保持するため、完了報告は
+Worker → Manager → Director と一段ずつ返る。`delegation` block を定義した role は daemon admission で
+`enabled`、`child_roles`、`max_depth`、`max_concurrency` を検証し、prompt の自己申告には依存しない。block を
+持たない role は従来の許可動作を維持する。depth admission も managed session では lifecycle state を直接読み、
+作成完了直後の daemon crash で dispatch sidecar への複製が遅れても深さを過小評価しない。sidecar は lifecycle に
+存在しない legacy / supervisor scope の fallback に限る。
 durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
 
 階層型チームでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
@@ -74,7 +78,10 @@ sidebar は各session名の横に `◆ Manager` / `● Worker` と階層イン�
 子の inbox commit 後は、live な Manager には通知を送り、停止中なら通知を next-launch queue に永続化する。
 いずれかの effective role に `delegation` block がある場合は、credential のない `session_delegate_issue` を拒否する。
 `max_concurrency` は実行中の子だけでなく未起動の delegated prompt も予約枠として数え、Agent の runtime/model を変更しても
-同じ session の利用数と絶対深度を引き継ぐ。
+同じ session の利用数と絶対深度を引き継ぐ。上限判定と一時枠の取得は dispatch store の同じ lock 内で行い、session
+作成や worker spawn の前に予約する。成功時は durable queue/run が枠を引き継ぎ、失敗時は guard が解放するため、並行 request
+が check と publish の間をすり抜けない。session の親は終了 run の retention 対象ではない immutable lineage に保存し、古い
+binding が削除された後も深度・sidebar・Garden の親子関係を維持する。
 
 reader は future version、不正な role ID、空の `scopes`、未知 scope、16 KiB を超える instruction、NUL、対応 scope を許可しない
 default を拒否する。workspace catalog の権威は target session branch ではなく daemon に登録された workspace root である。
@@ -143,24 +150,22 @@ session では許可、root では拒否として同じ 1 行が両方で真に�
 | `- session:` | MCP を配線する launch では常に載る（session 系統は無効化できない） |
 | `- issue:` | effective `issue_enabled` |
 | `- memory:` | effective `memory_enabled` |
-| `- local_llm_ask:` | Global `local_llm.enabled` |
 
 `issue_enabled` / `memory_enabled` の effective 値は、Global 設定に **daemon に登録された workspace root** の
 `.usagi/settings.json` を重ねて解決する。設定を tool 系統へ写す規則は `usagi-core` の `domain::agent::mcp_tools` に
 1 つだけあり、`usagi mcp` が registry を組むときも同じ関数を通る。prompt が述べる系統と `tools/list` が登録する
 系統が同じ設定から出ることは、この共有によって構造的に保証する。session worktree は `.usagi/settings.json` を
-持たない（git 追跡外）ため、worktree を権威にすると workspace の上書きが消える。`local_llm` は Global だけが権威である
-（正本は [7. MCP サーバ#daemon Agent への local LLM 配線](07-mcp.md#daemon-agent-への-local-llm-配線)）。
+持たない（git 追跡外）ため、worktree を権威にすると workspace の上書きが消える。
 
 設定が読めない場合は既定値へ倒さず launch を拒否し、error log に記録する。`usagi mcp` が serve loop の開始前に
 失敗するのと同じ規則である。既定へ倒すと、自身の MCP server が登録できない tool 系統を prompt が述べた Agent が起動する。
 
 ## safe projection と非永続データ
 
-`session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。list / status / overview の各 session は、これに加えて `parent_session_id` / `parent_session_name` / `organization_depth` / `organization_path` を返す。path は root の `Director` から当該 session までで、同一 session 内の Agent handoff は階層を増やさない。
+`session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。list / status / overview の各 session は、これに加えて lifecycle state に作成時だけ保存した `parent_session_id` と、そこから導出する `parent_session_name` / `organization_depth` / `organization_path` を返す。path は root の `Director` から当該 session までで、既存 session への dispatch や同一 session 内の Agent handoff は階層を変更しない。
 catalog が読めない場合も lifecycle metadata を返し、summary は `null` になる。
 
-TUI は `role_id` / `role_summary` と dispatch binding 由来の `parent_session_id` / `agent_status` を stable session identity keyed の controller projection として保持し、
+TUI は `role_id` / `role_summary`、lifecycle state 由来の `parent_session_id`、dispatch state 由来の `agent_status` を stable session identity keyed の controller projection として保持し、
 legacy `SessionRecord` や `state.json` へコピーしない。sidebar は role ID だけを badge 表示し、role metadata を
 attach / remove などの lifecycle capability 判定には使わない。
 

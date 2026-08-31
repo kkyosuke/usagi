@@ -22,7 +22,6 @@ updated_at: 2026-08-07T02:52:01.958771+00:00
 |---|---:|---|
 | high | #655 | live VT parser の CSI / SGR state と自己生成 checkpoint を bounded にする |
 | high | #656 | Agent readiness subprocess を owner lock 外で bounded に完了・回収する |
-| high | #657 | New workspace clone / register 中も entry loop の描画・入力を進める |
 | high | #658 | terminal observer / PR projection worker の停止を無通知にしない |
 | medium | #659 | scrollback 上限到達後の oldest eviction を O(1) にする |
 | medium | #660 | idle tick の session / git / terminal projection clone・scan を change-driven にする |

@@ -3,7 +3,7 @@
 //!
 //! It composes the two existing control-plane usecases: [`stop`](crate::usecase::stop)
 //! asks a running daemon to stop and waits for its endpoint retirement / exact
-//! record clear (or lock-fenced endpoint and record recovery when initially stale), then
+//! record clear (or performs lock-fenced recovery when it becomes stale), then
 //! [`launch_and_confirm`](crate::usecase::start::launch_and_confirm) spawns
 //! a detached `serve` and waits for it to register. The store, probe, terminator,
 //! launcher, and sleeper are injected, so this stays pure and fully testable.
@@ -51,6 +51,7 @@ mod tests {
     use crate::test_support::{
         FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
     };
+    use std::cell::Cell;
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
     use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe, Sleeper};
@@ -63,6 +64,27 @@ mod tests {
     impl Sleeper for OwnerCleanupSleeper<'_> {
         fn sleep(&self) {
             assert!(self.store.clear_if(self.expected).unwrap());
+        }
+    }
+
+    struct ExitingOwnerProbe {
+        owner_pid: u32,
+        owner_observations: Cell<u8>,
+    }
+
+    impl LivenessProbe for ExitingOwnerProbe {
+        fn observe(&self, record: &DaemonRecord) -> DaemonProcessObservation {
+            if record.pid != self.owner_pid {
+                return DaemonProcessObservation::Exact;
+            }
+            let observation = if self.owner_observations.get() == 0 {
+                DaemonProcessObservation::Exact
+            } else {
+                DaemonProcessObservation::Gone
+            };
+            self.owner_observations
+                .set(self.owner_observations.get() + 1);
+            observation
         }
     }
 
@@ -99,6 +121,37 @@ mod tests {
         );
         // The old daemon was signalled and the new one is now recorded.
         assert_eq!(terminator.terminated(), vec![1111]);
+        assert_eq!(store.load().unwrap().map(|record| record.pid), Some(5555));
+    }
+
+    #[test]
+    fn owner_exit_before_cleanup_is_reclaimed_then_restarted() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let old = DaemonRecord::new(1111);
+        store.save(&old).unwrap();
+        let probe = ExitingOwnerProbe {
+            owner_pid: old.pid,
+            owner_observations: Cell::new(0),
+        };
+        let terminator = RecordingTerminator::default();
+        let launcher = TestLauncher::registering(&store, 5555);
+
+        assert_eq!(
+            restart(
+                &store,
+                &probe,
+                &terminator,
+                &launcher,
+                &NoopSleeper,
+                &NoopReady,
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon restarted (pid 5555)"
+        );
+        assert_eq!(probe.owner_observations.get(), 2);
+        assert_eq!(terminator.terminated(), vec![old.pid]);
+        assert_eq!(launcher.launches(), 1);
         assert_eq!(store.load().unwrap().map(|record| record.pid), Some(5555));
     }
 

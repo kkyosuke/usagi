@@ -16,6 +16,7 @@ pub mod overview_modal;
 pub mod pr_modal;
 pub mod quit_modal;
 pub mod remove_modal;
+pub mod root_terminal_drawer;
 pub mod scratchpad_modal;
 pub mod splash;
 pub mod text_overlay;

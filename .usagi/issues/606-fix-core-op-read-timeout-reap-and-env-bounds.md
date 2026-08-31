@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, core, env, process, resilience, resource, security]
 dependson: []
-related: [500, 538]
+related: []
 created_at: 2026-07-31T15:00:00+09:00
 updated_at: 2026-08-01T08:15:00+09:00
 ---

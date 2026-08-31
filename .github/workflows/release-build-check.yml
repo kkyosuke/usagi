@@ -20,6 +20,7 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".github/workflows/create-release-pr.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/auto-release.yml"
       - ".github/workflows/release-build-check.yml"
@@ -45,7 +46,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # component は日付なし nightly へ入り、実際のビルドは rust-toolchain.toml が
       # pin した nightly で走る。target は pin した toolchain へ追加する必要があるため

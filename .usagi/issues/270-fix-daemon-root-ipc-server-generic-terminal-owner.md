@@ -6,7 +6,6 @@ priority: high
 labels: [daemon, ipc, terminal, runtime]
 dependson: [264]
 related: [263, 268]
-parent: 227
 created_at: 2026-07-13T01:32:29.174167+00:00
 updated_at: 2026-07-13T01:37:41.374955+00:00
 ---

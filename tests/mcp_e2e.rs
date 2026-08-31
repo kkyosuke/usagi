@@ -4,19 +4,20 @@
 
 mod support;
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use serde_json::json;
 use support::mcp::{FixtureArgv, McpHarness};
 use usagi_core::domain::{
     agent::{AgentProfileId, CallerRef, ModelSelector},
     id::{AgentId, OperationId, UserDecisionId, WorkspaceId},
     role::RoleId,
-    settings::DEFAULT_LOCAL_LLM_MODEL,
     user_decision::UserDecision,
 };
 use usagi_core::infrastructure::store::{
@@ -26,6 +27,79 @@ use usagi_core::usecase::client::{
     DaemonClient, DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent,
     TuiUserDecisionAction,
 };
+
+#[test]
+fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
+    let mcp = McpHarness::start();
+    let bootstrap_path = mcp.data_dir().join("daemon/bootstrap.lock");
+    let bootstrap = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&bootstrap_path)
+        .expect("the running daemon has a bootstrap lock node");
+    FileExt::lock_exclusive(&bootstrap).expect("the fixture holds bootstrap authority");
+
+    // `USAGI_WORKSPACE_ROOT` is the non-secret provision marker the daemon
+    // injects into its Agent and forwards to the MCP child. The child must
+    // attach to that already-running daemon: taking this held lock would spend
+    // the five-second bootstrap ceiling and then exit before stdio serve.
+    let started = Instant::now();
+    let mut child = support::daemon::usagi_command(
+        mcp.home(),
+        support::daemon::Channel::Local,
+        mcp.cwd(),
+        &["mcp".as_ref()],
+    )
+    .env(
+        usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV,
+        mcp.workspace(),
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("daemon-provisioned MCP child starts");
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "clientInfo": {"name": "attached-regression", "version": "1"}
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let mut response = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut response)
+        .unwrap();
+
+    if response.is_empty() {
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        panic!("MCP child closed before initialize: {stderr}");
+    }
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["result"]["serverInfo"]["name"], "usagi");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "attached MCP waited on bootstrap.lock"
+    );
+
+    let _ = child.kill();
+    child.wait().unwrap();
+}
 
 #[test]
 fn production_tools_list_fixes_the_49_tool_schema_contract() {
@@ -335,7 +409,7 @@ printf '%s\n%s\n%s\n' \
     assert!(dispatch.contains("investigate flaky startup"));
     assert!(!dispatch.contains("DELEGATE_ROLE_SECRET"));
     let argv = wait_for_fixture_argv(&mcp, "codex", None, "DELEGATE_ROLE_SECRET");
-    assert_shipping_role_argv(&argv, "reviewer", "DELEGATE_ROLE_SECRET", None, false);
+    assert_shipping_role_argv(&argv, "reviewer", "DELEGATE_ROLE_SECRET", None);
     let sessions = tool_text(&mcp.tool("session_list", &json!({})));
     let delegated_session = sessions["sessions"]
         .as_array()
@@ -413,6 +487,15 @@ fn production_dispatch_uses_the_trusted_root_before_and_after_session_creation()
 
     let created = mcp.tool("session_create", &json!({"name":"root-policy-target"}));
     assert!(created.get("error").is_none(), "{created}");
+    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
+    let created_by_agent = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "root-policy-target")
+        .unwrap();
+    assert_eq!(created_by_agent["parent_session_name"], "mcp-caller");
+    assert_eq!(created_by_agent["organization_depth"], 2);
     let dispatched = mcp.tool(
         "session_dispatch",
         &json!({
@@ -578,6 +661,22 @@ fn production_issue_writes_are_refused_at_the_workspace_root() {
 }
 
 #[test]
+fn claimed_child_store_tools_stay_bound_to_the_authenticated_session() {
+    let mut mcp = McpHarness::start();
+    drop(mcp.launch_caller());
+
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"Claimed child scope"})));
+
+    assert_eq!(created["number"], 1);
+    assert!(
+        mcp.workspace()
+            .join(".usagi/sessions/mcp-caller/.usagi/issues/001-claimed-child-scope.md")
+            .is_file()
+    );
+    assert!(!mcp.workspace().join(".usagi/issues").exists());
+}
+
+#[test]
 fn production_store_tools_round_trip_through_stdio_and_durable_files() {
     let mut mcp = McpHarness::start_in_session("store-e2e");
     let created = tool_text(&mcp.tool(
@@ -683,8 +782,8 @@ fn production_issue_create_commits_source_when_derived_refresh_fails() {
 }
 
 #[test]
-fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
-    let mut mcp = McpHarness::start_in_session("v1-sequence-compat");
+fn production_issue_create_uses_the_git_common_sequence_authority() {
+    let mut mcp = McpHarness::start_in_session("shared-sequence");
     let authority = mcp.workspace().join(".git/usagi/issue-numbers");
     let reservations = authority.join("reservations");
     fs::create_dir_all(&reservations).unwrap();
@@ -695,10 +794,14 @@ fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
     .unwrap();
     fs::write(reservations.join("0000000515.reserved"), "515\n").unwrap();
 
-    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"After v1"})));
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"After reservation"})));
 
     assert_eq!(created["number"], 516);
-    assert!(mcp.cwd().join(".usagi/issues/516-after-v1.md").is_file());
+    assert!(
+        mcp.cwd()
+            .join(".usagi/issues/516-after-reservation.md")
+            .is_file()
+    );
     assert_eq!(
         fs::read_to_string(reservations.join("0000000516.reserved")).unwrap(),
         "516\n"
@@ -712,7 +815,7 @@ fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
 
 #[test]
 fn production_issue_create_from_nested_linked_worktree_uses_git_common_authority() {
-    let mut mcp = McpHarness::start_in_nested_session("nested-v1-sequence-compat");
+    let mut mcp = McpHarness::start_in_nested_session("nested-shared-sequence");
     let authority = mcp.workspace().join(".git/usagi/issue-numbers");
     fs::create_dir_all(&authority).unwrap();
     fs::write(
@@ -1082,12 +1185,11 @@ fn assert_shipping_role_argv(
     role_id: &str,
     instructions: &str,
     user_prompt: Option<&str>,
-    local_llm: bool,
 ) {
     let role = RoleId::new(role_id).unwrap();
     let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
         usagi_core::domain::agent::prompt::PromptScope::Session,
-        Some(shipping_tool_families(local_llm)),
+        Some(shipping_tool_families()),
         Some((&role, instructions)),
     );
     let system_prompt = shipping_system_prompt(capture);
@@ -1129,22 +1231,18 @@ fn assert_shipping_role_argv(
 }
 
 /// The families a shipping launch gets: this harness leaves Issue and Memory at
-/// their default (enabled) in both settings layers, so only the delegation server
-/// varies with the local-LLM setting.
-fn shipping_tool_families(
-    local_llm: bool,
-) -> usagi_core::domain::agent::mcp_tools::McpToolFamilies {
+/// their default (enabled) in both settings layers.
+fn shipping_tool_families() -> usagi_core::domain::agent::mcp_tools::McpToolFamilies {
     usagi_core::domain::agent::mcp_tools::McpToolFamilies {
         issue: true,
         memory: true,
-        local_llm,
     }
 }
 
 fn assert_shipping_legacy_argv(capture: &FixtureArgv) {
     let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
         usagi_core::domain::agent::prompt::PromptScope::Session,
-        Some(shipping_tool_families(false)),
+        Some(shipping_tool_families()),
         None,
     );
     let assignments = capture
@@ -1165,10 +1263,19 @@ fn assert_secret_absent_from_durable_data(mcp: &McpHarness, secrets: &[&str]) {
         if path == fixture_argv {
             return;
         }
-        if path.is_dir() {
+        let Ok(metadata) = path.symlink_metadata() else {
+            return;
+        };
+        if metadata.is_dir() {
             for entry in fs::read_dir(path).unwrap() {
                 visit(&entry.unwrap().path(), fixture_argv, secrets);
             }
+            return;
+        }
+        // The production harness keeps its MCP transport FIFOs and daemon
+        // sockets live while this assertion runs. Reading a FIFO would block;
+        // only durable regular files belong to this scan.
+        if !metadata.is_file() {
             return;
         }
         let Ok(bytes) = fs::read(path) else {
@@ -1205,7 +1312,7 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         .expect("legacy caller argv was captured");
     assert_shipping_legacy_argv(&legacy);
     mcp.restart_with_credential(&caller_credential);
-    mcp.enable_local_llm();
+    mcp.write_legacy_local_llm_settings();
     write_session_role_catalog(
         &mcp,
         "shipping-reviewer",
@@ -1243,24 +1350,21 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         assert!(!response.to_string().contains(ROLE_SECRET));
         responses.push(response);
         let capture = wait_for_fixture_argv(&mcp, executable, Some(prompt), ROLE_SECRET);
-        assert_shipping_role_argv(
-            &capture,
-            "shipping-reviewer",
-            ROLE_SECRET,
-            Some(prompt),
-            true,
-        );
+        assert_shipping_role_argv(&capture, "shipping-reviewer", ROLE_SECRET, Some(prompt));
         captures.push(capture);
     }
 
     for capture in &captures {
-        assert!(
-            capture
-                .arguments
-                .iter()
-                .any(|argument| argument.contains(DEFAULT_LOCAL_LLM_MODEL)),
-            "local-LLM MCP configuration was not provisioned"
-        );
+        for removed_value in ["usagi-llm", "llm-mcp", "qwen2.5-coder:7b"] {
+            assert!(
+                capture
+                    .arguments
+                    .iter()
+                    .all(|argument| !argument.contains(removed_value)),
+                "legacy local-LLM setting entered shipping {runtime} argv",
+                runtime = capture.runtime
+            );
+        }
     }
 
     // Editing the catalog cannot rewrite the already-running process argv.
@@ -1541,6 +1645,51 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
+fn production_dispatch_into_an_existing_session_does_not_reparent_it() {
+    let mut mcp = McpHarness::start();
+    write_session_role_catalog(&mcp, "coder", "Dispatch coder", "DISPATCH_ROLE_SECRET");
+    let created = mcp.tool(
+        "session_create",
+        &json!({"name":"existing-top-level", "role":"coder"}),
+    );
+    assert!(created.get("error").is_none(), "{created}");
+
+    let caller_credential = mcp.launch_caller();
+    mcp.restart_with_credential(&caller_credential);
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+exit 0
+"#,
+    );
+    let dispatched = mcp.tool(
+        "session_dispatch",
+        &json!({
+            "session":{"name":"existing-top-level", "role":"coder"},
+            "agent":{"runtime":"codex","model":"fixture-codex"},
+            "prompt":"work in an existing top-level session"
+        }),
+    );
+    assert!(dispatched.get("error").is_none(), "{dispatched}");
+
+    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
+    let existing = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "existing-top-level")
+        .unwrap();
+    assert!(existing["parent_session_id"].is_null());
+    assert!(existing["parent_session_name"].is_null());
+    assert_eq!(existing["organization_depth"], 1);
+    assert_eq!(
+        existing["organization_path"],
+        json!(["Director", "existing-top-level"])
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One process-spanning dispatch keeps completion and argv assertions together.
 fn production_dispatch_worker_complete_reaches_the_caller_inbox() {
     let mut mcp = McpHarness::start();
@@ -1583,7 +1732,6 @@ printf '%s\n%s\n%s\n' \
         "coder",
         "DISPATCH_ROLE_SECRET",
         Some("complete through MCP"),
-        false,
     );
 
     let session = tool_text(&mcp.tool("session_get", &json!({"name":"mcp-worker"})));
@@ -1602,6 +1750,21 @@ printf '%s\n%s\n%s\n' \
         worker["organization_path"],
         json!(["Director", "mcp-caller", "mcp-worker"])
     );
+    let lifecycle: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::daemon::lifecycle_state_path(&mcp.data_dir())).unwrap(),
+    )
+    .unwrap();
+    let durable_sessions = lifecycle["state"]["sessions"].as_array().unwrap();
+    let caller_id = durable_sessions
+        .iter()
+        .find(|session| session["name"] == "mcp-caller")
+        .unwrap()["session_id"]
+        .clone();
+    let durable_worker = durable_sessions
+        .iter()
+        .find(|session| session["name"] == "mcp-worker")
+        .unwrap();
+    assert_eq!(durable_worker["parent_session_id"], caller_id);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let message = loop {
@@ -1622,6 +1785,17 @@ printf '%s\n%s\n%s\n' \
     assert_eq!(message["kind"], "completed");
     assert_eq!(message["summary"], "fixture completed");
     assert_eq!(message["result"]["commits"], json!(["abc123"]));
+    let page = tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true,"limit":1})));
+    let next_cursor = page["next_cursor"].as_u64().unwrap();
+    let ack = mcp.tool("agent_inbox_ack", &json!({"cursor":next_cursor}));
+    assert!(ack.get("error").is_none(), "{ack}");
+    assert_eq!(tool_text(&ack)["acked_cursor"], next_cursor);
+    assert!(
+        tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true})))["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     for (tool, arguments) in [
         ("session_get", json!({"name":"mcp-worker"})),

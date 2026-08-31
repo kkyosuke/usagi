@@ -137,19 +137,66 @@ impl WorkspaceSnapshot {
 ///
 /// path の検証・登録・最終利用時刻の更新・state 読み込みは実 IO を持つ合成側が実装する。
 /// Open 一覧と Recent はともにこの 1 つの port を経由する。
-pub trait WorkspaceLoader {
+pub trait WorkspaceLoader: Send {
+    /// Whether potentially slow open/refresh calls should be moved to a worker
+    /// while the terminal keeps painting.
+    fn background_operations(&self) -> bool;
+
     /// `path` の workspace を開き、画面描画用 snapshot を返す。
     ///
     /// # Errors
     ///
     /// workspace の解決・登録・更新・state 読み込みに失敗した場合、そのエラーを返す。
     ///
-    /// [`io::ErrorKind::PermissionDenied`] は「daemon がこの workspace を serve
-    /// していない」という 1 つの意味に固定する。daemon が権威を持つ workspace は 1 つだけなので、
-    /// 別 workspace の snapshot を返す代わりにこれを返す。entry 画面はこのエラーだけは
-    /// 画面を保ったまま理由を表示し（[`open_refusal_notice`]）、他のエラーは従来どおり
-    /// 呼び出し元へ伝播する。
+    /// [`io::ErrorKind::PermissionDenied`] は「daemon がこの workspace tenant を
+    /// adopt / serve できない」、[`io::ErrorKind::NotConnected`] は「daemon へ到達できない」
+    /// という 1 つずつの意味に固定する。別 workspace の snapshot を返す代わりにこれらを返す。
+    /// entry 画面はこの 2 つだけは画面を保ったまま理由を表示し
+    /// （[`open_failure_notice`]）、他のエラーは従来どおり呼び出し元へ伝播する。
     fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot>;
+
+    /// Refresh an already-open workspace without changing registry/Recent
+    /// ordering. Garden uses this to replace the read-only cache of inactive
+    /// project tabs before it is shown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace snapshot cannot be refreshed.
+    fn refresh(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot>;
+
+    /// Make an already prepared workspace the declaration used by subsequently
+    /// created daemon ports. Batch preparation may have inspected another
+    /// member last, so activation reasserts the chosen target without loading
+    /// it twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace declaration cannot be installed.
+    fn activate_prepared(&mut self, path: &Path) -> io::Result<()>;
+
+    /// Persist the ordered set of project tabs as one Unite recent. The
+    /// default keeps compatibility adapters storage-free.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the user-data store cannot be updated.
+    fn record_unite(&mut self, _paths: &[PathBuf]) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Start a non-blocking read of the global workspace registry.
+    ///
+    /// Home uses this only while its `+ Open` overlay is visible so workspace
+    /// additions from another usagi process become selectable without putting
+    /// file IO on the frame thread. `Ok(true)` means a refresh was admitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the refresh worker cannot be started.
+    fn dispatch_registry_refresh(&mut self) -> io::Result<bool>;
+
+    /// Take a completed global workspace-registry read without waiting.
+    fn take_registry_refresh(&mut self) -> Option<io::Result<Vec<Workspace>>>;
 
     /// Remove entries that no longer point at directories and return the paths
     /// removed from the core-owned workspace registry. The caller has already
@@ -225,14 +272,24 @@ pub struct WorkspaceCreateCompletion {
 
 /// entry 画面が [`WorkspaceLoader::open`] の失敗をその場で提示できるか判定する。
 ///
-/// [`io::ErrorKind::PermissionDenied`] は「daemon がその workspace を serve していない」という
-/// port の宣言なので、workspace 切り替え画面（Welcome の Recent・Open 一覧）はその画面に留まり、
-/// 理由と復帰手順を notice として出す。開けない workspace のために TUI 全体を畳む必要はなく、
-/// 利用者は同じ画面で serve されている workspace を選び直せる。ほかの失敗は画面を保っても
+/// 提示できるのは次の 2 つで、どちらも「この workspace は今開けないが、画面に留まれば
+/// 利用者が次の手を打てる」失敗である。
+///
+/// | kind | 意味 | 利用者の次の手 |
+/// |---|---|---|
+/// | [`io::ErrorKind::PermissionDenied`] | daemon がその workspace を serve していない | serve されている別の workspace を選び直す |
+/// | [`io::ErrorKind::NotConnected`] | daemon へ到達できない | 復帰を待って同じ workspace を開き直す |
+///
+/// 開けない workspace のために TUI 全体を畳む必要はない。とくに daemon 不達で畳むと、
+/// wedge した daemon が利用者を shell へ締め出すことになる。ほかの失敗は画面を保っても
 /// 解決しないため、呼び出し元へ伝播させる。
 #[must_use]
-pub fn open_refusal_notice(error: &io::Error) -> Option<String> {
-    (error.kind() == io::ErrorKind::PermissionDenied).then(|| error.to_string())
+pub fn open_failure_notice(error: &io::Error) -> Option<String> {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::NotConnected
+    )
+    .then(|| error.to_string())
 }
 
 /// TUI をどの画面から開始するかを表す。
@@ -323,14 +380,14 @@ pub enum Key {
     /// キャレットやタブを 1 つ右へ／モード選択では次の選択へ（→）。
     Right,
     /// キャレットを行頭へ（Home）。テキスト入力にフォーカスがある間はキャレット移動、
-    /// navigation 文脈では `+ new session`（`Ctrl-A` と同義。#257）。
+    /// navigation 文脈では `+ new session`（`Ctrl-A` と同義）。
     Home,
     /// キャレットを行末へ（End）。navigation 文脈では効果を持たない。
     End,
     /// キャレット位置の 1 文字を前方削除する（Del）。
     Delete,
     /// キャレットを入力の先頭へ（`Ctrl-A`）。テキスト入力にフォーカスがある間だけ
-    /// 行頭キャレットで、navigation 文脈では `+ new session` に予約されたまま（#287）。
+    /// 行頭キャレットで、navigation 文脈では `+ new session` に予約されたまま。
     LineStart,
     /// キャレットを入力の末尾へ（`Ctrl-E`。`End` と等価）。
     LineEnd,
@@ -448,7 +505,7 @@ pub fn run(entry: &EntryScreen, runner: &mut dyn ScreenRunner) -> io::Result<()>
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
-        EntryScreen, Key, ScreenRunner, Terminal, WorkspaceSnapshot, open_refusal_notice, run,
+        EntryScreen, Key, ScreenRunner, Terminal, WorkspaceSnapshot, open_failure_notice, run,
     };
     use std::io;
     use std::path::{Path, PathBuf};
@@ -664,16 +721,28 @@ mod tests {
     }
 
     #[test]
-    fn only_a_permission_denied_open_is_presentable_on_the_entry_screen() {
-        // The one refusal an entry screen can act on: this daemon serves another
+    fn only_a_refusal_or_an_unreachable_daemon_is_presentable_on_the_entry_screen() {
+        // The refusal an entry screen can act on: this daemon serves another
         // workspace, so the switcher shows the reason and stays open.
         let refusal = io::Error::new(
             io::ErrorKind::PermissionDenied,
             "cannot open /tmp/other: this daemon serves the workspace /tmp/served.",
         );
         assert_eq!(
-            open_refusal_notice(&refusal).as_deref(),
+            open_failure_notice(&refusal).as_deref(),
             Some("cannot open /tmp/other: this daemon serves the workspace /tmp/served.")
+        );
+
+        // An unreachable daemon is the same shape of failure: the workspace is
+        // not openable *now*. Tearing the TUI down for it would let a wedged
+        // daemon lock the user out to the shell.
+        let unreachable = io::Error::new(
+            io::ErrorKind::NotConnected,
+            "daemon unavailable: the daemon did not answer within this connection's deadline",
+        );
+        assert_eq!(
+            open_failure_notice(&unreachable).as_deref(),
+            Some("daemon unavailable: the daemon did not answer within this connection's deadline")
         );
 
         // Anything else is a failure the screen cannot resolve, so it propagates.
@@ -685,7 +754,7 @@ mod tests {
                 "workspace path is not a directory",
             ),
         ] {
-            assert_eq!(open_refusal_notice(&other), None, "{other}");
+            assert_eq!(open_failure_notice(&other), None, "{other}");
         }
     }
 

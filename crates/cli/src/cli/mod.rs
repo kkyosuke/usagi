@@ -77,8 +77,12 @@ pub enum TuiRequest {
     },
     /// Config 画面を開く。
     Config,
-    /// Doctor 画面を開く。
-    Doctor,
+    /// Doctor 診断または明示された修復を実行する。
+    Doctor {
+        fix: bool,
+        restart_agents: bool,
+        force: bool,
+    },
 }
 
 /// CLI の解析・ハンドラ実行結果。
@@ -96,6 +100,13 @@ pub enum RunOutcome {
     RequestDaemonReplacement { force: bool },
     /// stdio MCP server の起動を依頼する。
     LaunchMcp,
+    /// 孤立 resource の棚卸しまたは削除を合成ルートへ依頼する。
+    Clean {
+        /// 候補へ削除効果を適用するか。
+        apply: bool,
+        /// user changes を含み得る Git resource も削除するか。
+        force: bool,
+    },
     /// Codex `SessionStart` hook の structured payload を daemon へ渡す。
     CaptureCodexSession,
     /// エージェントのライフサイクルフックが名乗る phase を daemon へ報告する。
@@ -186,8 +197,30 @@ pub enum Command {
     },
     /// 設定を編集する（TUI の Config を開く）
     Config,
-    /// 必要ツールの導入状況を診断する（TUI の Doctor を開く）
-    Doctor,
+    /// 必要ツールと daemon / Agent integration を診断する
+    Doctor {
+        /// 修復可能な問題を修復してから再診断する
+        #[arg(long)]
+        fix: bool,
+        /// 古い daemon-owned Agent を停止し、現在の integration で exact resume する
+        #[arg(long, requires = "fix")]
+        restart_agents: bool,
+        /// 実行中 tool を含む live Agent の停止を許可する
+        #[arg(long, requires = "restart_agents")]
+        force: bool,
+    },
+    /// 紐付いていない workspace・daemon data・worktree・branch を整理する
+    Clean {
+        /// 削除せず候補だけを表示する（既定動作）
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        /// 検出した安全な候補を実際に削除する（省略時は dry-run）
+        #[arg(long)]
+        apply: bool,
+        /// dirty worktree と未マージ branch も削除する（--apply が必要）
+        #[arg(long, requires = "apply")]
+        force: bool,
+    },
     /// usagi バイナリを GitHub Releases から更新する
     Update {
         /// 更新先の release を一覧から選択する
@@ -281,7 +314,7 @@ impl From<SandboxModeArg> for SandboxMode {
 ///
 /// 引数なしの `usagi daemon` は `serve`（active role）と同じである。各 variant は
 /// 追加の positional を持たないため、clap が余分な argv を runtime 起動前に拒否する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum DaemonCommand {
     /// 前景で daemon を serve する（内部用）
     #[command(hide = true)]
@@ -300,6 +333,13 @@ pub enum DaemonCommand {
     Start,
     /// daemon の状態を表示する
     Status,
+    /// 稼働中 daemon が保持する 1 workspace を解放する
+    Retire {
+        path: PathBuf,
+        /// live な Agent / generic terminal を終了して解放することを明示する
+        #[arg(long)]
+        force: bool,
+    },
     /// daemon を停止する
     Stop {
         /// live な Agent / generic terminal を巻き添えに停止することを明示する
@@ -318,9 +358,9 @@ pub enum DaemonCommand {
         #[arg(long)]
         force: bool,
     },
-    /// macOS `LaunchAgent` を install する
+    /// macOS `LaunchAgent` / Linux systemd user service を install する
     InstallService,
-    /// macOS `LaunchAgent` を uninstall する
+    /// macOS `LaunchAgent` / Linux systemd user service を uninstall する
     UninstallService,
 }
 
@@ -332,13 +372,11 @@ pub enum SessionCommand {
         /// Stable session role selected from the effective role catalog.
         #[arg(long)]
         role: Option<String>,
+        /// Fully-qualified local or remote-tracking ref used as the base.
+        #[arg(long = "base")]
+        base_ref: Option<String>,
     },
     Remove {
-        name: String,
-    },
-    /// Explicitly resume the retained provider conversation in a new daemon
-    /// Agent runtime. This command is never issued during startup/reconnect.
-    Resume {
         name: String,
     },
     /// Resume one exact target returned by `resume-inventory`. The target is a
@@ -349,12 +387,6 @@ pub enum SessionCommand {
     /// List root and managed-session Agent resume targets for one workspace ID.
     ResumeInventory {
         workspace_id: String,
-    },
-    /// Validate legacy sessions without changing state unless `--apply` is set.
-    RecoverLegacy {
-        /// Persist the fully validated adoption plan.
-        #[arg(long)]
-        apply: bool,
     },
     Setup {
         name: String,
@@ -378,7 +410,20 @@ impl Command {
             Command::Hop => Box::new(h::Hop),
             Command::Open { path } => Box::new(h::Open { path }),
             Command::Config => Box::new(h::Config),
-            Command::Doctor => Box::new(h::Doctor),
+            Command::Doctor {
+                fix,
+                restart_agents,
+                force,
+            } => Box::new(h::Doctor {
+                fix,
+                restart_agents,
+                force,
+            }),
+            Command::Clean {
+                dry_run: _,
+                apply,
+                force,
+            } => Box::new(Clean { apply, force }),
             Command::Update { select_version } => Box::new(h::Update { select_version }),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
             Command::Version => Box::new(h::Version {
@@ -416,13 +461,27 @@ impl Command {
     }
 }
 
+struct Clean {
+    apply: bool,
+    force: bool,
+}
+
+impl Run for Clean {
+    fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
+        Ok(RunOutcome::Clean {
+            apply: self.apply,
+            force: self.force,
+        })
+    }
+}
+
 struct DaemonEntry {
     command: DaemonCommand,
 }
 
 impl Run for DaemonEntry {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
-        Ok(match self.command {
+        Ok(match self.command.clone() {
             DaemonCommand::Replace { force } => RunOutcome::RequestDaemonReplacement { force },
             command => RunOutcome::LaunchDaemon(command),
         })
@@ -444,17 +503,20 @@ struct Session {
 impl Run for Session {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         let (action, payload) = match &self.command {
-            SessionCommand::Create { name, role } => (
-                SessionAction::Create,
-                serde_json::json!({"name": name, "role": role}),
-            ),
+            SessionCommand::Create {
+                name,
+                role,
+                base_ref,
+            } => {
+                let mut payload = serde_json::json!({"name": name, "role": role});
+                if let Some(base_ref) = base_ref {
+                    payload["base_ref"] = serde_json::json!(base_ref);
+                }
+                (SessionAction::Create, payload)
+            }
             SessionCommand::Remove { name } => {
                 (SessionAction::Remove, serde_json::json!({"name": name}))
             }
-            SessionCommand::Resume { name } => (
-                SessionAction::ResumeAgent,
-                serde_json::json!({"name": name}),
-            ),
             SessionCommand::ResumeExact { target } => {
                 let target = serde_json::from_str(target).map_err(|_| {
                     io::Error::new(
@@ -479,10 +541,6 @@ impl Run for Session {
                     workspace,
                 }));
             }
-            SessionCommand::RecoverLegacy { apply } => (
-                SessionAction::RecoverLegacy,
-                serde_json::json!({"apply": apply}),
-            ),
             SessionCommand::Setup { name, command } => (
                 SessionAction::Setup,
                 serde_json::json!({"name": name, "command": command}),
@@ -584,7 +642,19 @@ mod tests {
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "doctor"]).unwrap().command,
-            Some(Command::Doctor)
+            Some(Command::Doctor {
+                fix: false,
+                restart_agents: false,
+                force: false,
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "clean"]).unwrap().command,
+            Some(Command::Clean {
+                dry_run: false,
+                apply: false,
+                force: false
+            })
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "update"]).unwrap().command,
@@ -604,6 +674,32 @@ mod tests {
             Cli::try_parse_from(["usagi", "version"]).unwrap().command,
             Some(Command::Version)
         ));
+    }
+
+    #[test]
+    fn doctor_repair_flags_require_explicit_escalation_in_order() {
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "doctor", "--fix"])
+                .unwrap()
+                .command,
+            Some(Command::Doctor {
+                fix: true,
+                restart_agents: false,
+                force: false,
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "doctor", "--fix", "--restart-agents", "--force"])
+                .unwrap()
+                .command,
+            Some(Command::Doctor {
+                fix: true,
+                restart_agents: true,
+                force: true,
+            })
+        ));
+        assert!(Cli::try_parse_from(["usagi", "doctor", "--restart-agents"]).is_err());
+        assert!(Cli::try_parse_from(["usagi", "doctor", "--fix", "--force"]).is_err());
     }
 
     /// 内部フックコマンド（ヘルプ非表示だが実行可能）も解析できる。
@@ -682,7 +778,32 @@ mod tests {
             assert!(out.is_empty());
             assert!(err.is_empty());
         }
+    }
 
+    /// tenant retire も typed な daemon 起動要求になる。
+    #[test]
+    fn retire_entry_returns_typed_launch_request() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = run(
+            argv(&["usagi", "daemon", "retire", "/tmp/work", "--force"]),
+            "9.9.9",
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            RunOutcome::LaunchDaemon(DaemonCommand::Retire {
+                path: std::path::PathBuf::from("/tmp/work"),
+                force: true,
+            })
+        );
+    }
+
+    /// daemon replacement と MCP もそれぞれの typed な起動要求になる。
+    #[test]
+    fn replacement_and_mcp_entries_return_typed_launch_requests() {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let outcome = run(
@@ -742,6 +863,58 @@ mod tests {
                 .command,
             Some(Command::Completion { shell: Shell::Zsh })
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "clean", "--apply", "--force"])
+                .unwrap()
+                .command,
+            Some(Command::Clean {
+                dry_run: false,
+                apply: true,
+                force: true
+            })
+        ));
+        assert!(Cli::try_parse_from(["usagi", "clean", "--force"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "clean", "--dry-run"])
+                .unwrap()
+                .command,
+            Some(Command::Clean {
+                dry_run: true,
+                apply: false,
+                force: false
+            })
+        ));
+        assert!(Cli::try_parse_from(["usagi", "clean", "--dry-run", "--apply"]).is_err());
+    }
+
+    #[test]
+    fn clean_becomes_a_typed_composition_request() {
+        let (dry_run, output) = super::execute(Command::Clean {
+            dry_run: false,
+            apply: false,
+            force: false,
+        });
+        assert_eq!(
+            dry_run,
+            RunOutcome::Clean {
+                apply: false,
+                force: false
+            }
+        );
+        assert!(output.is_empty());
+
+        let (apply, _) = super::execute(Command::Clean {
+            dry_run: false,
+            apply: true,
+            force: true,
+        });
+        assert_eq!(
+            apply,
+            RunOutcome::Clean {
+                apply: true,
+                force: true
+            }
+        );
     }
 
     #[test]
@@ -754,14 +927,6 @@ mod tests {
             (
                 ["usagi", "session", "remove", "a"].as_slice(),
                 usagi_core::usecase::client::SessionAction::Remove,
-            ),
-            (
-                ["usagi", "session", "resume", "a"].as_slice(),
-                usagi_core::usecase::client::SessionAction::ResumeAgent,
-            ),
-            (
-                ["usagi", "session", "recover-legacy", "--apply"].as_slice(),
-                usagi_core::usecase::client::SessionAction::RecoverLegacy,
             ),
             (
                 ["usagi", "session", "setup", "a", "echo ok"].as_slice(),
@@ -782,6 +947,7 @@ mod tests {
             SessionCommand::Create {
                 name: "a".into(),
                 role: None,
+                base_ref: None,
             },
             SessionCommand::Create { .. }
         ));
@@ -853,6 +1019,31 @@ mod tests {
                 ..
             }) if payload == serde_json::json!({"name":"review-auth", "role":"reviewer"})
         ));
+
+        let parsed = Cli::try_parse_from([
+            "usagi",
+            "session",
+            "create",
+            "remote-fix",
+            "--base",
+            "refs/remotes/origin/main",
+        ])
+        .unwrap()
+        .command
+        .unwrap();
+        let (outcome, _) = super::execute(parsed);
+        assert!(matches!(
+            outcome,
+            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session {
+                action: usagi_core::usecase::client::SessionAction::Create,
+                payload,
+                ..
+            }) if payload == serde_json::json!({
+                "name":"remote-fix",
+                "role":null,
+                "base_ref":"refs/remotes/origin/main"
+            })
+        ));
     }
 
     /// TUI を開くコマンドは、解析済み引数を保った起動要求を返す。
@@ -868,7 +1059,14 @@ mod tests {
                 },
             ),
             (&["usagi", "config"][..], TuiRequest::Config),
-            (&["usagi", "doctor"][..], TuiRequest::Doctor),
+            (
+                &["usagi", "doctor"][..],
+                TuiRequest::Doctor {
+                    fix: false,
+                    restart_agents: false,
+                    force: false,
+                },
+            ),
         ] {
             let mut out = Vec::new();
             let mut err = Vec::new();
@@ -901,6 +1099,28 @@ mod tests {
         assert!(!out.is_empty());
     }
 
+    /// daemon service の help は実装済みの macOS / Linux を両方示す。
+    #[test]
+    fn daemon_service_help_names_both_supported_platforms() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = run(
+            argv(&["usagi", "daemon", "--help"]),
+            "9.9.9",
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let help = String::from_utf8(out).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Exit(0));
+        assert!(err.is_empty());
+        assert!(help.contains("macOS `LaunchAgent` / Linux systemd user service を install する"));
+        assert!(
+            help.contains("macOS `LaunchAgent` / Linux systemd user service を uninstall する")
+        );
+    }
+
     /// `--version` フラグと `version` サブコマンドはどちらも注入された配布 version を出す。
     #[test]
     fn run_reports_injected_version() {
@@ -926,7 +1146,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(outcome, RunOutcome::SelfUpdate { .. }));
-        assert!(String::from_utf8(out).unwrap().contains("select"));
+        assert!(String::from_utf8(out).unwrap().contains("リリースを選んで"));
         assert!(err.is_empty());
     }
 
@@ -999,7 +1219,11 @@ mod tests {
         };
         assert_eq!(request.clone(), request);
         assert!(format!("{request:?}").contains("Workspace"));
-        let outcome = RunOutcome::LaunchTui(TuiRequest::Doctor);
+        let outcome = RunOutcome::LaunchTui(TuiRequest::Doctor {
+            fix: false,
+            restart_agents: false,
+            force: false,
+        });
         assert_eq!(outcome.clone(), outcome);
         assert!(format!("{outcome:?}").contains("Doctor"));
     }

@@ -519,6 +519,8 @@ pub struct TerminalSession {
     /// shrinking it early would irreversibly clip cells while the PTY still
     /// uses the old width.
     pending_geometry: Option<Geometry>,
+    /// Client-local view mutations that do not advance the daemon output cursor.
+    local_view_revision: u64,
 }
 
 impl TerminalSession {
@@ -553,6 +555,7 @@ impl TerminalSession {
             resize_retry_at: None,
             viewport_notice: None,
             pending_geometry: None,
+            local_view_revision: 0,
         }
     }
 
@@ -587,7 +590,16 @@ impl TerminalSession {
         (self.state as u8).hash(&mut key);
         (self.history as u8).hash(&mut key);
         self.error.hash(&mut key);
+        self.local_view_revision.hash(&mut key);
         key.finish()
+    }
+
+    /// Clears this client's primary viewport immediately while the shell
+    /// processes the forwarded readline clear chord.
+    pub fn clear_for_user(&mut self) -> bool {
+        let cleared = self.screen.clear_for_user();
+        self.local_view_revision = self.local_view_revision.saturating_add(u64::from(cleared));
+        cleared
     }
 
     /// Whether the current view restored the terminal's retained history, or is
@@ -707,7 +719,11 @@ impl TerminalSession {
     /// the returned selection's copy text.
     #[must_use]
     pub fn begin_selection(&self, anchor: TerminalPoint) -> TerminalSelection {
-        TerminalSelection::begin(self.cells(), anchor)
+        TerminalSelection::begin_with_wraps(
+            self.cells(),
+            self.screen.soft_wraps_with_scrollback(),
+            anchor,
+        )
     }
 
     /// Attaches (or reattaches) with this pane's viewport and rebuilds the
@@ -3481,10 +3497,13 @@ mod tests {
 
     #[test]
     fn begin_selection_snapshots_the_current_terminal_cells() {
-        let session = TerminalSession::new(terminal(), geometry());
+        let mut session = TerminalSession::new(terminal(), Geometry { rows: 2, cols: 4 });
+        session.screen.advance(b"abcde");
         let point = TerminalPoint { row: 0, column: 0 };
-        let selection = session.begin_selection(point);
+        let mut selection = session.begin_selection(point);
+        selection.extend(TerminalPoint { row: 1, column: 0 });
         assert_eq!(selection.anchor(), point);
-        assert_eq!(selection.focus(), point);
+        assert_eq!(selection.focus(), TerminalPoint { row: 1, column: 0 });
+        assert_eq!(selection.text(), "abcde");
     }
 }

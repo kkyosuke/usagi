@@ -5,7 +5,7 @@ status: done
 priority: low
 labels: [design, daemon, terminal]
 dependson: [209]
-related: [168, 213]
+related: []
 created_at: 2026-07-12T11:40:16.705437+00:00
 updated_at: 2026-07-12T21:32:12.066907+00:00
 ---

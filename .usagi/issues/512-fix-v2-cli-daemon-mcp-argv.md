@@ -5,8 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, cli, daemon, mcp]
 dependson: []
-related: [481]
-parent: 453
+related: []
 created_at: 2026-07-21T21:34:02.710474+00:00
 updated_at: 2026-07-21T21:46:19.564076+00:00
 ---
@@ -29,8 +28,6 @@ root/v2 の `src/main.rs` は clap より前に `args[1]` だけで daemon/MCP �
 
 ## 対象責務と非対象
 
-完全な process argv を副作用前に clap で解析し、合成ルートへ typed な daemon/MCP 起動要求を返す入口面を対象とする。daemon presentation は閉じた verb 型だけを受け取り、未知 verb の成功経路を持たない。daemon lifecycle、MCP JSON-RPC wire semantics、daemon reply failure の exit 1 mapping（#481）の再設計は非対象である。
-
 ## 受入条件
 
 - [ ] `daemon` / `mcp` を含む完全な argv が、data directory 解決・daemon bootstrap/process 起動・socket/stdio serve 等の副作用より前に clap で検証される。
@@ -38,7 +35,6 @@ root/v2 の `src/main.rs` は clap より前に `args[1]` だけで daemon/MCP �
 - [ ] daemon presentation の dispatch は閉じた typed verb を受け、未知文字列を stdout＋`Ok` に変換しない。
 - [ ] `usagi daemon` / `serve` / `start` / `status` / `stop` / `restart` / `install-service` / `uninstall-service` と、引数なしの MCP stdio server は従来どおり動作する。
 - [ ] 通常 CLI と引数なし TUI、`--help` / `--version` の既存契約を壊さない。
-- [ ] clap 解析後の daemon failure は #481 の契約どおり exit 1、stderr safe message、stdout 空を維持する。
 
 ## 必須回帰テスト
 

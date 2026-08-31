@@ -37,7 +37,7 @@ jobs:
       notes: ${{ steps.notes.outputs.notes }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -137,7 +137,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # component は日付なし nightly へ入り、実際のビルドは rust-toolchain.toml が
       # pin した nightly で走る。target は pin した toolchain へ追加する必要があるため
@@ -184,7 +184,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |

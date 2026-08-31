@@ -12,7 +12,9 @@ use usagi_core::domain::{
     },
 };
 
-use super::{CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner};
+use super::{
+    CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner, PROFILE_REVISION,
+};
 use crate::usecase::{
     generation::ProcessIdentity,
     runtime::{
@@ -202,6 +204,25 @@ fn root_scope_with_an_outer_launcher_avoids_a_nested_platform_sandbox() {
 }
 
 #[test]
+fn interactive_session_with_an_outer_launcher_uses_it_for_git_and_network_boundary() {
+    let resolved = CodexAdapter::new(FakeProvisioner::with_outer_sandbox())
+        .resolve(&request(LaunchMode::Interactive))
+        .unwrap();
+    assert!(resolved.provision.sandbox_launcher().is_some());
+    assert!(
+        resolved
+            .snapshot
+            .plan
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "danger-full-access"])
+    );
+    assert!(!resolved.snapshot.plan.argv.iter().any(|argument| {
+        argument == "workspace-write" || argument == "--dangerously-bypass-approvals-and-sandbox"
+    }));
+}
+
+#[test]
 fn sakana_profile_shares_the_codex_grammar_but_launches_its_own_executable() {
     let mut adapter = CodexAdapter::sakana(FakeProvisioner::ready());
     assert_eq!(adapter.profile().id.as_str(), "sakana-ai");
@@ -272,7 +293,7 @@ fn renders_resume_only_without_an_initial_prompt() {
     request.provider_resume = Some(ProviderResumeRef {
         provider: ProviderKind::Codex,
         native_session_id: ProviderSessionId::new("structured-codex-session").unwrap(),
-        adapter_revision: 1,
+        adapter_revision: PROFILE_REVISION,
         scope: request.scope.clone(),
         provenance: ProviderCaptureProvenance::ProviderStructured,
         last_known_status: ProviderResumeStatus::Interrupted,
@@ -443,12 +464,12 @@ fn durable_snapshot_contains_no_provisioned_values_and_fails_closed_on_revision_
     assert!(!serialized.contains("ephemeral system prompt"));
     assert!(adapter.validate_snapshot(&resolved.snapshot).is_ok());
 
-    let newer = CodexAdapter::with_revision(FakeProvisioner::ready(), 2);
+    let newer = CodexAdapter::with_revision(FakeProvisioner::ready(), PROFILE_REVISION + 1);
     assert_eq!(
         newer.validate_snapshot(&resolved.snapshot),
         Err(LaunchValidationError::ProfileRevisionMismatch {
-            expected: 1,
-            actual: 2
+            expected: PROFILE_REVISION,
+            actual: PROFILE_REVISION + 1
         })
     );
 }

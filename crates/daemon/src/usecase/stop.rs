@@ -6,7 +6,8 @@
 //! probe, and then:
 //!
 //! - **running**: asks the process to terminate, then waits until the owner has
-//!   retired its endpoint and cleared that exact record;
+//!   retired its endpoint and cleared that exact record. If the owner exits
+//!   first, the same command completes the lock-fenced stale cleanup;
 //! - **stale**: acquires a scoped singleton fence, retires the stale endpoint,
 //!   then conditionally clears that exact leftover record. Both stale reasons
 //!   take this path — a vanished owner and a reused PID are equally proven gone,
@@ -116,24 +117,41 @@ pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
                 .expect("classify reports Alive only for a present record");
             let pid = record.pid;
             terminator.terminate(record)?;
-            wait_for_owner_cleanup(store, probe, sleeper, record)?;
+            if wait_for_owner_cleanup(store, probe, sleeper, record)? == OwnerCleanup::NeedsRecovery
+            {
+                reclaim_stale(store, stale_cleanup, record)?;
+            }
             Ok(format!("{describe}: daemon stopped (pid {pid})"))
         }
         DaemonState::Stale(_) | DaemonState::Unverified => {
             let record = record
                 .as_ref()
                 .expect("classify reports a reclaim candidate only for a present record");
-            match stale_cleanup.cleanup_if(store, record) {
-                Ok(StaleCleanup::Cleared) => Ok(format!("{describe}: cleared stale daemon record")),
-                Ok(StaleCleanup::Superseded) => Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "daemon ownership changed during stale cleanup",
-                )),
-                Err(error) => Err(error),
-            }
+            reclaim_stale(store, stale_cleanup, record)?;
+            Ok(format!("{describe}: cleared stale daemon record"))
         }
         DaemonState::Absent => Ok(format!("{describe}: daemon not running")),
     }
+}
+
+fn reclaim_stale(
+    store: &dyn DaemonRecordPort,
+    stale_cleanup: &dyn StaleDaemonCleanup,
+    expected: &DaemonRecord,
+) -> io::Result<()> {
+    match stale_cleanup.cleanup_if(store, expected)? {
+        StaleCleanup::Cleared => Ok(()),
+        StaleCleanup::Superseded => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "daemon ownership changed during stale cleanup",
+        )),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnerCleanup {
+    Completed,
+    NeedsRecovery,
 }
 
 fn wait_for_owner_cleanup(
@@ -141,27 +159,26 @@ fn wait_for_owner_cleanup(
     probe: &dyn LivenessProbe,
     sleeper: &dyn Sleeper,
     expected: &DaemonRecord,
-) -> io::Result<()> {
+) -> io::Result<OwnerCleanup> {
     for poll in 0..=MAX_CLEANUP_POLLS {
         match store.load_record()? {
             Some(current) if current == *expected => {
-                if probe.observe(expected)
-                    != usagi_core::domain::daemon::DaemonProcessObservation::Exact
-                {
+                if matches!(
+                    probe.observe(expected),
+                    usagi_core::domain::daemon::DaemonProcessObservation::Gone
+                        | usagi_core::domain::daemon::DaemonProcessObservation::IdentityMismatch
+                ) {
                     // The owner may retire, clear, and exit between our record
                     // read and process observation. Recheck the completion fence so
                     // a successful cleanup in that window is not reported as
                     // an incomplete shutdown.
                     return match store.load_record()? {
-                        Some(current) if current == *expected => Err(io::Error::other(format!(
-                            "daemon {} exited before endpoint cleanup completed",
-                            expected.pid
-                        ))),
-                        Some(_) | None => Ok(()),
+                        Some(current) if current == *expected => Ok(OwnerCleanup::NeedsRecovery),
+                        Some(_) | None => Ok(OwnerCleanup::Completed),
                     };
                 }
             }
-            Some(_) | None => return Ok(()),
+            Some(_) | None => return Ok(OwnerCleanup::Completed),
         }
         if poll < MAX_CLEANUP_POLLS {
             sleeper.sleep();
@@ -739,27 +756,26 @@ mod tests {
     }
 
     #[test]
-    fn owner_exit_before_cleanup_is_an_error_and_keeps_the_record() {
+    fn owner_exit_before_cleanup_is_recovered_in_the_same_stop() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let record = DaemonRecord::new(4321);
         store.save(&record).unwrap();
         let terminator = RecordingTerminator::default();
-        let error = stop(
-            &store,
-            &AliveThenGoneProbe {
-                calls: Cell::new(0),
-            },
-            &terminator,
-            &NoopSleeper,
-            &info(),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("before endpoint cleanup completed")
+        assert_eq!(
+            stop(
+                &store,
+                &AliveThenGoneProbe {
+                    calls: Cell::new(0),
+                },
+                &terminator,
+                &NoopSleeper,
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon stopped (pid 4321)"
         );
-        assert_eq!(store.load().unwrap(), Some(record));
+        assert_eq!(terminator.terminated(), vec![record.pid]);
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]

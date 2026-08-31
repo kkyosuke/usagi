@@ -5,14 +5,14 @@ status: done
 priority: high
 labels: [agent, daemon, security, claude, sandbox]
 dependson: []
-related: [530]
+related: []
 created_at: 2026-07-24T13:01:00.604658+00:00
 updated_at: 2026-07-24T20:13:00.387783+00:00
 ---
 
 ## 背景
 
-[#530](530-feat-agent-v2-claude-guard-workspace-os-sandbox.md) の第 2 段で、OS sandbox の**機構**を実装・ユニットテストした:
+OS sandbox の**機構**を実装・ユニットテストした:
 
 - `usagi claude-sandbox` コマンド（fail-closed の platform sandbox launcher）と純粋な計画ロジック `usagi-core::usecase::claude_sandbox`（macOS `sandbox-exec` profile / Linux `bwrap`。firmlink `/private` 対応・末尾スラッシュ正規化済み）。
 - `--settings` の hook JSON 材料化 `usagi_daemon::usecase::claude::scoped_settings_json`（`PreToolUse`→`guard-workspace`（session のみ）＋ライフサイクル→`agent-phase`）。
@@ -33,12 +33,8 @@ updated_at: 2026-07-24T20:13:00.387783+00:00
 
 ## 完了条件
 
-- session 起動の Claude が `usagi claude-sandbox --mode session -- claude …` 経由で起動し、`PreToolUse` に `guard-workspace` が配線される（#530 完了条件 1）。
-- root 起動の Claude が `--mode root` で起動し、project root と一時領域への書き込みだけが許可される（#530 完了条件 2）。
-- backend 不在・未対応 platform では無保護起動しない（#530 完了条件 3）。
 - 全 E2E テスト（上記 4 ファイル）が Linux CI で green。
 
 ## 参考
 
-- 機構の実装（第 2 段）: [#530](530-feat-agent-v2-claude-guard-workspace-os-sandbox.md)
 - phase 報告 IPC（第 3 段の別軸）: [#531](531-feat-agent-v2-agent-phase-daemon-phase-ipc.md)

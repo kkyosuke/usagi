@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [v2, daemon, test, lifecycle, leak]
 dependson: []
-related: [171]
+related: []
 created_at: 2026-07-24T22:38:25.106198+00:00
 updated_at: 2026-07-25T01:09:37.898311+00:00
 ---
@@ -33,8 +33,6 @@ PID 25529  PPID 1  ELAPSED 01:48:04
 さらに **test が daemon の workspace root を fixture ではなく開発者の実 worktree に束縛している**。daemon の workspace root は起動時 cwd（`spawn_ipc_server` の `std::env::current_dir()`）で決まる。`tests/cli_tui.rs` の `ProductionDaemonCleanup::spawn` と `daemon start` / `daemon restart` を叩く各 test は `.current_dir()` を設定しないため、cwd は cargo の manifest dir、すなわち **その session worktree のルート**になる。上記 PID 25529 の cwd がまさにそれである（`tests/agent_ipc_e2e.rs` の `start_daemon` と `tests/support/mcp.rs` は正しく fixture repo を `.current_dir()` している）。
 
 これは二次被害を生む。残留 daemon が session worktree 内に cwd を持ち、`target/llvm-cov-target/debug/usagi` を実行中のまま握るため、その session の `git worktree remove` / `remove_dir_all` が失敗・停滞する。「巨大 target の session remove が数分ブロックする」症状（[#529](529-fix-daemon-failed-session-remove.md) 周辺、および本 issue と同時に起票した teardown worker の issue）の一因である。
-
-なお [#171](171-fix-daemon-usagi-daemon-serve-teardown-data-dir-self-shutdown.md)（`done`）は、当時の daemon 実装に対してまったく同じクラスの不具合（ppid=1 の孤児 30 プロセス、tempdir socket、`cargo test` / `cargo llvm-cov` の 2 profile から対で発生）を修正し、恒久対策として「自分の data dir が消えたら終了する」自衛を要求していた。**v2 daemon（`crates/` + ルート `src/`）にはその自衛が存在しない**。同じ不具合が同じ原因で再発している。
 
 ## 設計判断
 

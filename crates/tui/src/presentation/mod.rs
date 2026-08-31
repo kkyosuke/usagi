@@ -1,6 +1,6 @@
 //! TUI 面の presentation 層。画面描画（各画面の view・共通 widget）と
-//! キー入力のマッピングを置く。描画は v1 と同じく自前の差分レンダリングで行い、
-//! UI フレームワーク（ratatui 等）には依存しない方針を引き継ぐ。
+//! キー入力のマッピングを置く。描画は自前の差分レンダリングで行い、
+//! UI フレームワーク（ratatui 等）には依存しない。
 //! 実 IO は持たず、出力先は呼び出し側（合成ルート）から注入する。
 //!
 //! 描画は 3 つに分ける: 各画面の view（[`views`]）・再利用 UI 部品（[`widgets`]）・
@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod theme;
 pub mod views;
 pub mod widgets;
+pub mod workspace_deck;
 pub mod workspace_runtime;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -26,7 +27,7 @@ use chrono::{DateTime, Timelike, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{
     AgentInventory, AgentProfileId, AgentResumeRelation, AgentResumeTarget,
-    AgentRuntimeInventoryState, ProviderResumeProjection,
+    AgentRuntimeInventoryState, AgentWorkspaceObservation, ProviderResumeProjection,
 };
 use usagi_core::domain::id::{
     AgentContinuationRef, OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId,
@@ -50,25 +51,31 @@ use crate::presentation::views::director_drawer::{
 };
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
+use crate::presentation::views::pr_modal;
 use crate::presentation::views::quit_modal;
+use crate::presentation::views::root_terminal_drawer;
 use crate::presentation::views::scratchpad_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, garden_click_at, garden_fits, home_header_action_at, render_home,
-    render_home_at, right_pane_tab_at, terminal_point_at,
+    Workspace as WorkspaceView, garden_click_at, garden_fits, garden_scroll_action,
+    home_header_action_at, render_home, render_home_at, right_pane_tab_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
+use crate::presentation::workspace_deck::{
+    OverlayIntent, ProjectBarTarget, WorkspaceDeck, project_bar, render_overlay,
+};
 use crate::presentation::workspace_runtime::{PaneRestoreTarget, WorkspaceRuntime};
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
     AgentTabIntentPortCommit, AgentTabProjection,
 };
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry, ExitChoice,
-    Feedback, GardenClick, NewRequest, Notice, OperationResult, Overlay, PendingToken, RoleChoice,
-    SessionRoleCatalog, SessionRoleProjection, Target,
+    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DirectorNew, Effect, EnvironmentEntry,
+    ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay,
+    PendingToken, RoleChoice, Route, SessionBranchCatalog, SessionRoleCatalog,
+    SessionRoleProjection, Target, WorkspaceDrawerFocus,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -80,17 +87,16 @@ use crate::usecase::application::daemon_backend::{
     TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
-use crate::usecase::application::pane::{PaneKind, PaneSelection, PaneTab, TabSelection};
+use crate::usecase::application::pane::{PaneKind, PaneTab, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
-use crate::usecase::application::terminal_screen::TerminalBuffer;
-use crate::usecase::application::terminal_screen::TerminalInputModes;
-use crate::usecase::application::terminal_selection::TerminalSelection;
+use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
+use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
 };
-use crate::usecase::application::{Key, ScreenRunner, Terminal, open_refusal_notice};
+use crate::usecase::application::{Key, ScreenRunner, Terminal, open_failure_notice};
 use crate::usecase::overview::SessionCommand;
 use crate::usecase::terminal_input::{
     LiveTerminalAction, PointerEvent, PointerKind, WHEEL_LINES, encode_mouse_wheel,
@@ -305,11 +311,13 @@ pub trait AgentCommandPort: Send {
     /// Declare the **detached background** terminals whose exit the client still
     /// has to notice.
     ///
-    /// Only the selected foreground terminal is attached, so a background tab
-    /// has no stream that could report its process exiting. The production
-    /// adapter observes these refs through a bounded per-scope terminal
-    /// inventory on its own thread — never by attaching or resuming one of them
-    /// — and reports each exit once through
+    /// A background tab normally has no stream that could report its process
+    /// exiting. The one exception is the managed terminal still visible behind
+    /// Director: it remains attached for live, dimmed output and is filtered out
+    /// before this method is called. The production adapter observes the
+    /// remaining refs through a bounded per-scope terminal inventory on its own
+    /// thread — never by attaching or resuming one of them — and reports each
+    /// exit once through
     /// [`take_exited_background_terminals`](Self::take_exited_background_terminals).
     /// Their **final output bytes** are not fetched here: they are read when the
     /// tab is brought to the foreground, or through the explicit read-only
@@ -519,7 +527,7 @@ impl PaneLaunchCommandPort for UnavailablePaneLaunchPort {
 /// Platform-native terminal launch boundary.
 ///
 /// This is deliberately independent from [`AgentCommandPort`]: `terminal new`
-/// must remain available just as it is in v1, without any daemon client.
+/// must remain available without any daemon client.
 pub trait ExternalTerminalPort: Send {
     /// Open a native terminal rooted at `directory`.
     ///
@@ -641,18 +649,23 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
 /// Maps a management [`Key`] to the bytes a focused live terminal should
 /// receive. Reserved prefix actions ([`Key::Live`]) do not reach the shell;
 /// all other keys, including global controls, do while Closeup owns the pane.
+#[cfg(test)]
 fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
+    key_to_terminal_bytes_for_mode(key, false)
+}
+
+fn key_to_terminal_bytes_for_mode(key: Key, bracketed_paste: bool) -> Option<Vec<u8>> {
     let bytes = match key {
         Key::Passthrough(bytes) => return (!bytes.is_empty()).then(|| bytes.clone()),
         Key::Management { passthrough, .. } => {
             return (!passthrough.is_empty()).then_some(passthrough);
         }
-        // Forward a paste as one bracketed-paste block so an agent that requested
-        // the mode inserts the multi-line text instead of submitting on every
-        // embedded newline (the fix for pasting clipboard into the agent).
+        // Mark a paste only when the focused program requested DECSET 2004.
+        // Otherwise those control sequences can become visible `200~` / `201~`
+        // text in a shell or an Agent that has not enabled bracketed paste yet.
         Key::Paste(text) => {
             return (!text.is_empty())
-                .then(|| crate::usecase::terminal_input::encode_bracketed_paste(&text));
+                .then(|| crate::usecase::terminal_input::encode_paste(&text, bracketed_paste));
         }
         Key::Char(ch) => ch.to_string().into_bytes(),
         Key::Enter => b"\r".to_vec(),
@@ -711,18 +724,43 @@ fn forward_live_terminal_input(
         }
         return true;
     }
-    let Some((terminal, bytes)) = runtime
+    let Some(terminal) = runtime
         .wants_live_input()
         .then(|| runtime.focused_terminal())
         .flatten()
-        .zip(key_to_terminal_bytes(key.clone()))
     else {
         return false;
     };
+    // Mode lookup walks the attached terminal set, so keep ordinary keystrokes
+    // on their existing direct path and consult it only for a paste.
+    let bracketed_paste = matches!(key, Key::Paste(_))
+        && ui
+            .terminal_input_modes(&terminal)
+            .is_some_and(|modes| modes.paste == PasteMode::Bracketed);
+    let Some(mut bytes) = key_to_terminal_bytes_for_mode(key.clone(), bracketed_paste) else {
+        return false;
+    };
+    // A generic shell's Ctrl-C is the workspace-terminal reset gesture: first
+    // interrupt the foreground job, then let readline handle Ctrl-L and repaint
+    // a fresh prompt at the top. Agent CLIs keep the ordinary SIGINT byte.
+    if matches!(key, Key::Quit) && !runtime.is_agent_terminal(&terminal) {
+        bytes.push(12);
+    }
     // The stream port is resident, so a launch in flight never drops a
     // keystroke; a genuine stream failure is surfaced instead of swallowed.
-    if let Err(message) = ui.send_terminal_bytes(&terminal, &bytes) {
-        controls.set_feedback(message);
+    match ui.send_terminal_bytes(&terminal, &bytes) {
+        Ok(()) => {
+            // Generic shells treat Ctrl-L (and the Ctrl-C reset sequence above)
+            // as a user-facing clear. Mutate the local view only after the
+            // durable input was accepted, matching the daemon authority.
+            if matches!(bytes.as_slice(), [12] | [3, 12])
+                && !runtime.is_agent_terminal(&terminal)
+                && ui.clear_terminal_for_user(&terminal)
+            {
+                controls.reset_after_clear();
+            }
+        }
+        Err(message) => controls.set_feedback(message),
     }
     true
 }
@@ -788,16 +826,20 @@ fn drawer_agent_owns_escape(runtime: &WorkspaceRuntime) -> bool {
     runtime.wants_live_input() && runtime.focused_terminal().is_some()
 }
 
-/// Retarget the two `Ctrl-O` follow-ups whose meaning differs in Director mode.
+/// Retarget `Ctrl-O` follow-ups whose meaning differs in an open drawer.
 ///
-/// In the drawer, New is the operation a control chord should reach — `Ctrl-O`
-/// `Ctrl-N` opens the CLI picker — and conversation cycling takes the plain
-/// follow-up `Ctrl-O` `n` in its place. Outside the drawer both chords keep
-/// their managed-pane meaning (`Ctrl-O Ctrl-N` cycles tabs, `Ctrl-O n` opens the
-/// drawer's New picker), so this swap is scoped to an open drawer and applied
-/// once, before any consumer of the key observes it.
-fn retarget_director_chords(runtime: &WorkspaceRuntime, key: Key) -> Key {
-    if !runtime.state().director_drawer_open() {
+/// A root terminal drawer maps plain `Ctrl-O n` to a new terminal tab. In the
+/// Director drawer, `Ctrl-O Ctrl-N` opens the CLI picker and conversation
+/// cycling takes plain `Ctrl-O n` in its place. Outside those drawers both
+/// chords keep their managed-pane meaning, so the retargeting is applied once,
+/// before any consumer of the key observes it.
+fn retarget_drawer_chords(runtime: &WorkspaceRuntime, key: Key) -> Key {
+    if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal)
+        && matches!(key, Key::Live(LiveTerminalAction::DirectorNew))
+    {
+        return Key::Live(LiveTerminalAction::NewRootTerminal);
+    }
+    if runtime.state().workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Director) {
         return key;
     }
     match key {
@@ -810,8 +852,149 @@ fn retarget_director_chords(runtime: &WorkspaceRuntime, key: Key) -> Key {
 #[derive(Debug, PartialEq, Eq)]
 enum WorkspaceInputRoute {
     Drawer(Vec<Effect>),
+    Garden(Vec<Effect>),
     Forwarded,
     Unhandled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrModalClickRoute {
+    Inside,
+    Outside,
+}
+
+fn route_pr_modal_click(
+    overlay: Option<Overlay>,
+    height: usize,
+    width: usize,
+    column: u16,
+    row: u16,
+) -> Option<PrModalClickRoute> {
+    (overlay == Some(Overlay::Prs)).then(|| {
+        if pr_modal::contains(height, width, column, row) {
+            PrModalClickRoute::Inside
+        } else {
+            PrModalClickRoute::Outside
+        }
+    })
+}
+
+/// Give the PR modal ownership of a project-bar click before the process-level
+/// bar can activate the surface behind it. Project-bar coordinates are outside
+/// Home, so they cannot flow through [`route_pr_modal_click`]'s modal geometry.
+fn dismiss_pr_modal_on_project_bar_click(runtime: &mut WorkspaceRuntime, key: &Key) -> bool {
+    if runtime.state().overlay() != Some(Overlay::Prs) || !matches!(key, Key::Click { row: 0, .. })
+    {
+        return false;
+    }
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GardenProjectVisit {
+    workspace: WorkspaceId,
+    session: SessionId,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GardenInputRoute {
+    Local(Vec<Effect>),
+    Project(GardenProjectVisit),
+}
+
+/// Give an open Garden exclusive ownership of the next user interaction.
+/// Backend/frame ticks are not user activity and keep the screen saver open.
+/// A pointer press also fences the rest of its drag/release gesture so closing
+/// the Garden cannot leak that tail into the terminal selection underneath.
+fn route_garden_input(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    material: Option<&HomeFrameMaterial>,
+    key: &Key,
+    pointer_gesture: &mut bool,
+) -> Option<GardenInputRoute> {
+    if *pointer_gesture && matches!(key, Key::Pointer(_)) {
+        if matches!(
+            key,
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Up,
+                ..
+            })
+        ) {
+            *pointer_gesture = false;
+        }
+        return Some(GardenInputRoute::Local(Vec::new()));
+    }
+    if runtime.state().overlay() != Some(Overlay::Garden) || !is_user_activity(key) {
+        return None;
+    }
+
+    let pointer = match key {
+        Key::Click { column, row } => material
+            .and_then(|material| {
+                garden_click_at(
+                    material.height,
+                    material.width,
+                    &material.projection,
+                    material.now,
+                    *column,
+                    *row,
+                )
+            })
+            .unwrap_or(GardenClick::Dismiss),
+        Key::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            column,
+            row,
+        }) => {
+            *pointer_gesture = true;
+            material
+                .and_then(|material| {
+                    garden_click_at(
+                        material.height,
+                        material.width,
+                        &material.projection,
+                        material.now,
+                        *column,
+                        *row,
+                    )
+                })
+                .unwrap_or(GardenClick::Dismiss)
+        }
+        Key::Pointer(PointerEvent {
+            kind: PointerKind::Drag,
+            ..
+        }) => {
+            *pointer_gesture = true;
+            GardenClick::Dismiss
+        }
+        Key::Left | Key::Right => material
+            .and_then(|material| {
+                garden_scroll_action(
+                    material.height,
+                    material.width,
+                    &material.projection,
+                    material.now,
+                    matches!(key, Key::Right),
+                )
+            })
+            .unwrap_or(GardenClick::Dismiss),
+        _ => GardenClick::Dismiss,
+    };
+    let effects = runtime.apply_event(AppEvent::GardenClick(pointer));
+    if let GardenClick::Visit {
+        workspace, session, ..
+    } = pointer
+        && workspace != runtime.state().workspace()
+    {
+        return Some(GardenInputRoute::Project(GardenProjectVisit {
+            workspace,
+            session,
+        }));
+    }
+    visit_garden_agent(ui, runtime, pointer);
+    Some(GardenInputRoute::Local(effects))
 }
 
 fn route_workspace_input_before_reducer(
@@ -828,6 +1011,10 @@ fn route_workspace_input_before_reducer(
     } else {
         WorkspaceInputRoute::Unhandled
     }
+}
+
+fn garden_shell_owned_wake(key: &Key) -> bool {
+    !matches!(key, Key::Click { .. } | Key::Other | Key::Resize)
 }
 
 /// Pulls the latest safe daemon observation at a TUI redraw boundary.
@@ -994,6 +1181,10 @@ pub struct ControllerBackendComposition {
     /// controller drains this channel; it never probes daemon inventory from a
     /// frame tick.
     pub restore_connection: Box<dyn RestoreConnectionPort>,
+    /// Dedicated port moved into the off-thread Garden observation job. It
+    /// observes the *other* open projects' Agent inventory, so it never shares
+    /// a connection with this workspace's own lanes.
+    pub garden_inventory: Box<dyn GardenInventoryPort>,
     pub agent_tab_intents: Box<dyn AgentTabIntentPort>,
     pub external_terminal: Box<dyn ExternalTerminalPort>,
     pub metrics: Box<dyn MetricsPort>,
@@ -1002,6 +1193,34 @@ pub struct ControllerBackendComposition {
     /// is a port so the frame loop's filesystem IO is countable in a test and
     /// stays out of the frame budget (#554).
     pub session_worktrees: Box<dyn SessionWorktreeScanPort>,
+}
+
+/// Read-only daemon lane behind the Garden's other open projects.
+///
+/// The Garden draws every open project, but only one of them has a resident
+/// workspace controller in this process. This port is how the shell observes
+/// the Agent membership of the others: it names a workspace and reads back that
+/// workspace's inventory, which the daemon answers from its own records for
+/// whichever workspace the request names (a daemon holds every open project as
+/// a tenant). It is observation only — it starts nothing, changes nothing, and
+/// never cold-starts a daemon, so a project whose daemon is gone simply keeps
+/// its read-only plot.
+pub trait GardenInventoryPort: Send {
+    /// The daemon's safe runtime and dispatch observation for one open project.
+    ///
+    /// # Errors
+    ///
+    /// Returns safe feedback when the daemon is unavailable or refuses the
+    /// workspace. The Garden keeps the plot it has.
+    fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String>;
+}
+
+struct UnavailableGardenInventoryPort;
+
+impl GardenInventoryPort for UnavailableGardenInventoryPort {
+    fn inventory(&mut self, _: WorkspaceId) -> Result<AgentWorkspaceObservation, String> {
+        Err("Agent inventory is unavailable".to_owned())
+    }
 }
 
 /// Dedicated restore-client connection lifecycle observed by the composition
@@ -1177,6 +1396,8 @@ enum ConfigStep {
     /// writes, then on success holds the `done` frame before returning home; a
     /// failed write stays on Config with an error for retry.
     Save,
+    /// A validated environment write should be persisted by the caller.
+    SaveEnvironment,
 }
 
 /// Draw one complete highlight sweep across the pending Save button. Settings
@@ -1202,6 +1423,43 @@ fn play_config_save_wave(
     Ok(())
 }
 
+fn save_config_responsive(
+    term: &mut dyn Terminal,
+    form: &mut Config,
+    settings: &mut dyn SettingsPort,
+    base: Option<&[String]>,
+) -> io::Result<bool> {
+    if !settings.background_operations() {
+        play_config_save_wave(term, form, base)?;
+        return Ok(form.commit_save(settings));
+    }
+    let Some((scope, draft)) = form.save_request() else {
+        return Ok(false);
+    };
+    let result = run_workspace_loading(term, "Saving settings…", false, || {
+        settings.save(scope, &draft)
+    });
+    Ok(form.finish_save(draft, result))
+}
+
+fn save_environment_responsive(
+    term: &mut dyn Terminal,
+    form: &mut Config,
+    settings: &mut dyn SettingsPort,
+) -> bool {
+    let Some((scope, bindings)) = form.environment_save_request() else {
+        return false;
+    };
+    let result = if settings.background_operations() {
+        run_workspace_loading(term, "Saving environment…", false, || {
+            settings.save_environment(scope, &bindings)
+        })
+    } else {
+        settings.save_environment(scope, &bindings)
+    };
+    form.finish_environment_save(bindings, result)
+}
+
 /// Workspace Config is a Home-owned modal and therefore cannot request that the
 /// enclosing TUI exit. Quit chords are projected to [`Self::Stay`] at the modal
 /// input boundary.
@@ -1209,6 +1467,7 @@ enum WorkspaceConfigStep {
     Stay,
     Back,
     Save,
+    SaveEnvironment,
 }
 
 /// New 画面でキー `key` を処理した結果の遷移。
@@ -1237,29 +1496,33 @@ enum OpenStep {
     Stay,
     Quit,
     Back,
-    Choose(PathBuf),
+    Choose(Vec<PathBuf>),
     ConfirmCleanup,
     ConfirmUnregister(PathBuf),
 }
 
 /// Workspace 画面のキー処理結果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WorkspaceStep {
     /// TUI を終了する。
     Quit,
     /// workspace を離れて Welcome へ戻る。呼び出し側がこの workspace のために
     /// 確立した資源を落としたあと、entry 画面を描き直す（#556）。
     Back,
+    /// A target snapshot was prepared while the current composition was still
+    /// resident. Returning drops that composition; the deck loop then commits
+    /// the target and creates its replacement.
+    Activate(Box<WorkspaceSnapshot>),
 }
 
 impl WorkspaceStep {
     /// workspace ループの停止理由を TUI 全体の終了理由へ投影する。workspace を
     /// 直接開いた入口（`usagi <path>`）は Welcome を持たないため、合成ルートが
     /// [`Exit::Welcome`] を受けて screen graph へ入り直す。
-    const fn exit(self) -> Exit {
+    fn exit(self) -> Exit {
         match self {
             Self::Quit => Exit::Quit,
-            Self::Back => Exit::Welcome,
+            Self::Back | Self::Activate(_) => Exit::Welcome,
         }
     }
 }
@@ -1269,24 +1532,25 @@ struct WorkspaceConfigContext<'a> {
     available_models: AvailableAgentModels,
 }
 
-/// Which Agent CLIs the Closeup `agent` command may select, and which one an
-/// omitted `-m` uses.
+/// Effective defaults needed when entering one workspace.
 ///
-/// Availability is observed by the composition root (the shell owns the PATH
-/// probe) and the default comes from the effective settings, so the TUI itself
-/// performs no IO to answer either question. The default fits callers without a
-/// probe or resolved settings: every CLI offered, `codex` selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AgentModelPolicy {
-    available: AvailableAgentModels,
-    default: usagi_core::domain::settings::DefaultModel,
+/// Agent availability is observed by the composition root (the shell owns the
+/// PATH probe); model and branch defaults come from effective settings. The
+/// fallback fits callers without resolved settings: every CLI offered, `codex`
+/// selected, and the current checkout used for new sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceEntryPolicy {
+    available_models: AvailableAgentModels,
+    default_model: usagi_core::domain::settings::DefaultModel,
+    default_branch: Option<String>,
 }
 
-impl Default for AgentModelPolicy {
+impl Default for WorkspaceEntryPolicy {
     fn default() -> Self {
         Self {
-            available: AvailableAgentModels::all(),
-            default: usagi_core::domain::settings::DefaultModel::default(),
+            available_models: AvailableAgentModels::all(),
+            default_model: usagi_core::domain::settings::DefaultModel::default(),
+            default_branch: None,
         }
     }
 }
@@ -1593,12 +1857,19 @@ struct WorkspaceUi {
     /// unadmitted completion can never free a newer worker's slot.
     next_pane_launch: u64,
     active_pane_launch: Option<u64>,
-    /// Live coordinator for the active target's selected foreground terminal.
-    /// Background and unselected tabs retain only their stable pane identity.
+    /// Live coordinators for terminals visible in the current frame. This is
+    /// normally the selected foreground terminal; Director additionally keeps
+    /// the dimmed managed-session preview attached. Hidden and unselected tabs
+    /// retain only their stable pane identity.
     terminals: Vec<TerminalSession>,
     /// Recently detached coordinators, oldest first. Keeping the coordinator
     /// preserves its connection-local input ledger and unresolved input fence.
     detached_terminals: VecDeque<TerminalSession>,
+    /// Generic terminals the user logically closed in this workspace UI. The
+    /// daemon keeps their PTYs alive, so a later inventory must not immediately
+    /// recreate their tabs. A fresh workspace UI starts empty and restores them
+    /// again; an explicit `terminal open` also removes the exact fence.
+    closed_generic_terminals: BTreeSet<TerminalRef>,
     terminal_reconnected: bool,
     terminal_size: (usize, usize),
     agent_tab_intent: Option<AgentTabIntentContext>,
@@ -1606,10 +1877,10 @@ struct WorkspaceUi {
     /// observation. It never projects from an inventory cached before a later
     /// pane admission.
     agent_observation_requested: bool,
-    /// An Agent terminal exit changes daemon inventory. Unlike a display-only
-    /// observation request, this must schedule one follow-up when an older
-    /// restore snapshot is already in flight.
-    agent_exit_observation_requested: bool,
+    /// A successful Agent launch/resume or terminal exit changes daemon
+    /// inventory. Unlike a display-only observation request, this must schedule
+    /// one follow-up when an older restore snapshot is already in flight.
+    agent_inventory_change_observation_requested: bool,
 }
 
 struct AgentTabIntentContext {
@@ -1644,6 +1915,102 @@ struct RestoreApply {
     outcome: RestoreJobOutcome,
 }
 
+/// Steady cadence of the Garden's cross-project observation while the screen
+/// saver is up. It bounds how stale another project's rabbits can be: cadence
+/// plus one round of requests.
+const GARDEN_OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1_000);
+
+/// Cadence after a round that observed nothing (no daemon, refused workspace).
+/// A Garden left open in front of a dead daemon must not retry every second.
+const GARDEN_OBSERVATION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5_000);
+
+/// Most open projects observed in one round. Beyond this the extra tabs keep
+/// their read-only plots rather than letting one round's request count follow an
+/// unbounded tab list.
+const MAX_OBSERVED_PROJECTS: usize = 16;
+
+/// One completed round of the Garden's cross-project observation.
+struct GardenObservationCompletion {
+    port: Box<dyn GardenInventoryPort>,
+    /// Inventories the daemon answered, each already checked to be the
+    /// workspace it was asked for.
+    inventories: Vec<AgentWorkspaceObservation>,
+}
+
+/// Admission for the Garden's cross-project observation lane.
+///
+/// The lane exists only while the Garden is on screen: nothing else in Home
+/// draws another project's Agents, so observing them behind a closed Garden
+/// would be daemon traffic nobody can see. Closing the Garden re-arms the lane,
+/// so re-opening it observes immediately instead of waiting out a cadence.
+#[derive(Debug, PartialEq, Eq)]
+struct GardenObservation {
+    in_flight: bool,
+    next_due: Option<std::time::Duration>,
+}
+
+impl GardenObservation {
+    const fn new() -> Self {
+        Self {
+            in_flight: false,
+            next_due: Some(std::time::Duration::ZERO),
+        }
+    }
+
+    /// Admit one round. `open` is whether the Garden owns the frame.
+    fn begin_if_due(&mut self, open: bool, now: std::time::Duration) -> bool {
+        if !open {
+            // Re-arm for the next opening, but never cancel a round already on
+            // its way: its port has to come back before another can start.
+            if !self.in_flight {
+                self.next_due = Some(std::time::Duration::ZERO);
+            }
+            return false;
+        }
+        if self.in_flight || self.next_due.is_none_or(|due| now < due) {
+            return false;
+        }
+        self.in_flight = true;
+        self.next_due = None;
+        true
+    }
+
+    /// Complete one round. `observed` is whether the daemon answered at all.
+    fn complete(&mut self, now: std::time::Duration, observed: bool) {
+        self.in_flight = false;
+        self.next_due = Some(
+            now + if observed {
+                GARDEN_OBSERVATION_INTERVAL
+            } else {
+                GARDEN_OBSERVATION_BACKOFF
+            },
+        );
+    }
+}
+
+/// Observe the other open projects' Agent inventory off the frame thread.
+///
+/// A workspace whose daemon does not answer, or answers with another
+/// workspace's inventory, is skipped: the Garden keeps that project's read-only
+/// plot rather than drawing a foreign project's rabbits in it.
+fn spawn_garden_observation_job(
+    mut port: Box<dyn GardenInventoryPort>,
+    workspaces: Vec<WorkspaceId>,
+    sender: Sender<GardenObservationCompletion>,
+) {
+    std::thread::spawn(move || {
+        let mut inventories = Vec::new();
+        for workspace in workspaces.into_iter().take(MAX_OBSERVED_PROJECTS) {
+            if let Ok(inventory) = port.inventory(workspace)
+                && inventory.inventory.workspace_id == workspace
+            {
+                inventories.push(inventory);
+            }
+        }
+        let _ = sender.send(GardenObservationCompletion { port, inventories });
+    });
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestoreJobOutcome {
     Applied,
@@ -1657,6 +2024,8 @@ enum RestoreJobOutcome {
 /// once; the rest are applied by the next frames.
 const MAX_BACKGROUND_EXITS_PER_FRAME: usize = 8;
 const DETACHED_TERMINAL_LIMIT: usize = 8;
+/// The process-level project tab bar permanently owns the first terminal row.
+const PROJECT_BAR_ROWS: usize = 1;
 
 const RESTORE_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
 const RESTORE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(4);
@@ -1994,11 +2363,12 @@ impl WorkspaceUi {
             active_pane_launch: None,
             terminals: Vec::new(),
             detached_terminals: VecDeque::new(),
+            closed_generic_terminals: BTreeSet::new(),
             terminal_reconnected: false,
             terminal_size: (0, 0),
             agent_tab_intent: None,
             agent_observation_requested: false,
-            agent_exit_observation_requested: false,
+            agent_inventory_change_observation_requested: false,
         }
     }
 
@@ -2104,24 +2474,50 @@ impl WorkspaceUi {
     }
 
     /// Keep exactly the active target's selected foreground terminal attached.
-    /// Every background target and unselected tab remains detached.
+    /// Every hidden background target and unselected tab remains detached.
+    #[cfg(test)]
     fn sync_foreground_terminal(&mut self, focused: Option<&TerminalRef>, geometry: Geometry) {
+        let visible = focused
+            .map(|terminal| vec![(terminal.clone(), geometry)])
+            .unwrap_or_default();
+        self.sync_visible_terminals(&visible);
+    }
+
+    /// Keep the bounded set of terminals visible in this frame attached, each
+    /// at the geometry of the surface that draws it.
+    ///
+    /// Ordinary Home supplies one entry. An open Director drawer supplies its
+    /// root conversation plus the managed-session terminal that remains visible
+    /// and dimmed behind it. Input ownership is independent: only the runtime's
+    /// focused terminal receives bytes.
+    fn sync_visible_terminals(&mut self, visible: &[(TerminalRef, Geometry)]) {
         let stale = self
             .terminals
             .iter()
-            .filter(|session| focused.is_none_or(|terminal| !session.terminal().fences(terminal)))
+            .filter(|session| {
+                !visible
+                    .iter()
+                    .any(|(terminal, _)| session.terminal().fences(terminal))
+            })
             .map(|session| session.terminal().clone())
             .collect::<Vec<_>>();
         for terminal in stale {
             self.close_terminal(&terminal);
         }
-        if let Some(terminal) = focused
-            && !self
+
+        for (terminal, geometry) in visible {
+            if let Some(index) = self
                 .terminals
                 .iter()
-                .any(|session| session.terminal().fences(terminal))
-        {
-            self.start_terminal_session(terminal.clone(), geometry);
+                .position(|session| session.terminal().fences(terminal))
+            {
+                if let Some(agent) = self.agent.as_mut() {
+                    self.terminals[index]
+                        .resize(&mut AgentStreamPort(agent.port.as_mut()), *geometry);
+                }
+            } else {
+                self.start_terminal_session(terminal.clone(), *geometry);
+            }
         }
     }
 
@@ -2137,6 +2533,7 @@ impl WorkspaceUi {
         }
     }
 
+    #[cfg(test)]
     fn resize_terminals(&mut self, geometry: Geometry) {
         let Some(agent) = self.agent.as_mut() else {
             return;
@@ -2165,6 +2562,13 @@ impl WorkspaceUi {
             Ok(()) => Ok(()),
             Err(error) => Err(error.message()),
         }
+    }
+
+    fn clear_terminal_for_user(&mut self, terminal: &TerminalRef) -> bool {
+        self.terminals
+            .iter_mut()
+            .find(|session| session.terminal().fences(terminal))
+            .is_some_and(TerminalSession::clear_for_user)
     }
 
     /// Poll every attached terminal once and return the refs of those the daemon
@@ -2199,15 +2603,29 @@ impl WorkspaceUi {
     /// Hand the detached background tabs to the port's bounded scope-inventory
     /// lane and drain the exits it has observed since the last frame.
     ///
-    /// This is the whole background contract: metadata only, per scope, off the
-    /// render thread. No `Attach` and no terminal-specific `Resume` is ever sent
-    /// for a background tab, and the returned refs are exactly the tabs whose
-    /// runtime the daemon no longer reports as live.
+    /// This is the whole detached-background contract: metadata only, per scope,
+    /// off the render thread. No `Attach` and no terminal-specific `Resume` is
+    /// ever sent for a detached tab, and the returned refs are exactly the tabs
+    /// whose runtime the daemon no longer reports as live.
     fn sync_background_terminals(&mut self, background: &[TerminalRef]) -> Vec<TerminalRef> {
         let Some(agent) = self.agent.as_mut() else {
             return Vec::new();
         };
-        agent.port.watch_background_terminals(background);
+        // Director's dimmed managed pane is background with respect to input,
+        // but visible and attached with respect to output. Its stream reports
+        // exit directly, so only genuinely detached tabs belong in the scope
+        // inventory lane.
+        let detached = background
+            .iter()
+            .filter(|terminal| {
+                !self
+                    .terminals
+                    .iter()
+                    .any(|session| session.terminal().fences(terminal))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        agent.port.watch_background_terminals(&detached);
         agent
             .port
             .take_exited_background_terminals(MAX_BACKGROUND_EXITS_PER_FRAME)
@@ -2238,6 +2656,50 @@ impl WorkspaceUi {
         while self.detached_terminals.len() > DETACHED_TERMINAL_LIMIT {
             self.detached_terminals.pop_front();
         }
+    }
+
+    /// Hide one generic terminal while its requested shell exit is still being
+    /// observed, and detach this client's subscription.
+    fn close_generic_terminal(&mut self, terminal: &TerminalRef) {
+        self.closed_generic_terminals.insert(terminal.clone());
+        self.close_terminal(terminal);
+    }
+
+    /// Whether a launch completion points back to a shell whose exit has not
+    /// reached coherent inventory yet. Reusing it would resurrect the exact
+    /// scrollback the user just closed.
+    fn generic_terminal_is_closing(&self, terminal: &TerminalRef) -> bool {
+        self.closed_generic_terminals
+            .iter()
+            .any(|closed| closed.fences(terminal))
+    }
+
+    /// A coherent inventory proves which process-local close fences can still
+    /// matter. Exited terminals no longer need suppression, keeping this set
+    /// bounded by the daemon's live generic inventory.
+    fn reconcile_closed_generic_terminals(&mut self, terminals: &[TerminalInventoryEntry]) {
+        self.closed_generic_terminals.retain(|closed| {
+            terminals.iter().any(|entry| {
+                entry.live && entry.kind == TerminalKind::Terminal && entry.terminal.fences(closed)
+            })
+        });
+    }
+
+    /// Return the authoritative inventory with only this UI's logically closed
+    /// generic terminals hidden. Agent rows and every other terminal row stay
+    /// unchanged for reconciliation.
+    fn restorable_terminal_inventory(
+        &self,
+        terminals: &[TerminalInventoryEntry],
+    ) -> Vec<TerminalInventoryEntry> {
+        terminals
+            .iter()
+            .filter(|entry| {
+                entry.kind != TerminalKind::Terminal
+                    || !self.closed_generic_terminals.contains(&entry.terminal)
+            })
+            .cloned()
+            .collect()
     }
 
     fn agent_continuation_for(&self, terminal: &TerminalRef) -> Option<AgentContinuationRef> {
@@ -2324,12 +2786,12 @@ impl WorkspaceUi {
         std::mem::take(&mut self.agent_observation_requested)
     }
 
-    fn request_agent_exit_observation(&mut self) {
-        self.agent_exit_observation_requested = true;
+    fn request_agent_inventory_change_observation(&mut self) {
+        self.agent_inventory_change_observation_requested = true;
     }
 
-    fn take_agent_exit_observation_request(&mut self) -> bool {
-        std::mem::take(&mut self.agent_exit_observation_requested)
+    fn take_agent_inventory_change_observation_request(&mut self) -> bool {
+        std::mem::take(&mut self.agent_inventory_change_observation_requested)
     }
 
     fn agent_inventory(&self) -> Option<&AgentInventory> {
@@ -2445,9 +2907,9 @@ impl WorkspaceUi {
             .map(TerminalSession::input_modes)
     }
 
-    /// Snapshot the retained rows of a detached background terminal without
-    /// attaching or polling it. Director owns the one live subscription; this
-    /// projection keeps the managed right pane visible behind the drawer.
+    /// Snapshot the retained rows of a background terminal without changing its
+    /// attachment or scroll controls. Director keeps the visible managed pane
+    /// attached, so this projection advances as its live stream is drained.
     fn retained_terminal_view(
         &self,
         terminal: &TerminalRef,
@@ -2494,6 +2956,17 @@ impl WorkspaceUi {
             .map(TerminalSession::cells)
     }
 
+    fn begin_terminal_selection(
+        &self,
+        terminal: &TerminalRef,
+        anchor: TerminalPoint,
+    ) -> Option<TerminalSelection> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .map(|session| session.begin_selection(anchor))
+    }
+
     fn terminal_error(&self, terminal: &TerminalRef) -> Option<&str> {
         self.terminals
             .iter()
@@ -2519,8 +2992,10 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     if config.is_selecting_team() {
         match key {
-            Key::Left | Key::Char('h') => config.cycle_team_picker(false),
-            Key::Right | Key::Char('l') | Key::Tab => config.cycle_team_picker(true),
+            Key::Left | Key::Char('h') => config.cycle_team_card(false),
+            Key::Right | Key::Char('l') => config.cycle_team_card(true),
+            Key::Up | Key::Char('k') => config.move_team_picker_vertical(false),
+            Key::Down | Key::Char('j') => config.move_team_picker_vertical(true),
             Key::Enter => config.apply_team_picker(),
             Key::Escape => config.cancel_team_picker(),
             _ => {}
@@ -2533,9 +3008,15 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
                 action: AppKey::SaveRoles,
                 ..
             } if config.scope() == usagi_core::usecase::settings::SettingsScope::Global => {
+                if settings.background_operations() {
+                    return ConfigStep::SaveEnvironment;
+                }
                 config.save_environment(settings);
             }
             Key::Enter if config.is_environment_save_focused() => {
+                if settings.background_operations() {
+                    return ConfigStep::SaveEnvironment;
+                }
                 config.save_environment(settings);
             }
             Key::Enter => config.newline_environment(),
@@ -2598,6 +3079,7 @@ fn step_workspace_config(
         ConfigStep::Stay | ConfigStep::Quit => WorkspaceConfigStep::Stay,
         ConfigStep::Back => WorkspaceConfigStep::Back,
         ConfigStep::Save => WorkspaceConfigStep::Save,
+        ConfigStep::SaveEnvironment => WorkspaceConfigStep::SaveEnvironment,
     }
 }
 
@@ -2607,9 +3089,14 @@ fn run_workspace_config(
     term: &mut dyn Terminal,
     settings: &mut dyn SettingsPort,
     available_models: AvailableAgentModels,
+    branches: &[BranchChoice],
     base: &[String],
 ) -> io::Result<()> {
-    let mut form = Config::load_workspace_with_available_models(settings, available_models);
+    let mut form = Config::load_workspace_with_available_models_and_branches(
+        settings,
+        available_models,
+        branches,
+    );
     loop {
         let (height, width) = term.size()?;
         term.draw(&config::render_over(height, width, base, &form))?;
@@ -2617,14 +3104,16 @@ fn run_workspace_config(
             WorkspaceConfigStep::Stay => {}
             WorkspaceConfigStep::Back => return Ok(()),
             WorkspaceConfigStep::Save => {
-                play_config_save_wave(term, &mut form, Some(base))?;
-                if form.commit_save(settings) {
+                if save_config_responsive(term, &mut form, settings, Some(base))? {
                     let (height, width) = term.size()?;
                     term.draw(&config::render_over(height, width, base, &form))?;
                     term.wait(config::DONE_DISPLAY)?;
                     form.reset_save();
                     return Ok(());
                 }
+            }
+            WorkspaceConfigStep::SaveEnvironment => {
+                let _ = save_environment_responsive(term, &mut form, settings);
             }
         }
     }
@@ -2900,10 +3389,11 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
                     .map(|workspace| vec![workspace.path.clone()])
                     .unwrap_or_default()
             };
-            paths
-                .into_iter()
-                .next()
-                .map_or(OpenStep::Stay, OpenStep::Choose)
+            if paths.is_empty() {
+                OpenStep::Stay
+            } else {
+                OpenStep::Choose(paths)
+            }
         }
         Key::Tab => {
             open.toggle_unite();
@@ -3048,7 +3538,12 @@ fn apply_session_projection(
 /// controller [`BackendEvent::Notice`]. Both are distinct from an in-form local
 /// validation error.
 fn drain_session_completions(ui: &mut WorkspaceUi) {
-    while let Ok(completion) = ui.session_completions.try_recv() {
+    let completions = ui
+        .session_completions
+        .try_iter()
+        .take(FRAME_EVENT_BUDGET)
+        .collect::<Vec<_>>();
+    for completion in completions {
         if ui.active_session_command != Some(completion.command_id) {
             continue;
         }
@@ -3334,8 +3829,9 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Resize | Key::Other => return Some(AppEvent::Tick),
         Key::Up => AppKey::Up,
         Key::Down => AppKey::Down,
-        // Left/Right move the focus inside a horizontal choice (the Yes/No quit
-        // confirmation); the reducer ignores them elsewhere. Tab motion between
+        // Switch-mode Left/Right is consumed by the process-level project deck
+        // before this mapping. When the keys reach the reducer they move a
+        // horizontal choice such as the quit confirmation. Tab motion between
         // live tabs stays Ctrl-N/P.
         Key::Left => AppKey::Left,
         Key::Right => AppKey::Right,
@@ -3346,8 +3842,8 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Escape => AppKey::Escape,
         // Runtime adapters preserve Ctrl-A as U+0001. `Ctrl-A` (LineStart) and
         // `Home` both mean `+ new session` here, where no text field owns focus:
-        // the sidebar-navigation contract from #257/#287 that this issue keeps
-        // intact. A focused palette / create form intercepts these before the
+        // the established sidebar-navigation contract that the reducer keeps intact.
+        // A focused palette / create form intercepts these before the
         // reducer, so caret motion never reaches this navigation branch.
         Key::LineStart | Key::Home | Key::Char('\u{1}') => AppKey::CtrlA,
         Key::Char(character) => AppKey::Char(character),
@@ -3398,11 +3894,17 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
         LiveTerminalAction::OpenPullRequests => Some(AppKey::OpenPrs),
+        LiveTerminalAction::OpenGarden => Some(AppKey::OpenGarden),
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
+        LiveTerminalAction::RootTerminal => Some(AppKey::ToggleRootTerminalDrawer),
+        LiveTerminalAction::NewRootTerminal => Some(AppKey::OpenRootTerminal),
         LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
-        LiveTerminalAction::CloseTab
+        LiveTerminalAction::OpenWorkspace
+        | LiveTerminalAction::OpenWorkspaceSwitcher
+        | LiveTerminalAction::ActivateWorkspace(_)
+        | LiveTerminalAction::CloseTab
         | LiveTerminalAction::ResumeTab
         | LiveTerminalAction::MoveTabNext
         | LiveTerminalAction::MoveTabPrevious
@@ -3423,8 +3925,48 @@ fn terminal_geometry(height: usize, width: usize) -> Geometry {
     }
 }
 
-fn foreground_terminal_geometry(height: usize, width: usize, director_open: bool) -> Geometry {
-    if director_open {
+/// Geometry of the managed terminal that remains visible to Director's left.
+///
+/// The Director overlays the right side of Home. Resizing the background PTY
+/// to that visible band keeps wrapping and cursor placement aligned with what
+/// the operator can actually see instead of continuing underneath the drawer.
+fn managed_background_terminal_geometry(
+    height: usize,
+    width: usize,
+    director_open: bool,
+    root_terminal_open: bool,
+) -> Geometry {
+    let (height, _) = widgets::normalize_size(height, width);
+    let cols = if director_open {
+        director_drawer::geometry(height, width).left
+    } else {
+        workspace::terminal_viewport(height, width).1
+    };
+    let rows = if root_terminal_open {
+        let available_width = root_terminal_available_width(height, width, director_open);
+        root_terminal_drawer::geometry_for(height, width, available_width)
+            .top
+            .saturating_sub(2 + 5)
+            .max(1)
+    } else {
+        height.saturating_sub(2 + 5).max(1)
+    };
+    Geometry {
+        cols: u16::try_from(cols.min(usize::from(u16::MAX)))
+            .expect("clamped Director background width fits u16"),
+        rows: u16::try_from(rows.min(usize::from(u16::MAX)))
+            .expect("clamped Director background height fits u16"),
+    }
+}
+
+fn foreground_terminal_geometry(
+    height: usize,
+    width: usize,
+    director_open: bool,
+    root_terminal_open: bool,
+    focus: Option<WorkspaceDrawerFocus>,
+) -> Geometry {
+    if director_open && focus == Some(WorkspaceDrawerFocus::Director) {
         let viewport = director_drawer::terminal_viewport(height, width);
         Geometry {
             cols: u16::try_from(viewport.cols.min(usize::from(u16::MAX)))
@@ -3432,9 +3974,117 @@ fn foreground_terminal_geometry(height: usize, width: usize, director_open: bool
             rows: u16::try_from(viewport.rows.min(usize::from(u16::MAX)))
                 .expect("clamped drawer terminal height fits u16"),
         }
+    } else if root_terminal_open {
+        let available_width = if director_open {
+            director_drawer::geometry(height, width).left
+        } else {
+            width
+        };
+        let viewport = root_terminal_drawer::terminal_viewport_for(height, width, available_width);
+        Geometry {
+            cols: u16::try_from(viewport.cols.min(usize::from(u16::MAX)))
+                .expect("clamped root-terminal drawer width fits u16"),
+            rows: u16::try_from(viewport.rows.min(usize::from(u16::MAX)))
+                .expect("clamped root-terminal drawer height fits u16"),
+        }
     } else {
         terminal_geometry(height, width)
     }
+}
+
+fn root_terminal_available_width(height: usize, width: usize, director_open: bool) -> usize {
+    if director_open {
+        let director = director_drawer::geometry(height, width);
+        if director.full_width {
+            width
+        } else {
+            director.left
+        }
+    } else {
+        width
+    }
+}
+
+/// Return the managed terminal that is genuinely visible beside Director.
+/// A full-width drawer occludes Home completely, so keeping that terminal
+/// attached would spend a stream slot on an invisible surface.
+fn visible_managed_background_terminal(
+    runtime: &WorkspaceRuntime,
+    height: usize,
+    width: usize,
+) -> Option<TerminalRef> {
+    let terminal = runtime.director_background_terminal()?;
+    let director_open = runtime.state().director_drawer_open();
+    let root_open = runtime.state().root_terminal_drawer_open();
+    if director_open && director_drawer::geometry(height, width).full_width {
+        return None;
+    }
+    if root_open {
+        let available_width = root_terminal_available_width(height, width, director_open);
+        if root_terminal_drawer::geometry_for(height, width, available_width).full_height {
+            return None;
+        }
+    }
+    Some(terminal)
+}
+
+/// Stable terminal/viewport set visible across Home and both workspace drawers.
+/// The focused root surface comes first; retained surfaces are read-only.
+fn visible_workspace_terminals(
+    runtime: &WorkspaceRuntime,
+    height: usize,
+    width: usize,
+) -> Vec<(TerminalRef, Geometry)> {
+    let mut visible = Vec::with_capacity(3);
+    let mut push = |terminal: Option<TerminalRef>, geometry: Geometry| {
+        if let Some(terminal) = terminal
+            && !visible
+                .iter()
+                .any(|(shown, _): &(TerminalRef, Geometry)| shown.fences(&terminal))
+        {
+            visible.push((terminal, geometry));
+        }
+    };
+    push(
+        runtime.preview_terminal(),
+        foreground_terminal_geometry(
+            height,
+            width,
+            runtime.state().director_drawer_open(),
+            runtime.state().root_terminal_drawer_open(),
+            runtime.state().workspace_drawer_focus(),
+        ),
+    );
+    push(
+        visible_managed_background_terminal(runtime, height, width),
+        managed_background_terminal_geometry(
+            height,
+            width,
+            runtime.state().director_drawer_open(),
+            runtime.state().root_terminal_drawer_open(),
+        ),
+    );
+    push(
+        runtime.director_terminal(),
+        foreground_terminal_geometry(
+            height,
+            width,
+            true,
+            false,
+            Some(WorkspaceDrawerFocus::Director),
+        ),
+    );
+    push(
+        runtime.root_terminal(),
+        foreground_terminal_geometry(
+            height,
+            width,
+            runtime.state().director_drawer_open(),
+            true,
+            Some(WorkspaceDrawerFocus::Terminal),
+        ),
+    );
+    visible
 }
 
 fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
@@ -3490,11 +4140,42 @@ fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> 
     base
 }
 
-/// Recent が指す単体 workspace path。Unite の runtime は今回の対象外なので開かない。
-fn recent_path(recent: &Recent) -> Option<&Path> {
+/// Ordered workspace paths represented by one Recent card.
+fn recent_paths(recent: &Recent) -> Vec<PathBuf> {
     match recent {
-        Recent::Workspace(overview) => Some(&overview.workspace.path),
-        Recent::Unite(_) => None,
+        Recent::Workspace(overview) => vec![overview.workspace.path.clone()],
+        Recent::Unite(unite) => unite
+            .members()
+            .iter()
+            .map(|overview| overview.workspace.path.clone())
+            .collect(),
+    }
+}
+
+fn registry_contains_path(registry: &[Workspace], path: &Path) -> bool {
+    for workspace in registry {
+        if workspace.path == path {
+            return true;
+        }
+    }
+    false
+}
+
+fn remove_registry_paths(registry: &mut Vec<Workspace>, removed: &[PathBuf]) {
+    let mut index = 0;
+    while index < registry.len() {
+        let mut matched = false;
+        for path in removed {
+            if registry[index].path == *path {
+                matched = true;
+                break;
+            }
+        }
+        if matched {
+            registry.remove(index);
+        } else {
+            index += 1;
+        }
     }
 }
 
@@ -3560,7 +4241,7 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
                 .map(ToString::to_string);
             if let Some(role) = ui.workspace.session_roles().get(id) {
                 projected.parent_session_id = role.parent_session_id;
-                projected.organization_depth = 1;
+                projected.organization_depth = 0;
                 let mut parent = role.parent_session_id;
                 let mut seen = BTreeSet::from([*id]);
                 while let Some(parent_id) = parent
@@ -3587,14 +4268,15 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
 /// controller projection as the interactive loop.
 ///
 /// This is the non-interactive `usagi launch <path>` fallback (no terminal), so
-/// it shows the initial Home surface: root selected/active, the snapshot's
-/// sessions, and the `+ new session` row.
+/// it shows the initial project bar and Home surface: root selected/active, the
+/// snapshot's sessions, and the `+ new session` row.
 #[must_use]
 pub fn render_home_snapshot(
     height: usize,
     width: usize,
     snapshot: &WorkspaceSnapshot,
 ) -> Vec<String> {
+    let (height, width) = widgets::normalize_size(height, width);
     let workspace = WorkspaceView::with_runtime_ids(
         snapshot.workspace.clone(),
         snapshot.state.clone(),
@@ -3625,7 +4307,14 @@ pub fn render_home_snapshot(
         &snapshot.workspace.path,
         &sessions,
     );
-    render_home(height, width, &projection)
+    let mut frame = Vec::with_capacity(height);
+    frame.push(project_bar(&WorkspaceDeck::new(snapshot), width).line);
+    frame.extend(render_home(
+        height.saturating_sub(PROJECT_BAR_ROWS),
+        width,
+        &projection,
+    ));
+    frame
 }
 
 /// Keep the controller's Home rows in step with the daemon session projection
@@ -3793,6 +4482,8 @@ fn controller_terminal_view(
     let mut projection = controls.project_window(rows, range.start, total_rows);
     if let Some(error) = ui.terminal_error(&terminal) {
         projection.feedback = Some(error.to_owned());
+    } else if let Some(error) = runtime.active_pane().error() {
+        projection.feedback = Some(error.to_owned());
     }
     Some(projection)
 }
@@ -3810,7 +4501,7 @@ fn director_drawer_projection(
         return DirectorDrawerProjection::default();
     }
     let pane = runtime.active_pane();
-    let selected = pane.selected();
+    let selected = runtime.director_selection();
     let mut conversations = Vec::new();
     for tab in pane.tabs() {
         let conversation = match tab {
@@ -3819,16 +4510,15 @@ fn director_drawer_projection(
                     ui.agent_continuation_for(&live.terminal),
                 ),
                 selected: matches!(
-                    selected,
-                    PaneSelection::Tab(TabSelection::Live(terminal))
-                        if terminal.fences(&live.terminal)
+                    selected.as_ref(),
+                    Some(TabSelection::Live(terminal)) if terminal.fences(&live.terminal)
                 ),
             }),
             PaneTab::Interrupted(interrupted) => Some(DirectorConversation {
                 label: interrupted.tab.safe_label(),
                 selected: matches!(
-                    selected,
-                    PaneSelection::Tab(TabSelection::Interrupted(continuation))
+                    selected.as_ref(),
+                    Some(TabSelection::Interrupted(continuation))
                         if *continuation == interrupted.tab.continuation
                 ),
             }),
@@ -3836,9 +4526,8 @@ fn director_drawer_projection(
                 Some(DirectorConversation {
                     label: "Agent (starting)".to_owned(),
                     selected: matches!(
-                        selected,
-                        PaneSelection::Tab(TabSelection::Pending(operation))
-                            if *operation == pending.operation
+                        selected.as_ref(),
+                        Some(TabSelection::Pending(operation)) if *operation == pending.operation
                     ),
                 })
             }
@@ -3977,8 +4666,8 @@ fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
     rows
 }
 
-/// Run the per-frame foreground-terminal sweep: poll the one attached selection,
-/// auto-close it if exited, then project its freshly polled viewport. Returns
+/// Run the per-frame visible-terminal sweep: poll the attached selection(s),
+/// auto-close them if exited, then project the focused viewport. Returns
 /// the projection plus its `(rows_len, scroll)` so a later pointer drag maps back
 /// to the exact retained cell.
 #[cfg(test)]
@@ -3998,7 +4687,7 @@ fn poll_and_project_terminals(
 }
 
 /// Close every pane the daemon reports as exited, from either observation lane:
-/// the attached foreground terminal's own `Resume` stream, and the bounded
+/// each attached visible terminal's own `Resume` stream, and the bounded
 /// per-scope inventory that watches the detached background tabs. The runtime
 /// drops the tab (clearing `has_live_pane` when it was the last) and the shell
 /// releases whatever client state it held.
@@ -4024,7 +4713,7 @@ fn close_exited_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
         // the last coherent Agent inventory. Wake the dedicated restore lane so
         // a terminated Agent is removed there without waiting for an unrelated
         // session lifecycle change to trigger another observation.
-        ui.request_agent_exit_observation();
+        ui.request_agent_inventory_change_observation();
     }
 }
 
@@ -4227,9 +4916,8 @@ fn pane_restore_targets(
         .iter()
         .filter(|entry| entry.live && entry.kind == TerminalKind::Terminal)
         .filter(|entry| entry.terminal.workspace_id == workspace)
-        // Workspace root belongs exclusively to the Agent drawer. Generic
-        // terminals remain managed-session Closeup panes.
-        .filter(|entry| entry.terminal.session_id.is_some())
+        // Root generic terminals are projected only by the dedicated bottom
+        // drawer; managed-session terminals remain Closeup panes.
         .filter(|entry| {
             entry
                 .terminal
@@ -4393,7 +5081,9 @@ fn apply_restore_completion(
     let observation = match ui.observe_agent_tabs(terminals.clone(), agents) {
         Ok(observation) => observation,
         Err(error) => {
-            let targets = generic_restore_targets(workspace, allowed_sessions, &terminals, runtime);
+            let restorable = ui.restorable_terminal_inventory(&terminals);
+            let targets =
+                generic_restore_targets(workspace, allowed_sessions, &restorable, runtime);
             let _ = runtime.append_restore_snapshot(
                 dispatched_interaction,
                 dispatched_registry_revision,
@@ -4411,6 +5101,8 @@ fn apply_restore_completion(
             outcome: RestoreJobOutcome::FenceRejected,
         };
     }
+    ui.reconcile_closed_generic_terminals(&terminals);
+    let restorable = ui.restorable_terminal_inventory(&terminals);
     let selected = runtime.focused_terminal();
     let mut saved_selections = BTreeMap::new();
     if let Some(context) = ui.agent_tab_intent.as_ref() {
@@ -4424,7 +5116,7 @@ fn apply_restore_completion(
         workspace,
         allowed_sessions,
         observation.projection,
-        &terminals,
+        &restorable,
         selected.as_ref(),
         interrupted,
         &saved_selections,
@@ -4487,29 +5179,52 @@ fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geom
     }
 }
 
-/// Close the focused pane tab (Ctrl-O x / Ctrl-O Ctrl-X) and perform the daemon transport work
-/// the runtime reports: detach a live subscription, or drop a still-pending
-/// launch (both its queued work and its completion routing) so it cannot spawn a
-/// detached daemon terminal behind the vanished placeholder.
+/// Close the focused pane tab (Ctrl-O x / Ctrl-O Ctrl-X) and perform the daemon transport work:
+/// request a live process exit, or drop a still-pending launch (both its queued
+/// work and its completion routing) so it cannot spawn a detached daemon
+/// terminal behind the vanished placeholder.
 fn close_focused_terminal_pane(
     ui: &mut WorkspaceUi,
     runtime: &mut WorkspaceRuntime,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
 ) {
-    // Agent inventory is authoritative and every existing Agent stays visible.
-    // Closing a live or interrupted Agent tab would only hide a still-owned
-    // runtime and make capacity impossible to manage, so direct the user to
-    // terminate the CLI instead. Pending launches remain cancellable below.
-    if runtime.focused_agent_terminal().is_some() || runtime.focused_interrupted().is_some() {
-        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-            "Agent tabs stay visible; exit the Agent with Ctrl-D",
-        ))));
+    // A live Agent is daemon-owned, so detaching its client subscription would
+    // only hide a still-running process and leave its capacity occupied. Make
+    // the close chord equivalent to the documented Ctrl-D exit instead. The
+    // normal exit observation then removes the authoritative tab and refreshes
+    // sidebar/Garden membership.
+    if let Some(terminal) = runtime.focused_agent_terminal() {
+        let ctrl_d = key_to_terminal_bytes_for_mode(Key::CtrlD, false)
+            .expect("Ctrl-D always has a live-terminal byte encoding");
+        if let Err(message) = ui.send_terminal_bytes(&terminal, &ctrl_d) {
+            runtime.surface_focused_pane_feedback(message);
+        }
+        return;
+    }
+    // An interrupted Agent owns no live PTY to receive Ctrl-D. Keep the history
+    // visible and tell the user how to re-establish an exit-capable runtime.
+    if runtime.focused_interrupted().is_some() {
+        runtime.surface_focused_pane_feedback(
+            "Interrupted Agent has no live process; resume it before closing",
+        );
+        return;
+    }
+    if let Some(terminal) = runtime.focused_terminal() {
+        // Generic terminals are daemon-owned too, but closing one is an
+        // explicit request to end its shell rather than merely hiding a live
+        // process. SIGINT clears a possibly-running foreground command/current
+        // edit before `exit` is consumed by the shell.
+        if let Err(message) = ui.send_terminal_bytes(&terminal, b"\x03exit\r") {
+            runtime.surface_focused_pane_feedback(message);
+            return;
+        }
+        let outcome = runtime.close_focused_pane();
+        if let Some(terminal) = outcome.detach {
+            ui.close_generic_terminal(&terminal);
+        }
         return;
     }
     let outcome = runtime.close_focused_pane();
-    if let Some(terminal) = outcome.detach {
-        ui.close_terminal(&terminal);
-    }
     if let Some(operation) = outcome.cancel {
         pending_targets.remove(&operation);
         // Only a launch still waiting for admission is cancellable: an admitted
@@ -4549,8 +5264,22 @@ fn handle_terminal_pointer(
     pointer: PointerEvent,
 ) -> bool {
     let point_at = |column, row| {
-        if runtime.state().director_drawer_open() {
+        if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director) {
             director_drawer::terminal_point_at(height, width, rows_len, scroll, column, row)
+        } else if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal) {
+            root_terminal_drawer::terminal_point_at_for(
+                height,
+                width,
+                root_terminal_available_width(
+                    height,
+                    width,
+                    runtime.state().director_drawer_open(),
+                ),
+                rows_len,
+                scroll,
+                column,
+                row,
+            )
         } else {
             terminal_point_at(height, width, rows_len, scroll, column, row)
         }
@@ -4566,10 +5295,10 @@ fn handle_terminal_pointer(
             let Some(point) = point_at(pointer.column, pointer.row) else {
                 return false;
             };
-            let Some(cells) = ui.terminal_cells(&terminal) else {
+            let Some(selection) = ui.begin_terminal_selection(&terminal, point) else {
                 return false;
             };
-            controls.press_pointer(TerminalSelection::begin(cells, point));
+            controls.press_pointer(selection);
         }
         PointerKind::Drag => {
             if runtime.focused_terminal().is_none() {
@@ -4631,7 +5360,7 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
         }
         _ => return false,
     };
-    let Some(selection) = runtime.selection_after_select(direction) else {
+    let Some(selection) = runtime.agent_selection_after_select(direction) else {
         return true;
     };
     let continuation = match &selection {
@@ -4647,6 +5376,25 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
             let _ = runtime.select_tab(direction);
         }
         Err(error) => surface_agent_tab_intent_error(runtime, error),
+    }
+    true
+}
+
+fn select_root_terminal_tab(key: &Key, runtime: &mut WorkspaceRuntime) -> bool {
+    if !runtime.state().root_terminal_drawer_open() {
+        return false;
+    }
+    let direction = match key {
+        Key::Live(LiveTerminalAction::NextTab) => {
+            crate::usecase::application::controller::TabDirection::Next
+        }
+        Key::Live(LiveTerminalAction::PreviousTab | LiveTerminalAction::OpenPullRequests) => {
+            crate::usecase::application::controller::TabDirection::Previous
+        }
+        _ => return false,
+    };
+    if let Some(selection) = runtime.root_terminal_selection_after_select(direction) {
+        let _ = runtime.select_tab_selection(selection);
     }
     true
 }
@@ -4760,6 +5508,19 @@ fn intercept_live_terminal_control(
     rows_len: usize,
     scroll: usize,
 ) -> bool {
+    if runtime.state().root_terminal_drawer_open()
+        && let Key::Click { column, row } = key
+    {
+        let projection = runtime.root_terminal_projection(None);
+        if let Some(index) =
+            root_terminal_drawer::tab_at(height, width, &projection.tabs, *column, *row)
+        {
+            if let Some(selection) = runtime.root_terminal_selection_at(index) {
+                let _ = runtime.select_tab_selection(selection);
+            }
+            return true;
+        }
+    }
     if is_director_new_click(key, runtime, height, width) {
         // Let the frame-loop action branch return the resulting launch effect
         // to the normal backend dispatcher.
@@ -4793,14 +5554,37 @@ fn intercept_live_terminal_control(
     if !runtime.wants_pane_control_input() && pane_only_control {
         return true;
     }
-    if !select_director_tab(key, ui, runtime) {
+    if !select_director_tab(key, ui, runtime) && !select_root_terminal_tab(key, runtime) {
         match key {
             Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
             Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
             Key::Live(LiveTerminalAction::ScrollBottom) => controls.scroll_to_bottom(),
-            Key::Live(LiveTerminalAction::Wheel { up, column, row }) => {
-                let point = if runtime.state().director_drawer_open() {
+            Key::Live(LiveTerminalAction::Wheel {
+                up,
+                column,
+                row,
+                notches,
+            }) => {
+                let point = if runtime.state().workspace_drawer_focus()
+                    == Some(WorkspaceDrawerFocus::Director)
+                {
                     director_drawer::terminal_point_at(height, width, 0, 0, *column, *row)
+                } else if runtime.state().workspace_drawer_focus()
+                    == Some(WorkspaceDrawerFocus::Terminal)
+                {
+                    root_terminal_drawer::terminal_point_at_for(
+                        height,
+                        width,
+                        root_terminal_available_width(
+                            height,
+                            width,
+                            runtime.state().director_drawer_open(),
+                        ),
+                        0,
+                        0,
+                        *column,
+                        *row,
+                    )
                 } else {
                     terminal_point_at(height, width, 0, 0, *column, *row)
                 };
@@ -4814,14 +5598,12 @@ fn intercept_live_terminal_control(
                     return true;
                 };
                 let bytes = if modes.mouse_protocol {
-                    Some(encode_mouse_wheel(
-                        *up,
-                        point.column,
-                        point.row,
-                        modes.mouse_encoding,
-                    ))
+                    Some(
+                        encode_mouse_wheel(*up, point.column, point.row, modes.mouse_encoding)
+                            .repeat(*notches),
+                    )
                 } else if modes.alternate_screen {
-                    Some(encode_wheel_arrows(*up, modes.application_cursor))
+                    Some(encode_wheel_arrows(*up, modes.application_cursor).repeat(*notches))
                 } else {
                     None
                 };
@@ -4830,12 +5612,11 @@ fn intercept_live_terminal_control(
                         controls.set_feedback(message);
                     }
                 } else {
-                    for _ in 0..WHEEL_LINES {
-                        if *up {
-                            controls.scroll_up();
-                        } else {
-                            controls.scroll_down();
-                        }
+                    let lines = notches.saturating_mul(WHEEL_LINES);
+                    if *up {
+                        controls.scroll_up_by(lines);
+                    } else {
+                        controls.scroll_down_by(lines);
                     }
                 }
             }
@@ -4848,6 +5629,9 @@ fn intercept_live_terminal_control(
             Key::Live(
                 action @ (LiveTerminalAction::MoveTabNext | LiveTerminalAction::MoveTabPrevious),
             ) => {
+                if runtime.state().root_terminal_drawer_open() {
+                    return true;
+                }
                 let direction = if *action == LiveTerminalAction::MoveTabNext {
                     crate::usecase::application::controller::TabDirection::Next
                 } else {
@@ -4966,9 +5750,13 @@ struct FrameMaterialKey {
     sessions: (u64, Option<SessionId>, u64),
     shell: u64,
     metrics: u64,
-    terminal: (u64, u64),
+    terminal: (u64, u64, u64, u64),
     animation: u64,
     create_pending: Option<String>,
+    /// Rounds of the Garden's cross-project observation that changed a plot.
+    /// The other projects' rabbits are draw material this loop owns, so their
+    /// change has to reach the key that admits a rebuild.
+    garden_observations: u64,
     now: DateTime<Utc>,
 }
 
@@ -4986,6 +5774,7 @@ impl FrameMaterialKey {
             && self.terminal == other.terminal
             && self.animation == other.animation
             && self.create_pending == other.create_pending
+            && self.garden_observations == other.garden_observations
             && self.now == other.now
     }
 }
@@ -5001,6 +5790,15 @@ impl HomeFrameMaterial {
         self.now = self
             .projection
             .canonical_garden_now(self.height, self.width, self.now);
+        self
+    }
+
+    fn with_workspace_deck_garden(mut self, deck: &WorkspaceDeck) -> Self {
+        let Some(active_sessions) = self.projection.garden_sessions().map(<[_]>::to_vec) else {
+            return self;
+        };
+        let (scope, sessions) = deck.garden_projection(&active_sessions);
+        self.projection = self.projection.with_deck_garden(scope, sessions);
         self
     }
 }
@@ -5020,6 +5818,12 @@ fn home_frame_material(
     create_pending: Option<&str>,
     now: DateTime<Utc>,
 ) -> HomeFrameMaterial {
+    let (managed_terminal_view, root_terminal_view) =
+        if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal) {
+            (None, terminal_view.map(Arc::new))
+        } else {
+            (terminal_view.map(Arc::new), None)
+        };
     home_frame_material_shared(
         height,
         width,
@@ -5029,7 +5833,8 @@ fn home_frame_material(
         metrics,
         health,
         Arc::new(git_diffs.clone()),
-        terminal_view.map(Arc::new),
+        managed_terminal_view,
+        root_terminal_view.as_deref(),
         create_pending,
         now,
     )
@@ -5046,7 +5851,8 @@ fn home_frame_material_shared(
     metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
     health: usagi_core::usecase::daemon_health::DaemonHealthTracker,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
-    terminal_view: Option<Arc<TerminalViewProjection>>,
+    managed_terminal_view: Option<Arc<TerminalViewProjection>>,
+    root_terminal_view: Option<&TerminalViewProjection>,
     create_pending: Option<&str>,
     now: DateTime<Utc>,
 ) -> HomeFrameMaterial {
@@ -5060,6 +5866,7 @@ fn home_frame_material_shared(
                     .find(|session| session.id == target)
                     .map(|session| (session.label.clone(), confirm))
             });
+    let root_terminal_projection = runtime.root_terminal_projection(root_terminal_view);
     let projection = HomeProjection::from_ordered_state(runtime.state(), workspace_name, sessions)
         .with_pane(runtime.preview_pane())
         .with_metrics(metrics)
@@ -5067,8 +5874,9 @@ fn home_frame_material_shared(
         // other renderer input, so an idle Home still skips redraws.
         .with_health(health)
         .with_shared_git_diffs(git_diffs)
-        .with_shared_terminal_view(terminal_view)
+        .with_shared_terminal_view(managed_terminal_view)
         .with_director_drawer(runtime.director_projection().clone())
+        .with_root_terminal_drawer(root_terminal_projection)
         .with_create_pending(create_pending.map(str::to_owned))
         .with_overlay_modals(
             runtime.overview_modal().cloned(),
@@ -5182,6 +5990,22 @@ fn render_controller_frame(
     ))
 }
 
+/// Add the project tab bar and deck overlay to a Home-height frame.
+///
+/// Both the ordinary frame loop and modal backgrounds use this composition so
+/// opening a modal cannot move the workspace projection into row zero.
+fn compose_workspace_shell_frame(
+    deck: &WorkspaceDeck,
+    home_height: usize,
+    width: usize,
+    home: &[String],
+) -> Vec<String> {
+    let mut frame = Vec::with_capacity(home_height.saturating_add(PROJECT_BAR_ROWS));
+    frame.push(project_bar(deck, width).line);
+    frame.extend(render_overlay(deck, home_height, width, home));
+    frame
+}
+
 /// Apply actions already routed by [`DaemonBackend`] to the stateful terminal
 /// host. This layer owns no Effect matching and therefore cannot diverge from
 /// the backend's route matrix.
@@ -5194,10 +6018,11 @@ fn drain_controller_host_actions(
     session_refresh: &mut dyn SessionRefreshPort,
     pending_session_refresh: &mut Option<Completions>,
 ) {
-    while let Ok(action) = actions.try_recv() {
+    for action in actions.try_iter().take(FRAME_EVENT_BUDGET) {
         match action {
             ControllerHostAction::Create(request, completions) => {
                 let name = request.intent.name;
+                let base_ref = request.intent.base_ref;
                 let role_id = request.intent.role_id;
                 let before = ui.workspace.session_ids().to_vec();
                 if begin_session_command(
@@ -5205,6 +6030,7 @@ fn drain_controller_host_actions(
                     SessionCommand::Create {
                         name: name.clone(),
                         role_id,
+                        base_ref,
                     },
                     SessionBackendCompletion::Create {
                         token: request.token,
@@ -5312,18 +6138,6 @@ fn drain_controller_host_actions(
                 }
             }
             ControllerHostAction::OpenTerminal(request) => {
-                // The workspace root pane is the Agent-only drawer. Refuse a
-                // generic terminal before recording a placeholder or issuing
-                // daemon work; managed-session Closeup remains unchanged.
-                if matches!(request.target, Target::Root(_)) {
-                    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
-                        Notice::new(format!(
-                            "{} Director accepts Agent conversations only",
-                            director_drawer::DIRECTOR_ICON
-                        )),
-                    )));
-                    continue;
-                }
                 if let Some(agent) = ui.agent.as_ref() {
                     let workspace = agent.workspace;
                     pending_targets.insert(request.operation_id, request.target);
@@ -5408,12 +6222,23 @@ fn drain_pane_completions_into_runtime(
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
     _geometry: Geometry,
 ) {
-    while let Ok(completion) = ui.pane_completions.try_recv() {
+    let completions = ui
+        .pane_completions
+        .try_iter()
+        .take(FRAME_EVENT_BUDGET)
+        .collect::<Vec<_>>();
+    for completion in completions {
         if ui.active_pane_launch == Some(completion.launch_id) {
             ui.active_pane_launch = None;
         }
         match completion.outcome {
             PaneLaunchOutcome::Agent { operation, result } => {
+                if result.is_ok() {
+                    // The daemon has admitted a new live runtime. Sidebar and
+                    // Garden membership comes from the coherent inventory, so
+                    // a cached pre-launch snapshot must not filter it back out.
+                    ui.request_agent_inventory_change_observation();
+                }
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
                 };
@@ -5478,6 +6303,9 @@ fn drain_pane_completions_into_runtime(
                 continuation,
                 result,
             } => {
+                if result.is_ok() {
+                    ui.request_agent_inventory_change_observation();
+                }
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
                 };
@@ -5489,6 +6317,14 @@ fn drain_pane_completions_into_runtime(
                 };
                 match result {
                     Ok(terminal) => {
+                        if ui.generic_terminal_is_closing(&terminal) {
+                            let _ = runtime.fail_pane(
+                                target,
+                                operation,
+                                "terminal is still closing; try again".to_owned(),
+                            );
+                            continue;
+                        }
                         let _ = runtime
                             .complete_pane_focus_if_uninterrupted(target, operation, terminal);
                     }
@@ -5629,6 +6465,208 @@ const fn is_user_activity(key: &Key) -> bool {
     !matches!(key, Key::Other)
 }
 
+/// Workspace-local drafts are not deck state and must not be discarded by a
+/// project activation.
+fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
+    let state = runtime.state();
+    state.create_session_form().is_some()
+        || state.note_editor().is_some()
+        || state.environment_editor().is_some()
+        || state.role_editor().is_some()
+}
+
+/// Run one blocking operation on a scoped worker while continuing to paint.
+/// For cancellable workspace opens, Escape discards a late result; the
+/// underlying call is allowed to settle safely before its borrowed port is
+/// returned. Non-cancellable saves leave queued input untouched.
+fn run_workspace_loading<T: Send>(
+    term: &mut dyn Terminal,
+    label: &str,
+    cancellable: bool,
+    operation: impl FnOnce() -> io::Result<T> + Send,
+) -> io::Result<T> {
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(operation);
+        let mut frame = 0_usize;
+        let mut cancelled = false;
+        loop {
+            let (height, width) = term.size()?;
+            let status = if cancelled { "Cancelling…" } else { label };
+            term.draw(&widgets::loading::loading_screen(
+                width,
+                height,
+                frame,
+                frame / 3,
+                status,
+            ))?;
+            // Even an immediately completed operation gets one visible frame.
+            // Without this fence, fast settings writes skipped feedback
+            // entirely and made the Enter key appear to do nothing.
+            if worker.is_finished() {
+                break;
+            }
+            let tick = std::time::Duration::from_millis(80);
+            if cancellable && !cancelled {
+                if matches!(term.wait_for_key(tick)?, Some(Key::Escape)) {
+                    cancelled = true;
+                }
+            } else {
+                // Saving and the post-cancel wait cannot accept input, but they
+                // must still yield so a slow operation does not become a render
+                // loop or consume keys intended for the next screen.
+                term.wait(tick)?;
+            }
+            frame = frame.wrapping_add(1);
+        }
+        let result = worker
+            .join()
+            .map_err(|_| io::Error::other("background operation stopped unexpectedly"))?;
+        if cancelled {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "operation was cancelled",
+            ))
+        } else {
+            result
+        }
+    })
+}
+
+/// Open and refresh a workspace while an interactive production adapter keeps
+/// presenting progress.
+///
+/// # Errors
+///
+/// Returns loader, terminal, worker, or cancellation failures.
+pub fn open_workspace_responsive(
+    term: &mut dyn Terminal,
+    loader: &mut dyn WorkspaceLoader,
+    path: &Path,
+    label: &str,
+) -> io::Result<WorkspaceSnapshot> {
+    if !loader.background_operations() {
+        let snapshot = loader.open(path)?;
+        return Ok(refresh_empty_workspace_snapshot(loader, snapshot));
+    }
+    run_workspace_loading(term, label, true, || {
+        let snapshot = loader.open(path)?;
+        Ok(refresh_empty_workspace_snapshot(loader, snapshot))
+    })
+}
+
+fn activate_workspace_responsive(
+    term: &mut dyn Terminal,
+    loader: &mut dyn WorkspaceLoader,
+    path: &Path,
+    label: &str,
+) -> io::Result<()> {
+    if loader.background_operations() {
+        run_workspace_loading(term, label, false, || loader.activate_prepared(path))
+    } else {
+        loader.activate_prepared(path)
+    }
+}
+
+fn prepare_deck_workspace(
+    term: &mut dyn Terminal,
+    loader: &mut Option<&mut dyn WorkspaceLoader>,
+    deck: &mut WorkspaceDeck,
+    path: &Path,
+    label: &str,
+) -> Option<WorkspaceSnapshot> {
+    let Some(loader) = loader.as_mut() else {
+        deck.set_notice("Open the workspace list to add or switch projects.");
+        return None;
+    };
+    match open_workspace_responsive(term, &mut **loader, path, label) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            // A cancelled worker may already have completed its declaration.
+            // Reassert the still-visible project before its resident pumps run
+            // again, so cancellation never silently switches tenant authority.
+            let _ = activate_workspace_responsive(
+                term,
+                &mut **loader,
+                deck.active_path(),
+                "Restoring current workspace…",
+            );
+            deck.set_notice(error.to_string());
+            None
+        }
+    }
+}
+
+fn refresh_empty_workspace_snapshot(
+    loader: &mut dyn WorkspaceLoader,
+    snapshot: WorkspaceSnapshot,
+) -> WorkspaceSnapshot {
+    if snapshot.session_ids.is_empty() {
+        let path = snapshot.workspace.path.clone();
+        return loader.refresh(&path).unwrap_or(snapshot);
+    }
+    snapshot
+}
+
+fn prepare_activation_settings(
+    workspace_config: &mut Option<WorkspaceConfigContext<'_>>,
+    loader: &mut Option<&mut dyn WorkspaceLoader>,
+    deck: &mut WorkspaceDeck,
+    current: &Path,
+    target: &Path,
+) -> bool {
+    let Some(context) = workspace_config.as_mut() else {
+        return true;
+    };
+    if let Err(error) = context.settings.select_workspace(target) {
+        let _ = context.settings.select_workspace(current);
+        if let Some(loader) = loader.as_mut() {
+            let _ = (**loader).activate_prepared(current);
+        }
+        deck.set_notice(error.to_string());
+        return false;
+    }
+    true
+}
+
+fn prepare_batch_settings(
+    workspace_config: &mut Option<WorkspaceConfigContext<'_>>,
+    loader: &mut Option<&mut dyn WorkspaceLoader>,
+    deck: &mut WorkspaceDeck,
+    current: &Path,
+    prepared: &[WorkspaceSnapshot],
+) -> bool {
+    let Some(context) = workspace_config.as_mut() else {
+        return true;
+    };
+    for snapshot in prepared {
+        if let Err(error) = context.settings.select_workspace(&snapshot.workspace.path) {
+            let _ = context.settings.select_workspace(current);
+            if let Some(loader) = loader.as_mut() {
+                let _ = (**loader).activate_prepared(current);
+            }
+            deck.set_notice(error.to_string());
+            return false;
+        }
+    }
+    true
+}
+
+/// Row zero belongs to the project bar. Home continues to receive coordinates
+/// relative to its own first row.
+fn adjust_project_bar_pointer(key: Key) -> Key {
+    match key {
+        Key::Click { column, row } if row > 0 => Key::Click {
+            column,
+            row: row - 1,
+        },
+        Key::Pointer(mut pointer) if pointer.row > 0 => {
+            pointer.row -= 1;
+            Key::Pointer(pointer)
+        }
+        other => other,
+    }
+}
+
 /// Tracks how long the user has been away from the keyboard.
 ///
 /// The clock itself stays in the frame loop, exactly as it already does for
@@ -5657,6 +6695,29 @@ impl IdleWatch {
     }
 }
 
+fn switch_arrow_target(deck: &WorkspaceDeck, state: &AppState, key: &Key) -> Option<PathBuf> {
+    if deck.overlay_open()
+        || state.overlay().is_some()
+        || state.director_drawer_open()
+        || state.route() != Route::Home(HomeMode::Switch)
+    {
+        return None;
+    }
+    match key {
+        Key::Left => Some(deck.previous_path().to_path_buf()),
+        Key::Right => Some(deck.next_path().to_path_buf()),
+        _ => None,
+    }
+}
+
+/// Maximum number of completions one Home frame may apply from each queue.
+const FRAME_EVENT_BUDGET: usize = 128;
+
+/// Registry reads are useful only while `+ Open` is visible. A short bounded
+/// cadence feels live across processes without turning the Home frame loop into
+/// a filesystem poller.
+const REGISTRY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -5669,12 +6730,21 @@ impl IdleWatch {
 fn drive_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
+    deck: &mut WorkspaceDeck,
+    registry: &[Workspace],
+    mut loader: Option<&mut dyn WorkspaceLoader>,
     backend_factory: &mut dyn ControllerBackendFactory,
     modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode,
     pr_auto_open: usagi_core::domain::settings::PrAutoOpen,
-    agent_models: AgentModelPolicy,
+    entry_policy: WorkspaceEntryPolicy,
     mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
+    let mut registry = registry.to_vec();
+    let WorkspaceEntryPolicy {
+        available_models,
+        default_model,
+        default_branch,
+    } = entry_policy;
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
     let workspace_name = snapshot.workspace.name.clone();
@@ -5688,6 +6758,9 @@ fn drive_workspace_controller(
     let mut browser = composition.browser;
     let mut restore_commands = Some(composition.restore_commands);
     let mut restore_connection = composition.restore_connection;
+    // Cross-project Garden observation. Its dedicated port is parked here while
+    // no round is in flight, exactly like the restore lane's.
+    let mut garden_inventory = Some(composition.garden_inventory);
     // Resident session-inventory lane. The frame loop only wakes and drains it;
     // the observation itself never runs here (#551).
     let mut session_refresh = composition.session_refresh;
@@ -5698,6 +6771,7 @@ fn drive_workspace_controller(
     // the newest is keeping all of them.
     let mut pending_session_refresh: Option<Completions> = None;
     let (restore_sender, restore_completions) = mpsc::channel();
+    let (garden_sender, garden_completions) = mpsc::channel::<GardenObservationCompletion>();
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     workspace.set_session_lifecycles(session_lifecycles);
@@ -5717,13 +6791,28 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     runtime.set_pr_auto_open(pr_auto_open);
     let data_home = usagi_core::infrastructure::paths::data_dir().ok();
     let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
         role_catalog,
     )));
-    runtime.set_agent_models(agent_models.available, agent_models.default);
+    // Git ref discovery can be slow on large or remote filesystems. Start Home
+    // immediately with the daemon's HEAD default, then reflux the catalog from a
+    // one-shot worker without ever holding the render thread.
+    let (branch_catalog_sender, branch_catalog_receiver) = mpsc::channel();
+    let branch_catalog_root = root_cwd.clone();
+    let branch_catalog_default = default_branch.clone();
+    let _ = std::thread::Builder::new()
+        .name("tui-branch-catalog".to_owned())
+        .spawn(move || {
+            let _ = branch_catalog_sender.send(session_branch_catalog(
+                &branch_catalog_root,
+                branch_catalog_default.as_deref(),
+            ));
+        });
+    runtime.set_agent_models(available_models, default_model);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
     }
@@ -5737,6 +6826,10 @@ fn drive_workspace_controller(
     // The screen saver's idle deadline rides the same clock: the shell observes
     // user input and monotonic time, the reducer only sees an injected duration.
     let mut idle_watch = IdleWatch::new(pointer_clock.elapsed());
+    // A Garden mouse-down owns the complete drag/release gesture even though
+    // the down itself closes the overlay. Later gesture phases must not land on
+    // the newly revealed terminal or sidebar.
+    let mut garden_pointer_gesture = false;
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
@@ -5756,6 +6849,10 @@ fn drive_workspace_controller(
     // and a capped backoff across worker jobs; a frame tick never resets it.
     let restore_clock = std::time::Instant::now();
     let mut restore_retry = RestoreRetryState::new();
+    let mut registry_refresh_pending = false;
+    let mut registry_refresh_due = std::time::Duration::ZERO;
+    let mut garden_observation = GardenObservation::new();
+    let mut garden_observations = 0_u64;
     // Filesystem hint for the inline create form. It is off the frame budget:
     // no scan happens while the form is closed (#554).
     let mut worktree_hint = SessionWorktreeHint::new(composition.session_worktrees);
@@ -5776,10 +6873,65 @@ fn drive_workspace_controller(
     let mut background_terminal_material_key = None;
     let mut background_terminal_view: Option<Arc<TerminalViewProjection>> = None;
     let mut background_terminal_generation = 0_u64;
+    let mut director_terminal_material_key = None;
+    let mut director_terminal_view: Option<Arc<TerminalViewProjection>> = None;
+    let mut director_terminal_generation = 0_u64;
+    let mut root_terminal_material_key = None;
+    let mut root_terminal_view: Option<Arc<TerminalViewProjection>> = None;
+    let mut root_terminal_generation = 0_u64;
     let mut director_material_key = None;
     let mut frame_material_key: Option<FrameMaterialKey> = None;
+    let mut allowed_sessions_revision = u64::MAX;
+    let mut current_sessions = BTreeSet::new();
     loop {
-        for event in backend.drain_events() {
+        let registry_now = restore_clock.elapsed();
+        if deck.add_overlay_open()
+            && !registry_refresh_pending
+            && registry_now >= registry_refresh_due
+            && let Some(loader) = loader.as_mut()
+        {
+            match (**loader).dispatch_registry_refresh() {
+                Ok(true) => registry_refresh_pending = true,
+                Ok(false) => {
+                    registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+                }
+                Err(error) => {
+                    deck.set_notice(error.to_string());
+                    registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+                    drawn_material = None;
+                    frame_material_key = None;
+                }
+            }
+        }
+        if let Some(completion) = loader
+            .as_mut()
+            .and_then(|loader| (**loader).take_registry_refresh())
+        {
+            registry_refresh_pending = false;
+            registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+            match completion {
+                Ok(latest) => {
+                    registry = latest;
+                    if deck.add_overlay_open() {
+                        deck.refresh_add(&registry);
+                        drawn_material = None;
+                        frame_material_key = None;
+                    }
+                }
+                Err(error) if deck.add_overlay_open() => {
+                    deck.set_notice(error.to_string());
+                    drawn_material = None;
+                    frame_material_key = None;
+                }
+                Err(_) => {}
+            }
+        }
+        if let Ok(catalog) = branch_catalog_receiver.try_recv() {
+            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
+                catalog,
+            )));
+        }
+        for event in backend.drain_events_bounded(FRAME_EVENT_BUDGET) {
             let _ = runtime.apply_event(event);
         }
         while let Some(epoch) = restore_connection.take_reconnected_epoch() {
@@ -5796,7 +6948,7 @@ fn drive_workspace_controller(
         if ui.take_agent_observation_request() {
             restore_retry.request_observation(restore_clock.elapsed());
         }
-        if ui.take_agent_exit_observation_request() {
+        if ui.take_agent_inventory_change_observation_request() {
             restore_retry.request_changed_observation(restore_clock.elapsed());
         }
         drain_session_completions(&mut ui);
@@ -5811,14 +6963,16 @@ fn drive_workspace_controller(
             restore_clock.elapsed(),
         );
         sync_runtime_sessions(&mut runtime, &ui, worktree_names);
-        let current_sessions = ui
-            .workspace
-            .session_ids()
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        ui.set_allowed_agent_sessions(current_sessions.iter().copied());
-        while let Ok(completion) = restore_completions.try_recv() {
+        if let Some(session) = pending_garden_visit.take() {
+            let _ = runtime.apply_event(AppEvent::VisitSession(session));
+        }
+        let workspace_material_revision = ui.workspace.material_revision();
+        if allowed_sessions_revision != workspace_material_revision {
+            current_sessions = ui.workspace.session_ids().iter().copied().collect();
+            ui.set_allowed_agent_sessions(current_sessions.iter().copied());
+            allowed_sessions_revision = workspace_material_revision;
+        }
+        for completion in restore_completions.try_iter().take(FRAME_EVENT_BUDGET) {
             let applied = apply_restore_completion(
                 completion,
                 &mut ui,
@@ -5838,19 +6992,45 @@ fn drive_workspace_controller(
                 surface_agent_tab_intent_error(&mut runtime, error);
             }
         }
-        let (height, width) = term.size()?;
+        for completion in garden_completions.try_iter().take(FRAME_EVENT_BUDGET) {
+            let observed = !completion.inventories.is_empty();
+            let mut changed = false;
+            for inventory in &completion.inventories {
+                changed |= deck.apply_garden_inventory(inventory);
+            }
+            if changed {
+                garden_observations = garden_observations.wrapping_add(1);
+            }
+            garden_inventory = Some(completion.port);
+            garden_observation.complete(restore_clock.elapsed(), observed);
+        }
+        let (terminal_height, width) = term.size()?;
+        let height = terminal_height.saturating_sub(PROJECT_BAR_ROWS);
         ui.set_terminal_size(height, width);
         let _ = runtime.apply_event(AppEvent::Resize {
             width: u16::try_from(width).unwrap_or(u16::MAX),
             height: u16::try_from(height).unwrap_or(u16::MAX),
         });
-        let geometry =
-            foreground_terminal_geometry(height, width, runtime.state().director_drawer_open());
+        let garden_available = garden_fits(height, width);
+        if runtime.state().overlay() == Some(Overlay::Garden) && !garden_available {
+            let _ = runtime.apply_event(AppEvent::GardenUnavailable);
+        }
+        let _ = runtime.apply_event(AppEvent::GardenAvailability(garden_available));
+        let geometry = foreground_terminal_geometry(
+            height,
+            width,
+            runtime.state().director_drawer_open(),
+            runtime.state().root_terminal_drawer_open(),
+            runtime.state().workspace_drawer_focus(),
+        );
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
-        // The right pane is what the foreground attachment serves, so it follows
-        // the previewed terminal: Switch's hover, Closeup's focus.
-        ui.sync_foreground_terminal(runtime.preview_terminal().as_ref(), geometry);
-        ui.resize_terminals(geometry);
+        // Keep every genuinely visible terminal attached. Concurrent Director
+        // and root-terminal drawers add two root surfaces beside the dimmed
+        // managed-session Agent instead of replacing or detaching it.
+        let director_terminal = runtime.director_terminal();
+        let root_terminal = runtime.root_terminal();
+        let visible_terminals = visible_workspace_terminals(&runtime, height, width);
+        ui.sync_visible_terminals(&visible_terminals);
         // Polling still runs every tick so output/admission progresses, but row
         // String creation and URL scanning run only behind the projection key.
         close_exited_panes(&mut ui, &mut runtime);
@@ -5866,7 +7046,7 @@ fn drive_workspace_controller(
             .and_then(|terminal| ui.terminal_projection_key(terminal))
             .unwrap_or(0);
         let next_terminal_key = (
-            focused_terminal,
+            focused_terminal.clone(),
             screen_revision,
             controls.revision(),
             geometry,
@@ -5882,12 +7062,20 @@ fn drive_workspace_controller(
             terminal_material_key = Some(next_terminal_key);
             terminal_generation = terminal_generation.saturating_add(1);
         }
-        let background_terminal = runtime.director_background_terminal();
+        let background_terminal = visible_managed_background_terminal(&runtime, height, width);
         let background_revision = background_terminal
             .as_ref()
             .and_then(|terminal| ui.terminal_projection_key(terminal))
             .unwrap_or(0);
-        let background_rows = workspace::terminal_viewport(height, width).0;
+        let background_rows = usize::from(
+            managed_background_terminal_geometry(
+                height,
+                width,
+                runtime.state().director_drawer_open(),
+                runtime.state().root_terminal_drawer_open(),
+            )
+            .rows,
+        );
         let next_background_key = (
             background_terminal.clone(),
             background_revision,
@@ -5901,14 +7089,77 @@ fn drive_workspace_controller(
             background_terminal_material_key = Some(next_background_key);
             background_terminal_generation = background_terminal_generation.saturating_add(1);
         }
+        let director_rows = director_drawer::terminal_viewport(height, width).rows;
+        let director_revision = director_terminal
+            .as_ref()
+            .and_then(|terminal| ui.terminal_projection_key(terminal))
+            .unwrap_or(0);
+        let director_focused = director_terminal.as_ref().is_some_and(|director| {
+            focused_terminal
+                .as_ref()
+                .is_some_and(|focused| focused.fences(director))
+        });
+        let next_director_terminal_key = (
+            director_terminal.clone(),
+            director_revision,
+            director_rows,
+            director_focused,
+            terminal_generation,
+        );
+        if director_terminal_material_key.as_ref() != Some(&next_director_terminal_key) {
+            director_terminal_view = if director_focused {
+                terminal_view.as_ref().map(Arc::clone)
+            } else {
+                director_terminal
+                    .as_ref()
+                    .and_then(|terminal| ui.retained_terminal_view(terminal, director_rows))
+                    .map(Arc::new)
+            };
+            director_terminal_material_key = Some(next_director_terminal_key);
+            director_terminal_generation = director_terminal_generation.saturating_add(1);
+        }
+        let root_rows = root_terminal_drawer::terminal_viewport_for(
+            height,
+            width,
+            root_terminal_available_width(height, width, runtime.state().director_drawer_open()),
+        )
+        .rows;
+        let root_revision = root_terminal
+            .as_ref()
+            .and_then(|terminal| ui.terminal_projection_key(terminal))
+            .unwrap_or(0);
+        let root_focused = root_terminal.as_ref().is_some_and(|root| {
+            focused_terminal
+                .as_ref()
+                .is_some_and(|focused| focused.fences(root))
+        });
+        let next_root_terminal_key = (
+            root_terminal.clone(),
+            root_revision,
+            root_rows,
+            root_focused,
+            terminal_generation,
+        );
+        if root_terminal_material_key.as_ref() != Some(&next_root_terminal_key) {
+            root_terminal_view = if root_focused {
+                terminal_view.as_ref().map(Arc::clone)
+            } else {
+                root_terminal
+                    .as_ref()
+                    .and_then(|terminal| ui.retained_terminal_view(terminal, root_rows))
+                    .map(Arc::new)
+            };
+            root_terminal_material_key = Some(next_root_terminal_key);
+            root_terminal_generation = root_terminal_generation.saturating_add(1);
+        }
         let next_director_key = (
             runtime.material_key(),
             ui.material_revision,
-            terminal_generation,
+            director_terminal_generation,
         );
         if director_material_key != Some(next_director_key) {
             let drawer_projection =
-                director_drawer_projection(&ui, &runtime, terminal_view.as_deref());
+                director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref());
             runtime.set_director_projection(drawer_projection);
             director_material_key = Some(next_director_key);
         }
@@ -5925,6 +7176,7 @@ fn drive_workspace_controller(
         let sessions_changed = session_material_key != Some(next_session_key);
         if sessions_changed {
             sessions = Arc::from(project_controller_sessions(&ui, runtime.state()));
+            deck.update_active_sessions(&sessions);
             metrics_sessions = sessions
                 .iter()
                 .map(|session| (session.id, session.cwd.clone()))
@@ -5939,7 +7191,12 @@ fn drive_workspace_controller(
             metrics_projection.apply(update);
         }
         let now = Utc::now();
-        let now = now.with_nanosecond(0).unwrap_or(now);
+        // Relative session labels change at minute granularity. Keying the full
+        // Home frame by seconds caused needless full-material rebuilds.
+        let now = now
+            .with_second(0)
+            .and_then(|now| now.with_nanosecond(0))
+            .unwrap_or(now);
         let drives_tick_animation = ui.creating_session.is_some()
             || sessions.iter().any(|session| session.removing)
             || runtime
@@ -5947,7 +7204,9 @@ fn drive_workspace_controller(
                 .tabs()
                 .iter()
                 .any(|tab| matches!(tab, PaneTab::Pending(_)));
-        let animation = if drives_tick_animation {
+        let animation = if garden_reduced_motion {
+            0
+        } else if drives_tick_animation {
             runtime.state().mascot_tick()
         } else {
             widgets::mascot::canonical_tick(runtime.state().mascot_tick())
@@ -5959,12 +7218,18 @@ fn drive_workspace_controller(
             sessions: next_session_key,
             shell: ui.material_revision,
             metrics: metrics_projection.generation(),
-            terminal: (terminal_generation, background_terminal_generation),
+            terminal: (
+                terminal_generation,
+                background_terminal_generation,
+                director_terminal_generation,
+                root_terminal_generation,
+            ),
             animation,
             create_pending: ui
                 .creating_session
                 .as_ref()
                 .map(|create| create.name.clone()),
+            garden_observations,
             now,
         };
         if frame_material_key.as_ref() != Some(&next_frame_key) {
@@ -5980,26 +7245,47 @@ fn drive_workspace_controller(
                 metrics_projection.metrics(),
                 metrics_projection.health(),
                 metrics_projection.shared_git_diffs(),
-                if runtime.state().director_drawer_open() {
+                if runtime.state().workspace_drawer_open() {
                     background_terminal_view.as_ref().map(Arc::clone)
                 } else {
                     terminal_view.as_ref().map(Arc::clone)
                 },
+                root_terminal_view.as_deref(),
                 ui.creating_session
                     .as_ref()
                     .map(|create| create.name.as_str()),
                 now,
             )
             .with_agent_inventory(ui.agent_inventory())
+            .with_workspace_deck_garden(deck)
             .with_garden_reduced_motion(garden_reduced_motion);
             // Skip only the drawing. A skipped tick has already run every drain
             // above and still runs restore admission, pane launches, and input
             // below, so nothing that makes progress depends on the redraw.
             if !controller_may_be_noop || drawn_material.as_ref() != Some(&material) {
-                term.draw(&render_home_material(&material))?;
+                let home = render_home_material(&material);
+                let frame = compose_workspace_shell_frame(deck, height, width, &home);
+                term.draw(&frame)?;
                 drawn_material = Some(material);
             }
             frame_material_key = Some(next_frame_key);
+        }
+        // The other open projects' Agents, observed only while the Garden is the
+        // frame. The active project keeps its own controller's richer phases.
+        let garden_open = runtime.state().overlay() == Some(Overlay::Garden);
+        if garden_inventory.is_some()
+            && garden_observation.begin_if_due(garden_open, restore_clock.elapsed())
+        {
+            let targets = deck.observable_workspaces();
+            if targets.is_empty() {
+                // The only open project is the one this loop already draws.
+                garden_observation.complete(restore_clock.elapsed(), true);
+            } else {
+                let port = garden_inventory
+                    .take()
+                    .expect("the Garden observation port was checked above");
+                spawn_garden_observation_job(port, targets, garden_sender.clone());
+            }
         }
         if restore_commands.is_some() && restore_retry.begin_if_due(restore_clock.elapsed()) {
             let port = restore_commands
@@ -6018,7 +7304,230 @@ fn drive_workspace_controller(
         drain_pane_launches(&mut ui, geometry);
         // Director mode owns `Ctrl-O Ctrl-N` as New; the swap happens once here
         // so PTY forwarding, pane controls, and the reducer all see one key.
-        let key = retarget_director_chords(&runtime, term.read_key()?);
+        let raw_key = retarget_drawer_chords(&runtime, term.read_key()?);
+        if dismiss_pr_modal_on_project_bar_click(&mut runtime, &raw_key) {
+            continue;
+        }
+        let bar_click = matches!(raw_key, Key::Click { row: 0, .. });
+        let bar_target = match &raw_key {
+            Key::Click { column, row: 0 } => project_bar(deck, width)
+                .target_at(usize::from(*column))
+                .cloned(),
+            _ => None,
+        };
+        let key = adjust_project_bar_pointer(raw_key);
+
+        // Leader shortcuts and the remaining project-bar clicks are process-level
+        // and win over every workspace surface, including a focused live PTY and
+        // Director. A PR modal claimed its outside click immediately above.
+        // Plain arrows are deliberately local to unobscured Switch mode.
+        let switch_arrow_target = switch_arrow_target(deck, runtime.state(), &key);
+        let direct_target = match (&key, &bar_target) {
+            (Key::Live(LiveTerminalAction::ActivateWorkspace(number)), _) => deck
+                .path_at(usize::from(number.saturating_sub(1)))
+                .map(Path::to_path_buf),
+            (_, Some(ProjectBarTarget::Workspace(path))) => Some(path.clone()),
+            _ => switch_arrow_target,
+        };
+        let opens_add = matches!(key, Key::Live(LiveTerminalAction::OpenWorkspace))
+            || matches!(bar_target, Some(ProjectBarTarget::Add));
+        if opens_add {
+            deck.open_add(&registry);
+            registry_refresh_due = std::time::Duration::ZERO;
+            drawn_material = None;
+            frame_material_key = None;
+            continue;
+        }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenWorkspaceSwitcher)) {
+            deck.open_switcher();
+            drawn_material = None;
+            frame_material_key = None;
+            continue;
+        }
+        if bar_click && direct_target.is_none() {
+            continue;
+        }
+        if let Some(path) = direct_target {
+            if path == deck.active_path() {
+                continue;
+            }
+            if workspace_has_unsaved_surface(&runtime) {
+                deck.open_switcher();
+                deck.set_notice("Save or cancel the current draft before switching.");
+                drawn_material = None;
+                frame_material_key = None;
+                continue;
+            }
+            if let Some(prepared) =
+                prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
+                && prepare_activation_settings(
+                    &mut workspace_config,
+                    &mut loader,
+                    deck,
+                    &root_cwd,
+                    &prepared.workspace.path,
+                )
+            {
+                return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+            }
+            drawn_material = None;
+            frame_material_key = None;
+            continue;
+        }
+        if deck.overlay_open() {
+            match deck.handle_overlay_key(&key) {
+                OverlayIntent::Stay => {}
+                OverlayIntent::Cancel => deck.close_overlay(),
+                OverlayIntent::Activate(path) => {
+                    if path == deck.active_path() {
+                        deck.close_overlay();
+                    } else if workspace_has_unsaved_surface(&runtime) {
+                        deck.set_notice("Save or cancel the current draft before switching.");
+                    } else if let Some(prepared) =
+                        prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
+                        && prepare_activation_settings(
+                            &mut workspace_config,
+                            &mut loader,
+                            deck,
+                            &root_cwd,
+                            &prepared.workspace.path,
+                        )
+                    {
+                        return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+                    }
+                }
+                OverlayIntent::Add(paths) => {
+                    if !paths.is_empty() {
+                        if workspace_has_unsaved_surface(&runtime) {
+                            deck.set_notice("Save or cancel the current draft before switching.");
+                        } else {
+                            let current = deck.active_path().to_path_buf();
+                            let mut prepared = Vec::with_capacity(paths.len());
+                            let mut failed = false;
+                            for (index, path) in paths.iter().enumerate() {
+                                let label =
+                                    format!("Opening workspace {} / {}…", index + 1, paths.len());
+                                let Some(snapshot) =
+                                    prepare_deck_workspace(term, &mut loader, deck, path, &label)
+                                else {
+                                    failed = true;
+                                    break;
+                                };
+                                prepared.push(snapshot);
+                            }
+                            if failed {
+                                if let Some(loader) = loader.as_mut() {
+                                    let _ = activate_workspace_responsive(
+                                        term,
+                                        &mut **loader,
+                                        &current,
+                                        "Restoring current workspace…",
+                                    );
+                                }
+                                prepared.clear();
+                            }
+                            if let Some(first) = prepared.first().cloned() {
+                                if let Some(loader) = loader.as_mut()
+                                    && let Err(error) = activate_workspace_responsive(
+                                        term,
+                                        &mut **loader,
+                                        &first.workspace.path,
+                                        "Activating workspace…",
+                                    )
+                                {
+                                    deck.set_notice(error.to_string());
+                                    drawn_material = None;
+                                    frame_material_key = None;
+                                    continue;
+                                }
+                                if !prepare_batch_settings(
+                                    &mut workspace_config,
+                                    &mut loader,
+                                    deck,
+                                    &root_cwd,
+                                    &prepared,
+                                ) {
+                                    drawn_material = None;
+                                    frame_material_key = None;
+                                    continue;
+                                }
+                                // Batch validation leaves the last member selected;
+                                // the composition created after this return belongs
+                                // to the first newly added tab.
+                                if !prepare_activation_settings(
+                                    &mut workspace_config,
+                                    &mut loader,
+                                    deck,
+                                    &root_cwd,
+                                    &first.workspace.path,
+                                ) {
+                                    drawn_material = None;
+                                    frame_material_key = None;
+                                    continue;
+                                }
+                                deck.append_snapshots(&prepared);
+                                if let Some(loader) = loader.as_mut() {
+                                    let _ = (**loader).record_unite(&deck.paths());
+                                }
+                                return Ok(WorkspaceStep::Activate(Box::new(first)));
+                            }
+                        }
+                    }
+                }
+                OverlayIntent::Close(path) => {
+                    if path == deck.active_path() {
+                        let Some(replacement) = deck
+                            .replacement_path_after_close(&path)
+                            .map(Path::to_path_buf)
+                        else {
+                            deck.close_path(&path);
+                            return Ok(WorkspaceStep::Back);
+                        };
+                        if workspace_has_unsaved_surface(&runtime) {
+                            deck.set_notice("Save or cancel the current draft before closing.");
+                        } else if let Some(prepared) = prepare_deck_workspace(
+                            term,
+                            &mut loader,
+                            deck,
+                            &replacement,
+                            "Opening replacement workspace…",
+                        ) && prepare_activation_settings(
+                            &mut workspace_config,
+                            &mut loader,
+                            deck,
+                            &root_cwd,
+                            &prepared.workspace.path,
+                        ) {
+                            deck.close_path(&path);
+                            return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+                        }
+                    } else {
+                        deck.close_path(&path);
+                        if let Some(loader) = loader.as_mut()
+                            && let Err(error) = (**loader).record_unite(&deck.paths())
+                        {
+                            deck.set_notice(error.to_string());
+                        }
+                    }
+                }
+            }
+            drawn_material = None;
+            frame_material_key = None;
+            continue;
+        }
+        if garden_pointer_gesture {
+            match key {
+                Key::Pointer(PointerEvent {
+                    kind: PointerKind::Up,
+                    ..
+                }) => {
+                    garden_pointer_gesture = false;
+                    continue;
+                }
+                Key::Pointer(_) => continue,
+                _ => garden_pointer_gesture = false,
+            }
+        }
         // Screen saver admission, before the key is routed anywhere: a wake-up
         // key resets the deadline first, so the frame that wakes the user can
         // never re-open the garden it just closed. A terminal too small to draw
@@ -6026,6 +7535,24 @@ fn drive_workspace_controller(
         let idle = idle_watch.observe(&key, pointer_clock.elapsed());
         if garden_fits(height, width) {
             let _ = runtime.apply_event(AppEvent::IdleElapsed(idle));
+        }
+        // Wheel, drag and raw terminal input are normally owned before the Home
+        // reducer. While the Garden is visible they are wake-up input instead:
+        // consume the first event and never mutate the covered pane.
+        if runtime.state().overlay() == Some(Overlay::Garden) {
+            if matches!(key, Key::Click { .. }) {
+                garden_pointer_gesture = true;
+            } else if garden_shell_owned_wake(&key) {
+                garden_pointer_gesture = matches!(
+                    key,
+                    Key::Pointer(PointerEvent {
+                        kind: PointerKind::Drag,
+                        ..
+                    })
+                );
+                let _ = runtime.apply_event(AppEvent::GardenClick(GardenClick::Dismiss));
+                continue;
+            }
         }
         // Neither a tick nor a resize refreshes an inventory here any more. Both
         // used to dispatch `RefreshDecisions` + `RefreshSessions`, which ran the
@@ -6035,8 +7562,59 @@ fn drive_workspace_controller(
         // A tick and a resize therefore cost exactly one redraw each, and the
         // only wake left is the explicit one a lifecycle action asks for through
         // `ControllerHostAction`.
-        let input_route =
-            route_workspace_input_before_reducer(&mut ui, &mut runtime, &mut controls, term, &key);
+        let garden_route = route_garden_input(
+            &mut ui,
+            &mut runtime,
+            drawn_material.as_ref(),
+            &key,
+            &mut garden_pointer_gesture,
+        );
+        if let Some(GardenInputRoute::Project(visit)) = garden_route {
+            let Some(path) = deck
+                .path_for_workspace(visit.workspace)
+                .map(Path::to_path_buf)
+            else {
+                deck.open_switcher();
+                deck.set_notice("That project is no longer open.");
+                garden_pointer_gesture = false;
+                drawn_material = None;
+                frame_material_key = None;
+                continue;
+            };
+            if let Some(prepared) =
+                prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
+                && prepare_activation_settings(
+                    &mut workspace_config,
+                    &mut loader,
+                    deck,
+                    &root_cwd,
+                    &prepared.workspace.path,
+                )
+            {
+                deck.schedule_garden_visit(prepared.workspace.path.clone(), visit.session);
+                return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+            }
+            let notice = deck.notice().map(str::to_owned);
+            deck.open_switcher();
+            if let Some(notice) = notice {
+                deck.set_notice(notice);
+            }
+            garden_pointer_gesture = false;
+            drawn_material = None;
+            frame_material_key = None;
+            continue;
+        }
+        let input_route = match garden_route {
+            Some(GardenInputRoute::Local(effects)) => WorkspaceInputRoute::Garden(effects),
+            Some(GardenInputRoute::Project(_)) => unreachable!("project visit returned above"),
+            None => route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                term,
+                &key,
+            ),
+        };
         if input_route == WorkspaceInputRoute::Forwarded {
             continue;
         }
@@ -6061,67 +7639,63 @@ fn drive_workspace_controller(
             continue;
         }
         let daemon_overlay_was_open = runtime.state().overlay() == Some(Overlay::Daemon);
-        let effects = if let WorkspaceInputRoute::Drawer(effects) = input_route {
+        let effects = if let WorkspaceInputRoute::Drawer(effects)
+        | WorkspaceInputRoute::Garden(effects) = input_route
+        {
             effects
         } else if is_director_new_click(&key, &runtime, height, width) {
             runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
         } else if let Key::Click { column, row } = key {
-            // The garden owns the whole frame while it is up, and it resolves
-            // its own clicks: the layout call that drew the rabbits returns the
-            // `SessionId`-tagged plots, so the shell hit-tests the frame the
-            // user actually saw instead of re-deriving session order from cells.
-            let garden_click = drawn_material.as_ref().and_then(|material| {
-                garden_click_at(
-                    material.height,
-                    material.width,
-                    &material.projection,
-                    material.now,
-                    column,
-                    row,
-                )
-            });
-            // Header rendering and hit-testing share one layout projection, so
-            // CJK breadcrumbs, notice presence, and narrow clipping cannot move
-            // an action away from its clickable cells.
-            let header_action = drawn_material.as_ref().and_then(|material| {
-                home_header_action_at(width, &material.projection, column, row)
-            });
-            let pane_tab = runtime
-                .wants_right_pane_tab_click()
-                .then(|| {
-                    drawn_material.as_ref().and_then(|material| {
-                        right_pane_tab_at(
-                            material.height,
-                            material.width,
-                            &material.projection,
-                            column,
-                            row,
-                        )
-                    })
-                })
-                .flatten();
-            match (garden_click, header_action, pane_tab) {
-                (Some(click), _, _) => {
-                    let effects = runtime.apply_event(AppEvent::GardenClick(click));
-                    // The activation this event performed made the clicked
-                    // session's pane the active one, so the rabbit's own tab can
-                    // be selected now. A rabbit whose tab has meanwhile gone
-                    // leaves the plain session Closeup as it is.
-                    visit_garden_agent(&mut ui, &mut runtime, click);
-                    effects
-                }
-                (None, Some(HomeHeaderAction::Director), _) => {
-                    runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
-                }
-                (None, Some(HomeHeaderAction::Decisions), _) => {
-                    runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
-                }
-                (None, None, Some(index)) => {
-                    select_right_pane_tab(&mut ui, &mut runtime, index);
+            if let Some(route) =
+                route_pr_modal_click(runtime.state().overlay(), height, width, column, row)
+            {
+                if route == PrModalClickRoute::Inside {
+                    // The modal owns its whole box; a click there must not
+                    // activate a header, pane tab, or sidebar row behind it.
                     Vec::new()
+                } else {
+                    runtime.apply_event(AppEvent::Key(AppKey::Escape))
                 }
-                (None, None, None) => {
-                    runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
+            } else {
+                // Header rendering and hit-testing share one layout projection, so
+                // Notice presence and narrow clipping cannot move an action away
+                // from its clickable cells.
+                let header_action = drawn_material.as_ref().and_then(|material| {
+                    home_header_action_at(width, &material.projection, column, row)
+                });
+                let pane_tab = runtime
+                    .wants_right_pane_tab_click()
+                    .then(|| {
+                        drawn_material.as_ref().and_then(|material| {
+                            right_pane_tab_at(
+                                material.height,
+                                material.width,
+                                &material.projection,
+                                column,
+                                row,
+                            )
+                        })
+                    })
+                    .flatten();
+                match (header_action, pane_tab) {
+                    (Some(HomeHeaderAction::Director), _) => {
+                        runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
+                    }
+                    (Some(HomeHeaderAction::RootTerminal), _) => {
+                        runtime.apply_event(AppEvent::Key(AppKey::ToggleRootTerminalDrawer))
+                    }
+                    (Some(HomeHeaderAction::Decisions), _) => {
+                        runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
+                    }
+                    (None, Some(index)) => {
+                        select_right_pane_tab(&mut ui, &mut runtime, index);
+                        Vec::new()
+                    }
+                    (None, None) => runtime.apply_event(sidebar_pointer_event(
+                        column,
+                        row,
+                        pointer_clock.elapsed(),
+                    )),
                 }
             }
         } else {
@@ -6145,7 +7719,7 @@ fn drive_workspace_controller(
                 let terminal_view = drawn_material
                     .as_ref()
                     .and_then(|material| material.projection.terminal_view().cloned());
-                let base = render_controller_frame(
+                let home = render_controller_frame(
                     height,
                     width,
                     &runtime,
@@ -6160,7 +7734,23 @@ fn drive_workspace_controller(
                         .as_ref()
                         .map(|create| create.name.as_str()),
                 );
-                run_workspace_config(term, context.settings, context.available_models, &base)?;
+                // Workspace frames reserve row zero for the project bar. Keep
+                // that exact composition behind Config; otherwise the Home
+                // projection is drawn one row too high while the modal is open.
+                let base = compose_workspace_shell_frame(deck, height, width, &home);
+                let branch_catalog = session_branch_catalog(
+                    &root_cwd,
+                    usagi_core::usecase::settings::read_for_workspace_entry(context.settings)
+                        .default_branch
+                        .as_deref(),
+                );
+                run_workspace_config(
+                    term,
+                    context.settings,
+                    context.available_models,
+                    &branch_catalog.branches,
+                    &base,
+                )?;
                 // The modal drew over the frame the gate remembers, so the next
                 // tick must redraw even if no material changed underneath it.
                 drawn_material = None;
@@ -6172,6 +7762,9 @@ fn drive_workspace_controller(
                 // A newly saved Agent default applies to the next `agent`
                 // command without reopening the workspace.
                 runtime.set_agent_models(context.available_models, effective.default_model);
+                let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
+                    session_branch_catalog(&root_cwd, effective.default_branch.as_deref()),
+                )));
                 // Team selection changes the effective role catalog immediately
                 // for the next session creation or Agent launch.
                 let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
@@ -6220,6 +7813,90 @@ fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> Sess
         .unwrap_or_default()
 }
 
+/// Reads local and remote-tracking branch identities for the create picker.
+/// A remote's symbolic `HEAD` is exposed as its `(default)` choice; other
+/// symbolic aliases are omitted. A failure shrinks the picker to the daemon's
+/// legacy `HEAD` default instead of making the workspace unusable.
+fn session_branch_catalog(
+    workspace_root: &Path,
+    configured_default: Option<&str>,
+) -> SessionBranchCatalog {
+    let output = usagi_core::infrastructure::git::confined_git_command(workspace_root)
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(symref)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .output();
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(_) | Err(_) => return SessionBranchCatalog::default(),
+    };
+    let branches = parse_session_branch_choices(&String::from_utf8_lossy(&output.stdout));
+    let default = configured_default
+        .filter(|configured| branches.iter().any(|branch| branch.refname == *configured))
+        .map(str::to_owned)
+        .or_else(|| {
+            branch_default_from_output(
+                usagi_core::infrastructure::git::confined_git_command(workspace_root)
+                    .args(["symbolic-ref", "--quiet", "HEAD"])
+                    .output(),
+                &branches,
+            )
+        });
+    SessionBranchCatalog { branches, default }
+}
+
+fn branch_default_from_output(
+    output: io::Result<std::process::Output>,
+    branches: &[BranchChoice],
+) -> Option<String> {
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(_) | Err(_) => return None,
+    };
+    let refname = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if branches.iter().any(|branch| branch.refname == refname) {
+        Some(refname)
+    } else {
+        None
+    }
+}
+
+fn parse_session_branch_choices(output: &str) -> Vec<BranchChoice> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (refname, symref) = line.split_once(' ').unwrap_or((line, ""));
+            let label = if symref.is_empty() {
+                refname
+                    .strip_prefix("refs/heads/")
+                    .map(|name| format!("local:{name}"))
+                    .or_else(|| {
+                        refname
+                            .strip_prefix("refs/remotes/")
+                            .map(|name| format!("remote:{name}"))
+                    })
+            } else {
+                remote_default_branch_label(refname, symref)
+            }?;
+            Some(BranchChoice {
+                label,
+                refname: refname.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn remote_default_branch_label(refname: &str, symref: &str) -> Option<String> {
+    let name = refname.strip_prefix("refs/remotes/")?;
+    let remote = name.strip_suffix("/HEAD")?;
+    let target_prefix = format!("refs/remotes/{remote}/");
+    (!remote.is_empty() && symref.starts_with(&target_prefix) && symref != refname)
+        .then(|| format!("remote:{remote}/(default)"))
+}
+
 /// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
 ///
 /// # Errors
@@ -6231,13 +7908,17 @@ pub fn run_workspace_controller_with_backend(
     snapshot: WorkspaceSnapshot,
     backend_factory: &mut dyn ControllerBackendFactory,
 ) -> io::Result<Exit> {
+    let mut deck = WorkspaceDeck::new(&snapshot);
     drive_workspace_controller(
         term,
         snapshot,
+        &mut deck,
+        &[],
+        None,
         backend_factory,
         usagi_core::domain::settings::ModalSelectionMode::Action,
         usagi_core::domain::settings::PrAutoOpen::default(),
-        AgentModelPolicy::default(),
+        WorkspaceEntryPolicy::default(),
         None,
     )
     .map(WorkspaceStep::exit)
@@ -6255,15 +7936,20 @@ pub fn run_workspace_controller_with_backend_and_settings(
     backend_factory: &mut dyn ControllerBackendFactory,
     settings: &usagi_core::domain::settings::Settings,
 ) -> io::Result<Exit> {
+    let mut deck = WorkspaceDeck::new(&snapshot);
     drive_workspace_controller(
         term,
         snapshot,
+        &mut deck,
+        &[],
+        None,
         backend_factory,
         settings.modal_selection_mode,
         settings.pr_auto_open,
-        AgentModelPolicy {
-            default: settings.default_model,
-            ..AgentModelPolicy::default()
+        WorkspaceEntryPolicy {
+            default_model: settings.default_model,
+            default_branch: settings.default_branch.clone(),
+            ..WorkspaceEntryPolicy::default()
         },
         None,
     )
@@ -6285,15 +7971,20 @@ pub fn run_workspace_controller_with_backend_and_config(
 ) -> io::Result<Exit> {
     settings.select_workspace(&snapshot.workspace.path)?;
     let effective = usagi_core::usecase::settings::read_for_workspace_entry(settings);
+    let mut deck = WorkspaceDeck::new(&snapshot);
     drive_workspace_controller(
         term,
         snapshot,
+        &mut deck,
+        &[],
+        None,
         backend_factory,
         effective.modal_selection_mode,
         effective.pr_auto_open,
-        AgentModelPolicy {
-            available: available_models,
-            default: effective.default_model,
+        WorkspaceEntryPolicy {
+            available_models,
+            default_model: effective.default_model,
+            default_branch: effective.default_branch.clone(),
         },
         Some(WorkspaceConfigContext {
             settings,
@@ -6301,6 +7992,35 @@ pub fn run_workspace_controller_with_backend_and_config(
         }),
     )
     .map(WorkspaceStep::exit)
+}
+
+/// Run a direct workspace entry inside the same process-level deck used by the
+/// Welcome/Open graph, so `Ctrl-O +` is available immediately.
+///
+/// # Errors
+///
+/// Returns workspace preparation, settings, persistence, or terminal IO
+/// failures.
+#[allow(clippy::too_many_arguments)]
+pub fn run_workspace_deck_with_backend_and_config(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    registry: &[Workspace],
+    loader: &mut dyn WorkspaceLoader,
+    backend_factory: &mut dyn ControllerBackendFactory,
+    settings: &mut dyn SettingsPort,
+    available_models: AvailableAgentModels,
+) -> io::Result<Exit> {
+    enter_workspace(
+        term,
+        snapshot,
+        registry,
+        loader,
+        settings,
+        backend_factory,
+        available_models,
+    )
+    .map(|exit| exit.unwrap_or(Exit::Welcome))
 }
 
 struct FixedBackendFactory {
@@ -6358,6 +8078,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
                 .take()
                 .unwrap_or_else(|| Box::new(UnavailableAgentCommandPort)),
             restore_connection: Box::new(UnavailableRestoreConnectionPort),
+            garden_inventory: Box::new(UnavailableGardenInventoryPort),
             agent_tab_intents: Box::new(UnavailableAgentTabIntentPort),
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics: self
@@ -6575,9 +8296,13 @@ pub fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availabili
 /// Open one workspace snapshot through the controller runtime, supplying
 /// fallback ports for the screen-graph entry points that do not inject a daemon
 /// Agent / metrics factory (`run_with_settings`).
+#[allow(clippy::too_many_arguments)]
 fn open_snapshot_via_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
+    deck: &mut WorkspaceDeck,
+    registry: &[Workspace],
+    loader: &mut dyn WorkspaceLoader,
     settings: &mut dyn SettingsPort,
     backend_factory: &mut dyn ControllerBackendFactory,
     available_models: AvailableAgentModels,
@@ -6587,12 +8312,16 @@ fn open_snapshot_via_controller(
     drive_workspace_controller(
         term,
         snapshot,
+        deck,
+        registry,
+        Some(loader),
         backend_factory,
         effective.modal_selection_mode,
         effective.pr_auto_open,
-        AgentModelPolicy {
-            available: available_models,
-            default: effective.default_model,
+        WorkspaceEntryPolicy {
+            available_models,
+            default_model: effective.default_model,
+            default_branch: effective.default_branch.clone(),
         },
         Some(WorkspaceConfigContext {
             settings,
@@ -6611,16 +8340,93 @@ fn open_snapshot_via_controller(
 fn enter_workspace(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
+    registry: &[Workspace],
+    loader: &mut dyn WorkspaceLoader,
     settings: &mut dyn SettingsPort,
     backend_factory: &mut dyn ControllerBackendFactory,
     available_models: AvailableAgentModels,
 ) -> io::Result<Option<Exit>> {
-    let step =
-        open_snapshot_via_controller(term, snapshot, settings, backend_factory, available_models)?;
-    Ok(match step {
-        WorkspaceStep::Quit => Some(Exit::Quit),
-        WorkspaceStep::Back => None,
-    })
+    let deck = WorkspaceDeck::new(&snapshot);
+    enter_workspace_deck(
+        term,
+        snapshot,
+        deck,
+        registry,
+        loader,
+        settings,
+        backend_factory,
+        available_models,
+    )
+}
+
+/// Run the process-level deck while keeping exactly one workspace composition
+/// resident. A prepared activation returns from the old frame first, so all of
+/// its ports are dropped before the next factory call.
+#[allow(clippy::too_many_arguments)]
+fn enter_workspace_deck(
+    term: &mut dyn Terminal,
+    mut snapshot: WorkspaceSnapshot,
+    mut deck: WorkspaceDeck,
+    registry: &[Workspace],
+    loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
+    backend_factory: &mut dyn ControllerBackendFactory,
+    available_models: AvailableAgentModels,
+) -> io::Result<Option<Exit>> {
+    if deck.slots().len() > 1 {
+        let _ = loader.record_unite(&deck.paths());
+    }
+    loop {
+        let step = open_snapshot_via_controller(
+            term,
+            snapshot,
+            &mut deck,
+            registry,
+            loader,
+            settings,
+            backend_factory,
+            available_models,
+        )?;
+        match step {
+            WorkspaceStep::Quit => return Ok(Some(Exit::Quit)),
+            WorkspaceStep::Back => return Ok(None),
+            WorkspaceStep::Activate(prepared) => {
+                deck.activate_snapshot(&prepared);
+                if deck.slots().len() > 1 {
+                    let _ = loader.record_unite(&deck.paths());
+                }
+                snapshot = *prepared;
+            }
+        }
+    }
+}
+
+fn prepare_workspace_deck(
+    term: &mut dyn Terminal,
+    loader: &mut dyn WorkspaceLoader,
+    paths: &[PathBuf],
+) -> io::Result<(Vec<WorkspaceSnapshot>, WorkspaceSnapshot, WorkspaceDeck)> {
+    let Some((first_path, remaining_paths)) = paths.split_first() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a project deck needs at least one workspace",
+        ));
+    };
+    let primary = open_workspace_responsive(term, loader, first_path, "Opening workspace 1…")?;
+    let mut snapshots = vec![primary.clone()];
+    for (index, path) in remaining_paths.iter().enumerate() {
+        let label = format!("Opening workspace {} / {}…", index + 2, paths.len());
+        snapshots.push(open_workspace_responsive(term, loader, path, &label)?);
+    }
+    activate_workspace_responsive(
+        term,
+        loader,
+        &primary.workspace.path,
+        "Activating workspace…",
+    )?;
+    let mut deck = WorkspaceDeck::new(&primary);
+    deck.append_snapshots(&snapshots);
+    Ok((snapshots, primary, deck))
 }
 
 struct CompatibilityBackendFactory<'a, 'b, 'c> {
@@ -6671,6 +8477,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
                 AgentCommandPortFactory::create,
             ),
             restore_connection: Box::new(UnavailableRestoreConnectionPort),
+            garden_inventory: Box::new(UnavailableGardenInventoryPort),
             agent_tab_intents: Box::new(UnavailableAgentTabIntentPort),
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics,
@@ -6779,7 +8586,7 @@ impl EntryFrameMaterial {
 /// # Errors
 ///
 /// Returns workspace loading, settings, or terminal IO failures.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_screen_graph_with_backend(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -6791,7 +8598,49 @@ pub fn run_screen_graph_with_backend(
     backend_factory: &mut dyn ControllerBackendFactory,
     available_models: AvailableAgentModels,
 ) -> io::Result<Exit> {
+    run_screen_graph_with_backend_and_notice(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        backend_factory,
+        available_models,
+        None,
+    )
+}
+
+/// [`run_screen_graph_with_backend`] that opens with `notice` already on the
+/// Welcome screen.
+///
+/// This is what makes an entry that could not open its workspace land *inside*
+/// the TUI rather than back at the shell: the composition root turns the failure
+/// into the same notice the Recent list would have shown
+/// ([`open_failure_notice`]), and the switcher comes up with it. The first frame
+/// therefore explains why the requested workspace is not on screen, and the user
+/// can pick another one or retry the same one.
+///
+/// # Errors
+///
+/// Returns workspace loading, settings, or terminal IO failures.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn run_screen_graph_with_backend_and_notice(
+    term: &mut dyn Terminal,
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
+    backend_factory: &mut dyn ControllerBackendFactory,
+    available_models: AvailableAgentModels,
+    notice: Option<String>,
+) -> io::Result<Exit> {
+    let mut registry = workspaces.clone();
     let mut welcome = Welcome::new(recent);
+    welcome.set_notice(notice);
     let mut open = open_from_registry(workspaces, welcome.recent());
     let mut new_form = New::default();
     let mut config_form = Config::load_with_available_models(settings, available_models);
@@ -6832,11 +8681,20 @@ pub fn run_screen_graph_with_backend(
             }
         }
         if let Some(snapshot) = created_snapshot {
+            if !registry_contains_path(&registry, &snapshot.workspace.path) {
+                registry.push(snapshot.workspace.clone());
+            }
             welcome.record_opened(&snapshot.workspace);
             open.record_opened(&snapshot.workspace);
-            if let Some(exit) =
-                enter_workspace(term, snapshot, settings, backend_factory, available_models)?
-            {
+            if let Some(exit) = enter_workspace(
+                term,
+                snapshot,
+                &registry,
+                loader,
+                settings,
+                backend_factory,
+                available_models,
+            )? {
                 return Ok(exit);
             }
             screen = Screen::Welcome;
@@ -6878,32 +8736,43 @@ pub fn run_screen_graph_with_backend(
                     screen = Screen::Config;
                 }
                 WelcomeStep::OpenRecent(index) => {
-                    let Some(path) = welcome
-                        .recent()
-                        .get(index)
-                        .and_then(recent_path)
-                        .map(Path::to_path_buf)
-                    else {
+                    // `Welcome` only creates this action for a visible Recent
+                    // number, so the index is fenced by the same model.
+                    let recent = &welcome.recent()[index];
+                    let paths = recent_paths(recent);
+                    if paths.is_empty() {
                         continue;
-                    };
+                    }
                     // A workspace this daemon does not serve keeps the switcher on
                     // screen with the reason, so another Recent entry can be tried.
-                    let snapshot = match loader.open(&path) {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => match open_refusal_notice(&error) {
-                            Some(notice) => {
-                                welcome.set_notice(Some(notice));
+                    let (snapshots, snapshot, deck) =
+                        match prepare_workspace_deck(term, loader, &paths) {
+                            Ok(prepared) => prepared,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                welcome.set_notice(Some(
+                                    "Workspace opening was cancelled.".to_owned(),
+                                ));
                                 continue;
                             }
-                            None => return Err(error),
-                        },
-                    };
+                            Err(error) => match open_failure_notice(&error) {
+                                Some(notice) => {
+                                    welcome.set_notice(Some(notice));
+                                    continue;
+                                }
+                                None => return Err(error),
+                            },
+                        };
                     welcome.set_notice(None);
-                    welcome.record_opened(&snapshot.workspace);
-                    open.record_opened(&snapshot.workspace);
-                    if let Some(exit) = enter_workspace(
+                    for snapshot in &snapshots {
+                        welcome.record_opened(&snapshot.workspace);
+                        open.record_opened(&snapshot.workspace);
+                    }
+                    if let Some(exit) = enter_workspace_deck(
                         term,
                         snapshot,
+                        deck,
+                        &registry,
+                        loader,
                         settings,
                         backend_factory,
                         available_models,
@@ -6917,28 +8786,40 @@ pub fn run_screen_graph_with_backend(
                 OpenStep::Stay => {}
                 OpenStep::Quit => return Ok(Exit::Quit),
                 OpenStep::Back => screen = Screen::Welcome,
-                OpenStep::Choose(path) => {
+                OpenStep::Choose(paths) => {
                     // Same contract as Recent: the list stays up with the reason so
                     // the workspace this daemon does serve can be chosen instead.
-                    let snapshot = match loader.open(&path) {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => match open_refusal_notice(&error) {
-                            Some(notice) => {
-                                open.set_notice(Some(notice));
+                    let (snapshots, snapshot, deck) =
+                        match prepare_workspace_deck(term, loader, &paths) {
+                            Ok(prepared) => prepared,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                open.set_notice(Some(
+                                    "Workspace opening was cancelled.".to_owned(),
+                                ));
                                 continue;
                             }
-                            None => return Err(error),
-                        },
-                    };
+                            Err(error) => match open_failure_notice(&error) {
+                                Some(notice) => {
+                                    open.set_notice(Some(notice));
+                                    continue;
+                                }
+                                None => return Err(error),
+                            },
+                        };
                     open.set_notice(None);
-                    welcome.record_opened(&snapshot.workspace);
-                    open.record_opened(&snapshot.workspace);
+                    for snapshot in &snapshots {
+                        welcome.record_opened(&snapshot.workspace);
+                        open.record_opened(&snapshot.workspace);
+                    }
                     // Leaving returns to Welcome, not to the list that was used
                     // to get here: all three entries share one way back so the
                     // switcher is always reachable from a workspace.
-                    if let Some(exit) = enter_workspace(
+                    if let Some(exit) = enter_workspace_deck(
                         term,
                         snapshot,
+                        deck,
+                        &registry,
+                        loader,
                         settings,
                         backend_factory,
                         available_models,
@@ -6950,10 +8831,12 @@ pub fn run_screen_graph_with_backend(
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(&open.workspaces())?;
                     open.remove_paths(&removed);
+                    remove_registry_paths(&mut registry, &removed);
                 }
                 OpenStep::ConfirmUnregister(path) => {
                     let removed = loader.unregister(&[path])?;
                     open.remove_paths(&removed);
+                    remove_registry_paths(&mut registry, &removed);
                 }
             },
             Screen::New => match step_new(&mut new_form, key) {
@@ -7002,8 +8885,7 @@ pub fn run_screen_graph_with_backend(
                     // terminal, so whatever the gate remembers is no longer on
                     // screen and the next tick must redraw unconditionally.
                     drawn_material = None;
-                    play_config_save_wave(term, &mut config_form, None)?;
-                    if config_form.commit_save(settings) {
+                    if save_config_responsive(term, &mut config_form, settings, None)? {
                         // Hold the `done` confirmation briefly, then return home
                         // with no key press. A failed write skips this and leaves
                         // Config on screen with the error for retry.
@@ -7014,12 +8896,16 @@ pub fn run_screen_graph_with_backend(
                         screen = Screen::Welcome;
                     }
                 }
+                ConfigStep::SaveEnvironment => {
+                    drawn_material = None;
+                    let _ = save_environment_responsive(term, &mut config_form, settings);
+                }
             },
         }
     }
 }
 
-/// v1 と同じ Welcome 起動エフェクトを再生し、実際に描いたフレーム数を返す。
+/// Welcome 起動エフェクトを再生し、実際に描いたフレーム数を返す。
 ///
 /// **打鍵で中断できる**。フレーム間の待機は [`Terminal::wait_for_key`] で行い、
 /// キーが届いた時点で残りのフレームを捨てて抜ける。中断に使ったキーは
@@ -7211,36 +9097,48 @@ mod tests {
         AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
-        FixedBackendFactory, FsSessionWorktreeScanPort, Geometry, GitDiff, IdleWatch,
-        MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
-        NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
-        PaneLaunchCommandPort, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
-        SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
-        SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
-        TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
+        FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort,
+        Geometry, GitDiff, IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort,
+        MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep,
+        PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
+        SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory,
+        SessionCommandResult, SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort,
+        SessionWorktreeHint, SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk,
+        TerminalError, TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
         TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
-        UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
-        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
-        WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken,
-        WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
-        WorkspaceView, app_event_from_key, close_exited_panes, controller_terminal_view,
-        copy_terminal_selection, director_organization, drain_session_completions,
-        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at,
-        handle_terminal_pointer, home_frame_material, intercept_live_terminal_control,
-        is_user_activity, key_to_terminal_bytes, new_project_notice, play_startup_splash,
-        poll_and_project_terminals, projection_build_counts, render_controller_frame,
-        render_home_material, render_home_snapshot, reset_projection_build_counts,
-        restore_open_panes, retarget_director_chords, route_workspace_input_before_reducer,
-        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
+        UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
+        UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceConfigContext,
+        WorkspaceConfigStep, WorkspaceCreateCompletion, WorkspaceCreateEffect,
+        WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute, WorkspaceLoader,
+        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        activate_workspace_responsive, adjust_project_bar_pointer, app_event_from_key,
+        close_exited_panes, compose_workspace_shell_frame, controller_terminal_view,
+        copy_terminal_selection, director_organization, dismiss_pr_modal_on_project_bar_click,
+        drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
+        garden_click_at, garden_fits, garden_shell_owned_wake, handle_terminal_pointer,
+        home_frame_material, intercept_live_terminal_control, is_user_activity,
+        key_to_terminal_bytes, key_to_terminal_bytes_for_mode, new_project_notice,
+        open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
+        prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
+        prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
+        remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
+        reset_projection_build_counts, restore_open_panes, retarget_drawer_chords,
+        route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
+        run as run_from_start, run_screen_graph_with_backend,
+        run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
-        run_workspace_controller_with_backend_and_settings, safe_session_error,
-        select_right_pane_tab, sidebar_pointer_event, step_config, step_new, step_open,
-        terminal_geometry, visit_garden_agent, welcome_action, write_banner,
+        run_workspace_controller_with_backend_and_settings,
+        run_workspace_deck_with_backend_and_config, run_workspace_loading, safe_session_error,
+        save_config_responsive, save_environment_responsive, select_right_pane_tab,
+        select_root_terminal_tab, sidebar_pointer_event, step_config, step_new, step_open,
+        step_workspace_config, terminal_geometry, visit_garden_agent, welcome_action,
+        workspace_has_unsaved_surface, write_banner,
     };
+    use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
@@ -7252,8 +9150,9 @@ mod tests {
         AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabProjection,
         AgentTabSlotIntent, AgentTabTargetProjection,
     };
+    use crate::usecase::application::controller::WorkspaceDrawerFocus;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, BackendEvent, DirectorNew, Effect, EnvironmentEntry,
+        AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry,
         GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode, NewRequest, Overlay, PendingToken,
         RoleEditorScope, Route, SessionCreateIntent, SessionRoleCatalog, TabDirection, Target,
     };
@@ -7271,6 +9170,7 @@ mod tests {
     use std::collections::{BTreeSet, VecDeque};
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -7279,12 +9179,14 @@ mod tests {
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::{
         AgentInventory, AgentProfileId, AgentRuntimeInventoryItem, AgentRuntimeInventoryState,
+        AgentWorkspaceObservation,
     };
     use usagi_core::domain::id::{
         AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId,
         SessionId, TerminalId, TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::session_lifecycle::AgentPhase;
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, Settings};
     use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
     use usagi_core::domain::user_decision::UserDecisionAnswer;
@@ -7481,6 +9383,10 @@ mod tests {
             Some(AppEvent::Key(AppKey::OpenPrs))
         );
         assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenGarden)),
+            Some(AppEvent::Key(AppKey::OpenGarden))
+        );
+        assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::Agent)),
             Some(AppEvent::Key(AppKey::CtrlA))
         );
@@ -7493,13 +9399,17 @@ mod tests {
             Some(AppEvent::Key(AppKey::OpenDirectorNew))
         );
         assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::RootTerminal)),
+            Some(AppEvent::Key(AppKey::ToggleRootTerminalDrawer))
+        );
+        assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::QuitConfirmation)),
             Some(AppEvent::Key(AppKey::OpenQuitConfirmation))
         );
     }
 
     #[test]
-    fn closeup_live_pr_action_opens_the_active_sessions_modal() {
+    fn closeup_live_pr_action_requests_the_active_sessions_prs_without_an_empty_modal() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let target = Target::Session(session);
@@ -7525,7 +9435,7 @@ mod tests {
             crate::usecase::application::controller::update(&mut state, event),
             vec![Effect::LoadPullRequests { target }]
         );
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.overlay(), None);
         assert_eq!(state.pr_overlay().unwrap().target(), target);
     }
 
@@ -7564,6 +9474,23 @@ mod tests {
         assert_eq!(terminal_copy_event, None);
     }
 
+    #[test]
+    fn garden_claims_shell_owned_terminal_input_as_wake_events() {
+        assert!(garden_shell_owned_wake(&Key::Pointer(PointerEvent {
+            kind: crate::usecase::terminal_input::PointerKind::Drag,
+            column: 1,
+            row: 1,
+        })));
+        assert!(garden_shell_owned_wake(&Key::Live(
+            LiveTerminalAction::ScrollDown
+        )));
+        assert!(garden_shell_owned_wake(&Key::Passthrough(vec![1])));
+        assert!(garden_shell_owned_wake(&Key::Enter));
+        assert!(garden_shell_owned_wake(&Key::Quit));
+        assert!(garden_shell_owned_wake(&Key::CtrlQ));
+        assert!(!garden_shell_owned_wake(&Key::Other));
+    }
+
     /// A resize is a redraw, never an inventory refresh. It reaches the reducer
     /// as the same mascot tick as a wake-up, while the real dimensions come from
     /// `term.size()` at the head of the frame; the daemon lanes are not involved
@@ -7588,12 +9515,56 @@ mod tests {
         );
     }
 
-    /// The screen saver's deadline must survive an Agent working all night and
-    /// end the moment a person touches the terminal, so the classification of
-    /// "was that a user?" is pinned over the whole key vocabulary.
     #[test]
-    fn only_a_real_interaction_postpones_the_screen_saver() {
-        let interactions = [
+    fn pr_modal_click_route_claims_the_box_and_closes_on_its_background() {
+        assert_eq!(
+            route_pr_modal_click(Some(Overlay::Prs), 24, 80, 0, 2),
+            Some(PrModalClickRoute::Inside)
+        );
+        assert_eq!(
+            route_pr_modal_click(Some(Overlay::Prs), 24, 80, 0, 1),
+            Some(PrModalClickRoute::Outside)
+        );
+        assert_eq!(route_pr_modal_click(None, 24, 80, 0, 1), None);
+        assert_eq!(
+            route_pr_modal_click(Some(Overlay::Notes), 24, 80, 0, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn project_bar_click_closes_the_pr_modal_without_reaching_the_bar() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target: Target::Session(session),
+            revision: 1,
+            prs: vec![usagi_core::domain::pullrequest::PrLink::new(
+                1625,
+                "https://github.com/kkyosuke/usagi/pull/1625",
+            )],
+        }));
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
+
+        assert!(dismiss_pr_modal_on_project_bar_click(
+            &mut runtime,
+            &Key::Click { column: 2, row: 0 }
+        ));
+        assert_eq!(runtime.state().overlay(), None);
+
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
+        assert!(!dismiss_pr_modal_on_project_bar_click(
+            &mut runtime,
+            &Key::Click { column: 2, row: 1 }
+        ));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
+    }
+
+    fn user_interactions() -> Vec<Key> {
+        vec![
             Key::Up,
             Key::Down,
             Key::Left,
@@ -7632,8 +9603,15 @@ mod tests {
             // A resize is the user dragging a window edge, and the design has it
             // both close the garden and restart the timer.
             Key::Resize,
-        ];
-        for key in interactions {
+        ]
+    }
+
+    /// The screen saver's deadline must survive an Agent working all night and
+    /// end the moment a person touches the terminal, so the classification of
+    /// "was that a user?" is pinned over the whole key vocabulary.
+    #[test]
+    fn only_a_real_interaction_postpones_the_screen_saver() {
+        for key in user_interactions() {
             assert!(is_user_activity(&key), "{key:?} should postpone the garden");
         }
         // The one wake-up that is not a person: frame ticks, drained daemon
@@ -7744,7 +9722,7 @@ mod tests {
         let rows = render_home_material(&garden);
         let text = rows.join("\n");
         assert_eq!(rows.len(), 24);
-        assert!(text.contains("Garden · click a usagi to visit · any key to return"));
+        assert!(text.contains("Garden · click a usagi") && text.contains("any key · wake"));
         assert!(text.contains("alpha"));
 
         // Every cell of the frame resolves through the same layout that drew it,
@@ -7762,6 +9740,7 @@ mod tests {
         };
         // Agent の居ない session なので、押せるのは区画（agent 無しの訪問）である。
         let visit = Some(GardenClick::Visit {
+            workspace,
             session,
             agent: None,
         });
@@ -7784,6 +9763,320 @@ mod tests {
         assert!(!after.contains("any key to return"));
     }
 
+    #[test]
+    fn garden_routes_click_and_pointer_down_through_the_drawn_frame_hit_test() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let record = SessionRecord {
+            name: "alpha".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("/tmp/demo/alpha"),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let sessions = vec![ProjectedSession::from_record(session, &record)];
+        let root = PathBuf::from("/tmp/demo");
+        let no_diffs = BTreeMap::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut pointer_gesture = false;
+
+        for key in [
+            Key::Click { column: 0, row: 23 },
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 0,
+                row: 23,
+            }),
+        ] {
+            let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+            let material = home_frame_material(
+                24,
+                80,
+                &runtime,
+                "demo",
+                &root,
+                &sessions,
+                None,
+                health(),
+                &no_diffs,
+                None,
+                None,
+                now(),
+            );
+            assert_eq!(
+                route_garden_input(
+                    &mut ui,
+                    &mut runtime,
+                    Some(&material),
+                    &key,
+                    &mut pointer_gesture,
+                ),
+                Some(GardenInputRoute::Local(Vec::new())),
+            );
+            assert_eq!(runtime.state().overlay(), None);
+            if pointer_gesture {
+                assert_eq!(
+                    route_garden_input(
+                        &mut ui,
+                        &mut runtime,
+                        None,
+                        &Key::Pointer(PointerEvent {
+                            kind: PointerKind::Up,
+                            column: 0,
+                            row: 23,
+                        }),
+                        &mut pointer_gesture,
+                    ),
+                    Some(GardenInputRoute::Local(Vec::new())),
+                );
+            }
+        }
+        assert!(!pointer_gesture);
+    }
+
+    #[test]
+    fn garden_frame_material_uses_every_open_projects_projection() {
+        let alpha = snapshot("alpha");
+        let beta = snapshot("beta");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+        let session = alpha.session_ids[0];
+        let sessions = vec![ProjectedSession::from_record(
+            session,
+            &alpha.state.sessions[0],
+        )];
+        let mut runtime = WorkspaceRuntime::new(alpha.workspace_id, vec![session]);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+
+        // One material build per frame, exactly as the loop does it: the deck
+        // projection replaces the active-only Garden rather than folding twice.
+        let build = |deck: &WorkspaceDeck| {
+            home_frame_material(
+                24,
+                100,
+                &runtime,
+                "alpha",
+                &alpha.workspace.path,
+                &sessions,
+                None,
+                health(),
+                &BTreeMap::new(),
+                None,
+                None,
+                now(),
+            )
+            .with_workspace_deck_garden(deck)
+        };
+        let material = build(&deck);
+        let plots = material
+            .projection
+            .garden_sessions()
+            .expect("the idle Home frame is the Garden");
+
+        assert_eq!(plots.len(), 2);
+        assert_eq!(plots[0].label, "alpha / alpha-session");
+        assert_eq!(plots[1].label, "beta / beta-session");
+        // Until the observation lane reaches it, the other project is drawn
+        // read-only: no rabbit is invented for a membership nobody observed.
+        assert!(!plots[1].agents_observed);
+        let read_only = render_home_material(&material);
+        assert!(read_only.iter().any(|row| row.contains("project inactive")));
+
+        // The daemon answers for whichever workspace the request names, so the
+        // other project's Agents reach its plot without a resident controller.
+        let runtime_id = AgentRuntimeId::new();
+        assert!(deck.apply_garden_inventory(&AgentWorkspaceObservation {
+            inventory: AgentInventory {
+                workspace_id: beta.workspace_id,
+                runtimes: vec![AgentRuntimeInventoryItem {
+                    runtime: AgentRuntimeRef {
+                        agent_runtime_id: runtime_id,
+                        terminal: TerminalRef {
+                            daemon_generation: DaemonGeneration::new(),
+                            terminal_id: TerminalId::new(),
+                            workspace_id: beta.workspace_id,
+                            session_id: Some(beta.session_ids[0]),
+                            worktree_id: WorktreeId::new(),
+                        },
+                        session_id: Some(beta.session_ids[0]),
+                    },
+                    continuation: AgentContinuationRef::new(),
+                    state: AgentRuntimeInventoryState::Live,
+                    resumed_from: None,
+                }],
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::from([(
+                beta.session_ids[0],
+                usagi_core::domain::agent::AgentStatus::Idle,
+            )]),
+        }));
+        let material = build(&deck);
+        let plots = material
+            .projection
+            .garden_sessions()
+            .expect("the idle Home frame is the Garden");
+        assert_eq!(
+            plots[1]
+                .agents
+                .iter()
+                .map(|agent| (agent.runtime_id, agent.phase))
+                .collect::<Vec<_>>(),
+            vec![(runtime_id, AgentPhase::Running)]
+        );
+        let observed = render_home_material(&material);
+        assert!(!observed.iter().any(|row| row.contains("project inactive")));
+        assert!(observed.iter().any(|row| row.contains("idle")));
+        assert!(observed.iter().any(|row| row.contains("0 running")));
+    }
+
+    #[test]
+    fn garden_arrow_scrolls_one_drawn_column_without_waking_home() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let mut material = home_frame_material(
+            23,
+            80,
+            &runtime,
+            "demo",
+            Path::new("/tmp/demo"),
+            &[],
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        );
+        material.projection = material.projection.with_deck_garden(
+            "5 open projects".to_owned(),
+            (0..5)
+                .map(|index| {
+                    (
+                        WorkspaceId::new(),
+                        crate::presentation::widgets::garden::GardenSession {
+                            id: SessionId::new(),
+                            label: format!("project-{index} / session-{index}"),
+                            lifecycle: SessionLifecycle::Available,
+                            selected: false,
+                            failure_summary: None,
+                            agents_observed: false,
+                            agents: Vec::new(),
+                            agent_status: None,
+                            pr_merged: false,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut pointer_gesture = false;
+
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                Some(&material),
+                &Key::Right,
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Local(Vec::new())),
+        );
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+        assert_eq!(runtime.state().garden_scroll(), 1);
+    }
+
+    #[test]
+    fn documented_garden_minimum_includes_the_project_bar_row() {
+        assert!(garden_fits(14 - PROJECT_BAR_ROWS, 64));
+        assert!(!garden_fits(13 - PROJECT_BAR_ROWS, 64));
+    }
+
+    #[test]
+    fn garden_routes_an_inactive_projects_plot_to_the_deck_shell() {
+        let workspace = WorkspaceId::new();
+        let foreign_workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let root = PathBuf::from("/tmp/demo");
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let mut material = home_frame_material(
+            24,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &[],
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        );
+        material.projection = material.projection.with_deck_garden(
+            "2 open projects".to_owned(),
+            vec![(
+                foreign_workspace,
+                crate::presentation::widgets::garden::GardenSession {
+                    id: session,
+                    label: "other / review".to_owned(),
+                    lifecycle: SessionLifecycle::Available,
+                    selected: false,
+                    failure_summary: None,
+                    agents_observed: false,
+                    agents: Vec::new(),
+                    agent_status: None,
+                    pr_merged: false,
+                },
+            )],
+        );
+        let click = (0..24)
+            .flat_map(|row| (0..80).map(move |column| (column, row)))
+            .find(|&(column, row)| {
+                matches!(
+                    garden_click_at(
+                        material.height,
+                        material.width,
+                        &material.projection,
+                        material.now,
+                        column,
+                        row,
+                    ),
+                    Some(GardenClick::Visit { workspace, .. }) if workspace == foreign_workspace
+                )
+            })
+            .expect("the inactive project plot is clickable");
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut pointer_gesture = false;
+
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                Some(&material),
+                &Key::Click {
+                    column: click.0,
+                    row: click.1,
+                },
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Project(super::GardenProjectVisit {
+                workspace: foreign_workspace,
+                session,
+            })),
+        );
+        assert_eq!(runtime.state().overlay(), None);
+    }
+
     /// Any other press is the documented wake-up: it is consumed, and the Home
     /// from before the screen saver comes back with no target changed.
     #[test]
@@ -7798,6 +10091,143 @@ mod tests {
         let _ = runtime.apply_event(AppEvent::GardenClick(GardenClick::Dismiss));
         assert_eq!(runtime.state().overlay(), None);
         assert_eq!(runtime.state().active(), before);
+    }
+
+    #[test]
+    fn garden_consumes_every_kind_of_user_input_before_the_terminal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut pointer_gesture = false;
+        for key in user_interactions() {
+            let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+            assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+            assert_eq!(
+                route_garden_input(&mut ui, &mut runtime, None, &key, &mut pointer_gesture,),
+                Some(GardenInputRoute::Local(Vec::new())),
+                "Garden did not consume {key:?}",
+            );
+            assert_eq!(runtime.state().overlay(), None);
+            if pointer_gesture {
+                assert_eq!(
+                    route_garden_input(
+                        &mut ui,
+                        &mut runtime,
+                        None,
+                        &Key::Pointer(PointerEvent {
+                            kind: PointerKind::Up,
+                            column: 0,
+                            row: 0,
+                        }),
+                        &mut pointer_gesture,
+                    ),
+                    Some(GardenInputRoute::Local(Vec::new())),
+                );
+            }
+            assert!(!pointer_gesture);
+        }
+
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &Key::Other,
+                &mut pointer_gesture,
+            ),
+            None,
+        );
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+    }
+
+    #[test]
+    fn garden_pointer_press_owns_its_drag_and_release_after_dismissal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let mut pointer_gesture = false;
+        let pointer = |kind| {
+            Key::Pointer(PointerEvent {
+                kind,
+                column: 4,
+                row: 9,
+            })
+        };
+
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Drag),
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Local(Vec::new())),
+        );
+        assert!(pointer_gesture);
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Up),
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Local(Vec::new())),
+        );
+        assert!(!pointer_gesture);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Down),
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Local(Vec::new())),
+        );
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(pointer_gesture);
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Drag),
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Local(Vec::new())),
+        );
+        assert!(pointer_gesture);
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Up),
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Local(Vec::new())),
+        );
+        assert!(!pointer_gesture);
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Up),
+                &mut pointer_gesture,
+            ),
+            None,
+        );
     }
 
     /// うさぎの click は session を訪問したうえで、その agent 自身の tab を開く。
@@ -7855,6 +10285,7 @@ mod tests {
         // 区画の click（agent 無し）は tab を動かさない。
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
         let plot_click = GardenClick::Visit {
+            workspace,
             session,
             agent: None,
         };
@@ -7865,6 +10296,7 @@ mod tests {
         // うさぎの click は、その runtime を持つ tab を選ぶ。
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
         let rabbit_click = GardenClick::Visit {
+            workspace,
             session,
             agent: Some(runtime_id),
         };
@@ -7875,6 +10307,7 @@ mod tests {
         // 押した瞬間に終了していたうさぎは、無関係な tab を選ばない（選択はそのまま）。
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
         let gone = GardenClick::Visit {
+            workspace,
             session,
             agent: Some(AgentRuntimeId::new()),
         };
@@ -7886,9 +10319,8 @@ mod tests {
         visit_garden_agent(&mut ui, &mut runtime, GardenClick::Dismiss);
     }
 
-    /// tab strip がまだ無い session（Closeup が action launcher を開く）では、
-    /// うさぎの click は session の訪問までで止まる。launcher の裏の pane を
-    /// 勝手に選ばない。
+    /// tab strip がまだ無い session では、うさぎの click は空の Closeup への
+    /// 訪問までで止まり、pane を勝手に選ばない。
     #[test]
     fn a_rabbit_click_on_a_tabless_session_stops_at_its_closeup() {
         let workspace = WorkspaceId::new();
@@ -7899,11 +10331,16 @@ mod tests {
 
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
         let click = GardenClick::Visit {
+            workspace,
             session,
             agent: Some(AgentRuntimeId::new()),
         };
+        // The Garden overlay owns input before the visit reaches Closeup, so a
+        // covered pane strip cannot receive the agent click.
+        visit_garden_agent(&mut ui, &mut runtime, click);
+        assert_eq!(runtime.focused_terminal(), None);
         let _ = runtime.apply_event(AppEvent::GardenClick(click));
-        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert_eq!(runtime.state().overlay(), None);
         visit_garden_agent(&mut ui, &mut runtime, click);
         assert_eq!(runtime.focused_terminal(), None);
     }
@@ -8032,6 +10469,7 @@ mod tests {
                 operation_id: OperationId::new(),
                 intent: SessionCreateIntent {
                     name: "feature".to_owned(),
+                    base_ref: None,
                     profile: None,
                     model: None,
                     role_id: None,
@@ -8169,6 +10607,7 @@ mod tests {
                 operation_id: OperationId::new(),
                 intent: SessionCreateIntent {
                     name: "feature".into(),
+                    base_ref: None,
                     profile: None,
                     model: None,
                     role_id: None,
@@ -8580,12 +11019,12 @@ mod tests {
                 .map(|session| (session.label.as_str(), session.organization_depth))
                 .collect::<Vec<_>>(),
             vec![
-                ("manager", 1),
-                ("worker", 2),
-                ("stopped", 3),
-                ("running", 1),
-                ("failed", 2),
-                ("orphan", 1),
+                ("manager", 0),
+                ("worker", 1),
+                ("stopped", 2),
+                ("running", 0),
+                ("failed", 1),
+                ("orphan", 0),
             ]
         );
         assert_eq!(projected[1].parent_session_id, Some(director_child));
@@ -8704,11 +11143,11 @@ mod tests {
                 resume: true,
             });
             super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            super::drain_pane_completions_into_runtime(
+            drain_completions_at(
                 &mut ui,
                 &mut runtime,
                 &mut std::collections::HashMap::new(),
+                1,
                 Geometry { cols: 20, rows: 5 },
             );
         }
@@ -8728,14 +11167,18 @@ mod tests {
         });
         let mut pending = std::collections::HashMap::from([(operation, target)]);
         super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        super::drain_pane_completions_into_runtime(
+        drain_completions_at(
             &mut ui,
             &mut runtime,
             &mut pending,
+            1,
             Geometry { cols: 20, rows: 5 },
         );
         assert!(pending.is_empty());
+        assert!(
+            ui.take_agent_inventory_change_observation_request(),
+            "a successful Agent launch must replace the pre-launch inventory"
+        );
         ui.resize_terminals(Geometry { cols: 30, rows: 6 });
         let projected_records = ui.workspace.sessions().to_vec();
         super::apply_session_projection(
@@ -8768,11 +11211,11 @@ mod tests {
         });
         pending.insert(operation, target);
         super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        super::drain_pane_completions_into_runtime(
+        drain_completions_at(
             &mut ui,
             &mut runtime,
             &mut pending,
+            1,
             Geometry { cols: 20, rows: 5 },
         );
 
@@ -8793,6 +11236,10 @@ mod tests {
             &mut runtime,
             &mut pending,
             Geometry { cols: 20, rows: 5 },
+        );
+        assert!(
+            ui.take_agent_inventory_change_observation_request(),
+            "a daemon admission still changes inventory after its pending tab closes"
         );
 
         let failed_agent = OperationId::new();
@@ -8819,6 +11266,10 @@ mod tests {
             Geometry { cols: 20, rows: 5 },
         );
         assert!(pending.is_empty());
+        assert!(
+            !ui.take_agent_inventory_change_observation_request(),
+            "a rejected Agent launch does not change daemon inventory"
+        );
 
         ui.pane_completion_sender
             .send(super::PaneLaunchCompletion {
@@ -8887,6 +11338,9 @@ mod tests {
         /// terminal's geometry with the attach itself.
         attach_geometries: Vec<(TerminalRef, Geometry)>,
         polls: usize,
+        poll_terminals: Vec<TerminalRef>,
+        scripted_polls: Vec<(TerminalRef, Vec<TerminalChunk>)>,
+        background_watches: Vec<Vec<TerminalRef>>,
         inputs: Vec<Vec<u8>>,
         resizes: usize,
         resize_geometries: Vec<(TerminalRef, Geometry)>,
@@ -8932,11 +11386,20 @@ mod tests {
 
         fn poll_terminal(
             &mut self,
-            _terminal: &TerminalRef,
+            terminal: &TerminalRef,
             _after_offset: u64,
         ) -> Result<Vec<TerminalChunk>, TerminalError> {
-            self.0.lock().unwrap().polls += 1;
-            Ok(Vec::new())
+            let mut calls = self.0.lock().unwrap();
+            calls.polls += 1;
+            calls.poll_terminals.push(terminal.clone());
+            let Some(position) = calls
+                .scripted_polls
+                .iter()
+                .position(|(candidate, _)| candidate.fences(terminal))
+            else {
+                return Ok(Vec::new());
+            };
+            Ok(calls.scripted_polls.remove(position).1)
         }
 
         fn input_terminal(
@@ -8968,6 +11431,14 @@ mod tests {
             _subscription: TerminalSubscription,
         ) {
             self.0.lock().unwrap().detaches += 1;
+        }
+
+        fn watch_background_terminals(&mut self, terminals: &[TerminalRef]) {
+            self.0
+                .lock()
+                .unwrap()
+                .background_watches
+                .push(terminals.to_vec());
         }
     }
 
@@ -9125,11 +11596,12 @@ mod tests {
     /// Take exactly `count` completions off the worker channel, then put them back
     /// through the drain the frame loop uses. Nothing sleeps, so the number of
     /// completions each request produced is exact.
-    fn drain_completions(
+    fn drain_completions_at(
         ui: &mut WorkspaceUi,
         runtime: &mut WorkspaceRuntime,
         pending: &mut std::collections::HashMap<OperationId, Target>,
         count: usize,
+        geometry: Geometry,
     ) -> Vec<super::PaneLaunchOutcome> {
         let taken = (0..count)
             .map(|_| {
@@ -9147,8 +11619,17 @@ mod tests {
                 .send(completion)
                 .expect("the workspace still owns its completion receiver");
         }
-        super::drain_pane_completions_into_runtime(ui, runtime, pending, terminal_geometry(20, 80));
+        super::drain_pane_completions_into_runtime(ui, runtime, pending, geometry);
         outcomes
+    }
+
+    fn drain_completions(
+        ui: &mut WorkspaceUi,
+        runtime: &mut WorkspaceRuntime,
+        pending: &mut std::collections::HashMap<OperationId, Target>,
+        count: usize,
+    ) -> Vec<super::PaneLaunchOutcome> {
+        drain_completions_at(ui, runtime, pending, count, terminal_geometry(20, 80))
     }
 
     fn drain_next_completion(
@@ -10327,10 +12808,11 @@ mod tests {
             )
         };
 
-        // Base Home frame: workspace name and session row render.
+        // Base Home frame: project identity stays in the outer tab bar, while
+        // the Home frame renders its session row without a duplicate breadcrumb.
         let runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let base = frame(&runtime, sessions);
-        assert!(base.join("\n").contains("atlas"));
+        assert!(!base.join("\n").contains("atlas"));
         assert!(base.join("\n").contains("alpha"));
 
         // Create form: with no sessions a single Down reaches + new session. It
@@ -10398,6 +12880,21 @@ mod tests {
     }
 
     #[test]
+    fn workspace_shell_composition_keeps_home_below_the_project_bar() {
+        let snapshot = snapshot("atlas");
+        let deck = WorkspaceDeck::new(&snapshot);
+        let home = (0..19)
+            .map(|row| format!("home row {row}"))
+            .collect::<Vec<_>>();
+
+        let frame = compose_workspace_shell_frame(&deck, 19, 80, &home);
+
+        assert_eq!(frame.len(), 20);
+        assert!(strip_ansi(&frame[0]).contains("atlas"));
+        assert_eq!(frame[1], "home row 0");
+    }
+
+    #[test]
     fn closeup_environment_editor_is_composited_over_home() {
         use crate::presentation::views::workspace::ProjectedSession;
         use crate::presentation::workspace_runtime::WorkspaceRuntime;
@@ -10406,6 +12903,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Enter);
         let _ = runtime.handle_key(Key::Enter);
         for _ in 0..3 {
             let _ = runtime.handle_key(Key::Down);
@@ -10533,6 +13031,105 @@ mod tests {
             super::session_role_catalog(None, &workspace),
             SessionRoleCatalog::default()
         );
+    }
+
+    #[test]
+    fn branch_choices_include_remote_defaults_and_skip_other_symbolic_aliases() {
+        assert_eq!(
+            super::parse_session_branch_choices(
+                "refs/heads/main \nrefs/heads/feature \nrefs/heads/current refs/heads/main\nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/alias refs/remotes/origin/main\nrefs/remotes/origin/main \nrefs/remotes/upstream/HEAD refs/remotes/other/main\nnot-a-ref\n"
+            ),
+            vec![
+                crate::usecase::application::controller::BranchChoice {
+                    label: "local:main".into(),
+                    refname: "refs/heads/main".into(),
+                },
+                crate::usecase::application::controller::BranchChoice {
+                    label: "local:feature".into(),
+                    refname: "refs/heads/feature".into(),
+                },
+                crate::usecase::application::controller::BranchChoice {
+                    label: "remote:origin/(default)".into(),
+                    refname: "refs/remotes/origin/HEAD".into(),
+                },
+                crate::usecase::application::controller::BranchChoice {
+                    label: "remote:origin/main".into(),
+                    refname: "refs/remotes/origin/main".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_catalog_falls_back_when_git_cannot_start() {
+        let root = tempdir().unwrap();
+        let branches = vec![crate::usecase::application::controller::BranchChoice {
+            label: "local:main".into(),
+            refname: "refs/heads/main".into(),
+        }];
+
+        assert!(
+            super::branch_default_from_output(
+                Err(std::io::Error::other("git unavailable")),
+                &branches,
+            )
+            .is_none()
+        );
+        assert!(
+            super::branch_default_from_output(
+                Command::new("git").arg("not-a-command").output(),
+                &branches,
+            )
+            .is_none()
+        );
+        assert!(
+            super::branch_default_from_output(
+                Command::new("git").arg("--version").output(),
+                &branches,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            super::session_branch_catalog(&root.path().join("missing"), None),
+            crate::usecase::application::controller::SessionBranchCatalog::default()
+        );
+    }
+
+    #[test]
+    fn branch_catalog_reads_the_current_local_branch() {
+        let root = tempdir().unwrap();
+        let git = |arguments: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(arguments)
+                .status()
+                .unwrap()
+        };
+        assert!(git(&["init", "--initial-branch=main"]).success());
+        assert!(git(&["config", "user.name", "fixture"]).success());
+        assert!(git(&["config", "user.email", "fixture@example.invalid"]).success());
+        std::fs::write(root.path().join("tracked"), "base\n").unwrap();
+        assert!(git(&["add", "tracked"]).success());
+        assert!(git(&["commit", "-m", "base"]).success());
+
+        let catalog = super::session_branch_catalog(root.path(), None);
+
+        assert_eq!(catalog.default.as_deref(), Some("refs/heads/main"));
+        assert_eq!(
+            catalog.branches,
+            vec![crate::usecase::application::controller::BranchChoice {
+                label: "local:main".into(),
+                refname: "refs/heads/main".into(),
+            }]
+        );
+
+        assert!(git(&["branch", "feature"]).success());
+        let configured = super::session_branch_catalog(root.path(), Some("refs/heads/feature"));
+        assert_eq!(configured.default.as_deref(), Some("refs/heads/feature"));
+
+        let stale = super::session_branch_catalog(root.path(), Some("refs/heads/missing"));
+        assert_eq!(stale.default.as_deref(), Some("refs/heads/main"));
     }
 
     #[test]
@@ -11667,20 +14264,25 @@ mod tests {
         };
         let base = material(&runtime);
 
-        // A resting tick is not material: the rabbit's four idle phases collapse
-        // onto one frame, so the loop draws nothing while it holds its pose.
-        for _ in 0..3 {
+        // The decorative rabbit holds its resting pose for 32 runtime ticks, so
+        // an idle Home does not repaint at the terminal clock cadence.
+        for _ in 0..31 {
             let _ = runtime.apply_event(AppEvent::Tick);
             assert_eq!(material(&runtime), base, "a resting tick forced a redraw");
         }
-        // The blink and the ear flop are: both must reach the terminal.
+        // The blink and the ear flop are each held for eight ticks, but both
+        // transitions must still reach the terminal.
         let _ = runtime.apply_event(AppEvent::Tick);
         let blink = material(&runtime);
         assert_ne!(blink, base, "the rabbit stopped blinking");
-        let _ = runtime.apply_event(AppEvent::Tick);
+        for _ in 0..8 {
+            let _ = runtime.apply_event(AppEvent::Tick);
+        }
         let flop = material(&runtime);
         assert_ne!(flop, blink, "the rabbit stopped flopping its ear");
-        let _ = runtime.apply_event(AppEvent::Tick);
+        for _ in 0..8 {
+            let _ = runtime.apply_event(AppEvent::Tick);
+        }
         assert_eq!(
             material(&runtime),
             base,
@@ -11811,11 +14413,36 @@ mod tests {
             None,
             health(),
             &no_diffs,
-            Some(view),
+            Some(view.clone()),
             None,
             clock,
         );
         assert_ne!(terminal_output, base, "terminal output did not redraw");
+
+        let mut root_drawer = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = root_drawer.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let root_output = home_frame_material(
+            20,
+            80,
+            &root_drawer,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            health(),
+            &no_diffs,
+            Some(view.clone()),
+            None,
+            clock,
+        );
+        assert!(root_output.projection.terminal_view().is_none());
+        assert_eq!(
+            render_home_material(&root_output)
+                .join("\n")
+                .matches("output")
+                .count(),
+            1
+        );
 
         // The pending create skeleton.
         let pending = home_frame_material(
@@ -12109,6 +14736,41 @@ mod tests {
                 && !frame.contains("Scope:")
                 && frame.contains("direct-config")
         }));
+    }
+
+    #[test]
+    fn direct_deck_entry_uses_the_shared_workspace_composition() {
+        let snapshot = snapshot("direct-deck");
+        let registry = vec![snapshot.workspace.clone()];
+        let mut term = FakeTerminal::with_keys(&[Key::CtrlQ, Key::Char('y')]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            launch: None,
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
+            session_worktrees: None,
+        };
+
+        assert_eq!(
+            run_workspace_deck_with_backend_and_config(
+                &mut term,
+                snapshot,
+                &registry,
+                &mut loader,
+                &mut factory,
+                &mut settings,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(settings.selected, vec![PathBuf::from("/tmp/direct-deck")]);
     }
 
     #[test]
@@ -12547,6 +15209,7 @@ mod tests {
                     operation_id: OperationId::new(),
                     intent: SessionCreateIntent {
                         name: format!("session-{token}"),
+                        base_ref: None,
                         profile: None,
                         model: None,
                         role_id: None,
@@ -13133,6 +15796,16 @@ mod tests {
         terminal: TerminalRef,
         port: Box<dyn AgentCommandPort>,
     ) -> (WorkspaceUi, WorkspaceRuntime) {
+        focused_live_pane_of_kind(workspace, session, terminal, PaneKind::Agent, port)
+    }
+
+    fn focused_live_pane_of_kind(
+        workspace: WorkspaceId,
+        session: SessionId,
+        terminal: TerminalRef,
+        kind: PaneKind,
+        port: Box<dyn AgentCommandPort>,
+    ) -> (WorkspaceUi, WorkspaceRuntime) {
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, vec![session], port);
@@ -13140,7 +15813,7 @@ mod tests {
         // The first managed session is already selected; Enter activates it.
         let _ = runtime.handle_key(Key::Enter);
         let operation = OperationId::new();
-        let _ = runtime.request_pane(Target::Session(session), operation, PaneKind::Agent);
+        let _ = runtime.request_pane(Target::Session(session), operation, kind);
         let _ = runtime.complete_pane(Target::Session(session), operation, terminal.clone());
         let _ = runtime.focus_terminal(Target::Session(session), terminal.clone());
         ui.start_terminal_session(terminal, terminal_geometry(20, 80));
@@ -13175,7 +15848,7 @@ mod tests {
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
         assert!(
-            ui.take_agent_exit_observation_request(),
+            ui.take_agent_inventory_change_observation_request(),
             "an Agent exit must refresh sidebar and Garden membership immediately"
         );
     }
@@ -13328,7 +16001,7 @@ mod tests {
         );
         assert!(runtime.state().has_live_pane());
         assert!(
-            ui.take_agent_exit_observation_request(),
+            ui.take_agent_inventory_change_observation_request(),
             "a background Agent exit must wake the coherent inventory lane"
         );
         // The closed tab stops being watched on the next frame.
@@ -13913,21 +16586,20 @@ mod tests {
     }
 
     #[test]
-    fn close_tab_live_action_keeps_the_focused_agent_attached() {
+    fn close_tab_live_action_sends_ctrl_d_to_the_focused_agent() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
-        let detaches = Arc::new(Mutex::new(Vec::new()));
+        let inputs = Arc::new(Mutex::new(Vec::new()));
         let (ui, mut runtime) = focused_live_pane(
             workspace,
             session,
             terminal.clone(),
-            Box::new(ScriptedAgentPort {
+            Box::new(WheelRecordingPort {
                 terminal,
-                subscription: 8,
                 replay: Vec::new(),
-                poll_error: None,
-                detaches: Arc::clone(&detaches),
+                inputs: Arc::clone(&inputs),
+                input_error: false,
             }),
         );
         let mut controls = LiveTerminalControls::default();
@@ -13951,13 +16623,150 @@ mod tests {
         ));
 
         assert_eq!(runtime.active_pane().tabs().len(), 1);
-        assert!(detaches.lock().unwrap().is_empty());
+        assert!(ui.closed_generic_terminals.is_empty());
+        assert_eq!(*inputs.lock().unwrap(), vec![vec![4]]);
+        assert!(runtime.state().notice().is_none());
+    }
+
+    #[test]
+    fn generic_terminal_ctrl_l_and_ctrl_c_clear_the_shell_and_close_requests_exit() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = focused_live_pane_of_kind(
+            workspace,
+            session,
+            terminal.clone(),
+            PaneKind::Terminal,
+            Box::new(WheelRecordingPort {
+                terminal: terminal.clone(),
+                replay: b"one\r\ntwo\r\nthree".to_vec(),
+                inputs: Arc::clone(&inputs),
+                input_error: false,
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &Key::Passthrough(vec![12]),
+        ));
+        assert!(
+            !ui.terminal_rows(&terminal, None)
+                .expect("focused terminal remains attached")
+                .join("\n")
+                .contains("one")
+        );
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &Key::Quit,
+        ));
+
+        let mut browser = UnavailableBrowserOpener;
+        let mut pending_targets = std::collections::HashMap::new();
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CloseTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            0,
+            0,
+        ));
+
         assert_eq!(
-            runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
-            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+            *inputs.lock().unwrap(),
+            vec![
+                b"\x0c".to_vec(),
+                b"\x03\x0c".to_vec(),
+                b"\x03exit\r".to_vec()
+            ]
+        );
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(ui.closed_generic_terminals.contains(&terminal));
+    }
+
+    #[test]
+    fn close_tab_live_action_surfaces_a_safe_delivery_failure() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = focused_live_pane_of_kind(
+            workspace,
+            session,
+            terminal.clone(),
+            PaneKind::Terminal,
+            Box::new(WheelRecordingPort {
+                terminal,
+                replay: b"retained".to_vec(),
+                inputs: Arc::clone(&inputs),
+                input_error: true,
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+        let mut pending_targets = std::collections::HashMap::new();
+
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CloseTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            0,
+            0,
+        ));
+
+        assert!(inputs.lock().unwrap().is_empty());
+        assert_eq!(runtime.active_pane().tabs().len(), 1);
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some("daemon unavailable; keystroke not delivered")
+        );
+        assert!(runtime.state().notice().is_none());
+    }
+
+    #[test]
+    fn focused_pane_feedback_is_visible_in_a_live_terminal_footer() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(WheelRecordingPort {
+                terminal,
+                replay: b"retained".to_vec(),
+                inputs: Arc::new(Mutex::new(Vec::new())),
+                input_error: false,
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+
+        runtime.surface_focused_pane_feedback("Agent close input was not delivered");
+        let view = controller_terminal_view(&ui, &runtime, &mut controls, 10).unwrap();
+
+        assert_eq!(
+            view.feedback.as_deref(),
+            Some("Agent close input was not delivered")
         );
     }
 
@@ -13967,11 +16776,11 @@ mod tests {
         let cases = [
             (
                 b"\x1b[?1000h\x1b[?1006hclaude".as_slice(),
-                Some(b"\x1b[<64;5;1M".to_vec()),
+                Some(b"\x1b[<64;5;1M".repeat(3)),
             ),
             (
                 b"\x1b[?1049h\x1b[?1hcodex".as_slice(),
-                Some(b"\x1bOA".repeat(super::WHEEL_LINES)),
+                Some(b"\x1bOA".repeat(super::WHEEL_LINES * 3)),
             ),
             (b"\x1b[?1000hclaude".as_slice(), None),
         ];
@@ -14005,6 +16814,7 @@ mod tests {
                     up: true,
                     column: 41,
                     row: 5,
+                    notches: 3,
                 }),
                 &mut ui,
                 &mut runtime,
@@ -14056,6 +16866,7 @@ mod tests {
                 up: true,
                 column: 0,
                 row: 0,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -14073,6 +16884,7 @@ mod tests {
                 up: true,
                 column: 41,
                 row: 5,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -14095,6 +16907,7 @@ mod tests {
                 up: false,
                 column: 41,
                 row: 5,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -14117,6 +16930,7 @@ mod tests {
                 up: true,
                 column: 41,
                 row: 5,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -14140,6 +16954,7 @@ mod tests {
                 up: true,
                 column: u16::try_from(drawer.left.saturating_add(2)).expect("drawer column"),
                 row: u16::try_from(drawer.top.saturating_add(4)).expect("drawer row"),
+                notches: 1,
             }),
             &mut empty_ui,
             &mut empty_runtime,
@@ -14152,6 +16967,48 @@ mod tests {
             rows_len,
             scroll,
         ));
+    }
+
+    #[test]
+    fn paste_markers_follow_the_focused_programs_bracketed_paste_mode() {
+        for (replay, expected) in [
+            (b"agent".as_slice(), b"one\ntwo".to_vec()),
+            (
+                b"\x1b[?2004hagent".as_slice(),
+                b"\x1b[200~one\ntwo\x1b[201~".to_vec(),
+            ),
+            (
+                b"\x1b[?2004h\x1b[?2004lagent".as_slice(),
+                b"one\ntwo".to_vec(),
+            ),
+        ] {
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let terminal = live_terminal_ref(workspace, session);
+            let inputs = Arc::new(Mutex::new(Vec::new()));
+            let (mut ui, runtime) = focused_live_pane(
+                workspace,
+                session,
+                terminal.clone(),
+                Box::new(WheelRecordingPort {
+                    terminal,
+                    replay: replay.to_vec(),
+                    inputs: Arc::clone(&inputs),
+                    input_error: false,
+                }),
+            );
+            let mut controls = LiveTerminalControls::default();
+            let mut term = FakeTerminal::default();
+
+            assert!(forward_live_terminal_input(
+                &mut ui,
+                &runtime,
+                &mut controls,
+                &mut term,
+                &Key::Paste("one\ntwo".to_owned()),
+            ));
+            assert_eq!(*inputs.lock().unwrap(), vec![expected]);
+        }
     }
 
     /// `Ctrl-O b` is the way back to live output. A scrolled viewport holds its
@@ -14295,6 +17152,8 @@ mod tests {
             before,
         ));
         let _ = runtime.handle_key(Key::Escape);
+        assert!(runtime.wants_live_input());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Switch));
         assert!(!runtime.wants_live_input());
         for key in [
             Key::Live(LiveTerminalAction::ScrollUp),
@@ -14682,6 +17541,23 @@ mod tests {
                 .any(|conversation| conversation.label == "Agent (starting)"
                     && conversation.selected)
         );
+        runtime.inject_pane_event_for_test(
+            Target::Root(workspace),
+            crate::usecase::application::pane::PaneEvent::Select(
+                crate::usecase::application::pane::PaneSelection::Tab(TabSelection::Interrupted(
+                    interrupted_continuation,
+                )),
+            ),
+        );
+        assert!(super::select_director_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert_eq!(
+            runtime.active_pane().selected(),
+            &crate::usecase::application::pane::PaneSelection::Tab(TabSelection::Pending(pending))
+        );
 
         // Bypass runtime admission to prove the projection independently drops
         // every generic/diff shape if an impossible state reaches it.
@@ -14935,7 +17811,10 @@ mod tests {
             }],
         ));
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        ui.start_terminal_session(terminal, foreground_terminal_geometry(20, 80, true));
+        ui.start_terminal_session(
+            terminal,
+            foreground_terminal_geometry(20, 80, true, false, Some(WorkspaceDrawerFocus::Director)),
+        );
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
         let mut browser = RecordingBrowser::default();
@@ -14959,7 +17838,74 @@ mod tests {
     }
 
     #[test]
-    fn root_generic_host_request_and_untracked_resume_completion_are_inert() {
+    fn root_terminal_pointer_and_wheel_use_the_bottom_drawer_viewport() {
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal);
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+        let mut pending = std::collections::HashMap::new();
+        let drawer = crate::presentation::views::root_terminal_drawer::geometry(20, 80);
+        let row = u16::try_from(drawer.top + 2).unwrap();
+
+        assert!(!handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            1,
+            0,
+            PointerEvent {
+                kind: PointerKind::Down,
+                column: 2,
+                row,
+            },
+        ));
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::Wheel {
+                up: true,
+                column: 2,
+                row,
+                notches: 1,
+            }),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            0,
+            0,
+        ));
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::MoveTabNext),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            0,
+            0,
+        ));
+    }
+
+    #[test]
+    fn root_generic_host_request_is_admitted_and_untracked_resume_completion_is_inert() {
         let workspace = WorkspaceId::new();
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
@@ -14967,23 +17913,26 @@ mod tests {
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let mut pending = std::collections::HashMap::new();
         let (mut host, actions) = ControllerHost::channel();
+        let operation = OperationId::new();
         super::BackendAgentPort::open_terminal(
             &mut host,
             crate::usecase::application::daemon_backend::OpenTerminalRequest {
                 target: Target::Root(workspace),
-                operation_id: OperationId::new(),
+                operation_id: operation,
                 arguments: "new".to_owned(),
             },
         );
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
-        assert!(pending.is_empty());
-        assert!(ui.pane_launches.is_empty());
-        assert_eq!(
+        assert_eq!(pending.get(&operation), Some(&Target::Root(workspace)));
+        assert_eq!(ui.pane_launches.len(), 1);
+        assert!(
             runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
-            Some("♛ Director accepts Agent conversations only")
+                .panes()
+                .pane(Target::Root(workspace))
+                .unwrap()
+                .tabs()
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Pending(pending) if pending.operation == operation && pending.kind == PaneKind::Terminal))
         );
 
         ui.pane_completion_sender
@@ -15002,7 +17951,17 @@ mod tests {
             &mut pending,
             terminal_geometry(20, 80),
         );
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(
+            runtime
+                .panes()
+                .pane(Target::Root(workspace))
+                .unwrap()
+                .tabs()
+                .iter()
+                .any(
+                    |tab| matches!(tab, PaneTab::Pending(pending) if pending.operation == operation)
+                )
+        );
     }
 
     #[test]
@@ -16264,6 +19223,123 @@ mod tests {
         );
     }
 
+    /// The Garden's cross-project lane observes only while the screen saver is
+    /// on screen, keeps one round in flight at a time, and backs off when the
+    /// daemon answers nothing. Closing the Garden re-arms it, so the next
+    /// opening shows the other projects' Agents without waiting out a cadence.
+    #[test]
+    fn garden_observation_runs_only_while_the_garden_is_open_and_backs_off_unanswered() {
+        let mut lane = super::GardenObservation::new();
+        let mut now = std::time::Duration::ZERO;
+        for _ in 0..1_000 {
+            assert!(
+                !lane.begin_if_due(false, now),
+                "a closed Garden observes nothing"
+            );
+            now += std::time::Duration::from_millis(16);
+        }
+
+        assert!(lane.begin_if_due(true, now), "opening observes immediately");
+        assert!(
+            !lane.begin_if_due(true, now),
+            "one round holds the only port"
+        );
+        lane.complete(now, true);
+        assert!(!lane.begin_if_due(true, now));
+        let just_before = (now + super::GARDEN_OBSERVATION_INTERVAL)
+            .checked_sub(std::time::Duration::from_millis(1))
+            .expect("the cadence is longer than a millisecond");
+        assert!(!lane.begin_if_due(true, just_before));
+        assert!(lane.begin_if_due(true, now + super::GARDEN_OBSERVATION_INTERVAL));
+
+        // Nothing answered: the same open Garden waits out the longer backoff.
+        lane.complete(now, false);
+        assert!(!lane.begin_if_due(true, now + super::GARDEN_OBSERVATION_INTERVAL * 4));
+        assert!(lane.begin_if_due(true, now + super::GARDEN_OBSERVATION_BACKOFF));
+
+        // A round dispatched before the Garden closed still owns the port, so
+        // closing does not admit a second one; once it lands, re-opening
+        // observes at once.
+        assert!(!lane.begin_if_due(false, now));
+        lane.complete(now, true);
+        assert!(!lane.begin_if_due(false, now));
+        assert!(lane.begin_if_due(true, now));
+    }
+
+    /// One round asks each *other* open project for its own inventory. An
+    /// answer that names a different workspace is dropped rather than drawn in
+    /// the plot that was asked about, and the port comes back either way.
+    #[test]
+    fn a_garden_round_observes_every_other_project_and_drops_a_mismatched_answer() {
+        struct FakeGardenInventory {
+            answers: BTreeMap<WorkspaceId, Result<AgentWorkspaceObservation, String>>,
+            asked: Arc<Mutex<Vec<WorkspaceId>>>,
+        }
+
+        impl super::GardenInventoryPort for FakeGardenInventory {
+            fn inventory(
+                &mut self,
+                workspace: WorkspaceId,
+            ) -> Result<AgentWorkspaceObservation, String> {
+                self.asked.lock().unwrap().push(workspace);
+                self.answers
+                    .remove(&workspace)
+                    .unwrap_or_else(|| Err("daemon unavailable".to_owned()))
+            }
+        }
+
+        // An embedder that supplies no Garden lane keeps every other project's
+        // plot read-only instead of failing the frame.
+        assert!(
+            UnavailableGardenInventoryPort
+                .inventory(WorkspaceId::new())
+                .is_err()
+        );
+
+        let observed = WorkspaceId::new();
+        let mismatched = WorkspaceId::new();
+        let unavailable = WorkspaceId::new();
+        let empty_inventory = |workspace| AgentWorkspaceObservation {
+            inventory: AgentInventory {
+                workspace_id: workspace,
+                runtimes: Vec::new(),
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::new(),
+        };
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let port = FakeGardenInventory {
+            answers: [
+                (observed, Ok(empty_inventory(observed))),
+                // The daemon answered about someone else: that is not evidence
+                // about the project this round asked for.
+                (mismatched, Ok(empty_inventory(WorkspaceId::new()))),
+            ]
+            .into_iter()
+            .collect(),
+            asked: Arc::clone(&asked),
+        };
+        let (sender, completions) = std::sync::mpsc::channel();
+        // More projects than one round observes, so the bound is exercised too.
+        let mut targets = vec![observed, mismatched, unavailable];
+        targets.extend((0..super::MAX_OBSERVED_PROJECTS).map(|_| WorkspaceId::new()));
+
+        super::spawn_garden_observation_job(Box::new(port), targets, sender);
+        let completion = completions
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the round returns its port");
+
+        assert_eq!(
+            completion
+                .inventories
+                .iter()
+                .map(|inventory| inventory.inventory.workspace_id)
+                .collect::<Vec<_>>(),
+            vec![observed]
+        );
+        assert_eq!(asked.lock().unwrap().len(), super::MAX_OBSERVED_PROJECTS);
+    }
+
     #[test]
     fn restore_retry_backoff_bounds_long_outage_and_reconnect_dispatches_once() {
         let mut retry = super::RestoreRetryState::new();
@@ -17220,12 +20296,11 @@ mod tests {
         assert_eq!(root.selected, Some(first_terminal));
         assert_eq!(root.panes[0].terminal, second_terminal);
         assert_eq!(root.panes[1].kind, PaneKind::Agent);
-        assert_eq!(root.panes.len(), 2);
-        assert!(root.panes.iter().all(|pane| pane.kind == PaneKind::Agent));
+        assert_eq!(root.panes.len(), 3);
         assert!(
             root.panes
                 .iter()
-                .all(|pane| !pane.terminal.fences(&root_generic))
+                .any(|pane| pane.kind == PaneKind::Terminal && pane.terminal.fences(&root_generic))
         );
         let managed = targets
             .iter()
@@ -17370,6 +20445,239 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One stream fixture proves simultaneous attach, resize, poll, and detach ownership.
+    fn director_keeps_the_dimmed_managed_terminal_attached_and_moving() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = scoped_terminal_ref(workspace, Some(session));
+        let root = scoped_terminal_ref(workspace, None);
+        let initial = b"one\r\ntwo\r\nthree";
+        let moved = b"\r\ndim-managed-moved";
+        let calls = Arc::new(Mutex::new(StreamCalls {
+            scripted_polls: vec![(
+                managed.clone(),
+                vec![TerminalChunk {
+                    start_offset: initial.len() as u64,
+                    end_offset: (initial.len() + moved.len()) as u64,
+                    data: moved.to_vec(),
+                }],
+            )],
+            ..StreamCalls::default()
+        }));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(RecordingStreamPort(Arc::clone(&calls))),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Enter);
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![
+                super::PaneRestoreTarget {
+                    target: Target::Root(workspace),
+                    panes: vec![LivePane {
+                        terminal: root.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(root.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+                super::PaneRestoreTarget {
+                    target: Target::Session(session),
+                    panes: vec![LivePane {
+                        terminal: managed.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(managed.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+            ],
+        ));
+        let managed_geometry = terminal_geometry(24, 100);
+        let managed_director_geometry =
+            super::managed_background_terminal_geometry(24, 100, true, false);
+        let drawer_geometry = foreground_terminal_geometry(
+            24,
+            100,
+            true,
+            false,
+            Some(WorkspaceDrawerFocus::Director),
+        );
+
+        ui.sync_foreground_terminal(Some(&managed), managed_geometry);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert_director_background_visibility(&runtime, &managed);
+        ui.sync_visible_terminals(&[
+            (root.clone(), drawer_geometry),
+            (managed.clone(), managed_director_geometry),
+        ]);
+        close_exited_panes(&mut ui, &mut runtime);
+
+        let dimmed_view = ui
+            .retained_terminal_view(&managed, 2)
+            .expect("the visible managed terminal remains projected");
+        assert!(
+            strip_ansi(&dimmed_view.rows.join("\n")).contains("dim-managed-moved"),
+            "the attached background stream must advance its retained view"
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.attach_geometries,
+            [
+                (managed.clone(), managed_geometry),
+                (root.clone(), drawer_geometry),
+            ]
+        );
+        assert!(
+            calls
+                .resize_geometries
+                .contains(&(managed.clone(), managed_director_geometry))
+        );
+        assert!(
+            calls
+                .poll_terminals
+                .iter()
+                .any(|terminal| terminal == &root)
+        );
+        assert!(
+            calls
+                .poll_terminals
+                .iter()
+                .any(|terminal| terminal == &managed)
+        );
+        assert_eq!(
+            calls.background_watches.last().cloned(),
+            Some(Vec::new()),
+            "the attached dimmed terminal must not also enter inventory polling"
+        );
+        assert_eq!(calls.detaches, 0);
+    }
+
+    fn assert_director_background_visibility(runtime: &WorkspaceRuntime, managed: &TerminalRef) {
+        assert_eq!(
+            super::visible_managed_background_terminal(runtime, 24, 80).as_ref(),
+            Some(managed)
+        );
+        assert_eq!(
+            super::visible_managed_background_terminal(runtime, 24, 79),
+            None,
+            "a full-width drawer must not keep an occluded terminal attached"
+        );
+    }
+
+    #[test]
+    fn concurrent_drawers_keep_root_surfaces_and_selected_session_agent_visible() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = scoped_terminal_ref(workspace, Some(session));
+        let root_agent = scoped_terminal_ref(workspace, None);
+        let root_terminal = scoped_terminal_ref(workspace, None);
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Enter);
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![
+                super::PaneRestoreTarget {
+                    target: Target::Session(session),
+                    panes: vec![LivePane {
+                        terminal: managed.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(managed.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+                super::PaneRestoreTarget {
+                    target: Target::Root(workspace),
+                    panes: vec![
+                        LivePane {
+                            terminal: root_agent.clone(),
+                            kind: PaneKind::Agent,
+                        },
+                        LivePane {
+                            terminal: root_terminal.clone(),
+                            kind: PaneKind::Terminal,
+                        },
+                    ],
+                    selected: Some(root_agent.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+            ],
+        ));
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        assert!(runtime.state().director_drawer_open());
+        assert!(runtime.state().root_terminal_drawer_open());
+        assert_eq!(runtime.focused_terminal(), Some(root_terminal.clone()));
+        let visible = super::visible_workspace_terminals(&runtime, 30, 160)
+            .into_iter()
+            .map(|(terminal, _)| terminal)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            visible,
+            [root_terminal.clone(), managed.clone(), root_agent.clone()]
+        );
+        assert_eq!(
+            super::visible_managed_background_terminal(&runtime, 8, 160),
+            None,
+            "a full-height root drawer must not retain an occluded managed Agent"
+        );
+        assert_eq!(super::root_terminal_available_width(30, 79, true), 79);
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
+        let visible = super::visible_workspace_terminals(&runtime, 30, 160)
+            .into_iter()
+            .map(|(terminal, _)| terminal)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, [root_agent, managed, root_terminal]);
+    }
+
+    fn sync_test_director_terminals(
+        ui: &mut WorkspaceUi,
+        root: &TerminalRef,
+        managed: &TerminalRef,
+        height: usize,
+        width: usize,
+    ) {
+        ui.sync_visible_terminals(&[
+            (
+                root.clone(),
+                foreground_terminal_geometry(
+                    height,
+                    width,
+                    true,
+                    false,
+                    Some(WorkspaceDrawerFocus::Director),
+                ),
+            ),
+            (
+                managed.clone(),
+                super::managed_background_terminal_geometry(height, width, true, false),
+            ),
+        ]);
+    }
+
+    fn plain_terminal_rows(view: &super::TerminalViewProjection) -> String {
+        strip_ansi(&view.rows.join("\n"))
+            .replace(TERMINAL_CURSOR_MARKER, "")
+            .trim_end()
+            .to_owned()
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One round trip retains both surfaces' independent viewport and selection state.
     fn drawer_round_trip_restores_both_views_and_restates_each_viewport_without_resync() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -17413,11 +20721,16 @@ mod tests {
             ],
         ));
         let managed_geometry = terminal_geometry(24, 100);
-        let drawer_geometry = foreground_terminal_geometry(24, 100, true);
+        let drawer_geometry = foreground_terminal_geometry(
+            24,
+            100,
+            true,
+            false,
+            Some(WorkspaceDrawerFocus::Director),
+        );
         let mut controls = LiveTerminalControls::default();
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
-        ui.resize_terminals(managed_geometry);
         let _ = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
         controls.scroll_up();
         controls.begin_selection(TerminalSelection::begin(
@@ -17429,10 +20742,9 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root.clone()));
-        ui.sync_foreground_terminal(Some(&root), drawer_geometry);
-        ui.resize_terminals(drawer_geometry);
+        sync_test_director_terminals(&mut ui, &root, &managed, 24, 100);
         let retained = ui.retained_terminal_view(&managed, 1).unwrap();
-        assert_eq!(retained.rows, vec!["three"]);
+        assert_eq!(plain_terminal_rows(&retained), "three");
         let _ = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
         controls.scroll_up();
         controls.scroll_up();
@@ -17446,7 +20758,6 @@ mod tests {
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(managed.clone()));
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
-        ui.resize_terminals(managed_geometry);
         let managed_view = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
         assert_eq!(managed_view.scroll, 1);
         assert_eq!(
@@ -17456,8 +20767,7 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root.clone()));
-        ui.sync_foreground_terminal(Some(&root), drawer_geometry);
-        ui.resize_terminals(drawer_geometry);
+        sync_test_director_terminals(&mut ui, &root, &managed, 24, 100);
         let drawer_view = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
         assert_eq!(drawer_view.scroll, 2);
         assert_eq!(
@@ -17466,20 +20776,33 @@ mod tests {
         );
 
         let calls = calls.lock().unwrap();
-        // Every attach states its pane's viewport, including the two that return
-        // to a size the pane already had: the daemon released this window's
-        // claim on the shared viewport together with the detached attachment.
-        // None of it costs a separate resize.
-        let round_trip = [(managed, managed_geometry), (root, drawer_geometry)];
+        // The managed pane stays attached through both Director visits. Only the
+        // root conversation is detached when the drawer closes and attached
+        // again when it reopens; each attach states that surface's own viewport.
         assert_eq!(
             calls.attach_geometries,
-            [round_trip.clone(), round_trip].concat()
+            [
+                (managed.clone(), managed_geometry),
+                (root.clone(), drawer_geometry),
+                (root, drawer_geometry),
+            ]
         );
-        assert_eq!(calls.resize_geometries, Vec::new());
-        // One attach per focus transition means neither same-geometry reattach
-        // entered the checkpoint-refusal retry path.
-        assert_eq!(calls.attaches, 4);
-        assert_eq!(calls.detaches, 3);
+        assert_eq!(
+            calls.resize_geometries,
+            [
+                (
+                    managed.clone(),
+                    super::managed_background_terminal_geometry(24, 100, true, false),
+                ),
+                (managed.clone(), managed_geometry),
+                (
+                    managed,
+                    super::managed_background_terminal_geometry(24, 100, true, false),
+                ),
+            ]
+        );
+        assert_eq!(calls.attaches, 3);
+        assert_eq!(calls.detaches, 1);
     }
 
     #[test]
@@ -17596,12 +20919,10 @@ mod tests {
             bytes_before
         );
         assert_eq!(
-            runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
-            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+            runtime.active_pane().error(),
+            Some("terminal session is no longer available")
         );
+        assert!(runtime.state().notice().is_none());
 
         let mut closed_intent = durable.lock().unwrap().clone();
         closed_intent.apply(AgentTabIntentMutation::Dismiss { continuation });
@@ -17935,6 +21256,16 @@ mod tests {
         let durable = Arc::new(Mutex::new(intent));
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(WheelRecordingPort {
+                    terminal: generic.clone(),
+                    replay: Vec::new(),
+                    inputs: Arc::new(Mutex::new(Vec::new())),
+                    input_error: false,
+                }),
+            )
             .with_agent_tab_intent(
                 workspace,
                 BTreeSet::from([session]),
@@ -17987,10 +21318,10 @@ mod tests {
             assert_eq!(state.targets[0].selected, Some(closed));
         }
 
-        // Closing a generic tab remains available and is not a conversation
-        // dismissal, so it
-        // records neither a lineage nor a deferred terminal fence.
+        // Closing a generic tab is not a durable conversation dismissal. It
+        // records only a process-local exact fence against inventory restore.
         let _ = runtime.focus_terminal(Target::Session(session), generic.clone());
+        ui.start_terminal_session(generic.clone(), terminal_geometry(20, 80));
         let before = durable.lock().unwrap().clone();
         super::close_focused_terminal_pane(
             &mut ui,
@@ -18002,6 +21333,177 @@ mod tests {
             PaneTab::Live(LivePane { terminal, .. }) if terminal.fences(&generic)
         )));
         assert_eq!(*durable.lock().unwrap(), before);
+        assert_eq!(ui.closed_generic_terminals, BTreeSet::from([generic]));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One user flow covers close, inventory replay, explicit open, and exit cleanup.
+    fn generic_close_survives_inventory_replay_until_explicit_open() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = scoped_terminal_ref(workspace, Some(session));
+        let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(WheelRecordingPort {
+                    terminal: terminal.clone(),
+                    replay: Vec::new(),
+                    inputs: Arc::new(Mutex::new(Vec::new())),
+                    input_error: false,
+                }),
+            )
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::from([session]),
+                Box::new(MemoryIntentPort {
+                    state: durable,
+                    mutations: Arc::new(Mutex::new(Vec::new())),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let completion = |live: bool, fence: (u64, u64), port: Box<dyn AgentCommandPort>| {
+            super::RestoreCompletion {
+                port,
+                dispatched_interaction: fence.0,
+                dispatched_registry_revision: fence.1,
+                dispatched_allowed_sessions: BTreeSet::from([session]),
+                terminals: Ok(vec![TerminalInventoryEntry {
+                    terminal: terminal.clone(),
+                    kind: TerminalKind::Terminal,
+                    live,
+                }]),
+                agents: Ok(AgentInventory {
+                    workspace_id: workspace,
+                    runtimes: Vec::new(),
+                    resumable: Vec::new(),
+                }),
+                observation_coherent: true,
+            }
+        };
+
+        let first_fence = runtime.restore_fence();
+        let first = super::apply_restore_completion(
+            completion(true, first_fence, Box::new(UnavailableAgentCommandPort)),
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &BTreeSet::from([session]),
+        );
+        assert_eq!(first.outcome, super::RestoreJobOutcome::Applied);
+        assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
+        ui.start_terminal_session(terminal.clone(), terminal_geometry(20, 80));
+
+        super::close_focused_terminal_pane(
+            &mut ui,
+            &mut runtime,
+            &mut std::collections::HashMap::new(),
+        );
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(ui.closed_generic_terminals.contains(&terminal));
+
+        // The same live row may arrive from a restore already queued around the
+        // close. Its exact process-local fence keeps the tab closed.
+        let replay_fence = runtime.restore_fence();
+        let replay = super::apply_restore_completion(
+            completion(true, replay_fence, first.port),
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &BTreeSet::from([session]),
+        );
+        assert_eq!(replay.outcome, super::RestoreJobOutcome::Applied);
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(ui.closed_generic_terminals.contains(&terminal));
+
+        // A completion outside the pending tab's target is rejected by the
+        // runtime and must not release the close fence as a side effect.
+        let refused_operation = OperationId::new();
+        let target = Target::Session(session);
+        let _ = runtime.request_pane(target, refused_operation, PaneKind::Terminal);
+        let mut refused_pending = std::collections::HashMap::from([(refused_operation, target)]);
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Terminal {
+                    operation: refused_operation,
+                    result: Ok(scoped_terminal_ref(workspace, Some(SessionId::new()))),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut refused_pending,
+            terminal_geometry(20, 80),
+        );
+        assert!(ui.closed_generic_terminals.contains(&terminal));
+        let _ = runtime.fail_pane(target, refused_operation, "wrong scope".to_owned());
+
+        // An immediate `terminal open` may race the shell exit and resolve to
+        // that exact daemon terminal. Reject it instead of resurrecting the
+        // scrollback the user just closed.
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let mut pending = std::collections::HashMap::from([(operation, target)]);
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Terminal {
+                    operation,
+                    result: Ok(terminal.clone()),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            terminal_geometry(20, 80),
+        );
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some("terminal is still closing; try again")
+        );
+        assert!(ui.closed_generic_terminals.contains(&terminal));
+
+        // Coherent exit observation retires the fence. A later open can then
+        // accept only the fresh daemon terminal and its blank scrollback.
+        let exit_fence = runtime.restore_fence();
+        let exited = super::apply_restore_completion(
+            completion(false, exit_fence, replay.port),
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &BTreeSet::from([session]),
+        );
+        assert_eq!(exited.outcome, super::RestoreJobOutcome::Applied);
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(ui.closed_generic_terminals.is_empty());
+
+        let fresh = scoped_terminal_ref(workspace, Some(session));
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let mut pending = std::collections::HashMap::from([(operation, target)]);
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Terminal {
+                    operation,
+                    result: Ok(fresh.clone()),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            terminal_geometry(20, 80),
+        );
+        assert_eq!(runtime.focused_terminal(), Some(fresh));
     }
 
     #[test]
@@ -18061,12 +21563,10 @@ mod tests {
         assert!(durable.lock().unwrap().dismissed.is_empty());
         assert!(durable.lock().unwrap().dismissed_terminals.is_empty());
         assert_eq!(
-            runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
-            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+            runtime.active_pane().error(),
+            Some("terminal session is no longer available")
         );
+        assert!(runtime.state().notice().is_none());
     }
 
     #[test]
@@ -18807,7 +22307,7 @@ mod tests {
             Key::Live(LiveTerminalAction::PreviousTab),
             Key::Escape,
         ] {
-            assert_eq!(retarget_director_chords(&runtime, key.clone()), key);
+            assert_eq!(retarget_drawer_chords(&runtime, key.clone()), key);
         }
 
         assert!(
@@ -18819,11 +22319,11 @@ mod tests {
 
         // Open drawer: the two chords swap, and nothing else moves.
         assert_eq!(
-            retarget_director_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
             Key::Live(LiveTerminalAction::DirectorNew)
         );
         assert_eq!(
-            retarget_director_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
             Key::Live(LiveTerminalAction::NextTab)
         );
         for key in [
@@ -18832,16 +22332,130 @@ mod tests {
             Key::Escape,
             Key::Char('n'),
         ] {
-            assert_eq!(retarget_director_chords(&runtime, key.clone()), key);
+            assert_eq!(retarget_drawer_chords(&runtime, key.clone()), key);
         }
 
         // The retargeted chord reaches the reducer as New, exactly as the frame
         // loop dispatches it.
-        let retargeted = retarget_director_chords(&runtime, Key::Live(LiveTerminalAction::NextTab));
+        let retargeted = retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab));
         assert!(runtime.handle_key(retargeted).is_empty());
         assert!(matches!(
             runtime.state().director_new(),
             DirectorNew::Choosing(DefaultModel::Claude)
+        ));
+
+        // Director remains visible behind Shell, but its chord vocabulary no
+        // longer applies while Shell owns root input.
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(
+            runtime.state().workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+        assert_eq!(
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
+            Key::Live(LiveTerminalAction::NextTab)
+        );
+        assert_eq!(
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
+            Key::Live(LiveTerminalAction::NewRootTerminal)
+        );
+    }
+
+    #[test]
+    fn root_terminal_drawer_retargets_plain_new_to_a_terminal_tab() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+
+        assert_eq!(
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
+            Key::Live(LiveTerminalAction::NewRootTerminal)
+        );
+        assert_eq!(
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
+            Key::Live(LiveTerminalAction::NextTab)
+        );
+    }
+
+    #[test]
+    fn root_terminal_drawer_cycles_and_clicks_terminal_only_tabs() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = live_terminal_ref(workspace, session);
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            managed.clone(),
+            Box::new(WheelRecordingPort {
+                terminal: managed,
+                replay: Vec::new(),
+                inputs: Arc::new(Mutex::new(Vec::new())),
+                input_error: false,
+            }),
+        );
+        let first = scoped_terminal_ref(workspace, None);
+        let second = scoped_terminal_ref(workspace, None);
+        for terminal in [&first, &second] {
+            let operation = OperationId::new();
+            let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Terminal);
+            let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal.clone());
+        }
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let _ = runtime.select_tab_selection(TabSelection::Live(first.clone()));
+
+        assert!(!select_root_terminal_tab(&Key::Other, &mut runtime));
+        assert!(select_root_terminal_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.focused_terminal(), Some(second.clone()));
+        assert!(select_root_terminal_tab(
+            &Key::Live(LiveTerminalAction::PreviousTab),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.focused_terminal(), Some(first));
+
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+        let mut pending_targets = std::collections::HashMap::new();
+        let tab_row = u16::try_from(
+            crate::presentation::views::root_terminal_drawer::geometry(30, 100).top + 2,
+        )
+        .unwrap();
+        assert!(intercept_live_terminal_control(
+            &Key::Click {
+                column: 15,
+                row: tab_row,
+            },
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            30,
+            100,
+            0,
+            0,
+        ));
+        assert_eq!(runtime.focused_terminal(), Some(second));
+        assert!(!intercept_live_terminal_control(
+            &Key::Click {
+                column: 29,
+                row: tab_row,
+            },
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            30,
+            100,
+            0,
+            0,
         ));
     }
 
@@ -20014,6 +23628,7 @@ mod tests {
         frames: Vec<Vec<String>>,
         waits: Vec<std::time::Duration>,
         copied: Vec<String>,
+        size: Option<(usize, usize)>,
         create_call: Option<Receiver<String>>,
         observed_creates: Vec<String>,
         fail_size: bool,
@@ -20042,7 +23657,7 @@ mod tests {
             if self.fail_size {
                 return Err(io::Error::other("size failed"));
             }
-            Ok((0, 0))
+            Ok(self.size.unwrap_or((0, 0)))
         }
 
         fn draw(&mut self, frame: &[String]) -> io::Result<()> {
@@ -20167,22 +23782,49 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy, Default, Eq, PartialEq)]
+    enum FakeOpenSnapshot {
+        #[default]
+        Populated,
+        Empty,
+    }
+
+    #[derive(Clone, Copy, Default, Eq, PartialEq)]
+    enum FakeOperationMode {
+        #[default]
+        Inline,
+        Background,
+    }
+
+    enum FakeRegistryRefresh {
+        Queued(Vec<Workspace>),
+        Pending(Vec<Workspace>),
+    }
+
     #[derive(Default)]
     struct FakeLoader {
+        operation_mode: FakeOperationMode,
         opened: Vec<PathBuf>,
+        refreshed: Vec<PathBuf>,
+        open_snapshot: FakeOpenSnapshot,
+        activate_error: Option<&'static str>,
         cleanup_removed: Vec<PathBuf>,
         cleanup_calls: usize,
         unregistered: Vec<PathBuf>,
         unregister_calls: usize,
         created: Vec<NewRequest>,
         fail: bool,
-        /// Stands in for the daemon refusing to describe the workspace being
-        /// opened because it serves a different one: the loader reports it as
-        /// `PermissionDenied`, which entry screens present in place.
+        /// Stands in for the daemon refusing to adopt or describe the workspace
+        /// being opened: the loader reports it as `PermissionDenied`, which
+        /// entry screens present in place.
         refuse: Option<String>,
         /// Which paths `refuse` applies to. Empty means every path, so a fence
         /// that rejects only some registered workspaces can be expressed.
         refuse_paths: Vec<PathBuf>,
+        /// Stands in for the daemon being unreachable while the workspace is
+        /// opened: the loader reports it as `NotConnected`, which entry screens
+        /// present in place rather than ending the process for.
+        unreachable: Option<String>,
         /// Number of leading `create_workspace` calls that reject before the
         /// loader starts succeeding, standing in for a pre-flight rejection
         /// (e.g. the workspace already exists) that the user then corrects.
@@ -20194,10 +23836,18 @@ mod tests {
         release_after_polls: Option<usize>,
         completion_noise: bool,
         opened_at: Option<DateTime<Utc>>,
+        open_delay: std::time::Duration,
+        registry_refresh: Option<FakeRegistryRefresh>,
+        registry_refresh_dispatches: usize,
     }
 
     impl WorkspaceLoader for FakeLoader {
+        fn background_operations(&self) -> bool {
+            self.operation_mode == FakeOperationMode::Background
+        }
+
         fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
+            std::thread::sleep(self.open_delay);
             self.opened.push(path.to_path_buf());
             let fenced = self.refuse_paths.is_empty()
                 || self.refuse_paths.iter().any(|fenced| fenced == path);
@@ -20207,6 +23857,9 @@ mod tests {
                     refusal.clone(),
                 ));
             }
+            if let Some(outage) = self.unreachable.as_ref().filter(|_| fenced) {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, outage.clone()));
+            }
             if self.fail {
                 return Err(io::Error::other("open failed"));
             }
@@ -20215,10 +23868,52 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .unwrap_or("workspace");
             let mut snapshot = snapshot(name);
+            if self.open_snapshot == FakeOpenSnapshot::Empty {
+                snapshot.state.sessions.clear();
+                snapshot.session_ids.clear();
+            }
             if let Some(opened_at) = self.opened_at {
                 snapshot.workspace.updated_at = opened_at;
             }
             Ok(snapshot)
+        }
+
+        fn refresh(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
+            self.refreshed.push(path.to_path_buf());
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("workspace");
+            Ok(snapshot(name))
+        }
+
+        fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
+            self.activate_error
+                .map_or(Ok(()), |error| Err(io::Error::other(error)))
+        }
+
+        fn dispatch_registry_refresh(&mut self) -> io::Result<bool> {
+            match self.registry_refresh.take() {
+                Some(FakeRegistryRefresh::Queued(registry)) => {
+                    self.registry_refresh = Some(FakeRegistryRefresh::Pending(registry));
+                    self.registry_refresh_dispatches += 1;
+                    Ok(true)
+                }
+                state => {
+                    self.registry_refresh = state;
+                    Ok(false)
+                }
+            }
+        }
+
+        fn take_registry_refresh(&mut self) -> Option<io::Result<Vec<Workspace>>> {
+            match self.registry_refresh.take() {
+                Some(FakeRegistryRefresh::Pending(registry)) => Some(Ok(registry)),
+                queued => {
+                    self.registry_refresh = queued;
+                    None
+                }
+            }
         }
 
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
@@ -20310,6 +24005,232 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ResponsiveLoadingTerminal {
+        keys: VecDeque<Key>,
+        wait_keys: VecDeque<Key>,
+        waits: Vec<std::time::Duration>,
+        frames: Vec<Vec<String>>,
+        draw_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Terminal for ResponsiveLoadingTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            Ok((24, 80))
+        }
+
+        fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+            self.frames.push(frame.to_vec());
+            self.draw_count
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            Ok(())
+        }
+
+        fn wait(&mut self, duration: std::time::Duration) -> io::Result<()> {
+            self.waits.push(duration);
+            std::thread::sleep(duration.min(std::time::Duration::from_millis(2)));
+            Ok(())
+        }
+
+        fn wait_for_key(&mut self, duration: std::time::Duration) -> io::Result<Option<Key>> {
+            self.wait(duration)?;
+            Ok(self.wait_keys.pop_front())
+        }
+
+        fn read_key(&mut self) -> io::Result<Key> {
+            self.keys
+                .pop_front()
+                .ok_or_else(|| io::Error::other("no more keys"))
+        }
+    }
+
+    #[test]
+    fn blocking_operations_keep_painting_and_workspace_open_can_be_cancelled() {
+        let mut term = ResponsiveLoadingTerminal {
+            wait_keys: VecDeque::from([Key::Escape, Key::Enter]),
+            ..ResponsiveLoadingTerminal::default()
+        };
+        let draw_count = Arc::clone(&term.draw_count);
+
+        let error = run_workspace_loading(&mut term, "Opening workspace…", true, || {
+            while draw_count.load(std::sync::atomic::Ordering::Acquire) < 3 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok(())
+        })
+        .expect_err("escape cancels the visible wait");
+
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        let painted = term.frames.iter().flatten().cloned().collect::<String>();
+        assert!(painted.contains("Opening workspace…"));
+        assert!(painted.contains("Cancelling…"));
+        assert!(
+            term.frames.len() >= 3,
+            "the loading surface kept repainting"
+        );
+        assert_eq!(term.wait_keys, VecDeque::from([Key::Enter]));
+    }
+
+    #[test]
+    fn non_cancellable_loading_throttles_frames_without_consuming_input() {
+        let mut term = ResponsiveLoadingTerminal {
+            wait_keys: VecDeque::from([Key::Enter]),
+            ..ResponsiveLoadingTerminal::default()
+        };
+        let draw_count = Arc::clone(&term.draw_count);
+
+        run_workspace_loading(&mut term, "Saving settings…", false, || {
+            while draw_count.load(std::sync::atomic::Ordering::Acquire) < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok(())
+        })
+        .expect("non-cancellable save completes");
+
+        assert!(
+            term.frames.len() >= 2,
+            "the loading surface kept repainting"
+        );
+        assert!(
+            !term.waits.is_empty(),
+            "the render loop yielded between frames"
+        );
+        assert!(
+            term.waits
+                .iter()
+                .all(|duration| *duration == std::time::Duration::from_millis(80))
+        );
+        assert_eq!(term.wait_keys, VecDeque::from([Key::Enter]));
+    }
+
+    #[test]
+    fn a_panicking_background_operation_is_reported_as_io_failure() {
+        let mut term = ResponsiveLoadingTerminal::default();
+        let error = run_workspace_loading(
+            &mut term,
+            "Saving settings…",
+            false,
+            || -> io::Result<()> { panic!("injected worker panic") },
+        )
+        .expect_err("worker panic is mapped to a stable error");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            error.to_string(),
+            "background operation stopped unexpectedly"
+        );
+    }
+
+    #[test]
+    fn production_workspace_ports_open_refresh_and_activate_on_the_worker_path() {
+        let mut term = ResponsiveLoadingTerminal::default();
+        let mut loader = FakeLoader {
+            operation_mode: FakeOperationMode::Background,
+            open_snapshot: FakeOpenSnapshot::Empty,
+            ..FakeLoader::default()
+        };
+
+        let snapshot = open_workspace_responsive(
+            &mut term,
+            &mut loader,
+            Path::new("/tmp/background"),
+            "Opening workspace…",
+        )
+        .expect("background open succeeds");
+        activate_workspace_responsive(
+            &mut term,
+            &mut loader,
+            &snapshot.workspace.path,
+            "Activating workspace…",
+        )
+        .expect("background activation succeeds");
+
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/background")]);
+        assert_eq!(loader.refreshed, vec![PathBuf::from("/tmp/background")]);
+
+        let paths = vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")];
+        let (_, active, _) = prepare_workspace_deck(&mut term, &mut loader, &paths)
+            .expect("background deck preparation succeeds");
+        assert_eq!(active.workspace.path, PathBuf::from("/tmp/one"));
+
+        let mut failing_loader = FakeLoader {
+            activate_error: Some("activation failed"),
+            ..FakeLoader::default()
+        };
+        let error = prepare_workspace_deck(
+            &mut term,
+            &mut failing_loader,
+            &[PathBuf::from("/tmp/fail")],
+        )
+        .expect_err("activation failure is propagated");
+        assert_eq!(error.to_string(), "activation failed");
+    }
+
+    #[test]
+    fn cancelling_recent_and_open_list_restores_the_originating_screen() {
+        let cases = [
+            (
+                vec![Key::Char('1'), Key::Quit],
+                Vec::new(),
+                vec![recent("recent")],
+                "Menu",
+            ),
+            (
+                vec![Key::Char('o'), Key::Enter, Key::Quit],
+                vec![ws("open")],
+                Vec::new(),
+                "Open Workspace",
+            ),
+        ];
+
+        for (keys, workspaces, recent, originating_screen) in cases {
+            let mut term = ResponsiveLoadingTerminal {
+                keys: keys.into(),
+                wait_keys: VecDeque::from([Key::Escape]),
+                ..ResponsiveLoadingTerminal::default()
+            };
+            let mut loader = FakeLoader {
+                operation_mode: FakeOperationMode::Background,
+                open_delay: std::time::Duration::from_millis(20),
+                ..FakeLoader::default()
+            };
+            let mut settings = RecordingSettingsPort::default();
+            let mut sessions = UnavailableSessionCommandPortFactory;
+
+            assert_eq!(
+                run_with_settings(
+                    &mut term,
+                    workspaces,
+                    recent,
+                    now(),
+                    Start::Welcome,
+                    &mut loader,
+                    &mut settings,
+                    &mut sessions,
+                )
+                .unwrap(),
+                Exit::Quit
+            );
+            let frames = term
+                .frames
+                .iter()
+                .map(|frame| frame.join("\n"))
+                .collect::<Vec<_>>();
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.contains("Workspace opening was cancelled.")),
+                "cancel notice was absent from {originating_screen}: {frames:?}"
+            );
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.contains(originating_screen)),
+                "originating screen was absent: {frames:?}"
+            );
+        }
+    }
+
     #[test]
     fn run_quits_from_welcome_and_handles_menu_navigation() {
         for keys in [
@@ -20336,7 +24257,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_splash_draws_and_paces_every_v1_frame_without_reading_input() {
+    fn startup_splash_draws_and_paces_every_frame_without_reading_input() {
         let mut term = FakeTerminal::default();
 
         play_startup_splash(&mut term).unwrap();
@@ -20494,12 +24415,16 @@ mod tests {
         assert!(config.is_selecting_team());
         step_config(&mut config, Key::Other, &mut settings);
         step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Up, &mut settings);
         step_config(&mut config, Key::Right, &mut settings);
         step_config(&mut config, Key::Enter, &mut settings);
         assert!(!config.is_selecting_team());
         assert_eq!(config.settings().team_template, TeamTemplate::Flat);
 
         step_config(&mut config, Key::Enter, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Up, &mut settings);
         step_config(&mut config, Key::Left, &mut settings);
         step_config(&mut config, Key::Tab, &mut settings);
         step_config(&mut config, Key::Escape, &mut settings);
@@ -20611,6 +24536,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingSettingsPort {
         saves: usize,
+        environment_saves: usize,
+        background: bool,
         fail_save: bool,
     }
 
@@ -20618,11 +24545,15 @@ mod tests {
     struct WorkspaceBindingSettingsPort {
         selected: Vec<PathBuf>,
         saves: Vec<(SettingsScope, Settings)>,
+        refuse: Option<PathBuf>,
     }
 
     impl SettingsPort for WorkspaceBindingSettingsPort {
         fn select_workspace(&mut self, workspace_root: &Path) -> io::Result<()> {
             self.selected.push(workspace_root.to_path_buf());
+            if self.refuse.as_deref() == Some(workspace_root) {
+                return Err(io::Error::other("workspace settings are unreadable"));
+            }
             Ok(())
         }
 
@@ -20652,6 +24583,7 @@ mod tests {
         keys.extend("config".chars().map(Key::Char));
         keys.extend([
             Key::Enter,
+            Key::Down,
             Key::Down,
             Key::Down,
             Key::Down,
@@ -20766,6 +24698,10 @@ mod tests {
     }
 
     impl SettingsPort for RecordingSettingsPort {
+        fn background_operations(&self) -> bool {
+            self.background
+        }
+
         fn read(
             &mut self,
             _scope: usagi_core::usecase::settings::SettingsScope,
@@ -20784,6 +24720,190 @@ mod tests {
             self.saves += 1;
             Ok(())
         }
+
+        fn save_environment(
+            &mut self,
+            _scope: SettingsScope,
+            _environment: &usagi_core::domain::settings::EnvBindings,
+        ) -> io::Result<()> {
+            self.environment_saves += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn production_config_and_environment_writes_use_the_responsive_worker_path() {
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut config = Config::load(&mut settings);
+        let _ = step_config(&mut config, Key::Right, &mut settings);
+        for _ in 0..8 {
+            let _ = step_config(&mut config, Key::Down, &mut settings);
+        }
+        assert!(matches!(
+            step_config(&mut config, Key::Enter, &mut settings),
+            ConfigStep::Save
+        ));
+        let mut term = ResponsiveLoadingTerminal::default();
+        assert!(
+            save_config_responsive(&mut term, &mut config, &mut settings, None)
+                .expect("responsive settings save")
+        );
+
+        let mut environment = Config::load_workspace_with_available_models(
+            &mut settings,
+            AvailableAgentModels::all(),
+        );
+        let _ = step_config(&mut environment, Key::Down, &mut settings);
+        let _ = step_config(&mut environment, Key::Enter, &mut settings);
+        let _ = step_config(
+            &mut environment,
+            Key::Paste("A=1".to_owned()),
+            &mut settings,
+        );
+        let _ = step_config(&mut environment, Key::Tab, &mut settings);
+        assert!(matches!(
+            step_config(&mut environment, Key::Enter, &mut settings),
+            ConfigStep::SaveEnvironment
+        ));
+        assert!(save_environment_responsive(
+            &mut term,
+            &mut environment,
+            &mut settings,
+        ));
+
+        assert_eq!(settings.saves, 1);
+        assert_eq!(settings.environment_saves, 1);
+        assert_eq!(environment.settings().env["A"], "1");
+        let painted = term.frames.iter().flatten().cloned().collect::<String>();
+        assert!(painted.contains("Saving settings…"));
+        assert!(painted.contains("Saving environment…"));
+    }
+
+    #[test]
+    fn responsive_save_helpers_cover_empty_and_inline_environment_requests() {
+        let mut background = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut clean = Config::load(&mut background);
+        let mut term = ResponsiveLoadingTerminal::default();
+        assert!(!save_config_responsive(&mut term, &mut clean, &mut background, None).unwrap());
+        assert!(!save_environment_responsive(
+            &mut term,
+            &mut clean,
+            &mut background
+        ));
+
+        let mut inline = RecordingSettingsPort::default();
+        let mut environment = Config::load(&mut inline);
+        let _ = step_config(&mut environment, Key::Down, &mut inline);
+        let _ = step_config(&mut environment, Key::Down, &mut inline);
+        let _ = step_config(&mut environment, Key::Enter, &mut inline);
+        let _ = step_config(
+            &mut environment,
+            Key::Paste("INLINE=1".to_owned()),
+            &mut inline,
+        );
+        let _ = step_config(&mut environment, Key::Tab, &mut inline);
+        assert!(save_environment_responsive(
+            &mut term,
+            &mut environment,
+            &mut inline
+        ));
+        assert_eq!(inline.environment_saves, 1);
+    }
+
+    #[test]
+    fn background_environment_shortcut_reaches_both_config_surfaces() {
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut config = Config::load(&mut settings);
+        let _ = step_config(&mut config, Key::Down, &mut settings);
+        let _ = step_config(&mut config, Key::Down, &mut settings);
+        let _ = step_config(&mut config, Key::Enter, &mut settings);
+        let save = Key::Management {
+            action: AppKey::SaveRoles,
+            passthrough: vec![0x13],
+        };
+        assert!(matches!(
+            step_config(&mut config, save.clone(), &mut settings),
+            ConfigStep::SaveEnvironment
+        ));
+        assert!(matches!(
+            step_workspace_config(&mut config, save, &mut settings),
+            WorkspaceConfigStep::SaveEnvironment
+        ));
+    }
+
+    #[test]
+    fn workspace_config_dispatches_background_environment_save() {
+        let base = vec!["home".to_owned(); 24];
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Down,
+            Key::Enter,
+            Key::Paste("WORKSPACE=1".to_owned()),
+            Key::Tab,
+            Key::Enter,
+            Key::Escape,
+        ]);
+
+        run_workspace_config(
+            &mut term,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
+
+        assert_eq!(settings.environment_saves, 1);
+    }
+
+    #[test]
+    fn full_config_dispatches_background_environment_save() {
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut loader = FakeLoader::default();
+        let mut sessions = UnavailableSessionCommandPortFactory;
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Down,
+            Key::Down,
+            Key::Enter,
+            Key::Paste("GLOBAL=1".to_owned()),
+            Key::Management {
+                action: AppKey::SaveRoles,
+                passthrough: vec![0x13],
+            },
+            Key::Escape,
+            Key::Quit,
+        ]);
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                Vec::new(),
+                Vec::new(),
+                now(),
+                Start::Config,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(settings.environment_saves, 1);
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
@@ -20801,10 +24921,11 @@ mod tests {
         Key::Enter,
     ];
 
-    // Workspace Config starts on Agent and contains Agent → env → Team →
-    // Issue → Memory → Save.
-    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 7] = [
+    // Workspace Config starts on Agent and contains Agent → env → Base branch →
+    // Team → Issue → Memory → Save.
+    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 8] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
@@ -20829,7 +24950,14 @@ mod tests {
         let base = vec!["home".to_owned(); 24];
         let mut settings = RecordingSettingsPort::default();
         let mut back = FakeTerminal::with_keys(&[Key::Escape]);
-        run_workspace_config(&mut back, &mut settings, AvailableAgentModels::all(), &base).unwrap();
+        run_workspace_config(
+            &mut back,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
 
         let keys = WORKSPACE_CONFIG_SAVE_KEYS
             .iter()
@@ -20845,6 +24973,7 @@ mod tests {
             &mut failed,
             &mut failing_settings,
             AvailableAgentModels::all(),
+            &[],
             &base,
         )
         .unwrap();
@@ -20864,7 +24993,14 @@ mod tests {
         let mut term =
             FakeTerminal::with_keys(&[Key::Quit, Key::CtrlQ, Key::Char('q'), Key::Escape]);
 
-        run_workspace_config(&mut term, &mut settings, AvailableAgentModels::all(), &base).unwrap();
+        run_workspace_config(
+            &mut term,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
 
         assert_eq!(term.frames.len(), 4);
         assert!(
@@ -21747,7 +25883,10 @@ mod tests {
             &mut unite_loader,
         )
         .unwrap();
-        assert_eq!(unite_loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+        assert_eq!(
+            unite_loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")]
+        );
     }
 
     #[test]
@@ -21785,8 +25924,13 @@ mod tests {
             Key::Down,
             Key::CtrlD,
             Key::Enter,
-            Key::Quit,
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('q'),
         ]);
+        confirm.size = Some((24, 80));
         let mut confirm_loader = FakeLoader::default();
         run(
             &mut confirm,
@@ -21805,6 +25949,13 @@ mod tests {
         );
         assert!(confirm.frames[4].join("\n").contains("alpha"));
         assert!(!confirm.frames[4].join("\n").contains("beta"));
+        let add = confirm
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .find(|frame| frame.contains("Add workspace"))
+            .expect("the project add overlay opens");
+        assert!(!add.contains("beta"));
     }
 
     #[test]
@@ -21840,7 +25991,7 @@ mod tests {
         assert!(term.frames.iter().any(|frame| {
             frame
                 .join("\n")
-                .contains("No tabs stirring yet. Enter starts one.")
+                .contains("a: agent / t: terminal / Enter: actions")
         }));
     }
 
@@ -22036,13 +26187,13 @@ mod tests {
     }
 
     #[test]
-    fn unite_recent_stays_without_loading_a_workspace() {
+    fn unite_recent_reopens_the_ordered_workspace_deck() {
         let unite = Recent::Unite(UniteOverview::new(vec![
             WorkspaceOverview::new(ws("primary"), 0, 0, 0),
             WorkspaceOverview::new(ws("other"), 0, 0, 0),
         ]));
         let empty = Recent::Unite(UniteOverview::new(Vec::new()));
-        let keys = [Key::Char('2'), Key::Char('1'), Key::Char('q'), Key::Enter];
+        let keys = [Key::Char('2'), Key::Char('1'), Key::CtrlQ, Key::Char('y')];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader::default();
         run(
@@ -22053,10 +26204,14 @@ mod tests {
             &mut loader,
         )
         .unwrap();
-        assert!(loader.opened.is_empty());
-        // Both Unite selections stay on Welcome without changing it, so the
-        // menu is drawn once.
-        assert_eq!(term.frames.len(), 1);
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/primary"), PathBuf::from("/tmp/other")]
+        );
+        assert!(term.frames.iter().any(|frame| {
+            let text = frame.join("\n");
+            text.contains("primary") && text.contains("other")
+        }));
     }
 
     #[test]
@@ -22226,10 +26381,14 @@ mod tests {
             }),
             Some(vec![0x13])
         );
-        // A paste is wrapped in bracketed-paste markers so the agent inserts the
-        // multi-line text as one block; an empty paste sends nothing.
+        // A program that did not request bracketed paste gets the raw payload;
+        // an opted-in Agent gets one marked block. An empty paste sends nothing.
         assert_eq!(
             key_to_terminal_bytes(Key::Paste("a\nb".to_owned())),
+            Some(b"a\nb".to_vec())
+        );
+        assert_eq!(
+            key_to_terminal_bytes_for_mode(Key::Paste("a\nb".to_owned()), true),
             Some(b"\x1b[200~a\nb\x1b[201~".to_vec())
         );
         assert_eq!(key_to_terminal_bytes(Key::Paste(String::new())), None);
@@ -22258,11 +26417,27 @@ mod tests {
             }
         );
         assert_eq!(
-            foreground_terminal_geometry(24, 100, true),
-            Geometry { cols: 56, rows: 16 }
+            foreground_terminal_geometry(
+                24,
+                100,
+                true,
+                false,
+                Some(WorkspaceDrawerFocus::Director),
+            ),
+            Geometry { cols: 56, rows: 17 }
         );
         assert_eq!(
-            foreground_terminal_geometry(24, 100, false),
+            foreground_terminal_geometry(
+                24,
+                100,
+                false,
+                true,
+                Some(WorkspaceDrawerFocus::Terminal),
+            ),
+            Geometry { cols: 96, rows: 7 }
+        );
+        assert_eq!(
+            foreground_terminal_geometry(24, 100, false, false, None),
             terminal_geometry(24, 100)
         );
     }
@@ -22380,9 +26555,13 @@ mod tests {
     #[test]
     fn render_home_snapshot_draws_the_initial_home_surface() {
         // The non-interactive `usagi launch <path>` fallback renders one static
-        // Home frame through the controller projection: the workspace name, its
-        // sessions, and the `+ new session` row.
-        let frame = render_home_snapshot(30, 100, &snapshot("demo")).join("\n");
+        // project bar plus Home frame through the controller projection: the
+        // workspace name, its sessions, and both creation affordances.
+        let rows = render_home_snapshot(30, 100, &snapshot("demo"));
+        assert_eq!(rows.len(), 30);
+        assert!(rows[0].contains("1 demo"));
+        assert!(rows[0].contains("+ Open"));
+        let frame = rows.join("\n");
         assert!(frame.contains("demo"));
         assert!(frame.contains("demo-session"));
         assert!(frame.contains("+ new session"));
@@ -22942,12 +27121,10 @@ mod tests {
         assert!(runtime.active_pane().has_tabs());
         assert!(WorkspaceUi::agent_dismissed().is_empty());
         assert_eq!(
-            runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
-            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+            runtime.active_pane().error(),
+            Some("Interrupted Agent has no live process; resume it before closing")
         );
+        assert!(runtime.state().notice().is_none());
         assert!(requests.lock().unwrap().is_empty());
         assert!(ui.pane_launches.is_empty());
     }
@@ -23282,6 +27459,15 @@ mod tests {
         }
     }
 
+    impl super::GardenInventoryPort for CountedPort {
+        fn inventory(
+            &mut self,
+            _workspace: WorkspaceId,
+        ) -> Result<AgentWorkspaceObservation, String> {
+            Err("Agent inventory is unavailable".to_owned())
+        }
+    }
+
     impl BackendDecisionPort for CountedPort {
         fn refresh(&mut self, _workspace: WorkspaceId, _completions: Completions) {}
 
@@ -23304,7 +27490,7 @@ mod tests {
     /// `blocked_restore_inventory_never_blocks_render_or_quit`). Its drop
     /// therefore happens on that worker and is not ordered against the next
     /// workspace's composition.
-    const RESIDENT_PORTS_PER_COMPOSITION: usize = 11;
+    const RESIDENT_PORTS_PER_COMPOSITION: usize = 12;
 
     /// A production-shaped factory whose every port counts its own drop, and
     /// which records how many ports had been dropped when each workspace's
@@ -23352,6 +27538,9 @@ mod tests {
                 restore_commands: Box::new(UnavailableAgentCommandPort),
                 session_worktrees: Box::new(self.port()),
                 restore_connection: Box::new(self.port()),
+                // Owned by the loop unless a Garden round is in flight, which
+                // needs the screen saver to be up: these entries never open it.
+                garden_inventory: Box::new(self.port()),
                 agent_tab_intents: Box::new(self.port()),
                 external_terminal: Box::new(self.port()),
                 metrics: Box::new(self.port()),
@@ -23366,6 +27555,87 @@ mod tests {
         let mut workspace = ws(name);
         workspace.updated_at = updated_at;
         Recent::Workspace(WorkspaceOverview::new(workspace, 1, 0, 0))
+    }
+
+    /// `usagi open <path>` that could not reach a daemon lands in the switcher
+    /// instead of back on the shell, so the very first frame has to say why the
+    /// workspace it asked for is not on screen.
+    #[test]
+    fn a_notice_seeded_switcher_opens_with_the_reason_on_its_first_frame() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('q'), Key::Enter]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend_and_notice(
+                &mut term,
+                Vec::new(),
+                vec![recent_at("first", now())],
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+                Some("daemon unavailable: the daemon did not answer".to_owned()),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        let first = term.frames.first().expect("the switcher drew no frame");
+        assert!(
+            first
+                .iter()
+                .any(|line| line.contains("the daemon did not answer")),
+            "the first frame must carry the reason: {first:?}"
+        );
+        // Nothing was opened: the notice explains an absence, it does not stand
+        // in for a workspace that did load.
+        assert!(loader.opened.is_empty());
+    }
+
+    /// A daemon that cannot be reached must not end the process from an entry
+    /// screen. It is the same shape of failure as a workspace this daemon does
+    /// not serve — the switcher stays up with the reason — and collapsing to the
+    /// shell here is exactly how a wedged daemon locks a user out of usagi.
+    #[test]
+    fn an_unreachable_daemon_keeps_the_switcher_up_instead_of_ending_the_process() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('q'), Key::Enter]);
+        let mut loader = FakeLoader {
+            unreachable: Some("daemon unavailable: the daemon did not answer".to_owned()),
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                Vec::new(),
+                vec![recent_at("first", now())],
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/first")]);
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.iter().any(|line| line.contains("did not answer"))),
+            "the switcher must show why the workspace did not open"
+        );
+        // The outage happened before any workspace runtime existed, so no daemon
+        // port was created for a workspace that never opened.
+        assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
     }
 
     /// #556 acceptance. Home can return to Welcome, another workspace opens from
@@ -23603,6 +27873,643 @@ mod tests {
             factory.drops.load(Ordering::SeqCst),
             2 * RESIDENT_PORTS_PER_COMPOSITION
         );
+    }
+
+    #[test]
+    fn project_deck_add_and_digit_switch_drop_the_old_composition_before_create() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::ActivateWorkspace(1)),
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                vec![ws("alpha"), ws("beta")],
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(
+            loader.opened,
+            vec![
+                PathBuf::from("/tmp/alpha"),
+                PathBuf::from("/tmp/beta"),
+                PathBuf::from("/tmp/alpha"),
+            ]
+        );
+        assert_eq!(
+            factory.drops_at_create,
+            vec![
+                0,
+                RESIDENT_PORTS_PER_COMPOSITION,
+                2 * RESIDENT_PORTS_PER_COMPOSITION,
+            ]
+        );
+    }
+
+    #[test]
+    fn project_add_accepts_and_opens_an_unregistered_directory_path() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Tab,
+            Key::Paste("/tmp/external".to_owned()),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        term.size = Some((24, 80));
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![ws("alpha")],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/external")]
+        );
+        assert!(term.frames.iter().any(|frame| {
+            let frame = frame.join("\n");
+            frame.contains("Directory") && frame.contains("Tab registered")
+        }));
+    }
+
+    #[test]
+    fn project_add_applies_a_registry_refresh_while_the_overlay_is_open() {
+        let alpha = ws("alpha");
+        let beta = ws("beta");
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader {
+            registry_refresh: Some(FakeRegistryRefresh::Queued(vec![alpha.clone(), beta])),
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![alpha],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(loader.registry_refresh_dispatches, 1);
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")]
+        );
+    }
+
+    #[test]
+    fn add_workspace_overlay_can_close_its_checked_active_project() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::CtrlD,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                vec![ws("alpha"), ws("beta")],
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+        assert_eq!(factory.drops_at_create, vec![0]);
+        assert!(term.frames.last().unwrap().join("\n").contains("Recent"));
+    }
+
+    #[test]
+    fn switch_arrows_follow_project_tab_order_and_wrap() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Left,
+            Key::Right,
+            Key::Right,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                vec![ws("alpha"), ws("beta")],
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(
+            loader.opened,
+            vec![
+                PathBuf::from("/tmp/alpha"),
+                PathBuf::from("/tmp/beta"),
+                PathBuf::from("/tmp/alpha"),
+                PathBuf::from("/tmp/beta"),
+                PathBuf::from("/tmp/alpha"),
+            ]
+        );
+        assert_eq!(
+            factory.drops_at_create,
+            vec![
+                0,
+                RESIDENT_PORTS_PER_COMPOSITION,
+                2 * RESIDENT_PORTS_PER_COMPOSITION,
+                3 * RESIDENT_PORTS_PER_COMPOSITION,
+                4 * RESIDENT_PORTS_PER_COMPOSITION,
+            ]
+        );
+    }
+
+    #[test]
+    fn switch_arrows_are_owned_only_by_unobscured_switch_mode() {
+        let alpha = snapshot("alpha");
+        let beta = snapshot("beta");
+        let gamma = snapshot("gamma");
+        let deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta, gamma]).unwrap();
+        let mut state = AppState::home(alpha.workspace_id, alpha.session_ids.clone());
+
+        assert_eq!(
+            super::switch_arrow_target(&deck, &state, &Key::Left),
+            Some(PathBuf::from("/tmp/gamma"))
+        );
+        assert_eq!(
+            super::switch_arrow_target(&deck, &state, &Key::Right),
+            Some(PathBuf::from("/tmp/beta"))
+        );
+        assert_eq!(super::switch_arrow_target(&deck, &state, &Key::Up), None);
+
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::Key(AppKey::Enter),
+        );
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(super::switch_arrow_target(&deck, &state, &Key::Right), None);
+
+        let mut state = AppState::home(alpha.workspace_id, alpha.session_ids.clone());
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::Key(AppKey::CtrlQ),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+        assert_eq!(super::switch_arrow_target(&deck, &state, &Key::Left), None);
+
+        let mut overlay_deck = deck;
+        overlay_deck.open_switcher();
+        let state = AppState::home(alpha.workspace_id, alpha.session_ids);
+        assert_eq!(
+            super::switch_arrow_target(&overlay_deck, &state, &Key::Right),
+            None
+        );
+    }
+
+    #[test]
+    fn project_add_preserves_an_open_workspace_draft() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::Agent),
+            Key::Paste("keep-me".to_owned()),
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Escape,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        term.size = Some((24, 80));
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![ws("alpha"), ws("beta")],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+        assert_eq!(factory.drops_at_create, vec![0]);
+        assert!(
+            term.frames.iter().any(|frame| {
+                contains_wrapped(
+                    &frame.join("\n"),
+                    "Save or cancel the current draft before switching.",
+                )
+            }),
+            "{:#?}",
+            term.frames
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("keep-me"))
+        );
+    }
+
+    #[test]
+    fn project_bar_click_adds_and_activates_the_project_identity_it_rendered() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Click { column: 10, row: 0 },
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Click { column: 2, row: 0 },
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        term.size = Some((24, 80));
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![ws("alpha"), ws("beta")],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            loader.opened,
+            vec![
+                PathBuf::from("/tmp/alpha"),
+                PathBuf::from("/tmp/beta"),
+                PathBuf::from("/tmp/alpha"),
+            ]
+        );
+        assert!(term.frames.iter().any(|frame| frame[0].contains("+ Open")));
+    }
+
+    #[test]
+    fn project_prepare_failure_keeps_the_current_composition_and_deck() {
+        const REFUSAL: &str = "another daemon owns beta; retry after it releases the workspace";
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader {
+            refuse: Some(REFUSAL.to_owned()),
+            refuse_paths: vec![PathBuf::from("/tmp/beta")],
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![ws("alpha"), ws("beta")],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")]
+        );
+        assert_eq!(factory.drops_at_create, vec![0]);
+    }
+
+    #[test]
+    fn project_batch_settings_failure_is_all_or_nothing() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort {
+            refuse: Some(PathBuf::from("/tmp/gamma")),
+            ..WorkspaceBindingSettingsPort::default()
+        };
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![ws("alpha"), ws("beta"), ws("gamma")],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            loader.opened,
+            vec![
+                PathBuf::from("/tmp/alpha"),
+                PathBuf::from("/tmp/beta"),
+                PathBuf::from("/tmp/gamma"),
+            ]
+        );
+        assert_eq!(factory.drops_at_create, vec![0]);
+        assert!(settings.selected.ends_with(&[
+            PathBuf::from("/tmp/beta"),
+            PathBuf::from("/tmp/gamma"),
+            PathBuf::from("/tmp/alpha"),
+        ]));
+    }
+
+    #[test]
+    fn project_registry_path_fence_covers_empty_match_and_mismatch() {
+        let alpha = snapshot("alpha");
+        assert!(!registry_contains_path(&[], &alpha.workspace.path));
+        assert!(registry_contains_path(
+            std::slice::from_ref(&alpha.workspace),
+            &alpha.workspace.path,
+        ));
+        assert!(!registry_contains_path(
+            std::slice::from_ref(&alpha.workspace),
+            Path::new("/tmp/beta"),
+        ));
+
+        let beta = snapshot("beta");
+        let mut registry = vec![alpha.workspace, beta.workspace.clone()];
+        remove_registry_paths(&mut registry, &[]);
+        remove_registry_paths(&mut registry, &[PathBuf::from("/tmp/missing")]);
+        remove_registry_paths(&mut registry, &[PathBuf::from("/tmp/alpha")]);
+        assert_eq!(registry, vec![beta.workspace]);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture covers the deck helpers' shared fallback state.
+    fn project_deck_composition_helpers_cover_safe_fallbacks() {
+        let alpha = snapshot("alpha");
+        assert!(!workspace_has_unsaved_surface(&WorkspaceRuntime::new(
+            alpha.workspace_id,
+            Vec::new(),
+        )));
+        let mut deck = WorkspaceDeck::new(&alpha);
+        let mut term = FakeTerminal::default();
+
+        let mut no_loader: Option<&mut dyn WorkspaceLoader> = None;
+        assert!(
+            prepare_deck_workspace(
+                &mut term,
+                &mut no_loader,
+                &mut deck,
+                Path::new("/tmp/beta"),
+                "Opening…",
+            )
+            .is_none()
+        );
+        assert!(deck.notice().unwrap().contains("workspace list"));
+
+        let mut successful_loader = FakeLoader::default();
+        let mut loader: Option<&mut dyn WorkspaceLoader> = Some(&mut successful_loader);
+        assert_eq!(
+            prepare_deck_workspace(
+                &mut term,
+                &mut loader,
+                &mut deck,
+                Path::new("/tmp/beta"),
+                "Opening…",
+            )
+            .unwrap()
+            .workspace
+            .path,
+            PathBuf::from("/tmp/beta")
+        );
+
+        let mut failed_loader = FakeLoader {
+            fail: true,
+            ..FakeLoader::default()
+        };
+        let mut loader: Option<&mut dyn WorkspaceLoader> = Some(&mut failed_loader);
+        assert!(
+            prepare_deck_workspace(
+                &mut term,
+                &mut loader,
+                &mut deck,
+                Path::new("/tmp/beta"),
+                "Opening…",
+            )
+            .is_none()
+        );
+        assert_eq!(deck.notice(), Some("open failed"));
+
+        let mut no_config = None;
+        assert!(prepare_activation_settings(
+            &mut no_config,
+            &mut no_loader,
+            &mut deck,
+            Path::new("/tmp/alpha"),
+            Path::new("/tmp/beta"),
+        ));
+        assert!(prepare_batch_settings(
+            &mut no_config,
+            &mut no_loader,
+            &mut deck,
+            Path::new("/tmp/alpha"),
+            &[],
+        ));
+
+        let mut settings = WorkspaceBindingSettingsPort {
+            refuse: Some(PathBuf::from("/tmp/beta")),
+            ..WorkspaceBindingSettingsPort::default()
+        };
+        let mut rollback_loader = FakeLoader::default();
+        let mut rollback: Option<&mut dyn WorkspaceLoader> = Some(&mut rollback_loader);
+        let mut context = Some(WorkspaceConfigContext {
+            settings: &mut settings,
+            available_models: AvailableAgentModels::all(),
+        });
+        assert!(!prepare_activation_settings(
+            &mut context,
+            &mut rollback,
+            &mut deck,
+            Path::new("/tmp/alpha"),
+            Path::new("/tmp/beta"),
+        ));
+        assert_eq!(deck.notice(), Some("workspace settings are unreadable"));
+
+        assert_eq!(
+            adjust_project_bar_pointer(Key::Click { column: 4, row: 2 }),
+            Key::Click { column: 4, row: 1 }
+        );
+        assert_eq!(
+            adjust_project_bar_pointer(Key::Click { column: 4, row: 0 }),
+            Key::Click { column: 4, row: 0 }
+        );
+        assert_eq!(
+            adjust_project_bar_pointer(Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 4,
+                row: 2,
+            })),
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 4,
+                row: 1,
+            })
+        );
+        assert_eq!(adjust_project_bar_pointer(Key::Other), Key::Other);
+
+        assert_eq!(
+            prepare_workspace_deck(&mut term, &mut FakeLoader::default(), &[])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            recent_paths(&Recent::Workspace(WorkspaceOverview::new(
+                alpha.workspace,
+                0,
+                0,
+                0,
+            ))),
+            vec![PathBuf::from("/tmp/alpha")]
+        );
+        assert!(recent_paths(&Recent::Unite(UniteOverview::new(Vec::new()))).is_empty());
+    }
+
+    #[test]
+    fn deck_preparation_retries_an_empty_lifecycle_snapshot_for_garden() {
+        let mut fake = FakeLoader {
+            open_snapshot: FakeOpenSnapshot::Empty,
+            ..FakeLoader::default()
+        };
+        let paths = vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")];
+        let mut term = FakeTerminal::default();
+        let (_, active, mut deck) = prepare_workspace_deck(&mut term, &mut fake, &paths).unwrap();
+
+        assert_eq!(fake.opened, paths);
+        assert_eq!(fake.refreshed, paths);
+        assert_eq!(active.session_ids.len(), 1);
+        assert_eq!(deck.garden_projection(&[]).1.len(), 1);
+
+        fake.opened.clear();
+        fake.refreshed.clear();
+        let mut loader: Option<&mut dyn WorkspaceLoader> = Some(&mut fake);
+        let gamma = prepare_deck_workspace(
+            &mut term,
+            &mut loader,
+            &mut deck,
+            Path::new("/tmp/gamma"),
+            "Opening…",
+        )
+        .expect("an added project is prepared");
+        assert_eq!(gamma.session_ids.len(), 1);
+        assert_eq!(fake.opened, vec![PathBuf::from("/tmp/gamma")]);
+        assert_eq!(fake.refreshed, vec![PathBuf::from("/tmp/gamma")]);
     }
 
     /// #556 acceptance: the workspace fence still refuses, and it refuses as a

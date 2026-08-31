@@ -397,6 +397,7 @@ mod tests {
         assert_eq!(runtime.state().workspace(), workspace);
 
         let _ = runtime.update(AppEvent::Key(controller::AppKey::Enter));
+        let _ = runtime.update(AppEvent::Key(controller::AppKey::Enter));
         let effects = runtime.update(AppEvent::Key(controller::AppKey::SubmitCloseup(
             "agent".to_owned(),
         )));

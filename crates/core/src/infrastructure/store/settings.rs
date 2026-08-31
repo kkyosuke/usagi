@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::settings::{LocalSettings, validate_env_limits};
-use crate::infrastructure::paths::project_data_dir;
+use crate::infrastructure::paths::{RuntimeMode, project_data_dir, project_data_dir_for};
 use crate::infrastructure::persistence::json_file;
 use crate::infrastructure::persistence::store_lock::StoreLock;
 
@@ -21,6 +21,17 @@ impl WorkspaceSettingsStore {
     pub fn new(workspace_root: impl AsRef<Path>) -> Self {
         Self {
             dir: project_data_dir(workspace_root),
+        }
+    }
+
+    /// Address a workspace settings store in an explicit runtime mode.
+    ///
+    /// This keeps callers that already own a channel from re-reading an
+    /// unrelated ambient `USAGI_RUNTIME_MODE` value.
+    #[must_use]
+    pub fn new_for_mode(workspace_root: impl AsRef<Path>, mode: RuntimeMode) -> Self {
+        Self {
+            dir: project_data_dir_for(workspace_root, mode),
         }
     }
 
@@ -120,6 +131,7 @@ mod tests {
         let store = WorkspaceSettingsStore::new(workspace.path());
         let initial = LocalSettings {
             default_model: Some(DefaultModel::Claude),
+            default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: Some(false),
             memory_enabled: Some(true),
             team_template: Some(crate::domain::settings::TeamTemplate::Flat),
@@ -132,6 +144,23 @@ mod tests {
 
         store.initialize(&LocalSettings::default()).unwrap();
         assert_eq!(store.load().unwrap(), initial);
+    }
+
+    #[test]
+    fn explicit_mode_does_not_follow_the_ambient_process_channel() {
+        let workspace = tempfile::tempdir().unwrap();
+        let local = WorkspaceSettingsStore::new_for_mode(workspace.path(), RuntimeMode::Local);
+        let production =
+            WorkspaceSettingsStore::new_for_mode(workspace.path(), RuntimeMode::Production);
+
+        assert_eq!(
+            local.path(),
+            workspace.path().join(".usagi/local/settings.json")
+        );
+        assert_eq!(
+            production.path(),
+            workspace.path().join(".usagi/settings.json")
+        );
     }
 
     #[test]

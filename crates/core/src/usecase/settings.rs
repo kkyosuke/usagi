@@ -10,7 +10,7 @@ pub enum SettingsScope {
     /// Per-user Theme and modal settings plus defaults copied into new
     /// workspaces for Agent, Issue, and Memory.
     Global,
-    /// Agent, Issue, and Memory settings local to the current workspace.
+    /// Agent, Base branch, Team, Issue, and Memory settings local to the current workspace.
     Workspace,
 }
 
@@ -18,7 +18,13 @@ pub enum SettingsScope {
 ///
 /// Implementations own scope-to-storage resolution. Callers retain their draft
 /// when [`save`](Self::save) fails so an error remains safe to retry.
-pub trait SettingsPort {
+pub trait SettingsPort: Send {
+    /// Whether writes should be moved to a worker while an interactive client
+    /// keeps painting. In-memory adapters retain the synchronous default.
+    fn background_operations(&self) -> bool {
+        false
+    }
+
     /// Select the workspace identity used for subsequent workspace-scope reads
     /// and writes. Stateless embedders may keep the default no-op.
     ///
@@ -65,8 +71,8 @@ pub trait SettingsPort {
 }
 
 /// Resolve settings for a Home entry without allowing a damaged preference
-/// file to prevent the workspace from opening. Workspace Agent, Issue, and
-/// Memory values are applied over global Theme and modal settings; failures
+/// file to prevent the workspace from opening. Workspace Agent, Base branch,
+/// Team, Issue, and Memory values are applied over global Theme and modal settings; failures
 /// fall back to the readable global value, then to domain defaults.
 pub fn read_for_workspace_entry(port: &mut dyn SettingsPort) -> Settings {
     port.read(SettingsScope::Workspace)

@@ -195,8 +195,15 @@ repository に**立っている**ことは、どの workspace を指している
 
 この制限は **`bound` による暗黙の adopt にだけ**掛かる。「repository でなければ workspace になれない」という規則では
 ない。`usagi open <path>` と TUI の Open / New は `selected` を申告する明示的な操作であり、対象が repository か
-どうかを問わない。daemon が起動時 cwd を initial tenant にする経路も同じく制限しない。制限の根拠は
-「repository かどうか」ではなく「利用者がその workspace を指したと言えるか」である。
+どうかを問わない。制限の根拠は「repository かどうか」ではなく「利用者がその workspace を指したと言えるか」である。
+
+client が daemon を auto-start する前にも、同じ `bound` 解決を read-only preflight として行う。かつて adopt した
+workspace の最長一致、または申告 path 自身が repository の場合だけ、その解決済み root を lifecycle child と
+bootstrap broker の cwd にする。どちらでもない場合は handshake と同じ `workspace-mismatch` / effect none を返し、
+child、workspace fence、project-local `.usagi` を作らない。`selected` と、選択済み root に対する `unbound` readiness は
+明示操作なので従来どおり任意の canonical directory を起動 root にできる。Doctor のように選択を持たない `unbound`
+lifecycle probe は ambient cwd に同じ implicit rule を適用する。これにより、同じ `bound` command の可否は daemon の
+生死に依存しない。
 
 `selected` の adopt が失敗する理由は 3 つある。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
 他の workspace の接続には影響しない。
@@ -335,11 +342,16 @@ request 送信前に lane を確立できなかった場合は effect が確定�
 
 ### bootstrap section の bounded wait
 
-connect / cold start を跨いで 1 データディレクトリに daemon が 1 つだけ立つよう、client は `bootstrap.lock` の
+connect / cold start を跨いで 1 データディレクトリに daemon が 1 つだけ立つよう、**cold-start authority を持つ** client は `bootstrap.lock` の
 cross-process section を取る。この section と、private directory の setup section（`ensure_private_dir` が親
 ディレクトリに取る flock）は、**いずれも blocking `flock` ではなく bounded な `try_lock` retry** である。データ
 ディレクトリはマシン全体で共有されるため、blocking にすると MCP server / CLI / rollover のいずれかが section に
 いる間、UI 経路の接続確立が無期限に待ってしまう。保持したまま wedge したプロセスがいれば永久に待つ。
+
+daemon が provision した MCP child と Agent lifecycle hook は、発行元 daemon の live runtime に結び付くため、既存
+endpoint へ attach するだけでこの section に入らない。これらは daemon が動いていることを前提とする resident child であり、
+別 daemon を cold start しても claim 対象の runtime は存在しない。MCP の手動起動との分岐は
+[7. MCP サーバ#起動と経路](07-mcp.md#起動と経路)を正本とする。
 
 | section | 待ち上限 | 上限の根拠 | 超過時 |
 |---|---|---|---|
@@ -445,7 +457,7 @@ snapshot を読み直す。slow subscriber は bounded queue で coalesce/drop �
 
 ## managed session request
 
-`session` kind の `create`、`remove`、`list`、`overview`、legacy `resume_agent` は daemon が所有する durable lifecycle / Agent runtime に届く。create / remove / resume_agent は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。remove の hook は受理を意味し、worktree 撤去の完了ではない（下表）。`OperationId` の再送は action と canonical intent が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。create intent は canonical session target と role、remove intent は canonical session target、request origin（client request / compensating teardown）、effective `force` を含む。
+`session` kind の `create`、`remove`、`list`、`overview` は daemon が所有する durable lifecycle に届く。create / remove は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。provider conversation の再開は name-based session action ではなく、[exact target の `ResumeAgent`](#provider-conversation-resume-request) request だけが受け付ける。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。remove の hook は受理を意味し、worktree 撤去の完了ではない（下表）。`OperationId` の再送は action と canonical intent が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。create intent は canonical session target と role、remove intent は canonical session target、request origin（client request / compensating teardown）、effective `force` を含む。
 
 create の durable outcome と wire response / hook の対応は次の表を正本とする。同じ semantic operation の再送は daemon restart の前後を問わず同じ行を replay し、filesystem / Git effect を再実行しない。
 
@@ -562,7 +574,7 @@ path / provider を指定できず、daemon は credential から exact live run
 body を持たない。
 
 phase は wire に載る前に hook 側で検証する。usagi が配線した lifecycle event（`SessionStart` /
-`UserPromptSubmit` / `PreToolUse` / `Notification` / `Stop` / `SessionEnd`）と phase の対応が hook input の
+`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd`）と phase の対応が hook input の
 `hook_event_name` と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
 
@@ -589,6 +601,12 @@ item は durable operation timestamp と stable runtime ID で決定的に並ぶ
 Agent history / exit history / dismissal の allocator・retention・GC は
 [#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務であり、この request は
 削除 authority を返さない。
+
+`agent_workspace_observation` は process-level の read-only view が別 workspace を観測する request で、名指しした
+`WorkspaceId` の `AgentInventory` と `session_statuses` を同じ応答で返す。status map は managed session の
+`SessionId` だけを key とし、値は dispatch store の closed `AgentStatus` である。同じ session に複数 Agent がある場合は
+current run を持つ Agent を優先し、`session list` と同じ選択になる。root Agent、provider-native identity、prompt、path は
+map に含めない。この request は mutation を持たないため、fresh connection で安全に retry できる。
 
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで
@@ -617,15 +635,25 @@ safe な typed failure となる。native ID は
 inventory、IPC、hook、error、log へ出さない。provider capture、fence、redaction、new PTY spawn の正本は
 [Provider-native conversation resume](05-daemon.md#provider-native-conversation-resume) とする。
 
-現 wire generation の互換期間だけ `SessionAction::ResumeAgent` の session ID / name 指定を受け付ける。
-daemon がその scope の eligible exact target を厳密に 1 件へ解決できる場合だけ exact request に変換し、0 件は
-`unavailable`、複数件は typed conflict で拒否する。最新 timestamp や provider 種別による暗黙選択はしない。
-この legacy form は次の incompatible wire generation で削除できる。CLI の `resume-exact`、TUI の exact
-resume port、MCP `session_resume` の `target` form は同じ exact contract を使い、inventory は CLI / TUI port と
-MCP `agent_resume_inventory` が共通 contract を使う。
+CLI の `resume-exact`、TUI の exact resume port、MCP `session_resume` は同じ exact contract を使い、inventory は
+CLI / TUI port と MCP `agent_resume_inventory` が共通 contract を使う。session ID / name だけを指定する resume request は受け付けない。
 
-daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。exact / legacy の
-いずれも利用者による明示操作だけが request を作る。
+daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。利用者による明示操作だけが request を作る。
+
+Doctor の integration repair は同じ exact resume 境界を狭く拡張する。`diagnose_agents` は invoking binary が持つ
+code-defined profile revision と、live runtime の launch snapshot revision を比較し、古い hook / MCP integration
+だけを provider ID・argv・設定本文なしで返す。診断には exact resume metadata の準備可否も含み、1件でも準備できていなければ
+`restart_agents` は停止前に全件拒否する。`restart_agents` は利用者へ表示した診断集合の exact runtime ref を再送し、その集合だけを
+停止する非 retry mutation である。診断後に追加された Agent は停止せず、選択済み ref が差し替わった場合は全件停止前に stale として
+拒否する。reported phase が `running` の runtime は `force` なしで全件 effect-before-zero の `busy` となる。generic terminal は対象外である。
+
+停止後、client は daemon build policy を適用して seamless rollover を完了し、返された exact target を
+`resume_agent_with_current_integration` へ渡す。この repair-only request は source の旧 adapter revision を fence として
+保持したまま、active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope /
+lineage を変えずに hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
+旧 daemon がこの診断 vocabulary を実装していない場合、live Agent が無ければ通常 rollover を行う。live Agent がある場合は
+一覧を返して停止を保留し、`--restart-agents --force` が同時に指定された場合だけ既存の cold restart を使う。この互換経路は
+generic terminal も停止し得るが、再起動後も今回停止した runtime ID に対応する exact target だけを resume する。
 
 ## dispatch request
 
@@ -705,7 +733,7 @@ daemon は generation 1 の `max_revision` を 2 として広告し、`ServerHel
 従来どおり raw tail を返すため、両 revision が同じ daemon で同時に成立する。revision 2 の `screen` は schema version・
 geometry・active buffer・primary（常に存在）と alternate（active のときだけ）の grid / scrollback /
 oldest-row origin /
-cursor / saved cursor / scroll region、interned style table、decoder の途中状態、application cursor mode、mouse protocol の有効状態と coordinate encoding を持つため、reattach 後の最初のホイールから full-screen program へ同じ入力列を送れる。client は
+cursor / saved cursor / scroll region、interned style table、decoder の途中状態（128 KiB 上限の DEC synchronized output 未 commit bytes を含む）、application cursor mode、bracketed paste mode、mouse protocol の有効状態と coordinate encoding を持つため、reattach 後の最初の paste / ホイールから full-screen program へ同じ入力列を送れる。client は
 checkpoint から screen を復元し、`output_offset` からの raw suffix を同じ parser へ feed する。
 raw tail を blank parser へ流すことに起因する UTF-8 / CSI / OSC の切断は revision 2 では起こらない。
 

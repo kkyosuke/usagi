@@ -636,7 +636,7 @@ struct Entry {
     /// input after every reconnect as a stale sequence. Cross-connection identity
     /// lives in the separate operation ledger, keyed by client incarnation.
     inputs: BTreeMap<(ConnectionId, ClientId), InputLedger>,
-    /// The authoritative decoded screen for this terminal (#199). Every byte
+    /// The authoritative decoded screen for this terminal. Every byte
     /// this registry accepts is fed to it, so a checkpoint never depends on
     /// where the bounded journal happens to start.
     screen: VtScreen,
@@ -1201,6 +1201,29 @@ impl TerminalRegistry {
         Ok(ack)
     }
 
+    /// Applies an explicit user clear to the authoritative primary screen.
+    /// The PTY still receives the original control byte; this mutation only
+    /// makes future attach checkpoints agree with the client that initiated it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::StaleTarget`] when `reference` is not owned by
+    /// this registry.
+    pub fn clear_primary_for_user(
+        &mut self,
+        reference: &TerminalRef,
+    ) -> Result<bool, RegistryError> {
+        let entry = self.entry_mut(reference)?;
+        let cleared = entry.screen.clear_primary_for_user();
+        if cleared {
+            RETENTION_DROPPED_BYTES.fetch_add(counted(entry.retained_bytes), Ordering::Relaxed);
+            entry.journal.clear();
+            entry.retained_bytes = 0;
+            account_screen(entry);
+        }
+        Ok(cleared)
+    }
+
     /// Reads the recorded final of one durable input operation without writing.
     ///
     /// `Ok(None)` is a typed unknown: the operation was never recorded here, or
@@ -1660,7 +1683,7 @@ mod tests {
     fn revision_2_snapshot_reconstructs_a_screen_a_trimmed_raw_tail_cannot() {
         let r = reference();
         // A four byte journal keeps almost nothing, so the raw tail starts in the
-        // middle of an escape sequence — the #199 regression this replaces.
+        // middle of an escape sequence — the regression this replaces.
         let mut registry = TerminalRegistry::new(4, 2);
         registry
             .register(r.clone(), Geometry { cols: 12, rows: 3 })

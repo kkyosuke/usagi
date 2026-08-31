@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [daemon, orchestration, mcp, lifecycle]
 dependson: [251, 252, 253]
-related: [219, 248]
+related: [219]
 created_at: 2026-07-12T22:34:02.359082+00:00
 updated_at: 2026-07-13T00:05:49.201076+00:00
 ---
@@ -18,7 +18,6 @@ updated_at: 2026-07-13T00:05:49.201076+00:00
 
 | 層 | 所有する責務 |
 | --- | --- |
-| `usagi-core` | #250 の product-neutral capability/request/plan と既存 phase/lifecycle typed value。product hook payload、secret、CLI 文法を持たない |
 | Claude/Codex adapters | product 固有 hook/MCP/resume の render/provision contract。daemon へは scoped、redacted、typed result のみ返す |
 | `crates/daemon/src/usecase` | runtime token/sequence を検証する phase ingest、capability-gated MCP injection、resume/reclaim decision、operation attempt fence と session/runtime projection |
 | `crates/daemon/src/infrastructure` | scoped config/file/env provisioning、secret delivery、process identity probe、durable journal/store。secret は log/snapshot に書かない |

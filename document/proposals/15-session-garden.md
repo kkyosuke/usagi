@@ -1,9 +1,10 @@
 # 15. session garden
 
-> [設計提案一覧](README.md) ｜ 関連仕様: [TUI](../03-tui.md) ｜ 実装 issue: #674
+> [設計提案一覧](README.md) ｜ 現在仕様: [TUI](../03-tui.md) ｜ 実装履歴: #674
 
-session を庭の区画、その agent を区画にいるうさぎとして表す、Home の screen saver UI を提案する。一定時間操作がなければ Garden が
-自動的に現れ、入力すると元の画面へ戻る。目的は session 数や実行状態を一覧表より速く把握できることと、
+session を庭の区画、その agent を区画にいるうさぎとして表す Home の screen saver UI を導入した際の
+設計記録である。現在の表示・入力契約は [3. TUI#session garden](../03-tui.md#session-garden) が正本であり、
+本書は採用理由と実装履歴を残す。Garden の目的は session 数や実行状態を一覧表より速く把握できることと、
 `usagi` らしさを操作の邪魔にならない範囲で強めることである。
 
 Garden は session の lifecycle や Agent phase を所有しない。daemon-authoritative な既存 projection を
@@ -38,7 +39,7 @@ Agent が動き続けていても人が操作していなければ Garden を表
            o(_(")(")             ·  ·  ·                  failed-build
                                                           ×(x.x)
        --v-------v-----------v-----------v----------v-------v----------v-------
-       Garden  click a usagi to visit · any key to return
+       Garden  ←/→ scroll · click to visit · Esc to return
 ```
 
 絵文字は端末で 1 桁または 2 桁になり得るため、production の地面・草花は ASCII を基本にする。上の `🌱` は
@@ -128,13 +129,14 @@ agent が 1 つの session は 1 羽を大きく描き、初期案と同じ見�
 
 1. 描画可能領域を、nameplate と表示上限ぶんのうさぎが収まる固定幅の plot に分割する。plot の大きさは
    agent の数で変えない（区画ごとに幅が変わると grid の決定性と hit test が崩れるため）。
-2. controller が持つ session 順を plot へ左上から割り当てる。
+2. controller が持つ session 順を plot へ上から下、次に右の列へ割り当てる。
 3. 各うさぎの stable `AgentRuntimeId` の先頭 bytes を animation phase の offset にだけ使い、全羽が同時に
    跳ねないようにする。
 4. `tick`、projection、領域サイズが同じなら、常に同じ frame を返す。
 
-session が plot 数を超える場合は末尾を `+ N more in session list` に畳み、既存 sidebar を完全な一覧の正本として
-残す。resize 後の再配置は許すが、同じ幅の refresh では場所を変えない。
+session が表示可能な列数を超える場合は横方向の viewport とし、`← Scroll` / `Scroll →` button と `←` / `→` key で
+1 plot 列ずつ移動する。前後の viewport は端の列を共有するため、現在位置を見失わずに全 session へ到達できる。
+resize 後の再配置は許すが、同じ幅・scroll offset の refresh では場所を変えない。
 
 ## 起こし方とクリック遷移
 
@@ -205,7 +207,7 @@ filesystem path、provider-native ID、terminal output、raw error は renderer 
 | 100×24 · 全 lifecycle | 状態別 pose・状態ラベル・3 列 2 行の plot |
 | 100×24 · reduced motion | 全 pose が静止姿勢に固定される |
 | 100×24 · session 0 件 | 空の庭と `No sessions in the garden` |
-| 64×14 · 最小サイズ | 2 列 1 行への縮退と `+ N more in session list` |
+| 64×14 terminal の Garden 本体 13 行（左右端） | 2 列 1 行への縮退と1列ずつの横スクロール |
 
 ```bash
 cargo run -p usagi-tui --example garden_sample
@@ -224,7 +226,37 @@ phase と最新 coherent Agent inventory を結合して各 agent の phase を�
 tab が無いうさぎを押せてしまう。tab strip と同じ observation を権威にすることで、庭の羽数と開ける tab が
 一致する（正本は [3. TUI#区画とうさぎ](../03-tui.md#区画とうさぎ)）。
 
-## 実装順序と受け入れ条件
+## inactive project のうさぎを daemon から観測する
+
+複数 project を開いたときの Garden は、当初 active project にしかうさぎを描かなかった。inactive project は
+session / lifecycle の cache だけを持ち、Agent membership は「観測していないので描かない」としていたためである。
+これは安全側の判断としては正しいが、Garden の目的（実行状態を一覧表より速く把握する）を開いている project の
+数だけ薄めてしまう。庭の半分が常に空区画なら、庭を見る理由が無い。
+
+観測を足す方法は 2 つあった。
+
+| 案 | 内容 | 採否 |
+|---|---|---|
+| inactive controller を resident にする | project ごとに workspace controller と lane 一式を常駐させる | **不採用**。tab の数だけ terminal 購読・pane 復元・PR 観測が増え、Garden という screen saver のために process の常時コストを倍以上にする |
+| workspace を名指しした read-only 観測 | Garden が前面の間だけ `AgentInventory { workspace }` を project ごとに読む | **採用** |
+
+採用案が成立するのは、`AgentInventory` が **connection の bound tenant ではなく request が名指しした
+`WorkspaceId`** を daemon 全体の Agent record から filter して答えるからである。daemon は開いている project を
+tenant として保持するので、既存の client から他 project の membership をそのまま読める。IPC protocol も
+daemon 側の record も増やさない。
+
+観測を Garden の表示中に限るのは、他の面が他 project の Agent を描かないからである。閉じた Garden の裏で
+読み続ける daemon traffic は誰も見ない。cold start もしない: 観測 lane が daemon を起こせるようにすると、
+screen saver が bootstrap lock と lifecycle subprocess を握ることになる。daemon が居なければ、その project は
+`project inactive` のままでよい。
+
+**lifecycle は cache のままにする**。inventory は Agent の membership であって session の一覧ではないので、
+これを lifecycle の live 性の証拠として使うと、cache が `creating` のまま止まった区画を「今まさに作成中」の
+姿で animation させてしまう。そこで `Available` の cached lifecycle だけをうさぎの土台にし、遷移中・失敗の
+cached lifecycle は従来どおり静止した `cached · …` に留める（正本は
+[3. TUI#inactive project の Agent 観測](../03-tui.md#inactive-project-の-agent-観測)）。
+
+## 実装履歴と受け入れ条件
 
 1. 固定 snapshot から ANSI-safe / width-safe な Garden frame と hitbox を返す widget / unit test を追加する。
 2. Garden overlay、idle event、wake / single-click transition を reducer に追加し、注入した経過時間で controller test を
@@ -238,14 +270,20 @@ tab が無いうさぎを押せてしまう。tab strip と同じ observation �
 6. lifecycle 別 animation（`Waiting` の耳交互表示、`Creating` の 2 pose 出現、`Deleting` の段階的 dim）を追加する。
 7. `USAGI_REDUCE_MOTION` を composition で読み、renderer が既に受け取る boolean へ配線する。
 8. `Failed` の safe failure summary を追加する。session の選択状態は Garden では装飾しない。
+9. 複数 project の session を tab 順に束ね、容量超過は Garden 内の横スクロールで全件へ到達可能にする。
 
-1〜8 はすべて実装済みで、うさぎは agent 単位である。
+10. inactive project の Agent membership を Garden 表示中だけ daemon から観測し、cached lifecycle が
+    `Available` の区画へうさぎを描く。
+11. うさぎの plot を左領域へ寄せ、右の notification panel に同じ safe projection から導出した現在状態を表示する。
+
+1〜11 はすべて実装済みで、うさぎは agent 単位である。
 
 受け入れ条件は次のとおりである。
 
 - 同じ入力 snapshot / tick / size は byte-for-byte 同じ frame になる。
 - すべての行が端末幅以内で、CJK の session label も途中で壊れない。
-- 0 / 1 / 表示上限超過の session、全 lifecycle、narrow / short terminal をテストする。
+- 0 / 1 / 表示上限超過の session、全 lifecycle、narrow / short terminal をテストし、表示上限超過時は
+  すべての session と横スクロール button が到達可能である。
 - 1 session に複数 agent があるとき、羽数と各 agent の phase が描かれ、集約によって実行中の agent が
   休んでいる姿に化けない。
 - 表示上限を超えた agent は `+N` に畳まれる。表示枠は `Waiting` が先に使い、`Waiting` 自体が上限を超える
@@ -255,7 +293,10 @@ tab が無いうさぎを押せてしまう。tab strip と同じ observation �
 - 5 分未満では Garden を開かず、5 分到達時に eligible な Home だけで開く。
 - backend event と terminal output は idle deadline を延長せず、user input と resize は延長する。
 - wake-up の最初の入力は背面へ伝播せず、うさぎ click だけが対応する既存 Closeup へ遷移する。
-- Garden から daemon command を直接発行しない。
+- Garden から daemon command を直接発行しない。observation lane は read-only で、daemon を起動しない。
+- 開いているどの project の session も、その project の Agent を観測できていればうさぎになり、観測できて
+  いなければ推測されない。
+- notification panel は表示中の plot と同じ viewport を説明し、完了、入力待ち、実行中、失敗を安全な文で区別する。
 - selected session が snapshot 更新で消えた場合は、既存 reconciliation と同じ surviving session へ着地する。
 
 ## 採用しない案

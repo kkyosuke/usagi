@@ -4,8 +4,8 @@ title: feat(daemon): daemon/agent を restart・crash・macOS 再起動後も du
 status: done
 priority: high
 labels: [daemon, launchd, session, agent, recovery, resilience, security]
-dependson: [349]
-related: [209, 221, 254, 310, 311, 348, 253, 252, 250]
+dependson: []
+related: [209, 221, 254, 310, 311, 253, 252]
 created_at: 2026-07-18T01:53:34.283021+00:00
 updated_at: 2026-07-18T02:34:22.214801+00:00
 ---
@@ -19,8 +19,6 @@ updated_at: 2026-07-18T02:34:22.214801+00:00
 
 一方で、既存の関連作業は本 issue と役割が異なる:
 
-- **#348 / #1040**: shared `sessions.json` が **未作成の最初の起動**に限り、検証済み legacy `state.json` を available managed session として一度だけ採用する。
-- **#349**: 既に partial な v2 lifecycle state（例: failed `test-1`）を持つ利用者向けに、`usagi session recover-legacy`（daemon IPC `SessionAction::RecoverLegacy`、dry-run 既定 + `--apply`）で legacy session を明示採用する **operator recovery 経路**。**＝「既存 partial state の復旧」はこの #349 が担当する。本 issue はそこへ依存し、同じ検証・atomic writer 契約を再利用するが復旧経路を作り直さない。**
 - **#254**: daemon 生存期間内での adapter resume/reclaim（verified identity のみ、ambiguous は fail-closed）。
 - **#310 / #311**: restart 時の trusted root cwd 統一と durable atomic JSON writer。
 
@@ -31,13 +29,12 @@ updated_at: 2026-07-18T02:34:22.214801+00:00
 1. **launchd supervision**: macOS で launchd が `usagi daemon serve`（detached `start` ではなく前景 serve）を supervise し、crash・login・再起動後に単一インスタンスとして再起動する。daemon 単一インスタンスの権威は従来どおり `serve` が保持する `daemon.lock` に置き、launchd は process supervisor に徹する。
 2. **interrupted 可視化**: daemon 起動時の reconcile で、durable state 上は `available` だが Agent runtime が失われた session を「中断（interrupted, resumable）」として projection し、sidebar から消さない。lifecycle の closed vocabulary（`creating`/`initializing`/`available`/`deleting`/`failed`）は変更せず、Agent runtime liveness という別軸で表現する。
 3. **provider resume metadata の永続化**: `agents.json` に、明示 Resume に十分なだけの provider metadata（provider 種別 Claude/Codex、worktree/cwd identity、安定した provider-native session id/name、last-known status/phase、adapter revision）を durable に保存する。secret・argv・transcript 本文は保存しない。
-4. **明示 Resume**: 利用者の明示操作からのみ `claude --resume <session>` / `codex resume <session>` に相当する新規 Agent を、解決済み managed-session worktree で起動する経路（daemon IPC `SessionAction::ResumeAgent`、CLI、TUI、MCP）を提供する。**既定で自動継続はしない。**
+4. **明示 Resume**: 利用者の明示操作からのみ `claude --resume <session>` / `codex resume <session>` に相当する新規 Agent を、解決済み managed-session worktree で起動する exact-target 経路（daemon IPC `DaemonRequest::ResumeAgent`、CLI、TUI、MCP）を提供する。**既定で自動継続はしない。**
 
 ## 非目標（明示的に out of scope）
 
 - **Agent の自動継続（auto-resume / auto-continue）**。crash 前の作業を無人で再開すると、危険な／陳腐化した操作（破壊的コマンド、古い前提に基づく編集、二重の外部副作用）を replay しうるため、既定で行わない。将来 opt-in にする場合は別 issue とし、per-session の明示同意・冪等性保証・verification gate を前提とする。本 issue では auto-resume を実装しない。
 - **daemon crash 後の PTY 画面・入出力の継続 attach**（broker / FD handoff）。#221 の将来設計に委ね、本 issue は #209 の explicit orphan 契約を維持する（生存 child は kill/attach/replacement せず interrupted として表示）。
-- 既存 partial v2 state / legacy `state.json` の採用ロジック（#348 / #349 が正本）。本 issue はその結果を projection・resume するだけで、採用・検証・atomic commit を再実装しない。
 - Windows / Linux の service supervision。まず macOS の launchd を対象とし、他 OS 対応は将来 issue とする（本 issue は非 launchd 環境で従来の `usagi daemon start` 経路を壊さないことだけを保証する）。
 
 ## アーキテクチャ（所有境界）
@@ -76,7 +73,7 @@ daemon の control authority と durable state は daemon に残す。launchd �
 
 ## 明示 Resume 契約
 
-- **入口**: daemon IPC `SessionAction::ResumeAgent`（operation ID 付き）。CLI `usagi session resume-agent <session>`、TUI の Resume 操作、MCP `agent_resume` tool（公開する場合）は全てこの action を呼ぶだけで、client が local に provider CLI を起動しない。
+- **入口**: daemon IPC `DaemonRequest::ResumeAgent`（operation ID と exact target 付き）。CLI `usagi session resume-exact <target>`、TUI の Resume 操作、MCP `session_resume` tool は全てこの request を呼ぶだけで、client が local に provider CLI を起動しない。
 - **明示性**: 既定で **利用者の明示操作からのみ**発火する。TUI 起動・sidebar 再接続・daemon restart・launchd 再起動・通常の session tool はこれを暗黙に呼ばない。
 - **動作**: 解決済み managed-session worktree を cwd として、保存済み provider-native session id/name で `claude --resume …` / `codex resume …` 相当の**新規 Agent runtime**を #254 の launch 経路で一度だけ spawn する。これは crash 前の PTY の再 attach ではなく、provider の resume 意味論による新しい会話継続である。
 - **fail-closed**: provider CLI 不在は safe `unavailable`、metadata 欠落・adapter 非互換・scope 不一致・worktree 欠損/変更は safe `invalid_argument` / typed rejection とし、spawn しない。ambiguous な identity は #254 どおり fail-closed で人の明示 action を要求する。
@@ -126,9 +123,9 @@ daemon の control authority と durable state は daemon に残す。launchd �
 
 - launchd LaunchAgent を install すると、macOS login / 再起動 / daemon の異常終了後に `usagi daemon serve` が単一インスタンスとして再起動し、`daemon.lock` の権威と二重起動防止が保たれる。uninstall で supervision が止まる。
 - daemon-only restart（Agent 生存）は #209 rollover のままで、session を interrupted にせず正しい generation へ再 attach できる。
-- daemon crash / SIGKILL / macOS 再起動後の起動で、identity を証明できない Agent runtime は interrupted として reconcile され、replacement spawn / kill / input を自動で行わない。当該 `available` session は sidebar に残り、legacy UI metadata（#348/#349 経由）を失わない。
+- daemon crash / SIGKILL / macOS 再起動後の起動で、identity を証明できない Agent runtime は interrupted として reconcile され、replacement spawn / kill / input を自動で行わない。当該 `available` session は sidebar に残る。
 - `agents.json` に provider 種別・worktree identity・provider-native session id/name・last-known status・adapter revision が durable に保存され、secret / argv / transcript は保存されない。
-- 明示 `SessionAction::ResumeAgent`（CLI / TUI / MCP から）だけが provider resume を起動し、通常の起動・再接続・restart・launchd 再起動では発火しない。auto-continue は存在しない。
+- 明示 `DaemonRequest::ResumeAgent`（CLI / TUI / MCP から）だけが provider resume を起動し、通常の起動・再接続・restart・launchd 再起動では発火しない。auto-continue は存在しない。
 - Resume は解決済み trusted worktree で新規 Agent を一度だけ spawn し、provider CLI 不在・metadata 欠落・adapter 非互換・scope/worktree 不一致・concurrent 要求の各ケースで fail-closed（二重 spawn / worktree effect / secret 露出なし）。
 - failure matrix の全ケースで、既存 durable state は byte-equivalent に保たれ partial snapshot を公開しない。
 
@@ -137,7 +134,7 @@ daemon の control authority と durable state は daemon に残す。launchd �
 - fake launchd 相当（composition root で差し替え可能な service installer 境界）で plist install/uninstall と `RunAtLoad`/`KeepAlive` 供給を検証する。実 launchd 登録なしで install 生成物と単一インスタンス lock の相互作用を確認する。
 - daemon restart / 擬似 crash（process 消失）/ macOS reboot 相当（全 runtime identity 失効）の runtime integration test で、interrupted reconcile と no-auto-replacement を検証する。
 - `agents.json` の provider metadata の round-trip、redaction（secret/argv/transcript 非保存）、後方互換（metadata 欠落 record）の store test。
-- `ResumeAgent` の scope 再解決・冪等 fence・fail-closed 各分岐を fake provider CLI fixture で検証する（実 CLI / 実 login 不要、#254 fixture 経路を再利用）。
+- exact-target `ResumeAgent` の scope 再解決・冪等 fence・fail-closed 各分岐を fake provider CLI fixture で検証する（実 CLI / 実 login 不要、#254 fixture 経路を再利用）。
 - TUI `FsWorkspaceLoader` / projection の regression で、restart 後に interrupted session が sidebar に stable ID で残り metadata を保つことを検証する。
 
 ## ドキュメント

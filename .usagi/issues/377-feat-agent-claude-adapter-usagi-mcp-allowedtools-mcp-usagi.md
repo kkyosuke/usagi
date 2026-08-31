@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [agent, daemon, mcp, orchestration]
 dependson: []
-related: [254, 253, 134]
+related: [254, 253]
 created_at: 2026-07-19T22:39:55.806782+00:00
 updated_at: 2026-07-19T22:43:22.491683+00:00
 ---

@@ -2,13 +2,17 @@
 //!
 //! The legacy-compatible dispatch registry and its workspace ownership sidecar
 //! are atomically replaced JSON documents under one cross-process lock. Each
-//! caller inbox is a locked, atomically replaced JSONL file so a crash cannot
-//! expose a partial delivery and concurrent daemon commands cannot lose one
-//! another's updates.
+//! caller inbox is an fsynced sequence journal with a derived offset index and
+//! an atomic ACK watermark. The same lock serializes append, ACK, migration and
+//! compaction so concurrent daemon commands cannot lose one another's updates.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -20,10 +24,19 @@ use crate::domain::agent::{
 };
 use crate::domain::id::{AgentId, OperationId, SessionId, WorkspaceId};
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
+use crate::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
 const REGISTRY_FILE: &str = "dispatch.json";
 const WORKSPACE_REGISTRY_FILE: &str = "dispatch-workspaces.json";
 const INBOX_DIR: &str = "inbox";
+const INBOX_INDEX_SUFFIX: &str = ".index.json";
+const INBOX_ACK_SUFFIX: &str = ".ack.json";
+
+/// Serialized ceilings keep one long-lived daemon from turning retained
+/// dispatch state into an unbounded parse, rewrite, or IPC response cost.
+const REGISTRY_HARD_BYTES: u64 = 2 * 1024 * 1024;
+const WORKSPACE_REGISTRY_HARD_BYTES: u64 = 2 * 1024 * 1024;
+const INBOX_HARD_BYTES: u64 = 4 * 1024 * 1024;
 
 /// How many finished dispatch runs the registry keeps.
 ///
@@ -34,24 +47,128 @@ const INBOX_DIR: &str = "inbox";
 /// caller can still find the run it is talking about; past that window the run
 /// is history, and history belongs in the inbox that already recorded it.
 const RUN_RETENTION: usize = 256;
+/// A byte-pressure prune keeps this many newest terminal runs available for
+/// duplicate report and reconnect replay. If protected/live state alone exceeds
+/// the byte ceiling, the new mutation is rejected without replacing the file.
+const RUN_REPLAY_FLOOR: usize = 32;
+const HISTORY_MAX_AGE_SECONDS: i64 = 365 * 24 * 60 * 60;
 
 /// How many already-read messages one caller's inbox keeps.
 const INBOX_READ_RETENTION: usize = 256;
+/// A byte-pressure compaction keeps this many newest acknowledged reports.
+const INBOX_READ_REPLAY_FLOOR: usize = 0;
 
-/// The hard ceiling on one caller's inbox, unread messages included.
-///
-/// Read messages are dropped first and this bound is never reached in ordinary
-/// use. It exists because "never drop an unread message" alone is not a bound: a
-/// caller that never reads its inbox would otherwise grow it without limit.
+/// The hard ceiling on one caller's inbox, unread messages included. Read
+/// messages are compacted first; if every slot is unacknowledged, append is
+/// rejected without evicting or mutating an existing report.
 const INBOX_HARD_LIMIT: usize = 4096;
+/// Maximum messages returned by one public inbox page.
+pub const INBOX_PAGE_MAX: usize = 100;
 /// Reserved inbox segment for a workspace-root caller. A `SessionId` is always a
 /// lowercase UUID, so this non-UUID literal can never collide with one.
 const ROOT_INBOX_SEGMENT: &str = "workspace-root";
+
+#[derive(Clone, Copy)]
+struct DispatchStoreLimits {
+    registry_bytes: u64,
+    workspace_registry_bytes: u64,
+    inbox_bytes: u64,
+    run_retention: usize,
+    run_replay_floor: usize,
+    inbox_read_retention: usize,
+    inbox_read_replay_floor: usize,
+    inbox_count: usize,
+    history_max_age_seconds: i64,
+}
+
+impl Default for DispatchStoreLimits {
+    fn default() -> Self {
+        Self {
+            registry_bytes: REGISTRY_HARD_BYTES,
+            workspace_registry_bytes: WORKSPACE_REGISTRY_HARD_BYTES,
+            inbox_bytes: INBOX_HARD_BYTES,
+            run_retention: RUN_RETENTION,
+            run_replay_floor: RUN_REPLAY_FLOOR,
+            inbox_read_retention: INBOX_READ_RETENTION,
+            inbox_read_replay_floor: INBOX_READ_REPLAY_FLOOR,
+            inbox_count: INBOX_HARD_LIMIT,
+            history_max_age_seconds: HISTORY_MAX_AGE_SECONDS,
+        }
+    }
+}
+
+fn serialized_document_len(value: &impl Serialize) -> Result<u64> {
+    let text = serde_json::to_string_pretty(value)?;
+    Ok(u64::try_from(text.len().saturating_add(1))?)
+}
 
 /// Maps an optional owning session to its durable inbox directory segment.
 /// `None` is the workspace root; `Some` is the session's UUID.
 fn session_segment(session_id: Option<SessionId>) -> String {
     session_id.map_or_else(|| ROOT_INBOX_SEGMENT.to_owned(), |id| id.as_str())
+}
+
+/// Stable position of the next inbox message to inspect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxCursor {
+    pub next_sequence: u64,
+}
+
+/// One bounded inbox query result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxPage {
+    pub messages: Vec<InboxMessage>,
+    pub next_cursor: InboxCursor,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InboxRecord {
+    sequence: u64,
+    #[serde(flatten)]
+    message: InboxMessage,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct InboxIndexEntry {
+    sequence: u64,
+    offset: u64,
+    created_at: DateTime<Utc>,
+    read: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct InboxIndex {
+    journal_len: u64,
+    valid_len: u64,
+    entries: Vec<InboxIndexEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct InboxAck {
+    next_sequence: u64,
+}
+
+impl Default for InboxAck {
+    fn default() -> Self {
+        Self { next_sequence: 1 }
+    }
+}
+
+fn next_inbox_sequence(entries: &[InboxIndexEntry]) -> Result<u64> {
+    entries.last().map_or(Ok(1), |entry| {
+        entry
+            .sequence
+            .checked_add(1)
+            .context("inbox sequence exhausted")
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum InboxLine {
+    Record(InboxRecord),
+    Legacy(InboxMessage),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +192,36 @@ struct Registry {
 struct WorkspaceRegistry {
     agent_workspaces: BTreeMap<AgentId, WorkspaceId>,
     prompts: Vec<WorkspacePrompt>,
+    #[serde(default)]
+    lineages: Vec<SessionLineage>,
+    #[serde(default)]
+    delegation_reservations: Vec<DelegationReservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionLineage {
+    workspace: WorkspaceId,
+    session: SessionId,
+    parent: Option<SessionId>,
+}
+
+struct ManagedSessionParent {
+    parent: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DelegationReservation {
+    workspace: WorkspaceId,
+    operation: OperationId,
+    parent: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegationReservationOutcome {
+    Reserved,
+    AlreadyAdmitted,
+    LimitReached,
+    InProgress,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +232,8 @@ struct WorkspacePrompt {
     queued_at: DateTime<Utc>,
     #[serde(default)]
     caller: Option<CallerRef>,
+    #[serde(default)]
+    operation_id: Option<OperationId>,
 }
 
 impl WorkspacePrompt {
@@ -96,6 +245,33 @@ impl WorkspacePrompt {
             caller: self.caller,
         }
     }
+}
+
+fn record_lineage(
+    registry: &mut WorkspaceRegistry,
+    workspace_id: WorkspaceId,
+    session_id: SessionId,
+    parent_session_id: Option<SessionId>,
+) -> Result<()> {
+    if Some(session_id) == parent_session_id {
+        return Ok(());
+    }
+    if let Some(existing) = registry
+        .lineages
+        .iter()
+        .find(|lineage| lineage.workspace == workspace_id && lineage.session == session_id)
+    {
+        if existing.parent != parent_session_id {
+            anyhow::bail!("session delegation parent cannot be reassigned");
+        }
+        return Ok(());
+    }
+    registry.lineages.push(SessionLineage {
+        workspace: workspace_id,
+        session: session_id,
+        parent: parent_session_id,
+    });
+    Ok(())
 }
 
 /// Durable, secret-free proof that an Agent operation was prepared before its
@@ -115,6 +291,13 @@ pub enum CredentialProvenance {
 }
 
 impl Registry {
+    fn remove_run_at(&mut self, index: usize) {
+        let dropped = self.runs.remove(index).run_id;
+        self.bindings.retain(|binding| binding.run_id != dropped);
+        self.admissions
+            .retain(|admission| admission.operation_id != dropped);
+    }
+
     fn reserve_admission(
         &mut self,
         agent: Agent,
@@ -194,7 +377,7 @@ impl Registry {
     /// reuses so a relaunch keeps its identity, and dropping it would mint a new
     /// `AgentId` on every restart. Their count is bounded by the sessions,
     /// runtimes and models in play rather than by how many dispatches have run.
-    fn retain_bounded(&mut self) {
+    fn retain_count_bounded(&mut self, retention: usize) {
         let terminal_run = |run: &DispatchRun| {
             matches!(
                 run.status,
@@ -202,7 +385,7 @@ impl Registry {
             )
         };
         let terminal_count = self.runs.iter().filter(|run| terminal_run(run)).count();
-        let mut over = terminal_count.saturating_sub(RUN_RETENTION);
+        let mut over = terminal_count.saturating_sub(retention);
         if over == 0 {
             return;
         }
@@ -224,6 +407,52 @@ impl Registry {
             .retain(|binding| !dropped.contains(&binding.run_id));
         self.admissions
             .retain(|admission| !dropped.contains(&admission.operation_id));
+    }
+
+    fn drop_oldest_terminal_run(&mut self, replay_floor: usize) -> bool {
+        let terminal = |run: &DispatchRun| {
+            matches!(
+                run.status,
+                RunStatus::Completed | RunStatus::Failed | RunStatus::NoReport
+            )
+        };
+        if self.runs.iter().filter(|run| terminal(run)).count() <= replay_floor {
+            return false;
+        }
+        let index = self
+            .runs
+            .iter()
+            .position(terminal)
+            .expect("terminal count was computed from the same run list");
+        self.remove_run_at(index);
+        true
+    }
+
+    fn retain_age_bounded(&mut self, cutoff: DateTime<Utc>, replay_floor: usize) {
+        loop {
+            let terminal_count = self
+                .runs
+                .iter()
+                .filter(|run| {
+                    matches!(
+                        run.status,
+                        RunStatus::Completed | RunStatus::Failed | RunStatus::NoReport
+                    )
+                })
+                .count();
+            if terminal_count <= replay_floor {
+                return;
+            }
+            let Some(index) = self.runs.iter().position(|run| {
+                matches!(
+                    run.status,
+                    RunStatus::Completed | RunStatus::Failed | RunStatus::NoReport
+                ) && run.ended_at.is_some_and(|ended_at| ended_at < cutoff)
+            }) else {
+                return;
+            };
+            self.remove_run_at(index);
+        }
     }
 
     fn reconcile_incomplete_admissions(&mut self) -> usize {
@@ -269,6 +498,9 @@ pub struct QueuedPrompt {
 /// File-backed durable dispatch state rooted at the daemon state directory.
 pub struct DispatchStore {
     dir: PathBuf,
+    limits: DispatchStoreLimits,
+    #[cfg(test)]
+    inbox_bytes_read: AtomicU64,
 }
 
 impl DispatchStore {
@@ -276,6 +508,18 @@ impl DispatchStore {
     pub fn new(dir: impl AsRef<Path>) -> Self {
         Self {
             dir: dir.as_ref().into(),
+            limits: DispatchStoreLimits::default(),
+            #[cfg(test)]
+            inbox_bytes_read: AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_limits(dir: impl AsRef<Path>, limits: DispatchStoreLimits) -> Self {
+        Self {
+            dir: dir.as_ref().into(),
+            limits,
+            inbox_bytes_read: AtomicU64::new(0),
         }
     }
 
@@ -301,7 +545,7 @@ impl DispatchStore {
         prompt: String,
         queued_at: DateTime<Utc>,
     ) -> Result<QueuedPrompt> {
-        self.queue_prompt_for(workspace_id, session_id, prompt, queued_at, None)
+        self.queue_prompt_for(workspace_id, session_id, prompt, queued_at, None, None)
     }
 
     /// Queues a next-launch prompt together with its authenticated parent.
@@ -319,8 +563,16 @@ impl DispatchStore {
         prompt: String,
         queued_at: DateTime<Utc>,
         caller: CallerRef,
+        operation_id: OperationId,
     ) -> Result<QueuedPrompt> {
-        self.queue_prompt_for(workspace_id, session_id, prompt, queued_at, Some(caller))
+        self.queue_prompt_for(
+            workspace_id,
+            session_id,
+            prompt,
+            queued_at,
+            Some(caller),
+            Some(operation_id),
+        )
     }
 
     fn queue_prompt_for(
@@ -330,6 +582,7 @@ impl DispatchStore {
         prompt: String,
         queued_at: DateTime<Utc>,
         caller: Option<CallerRef>,
+        operation_id: Option<OperationId>,
     ) -> Result<QueuedPrompt> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut workspace_registry = self.load_workspace_registry()?;
@@ -343,7 +596,13 @@ impl DispatchStore {
             prompt,
             queued_at,
             caller,
+            operation_id,
         };
+        if let Some(caller) = &queued.caller
+            && workspace_registry.agent_workspaces.get(&caller.agent_id) != Some(&workspace_id)
+        {
+            anyhow::bail!("delegation caller does not belong to the workspace");
+        }
         let existing = workspace_registry
             .prompts
             .iter()
@@ -370,7 +629,7 @@ impl DispatchStore {
                 .position(|item| item.session_id == session_id)
         {
             registry.prompts.remove(index);
-            json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+            self.write_registry(registry)?;
         }
         Ok(queued.into_legacy_shape())
     }
@@ -436,7 +695,7 @@ impl DispatchStore {
                     .position(|item| item.session_id == session_id)
                 {
                     registry.prompts.remove(index);
-                    json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+                    self.write_registry(&mut registry)?;
                 }
             }
             json_file::write_atomic(
@@ -454,7 +713,7 @@ impl DispatchStore {
                 .position(|item| item.session_id == session_id)
             {
                 let prompt = registry.prompts.remove(index);
-                json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+                self.write_registry(&mut registry)?;
                 return Ok(Some(prompt));
             }
         }
@@ -467,6 +726,20 @@ impl DispatchStore {
             .join(INBOX_DIR)
             .join(session_segment(caller.session_id))
             .join(format!("{}.jsonl", caller.agent_id.as_str()))
+    }
+
+    fn inbox_index_path(&self, caller: &CallerRef) -> PathBuf {
+        let path = self.inbox_path(caller);
+        let mut value = path.into_os_string();
+        value.push(INBOX_INDEX_SUFFIX);
+        PathBuf::from(value)
+    }
+
+    fn inbox_ack_path(&self, caller: &CallerRef) -> PathBuf {
+        let path = self.inbox_path(caller);
+        let mut value = path.into_os_string();
+        value.push(INBOX_ACK_SUFFIX);
+        PathBuf::from(value)
     }
 
     /// Upserts an agent by its never-reused incarnation ID.
@@ -497,8 +770,9 @@ impl DispatchStore {
         workspace_registry
             .agent_workspaces
             .insert(agent.agent_id, workspace_id);
+        self.prepare_registry(&mut registry)?;
+        self.validate_workspace_registry(&workspace_registry)?;
         self.write_workspace_registry(&workspace_registry)?;
-        registry.retain_bounded();
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(agent)
     }
@@ -565,8 +839,9 @@ impl DispatchStore {
         // can leave only an inert mapping to a nonexistent Agent; the
         // inverse order could publish an unowned Agent that a later
         // workspace might incorrectly adopt.
+        self.prepare_registry(&mut registry)?;
+        self.validate_workspace_registry(&workspace_registry)?;
         self.write_workspace_registry(&workspace_registry)?;
-        registry.retain_bounded();
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(agent)
     }
@@ -622,22 +897,51 @@ impl DispatchStore {
             .copied())
     }
 
-    /// Counts active and durably queued child delegations for one organization
-    /// member. The member is identified by session lineage rather than by a
-    /// replaceable runtime/model Agent incarnation.
+    /// Atomically reserves one delegation concurrency slot until the caller
+    /// publishes a queued prompt or active admission.
     ///
     /// # Errors
     ///
-    /// Returns an error when either durable registry cannot be read.
-    pub fn delegation_usage(&self, caller: &CallerRef) -> Result<usize> {
+    /// Returns an error when durable state cannot be read or written, or the
+    /// caller has no authenticated workspace ownership.
+    pub fn reserve_delegation(
+        &self,
+        caller: &CallerRef,
+        operation_id: OperationId,
+        max_concurrency: usize,
+    ) -> Result<DelegationReservationOutcome> {
         let _lock = StoreLock::acquire(&self.dir)?;
-        let workspace_registry = self.load_workspace_registry()?;
+        let mut workspace_registry = self.load_workspace_registry()?;
         let workspace_id = workspace_registry
             .agent_workspaces
             .get(&caller.agent_id)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("caller workspace ownership is unavailable"))?;
         let registry = self.load_registry()?;
+        if registry.bindings.iter().any(|binding| {
+            binding.run_id == operation_id
+                && binding.caller.session_id == caller.session_id
+                && workspace_registry
+                    .agent_workspaces
+                    .get(&binding.worker.agent_id)
+                    == Some(&workspace_id)
+        }) || workspace_registry.prompts.iter().any(|prompt| {
+            prompt.operation_id == Some(operation_id)
+                && prompt.workspace_id == workspace_id
+                && prompt
+                    .caller
+                    .as_ref()
+                    .is_some_and(|parent| parent.session_id == caller.session_id)
+        }) {
+            return Ok(DelegationReservationOutcome::AlreadyAdmitted);
+        }
+        if workspace_registry
+            .delegation_reservations
+            .iter()
+            .any(|reservation| reservation.operation == operation_id)
+        {
+            return Ok(DelegationReservationOutcome::InProgress);
+        }
         let active = registry
             .bindings
             .iter()
@@ -665,10 +969,114 @@ impl DispatchStore {
                     && prompt
                         .caller
                         .as_ref()
-                        .is_some_and(|queued| queued.session_id == caller.session_id)
+                        .is_some_and(|parent| parent.session_id == caller.session_id)
             })
             .count();
-        Ok(active.saturating_add(queued))
+        let reserved = workspace_registry
+            .delegation_reservations
+            .iter()
+            .filter(|reservation| {
+                reservation.workspace == workspace_id && reservation.parent == caller.session_id
+            })
+            .count();
+        if active.saturating_add(queued).saturating_add(reserved) >= max_concurrency {
+            return Ok(DelegationReservationOutcome::LimitReached);
+        }
+        workspace_registry
+            .delegation_reservations
+            .push(DelegationReservation {
+                workspace: workspace_id,
+                operation: operation_id,
+                parent: caller.session_id,
+            });
+        self.write_workspace_registry(&workspace_registry)?;
+        Ok(DelegationReservationOutcome::Reserved)
+    }
+
+    /// Releases a transient delegation slot after publication or failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable state cannot be read or written.
+    pub fn release_delegation(&self, operation_id: OperationId) -> Result<bool> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        let before = workspace_registry.delegation_reservations.len();
+        workspace_registry
+            .delegation_reservations
+            .retain(|reservation| reservation.operation != operation_id);
+        let changed = workspace_registry.delegation_reservations.len() != before;
+        if changed {
+            self.write_workspace_registry(&workspace_registry)?;
+        }
+        Ok(changed)
+    }
+
+    /// Returns immutable session parentage retained independently of run
+    /// history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable state cannot be read.
+    pub fn session_parent(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+    ) -> Result<Option<SessionId>> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        if let Some(parent) = self.managed_session_parent(workspace_id, session_id)? {
+            return Ok(parent.parent);
+        }
+        Ok(self
+            .load_workspace_registry()?
+            .lineages
+            .into_iter()
+            .find(|lineage| lineage.workspace == workspace_id && lineage.session == session_id)
+            .and_then(|lineage| lineage.parent))
+    }
+
+    fn managed_session_parent(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+    ) -> Result<Option<ManagedSessionParent>> {
+        Ok(DaemonLifecycleStore::new(&self.dir)
+            .load()?
+            .filter(|state| state.workspace_id == workspace_id)
+            .and_then(|state| {
+                state
+                    .sessions
+                    .into_iter()
+                    .find(|session| session.session_id == session_id)
+                    .map(|session| ManagedSessionParent {
+                        parent: session.parent_session_id,
+                    })
+            }))
+    }
+
+    /// Records the parent fixed by the lifecycle create operation. Repeating
+    /// the same fact is idempotent; a later dispatch cannot reassign it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable state cannot be read or written, or when
+    /// the same session incarnation was already registered with another parent.
+    pub fn record_session_parent(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        parent_session_id: Option<SessionId>,
+    ) -> Result<()> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        record_lineage(
+            &mut workspace_registry,
+            workspace_id,
+            session_id,
+            parent_session_id,
+        )?;
+        self.validate_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&workspace_registry)
     }
 
     /// Resolves the absolute delegation depth of an organization member from
@@ -686,25 +1094,38 @@ impl DispatchStore {
             .get(&caller.agent_id)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("caller workspace ownership is unavailable"))?;
-        let registry = self.load_registry()?;
+        let lifecycle = DaemonLifecycleStore::new(&self.dir)
+            .load()?
+            .filter(|state| state.workspace_id == workspace_id);
         let mut depth = 0usize;
         let mut cursor = caller.session_id;
         let mut seen = BTreeSet::new();
         while let Some(session_id) = cursor
             && seen.insert(session_id)
         {
-            let Some(parent) = registry.bindings.iter().rev().find(|binding| {
-                workspace_registry
-                    .agent_workspaces
-                    .get(&binding.worker.agent_id)
-                    == Some(&workspace_id)
-                    && binding.worker.session_id == Some(session_id)
-                    && binding.caller.session_id != binding.worker.session_id
-            }) else {
+            let Some(parent) = lifecycle
+                .as_ref()
+                .and_then(|state| {
+                    state
+                        .sessions
+                        .iter()
+                        .find(|session| session.session_id == session_id)
+                        .map(|session| session.parent_session_id)
+                })
+                .or_else(|| {
+                    workspace_registry
+                        .lineages
+                        .iter()
+                        .find(|lineage| {
+                            lineage.workspace == workspace_id && lineage.session == session_id
+                        })
+                        .map(|lineage| lineage.parent)
+                })
+            else {
                 break;
             };
             depth = depth.saturating_add(1);
-            cursor = parent.caller.session_id;
+            cursor = parent;
         }
         Ok(depth)
     }
@@ -781,7 +1202,15 @@ impl DispatchStore {
     ) -> Result<AgentAdmissionReservation> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
+        let workspace_registry = self.load_workspace_registry()?;
+        workspace_registry
+            .agent_workspaces
+            .get(&binding.worker.agent_id)
+            .context("worker workspace ownership is unavailable")?;
         let reservation = registry.reserve_admission(agent, run, binding, admission);
+        self.prepare_registry(&mut registry)?;
+        self.validate_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&workspace_registry)?;
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(reservation)
     }
@@ -796,7 +1225,7 @@ impl DispatchStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
         let committed = registry.commit_admission(operation_id);
-        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        self.write_registry(&mut registry)?;
         Ok(committed)
     }
 
@@ -811,7 +1240,7 @@ impl DispatchStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
         let failed = registry.fail_admission(operation_id);
-        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        self.write_registry(&mut registry)?;
         Ok(failed)
     }
 
@@ -825,8 +1254,16 @@ impl DispatchStore {
     pub fn reconcile_incomplete_admissions(&self) -> Result<usize> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
+        let mut workspace_registry = self.load_workspace_registry()?;
         let reconciled = registry.reconcile_incomplete_admissions();
-        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        // These guards represent code executing in the previous daemon
+        // process. No credential or worker survives restart, so retaining one
+        // would leak a concurrency slot forever.
+        if !workspace_registry.delegation_reservations.is_empty() {
+            workspace_registry.delegation_reservations.clear();
+            self.write_workspace_registry(&workspace_registry)?;
+        }
+        self.write_registry(&mut registry)?;
         Ok(reconciled)
     }
 
@@ -932,8 +1369,7 @@ impl DispatchStore {
             changed = true;
         }
         if changed {
-            registry.retain_bounded();
-            json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+            self.write_registry(&mut registry)?;
         }
         Ok(changed)
     }
@@ -942,18 +1378,23 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn upsert_binding(&self, binding: DispatchBinding) -> Result<DispatchBinding> {
-        self.mutate_registry(|registry| {
-            if let Some(existing) = registry
-                .bindings
-                .iter_mut()
-                .find(|item| item.run_id == binding.run_id)
-            {
-                *existing = binding.clone();
-            } else {
-                registry.bindings.push(binding.clone());
-            }
-            binding
-        })
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut registry = self.load_registry()?;
+        let workspace_registry = self.load_workspace_registry()?;
+        if let Some(existing) = registry
+            .bindings
+            .iter_mut()
+            .find(|item| item.run_id == binding.run_id)
+        {
+            *existing = binding.clone();
+        } else {
+            registry.bindings.push(binding.clone());
+        }
+        self.prepare_registry(&mut registry)?;
+        self.validate_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&workspace_registry)?;
+        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        Ok(binding)
     }
 
     /// # Errors
@@ -982,23 +1423,203 @@ impl DispatchStore {
     /// # Errors
     ///
     /// Returns an error when the inbox cannot be locked, read, or written.
-    pub fn append_inbox(&self, caller: &CallerRef, message: InboxMessage) -> Result<()> {
+    #[allow(clippy::too_many_lines)]
+    pub fn append_inbox(&self, caller: &CallerRef, mut message: InboxMessage) -> Result<()> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let path = self.inbox_path(caller);
-        let mut messages = Self::read_inbox(&path)?;
-        messages.push(message);
-        // Bounding here is what turns an append from O(history) into O(bound):
-        // the whole file is rewritten each time, so without it N deliveries cost
-        // O(N²) and a long-lived caller's inbox never stops getting slower.
-        retain_bounded_inbox(&mut messages);
-        Self::write_inbox(&path, &messages)
+        let mut index = self.inbox_index(caller)?;
+        let ack = self.read_inbox_ack(caller)?;
+        Self::validate_inbox_ack(ack, &index)?;
+        let read_count = index
+            .entries
+            .iter()
+            .filter(|entry| entry.read || entry.sequence < ack.next_sequence)
+            .count();
+        let history_cutoff = Utc::now()
+            .checked_sub_signed(chrono::Duration::seconds(
+                self.limits.history_max_age_seconds,
+            ))
+            .context("dispatch inbox age limit is outside the clock range")?;
+        let aged_read = index.entries.iter().any(|entry| {
+            (entry.read || entry.sequence < ack.next_sequence) && entry.created_at < history_cutoff
+        });
+        if read_count > self.limits.inbox_read_retention
+            || index.entries.len() >= self.limits.inbox_count
+            || aged_read
+        {
+            index = self.compact_inbox(caller, &index, ack, 0)?;
+        }
+        if index.entries.len() >= self.limits.inbox_count {
+            anyhow::bail!("dispatch inbox capacity is exhausted by unacknowledged messages");
+        }
+
+        let sequence = next_inbox_sequence(&index.entries)?;
+        message.read = false;
+        let record = InboxRecord { sequence, message };
+        let mut bytes = serde_json::to_vec(&record)?;
+        bytes.push(b'\n');
+        let encoded_len = u64::try_from(bytes.len())?;
+        if encoded_len > self.limits.inbox_bytes {
+            anyhow::bail!("dispatch inbox capacity is exhausted by one oversized message");
+        }
+        if index.valid_len.saturating_add(encoded_len) > self.limits.inbox_bytes {
+            index = self.compact_inbox(caller, &index, ack, encoded_len)?;
+            if index.valid_len.saturating_add(encoded_len) > self.limits.inbox_bytes {
+                anyhow::bail!("dispatch inbox capacity is exhausted by unacknowledged messages");
+            }
+        }
+        let parent = path.parent().context("dispatch inbox path has no parent")?;
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut offset = file.metadata()?.len();
+        if index.valid_len < offset {
+            file.set_len(index.valid_len)?;
+            offset = index.valid_len;
+            index.journal_len = offset;
+        }
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        let journal_len = offset + u64::try_from(bytes.len())?;
+        index.entries.push(InboxIndexEntry {
+            sequence: record.sequence,
+            offset,
+            created_at: record.message.created_at,
+            read: false,
+        });
+        index.journal_len = journal_len;
+        index.valid_len = journal_len;
+        self.write_inbox_index(caller, &index)
     }
 
+    /// Returns a stable, bounded page without acknowledging it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid/expired cursor or unreadable state.
+    pub fn inbox_page(
+        &self,
+        caller: &CallerRef,
+        cursor: Option<InboxCursor>,
+        limit: usize,
+        unread_only: bool,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<InboxPage> {
+        if !(1..=INBOX_PAGE_MAX).contains(&limit) {
+            anyhow::bail!("dispatch inbox page limit must be 1..={INBOX_PAGE_MAX}");
+        }
+        if cursor.is_some_and(|value| value.next_sequence == 0) {
+            anyhow::bail!("dispatch inbox cursor sequence must be positive");
+        }
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let index = self.inbox_index(caller)?;
+        let ack = self.read_inbox_ack(caller)?;
+        Self::validate_inbox_ack(ack, &index)?;
+        let end = next_inbox_sequence(&index.entries)?;
+        if cursor.is_some_and(|value| value.next_sequence > end) {
+            anyhow::bail!("dispatch inbox cursor is outside the retained sequence range");
+        }
+        let Some(first) = index.entries.first() else {
+            let next_sequence = cursor.map_or(ack.next_sequence, |value| value.next_sequence);
+            return Ok(InboxPage {
+                messages: Vec::new(),
+                next_cursor: InboxCursor { next_sequence },
+                has_more: false,
+            });
+        };
+        if cursor.is_some_and(|value| value.next_sequence < first.sequence) {
+            anyhow::bail!(
+                "dispatch inbox cursor expired: earliest retained sequence is {}",
+                first.sequence
+            );
+        }
+        let mut start = cursor.map_or(first.sequence, |value| value.next_sequence);
+        if unread_only {
+            start = start.max(ack.next_sequence);
+        }
+        if let Some(since) = since {
+            let since_sequence = index
+                .entries
+                .iter()
+                .find(|entry| entry.created_at > since)
+                .map_or(end, |entry| entry.sequence);
+            start = start.max(since_sequence);
+        }
+        let selected = index
+            .entries
+            .iter()
+            .filter(|entry| entry.sequence >= start)
+            .filter(|entry| since.is_none_or(|value| entry.created_at > value))
+            .filter(|entry| !unread_only || (!entry.read && entry.sequence >= ack.next_sequence))
+            .take(limit + 1)
+            .copied()
+            .collect::<Vec<_>>();
+        let has_more = selected.len() > limit;
+        let page_entries = &selected[..selected.len().min(limit)];
+        let mut records = self.read_inbox_records(caller, page_entries)?;
+        for record in &mut records {
+            record.message.read = record.message.read || record.sequence < ack.next_sequence;
+        }
+        let next_sequence = if has_more {
+            records
+                .last()
+                .context("dispatch inbox page cursor has no returned record")?
+                .sequence
+                + 1
+        } else {
+            end.max(start)
+        };
+        Ok(InboxPage {
+            messages: records.into_iter().map(|record| record.message).collect(),
+            next_cursor: InboxCursor { next_sequence },
+            has_more,
+        })
+    }
+
+    /// Advances the caller's durable ACK watermark. Repeating the same or an
+    /// older ACK is effect-free.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cursor is outside the published inbox range or
+    /// the ACK state cannot be persisted.
+    pub fn ack_inbox(&self, caller: &CallerRef, cursor: InboxCursor) -> Result<InboxCursor> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let index = self.inbox_index(caller)?;
+        let end = next_inbox_sequence(&index.entries)?;
+        if cursor.next_sequence == 0 || cursor.next_sequence > end {
+            anyhow::bail!("dispatch inbox ACK cursor is outside the published sequence range");
+        }
+        let mut ack = self.read_inbox_ack(caller)?;
+        Self::validate_inbox_ack(ack, &index)?;
+        if cursor.next_sequence > ack.next_sequence {
+            ack.next_sequence = cursor.next_sequence;
+            let path = self.inbox_ack_path(caller);
+            let parent = path
+                .parent()
+                .context("dispatch inbox ACK path has no parent")?;
+            json_file::write_atomic(parent, &path, &ack)?;
+        }
+        Ok(InboxCursor {
+            next_sequence: ack.next_sequence,
+        })
+    }
+
+    /// Compatibility projection for internal exact-run recovery. Public callers
+    /// use [`Self::inbox_page`] so response work is bounded by a page.
+    ///
     /// # Errors
     ///
     /// Returns an error when the inbox cannot be read.
     pub fn inbox(&self, caller: &CallerRef) -> Result<Vec<InboxMessage>> {
-        Self::read_inbox(&self.inbox_path(caller))
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let index = self.inbox_index(caller)?;
+        let ack = self.read_inbox_ack(caller)?;
+        Self::validate_inbox_ack(ack, &index)?;
+        let mut records = self.read_inbox_records(caller, &index.entries)?;
+        for record in &mut records {
+            record.message.read = record.message.read || record.sequence < ack.next_sequence;
+        }
+        Ok(records.into_iter().map(|record| record.message).collect())
     }
 
     /// # Errors
@@ -1019,20 +1640,30 @@ impl DispatchStore {
     /// Returns an error when the inbox cannot be locked, read, or written.
     pub fn mark_inbox_read(&self, caller: &CallerRef, run_id: OperationId) -> Result<bool> {
         let _lock = StoreLock::acquire(&self.dir)?;
-        let path = self.inbox_path(caller);
-        let mut messages = Self::read_inbox(&path)?;
+        let index = self.inbox_index(caller)?;
+        let mut records = self.read_inbox_records(caller, &index.entries)?;
         let mut changed = false;
-        for message in &mut messages {
-            if message.run_id == run_id && !message.read {
-                message.read = true;
+        for record in &mut records {
+            if record.message.run_id == run_id && !record.message.read {
+                record.message.read = true;
                 changed = true;
             }
         }
         if changed {
-            // Marking read is what makes a message evictable, so the bound is
-            // applied on this write too and not only when one is appended.
-            retain_bounded_inbox(&mut messages);
-            Self::write_inbox(&path, &messages)?;
+            let mut remove = records
+                .iter()
+                .filter(|record| record.message.read)
+                .count()
+                .saturating_sub(self.limits.inbox_read_retention);
+            records.retain(|record| {
+                if record.message.read && remove > 0 {
+                    remove -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            self.write_inbox_records(caller, &records)?;
         }
         Ok(changed)
     }
@@ -1044,89 +1675,365 @@ impl DispatchStore {
         // Bounding on every write makes the bound a property of the document
         // rather than of a maintenance tick that may never run on a daemon that
         // is restarted often.
-        registry.retain_bounded();
-        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        self.write_registry(&mut registry)?;
         Ok(result)
     }
 
     fn load_registry(&self) -> Result<Registry> {
+        Self::ensure_file_within(
+            &self.registry_path(),
+            self.limits.registry_bytes,
+            "dispatch registry",
+        )?;
         Ok(json_file::read(&self.registry_path())?.unwrap_or_default())
     }
 
     fn load_workspace_registry(&self) -> Result<WorkspaceRegistry> {
+        Self::ensure_file_within(
+            &self.workspace_registry_path(),
+            self.limits.workspace_registry_bytes,
+            "dispatch workspace registry",
+        )?;
         Ok(json_file::read(&self.workspace_registry_path())?.unwrap_or_default())
     }
 
     fn write_workspace_registry(&self, registry: &WorkspaceRegistry) -> Result<()> {
+        self.validate_workspace_registry(registry)?;
         json_file::write_atomic(&self.dir, &self.workspace_registry_path(), registry)
     }
 
-    fn read_inbox(path: &Path) -> Result<Vec<InboxMessage>> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+    fn validate_workspace_registry(&self, registry: &WorkspaceRegistry) -> Result<()> {
+        let bytes = serialized_document_len(registry)?;
+        if bytes > self.limits.workspace_registry_bytes {
+            anyhow::bail!("dispatch workspace registry capacity is exhausted");
+        }
+        Ok(())
+    }
+
+    fn write_registry(&self, registry: &mut Registry) -> Result<()> {
+        self.prepare_registry(registry)?;
+        json_file::write_atomic(&self.dir, &self.registry_path(), registry)
+    }
+
+    fn prepare_registry(&self, registry: &mut Registry) -> Result<()> {
+        registry.retain_count_bounded(self.limits.run_retention);
+        let cutoff = Utc::now()
+            .checked_sub_signed(chrono::Duration::seconds(
+                self.limits.history_max_age_seconds,
+            ))
+            .context("dispatch history age limit is outside the clock range")?;
+        registry.retain_age_bounded(cutoff, self.limits.run_replay_floor);
+        loop {
+            let bytes = serialized_document_len(&*registry)?;
+            if bytes <= self.limits.registry_bytes {
+                return Ok(());
+            }
+            registry
+                .drop_oldest_terminal_run(self.limits.run_replay_floor)
+                .then_some(())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("dispatch registry capacity is exhausted by protected records")
+                })?;
+        }
+    }
+
+    fn ensure_file_within(path: &Path, maximum: u64, label: &str) -> Result<()> {
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.len() > maximum => {
+                anyhow::bail!("{label} exceeds its serialized byte limit")
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("failed to inspect {label}")),
+        }
+    }
+
+    fn read_inbox_ack(&self, caller: &CallerRef) -> Result<InboxAck> {
+        Ok(json_file::read(&self.inbox_ack_path(caller))?.unwrap_or_default())
+    }
+
+    fn validate_inbox_ack(ack: InboxAck, index: &InboxIndex) -> Result<()> {
+        let end = next_inbox_sequence(&index.entries)?;
+        if ack.next_sequence == 0 || ack.next_sequence > end {
+            anyhow::bail!("dispatch inbox ACK state is outside the published sequence range");
+        }
+        Ok(())
+    }
+
+    fn inbox_index(&self, caller: &CallerRef) -> Result<InboxIndex> {
+        let journal_len = match fs::metadata(self.inbox_path(caller)) {
+            Ok(metadata) if metadata.len() <= self.limits.inbox_bytes => metadata.len(),
+            Ok(_) => anyhow::bail!("dispatch inbox exceeds its serialized byte limit"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(InboxIndex::default());
+            }
+            Err(error) => return Err(error).context("failed to inspect dispatch inbox"),
+        };
+        if let Ok(Some(index)) = json_file::read::<InboxIndex>(&self.inbox_index_path(caller))
+            && index.journal_len == journal_len
+            && index.valid_len <= index.journal_len
+            && index.entries.first().is_none_or(|entry| entry.offset == 0)
+            && index.entries.first().is_none_or(|entry| entry.sequence > 0)
+            && index
+                .entries
+                .last()
+                .is_none_or(|entry| entry.offset < index.valid_len)
+            && index
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence && pair[0].offset < pair[1].offset)
+        {
+            return Ok(index);
+        }
+        self.rebuild_inbox_index(caller)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn rebuild_inbox_index(&self, caller: &CallerRef) -> Result<InboxIndex> {
+        let path = self.inbox_path(caller);
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(InboxIndex::default());
+            }
             Err(error) => return Err(error).context(format!("failed to read {}", path.display())),
         };
-        text.lines()
-            .map(|line| {
-                serde_json::from_str(line).context("failed to parse dispatch inbox message")
-            })
-            .collect()
+        let journal_len = file.metadata()?.len();
+        let mut reader = BufReader::new(file);
+        let mut index = InboxIndex {
+            journal_len,
+            ..InboxIndex::default()
+        };
+        let mut records = Vec::new();
+        let mut migrated = false;
+        loop {
+            let offset = index.valid_len;
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 {
+                break;
+            }
+            #[cfg(test)]
+            self.inbox_bytes_read
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+            // A terminating LF is the journal commit marker. A writer crash can
+            // leave a complete-looking JSON value at EOF, but it was not
+            // durably published and must be truncated by the next append.
+            if !line.ends_with('\n') {
+                break;
+            }
+            let record = match serde_json::from_str::<InboxLine>(line.trim_end_matches('\n')) {
+                Ok(InboxLine::Record(record)) => record,
+                Ok(InboxLine::Legacy(message)) => {
+                    migrated = true;
+                    InboxRecord {
+                        sequence: next_inbox_sequence(&index.entries)?,
+                        message,
+                    }
+                }
+                Err(error) => return Err(error).context("failed to parse dispatch inbox message"),
+            };
+            // Compaction removes acknowledged/read records without renumbering:
+            // cursors already handed to callers must remain stable. The retained
+            // journal can therefore start above one or contain gaps, but sequence
+            // identity must stay positive and strictly increasing.
+            if record.sequence == 0
+                || index
+                    .entries
+                    .last()
+                    .is_some_and(|entry| record.sequence <= entry.sequence)
+            {
+                anyhow::bail!("dispatch inbox sequence is not strictly increasing");
+            }
+            if records.len() >= self.limits.inbox_count {
+                anyhow::bail!("dispatch inbox exceeds its hard limit");
+            }
+            index.entries.push(InboxIndexEntry {
+                sequence: record.sequence,
+                offset,
+                created_at: record.message.created_at,
+                read: record.message.read,
+            });
+            index.valid_len += u64::try_from(bytes)?;
+            records.push(record);
+        }
+        if migrated {
+            return self.write_inbox_records(caller, &records);
+        }
+        self.write_inbox_index(caller, &index)?;
+        Ok(index)
     }
 
-    fn write_inbox(path: &Path, messages: &[InboxMessage]) -> Result<()> {
-        let parent = path.parent().expect("inbox path has a parent");
+    fn write_inbox_index(&self, caller: &CallerRef, index: &InboxIndex) -> Result<()> {
+        json_file::write_atomic_cache(&self.dir, &self.inbox_index_path(caller), index)
+    }
+
+    fn read_inbox_records(
+        &self,
+        caller: &CallerRef,
+        entries: &[InboxIndexEntry],
+    ) -> Result<Vec<InboxRecord>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = self.inbox_path(caller);
+        let mut file =
+            fs::File::open(&path).context(format!("failed to read {}", path.display()))?;
+        let mut records = Vec::new();
+        for entry in entries {
+            file.seek(SeekFrom::Start(entry.offset))?;
+            let mut reader = BufReader::new(&file);
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 || !line.ends_with('\n') {
+                anyhow::bail!("dispatch inbox index points beyond its journal");
+            }
+            #[cfg(test)]
+            self.inbox_bytes_read
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+            let record: InboxRecord = serde_json::from_str(line.trim_end_matches('\n'))
+                .context("failed to parse indexed dispatch inbox message")?;
+            if record.sequence != entry.sequence {
+                anyhow::bail!("dispatch inbox index does not match its journal");
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn write_inbox_records(
+        &self,
+        caller: &CallerRef,
+        records: &[InboxRecord],
+    ) -> Result<InboxIndex> {
+        if records.len() > self.limits.inbox_count {
+            anyhow::bail!("dispatch inbox exceeds its hard limit");
+        }
+        let path = self.inbox_path(caller);
+        let parent = path.parent().context("dispatch inbox path has no parent")?;
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-        let mut text = messages
-            .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
-        if !text.is_empty() {
+        let mut offset = 0_u64;
+        let mut text = String::new();
+        let mut entries = Vec::with_capacity(records.len());
+        for record in records {
+            entries.push(InboxIndexEntry {
+                sequence: record.sequence,
+                offset,
+                created_at: record.message.created_at,
+                read: record.message.read,
+            });
+            let line = serde_json::to_string(record)?;
+            offset += u64::try_from(line.len() + 1)?;
+            text.push_str(&line);
             text.push('\n');
         }
-        json_file::write_text_atomic(path, &text)
+        if offset > self.limits.inbox_bytes {
+            anyhow::bail!("dispatch inbox exceeds its serialized byte limit");
+        }
+        // The index is a disposable cache. Remove it before replacing the
+        // journal so a crash cannot leave a same-length stale index that later
+        // causes committed records to be hidden or truncated.
+        match fs::remove_file(self.inbox_index_path(caller)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to retire dispatch inbox index"),
+        }
+        json_file::write_text_atomic(&path, &text)?;
+        let index = InboxIndex {
+            journal_len: offset,
+            valid_len: offset,
+            entries,
+        };
+        self.write_inbox_index(caller, &index)?;
+        Ok(index)
     }
-}
 
-/// Bound one caller's inbox with the shipped limits.
-fn retain_bounded_inbox(messages: &mut Vec<InboxMessage>) {
-    retain_inbox_within(messages, INBOX_READ_RETENTION, INBOX_HARD_LIMIT);
-}
-
-/// Bound one caller's inbox, dropping read messages before unread ones.
-///
-/// An unread message is a report its caller has not seen, so it outranks every
-/// read one however old. "Never drop unread" is not by itself a bound, though: a
-/// caller that never reads would grow its inbox forever. Past `hard_limit` the
-/// oldest unread messages go too, and the drop is recorded so the loss is
-/// inspectable rather than silent.
-///
-/// The limits are parameters so the shipped ones can stay at values a real
-/// caller never reaches while the policy itself is still exercised directly.
-/// Driving `hard_limit` through the store would mean appending thousands of
-/// messages, each of which rewrites the whole file.
-fn retain_inbox_within(messages: &mut Vec<InboxMessage>, read_retention: usize, hard_limit: usize) {
-    let read_count = messages.iter().filter(|message| message.read).count();
-    let mut over_read = read_count.saturating_sub(read_retention);
-    if over_read > 0 {
-        messages.retain(|message| {
-            if over_read > 0 && message.read {
-                over_read -= 1;
-                return false;
+    fn compact_inbox(
+        &self,
+        caller: &CallerRef,
+        index: &InboxIndex,
+        ack: InboxAck,
+        required_bytes: u64,
+    ) -> Result<InboxIndex> {
+        let mut records = self.read_inbox_records(caller, &index.entries)?;
+        let is_read =
+            |record: &InboxRecord| record.message.read || record.sequence < ack.next_sequence;
+        let read_count = records.iter().filter(|record| is_read(record)).count();
+        // Keep the journal tail when it is eligible for compaction. Besides
+        // preserving the next sequence after index rebuild, this prevents a
+        // crash between compaction and append from leaving an ACK watermark
+        // above an empty journal's published range. An unread tail already
+        // provides that durable sequence floor.
+        let sequence_floor = usize::from(records.last().is_some_and(&is_read));
+        let replay_floor = self.limits.inbox_read_replay_floor.max(sequence_floor);
+        let removable = read_count.saturating_sub(replay_floor);
+        let retention_excess = read_count
+            .saturating_sub(self.limits.inbox_read_retention)
+            .min(removable);
+        let cutoff = Utc::now()
+            .checked_sub_signed(chrono::Duration::seconds(
+                self.limits.history_max_age_seconds,
+            ))
+            .context("dispatch inbox age limit is outside the clock range")?;
+        let age_excess = records
+            .iter()
+            .filter(|record| is_read(record) && record.message.created_at < cutoff)
+            .count()
+            .min(removable);
+        let capacity_excess = records
+            .len()
+            .saturating_add(1)
+            .saturating_sub(self.limits.inbox_count)
+            .min(removable);
+        let record_bytes = records
+            .iter()
+            .map(|record| -> Result<u64> {
+                let bytes = serde_json::to_vec(record)?;
+                Ok(u64::try_from(bytes.len() + 1)?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut retained_bytes = record_bytes.iter().copied().sum::<u64>();
+        let read_bytes = records
+            .iter()
+            .zip(&record_bytes)
+            .filter_map(|(record, bytes)| is_read(record).then_some(*bytes))
+            .collect::<Vec<_>>();
+        let mut remove = retention_excess.max(capacity_excess).max(age_excess);
+        for bytes in read_bytes.iter().take(remove) {
+            retained_bytes = retained_bytes.saturating_sub(*bytes);
+        }
+        while remove < removable
+            && retained_bytes.saturating_add(required_bytes) > self.limits.inbox_bytes
+        {
+            retained_bytes = retained_bytes.saturating_sub(read_bytes[remove]);
+            remove += 1;
+        }
+        if remove == 0 {
+            return Ok(index.clone());
+        }
+        records.retain_mut(|record| {
+            let read = is_read(record);
+            record.message.read = read;
+            if read && remove > 0 {
+                remove -= 1;
+                false
+            } else {
+                true
             }
-            true
         });
+        self.write_inbox_records(caller, &records)
     }
-    let over_hard = messages.len().saturating_sub(hard_limit);
-    if over_hard == 0 {
-        return;
+}
+
+impl Clone for DispatchStore {
+    fn clone(&self) -> Self {
+        Self {
+            dir: self.dir.clone(),
+            limits: self.limits,
+            #[cfg(test)]
+            inbox_bytes_read: AtomicU64::new(0),
+        }
     }
-    crate::infrastructure::error_log::ErrorLog::record(&format!(
-        "dispatch inbox reached its {hard_limit} message ceiling; \
-         dropping the {over_hard} oldest unread message(s)"
-    ));
-    messages.drain(..over_hard);
 }
 
 #[cfg(test)]
@@ -1151,6 +2058,18 @@ mod tests {
                 agent_id: agent,
             },
         )
+    }
+
+    #[test]
+    fn clone_preserves_the_durable_root_without_sharing_test_observation_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        store.inbox_bytes_read.store(7, Ordering::Relaxed);
+
+        let cloned = store.clone();
+
+        assert_eq!(cloned.dir, store.dir);
+        assert_eq!(cloned.inbox_bytes_read.load(Ordering::Relaxed), 0);
     }
     fn agent(session_id: SessionId, agent_id: AgentId) -> Agent {
         Agent {
@@ -1275,6 +2194,25 @@ mod tests {
         );
         assert_eq!(store.agents().unwrap().len(), 2);
         assert!(store.registry_path().is_file());
+    }
+
+    #[test]
+    fn legacy_unowned_binding_does_not_invent_workspace_lineage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (_, _, caller) = ids();
+        let binding = DispatchBinding {
+            run_id: OperationId::new(),
+            caller,
+            worker: WorkerRef {
+                session_id: Some(SessionId::new()),
+                agent_id: AgentId::new(),
+            },
+        };
+
+        assert_eq!(store.upsert_binding(binding.clone()).unwrap(), binding);
+        assert_eq!(store.binding(binding.run_id).unwrap(), Some(binding));
+        assert!(store.load_workspace_registry().unwrap().lineages.is_empty());
     }
 
     #[test]
@@ -1451,9 +2389,18 @@ mod tests {
         let store = DispatchStore::new(tmp.path());
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
+        let parent_session = SessionId::new();
+        let parent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("parent").unwrap(),
+            )
+            .unwrap();
         let caller = CallerRef {
-            session_id: Some(SessionId::new()),
-            agent_id: AgentId::new(),
+            session_id: Some(parent_session),
+            agent_id: parent.agent_id,
         };
         store
             .queue_delegated_prompt(
@@ -1462,6 +2409,7 @@ mod tests {
                 "delegated work".into(),
                 now(),
                 caller.clone(),
+                OperationId::new(),
             )
             .unwrap();
 
@@ -1484,8 +2432,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // One durable graph proves queue, active-run, replacement, and ancestry joins together.
-    fn delegation_usage_counts_queued_and_active_children_by_session_lineage() {
+    fn delegation_depth_survives_manager_runtime_replacement() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
         let workspace = WorkspaceId::new();
@@ -1506,26 +2453,6 @@ mod tests {
                 ModelSelector::new("second").unwrap(),
             )
             .unwrap();
-        let active_session = SessionId::new();
-        let active_worker = store
-            .upsert_agent_by_runtime_model(
-                workspace,
-                Some(active_session),
-                AgentProfileId::new("codex").unwrap(),
-                ModelSelector::new("worker").unwrap(),
-            )
-            .unwrap();
-        let active_run = OperationId::new();
-        store
-            .upsert_run(DispatchRun {
-                run_id: active_run,
-                agent_id: active_worker.agent_id,
-                prompt: "active".into(),
-                started_at: now(),
-                ended_at: None,
-                status: RunStatus::Running,
-            })
-            .unwrap();
         let director = store
             .upsert_agent_by_runtime_model(
                 workspace,
@@ -1533,6 +2460,9 @@ mod tests {
                 AgentProfileId::new("codex").unwrap(),
                 ModelSelector::new("director").unwrap(),
             )
+            .unwrap();
+        store
+            .record_session_parent(workspace, manager_session, None)
             .unwrap();
         let manager_run = OperationId::new();
         store
@@ -1548,42 +2478,6 @@ mod tests {
                 },
             })
             .unwrap();
-        store
-            .upsert_binding(DispatchBinding {
-                run_id: active_run,
-                caller: CallerRef {
-                    session_id: Some(manager_session),
-                    agent_id: original_manager.agent_id,
-                },
-                worker: WorkerRef {
-                    session_id: Some(active_session),
-                    agent_id: active_worker.agent_id,
-                },
-            })
-            .unwrap();
-        store
-            .queue_delegated_prompt(
-                workspace,
-                Some(SessionId::new()),
-                "queued".into(),
-                now(),
-                CallerRef {
-                    session_id: Some(manager_session),
-                    agent_id: original_manager.agent_id,
-                },
-            )
-            .unwrap();
-
-        assert_eq!(
-            store
-                .delegation_usage(&CallerRef {
-                    session_id: Some(manager_session),
-                    agent_id: replacement_manager.agent_id,
-                })
-                .unwrap(),
-            2,
-            "a replacement Manager inherits both active and queued usage"
-        );
         assert_eq!(
             store
                 .delegation_depth(&CallerRef {
@@ -1615,8 +2509,518 @@ mod tests {
             session_id: Some(SessionId::new()),
             agent_id: AgentId::new(),
         };
-        assert!(store.delegation_usage(&unknown).is_err());
         assert!(store.delegation_depth(&unknown).is_err());
+    }
+
+    #[test]
+    fn managed_lifecycle_parentage_overrides_a_stale_dispatch_sidecar() {
+        use crate::domain::session_lifecycle::{ManagedSession, WorkspaceLifecycleState};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let parent = ManagedSession::adopt_available("parent".into(), now());
+        let parent_session = parent.session_id;
+        let mut child = ManagedSession::adopt_available("child".into(), now());
+        child.parent_session_id = Some(parent_session);
+        let child_session = child.session_id;
+        let top_level = ManagedSession::adopt_available("top-level".into(), now());
+        let top_level_session = top_level.session_id;
+        let mut lifecycle = WorkspaceLifecycleState::new(workspace, now());
+        lifecycle.sessions = vec![parent, child, top_level];
+        DaemonLifecycleStore::new(tmp.path())
+            .initialize(&lifecycle, tmp.path())
+            .unwrap();
+
+        let child_agent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(child_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("child").unwrap(),
+            )
+            .unwrap();
+        let top_level_agent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(top_level_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("top-level").unwrap(),
+            )
+            .unwrap();
+        store
+            .record_session_parent(workspace, child_session, None)
+            .unwrap();
+        store
+            .record_session_parent(workspace, top_level_session, Some(parent_session))
+            .unwrap();
+
+        assert_eq!(
+            store.session_parent(workspace, child_session).unwrap(),
+            Some(parent_session)
+        );
+        assert_eq!(
+            store.session_parent(workspace, top_level_session).unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .delegation_depth(&CallerRef {
+                    session_id: Some(child_session),
+                    agent_id: child_agent.agent_id,
+                })
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .delegation_depth(&CallerRef {
+                    session_id: Some(top_level_session),
+                    agent_id: top_level_agent.agent_id,
+                })
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn delegation_reservation_closes_the_concurrency_check_to_publish_gap() {
+        use std::sync::{Arc, Barrier};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(DispatchStore::new(tmp.path()));
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let manager = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("manager").unwrap(),
+            )
+            .unwrap();
+        let caller = CallerRef {
+            session_id: Some(session),
+            agent_id: manager.agent_id,
+        };
+        let barrier = Arc::new(Barrier::new(3));
+        let operations = [OperationId::new(), OperationId::new()];
+        let workers = operations
+            .into_iter()
+            .map(|operation_id| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                let caller = caller.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.reserve_delegation(&caller, operation_id, 1).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == DelegationReservationOutcome::Reserved)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == DelegationReservationOutcome::LimitReached)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One graph covers every reservation and immutable-lineage boundary.
+    fn delegation_reservation_replay_keeps_creation_lineage_immutable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let parent_session = SessionId::new();
+        let parent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("parent").unwrap(),
+            )
+            .unwrap();
+        let caller = CallerRef {
+            session_id: Some(parent_session),
+            agent_id: parent.agent_id,
+        };
+        assert!(
+            store
+                .reserve_delegation(
+                    &CallerRef {
+                        session_id: None,
+                        agent_id: AgentId::new(),
+                    },
+                    OperationId::new(),
+                    1,
+                )
+                .is_err()
+        );
+
+        let reserved = OperationId::new();
+        assert_eq!(
+            store.reserve_delegation(&caller, reserved, 1).unwrap(),
+            DelegationReservationOutcome::Reserved
+        );
+        assert_eq!(
+            store.reserve_delegation(&caller, reserved, 1).unwrap(),
+            DelegationReservationOutcome::InProgress
+        );
+        assert!(store.release_delegation(reserved).unwrap());
+        assert!(!store.release_delegation(reserved).unwrap());
+
+        let child_session = SessionId::new();
+        let child = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(child_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("child").unwrap(),
+            )
+            .unwrap();
+        let active_run = OperationId::new();
+        store
+            .upsert_run(DispatchRun {
+                run_id: active_run,
+                agent_id: child.agent_id,
+                prompt: "active".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let binding = DispatchBinding {
+            run_id: active_run,
+            caller: caller.clone(),
+            worker: WorkerRef {
+                session_id: Some(child_session),
+                agent_id: child.agent_id,
+            },
+        };
+        store
+            .record_session_parent(workspace, child_session, Some(parent_session))
+            .unwrap();
+        store.upsert_binding(binding.clone()).unwrap();
+        assert_eq!(store.bindings().unwrap(), vec![binding]);
+        assert_eq!(
+            store.reserve_delegation(&caller, active_run, 2).unwrap(),
+            DelegationReservationOutcome::AlreadyAdmitted
+        );
+        assert_eq!(
+            store
+                .reserve_delegation(&caller, OperationId::new(), 1)
+                .unwrap(),
+            DelegationReservationOutcome::LimitReached
+        );
+
+        let queued_operation = OperationId::new();
+        let queued_session = SessionId::new();
+        store
+            .record_session_parent(workspace, queued_session, Some(parent_session))
+            .unwrap();
+        store
+            .queue_delegated_prompt(
+                workspace,
+                Some(queued_session),
+                "queued".into(),
+                now(),
+                caller.clone(),
+                queued_operation,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .reserve_delegation(&caller, queued_operation, 3)
+                .unwrap(),
+            DelegationReservationOutcome::AlreadyAdmitted
+        );
+        assert!(
+            store
+                .queue_delegated_prompt(
+                    WorkspaceId::new(),
+                    Some(SessionId::new()),
+                    "wrong workspace".into(),
+                    now(),
+                    caller.clone(),
+                    OperationId::new(),
+                )
+                .is_err()
+        );
+
+        let other_parent_session = SessionId::new();
+        let other_parent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(other_parent_session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("other-parent").unwrap(),
+            )
+            .unwrap();
+        let conflicting = CallerRef {
+            session_id: Some(other_parent_session),
+            agent_id: other_parent.agent_id,
+        };
+        store
+            .queue_delegated_prompt(
+                workspace,
+                Some(queued_session),
+                "dispatch without reparenting".into(),
+                now(),
+                conflicting.clone(),
+                OperationId::new(),
+            )
+            .unwrap();
+        store
+            .upsert_binding(DispatchBinding {
+                run_id: OperationId::new(),
+                caller: conflicting,
+                worker: WorkerRef {
+                    session_id: Some(child_session),
+                    agent_id: child.agent_id,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            store.session_parent(workspace, child_session).unwrap(),
+            Some(parent_session)
+        );
+        store
+            .record_session_parent(workspace, child_session, Some(parent_session))
+            .unwrap();
+        assert_eq!(
+            store.session_parent(workspace, queued_session).unwrap(),
+            Some(parent_session)
+        );
+        assert!(
+            store
+                .record_session_parent(workspace, child_session, Some(other_parent_session),)
+                .is_err()
+        );
+        let self_parented_session = SessionId::new();
+        store
+            .record_session_parent(
+                workspace,
+                self_parented_session,
+                Some(self_parented_session),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .session_parent(workspace, self_parented_session)
+                .unwrap(),
+            None
+        );
+
+        let unowned_agent = AgentId::new();
+        assert!(
+            store
+                .reserve_admission(
+                    agent(SessionId::new(), unowned_agent),
+                    DispatchRun {
+                        run_id: OperationId::new(),
+                        agent_id: unowned_agent,
+                        prompt: "unowned".into(),
+                        started_at: now(),
+                        ended_at: None,
+                        status: RunStatus::Preparing,
+                    },
+                    DispatchBinding {
+                        run_id: OperationId::new(),
+                        caller: caller.clone(),
+                        worker: WorkerRef {
+                            session_id: Some(SessionId::new()),
+                            agent_id: unowned_agent,
+                        },
+                    },
+                    AgentAdmissionReservation {
+                        operation_id: OperationId::new(),
+                        semantic_key: "unowned".into(),
+                        credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                    },
+                )
+                .is_err()
+        );
+
+        let admitted_agent_id = AgentId::new();
+        let admitted_session = SessionId::new();
+        let admitted_operation = OperationId::new();
+        let mut ownership = store.load_workspace_registry().unwrap();
+        ownership
+            .agent_workspaces
+            .insert(admitted_agent_id, workspace);
+        store.write_workspace_registry(&ownership).unwrap();
+        store
+            .record_session_parent(workspace, admitted_session, Some(parent_session))
+            .unwrap();
+        let admitted = agent(admitted_session, admitted_agent_id);
+        store
+            .reserve_admission(
+                admitted,
+                DispatchRun {
+                    run_id: admitted_operation,
+                    agent_id: admitted_agent_id,
+                    prompt: "admitted".into(),
+                    started_at: now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: admitted_operation,
+                    caller: caller.clone(),
+                    worker: WorkerRef {
+                        session_id: Some(admitted_session),
+                        agent_id: admitted_agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: admitted_operation,
+                    semantic_key: "admitted".into(),
+                    credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .unwrap();
+        assert!(store.agent(admitted_agent_id).unwrap().is_some());
+
+        let conflicting_operation = OperationId::new();
+        store
+            .reserve_admission(
+                agent(admitted_session, admitted_agent_id),
+                DispatchRun {
+                    run_id: conflicting_operation,
+                    agent_id: admitted_agent_id,
+                    prompt: "dispatch without reparenting".into(),
+                    started_at: now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: conflicting_operation,
+                    caller: CallerRef {
+                        session_id: Some(other_parent_session),
+                        agent_id: other_parent.agent_id,
+                    },
+                    worker: WorkerRef {
+                        session_id: Some(admitted_session),
+                        agent_id: admitted_agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: conflicting_operation,
+                    semantic_key: "conflicting-parent".into(),
+                    credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .unwrap();
+        assert!(store.run(conflicting_operation).unwrap().is_some());
+        assert!(store.admission(conflicting_operation).unwrap().is_some());
+        assert_eq!(
+            store.session_parent(workspace, admitted_session).unwrap(),
+            Some(parent_session)
+        );
+
+        assert_eq!(
+            store
+                .reserve_delegation(&caller, OperationId::new(), 10)
+                .unwrap(),
+            DelegationReservationOutcome::Reserved
+        );
+        store.reconcile_incomplete_admissions().unwrap();
+        assert!(
+            store
+                .reserve_delegation(&caller, OperationId::new(), 10)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn session_lineage_survives_dispatch_run_retention() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let parent_session = SessionId::new();
+        let child_session = SessionId::new();
+        let parent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("parent").unwrap(),
+            )
+            .unwrap();
+        let child = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(child_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("child").unwrap(),
+            )
+            .unwrap();
+        store
+            .record_session_parent(workspace, child_session, Some(parent_session))
+            .unwrap();
+        let lineage_run = OperationId::new();
+        store
+            .upsert_run(DispatchRun {
+                run_id: lineage_run,
+                agent_id: child.agent_id,
+                prompt: "lineage".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            })
+            .unwrap();
+        store
+            .upsert_binding(DispatchBinding {
+                run_id: lineage_run,
+                caller: CallerRef {
+                    session_id: Some(parent_session),
+                    agent_id: parent.agent_id,
+                },
+                worker: WorkerRef {
+                    session_id: Some(child_session),
+                    agent_id: child.agent_id,
+                },
+            })
+            .unwrap();
+        for _ in 0..=RUN_RETENTION {
+            store
+                .upsert_run(DispatchRun {
+                    run_id: OperationId::new(),
+                    agent_id: child.agent_id,
+                    prompt: "history".into(),
+                    started_at: now(),
+                    ended_at: Some(now()),
+                    status: RunStatus::Completed,
+                })
+                .unwrap();
+        }
+        assert!(store.binding(lineage_run).unwrap().is_none());
+        assert_eq!(
+            store.session_parent(workspace, child_session).unwrap(),
+            Some(parent_session)
+        );
+        assert_eq!(
+            store
+                .delegation_depth(&CallerRef {
+                    session_id: Some(child_session),
+                    agent_id: child.agent_id,
+                })
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1745,6 +3149,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One reservation lifecycle keeps prepare, commit, and restart reconciliation together.
     fn admission_reservation_is_atomic_secret_free_and_reconciles_incomplete_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
@@ -1753,6 +3158,9 @@ mod tests {
         let mut worker = agent(session, agent_id);
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
+        store
+            .upsert_agent(WorkspaceId::new(), worker.clone())
+            .unwrap();
         let run = DispatchRun {
             run_id: operation,
             agent_id,
@@ -1874,6 +3282,193 @@ mod tests {
     }
 
     #[test]
+    fn inbox_pages_and_explicit_ack_converge_without_response_loss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        assert!(
+            store
+                .inbox_page(&caller, None, 1, true, None)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        for limit in [0, INBOX_PAGE_MAX + 1] {
+            assert!(store.inbox_page(&caller, None, limit, false, None).is_err());
+        }
+        let run_ids = (0..3).map(|_| OperationId::new()).collect::<Vec<_>>();
+        for run_id in &run_ids {
+            store
+                .append_inbox(&caller, message(*run_id, worker.clone()))
+                .unwrap();
+        }
+
+        let first = store.inbox_page(&caller, None, 2, true, None).unwrap();
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|item| item.run_id)
+                .collect::<Vec<_>>(),
+            run_ids[..2]
+        );
+        assert!(first.has_more);
+        assert_eq!(first.next_cursor.next_sequence, 3);
+        let since_epoch = Utc.timestamp_opt(0, 0).single().unwrap();
+        let page = store.inbox_page(&caller, None, 2, false, Some(since_epoch));
+        assert_eq!(page.unwrap().messages.len(), 2);
+        assert!(
+            store
+                .inbox_page(&caller, None, 2, false, Some(now()))
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert_eq!(
+            store.inbox_page(&caller, None, 2, true, None).unwrap(),
+            first,
+            "a lost response without ACK must replay the same page"
+        );
+
+        assert_eq!(
+            store.ack_inbox(&caller, first.next_cursor).unwrap(),
+            first.next_cursor
+        );
+        assert_eq!(
+            store.ack_inbox(&caller, first.next_cursor).unwrap(),
+            first.next_cursor
+        );
+        let reopened = DispatchStore::new(tmp.path());
+        let unread = reopened.inbox_page(&caller, None, 2, true, None).unwrap();
+        assert_eq!(unread.messages.len(), 1);
+        assert_eq!(unread.messages[0].run_id, run_ids[2]);
+        assert_eq!(unread.next_cursor.next_sequence, 4);
+        reopened.ack_inbox(&caller, unread.next_cursor).unwrap();
+        assert!(
+            reopened
+                .inbox_page(&caller, None, 2, true, None)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .inbox_page(
+                    &caller,
+                    Some(InboxCursor { next_sequence: 0 }),
+                    1,
+                    false,
+                    None,
+                )
+                .is_err()
+        );
+        assert!(
+            reopened
+                .ack_inbox(&caller, InboxCursor { next_sequence: 5 })
+                .is_err()
+        );
+        assert!(
+            reopened
+                .inbox_page(
+                    &caller,
+                    Some(InboxCursor { next_sequence: 5 }),
+                    1,
+                    false,
+                    None,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("outside the retained")
+        );
+    }
+
+    #[test]
+    fn indexed_inbox_pages_read_only_page_records_and_legacy_files_migrate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let records = (1..=u64::try_from(INBOX_HARD_LIMIT).unwrap())
+            .map(|sequence| InboxRecord {
+                sequence,
+                message: message(OperationId::new(), worker.clone()),
+            })
+            .collect::<Vec<_>>();
+        let index = store.write_inbox_records(&caller, &records).unwrap();
+
+        store.inbox_bytes_read.store(0, Ordering::Relaxed);
+        let page = store
+            .inbox_page(
+                &caller,
+                Some(InboxCursor {
+                    next_sequence: u64::try_from(INBOX_HARD_LIMIT - 99).unwrap(),
+                }),
+                INBOX_PAGE_MAX,
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(page.messages.len(), INBOX_PAGE_MAX);
+        assert!(!page.has_more);
+        assert!(store.inbox_bytes_read.load(Ordering::Relaxed) * 20 < index.journal_len);
+        fs::write(store.inbox_index_path(&caller), "{broken").unwrap();
+        assert_eq!(
+            store
+                .inbox_page(
+                    &caller,
+                    Some(InboxCursor {
+                        next_sequence: u64::try_from(INBOX_HARD_LIMIT).unwrap(),
+                    }),
+                    1,
+                    false,
+                    None,
+                )
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.inbox_index(&caller).unwrap().entries.len(),
+            INBOX_HARD_LIMIT
+        );
+
+        let legacy_caller = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: AgentId::new(),
+        };
+        let legacy = [
+            message(OperationId::new(), worker.clone()),
+            message(OperationId::new(), worker),
+        ];
+        let text = legacy
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n")
+            + "\n";
+        let path = store.inbox_path(&legacy_caller);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+        assert_eq!(
+            store
+                .inbox_page(&legacy_caller, None, 10, false, None)
+                .unwrap()
+                .messages,
+            legacy
+        );
+        assert!(fs::read_to_string(path).unwrap().contains("\"sequence\":1"));
+    }
+
+    #[test]
     fn locked_mutations_do_not_lose_concurrent_inbox_writes() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(DispatchStore::new(tmp.path()));
@@ -1900,17 +3495,174 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_invalid_inboxes_are_handled() {
+    fn missing_torn_and_invalid_inboxes_are_handled() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
-        let (_, _, caller) = ids();
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
         assert!(store.inbox(&caller).unwrap().is_empty());
         fs::create_dir_all(store.inbox_path(&caller).parent().unwrap()).unwrap();
-        fs::write(store.inbox_path(&caller), "broken\n").unwrap();
+        fs::write(store.inbox_path(&caller), "broken\nalso-broken\n").unwrap();
         assert!(store.inbox(&caller).is_err());
+        fs::write(store.inbox_path(&caller), "{final-torn").unwrap();
+        assert!(store.inbox(&caller).unwrap().is_empty());
+        let complete_but_uncommitted = serde_json::to_string(&InboxRecord {
+            sequence: 1,
+            message: message(OperationId::new(), worker.clone()),
+        })
+        .unwrap();
+        fs::write(store.inbox_path(&caller), complete_but_uncommitted).unwrap();
+        assert!(store.inbox(&caller).unwrap().is_empty());
+        store
+            .append_inbox(&caller, message(OperationId::new(), worker))
+            .unwrap();
+        assert_eq!(store.inbox(&caller).unwrap().len(), 1);
+        assert!(
+            fs::read_to_string(store.inbox_path(&caller))
+                .unwrap()
+                .ends_with('\n')
+        );
         fs::remove_file(store.inbox_path(&caller)).unwrap();
         fs::create_dir(store.inbox_path(&caller)).unwrap();
         assert!(store.inbox(&caller).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn inbox_journal_and_derived_index_corruption_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let path = store.inbox_path(&caller);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        assert!(
+            store
+                .rebuild_inbox_index(&caller)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        fs::create_dir(&path).unwrap();
+        assert!(store.rebuild_inbox_index(&caller).is_err());
+        fs::remove_dir(&path).unwrap();
+        symlink(&path, &path).unwrap();
+        assert!(store.rebuild_inbox_index(&caller).is_err());
+        assert!(store.inbox_index(&caller).is_err());
+        fs::remove_file(&path).unwrap();
+
+        let invalid = InboxRecord {
+            sequence: 0,
+            message: message(OperationId::new(), worker.clone()),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&invalid).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            store
+                .rebuild_inbox_index(&caller)
+                .unwrap_err()
+                .to_string()
+                .contains("strictly increasing")
+        );
+
+        let records = (1..=u64::try_from(INBOX_HARD_LIMIT + 1).unwrap())
+            .map(|sequence| InboxRecord {
+                sequence,
+                message: message(OperationId::new(), worker.clone()),
+            })
+            .collect::<Vec<_>>();
+        let text = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n")
+            + "\n";
+        fs::write(&path, text).unwrap();
+        assert!(
+            store
+                .rebuild_inbox_index(&caller)
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+
+        let record = InboxRecord {
+            sequence: 7,
+            message: message(OperationId::new(), worker),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        let matching = InboxIndexEntry {
+            sequence: 7,
+            offset: 0,
+            created_at: record.message.created_at,
+            read: false,
+        };
+        let missing_path = tmp.path().join("missing");
+        let missing_store = DispatchStore::new(&missing_path);
+        assert!(
+            missing_store
+                .read_inbox_records(&caller, &[matching])
+                .is_err()
+        );
+        let beyond = InboxIndexEntry {
+            offset: fs::metadata(&path).unwrap().len(),
+            ..matching
+        };
+        assert!(store.read_inbox_records(&caller, &[beyond]).is_err());
+        let mismatched = InboxIndexEntry {
+            sequence: 8,
+            ..matching
+        };
+        assert!(store.read_inbox_records(&caller, &[mismatched]).is_err());
+
+        let index_path = store.inbox_index_path(&caller);
+        fs::write(&index_path, b"stale-index").unwrap();
+        fs::remove_file(&index_path).unwrap();
+        fs::create_dir(&index_path).unwrap();
+        assert!(store.write_inbox_records(&caller, &[record]).is_err());
+    }
+
+    #[test]
+    fn corrupt_ack_state_fails_closed_without_hiding_unread_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        store
+            .append_inbox(&caller, message(OperationId::new(), worker.clone()))
+            .unwrap();
+        let path = store.inbox_ack_path(&caller);
+        fs::write(&path, r#"{"next_sequence":99}"#).unwrap();
+
+        assert!(store.inbox_page(&caller, None, 1, true, None).is_err());
+        assert!(store.inbox(&caller).is_err());
+        assert!(
+            store
+                .append_inbox(&caller, message(OperationId::new(), worker))
+                .is_err()
+        );
+        assert_eq!(store.inbox_index(&caller).unwrap().entries.len(), 1);
     }
 
     #[test]
@@ -2141,10 +3893,14 @@ mod tests {
             session_id: Some(session),
             agent_id,
         };
+        let owned_worker = agent(session, agent_id);
+        store
+            .upsert_agent(WorkspaceId::new(), owned_worker.clone())
+            .unwrap();
         let reserved = OperationId::new();
         store
             .reserve_admission(
-                agent(session, agent_id),
+                owned_worker,
                 DispatchRun {
                     run_id: reserved,
                     agent_id,
@@ -2202,9 +3958,8 @@ mod tests {
         );
     }
 
-    /// An append rewrites the whole inbox file, so an unbounded inbox costs
-    /// O(N²) over N deliveries. An unread report is not history, though: it is a
-    /// result its caller has not seen.
+    /// An unread report is not history, so acknowledged/read records are the
+    /// only records eligible for bounded compaction.
     #[test]
     fn a_read_inbox_is_bounded_and_unread_reports_outrank_every_read_one() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2241,52 +3996,429 @@ mod tests {
             "an unread report was dropped to make room for read ones"
         );
         assert!(inbox.len() <= INBOX_HARD_LIMIT);
+
+        // Read retention can leave a stable-sequence gap after an unread record.
+        // Losing the disposable index must not make that authoritative journal
+        // impossible to rebuild on restart.
+        fs::remove_file(store.inbox_index_path(&caller)).unwrap();
+        let reopened = DispatchStore::new(tmp.path());
+        assert!(
+            reopened
+                .inbox(&caller)
+                .unwrap()
+                .iter()
+                .any(|item| item.run_id == awaited && !item.read)
+        );
     }
 
-    /// "Never drop unread" is not a bound on its own: a caller that never reads
-    /// would grow its inbox forever. The ceiling is the backstop, and what it
-    /// drops is recorded rather than lost silently.
     #[test]
-    fn the_inbox_ceiling_drops_the_oldest_unread_only_after_every_read_one() {
-        let (session, agent_id, _) = ids();
+    fn the_inbox_ceiling_backpressures_unread_and_recycles_acknowledged_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
         let worker = WorkerRef {
             session_id: Some(session),
             agent_id,
         };
-        let mut messages: Vec<InboxMessage> = (0..10)
-            .map(|index| {
-                let mut item = message(OperationId::new(), worker.clone());
-                item.read = index % 2 == 0;
-                item.summary = format!("m{index}");
-                item
+        let records = (1..=u64::try_from(INBOX_HARD_LIMIT).unwrap())
+            .map(|sequence| InboxRecord {
+                sequence,
+                message: message(OperationId::new(), worker.clone()),
             })
-            .collect();
-        let oldest_unread = messages
-            .iter()
-            .find(|item| !item.read)
-            .map(|item| item.summary.clone())
+            .collect::<Vec<_>>();
+        store.write_inbox_records(&caller, &records).unwrap();
+        let before = fs::read(store.inbox_path(&caller)).unwrap();
+
+        assert!(
+            store
+                .append_inbox(&caller, message(OperationId::new(), worker.clone()))
+                .unwrap_err()
+                .to_string()
+                .contains("unacknowledged")
+        );
+        assert_eq!(fs::read(store.inbox_path(&caller)).unwrap(), before);
+        assert_eq!(
+            store.inbox_index(&caller).unwrap().entries.len(),
+            INBOX_HARD_LIMIT
+        );
+
+        store
+            .ack_inbox(&caller, InboxCursor { next_sequence: 2 })
             .unwrap();
-
-        // Exactly at the ceiling nothing is dropped: the bound is "no more
-        // than", not "fewer than".
-        let mut at_ceiling = messages.clone();
-        let ceiling = at_ceiling.len();
-        retain_inbox_within(&mut at_ceiling, 100, ceiling);
-        assert_eq!(at_ceiling.len(), 10);
-
-        // Read messages go first, and only what is still over the ceiling comes
-        // out of the unread ones.
-        retain_inbox_within(&mut messages, 2, 4);
-        assert_eq!(messages.len(), 4);
+        store
+            .append_inbox(&caller, message(OperationId::new(), worker))
+            .unwrap();
+        let index = store.inbox_index(&caller).unwrap();
+        assert_eq!(index.entries.len(), INBOX_HARD_LIMIT);
+        assert_eq!(index.entries.first().unwrap().sequence, 2);
         assert!(
-            messages.iter().filter(|item| item.read).count() <= 2,
-            "read messages were kept past their retention"
+            store
+                .inbox_page(
+                    &caller,
+                    Some(InboxCursor { next_sequence: 1 }),
+                    1,
+                    false,
+                    None,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("cursor expired")
+        );
+
+        // Prefix compaction also advances the first retained sequence. The
+        // index is derived state, so deleting it must still allow exact rebuild.
+        fs::remove_file(store.inbox_index_path(&caller)).unwrap();
+        let reopened = DispatchStore::new(tmp.path());
+        let rebuilt = reopened.inbox_index(&caller).unwrap();
+        assert_eq!(rebuilt.entries.len(), INBOX_HARD_LIMIT);
+        assert_eq!(rebuilt.entries.first().unwrap().sequence, 2);
+        assert_eq!(rebuilt.entries.last().unwrap().sequence, 4097);
+    }
+
+    #[test]
+    fn small_serialized_budgets_bound_registry_and_inbox_history() {
+        let registry_tmp = tempfile::tempdir().unwrap();
+        let mut limits = DispatchStoreLimits {
+            registry_bytes: 1_600,
+            run_retention: 128,
+            run_replay_floor: 1,
+            history_max_age_seconds: 0,
+            ..DispatchStoreLimits::default()
+        };
+        let store = DispatchStore::with_limits(registry_tmp.path(), limits);
+        let workspace = WorkspaceId::new();
+        let (session, agent_id, caller) = ids();
+        store
+            .upsert_agent(workspace, agent(session, agent_id))
+            .unwrap();
+        for _ in 0..128 {
+            store
+                .upsert_run(DispatchRun {
+                    run_id: OperationId::new(),
+                    agent_id,
+                    prompt: "terminal history".repeat(12),
+                    started_at: now(),
+                    ended_at: Some(now()),
+                    status: RunStatus::Completed,
+                })
+                .unwrap();
+        }
+        let registry = store.load_registry().unwrap();
+        assert!(registry.runs.len() < 128);
+        assert!(fs::metadata(store.registry_path()).unwrap().len() <= limits.registry_bytes);
+
+        let before = fs::read(store.registry_path()).unwrap();
+        let error = store
+            .upsert_run(DispatchRun {
+                run_id: OperationId::new(),
+                agent_id,
+                prompt: "live".repeat(usize::try_from(limits.registry_bytes).unwrap()),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("protected records"));
+        assert_eq!(fs::read(store.registry_path()).unwrap(), before);
+
+        let inbox_tmp = tempfile::tempdir().unwrap();
+        limits.inbox_bytes = 1_600;
+        limits.inbox_count = 64;
+        limits.inbox_read_retention = 64;
+        limits.inbox_read_replay_floor = 0;
+        let inbox_store = DispatchStore::with_limits(inbox_tmp.path(), limits);
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        for _ in 0..128 {
+            let run_id = OperationId::new();
+            inbox_store
+                .append_inbox(&caller, message(run_id, worker.clone()))
+                .unwrap();
+            inbox_store.mark_inbox_read(&caller, run_id).unwrap();
+        }
+        let index = inbox_store.inbox_index(&caller).unwrap();
+        assert!(index.entries.len() < 128);
+        assert!(!index.entries.is_empty());
+        assert!(index.valid_len <= limits.inbox_bytes);
+
+        let last_sequence = index.entries.last().unwrap().sequence;
+        let next_run = OperationId::new();
+        inbox_store
+            .append_inbox(&caller, message(next_run, worker))
+            .unwrap();
+        let rebuilt = {
+            fs::remove_file(inbox_store.inbox_index_path(&caller)).unwrap();
+            DispatchStore::with_limits(inbox_tmp.path(), limits)
+                .inbox_index(&caller)
+                .unwrap()
+        };
+        assert_eq!(rebuilt.entries.last().unwrap().sequence, last_sequence + 1);
+    }
+
+    #[test]
+    fn serialized_capacity_refusals_leave_existing_state_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut limits = DispatchStoreLimits {
+            inbox_bytes: 1_100,
+            inbox_count: 64,
+            inbox_read_retention: 64,
+            inbox_read_replay_floor: 1,
+            ..DispatchStoreLimits::default()
+        };
+        let store = DispatchStore::with_limits(tmp.path(), limits);
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let mut accepted = 0;
+        loop {
+            let before = fs::read(store.inbox_path(&caller)).unwrap_or_default();
+            match store.append_inbox(&caller, message(OperationId::new(), worker.clone())) {
+                Ok(()) => accepted += 1,
+                Err(error) => {
+                    assert!(error.to_string().contains("capacity is exhausted"));
+                    assert_eq!(fs::read(store.inbox_path(&caller)).unwrap(), before);
+                    break;
+                }
+            }
+            assert!(accepted < limits.inbox_count);
+        }
+        assert!(accepted > 0);
+
+        limits.registry_bytes = 1;
+        limits.workspace_registry_bytes = 1;
+        limits.inbox_bytes = 1;
+        let empty = tempfile::tempdir().unwrap();
+        let store = DispatchStore::with_limits(empty.path(), limits);
+        assert!(
+            store
+                .upsert_agent(WorkspaceId::new(), agent(session, AgentId::new()))
+                .is_err()
+        );
+        assert!(!store.registry_path().exists());
+        assert!(!store.workspace_registry_path().exists());
+
+        fs::write(store.registry_path(), "not-json").unwrap();
+        assert!(
+            store
+                .agents()
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
+        fs::write(store.workspace_registry_path(), "not-json").unwrap();
+        assert!(
+            store
+                .agents_in_workspace(WorkspaceId::new())
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
+        let inbox_path = store.inbox_path(&caller);
+        fs::create_dir_all(inbox_path.parent().unwrap()).unwrap();
+        fs::write(inbox_path, "not-json\n").unwrap();
+        assert!(
+            store
+                .inbox(&caller)
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
+    }
+
+    #[test]
+    fn inbox_byte_pressure_compacts_only_read_history_before_append() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let first_run = OperationId::new();
+        let second_run = OperationId::new();
+        let third_run = OperationId::new();
+        let first = message(first_run, worker.clone());
+        let second = message(second_run, worker.clone());
+        let third = message(third_run, worker);
+        let line_len = |sequence, message: InboxMessage| {
+            let mut bytes = serde_json::to_vec(&InboxRecord { sequence, message }).unwrap();
+            bytes.push(b'\n');
+            u64::try_from(bytes.len()).unwrap()
+        };
+        let mut read_first = first.clone();
+        read_first.read = true;
+        let first_and_second = line_len(1, read_first) + line_len(2, second.clone());
+        let second_and_third = line_len(2, second.clone()) + line_len(3, third.clone());
+        let limits = DispatchStoreLimits {
+            inbox_bytes: first_and_second.max(second_and_third),
+            inbox_count: 64,
+            inbox_read_retention: 64,
+            inbox_read_replay_floor: 0,
+            ..DispatchStoreLimits::default()
+        };
+        let store = DispatchStore::with_limits(tmp.path(), limits);
+        store.append_inbox(&caller, first).unwrap();
+        assert!(store.mark_inbox_read(&caller, first_run).unwrap());
+        store.append_inbox(&caller, second).unwrap();
+        store.append_inbox(&caller, third).unwrap();
+
+        let index = store.inbox_index(&caller).unwrap();
+        assert_eq!(
+            index
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(index.valid_len <= limits.inbox_bytes);
+        let retained = store.inbox(&caller).unwrap();
+        assert!(!retained.iter().any(|message| message.run_id == first_run));
+        assert!(retained.iter().any(|message| message.run_id == second_run));
+        assert!(retained.iter().any(|message| message.run_id == third_run));
+    }
+
+    #[test]
+    fn each_serialized_capacity_boundary_has_typed_effect_zero_refusal() {
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+
+        let oversized_tmp = tempfile::tempdir().unwrap();
+        let oversized = DispatchStore::with_limits(
+            oversized_tmp.path(),
+            DispatchStoreLimits {
+                inbox_bytes: 1,
+                ..DispatchStoreLimits::default()
+            },
         );
         assert!(
-            !messages.iter().any(|item| item.summary == oldest_unread),
-            "the ceiling dropped a newer unread message before the oldest"
+            oversized
+                .append_inbox(&caller, message(OperationId::new(), worker.clone()))
+                .unwrap_err()
+                .to_string()
+                .contains("one oversized message")
         );
-        // What survives is the newest of what was there.
-        assert_eq!(messages.last().unwrap().summary, "m9");
+        assert!(!oversized.inbox_path(&caller).exists());
+
+        let workspace_tmp = tempfile::tempdir().unwrap();
+        let workspace_limited = DispatchStore::with_limits(
+            workspace_tmp.path(),
+            DispatchStoreLimits {
+                workspace_registry_bytes: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            workspace_limited
+                .upsert_agent(WorkspaceId::new(), agent(session, AgentId::new()))
+                .unwrap_err()
+                .to_string()
+                .contains("workspace registry capacity is exhausted")
+        );
+        assert!(!workspace_limited.registry_path().exists());
+        assert!(!workspace_limited.workspace_registry_path().exists());
+
+        let records = vec![
+            InboxRecord {
+                sequence: 1,
+                message: message(OperationId::new(), worker.clone()),
+            },
+            InboxRecord {
+                sequence: 2,
+                message: message(OperationId::new(), worker),
+            },
+        ];
+        let count_tmp = tempfile::tempdir().unwrap();
+        let count_limited = DispatchStore::with_limits(
+            count_tmp.path(),
+            DispatchStoreLimits {
+                inbox_count: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            count_limited
+                .write_inbox_records(&caller, &records)
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+        assert!(!count_limited.inbox_path(&caller).exists());
+
+        let bytes_tmp = tempfile::tempdir().unwrap();
+        let bytes_limited = DispatchStore::with_limits(
+            bytes_tmp.path(),
+            DispatchStoreLimits {
+                inbox_bytes: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            bytes_limited
+                .write_inbox_records(&caller, &records[..1])
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
+        assert!(!bytes_limited.inbox_path(&caller).exists());
+    }
+
+    #[test]
+    fn byte_pruning_removes_terminal_run_lineage_from_one_ssot_path() {
+        let (session, agent_id, caller) = ids();
+        let run_id = OperationId::new();
+        let mut registry = Registry {
+            runs: vec![DispatchRun {
+                run_id,
+                agent_id,
+                prompt: "done".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            }],
+            bindings: vec![DispatchBinding {
+                run_id,
+                caller,
+                worker: WorkerRef {
+                    session_id: Some(session),
+                    agent_id,
+                },
+            }],
+            admissions: vec![AgentAdmissionReservation {
+                operation_id: run_id,
+                semantic_key: "key".into(),
+                credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+            }],
+            ..Registry::default()
+        };
+        assert!(registry.drop_oldest_terminal_run(0));
+        assert!(registry.runs.is_empty());
+        assert!(registry.bindings.is_empty());
+        assert!(registry.admissions.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serialized_limit_metadata_errors_keep_the_io_context() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        let path = blocked.join("state.json");
+        fs::write(&path, "{}").unwrap();
+        let mode = fs::metadata(&blocked).unwrap().permissions().mode();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = DispatchStore::ensure_file_within(&path, 1024, "dispatch fixture");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(
+            format!("{:#}", result.unwrap_err()).contains("failed to inspect dispatch fixture")
+        );
     }
 }

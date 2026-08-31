@@ -16,7 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use usagi_core::domain::agent::AgentProfileId;
+use usagi_core::domain::agent::{AgentProfileId, AgentWorkspaceObservation};
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_core::domain::terminal_launch::{
@@ -75,7 +75,7 @@ fn short_dir(prefix: &str) -> tempfile::TempDir {
 }
 
 fn channel_data_dir(home: &Path) -> PathBuf {
-    usagi_core::infrastructure::paths::channel_data_dir(home)
+    Channel::Local.data_dir(home)
 }
 
 fn git(repo: &Path, args: &[&str]) {
@@ -112,6 +112,13 @@ fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
     write_codex_cli(bin, "codex", count, ready_status);
 }
 
+/// Quote one UTF-8 path as a single POSIX shell word. Cargo may place the test
+/// binary under a target directory containing spaces, quotes, or a literal
+/// `$HOME`; double quotes would re-expand that text inside the fixture provider.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'"'"'"#))
+}
+
 fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &Path) {
     fs::create_dir_all(bin).unwrap();
     let script = format!(
@@ -133,14 +140,25 @@ fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &P
 /// same one-line conversation.
 fn write_codex_cli(bin: &Path, program: &str, count: &Path, ready_status: i32) {
     fs::create_dir_all(bin).unwrap();
+    let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | \"{}\" codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
-        env!("CARGO_BIN_EXE_usagi"),
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         count.display(),
     );
     let path = bin.join(program);
     fs::write(&path, script).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn fixture_shell_quote_preserves_metacharacters_as_one_word() {
+    let value = "/tmp/$HOME/it's a target";
+    let output = Command::new("/bin/sh")
+        .args(["-c", &format!("printf '%s' {}", shell_quote(value))])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, value.as_bytes());
 }
 
 fn write_shell(path: &Path, count: &Path) {
@@ -416,6 +434,69 @@ fn available_scope(client: &mut impl DaemonClient) -> (WorkspaceId, SessionId, W
     )
 }
 
+#[test]
+fn running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-clean-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let _ = available_scope(&mut client);
+    git(repo.path(), &["branch", "usagi/orphan", "HEAD"]);
+
+    let request = |client: &mut dyn DaemonClient, apply| {
+        client
+            .request(DaemonRequest::Session {
+                action: SessionAction::Clean,
+                operation_id: OperationId::new().to_string(),
+                payload: serde_json::json!({"apply": apply, "force": false}),
+            })
+            .unwrap()
+    };
+    let DaemonReply::Ok(dry_run) = request(&mut client, false) else {
+        panic!("clean inventory must be a synchronous observation")
+    };
+    assert!(
+        dry_run["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["kind"] == "branch"
+                    && item["name"] == "usagi/orphan"
+                    && item["protected"] == false
+            })
+    );
+
+    let DaemonReply::Ok(applied) = request(&mut client, true) else {
+        panic!("clean apply must report its completed result")
+    };
+    assert_eq!(applied["removed"], 1);
+    assert!(
+        !Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["show-ref", "--verify", "refs/heads/usagi/orphan"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["show-ref", "--verify", "refs/heads/usagi/agent-e2e"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
 fn launch_intent(
     workspace: WorkspaceId,
     session: SessionId,
@@ -538,6 +619,36 @@ fn screen_contains(rows: &[String], text: &str) -> bool {
     rows.iter().any(|row| row.contains(text))
 }
 
+/// Wait for the fixture process itself to publish a screen marker before
+/// driving its stdin. PTY echo can make an early write visible before the
+/// child has reached its read loop, which is not process readiness.
+fn wait_for_terminal_text(client: &mut impl DaemonClient, terminal: &TerminalRef, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let DaemonReply::Ok(snapshot) = client
+            .request(DaemonRequest::Terminal {
+                action: TerminalAction::Resync,
+                payload: serde_json::to_value(TerminalRequest::Resync {
+                    terminal: terminal.clone(),
+                })
+                .unwrap(),
+            })
+            .expect("the fixture terminal remains readable")
+        else {
+            unreachable!()
+        };
+        let rows = restored_screen(&snapshot);
+        if screen_contains(&rows, expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture terminal did not publish {expected:?}: {rows:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Poll the durable final of one Agent launch, then read it once more.
 ///
 /// `ResponseOutcome::Ok` carries no envelope operation identity, so the final and
@@ -578,13 +689,41 @@ fn wait_for_agent_completion(
     body
 }
 
-fn resume(client: &mut impl DaemonClient, session_name: &str) -> (String, TerminalRef) {
+fn resume(
+    client: &mut impl DaemonClient,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> (
+    String,
+    TerminalRef,
+    usagi_core::domain::agent::AgentResumeTarget,
+) {
+    let inventory = client
+        .request(DaemonRequest::AgentInventory { workspace })
+        .expect("Agent inventory is available");
+    let body = match inventory {
+        DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
+    };
+    let inventory: usagi_core::domain::agent::AgentInventory =
+        serde_json::from_value(body).expect("Agent inventory is valid");
+    let mut targets = inventory.resumable.into_iter().filter_map(|item| {
+        item.available
+            .then_some(item.target)
+            .flatten()
+            .filter(|target| target.session_id == Some(session))
+    });
+    let target = targets
+        .next()
+        .expect("one exact session target is available");
+    assert!(
+        targets.next().is_none(),
+        "resume target must be unambiguous"
+    );
     let operation = OperationId::new().to_string();
     let reply = client
-        .request(DaemonRequest::Session {
-            action: SessionAction::ResumeAgent,
+        .request(DaemonRequest::ResumeAgent {
             operation_id: operation.clone(),
-            payload: serde_json::json!({"name": session_name}),
+            target: target.clone(),
         })
         .expect("captured Codex conversation resumes through root IPC");
     let DaemonReply::Accepted { body, .. } = reply else {
@@ -593,17 +732,21 @@ fn resume(client: &mut impl DaemonClient, session_name: &str) -> (String, Termin
     (
         operation,
         serde_json::from_value(body["terminal"].clone()).unwrap(),
+        target,
     )
 }
 
-fn wait_for_resume_completion(client: &mut impl DaemonClient, operation: &str, session_name: &str) {
+fn wait_for_resume_completion(
+    client: &mut impl DaemonClient,
+    operation: &str,
+    target: &usagi_core::domain::agent::AgentResumeTarget,
+) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let reply = client
-            .request(DaemonRequest::Session {
-                action: SessionAction::ResumeAgent,
+            .request(DaemonRequest::ResumeAgent {
                 operation_id: operation.to_owned(),
-                payload: serde_json::json!({"name": session_name}),
+                target: target.clone(),
             })
             .expect("resume replay is available");
         let body = match reply {
@@ -784,6 +927,22 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     // Omitted profile and explicit `codex` both resolve through the root's
     // Codex default/registry path.  The omitted launch drives the full stream.
     let (operation, terminal) = launch(&mut first, workspace, session, None);
+    let DaemonReply::Ok(observation) = first
+        .request(DaemonRequest::AgentWorkspaceObservation { workspace })
+        .expect("the Garden observation is a read-only Agent request")
+    else {
+        panic!("the workspace observation is synchronous");
+    };
+    let observation: AgentWorkspaceObservation = serde_json::from_value(observation).unwrap();
+    assert_eq!(observation.inventory.workspace_id, workspace);
+    assert!(
+        observation
+            .inventory
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.terminal == terminal)
+    );
+    assert!(observation.session_statuses.contains_key(&session));
     thread::sleep(Duration::from_millis(100));
     let subscription = attach(&mut first, &terminal);
     first
@@ -837,7 +996,8 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     let durable = serde_json::to_string(&durable_records(&data_dir)).unwrap();
     assert!(durable.contains("provider_structured"), "{durable}");
 
-    let (resume_operation, resumed_terminal) = resume(&mut reattached, "agent-e2e");
+    let (resume_operation, resumed_terminal, resume_target) =
+        resume(&mut reattached, workspace, session);
     assert_ne!(terminal, resumed_terminal);
     let resumed_subscription = attach(&mut reattached, &resumed_terminal);
     reattached
@@ -854,7 +1014,7 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
         })
         .unwrap();
     assert_ne!(operation, resume_operation);
-    wait_for_resume_completion(&mut reattached, &resume_operation, "agent-e2e");
+    wait_for_resume_completion(&mut reattached, &resume_operation, &resume_target);
     assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 2);
 }
 
@@ -1287,6 +1447,7 @@ fn drawer_close_reopen_continues_input_on_the_same_daemon_connection() {
     let first_attach = attach_response(&mut client, &terminal);
     assert_eq!(first_attach["next_input_seq"], 0);
     let first_subscription = first_attach["subscription"].as_u64().unwrap();
+    wait_for_terminal_text(&mut client, &terminal, "shell-ready");
     client
         .request(DaemonRequest::Terminal {
             action: TerminalAction::Input,
@@ -1623,6 +1784,7 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
     let mut persistent = client(&data_dir);
     let (workspace, session, worktree) = available_scope(&mut persistent);
     let (_, agent_terminal) = launch(&mut persistent, workspace, session, None);
+    wait_for_spawns(&agent_spawns, 1);
     let agent_subscription = attach(&mut persistent, &agent_terminal);
     let DaemonReply::Ok(launched) = persistent
         .request(DaemonRequest::Terminal {
@@ -1652,7 +1814,6 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
         shell_terminal.daemon_generation,
         agent_terminal.daemon_generation
     );
-    wait_for_spawns(&agent_spawns, 1);
     wait_for_spawns(&shell_spawns, 1);
 
     let old_generation = agent_terminal.daemon_generation;
@@ -1669,10 +1830,13 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
         .expect("the terminal owner is registered");
     assert_eq!(u64::from(old_entry.process.pid), old_pid);
 
+    // Lifecycle is machine-wide: both standby hydration and the rollover
+    // control request must stay independent of an unrelated caller cwd.
+    let restart_cwd = short_dir("restart-cwd-");
     let mut restart = usagi_command(
         home.path(),
         Channel::Local,
-        repo.path(),
+        restart_cwd.path(),
         &["daemon".as_ref(), "restart".as_ref()],
     );
     let restarted = restart.output().expect("the shipping restart command runs");

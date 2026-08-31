@@ -132,7 +132,16 @@ pub trait GenericPtySpawner {
         terminal: &TerminalRef,
         geometry: Geometry,
     ) -> Result<ProcessIdentity, SpawnFailure>;
+
+    /// Terminate and reap the exact daemon-owned PTY process.
+    fn terminate_reap(&mut self, _terminal: &TerminalRef) -> Result<(), GenericTerminateReapError> {
+        Err(GenericTerminateReapError)
+    }
 }
+
+/// Exact generic-terminal termination or reaping could not be completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenericTerminateReapError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenericTerminalError {
@@ -491,9 +500,16 @@ impl GenericTerminalCoordinator {
         // already recorded operation is the read-only `input_outcome` path, which
         // is deliberately not gated this way.
         self.running(terminal)?;
-        self.terminals
+        let ack = self
+            .terminals
             .write_input(terminal, input, bytes, self.retention.now_ms(), writer)
-            .map_err(GenericTerminalError::Terminal)
+            .map_err(GenericTerminalError::Terminal)?;
+        if ack == InputAck::Written && matches!(bytes, [12] | [3, 12]) {
+            self.terminals
+                .clear_primary_for_user(terminal)
+                .map_err(GenericTerminalError::Terminal)?;
+        }
+        Ok(ack)
     }
 
     /// Reads the recorded final of one durable input operation. `Ok(None)` is a
@@ -625,6 +641,78 @@ impl GenericTerminalCoordinator {
             record.terminal.workspace_id == workspace
                 && matches!(record.state, TerminalRuntimeState::Running)
         })
+    }
+
+    /// Number of live generic terminal PTYs owned by one workspace.
+    #[must_use]
+    pub fn running_count_in_workspace(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> usize {
+        self.records
+            .values()
+            .filter(|record| {
+                record.terminal.workspace_id == workspace
+                    && matches!(record.state, TerminalRuntimeState::Running)
+            })
+            .count()
+    }
+
+    /// Number of PTY records that may still name a live process and therefore
+    /// must block an unforced workspace retirement.
+    #[must_use]
+    pub fn retirement_blocker_count_in_workspace(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> usize {
+        self.records
+            .values()
+            .filter(|record| {
+                record.terminal.workspace_id == workspace
+                    && terminal_state_blocks_retirement(record.state)
+            })
+            .count()
+    }
+
+    /// Terminates and forgets every generic terminal in one workspace.
+    pub fn close_workspace(
+        &mut self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+        store: &mut dyn TerminalStore,
+        spawner: &mut dyn GenericPtySpawner,
+    ) -> Result<usize, GenericTerminalError> {
+        let targets = self
+            .records
+            .values()
+            .filter(|record| record.terminal.workspace_id == workspace)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut terminate_failed = false;
+        for record in &targets {
+            if !terminal_state_requires_termination(record.state) {
+                continue;
+            }
+            if spawner.terminate_reap(&record.terminal).is_err() {
+                terminate_failed = true;
+                continue;
+            }
+            let retained = self.record_mut(&record.terminal)?;
+            retained.state = TerminalRuntimeState::Reclaimed;
+            retained.process = None;
+        }
+        if terminate_failed {
+            self.persist(store)?;
+            return Err(GenericTerminalError::ReconcileRequired(
+                TerminalReconcileState::OrphanRunning,
+            ));
+        }
+        for record in &targets {
+            self.records.remove(&record.terminal.terminal_id.as_str());
+            self.terminals.forget(&record.terminal);
+            self.retention.forget(&record.terminal);
+        }
+        self.persist(store)?;
+        Ok(targets.len())
     }
 
     /// Lists only terminals in the exact requested durable scope. Each entry is
@@ -775,10 +863,26 @@ impl GenericTerminalCoordinator {
     }
 }
 
+fn terminal_state_requires_termination(state: TerminalRuntimeState) -> bool {
+    matches!(
+        state,
+        TerminalRuntimeState::Running
+            | TerminalRuntimeState::ReconcileRequired(
+                TerminalReconcileState::SpawnAmbiguous
+                    | TerminalReconcileState::PersistAfterSpawn
+                    | TerminalReconcileState::OrphanRunning
+            )
+    )
+}
+
+fn terminal_state_blocks_retirement(state: TerminalRuntimeState) -> bool {
+    terminal_state_requires_termination(state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::{collections::BTreeMap, fmt::Write as _, path::PathBuf};
     use usagi_core::domain::{
         agent::EnvironmentVariableName,
         id::{
@@ -856,6 +960,26 @@ mod tests {
             self.0.clone()
         }
     }
+    #[derive(Default)]
+    struct RetiringSpawner(Vec<TerminalRef>);
+    impl GenericPtySpawner for RetiringSpawner {
+        fn spawn(
+            &mut self,
+            _: &ResolvedTerminalLaunch,
+            _: &TerminalRef,
+            _: Geometry,
+        ) -> Result<ProcessIdentity, SpawnFailure> {
+            Ok(process())
+        }
+
+        fn terminate_reap(
+            &mut self,
+            terminal: &TerminalRef,
+        ) -> Result<(), GenericTerminateReapError> {
+            self.0.push(terminal.clone());
+            Ok(())
+        }
+    }
     fn request() -> TerminalLaunchRequest {
         TerminalLaunchRequest {
             profile_id: TerminalProfileId::new("login-shell").unwrap(),
@@ -891,6 +1015,140 @@ mod tests {
             pid: 7,
             start_identity: "start".into(),
             process_group: 7,
+        }
+    }
+
+    #[test]
+    fn workspace_close_terminates_and_forgets_only_that_workspaces_terminals() {
+        let first_request = request();
+        let mut exited_request = request();
+        exited_request.scope.workspace_id = first_request.scope.workspace_id;
+        let second_request = request();
+        let (first, first_fence) = refs(&first_request);
+        let (exited, exited_fence) = refs(&exited_request);
+        let (second, second_fence) = refs(&second_request);
+        let mut coordinator = GenericTerminalCoordinator::new(3, 64, 1);
+        let mut store = Store::default();
+        let mut spawner = RetiringSpawner::default();
+        for (request, terminal, fence) in [
+            (&first_request, first.clone(), first_fence),
+            (&exited_request, exited.clone(), exited_fence),
+            (&second_request, second.clone(), second_fence),
+        ] {
+            coordinator
+                .launch(
+                    request,
+                    terminal,
+                    fence,
+                    Geometry { cols: 80, rows: 24 },
+                    &mut Resolver,
+                    &mut store,
+                    &mut spawner,
+                )
+                .unwrap();
+        }
+        coordinator.exit(&exited, 0, &mut store).unwrap();
+
+        assert_eq!(
+            coordinator.running_count_in_workspace(first.workspace_id),
+            1
+        );
+        assert_eq!(
+            coordinator
+                .close_workspace(first.workspace_id, &mut store, &mut spawner)
+                .unwrap(),
+            2
+        );
+        assert_eq!(spawner.0, vec![first]);
+        assert_eq!(coordinator.snapshot().records.len(), 1);
+        assert_eq!(coordinator.snapshot().records[0].terminal, second);
+    }
+
+    #[test]
+    fn workspace_close_keeps_a_live_terminal_when_termination_fails() {
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+
+        assert_eq!(
+            coordinator.close_workspace(
+                terminal.workspace_id,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            ),
+            Err(GenericTerminalError::ReconcileRequired(
+                TerminalReconcileState::OrphanRunning
+            ))
+        );
+        assert_eq!(coordinator.snapshot().records[0].terminal, terminal);
+    }
+
+    #[test]
+    fn ambiguous_terminal_blocks_retirement_and_is_not_forgotten() {
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        coordinator
+            .records
+            .get_mut(&terminal.terminal_id.as_str())
+            .unwrap()
+            .state =
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterSpawn);
+
+        assert_eq!(
+            coordinator.retirement_blocker_count_in_workspace(terminal.workspace_id),
+            1
+        );
+        assert!(
+            coordinator
+                .close_workspace(
+                    terminal.workspace_id,
+                    &mut store,
+                    &mut Spawner(Ok(process())),
+                )
+                .is_err()
+        );
+        assert_eq!(coordinator.snapshot().records[0].terminal, terminal);
+
+        for state in [
+            TerminalRuntimeState::Running,
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::SpawnAmbiguous),
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterSpawn),
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning),
+        ] {
+            assert!(terminal_state_requires_termination(state));
+        }
+        for state in [
+            TerminalRuntimeState::Reserved,
+            TerminalRuntimeState::Exited,
+            TerminalRuntimeState::Reclaimed,
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+        ] {
+            assert!(!terminal_state_requires_termination(state));
         }
     }
     #[test]
@@ -1553,6 +1811,19 @@ mod tests {
             )
             .unwrap();
         let connection = ConnectionId::new();
+        let mut history = String::new();
+        for line in 0..30 {
+            writeln!(history, "line {line}\r").unwrap();
+        }
+        let history = history.into_bytes();
+        coordinator.output(&terminal, history).unwrap();
+        let before = coordinator.terminal_snapshot(&terminal).unwrap();
+        assert!(
+            usagi_core::usecase::vt_screen::VtScreen::from_checkpoint(&before.screen)
+                .unwrap()
+                .scrollback_len()
+                > 0
+        );
         let attached = coordinator.attach(&terminal, connection).unwrap();
         // A live attachment can write, and the bytes reach the PTY writer.
         let mut pty = Writer::default();
@@ -1567,12 +1838,24 @@ mod tests {
                     input_seq: 0,
                     operation: None,
                 },
-                b"echo ok\n",
+                b"\x0c",
                 &mut pty,
             ),
             Ok(InputAck::Written)
         );
-        assert_eq!(pty.0, b"echo ok\n");
+        assert_eq!(pty.0, b"\x0c");
+        let cleared = coordinator.terminal_snapshot(&terminal).unwrap();
+        assert_eq!(cleared.base_offset, cleared.output_offset);
+        let cleared_screen =
+            usagi_core::usecase::vt_screen::VtScreen::from_checkpoint(&cleared.screen).unwrap();
+        assert_eq!(cleared_screen.scrollback_len(), 0);
+        assert_eq!(cleared_screen.cursor(), (0, 0));
+        assert!(
+            cleared_screen
+                .cells()
+                .iter()
+                .all(|row| row.trim().is_empty())
+        );
         coordinator.exit(&terminal, 0, &mut store).unwrap();
         clock.advance(1000);
         retention.collect();

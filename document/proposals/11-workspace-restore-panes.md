@@ -61,7 +61,7 @@ open workspace
   │
   ├─ FsWorkspaceLoader::open ─► lifecycle snapshot（session 行の復元。既存）
   │
-  ├─ 初回 frame を paint（#193 の first-paint 契約）
+  ├─ 初回 frame を paint（first-paint 契約）
   │
   ├─ local AgentTabIntent を load（欠落は空、corrupt は quarantine、future schema は read-only）
   │
@@ -96,7 +96,7 @@ open workspace
 
 ### tui: open 時 projection と display intent（#388 / #506）
 
-- #193 の非同期 launch-job パターンに従い、**初回 frame paint 後**に scope ごとの `inventory` を off-thread で取得し、
+- 非同期 launch-job パターンに従い、**初回 frame paint 後**に scope ごとの `inventory` を off-thread で取得し、
   UI thread を daemon handshake で直列ブロックしない。
 - versioned `AgentTabIntent` は workspace ID、root / managed-session target、完全な last-known `TerminalRef`、
   `AgentContinuationRef`、tab 順序・選択・dismissal だけを atomic file に保存する。provider ID、argv、environment、

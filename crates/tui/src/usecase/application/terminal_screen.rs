@@ -35,11 +35,21 @@ pub enum TerminalBuffer {
     Alternate,
 }
 
+/// How the focused program expects a paste payload to be encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteMode {
+    /// Send the original payload without terminal markers.
+    Plain,
+    /// Surround the payload with DECSET 2004 paste markers.
+    Bracketed,
+}
+
 /// Input modes requested by the program currently drawing the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalInputModes {
     pub alternate_screen: bool,
     pub application_cursor: bool,
+    pub paste: PasteMode,
     pub mouse_protocol: bool,
     pub mouse_encoding: MouseProtocolEncoding,
 }
@@ -69,6 +79,11 @@ impl TerminalScreen {
         TerminalInputModes {
             alternate_screen: self.screen.active_buffer() == ActiveBuffer::Alternate,
             application_cursor: self.screen.application_cursor(),
+            paste: if self.screen.bracketed_paste() {
+                PasteMode::Bracketed
+            } else {
+                PasteMode::Plain
+            },
             mouse_protocol: self.screen.mouse_protocol(),
             mouse_encoding: self.screen.mouse_encoding(),
         }
@@ -92,6 +107,11 @@ impl TerminalScreen {
     /// Feeds a chunk of raw PTY output into the shared parser.
     pub fn advance(&mut self, bytes: &[u8]) {
         self.screen.advance(bytes);
+    }
+
+    /// Drops primary-screen history and starts a fresh viewport at the top.
+    pub fn clear_for_user(&mut self) -> bool {
+        self.screen.clear_primary_for_user()
     }
 
     /// Changes the visible geometry without replaying historical control bytes.
@@ -320,6 +340,12 @@ impl TerminalScreen {
         self.screen.cells_with_scrollback()
     }
 
+    /// Auto-wrap markers aligned with [`Self::cells_with_scrollback`].
+    #[must_use]
+    pub fn soft_wraps_with_scrollback(&self) -> Vec<bool> {
+        self.screen.soft_wraps_with_scrollback()
+    }
+
     fn retained_row_count(&self) -> usize {
         self.screen.scrollback_len() + self.screen.grid().len()
     }
@@ -363,12 +389,10 @@ fn row_has_content(row: &[Cell]) -> bool {
         .any(|cell| !cell.continuation() && cell.ch() != ' ')
 }
 
-// Keep the ambiguity of terminal_link's wrap reconstruction exactly aligned:
-// a wide glyph whose continuation occupies the last cell is treated as blank
-// in the expanded ANSI-free grid and therefore does not imply wrapping.
+// The parser records auto-wrap separately from cell contents, so a hard line
+// ending exactly at the terminal width is not mistaken for a continuation.
 fn row_wraps(row: &[Cell]) -> bool {
-    row.last()
-        .is_some_and(|cell| !cell.continuation() && cell.ch() != ' ')
+    row.iter().any(Cell::wrapped)
 }
 
 fn render_row(row: &[Cell], cursor: Option<usize>, cursor_style: &str) -> String {
@@ -394,7 +418,7 @@ fn render_row_selected(
     links: Option<(usize, &HashSet<TerminalPoint>)>,
 ) -> String {
     // A cell sits on a detected link when its (row, column) is in the scanned
-    // set; such cells render underlined to mark them clickable (#389).
+    // set; such cells render underlined to mark them clickable.
     let is_link = |column: usize| {
         links.is_some_and(|(row, set)| set.contains(&TerminalPoint { row, column }))
     };
@@ -557,7 +581,9 @@ mod tests {
         // The window renderer must scan back to the logical-line boundary so
         // underline cells and global row coordinates match the full reference.
         let start = 2;
-        let end = full.len().saturating_sub(1);
+        // Stop inside the wrapped URL too, so link scanning must expand both
+        // before and after the requested window.
+        let end = start + 1;
         assert_eq!(
             screen.rows_with_scrollback_window(start, end, true),
             full[start..end]
@@ -565,7 +591,7 @@ mod tests {
         let count = screen.rows_with_scrollback_count(true);
         let (scan_start, scan_end) = screen.logical_scan_range(start, end, count);
         assert!(scan_start < start, "wrapped predecessor was not scanned");
-        assert!(scan_end >= end);
+        assert!(scan_end > end, "wrapped successor was not scanned");
     }
 
     #[test]

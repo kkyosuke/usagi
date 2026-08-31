@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [orchestration, supervisor, epic, daemon, agent]
 dependson: []
-related: [182, 183, 187, 219, 321, 322, 323]
+related: [219, 321, 322, 323]
 created_at: 2026-07-17T21:11:29.509875+00:00
 updated_at: 2026-07-18T02:19:12.921469+00:00
 ---
@@ -19,8 +19,6 @@ agent が task DAG を自動分解して worker へ委譲し、durable な完了
 ## 背景
 
 #321–#323 は session upsert、agent 指定、即時 launch、run_id、caller↔worker binding、durable inbox、worker の完了／失敗報告を提供する。しかし「親が結果を受けて DAG の次 node を選び、再起動後も同じ判断を継続する」state machine、予算・並列・深さ・human escalation、成果物検証と最終完了判定は未実装である。
-
-旧 #182/#183 の issue-DAG orchestration は session/PR 中心の別経路で完了済みであり、本 epic は agent run provenance と dispatch/inbox を使う daemon-owned supervisor を新設する。旧 state を暗黙に再利用・移行しない。
 
 ## 子 issue と依存 DAG
 
@@ -50,5 +48,4 @@ agent が task DAG を自動分解して worker へ委譲し、durable な完了
 
 - LLM に task 分解・次判断の正しさを保証させること。daemon は policy/fence/reducer を担当し、判断内容自体は agent input として扱う。
 - TUI での専用 supervisor UX。
-- 旧 #182 の session/PR-centric plan の自動移行。
 - daemon crash 後の PTY FD 継続。document/proposals/07-pty-crash-continuation.md の範囲である。

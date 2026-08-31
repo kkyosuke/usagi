@@ -71,16 +71,26 @@ pub fn disabled(label: &str, value: &str) -> String {
 /// Render a form action. Disabled actions remain visible but dimmed.
 #[must_use]
 pub fn action(label: &str, focused: bool, enabled: bool) -> String {
-    let marker = modal::selection_marker(focused);
     let style = if enabled {
         Role::Success.style().bold()
     } else {
         Style::new().dim()
     };
+    action_row(&style.paint(&format!("[ {label} ]")), focused)
+}
+
+/// Render an action whose label already carries its own per-character styling.
+#[must_use]
+pub fn action_with_styled_label(label: &str, focused: bool) -> String {
+    action_row(&format!("[ {label} ]"), focused)
+}
+
+fn action_row(control: &str, focused: bool) -> String {
+    let marker = modal::selection_marker(focused);
     let mut row = format!(
         "{marker}{}{}",
         " ".repeat(ACTION_BUTTON_OFFSET - 1),
-        style.paint(&format!("[ {label} ]"))
+        control
     );
     row.push_str(&" ".repeat(ROW_WIDTH.saturating_sub(display_width(&row))));
     row
@@ -88,7 +98,7 @@ pub fn action(label: &str, focused: bool, enabled: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ROW_WIDTH, action, bracketed, disabled, render};
+    use super::{ROW_WIDTH, action, action_with_styled_label, bracketed, disabled, render};
     use crate::presentation::widgets::display_width;
 
     #[test]
@@ -105,6 +115,10 @@ mod tests {
             ROW_WIDTH
         );
         assert_eq!(display_width(&action("Save", true, true)), ROW_WIDTH);
+        assert_eq!(
+            display_width(&action_with_styled_label("styled", true)),
+            ROW_WIDTH
+        );
         assert!(bracketed("Env", "0 variables", false, false).contains("[ 0 variables ]"));
         assert_eq!(
             display_width(&bracketed("Env", "128 variables", false, false)),

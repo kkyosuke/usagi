@@ -11,7 +11,6 @@
 #                             # --no-clean で前回のビルド成果物を再利用する
 
 # 計測対象は v2 workspace（ルートの bin パッケージ + crates/ 配下の 3 クレート）。
-# v1/ は退避された旧実装で、workspace から exclude されているため計測に含まれない。
 #
 # 計測から外す Rust item は、ソースコードの `#[coverage(off)]` を正本とする。
 # Cargo build script はテスト対象ではなく、cargo-llvm-cov のキャッシュ状態によって

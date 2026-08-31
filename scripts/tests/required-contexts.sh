@@ -16,36 +16,26 @@ assert_classification() {
   }
 }
 
-assert_classification $'rust=true\nv1_rust=false\nmarkdown=false' crates/core/src/lib.rs
-assert_classification $'rust=false\nv1_rust=true\nmarkdown=false' v1/src/lib.rs
-assert_classification $'rust=false\nv1_rust=false\nmarkdown=true' v1/document/06-conventions.md
-assert_classification $'rust=false\nv1_rust=false\nmarkdown=true' document/06-conventions.md
-assert_classification $'rust=false\nv1_rust=false\nmarkdown=false' document/assets/update-selector.svg
-assert_classification $'rust=true\nv1_rust=false\nmarkdown=false' scripts/coverage.sh scripts/v1-coverage.sh
-assert_classification $'rust=true\nv1_rust=false\nmarkdown=true' README.md scripts/coverage.sh
-assert_classification $'rust=true\nv1_rust=false\nmarkdown=false' unknown/new-format.data
+assert_classification $'rust=true\nmarkdown=false' crates/core/src/lib.rs
+assert_classification $'rust=false\nmarkdown=true' document/06-conventions.md
+assert_classification $'rust=false\nmarkdown=false' document/assets/update-selector.svg
+assert_classification $'rust=true\nmarkdown=true' README.md scripts/coverage.sh
+assert_classification $'rust=true\nmarkdown=false' unknown/new-format.data
 
 # Rust PR: all Rust aggregates report the heavy jobs; Markdown reports a skip.
 for context in test full-test coverage; do
   "$subject" report true success success
 done
-"$subject" report false success skipped # v1-coverage
 "$subject" report false success skipped
 # Markdown-only PR: Rust aggregates report skips; Markdown reports its heavy job.
 for context in test full-test coverage; do
   "$subject" report false success skipped
 done
-"$subject" report false success skipped # v1-coverage
 "$subject" report true success success
 # Unrelated static asset: every conditional aggregate reports a skip.
-for context in test full-test coverage v1-coverage markdown-link-check; do
+for context in test full-test coverage markdown-link-check; do
   "$subject" report false success skipped
 done
-# v1 Rust PR: only the v1 aggregate runs its heavy job.
-for context in test full-test coverage; do
-  "$subject" report false success skipped
-done
-"$subject" report true success success
 if "$subject" report true success failure 2>/dev/null; then
   echo "report accepted a failed required job" >&2
   exit 1
@@ -55,13 +45,25 @@ if "$subject" report false success skipped failure 2>/dev/null; then
   exit 1
 fi
 
+if output=$(REQUIRED_CONTEXTS_JQ=missing-jq-command "$subject" audit-workflows 2>&1); then
+  echo "audit-workflows accepted a missing jq command" >&2
+  exit 1
+fi
+grep -Fq "'missing-jq-command' is required for audit-workflows" <<<"$output"
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "required context fixtures passed (jq-dependent cases skipped: install jq to run them)"
+  exit 0
+fi
+
 audit_root="$tmp/audit-repo"
 mkdir -p "$audit_root/.github/workflows"
 cp "$repo_root/.github/required-contexts.json" "$audit_root/.github/required-contexts.json"
-for workflow in test.yml enforce-pr-base.yml coverage.yml v1-coverage.yml markdown-link-check.yml; do
+for workflow in test.yml enforce-pr-base.yml coverage.yml markdown-link-check.yml; do
   cp "$repo_root/.github/workflows/$workflow" "$audit_root/.github/workflows/$workflow"
 done
 REQUIRED_CONTEXTS_REPO_ROOT="$audit_root" "$subject" audit-workflows
+grep -Fqx '  push:' "$audit_root/.github/workflows/coverage.yml"
 sed -i.bak 's/^    name: coverage$/    name: coverage-renamed/' \
   "$audit_root/.github/workflows/coverage.yml"
 if REQUIRED_CONTEXTS_REPO_ROOT="$audit_root" "$subject" audit-workflows 2>/dev/null; then
@@ -78,6 +80,9 @@ cat > "$tmp/snapshot.json" <<'JSON'
   "conditions": {"ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}},
   "rules": [
     {"type": "deletion"},
+    {"type": "pull_request", "parameters": {
+      "required_approving_review_count": 1
+    }},
     {"type": "required_status_checks", "parameters": {
       "strict_required_status_checks_policy": true,
       "do_not_enforce_on_create": false,
@@ -90,10 +95,14 @@ JSON
 
 $subject prepare-ruleset "$tmp/snapshot.json" "$tmp/update.json" "$tmp/rollback.json"
 jq -e '.rules[] | select(.type == "required_status_checks")
-  | .parameters.required_status_checks | length == 6' "$tmp/update.json" >/dev/null
-jq -e '.bypass_actors == [{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]' "$tmp/update.json" >/dev/null
+  | .parameters.required_status_checks | length == 5' "$tmp/update.json" >/dev/null
+jq -e '.rules[] | select(.type == "pull_request")
+  | .parameters.required_approving_review_count == 0' "$tmp/update.json" >/dev/null
+jq -e '.bypass_actors == []' "$tmp/update.json" >/dev/null
 jq -e '.rules[] | select(.type == "required_status_checks")
   | .parameters.required_status_checks | length == 1' "$tmp/rollback.json" >/dev/null
+jq -e '.rules[] | select(.type == "pull_request")
+  | .parameters.required_approving_review_count == 1' "$tmp/rollback.json" >/dev/null
 
 jq '. + {id: 17627257}' "$tmp/update.json" > "$tmp/readback.json"
 $subject verify-ruleset "$tmp/readback.json"
@@ -101,6 +110,13 @@ jq '.rules |= map(if .type == "required_status_checks" then .parameters.required
   "$tmp/readback.json" > "$tmp/bad-readback.json"
 if $subject verify-ruleset "$tmp/bad-readback.json"; then
   echo "verify-ruleset accepted missing contexts" >&2
+  exit 1
+fi
+jq '(.rules[] | select(.type == "pull_request")
+  | .parameters.required_approving_review_count) = 1' \
+  "$tmp/readback.json" > "$tmp/bad-review-readback.json"
+if $subject verify-ruleset "$tmp/bad-review-readback.json"; then
+  echo "verify-ruleset accepted an approval-count drift" >&2
   exit 1
 fi
 

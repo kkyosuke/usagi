@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # ビルドは rust-toolchain.toml が pin した nightly で走るため、component も
       # そちらへ届く前提で入れる（正本は document/06-conventions.md）。
@@ -25,24 +25,34 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Update version in Cargo.toml
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          set -euo pipefail
+          scripts/ci/release-version.sh "$RELEASE_VERSION"
+
           # リリース対象はルートの v2 パッケージなので、ルート Cargo.toml の
           # 最初の version = "..." を入力されたバージョンで上書きする。
-          sed -i -e "0,/^version = \".*\"/{s/^version = \".*\"/version = \"${{ inputs.version }}\"/}" Cargo.toml
+          sed -i -e "0,/^version = \".*\"/{s/^version = \".*\"/version = \"${RELEASE_VERSION}\"/}" Cargo.toml
 
           # Cargo.lock も更新
           cargo check --workspace
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "chore: bump version to ${{ inputs.version }}"
-          title: "Release v${{ inputs.version }}"
+          title: "chore: release v${{ inputs.version }}"
+          # 本文は PR テンプレートを通らないため、`Internal-Issue` マーカーを
+          # 生成側で載せる（正本は document/06-conventions.md#プルリクエスト）。
+          # version bump は内部 issue を完了させないので none で固定する。
           body: |
             Bump version to `${{ inputs.version }}` for the next release.
-            
+
             > [!NOTE]
-            > Merging this PR will trigger the \`Auto Release on Version Bump\` workflow to automatically create the release tag and publish the artifacts.
-          branch: "release/v${{ inputs.version }}"
+            > Merging this PR will trigger the `Auto Release on Version Bump` workflow to automatically create the release tag and publish the artifacts.
+
+            Internal-Issue: none
+          branch: "chore/release-v${{ inputs.version }}"
           base: main

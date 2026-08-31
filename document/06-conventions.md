@@ -37,7 +37,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 
 ## 依存クレート
 
-外部依存は**必要になった時点で追加**する（v1 の依存を先回りで持ち込まない）。version は
+外部依存は**必要になった時点で追加**する。version は
 ルート `Cargo.toml` の `[workspace.dependencies]` で一元管理し、各クレートは
 `<crate>.workspace = true` で参照する。
 
@@ -105,6 +105,12 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 
 - タイトルは Conventional Commits 形式に合わせる。
 - 本文には「目的 / 変更内容 / テスト・確認方法」を含める。
+- 本文の `Internal-Issue` は、内部 issue を実装する変更では `#<number>`、内部 issue が無い変更では `none` とする。
+  番号を記した PR は対応する `.usagi/issues/<number>-*.md` を同じ差分で `done` にし、CI がこの同期を検証する。
+- **自動生成 PR も本文の SSoT はこのマーカーである**。本文を自分で組み立てられる生成元
+  （`create-release-pr.yml` のリリース PR）は生成時に `Internal-Issue: none` を書き込む。本文を差し込めない
+  Dependabot だけは author 名（`dependabot[bot]`）で `none` とみなす。この免除は「マーカーを省ける」だけで、
+  issue を `done` へ動かす差分が混ざれば同じように CI が失敗する。
 - ベースブランチは `main`。[CI](#cigithub-actions) が強制する。
 - **PR は Draft で開き、[CI](#cigithub-actions) の必須チェック（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になってから Ready for review にする**。ローカル push では重い full gate を走らせないため（[Git Hooks](#git-hookslefthook)）、最終的な full gate の green は CI で確認する。CI が落ちたら Draft のまま修正して push し直す。
 
@@ -130,15 +136,13 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
   |---|---|
   | workspace 構成・クレート責務・依存ルール | [02-architecture.md](02-architecture.md) |
   | 開発規約 | 本書（06-conventions.md） |
-  | v1 時点の仕様（コマンド・画面・データ構造・orchestration） | [v1/document/](../v1/document/README.md)（退避版。更新しない） |
 
 - **層をまたいで書かない**。v2 の実装が増えて仕様ドキュメントを追加するときも、1 つの事実の置き場所を
   1 か所に保つ。
 
 ### 構造
 
-- **1 ファイル = 1 トピック**。番号付きファイル（`01-` …）で構成し、番号は v1 の `document/` と
-  同じ体系を使う（[目次](README.md) 参照）。
+- **1 ファイル = 1 トピック**。番号付きファイル（`01-` …）で構成する（[目次](README.md) 参照）。
 - ファイルが長くなりすぎたら分割する（目安: 1 ファイル 300 行を超えたら要検討）。実装の内部詳細（コード構造・
   拡張点）は仕様ドキュメントに書かず、`02-architecture.md` か該当コードへのポインタにとどめる。
 
@@ -174,7 +178,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 |---|---|---|
 | 編集中 | フォーマット差分の確認 / コンパイル確認 / 変更 crate・module の test | `cargo fmt --all -- --check` / `cargo check --workspace --all-targets` / 変更箇所に対応する `cargo test -p <crate>` |
 | commit 前 | Lint / risk-based selected tests | `cargo clippy --workspace --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` が示す test（または同等以上の理由付き selected tests） |
-| push 前（ローカル） | Markdown link check（Markdown 差分あり） | `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
+| push 前（ローカル） | Markdown link check（Markdown 差分あり） | `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
 | PR・CI（最終 full gate） | 対象差分の fmt / clippy / full test / coverage 100% / Markdown link check と、全 PR での aggregate context 報告 | `.github/workflows/test.yml` が fmt / clippy / `cargo test --workspace --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する。対象外差分は重い job を省略し、stable aggregate は success を報告する |
 
 PR は Draft で開き、上表の CI 必須チェックが green になってから Ready for review にする（[プルリクエスト](#プルリクエスト)）。
@@ -200,6 +204,7 @@ CI で full test / coverage gate が必須となる条件は次のとおり（�
 - テストカバレッジ 100% を維持する（CI でチェック）。
   - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（ルートの `src/main.rs`）で束ねる。
   - 計測から外す必要がある item には、ファイル名の正規表現ではなく該当する module または function に `#[coverage(off)]` を付ける（外部 module ファイル全体を外す場合は inner attribute の `#![coverage(off)]`）。使用できるのは、テスト可能なロジックを抜いたあとの「実 IO そのもの」、または LLVM coverage が generic の単相化を重複計上する場合に限る。いずれも振る舞いを検証する fake / integration test を残し、除外理由を同じ変更に記録する。未テストの業務ロジック、到達しにくい error path、短期的な coverage 目標の回避には使わない。
+  - `#[coverage(off)]` はその item だけに適用され、内部の closure など別 item には継承されない。除外した合成関数は closure-free に保つか、入れ子の item をテスト可能な関数へ分離し、意図しない未計測 item を作らない。
   - `#[coverage(off)]` は nightly の `coverage_attribute` feature を必要とする。通常の build / test と coverage gate は、同じ nightly toolchain で実行する。
   - **その nightly は `rust-toolchain.toml` で日付 pin する**。`channel = "nightly"` のままだと CI が毎回その日の nightly を取り、新しく安定化した lint が既存コードで一斉に発火して無関係な PR まで Rust lint で落ちる。toolchain の更新は「pin を上げる PR」で意図的に行い、その PR で新 lint の対応もまとめる。CI の workflow は `dtolnay/rust-toolchain@nightly` で component を入れるが、その対象は日付なしの `nightly` なので、pin した toolchain が使う component（`llvm-tools-preview` / `rustfmt` / `clippy`）は `rust-toolchain.toml` の `components` が正本である。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
@@ -224,7 +229,9 @@ fn read_real_pty() { /* OS call only */ }
 凍結されており、これは新規に選べる許可理由ではない。返済時はテストを追加して属性と registry entry を同じ変更で
 削除するか、上記 3 理由のいずれかを証拠テストとともに登録し直す。追加・削除後は `ruby scripts/coverage-off-lint.rb`
 を実行する。source だけの追加、registry だけ残る stale symbol、重複、理由・owner・期限・テスト証跡の欠落、期限切れ、
-許可外理由は CI を失敗させる。現行 debt の領域別 inventory と返済順序は
+許可外理由に加え、[`coverage-off-budget.json`](../coverage-off-budget.json) の owner / path 別 inventory と一致しない
+件数変更は CI を失敗させる。budget 更新は増減を review 上で明示するだけで、許可理由の適合確認を代替しない。
+現行 debt の領域別 inventory と返済順序は
 [8. coverage exclusion inventory](08-coverage.md) を参照する。
 
 ## 変更箇所からの推奨テスト
@@ -283,6 +290,11 @@ daemon の workspace root は**起動時 cwd** で決まるため（[5. daemon](
 | cwd の隔離 | 起動ごとに fixture workspace を `.current_dir()` に設定し、cwd がチェックアウトの内側でないことを assert する |
 | workspace root の回帰検出 | fixture の teardown で、起動した daemon が adopt した workspace（`daemon/w/<digest>/root.json`）がすべて fixture であることを assert する |
 | exact reap | teardown で graceful stop を試み、残った場合だけ `daemon.json` の pid + process-start identity が一致する incarnation へ SIGTERM → SIGKILL と段階的に落とす |
+
+daemon から分離して常駐する bootstrap broker も同じ teardown の対象である。broker は digest-scoped な
+`bootstrap-broker-<digest>.json` に pid + process-start identity を記録する。fixture はまず private socket へ stop を送り、
+残った exact incarnation だけを SIGTERM → SIGKILL で reap する。production の 1 時間 idle timeout は test cleanup の
+代用にしない。
 
 `daemon serve` の直接起動だけでなく、`daemon start` / `daemon restart` と client bootstrap（`session ...` /
 `mcp` / TUI）による間接起動も同じ経路に載せる。自プロセス上に fake daemon を立てるテストの record は reap 対象外に
@@ -379,41 +391,44 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/test.yml` | `main` への push / PR | Rust gate 対象差分では fmt / clippy と full test（`--workspace`）を独立 job で並列実行し、全差分で `test` / `full-test` aggregate を報告 |
-| `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1 を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証（v1 は出荷しないが、tree に残る間は検証する） |
-| `.github/workflows/v1-coverage.yml` | PR | v1 Rust source / manifest 差分では `v1/Cargo.toml` の line/function coverage 100% を強制し、全差分で `v1-coverage` aggregate を報告。gate 自体は `test.yml` の実 crate fixture で検証 |
+| `.github/workflows/test.yml` | `main` への push / PR | Rust gate 対象差分では fmt / clippy、Linux full test（`--workspace`）、Intel / Arm macOS の shipping Agent IPC E2E を独立 job で並列実行し、全差分で `test` / `full-test` aggregate を報告 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
-| `.github/workflows/tui-e2e.yml` | `main` 向け PR / merge queue / 明示的手動実行 | 退避された v1 の実 PTY TUI E2E。PR / merge queue では `v1/Cargo.toml` の `[package].version` が base と異なる場合だけ実行する。v1 はリリース起点ではなくなったため、実質は手動実行の経路である。v2 の実 PTY E2E は `test.yml` の full test に含まれる |
+| `.github/workflows/tui-e2e.yml` | `main` 向け PR / merge queue / 明示的手動実行 | 現行パッケージの実 PTY TUI E2E。PR / merge queue ではルート `Cargo.toml` の `[package].version` が base と異なる場合だけ実行する |
 | `.github/workflows/release-build-check.yml` | ルート `Cargo.toml` / `Cargo.lock`、またはリリース経路の workflow / `rust-toolchain.toml` を変更する PR | リリースと同じ 3 プラットフォーム・同じ `--features production` で `cargo build --release` し、リリースビルドが成功することをマージ前に検証する。host target では installer の version 出力契約も検証する。workflow 自身も trigger に含めるのは、リリース経路を変更する PR では version が動かず、version だけを trigger にすると経路の変更が無検証でマージされるためである |
-| `.github/workflows/coverage.yml` | PR | Rust gate 対象差分では `coverage(off)` registry lint、カバレッジ計測・未達レポート（PR コメント + Job Summary）・100% 未満で失敗し、全差分で `coverage` aggregate を報告 |
+| `.github/workflows/coverage.yml` | `main` への push / PR | Rust gate 対象差分では `coverage(off)` registry lint、カバレッジ計測・未達レポート（PR ではコメント + Job Summary、push では Job Summary）・100% 未満で失敗し、全差分で `coverage` aggregate を報告 |
 | `.github/workflows/markdown-link-check.yml` | `main` への push / PR | Markdown 対象差分ではリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証し、全差分で `markdown-link-check` aggregate を報告 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
+| `.github/workflows/security-audit.yml` | 毎週 / 手動 | `Cargo.lock` を RustSec advisory database と照合する。PR / `main` push では `test.yml` の policy check として同じ audit を実行し、required `test` aggregate が結果を伝播する |
 
+- Rust 依存は Dependabot が毎週更新 PR を作り、GitHub Actions の参照も同じ周期で更新する。RustSec advisory を一時的に
+  除外するときは `.github/security-audit-exceptions.json` に advisory ID、GitHub handle の `owner`、ISO 形式の `expires`、
+  具体的な `rationale` を登録する。`expires` は検証日から 90 日以内とし、期限切れ・必須項目欠落・未知フィールド・重複は
+  audit 前の checker が拒否する。更新には改めて owner と rationale のレビューを必要とし、恒久的な除外は認めない。
 - リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
-- `test.yml` は `scripts/ci/root-readme.sh` でルート `README.md` の最低限の contract（`# usagi` 見出し・`document/` の v2 正本と `v1/` へのリンク・truncation 検出のための本文行数）を検証する。リンクチェックはリンクが 0 本になった README を通してしまい、実際にルート README が 1 行へ破壊されたまま `main` に残った事故があるため、この checker が独立した gate として必要である。checker 自体は `scripts/tests/root-readme.sh` の fixture test で検証する。
+- `test.yml` は `scripts/ci/root-readme.sh` でルート `README.md` の最低限の contract（`# usagi` 見出し・`document/` の正本へのリンク・truncation 検出のための本文行数）を検証する。リンクチェックはリンクが 0 本になった README を通してしまい、実際にルート README が 1 行へ破壊されたまま `main` に残った事故があるため、この checker が独立した gate として必要である。checker 自体は `scripts/tests/root-readme.sh` の fixture test で検証する。
 - Rust の test / coverage workflow は PR または branch ごとに最新の実行だけを継続し、古い commit の実行をキャンセルする。
-- required status check の正本は `.github/required-contexts.json` である。ruleset `17627257` は `test`、
-  `enforce-base-main`、`full-test`、`coverage`、`v1-coverage`、`markdown-link-check` を GitHub Actions（integration ID
+- required status check、review count、bypass actor の正本は `.github/required-contexts.json` である。ruleset `17627257` は `test`、
+  `enforce-base-main`、`full-test`、`coverage`、`markdown-link-check` を GitHub Actions（integration ID
   `15368`）の required context として持つ。各 workflow は path filter をイベントに置かず、軽量な差分判定後に対象の重い job だけを
   実行する。aggregate job は `if: always()` で判定 job と実行 job の結果を検査するため、Rust、Markdown-only、既知の静的 asset の
   どの PR でも同じ context 名を報告し、判定失敗や対象 job 失敗を success へ変換しない。未知 path は fail-safe で Rust gate 対象とする。
 - `scripts/ci/required-contexts.sh audit-workflows` は contract の workflow / job / context 名を照合し、rename drift を検出する。
-  `scripts/tests/required-contexts.sh` は v2 Rust、v1 Rust、Markdown-only、無関係 path の分類と aggregate、ruleset payload の fixture を検証する。
+  `scripts/tests/required-contexts.sh` は Rust、Markdown-only、無関係 path の分類と aggregate、ruleset payload の fixture を検証する。
   workflow 名や job 名を変更するときは、ruleset を先に変更して存在しない context を required にせず、同じ変更で contract と fixture を
   更新する。
 - ruleset 更新では、更新直前の GET response を保存し、`scripts/ci/required-contexts.sh prepare-ruleset` で update payload と
   rollback payload を生成する。PUT 後は GET response へ `verify-ruleset` を実行する。失敗時は保存した rollback payload を同じ ruleset へ
-  PUT する。bypass policy は RepositoryRole ID `5`（admin）の `always` だけを許可し、通常 merge は required context と 1 approval を
-  必須にする。bypass や admin merge は障害復旧など明示的に承認された操作に限り、通常の workflow rollout には使用しない。
+  PUT する。required context を迂回できる actor は置かない。単独 maintainer が自分の PR を merge できるよう approval count は 0 とし、
+  required context の全成功を merge の必須条件にする。緊急時に ruleset を変更する場合も、変更前 snapshot と rollback payload を保存し、
+  復旧後に contract と一致することを `verify-ruleset` で確認する。
 - `coverage.yml` は 100% 計測の前に `scripts/coverage-off-lint.rb` を実行する。lint 自体は `scripts/tests/coverage-off-lint.sh` の fixture（許可 IO、禁止 reducer、理由欠落、stale、追加、削除、期限切れ）で検証し、`test.yml` でも実行する。
 - カバレッジ未達（100% 未満）のとき、`coverage.yml` は `cargo llvm-cov report --json` から**未達ファイルと未達関数**（ファイル path・関数名・宣言行・関数率/行率・不足量・未達行レンジ）のレポートを生成し、PR コメント（同一リポジトリ PR。`marocchino/sticky-pull-request-comment` の header + recreate で再実行時も 1 件に更新）と Job Summary の両方へ出す。Job Summary は権限不要のため fork PR でも一覧が見え、コメント投稿は `continue-on-error` で **coverage gate の合否（exit code）から独立**させる。関数カバレッジは JSON summary（generic の単相化をマージした集計＝gate と一致。lcov の per-monomorphization な `FN/FNDA` を数えると gate と食い違う）を使い、関数名は `c++filt`（binutils。Rust v0 を demangle）で可読化する。出力はファイル/関数/行レンジの上限で切り詰め、超過分は明示する。レポート生成は `scripts/coverage-report-comment.rb`（Ruby, stdlib のみ）に抽出し、`scripts/tests/coverage-report-comment.sh` の fixture test（`test.yml` の script-tests job で実行）で固定する。閾値・対象パッケージ選択の SSoT は `scripts/coverage.sh`。
-- TUI E2E の version 判定は checkout 済みの HEAD ではなく、イベントが渡す base SHA と head SHA のそれぞれから `[package].version` を読む。したがって、同じ `v1/Cargo.toml` を編集しても version が不変なら job は skip され、fork PR でも secrets や書き込み権限を必要としない。merge queue では合成 head と queue base を同じ方法で比較する。手動実行は input を明示して release candidate を再検証するときだけ実行する。
+- TUI E2E の version 判定は checkout 済みの HEAD ではなく、イベントが渡す base SHA と head SHA のそれぞれからルート `[package].version` を読む。version が不変なら job は skip され、fork PR でも secrets や書き込み権限を必要としない。merge queue では合成 head と queue base を同じ方法で比較する。手動実行は input を明示して release candidate を再検証するときだけ実行する。
 
 ## リリース
 
 リリースは **ルート `Cargo.toml` の `version` 変更を起点に自動化**されている。手動でタグを切る必要はない。
-出荷するバイナリは**ルートの v2 パッケージ**であり、`v1/` に退避された実装は出荷しない（`v1/` は
-[CI](#cigithub-actions) の `v1-test.yml` / `v1-coverage.yml` が引き続き検証するが、リリース経路には乗らない）。
+出荷するバイナリは**ルートパッケージ**である。
 
 ### 出荷 artifact の要件
 
@@ -421,7 +436,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 |---|---|
 | feature | `--features production` を付ける。この feature が無い artifact は `USAGI_RUNTIME_MODE` 未指定時に local を既定にするため、利用者のデータが `~/.usagi/local/` に入る（正本は [5. daemon#artifact の既定 mode](05-daemon.md#artifact-の既定-mode)） |
 | toolchain | `rust-toolchain.toml` が pin した nightly。cross target は `rustup target add` で pin した toolchain へ入れる（`dtolnay/rust-toolchain` の `targets:` は日付なし nightly に入るため使わない） |
-| 対象 platform | Linux amd64 / macOS amd64 / macOS arm64 の 3 つ。installer（`scripts/install.sh`）の `platform_asset` は darwin / linux だけを受け付け、それ以外は fail する。加えて v2 は Unix domain socket の IPC と Unix 専用の process / permission API に依存するため Windows ではコンパイルできない |
+| 対象 platform | Linux amd64 / macOS amd64 / macOS arm64 の 3 つ。installer（`scripts/install.sh`）の `platform_asset` はこの OS / architecture の組み合わせだけを受け付け、それ以外は artifact の取得前に fail する。加えて v2 は Unix domain socket の IPC と Unix 専用の process / permission API に依存するため Windows ではコンパイルできない |
 | archive | `usagi-<os>-<arch>.tar.gz`。中身は唯一の top-level entry `usagi`（installer の `verify_archive` が要求する） |
 | verification artifact | 各 archive と同名の `.sha256` と `.version`。installer は両方を必須とし、存在しない旧 release へ無検証 fallback しない |
 | version 出力 | `usagi <version>`（installer の `read_version` が要求する。`release-build-check.yml` が host target でこの契約を検証する） |
@@ -436,9 +451,6 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 
 > version が変わらない push、または同名タグが既に存在する場合はスキップされる。
 
-v2 として最初に出す version は、既存の v1 release（`2.9.1`）より大きくなければならない。小さい version の
-タグを切ると `/releases/latest` が v1 のままになり、installer の既定経路が新しい v2 を選ばない。
-
 ### ワークフロー構成
 
 | ファイル | トリガー | 役割 |
@@ -448,3 +460,7 @@ v2 として最初に出す version は、既存の v1 release（`2.9.1`）よ�
 | `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v2 のビルド（`--features production`）・SHA-256 / version artifact 生成・GitHub Release 作成 |
 
 `release.yml` は `v*` タグの手動 push でも従来どおり動作する（`workflow_call` は追加のトリガー）。
+
+`create-release-pr.yml` は dispatch input を `run:` へ式展開せず環境変数で渡し、
+`scripts/ci/release-version.sh` の SemVer vocabulary を通過した値だけを manifest・PR title・branch に使う。
+生成する title と branch もそれぞれ Conventional Commits と `<type>/<説明>` の規約に従う。

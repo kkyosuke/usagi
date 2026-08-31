@@ -11,6 +11,7 @@ readonly LOCK_DIR="$USAGI_DIR/update.lock"
 STAGE_DIR=""
 LOCK_HELD=0
 SELECTOR_ACTIVE=0
+SELECT_VERSION=0
 
 cleanup() {
     local status=$?
@@ -34,17 +35,18 @@ fail() {
 }
 
 select_release() {
-    local releases release_count selected=1 window_start=1 key sequence version
+    local releases release_count selected=1 window_start=1 key sequence version current_version action
     if [ ! -r /dev/tty ]; then
         fail "a terminal is required to select a release"
     fi
     releases="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" | sed -nE 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"v?([0-9]+\.[0-9]+\.[0-9]+)"[,]?$/\1/p' | awk '!seen[$0]++')"
     [ -n "$releases" ] || fail "could not find any stable releases"
     release_count="$(printf '%s\n' "$releases" | wc -l | tr -d ' ')"
+    current_version="$(read_version "$TARGET")"
 
     SELECTOR_ACTIVE=1
     printf '\033[?25l' > /dev/tty
-    render_release_selector "$releases" "$release_count" "$selected" "$window_start" 0
+    render_release_selector "$releases" "$release_count" "$selected" "$window_start" 0 "$current_version"
     while true; do
         IFS= read -rsn1 key < /dev/tty || fail "could not read release selection"
         case "$key" in
@@ -66,7 +68,11 @@ select_release() {
             j)
                 if [ "$selected" -lt "$release_count" ]; then selected=$((selected + 1)); fi
                 ;;
-            q) printf '\033[?25h\n' > /dev/tty; SELECTOR_ACTIVE=0; fail "release selection cancelled" ;;
+            q)
+                printf '\033[?25h\nリリース選択をキャンセルしたよ\n' > /dev/tty
+                SELECTOR_ACTIVE=0
+                exit 0
+                ;;
             *) continue ;;
         esac
         if [ "$selected" -lt "$window_start" ]; then
@@ -74,13 +80,43 @@ select_release() {
         elif [ "$selected" -ge $((window_start + 5)) ]; then
             window_start=$((selected - 4))
         fi
-        render_release_selector "$releases" "$release_count" "$selected" "$window_start" 1
+        render_release_selector "$releases" "$release_count" "$selected" "$window_start" 1 "$current_version"
     done
     printf '\033[?25h' > /dev/tty
     SELECTOR_ACTIVE=0
     version="$(printf '%s\n' "$releases" | sed -n "${selected}p")"
     [ -n "$version" ] || fail "invalid release selection"
+    action="$(release_action "$current_version" "$version")"
+    case "$action" in
+        downgrade)
+            printf 'v%s から v%s へダウングレードする？ [y/N] ' "$current_version" "$version" > /dev/tty
+            IFS= read -rsn1 key < /dev/tty || fail "could not read downgrade confirmation"
+            printf '\n' > /dev/tty
+            case "$key" in
+                y|Y) ;;
+                *) printf 'ダウングレードをキャンセルしたよ\n' > /dev/tty; exit 0 ;;
+            esac
+            ;;
+    esac
     USAGI_VERSION="v${version}"
+}
+
+release_action() {
+    local current=$1 selected=$2
+    if [ -z "$current" ]; then
+        printf 'install\n'
+    elif [ "$current" = "$selected" ]; then
+        printf 'reinstall\n'
+    else
+        awk -v current="$current" -v selected="$selected" 'BEGIN {
+            split(current, a, "."); split(selected, b, ".");
+            for (i = 1; i <= 3; i++) {
+                if ((a[i] + 0) < (b[i] + 0)) { print "upgrade"; exit }
+                if ((a[i] + 0) > (b[i] + 0)) { print "downgrade"; exit }
+            }
+            print "reinstall"
+        }'
+    fi
 }
 
 resolve_latest_release() {
@@ -94,18 +130,31 @@ resolve_latest_release() {
 }
 
 render_release_selector() {
-    local releases=$1 release_count=$2 selected=$3 window_start=$4 redraw=$5
-    local row index version marker badge c_reset c_bold c_pink c_cyan c_dim
+    local releases=$1 release_count=$2 selected=$3 window_start=$4 redraw=$5 current_version=$6
+    local row index version marker badge action c_reset c_bold c_pink c_cyan c_dim
     c_reset=$'\033[0m'
     c_bold=$'\033[1m'
     c_pink=$'\033[95m'
     c_cyan=$'\033[96m'
     c_dim=$'\033[2m'
 
-    [ "$redraw" -eq 0 ] || printf '\033[12A' > /dev/tty
+    version="$(printf '%s\n' "$releases" | sed -n "${selected}p")"
+    action="$(release_action "$current_version" "$version")"
+    [ "$redraw" -eq 0 ] || printf '\033[14A' > /dev/tty
     printf '%s╭─ usagi update ────────────────────────────╮%s\n' "$c_pink" "$c_reset" > /dev/tty
-    printf '│ %sChoose a version%s                          │\n' "$c_bold" "$c_reset" > /dev/tty
-    printf '│ %s↑/↓ move  •  Enter install  •  q cancel%s   │\n' "$c_dim" "$c_reset" > /dev/tty
+    printf '│ %sバージョンを選択%s                          │\n' "$c_bold" "$c_reset" > /dev/tty
+    printf '│ %s↑/↓ 移動 • Enter 決定 • q キャンセル%s      │\n' "$c_dim" "$c_reset" > /dev/tty
+    if [ -n "$current_version" ]; then
+        printf '│ 現在: v%-34.34s │\n' "$current_version" > /dev/tty
+    else
+        printf '│ 現在: 未インストール%22s│\n' '' > /dev/tty
+    fi
+    case "$action" in
+        install) printf '│ 操作: インストール v%-21.21s │\n' "$version" > /dev/tty ;;
+        reinstall) printf '│ 操作: 再インストール v%-19.19s │\n' "$version" > /dev/tty ;;
+        upgrade) printf '│ 操作: アップグレード v%-19.19s │\n' "$version" > /dev/tty ;;
+        downgrade) printf '│ 操作: ダウングレード v%-19.19s │\n' "$version" > /dev/tty ;;
+    esac
     printf '%s├───────────────────────────────────────────┤%s\n' "$c_pink" "$c_reset" > /dev/tty
     row=0
     while [ "$row" -lt 5 ]; do
@@ -117,12 +166,12 @@ render_release_selector() {
             marker="${c_pink}>${c_reset} "
         fi
         if [ "$index" -eq 1 ] && [ -n "$version" ]; then
-            badge='latest'
+            badge='最新'
         fi
         if [ -n "$version" ]; then
             printf '│ %b%s%-20s%s ' "$marker" "$c_bold" "v${version}" "$c_reset" > /dev/tty
             if [ -n "$badge" ]; then
-                printf '%s%-6s%s%13s│\n' "$c_cyan" "$badge" "$c_reset" '' > /dev/tty
+                printf '%s%s%s%15s│\n' "$c_cyan" "$badge" "$c_reset" '' > /dev/tty
             else
                 printf '%19s│\n' '' > /dev/tty
             fi
@@ -138,7 +187,7 @@ render_release_selector() {
 
 case "${1:-}" in
     --select-version)
-        select_release
+        SELECT_VERSION=1
         ;;
     '')
         ;;
@@ -195,6 +244,10 @@ platform_asset() {
         aarch64|arm64) arch=arm64 ;;
         *) fail "unsupported architecture: $arch" ;;
     esac
+    case "$os-$arch" in
+        linux-amd64|macos-amd64|macos-arm64) ;;
+        *) fail "unsupported platform: $os-$arch" ;;
+    esac
     printf 'usagi-%s-%s.tar.gz\n' "$os" "$arch"
 }
 
@@ -249,9 +302,12 @@ verify_expected_version() {
     printf '%s\n' "$actual"
 }
 
+ASSET_NAME="$(platform_asset)"
+if [ "$SELECT_VERSION" -eq 1 ]; then
+    select_release
+fi
 acquire_lock
 
-ASSET_NAME="$(platform_asset)"
 if [ -z "${USAGI_VERSION:-}" ]; then resolve_latest_release; fi
 case "$USAGI_VERSION" in
     v[0-9]*.[0-9]*.[0-9]*) ;;
@@ -268,7 +324,7 @@ ARCHIVE="$STAGE_DIR/$ASSET_NAME"
 CHECKSUM="$STAGE_DIR/$ASSET_NAME.sha256"
 VERSION_FILE="$STAGE_DIR/$ASSET_NAME.version"
 
-echo "Downloading and verifying $ASSET_NAME..."
+echo "$ASSET_NAME をダウンロードして検証中だよ！ぴょん"
 curl -fsSL "$BASE_URL/$ASSET_NAME" -o "$ARCHIVE"
 curl -fsSL "$BASE_URL/$ASSET_NAME.sha256" -o "$CHECKSUM"
 curl -fsSL "$BASE_URL/$ASSET_NAME.version" -o "$VERSION_FILE"
@@ -317,14 +373,16 @@ printf "   %s(\(\\%s\n" "$C_PINK" "$C_RST"
 printf "   %s%s%s  %s%s%s\n" "$C_PINK" "$FACE" "$C_RST" "$C_BOLD" "$MESSAGE" "$C_RST"
 printf '   %so_(")(")%s  %s→%s  %s%s/usagi%s\n' "$C_PINK" "$C_RST" "$C_DIM" "$C_RST" "$C_CYAN" "$BIN_DIR" "$C_RST"
 printf "\n"
+printf "次回の起動から新しい CLI を使えるよ。起動中の TUI は開き直してね。\n"
+printf "daemon の build が古い場合は 'usagi doctor --fix' で入れ替えてね。\n"
 
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
         echo ""
-        echo "Please add the following line to your shell configuration file (e.g., ~/.bashrc, ~/.zshrc):"
+        echo "次の行を shell の設定ファイル（例: ~/.bashrc、~/.zshrc）へ追加してね："
         echo "  export PATH=\"\$PATH:$BIN_DIR\""
         echo ""
-        echo "After adding, restart your shell or run 'source <your-rc-file>' to apply the changes."
+        echo "追加後に shell を再起動するか、'source <設定ファイル>' を実行してね。"
         ;;
 esac

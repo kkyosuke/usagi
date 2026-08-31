@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, security, orchestration, daemon, agent, claude, codex, sandbox]
 dependson: []
-related: [107, 377, 537, 630]
+related: [377, 537, 630]
 created_at: 2026-08-02T23:13:59.705211+00:00
 updated_at: 2026-08-03T02:26:41.432042+00:00
 ---
@@ -42,5 +42,3 @@ root scopeのEdit/Write、redirect、filesystem mutator、Git worktree/index/ref
 Claude/Codex rootのEdit、Bash write、git add/commit、redirect、symlink write、inline `diff.external`、repository-config diff driverが非0かつrepo/index byte不変となるproduction E2Eを追加する。read-only status/log/diffとsession delegationは成功させる。
 
 ## 既存 issue との差分
-
-#107 はroot guard契約そのものだが、現v2 production wiringはClaude rootに未配線でCodexに同等境界がない。#377 はMCP toolsのapproval省略でfilesystem境界は緩和しない契約、#537 は現Claude root wiringの導入元である。

@@ -5,6 +5,11 @@
 //! replace a session lifecycle or a one-worker dispatch operation.
 
 use crate::mcp::tool::Tool;
+use std::sync::OnceLock;
+use usagi_core::domain::supervisor::{
+    MAX_ARTIFACT_CONTRACT_BYTES, MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES,
+    MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES, MAX_TASK_ID_BYTES,
+};
 
 #[must_use]
 pub fn tools() -> Vec<Box<dyn Tool>> {
@@ -27,8 +32,52 @@ impl Tool for SupervisorStart {
         "daemon 所有の supervisor run を開始する"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"root_task":{"type":"string"},"initial_task_dag":{"type":"array","items":{"type":"object","properties":{"task_id":{"type":"string"},"parent_task_id":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}},"instruction":{"type":"string"},"required_artifact_contract":{"type":"string"}},"required":["task_id","instruction"],"additionalProperties":false}},"policy_selector":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["root_task","idempotency_key"],"additionalProperties":false}"#
+        static SCHEMA: OnceLock<String> = OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "root_task": bounded_string(MAX_SUPERVISOR_TEXT_BYTES),
+                    "initial_task_dag": {
+                        "type": "array",
+                        "maxItems": MAX_INITIAL_TASKS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task_id": bounded_string(MAX_TASK_ID_BYTES),
+                                "parent_task_id": bounded_string(MAX_TASK_ID_BYTES),
+                                "dependencies": {
+                                    "type": "array",
+                                    "maxItems": MAX_TASK_DEPENDENCIES,
+                                    "items": bounded_string(MAX_TASK_ID_BYTES),
+                                },
+                                "instruction": bounded_string(MAX_SUPERVISOR_TEXT_BYTES),
+                                "required_artifact_contract": bounded_string(
+                                    MAX_ARTIFACT_CONTRACT_BYTES,
+                                ),
+                            },
+                            "required": ["task_id", "instruction"],
+                            "additionalProperties": false,
+                        },
+                    },
+                    "policy_selector": bounded_string(MAX_SUPERVISOR_KEY_BYTES),
+                    "idempotency_key": bounded_string(MAX_SUPERVISOR_KEY_BYTES),
+                },
+                "required": ["root_task", "idempotency_key"],
+                "additionalProperties": false,
+            })
+            .to_string()
+        })
     }
+}
+
+fn bounded_string(maximum: usize) -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": maximum,
+        "x-maxUtf8Bytes": maximum,
+    })
 }
 pub struct SupervisorGet;
 impl Tool for SupervisorGet {
@@ -88,5 +137,36 @@ impl Tool for SupervisorEvents {
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"supervisor_run_id":{"type":"string"},"after_sequence":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["supervisor_run_id"],"additionalProperties":false}"#
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_schema_is_derived_from_the_domain_resource_policy() {
+        let schema: serde_json::Value =
+            serde_json::from_str(SupervisorStart.input_schema()).unwrap();
+        let properties = &schema["properties"];
+        assert_eq!(
+            properties["root_task"]["x-maxUtf8Bytes"],
+            MAX_SUPERVISOR_TEXT_BYTES
+        );
+        assert_eq!(
+            properties["initial_task_dag"]["maxItems"],
+            MAX_INITIAL_TASKS
+        );
+        let task = &properties["initial_task_dag"]["items"]["properties"];
+        assert_eq!(task["task_id"]["maxLength"], MAX_TASK_ID_BYTES);
+        assert_eq!(task["dependencies"]["maxItems"], MAX_TASK_DEPENDENCIES);
+        assert_eq!(
+            task["required_artifact_contract"]["maxLength"],
+            MAX_ARTIFACT_CONTRACT_BYTES
+        );
+        assert_eq!(
+            properties["idempotency_key"]["maxLength"],
+            MAX_SUPERVISOR_KEY_BYTES
+        );
     }
 }

@@ -46,7 +46,6 @@ const TOOLS_CLOSE: &str = "</tools>";
 const SESSION_TOOLS: &str = "- session: session の作成・観測・委譲・完了報告は daemon が権威です。手順は resource usagi://guides/orchestration を読んでください。";
 const ISSUE_TOOLS: &str = "- issue: 作業の起点となる backlog を検索・参照できます。git 追跡下のため、書き込みは session worktree からだけ受理されます。";
 const MEMORY_TOOLS: &str = "- memory: session をまたいで残す判断や制約を検索・保存できます。";
-const LOCAL_LLM_TOOLS: &str = "- local_llm_ask: トークン節約のため、要約・命名・定型文の生成・単純な変換といった軽量で重要度の低いタスクは委譲してください。判断が必要な作業や重要な実装はあなた自身が行ってください。";
 
 /// The immutable boundary of the checkout the launch runs in.
 #[must_use]
@@ -93,7 +92,6 @@ fn tool_lines(families: McpToolFamilies) -> impl Iterator<Item = &'static str> {
         Some(SESSION_TOOLS),
         families.issue.then_some(ISSUE_TOOLS),
         families.memory.then_some(MEMORY_TOOLS),
-        families.local_llm.then_some(LOCAL_LLM_TOOLS),
     ]
     .into_iter()
     .flatten()
@@ -103,31 +101,28 @@ fn tool_lines(families: McpToolFamilies) -> impl Iterator<Item = &'static str> {
 mod tests {
     use super::*;
 
-    /// The session boundary is still byte-identical to v1. The root boundary
-    /// deliberately diverges: v1 named the issue store there, and that fact now
-    /// lives in the tools fragment, which knows whether the store is enabled.
-    const V1_SESSION_SCOPE: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n</instructions>";
+    /// Stable session boundary. Tool availability lives in the separate tools
+    /// fragment so this text names no concrete tool.
+    const SESSION_SCOPE_CONTRACT: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n</instructions>";
 
     const ALL: McpToolFamilies = McpToolFamilies {
         issue: true,
         memory: true,
-        local_llm: true,
     };
     const NONE: McpToolFamilies = McpToolFamilies {
         issue: false,
         memory: false,
-        local_llm: false,
     };
 
     #[test]
-    fn the_session_boundary_is_byte_identical_to_v1_and_names_no_tool() {
+    fn the_session_boundary_matches_its_stable_contract_and_names_no_tool() {
         assert_eq!(
             scope_prompt(PromptScope::Session).as_bytes(),
-            V1_SESSION_SCOPE.as_bytes()
+            SESSION_SCOPE_CONTRACT.as_bytes()
         );
         for scope in [PromptScope::Root, PromptScope::Session] {
             let boundary = scope_prompt(scope);
-            for tool in ["issue", "memory", "tools/list", "local_llm_ask"] {
+            for tool in ["issue", "memory", "tools/list"] {
                 assert!(
                     !boundary.contains(tool),
                     "{tool} leaked into the {scope:?} boundary"
@@ -166,13 +161,6 @@ mod tests {
                 },
                 MEMORY_TOOLS,
             ),
-            (
-                McpToolFamilies {
-                    local_llm: true,
-                    ..NONE
-                },
-                LOCAL_LLM_TOOLS,
-            ),
         ] {
             let prompt = launch_system_prompt(PromptScope::Session, Some(families), None);
             assert!(!baseline.contains(line), "{line} is not gated");
@@ -194,19 +182,19 @@ mod tests {
             Some((&id, "Review correctness.")),
         );
 
-        assert!(prompt.starts_with(V1_SESSION_SCOPE));
+        assert!(prompt.starts_with(SESSION_SCOPE_CONTRACT));
         assert!(prompt.ends_with("<role id=\"reviewer\">\nReview correctness.\n</role>"));
         assert_eq!(prompt.matches("<tools>").count(), 1);
         assert_eq!(prompt.matches("</tools>").count(), 1);
         assert_eq!(prompt.matches("<role id=").count(), 1);
 
-        let boundary = prompt.find(V1_SESSION_SCOPE).unwrap();
+        let boundary = prompt.find(SESSION_SCOPE_CONTRACT).unwrap();
         let tools = prompt.find("<tools>").unwrap();
         let role = prompt.find("<role id=").unwrap();
         assert!(boundary < tools && tools < role);
 
         // Every enabled family appears once, in the declared order.
-        let lines: Vec<usize> = [SESSION_TOOLS, ISSUE_TOOLS, MEMORY_TOOLS, LOCAL_LLM_TOOLS]
+        let lines: Vec<usize> = [SESSION_TOOLS, ISSUE_TOOLS, MEMORY_TOOLS]
             .iter()
             .map(|line| {
                 assert_eq!(prompt.matches(line).count(), 1);
