@@ -301,7 +301,7 @@ impl Tool for SessionPrompt {
         "session_prompt"
     }
     fn description(&self) -> &'static str {
-        "既存セッションの agent に指示（プロンプト）を送るときに使う。name と prompt が必須。mode で配送先を選ぶ（auto=daemon が live/queue を判定、queue=起動時キュー、live=実行中端末へ直接）。"
+        "実行中の既存 session agent に追加指示を送る。name と prompt は必須。auto（既定）/live は live agent が無ければ失敗し、agent を起動したい場合は session_dispatch を使う。queue は次回起動まで待たせることを意図した場合だけ使う。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"mode":{"type":"string","enum":["auto","queue","live"]},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name","prompt"]}"#

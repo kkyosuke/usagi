@@ -242,6 +242,22 @@ fn production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_do
 fn production_session_prompt_is_durable_and_status_observes_the_session() {
     let mut mcp = McpHarness::start();
     assert!(mcp.tool("session_create", &json!({"name":"prompt-target"}))["error"].is_null());
+    let auto = mcp.tool(
+        "session_prompt",
+        &json!({"name":"prompt-target","prompt":"do not defer me"}),
+    );
+    assert_eq!(auto["error"]["code"], -32603, "{auto}");
+    assert!(
+        auto["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("use session_dispatch")
+    );
+    let workspace_dispatch =
+        fs::read_to_string(mcp.data_dir().join("daemon/dispatch-workspaces.json"))
+            .unwrap_or_default();
+    assert!(!workspace_dispatch.contains("do not defer me"));
+
     let response = mcp.tool(
         "session_prompt",
         &json!({"name":"prompt-target","prompt":"continue the task","mode":"queue"}),

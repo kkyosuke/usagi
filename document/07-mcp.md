@@ -166,7 +166,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_create` / `session_recover_legacy` | daemon IPC を通じて session lifecycle store と worktree を操作する |
 | `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
-| `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、handshake で fence した workspace と optional session が一致する次回 Agent launch 用 durable queue または live Agent PTY へ配送する |
+| `session_prompt` | `auto` / `live` は handshake で fence した workspace と optional session が一致する live Agent PTY へ配送し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ durable queue へ配送する。停止中の Agent を起動する入口は `session_dispatch` とする |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
 | `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する。失敗時は作成した session を巻き戻す（[delegation の atomicity](#delegation-の-atomicity)） |
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |

@@ -957,10 +957,10 @@ impl AgentRuntime {
                     && record.runtime.session_id == session
                     && record.state == super::runtime::RuntimeState::Running
             });
-        if matches!(mode, PromptMode::Live) && live.is_none() {
+        if matches!(mode, PromptMode::Auto | PromptMode::Live) && live.is_none() {
             return Err(ProtocolError::new(
                 ErrorCode::Unavailable,
-                "target session has no live agent",
+                "target session has no live agent; use session_dispatch to start it or mode=queue for intentional deferred delivery",
             ));
         }
         if matches!(mode, PromptMode::Queue) && live.is_some() {
@@ -2398,12 +2398,22 @@ impl AgentRuntime {
                 "A child report is ready (run {}). Read your session inbox, verify the result, aggregate all required children, then report only to your caller. Summary: {}",
                 message.run_id, message.summary
             );
-            let _ = self.prompt(
-                workspace,
-                delivered_to.session_id,
-                &notice,
-                PromptMode::Auto,
-            );
+            if self
+                .prompt(
+                    workspace,
+                    delivered_to.session_id,
+                    &notice,
+                    PromptMode::Live,
+                )
+                .is_err()
+            {
+                let _ = self.prompt(
+                    workspace,
+                    delivered_to.session_id,
+                    &notice,
+                    PromptMode::Queue,
+                );
+            }
         }
         Ok(ReportDelivery {
             delivered_to,
@@ -5606,7 +5616,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn queued_prompt_is_consumed_by_launch_and_auto_then_delivers_live() {
+    fn queued_prompt_is_explicitly_consumed_by_launch_and_auto_only_delivers_live() {
         let mut runtime = runtime();
         let launch_intent = intent(None);
         let workspace = launch_intent.workspace;
@@ -5626,8 +5636,22 @@ mod tests {
                 .code,
             ErrorCode::Unavailable
         );
+        assert_eq!(
+            runtime
+                .prompt(workspace, Some(session), "start me", PromptMode::Auto)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        assert!(
+            runtime
+                .dispatch
+                .queued_prompt(workspace, Some(session))
+                .unwrap()
+                .is_none()
+        );
         let queued = runtime
-            .prompt(workspace, Some(session), "queued work", PromptMode::Auto)
+            .prompt(workspace, Some(session), "queued work", PromptMode::Queue)
             .unwrap();
         assert_eq!(queued.delivered_to, "queue");
         assert!(
