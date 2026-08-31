@@ -1,8 +1,8 @@
 //! Session Garden の純粋な描画サンプル。
 //!
-//! daemon の状態を所有せず、表示用に閉じた [`GardenSession`] を固定 plot に並べる。
-//! frame と同じ layout から [`GardenHitbox`] も返すため、後続実装は座標から session
-//! identity を再計算せず click target を解決できる。
+//! daemon の状態を所有せず、表示用に閉じた [`GardenSession`] を広い world または
+//! compact plot に並べる。frame と同じ layout から [`GardenHitbox`] も返すため、
+//! 後続実装は座標から session identity を再計算せず click target を解決できる。
 
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
@@ -11,6 +11,7 @@ use crate::presentation::theme::{Role, Style, garden_rabbit_style};
 
 use super::agent_status;
 use super::button::InlineButton;
+use super::garden_world;
 use super::{clip_to_width, display_width, pad_to_width};
 use usagi_core::domain::agent::AgentStatus as DispatchAgentStatus;
 
@@ -91,7 +92,7 @@ pub struct GardenSession {
     pub selected: bool,
     pub failure_summary: Option<String>,
     /// Whether the active workspace controller observed Agent membership for
-    /// this plot. Inactive project snapshots set this false instead of claiming
+    /// this session. Inactive project snapshots set this false instead of claiming
     /// that an empty cached list means the session owns no Agents.
     pub agents_observed: bool,
     pub agents: Vec<GardenAgent>,
@@ -115,8 +116,8 @@ pub type GardenAgent = agent_status::AgentStatus;
 pub struct GardenHitbox {
     pub session_id: SessionId,
     /// この rectangle が 1 羽のうさぎ（= 1 agent）なら、その stable runtime identity。
-    /// `None` は区画そのもの（nameplate・status 行・うさぎの居ない余白）で、click は
-    /// session の訪問だけを意味する。
+    /// `None` は session の巣穴（compact 表示では区画そのもの）で、click は session
+    /// の訪問だけを意味する。
     pub agent: Option<AgentRuntimeId>,
     pub column: usize,
     pub row: usize,
@@ -125,7 +126,7 @@ pub struct GardenHitbox {
 }
 
 impl GardenHitbox {
-    /// terminal cell がこの plot に含まれるか。
+    /// terminal cell がこの target に含まれるか。
     #[must_use]
     pub const fn contains(self, column: usize, row: usize) -> bool {
         column >= self.column
@@ -159,14 +160,16 @@ impl GardenScrollHitbox {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GardenFrame {
     pub rows: Vec<String>,
-    /// うさぎの rectangle は必ず、それを含む区画の rectangle より **先** に並ぶ。
-    /// click 解決は最初に当たったものを採るため、うさぎが区画に優先する。
+    /// うさぎの rectangle は必ず session の巣穴／区画より **先** に並ぶ。
+    /// click 解決は最初に当たったものを採るため、重なった絵では最後に描いた
+    /// うさぎが優先し、すべてのうさぎは巣穴／区画に優先する。
     pub hitboxes: Vec<GardenHitbox>,
     /// Footer の左 / 右 scroll button。描画した span と click 範囲を共有する。
     pub scroll_hitboxes: Vec<GardenScrollHitbox>,
-    /// 描画した左端の 0-based plot 列。要求値が範囲外なら末尾へ clamp する。
+    /// 描画した 0-based 横位置。world では 16 cell 単位、compact 表示では区画列単位。
+    /// 要求値が範囲外なら末尾へ clamp する。
     pub scroll: usize,
-    /// 左端にできる最大の plot 列 offset。
+    /// 左端にできる最大の横位置 offset。
     pub max_scroll: usize,
     /// 端末に収まらず描画しなかった session 数。
     pub hidden_sessions: usize,
@@ -296,6 +299,80 @@ pub fn render_scrolled(
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
     let layout = garden_layout(height, width)?;
+    if let Some(mut frame) = garden_world::render(
+        height,
+        layout.garden_width,
+        workspace_name,
+        sessions,
+        requested_scroll,
+        tick,
+        reduced_motion,
+    ) {
+        let visible_sessions = sessions
+            .iter()
+            .filter(|session| {
+                frame
+                    .hitboxes
+                    .iter()
+                    .any(|hitbox| hitbox.session_id == session.id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        attach_world_notification_panel(
+            &mut frame.rows,
+            width,
+            layout,
+            workspace_name,
+            sessions,
+            &visible_sessions,
+        );
+        return Some(frame);
+    }
+    render_compact_scrolled(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        requested_scroll,
+        tick,
+        reduced_motion,
+    )
+}
+
+fn attach_world_notification_panel(
+    rows: &mut [String],
+    width: usize,
+    layout: GardenLayout,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    visible_sessions: &[GardenSession],
+) {
+    let footer_start = rows.len().saturating_sub(FOOTER_ROWS);
+    let body_height = footer_start.saturating_sub(1);
+    let notifications = notification_rows(body_height, layout.notification_width, visible_sessions);
+    rows[0] = header_line(width, workspace_name, sessions);
+    for (row, notification) in rows[1..footer_start].iter_mut().zip(notifications) {
+        attach_notification_row(row, width, layout, &notification);
+    }
+    for row in &mut rows[footer_start..] {
+        *row = pad_to_width(row, width);
+    }
+}
+
+/// Fixed-plot fallback kept for terminals that cannot hold the roaming world.
+///
+/// The compact renderer remains separately testable because it is a real production
+/// fallback, not a historical implementation hidden behind test-only cfg.
+fn render_compact_scrolled(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    requested_scroll: usize,
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<GardenFrame> {
+    let layout = garden_layout(height, width)?;
     let GardenViewport {
         scroll,
         max_scroll,
@@ -415,17 +492,26 @@ fn attach_notification_panel(
     let notifications =
         notification_rows(layout.garden_height, layout.notification_width, sessions);
     for (row, notification) in body.iter_mut().zip(notifications) {
-        let garden = pad_to_width(row, layout.garden_width);
-        let separator = Style::new().dim().paint("│");
-        *row = pad_to_width(
-            &format!(
-                "{garden}{separator} {}{}",
-                pad_to_width(&notification, layout.notification_width),
-                " ".repeat(SIDE_PADDING)
-            ),
-            width,
-        );
+        attach_notification_row(row, width, layout, &notification);
     }
+}
+
+fn attach_notification_row(
+    row: &mut String,
+    width: usize,
+    layout: GardenLayout,
+    notification: &str,
+) {
+    let garden = pad_to_width(row, layout.garden_width);
+    let separator = Style::new().dim().paint("│");
+    *row = pad_to_width(
+        &format!(
+            "{garden}{separator} {}{}",
+            pad_to_width(notification, layout.notification_width),
+            " ".repeat(SIDE_PADDING)
+        ),
+        width,
+    );
 }
 
 /// Render the current viewport's session state as a compact notification list.
@@ -678,6 +764,16 @@ pub fn canonical_tick_scrolled(
     reduced_motion: bool,
 ) -> Option<u64> {
     let layout = garden_layout(height, width)?;
+    if let Some(canonical) = garden_world::canonical_tick(
+        height,
+        layout.garden_width,
+        sessions,
+        requested_scroll,
+        tick,
+        reduced_motion,
+    ) {
+        return Some(canonical);
+    }
     let viewport = garden_viewport(layout, sessions.len(), requested_scroll);
     let sessions = &sessions[viewport.visible_start..viewport.visible_end];
     if reduced_motion || !sessions.iter().any(session_may_animate) {
@@ -1250,10 +1346,7 @@ fn centered(width: usize, value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        GRASS, GardenAgent, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, SOIL, render,
-        render_scrolled,
-    };
+    use super::{GRASS, GardenAgent, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, SOIL};
     use crate::presentation::widgets::display_width;
     use usagi_core::domain::agent::AgentStatus as DispatchAgentStatus;
     use usagi_core::domain::id::{AgentRuntimeId, SessionId};
@@ -1261,6 +1354,45 @@ mod tests {
 
     /// animation offset が 0 になる id（先頭 2 桁が `00`）。tick をそのまま phase として扱える。
     const STEADY_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+    fn render(
+        height: usize,
+        width: usize,
+        workspace_name: &str,
+        sessions: &[GardenSession],
+        tick: u64,
+        reduced_motion: bool,
+    ) -> Option<super::GardenFrame> {
+        super::render_compact_scrolled(
+            height,
+            width,
+            workspace_name,
+            sessions,
+            0,
+            tick,
+            reduced_motion,
+        )
+    }
+
+    fn render_scrolled(
+        height: usize,
+        width: usize,
+        workspace_name: &str,
+        sessions: &[GardenSession],
+        scroll: usize,
+        tick: u64,
+        reduced_motion: bool,
+    ) -> Option<super::GardenFrame> {
+        super::render_compact_scrolled(
+            height,
+            width,
+            workspace_name,
+            sessions,
+            scroll,
+            tick,
+            reduced_motion,
+        )
+    }
 
     /// 区画そのものの rectangle だけ（うさぎ 1 羽ずつの rectangle を除く）。
     fn plots(frame: &super::GardenFrame) -> Vec<super::GardenHitbox> {
@@ -1305,6 +1437,21 @@ mod tests {
 
     fn plain(frame: &super::GardenFrame) -> Vec<String> {
         frame.rows.iter().map(|row| plain_row(row)).collect()
+    }
+
+    #[test]
+    fn public_render_routes_to_the_layout_selected_for_the_terminal() {
+        let session = session(
+            STEADY_ID,
+            "world",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        let frame = super::render(24, 120, "atlas", &[session], 0, false).expect("garden fits");
+        let text = plain(&frame).join("\n");
+        assert!(text.contains("click a usagi"));
+        assert!(text.contains("Notifications"));
+        assert!(text.contains('~'));
     }
 
     #[test]
@@ -1987,7 +2134,7 @@ mod tests {
             assert!(!text.contains("growing"), "{text}");
             assert!(!text.contains("heading home"), "{text}");
             assert_eq!(
-                super::canonical_tick(24, 100, std::slice::from_ref(&cached), 5, false),
+                super::canonical_tick(17, 100, std::slice::from_ref(&cached), 5, false),
                 Some(0)
             );
         }
@@ -2165,12 +2312,12 @@ mod tests {
             AgentPhase::Ready,
         );
         assert_eq!(
-            super::canonical_tick(24, 100, std::slice::from_ref(&idle), 1, false),
-            super::canonical_tick(24, 100, std::slice::from_ref(&idle), 0, false),
+            super::canonical_tick(17, 100, std::slice::from_ref(&idle), 1, false),
+            super::canonical_tick(17, 100, std::slice::from_ref(&idle), 0, false),
             "a held pose stays collapsed across the cycle boundary"
         );
         assert_eq!(
-            super::canonical_tick(24, 100, std::slice::from_ref(&idle), 4, false),
+            super::canonical_tick(17, 100, std::slice::from_ref(&idle), 4, false),
             Some(4)
         );
 
@@ -2181,7 +2328,7 @@ mod tests {
             AgentPhase::Running,
         );
         let tick = 3;
-        let canonical = super::canonical_tick(24, 100, std::slice::from_ref(&running), tick, false)
+        let canonical = super::canonical_tick(17, 100, std::slice::from_ref(&running), tick, false)
             .expect("fits");
         assert_eq!(
             render(24, 100, "x", std::slice::from_ref(&running), tick, false)
@@ -2206,11 +2353,11 @@ mod tests {
             AgentPhase::Waiting,
         );
         assert_eq!(
-            super::canonical_tick(24, 100, std::slice::from_ref(&waiting), 5, false),
+            super::canonical_tick(17, 100, std::slice::from_ref(&waiting), 5, false),
             Some(5)
         );
-        assert_eq!(super::canonical_tick(24, 100, &[waiting], 5, true), Some(0));
-        assert_eq!(super::canonical_tick(24, 100, &[], 5, false), Some(0));
+        assert_eq!(super::canonical_tick(17, 100, &[waiting], 5, true), Some(0));
+        assert_eq!(super::canonical_tick(17, 100, &[], 5, false), Some(0));
         assert_eq!(super::canonical_tick(12, 100, &[], 5, false), None);
     }
 

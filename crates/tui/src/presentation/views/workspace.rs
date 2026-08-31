@@ -4922,7 +4922,9 @@ mod tests {
                 .any(|agent| agent.phase == AgentPhase::Running)
         );
 
-        let frame = render_home_at(24, 100, &home, now());
+        // A wide viewport keeps every virtual-world home in this aggregate phase fixture.
+        // Ordinary terminals pan through the same material one region at a time.
+        let frame = render_home_at(24, 540, &home, now());
         let text = frame
             .iter()
             .map(|line| strip(line))
@@ -4930,14 +4932,14 @@ mod tests {
             .join("\n");
         assert_eq!(frame.len(), 24);
         // Garden が Home を置き換えている（sidebar ではなく庭の footer が出る）。
-        assert!(text.contains("Garden · ←/→ scroll · click"));
-        assert!(text.contains("Esc · return"));
+        assert!(text.contains("Garden · click a usagi"));
+        assert!(text.contains("any key · wake"));
         assert!(text.contains("Notifications"));
         assert!(text.contains("running"));
         assert!(text.contains("waiting"));
         assert!(text.contains("1 run · 1 done"));
         assert!(!text.contains("> s0"));
-        assert!(text.contains("1-4 / 5"));
+        assert!(text.contains("failed · worktree missing"));
         assert!(text.contains("s0"));
 
         // 最小サイズに満たない端末では Garden を開かず Home を保つ。操作できる一覧を
@@ -5211,8 +5213,8 @@ mod tests {
         let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
 
         let frame = garden_frame(24, 100, &home, now()).expect("the garden owns this frame");
-        // Agent の居ない庭なので、rectangle は区画ぶんだけである。
-        assert_eq!(frame.hitboxes.len(), 3);
+        // Agent の居ない compact 庭なので、rectangle は区画ぶんだけである。
+        assert_eq!(frame.hitboxes.len(), ids.len());
         assert!(frame.hitboxes.iter().all(|hitbox| hitbox.agent.is_none()));
         for hitbox in &frame.hitboxes {
             let column = u16::try_from(hitbox.column + hitbox.width / 2).expect("fits a u16");
@@ -5248,12 +5250,8 @@ mod tests {
         assert_eq!(garden_scroll_action(12, 100, &home, now(), true), None);
     }
 
-    #[test]
-    fn garden_horizontal_scroll_reaches_later_projects_with_keyboard_and_footer_buttons() {
-        let active_workspace = WorkspaceId::new();
-        let mut state = AppState::home(active_workspace, Vec::new());
-        let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
-        let rows = (0..5)
+    fn garden_project_rows() -> Vec<(WorkspaceId, widgets::garden::GardenSession)> {
+        (0..5)
             .map(|index| {
                 let workspace = WorkspaceId::new();
                 let session = SessionId::new();
@@ -5272,7 +5270,15 @@ mod tests {
                     },
                 )
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    #[test]
+    fn garden_horizontal_scroll_reaches_later_projects_with_keyboard_and_footer_buttons() {
+        let active_workspace = WorkspaceId::new();
+        let mut state = AppState::home(active_workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let rows = garden_project_rows();
         let (later_workspace, later_session) = (rows[4].0, rows[4].1.id);
         let project = |state: &AppState| {
             HomeProjection::from_state(state, "active", Path::new("/work"), &[])
@@ -5391,22 +5397,28 @@ mod tests {
             .filter(|hitbox| hitbox.agent.is_some())
             .collect::<Vec<_>>();
         assert_eq!(rabbits.len(), 2);
-        // うさぎは区画の内側にあり、区画より先に並ぶ（click は先に当たったものを採る）。
-        let plot = frame
+        // うさぎは巣穴より先に並ぶ。複数の動く sprite が重なった cell では、
+        // 実際に後から描かれた（hitbox 上は先頭の）うさぎを click 対象にする。
+        let home_hitbox = frame
             .hitboxes
             .iter()
             .position(|hitbox| hitbox.agent.is_none())
-            .expect("the plot itself is a target");
-        assert_eq!(plot, 2);
+            .expect("the home itself is a target");
+        assert_eq!(home_hitbox, 2);
         for rabbit in rabbits {
             let column = u16::try_from(rabbit.column + rabbit.width / 2).expect("fits a u16");
             let row = u16::try_from(rabbit.row + rabbit.height / 2).expect("fits a u16");
+            let topmost_agent = frame
+                .hitboxes
+                .iter()
+                .find(|hitbox| hitbox.contains(usize::from(column), usize::from(row)))
+                .and_then(|hitbox| hitbox.agent);
             assert_eq!(
                 garden_click_at(24, 100, &home, now(), column, row),
                 Some(GardenClick::Visit {
                     workspace,
                     session,
-                    agent: rabbit.agent,
+                    agent: topmost_agent,
                 }),
             );
             assert!(
@@ -5415,8 +5427,8 @@ mod tests {
                     .any(|runtime| Some(runtime.agent_runtime_id) == rabbit.agent)
             );
         }
-        // nameplate 行は区画そのものなので、agent を名指さない。
-        let nameplate = frame.hitboxes[plot];
+        // nameplate 行は巣穴そのものなので、agent を名指さない。
+        let nameplate = frame.hitboxes[home_hitbox];
         assert_eq!(
             garden_click_at(
                 24,

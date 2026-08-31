@@ -48,9 +48,9 @@ workspace を開くと Home へ移る。最上段の project tab bar には同�
 選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。`+ Open` は左右の余白を
 含めてクリックでき、登録済み workspace の複数選択に加えて `Tab` から既存ディレクトリを直接追加できる。overlay を
 開いている間は別の usagi が追加した workspace も自動で一覧へ反映される。Session Garden では開いている全 project の
-session をまとめて見渡せる。workspace root の
-shell は header の `[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。Session Garden はうさぎを左へ寄せ、
-右の `Notifications` に `Agent completed.` や入力待ちなど、現在の状態を短い文で表示する。
+session を巣穴として、Agent のうさぎが池・餌場・木陰を行き来する共有の庭を見渡せる。右の `Notifications` は
+`Agent completed.` や入力待ちなど、現在の viewport の状態を短い文で表示する。workspace root の shell は header の
+`[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。
 
 ```text
  1 usagi   2 api   3 web   + Open
