@@ -1477,11 +1477,10 @@ fn run_config_save_loading<T: Send>(
         false,
         false,
         operation,
-        |height, width, frame, _status, _show_progress| {
-            if frame > 0 {
-                form.advance_save_animation();
-            }
-            config::render_over(height, width, base, form)
+        |height, width, _frame, _status, _show_progress| {
+            let lines = config::render_over(height, width, base, form);
+            form.advance_save_animation();
+            lines
         },
     )
 }
