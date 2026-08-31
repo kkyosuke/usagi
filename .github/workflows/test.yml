@@ -106,6 +106,9 @@ jobs:
     - name: Test release-version validator
       run: bash scripts/tests/release-version.sh
 
+    - name: Test release-version bump calculator
+      run: bash scripts/tests/next-release-version.sh
+
     - name: Test verified installer transaction
       run: bash scripts/tests/install.sh
 

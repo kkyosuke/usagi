@@ -455,12 +455,13 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/create-release-pr.yml` | 手動（`workflow_dispatch`） | 指定 version へルート `Cargo.toml` を更新するリリース PR を作成する |
+| `.github/workflows/create-release-pr.yml` | 手動（`workflow_dispatch`） | `major` / `minor` / `patch` から選び、ルート `Cargo.toml` の現在版から次版を算出してリリース PR を作成する |
 | `.github/workflows/auto-release.yml` | `main` へのルート `Cargo.toml` 変更 push | version 変更を検知し `release.yml` を呼び出す |
 | `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v2 のビルド（`--features production`）・SHA-256 / version artifact 生成・GitHub Release 作成 |
 
 `release.yml` は `v*` タグの手動 push でも従来どおり動作する（`workflow_call` は追加のトリガー）。
 
-`create-release-pr.yml` は dispatch input を `run:` へ式展開せず環境変数で渡し、
-`scripts/ci/release-version.sh` の SemVer vocabulary を通過した値だけを manifest・PR title・branch に使う。
+`create-release-pr.yml` は dispatch の choice input を `run:` へ式展開せず環境変数で渡し、
+`scripts/ci/next-release-version.sh` が `major` / `minor` / `patch` の選択と現在の SemVer を検証して算出した値だけを
+manifest・PR title・branch に使う。
 生成する title と branch もそれぞれ Conventional Commits と `<type>/<説明>` の規約に従う。
