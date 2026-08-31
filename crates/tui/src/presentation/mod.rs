@@ -10792,6 +10792,10 @@ mod tests {
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         std::thread::sleep(std::time::Duration::from_millis(10));
         super::drain_session_completions(&mut ui);
+        backend.dispatch(Effect::SleepSession { workspace, session });
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        super::drain_session_completions(&mut ui);
         backend.dispatch(Effect::RemoveSession {
             workspace,
             session,
@@ -10801,13 +10805,18 @@ mod tests {
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         std::thread::sleep(std::time::Duration::from_millis(10));
         super::drain_session_completions(&mut ui);
+        backend.dispatch(Effect::SleepSession {
+            workspace,
+            session: SessionId::new(),
+        });
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         backend.dispatch(Effect::OpenTerminal {
             target,
             operation_id: OperationId::new(),
             arguments: "new".into(),
         });
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
-        // Only the user-initiated `Remove` reaches the command port. The
+        // Only the user-initiated `Sleep` and `Remove` reach the command port. The
         // refresh went to the resident lane, so it neither spawned a worker nor
         // opened a connection of its own (#551).
         assert_eq!(
@@ -10815,7 +10824,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .len(),
-            1
+            2
         );
     }
 
@@ -15232,6 +15241,33 @@ mod tests {
             AppEvent::Backend(BackendEvent::Notice(notice)) if notice.message == "daemon unavailable"
         ));
         assert!(receiver.try_recv().is_err());
+
+        let (completions, receiver) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        let completion = super::SessionBackendCompletion::Sleep {
+            before: vec![existing],
+            completions,
+        };
+        super::emit_session_command_result(
+            &Ok(SessionCommandResult::message("slept")),
+            &completion,
+        );
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Sessions(sessions)) if sessions == [existing]
+        ));
+
+        let (completions, receiver) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        let completion = super::SessionBackendCompletion::Sleep {
+            before: vec![existing],
+            completions,
+        };
+        super::emit_session_command_result(&Err("sleep refused".to_owned()), &completion);
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(notice)) if notice.message == "sleep refused"
+        ));
     }
 
     #[derive(Clone, Copy)]

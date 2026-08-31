@@ -611,6 +611,28 @@ mod tests {
         }
     }
 
+    struct DefaultSleepSessions;
+
+    impl SessionCommandPort for DefaultSleepSessions {
+        fn create(&mut self, _: CreateSessionRequest, _: Completions) {}
+        fn refresh(&mut self, _: WorkspaceId, _: Completions) {}
+        fn remove(&mut self, _: RemoveSessionRequest, _: Completions) {}
+    }
+
+    #[test]
+    fn default_session_sleep_is_an_explicit_no_op() {
+        let (completions, receiver) = Completions::channel();
+        SessionCommandPort::sleep(
+            &mut DefaultSleepSessions,
+            SleepSessionRequest {
+                workspace: WorkspaceId::new(),
+                session: SessionId::new(),
+            },
+            completions,
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
     #[derive(Default)]
     struct FakeAgent {
         launched: Vec<LaunchAgentRequest>,

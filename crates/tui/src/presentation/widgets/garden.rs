@@ -2027,6 +2027,11 @@ mod tests {
                 AgentPhase::Interrupted,
                 "interrupted",
             ),
+            (
+                SessionLifecycle::Available,
+                AgentPhase::Sleeping,
+                "sleeping",
+            ),
             (SessionLifecycle::Available, AgentPhase::Ready, "available"),
             (SessionLifecycle::Available, AgentPhase::Ended, "done"),
             (SessionLifecycle::Available, AgentPhase::Exited, "done"),

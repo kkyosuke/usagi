@@ -4029,6 +4029,65 @@ mod tests {
     }
 
     #[test]
+    fn saturated_launch_refuses_when_no_completed_resume_source_is_safe() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let generation = DaemonGeneration::new();
+        let mut agent = AgentRuntime::new(
+            generation,
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty {
+                terminate_success: true,
+                ..Pty::default()
+            },
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        );
+        let mut one_slot = RuntimeCoordinator::new(1, 64 * 1024, 64);
+        one_slot.activate_generation(generation).unwrap();
+        agent.coordinator = one_slot;
+        let first = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: None,
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+
+        assert_eq!(
+            agent
+                .launch(
+                    &OperationId::new().to_string(),
+                    &AgentLaunchIntent {
+                        workspace,
+                        session: Some(session),
+                        profile: None,
+                    },
+                    &FakeScope(Ok(resolved)),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::ResourceExhausted
+        );
+        assert_eq!(agent.concurrency().in_use, 1);
+        assert_eq!(
+            agent
+                .coordinator
+                .runtime_for_terminal(&first.terminal)
+                .unwrap()
+                .terminal,
+            first.terminal
+        );
+    }
+
+    #[test]
     fn manual_sleep_requires_an_idle_exact_resume_source_and_retains_the_session() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();

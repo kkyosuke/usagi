@@ -602,6 +602,11 @@ mod tests {
             })
         );
         assert_eq!(
+            parse_session("sleep feature x"),
+            Err("session name must not contain whitespace")
+        );
+        assert_eq!(parse_session("sleep"), Err("session name is required"));
+        assert_eq!(
             parse_session("remove feature-x --force"),
             Ok(SessionCommand::Remove {
                 name: "feature-x".into(),

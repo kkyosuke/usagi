@@ -413,6 +413,7 @@ mod tests {
         let rows = [
             (AgentRuntimeInventoryState::Reserved, "reserved"),
             (AgentRuntimeInventoryState::Live, "live"),
+            (AgentRuntimeInventoryState::Sleeping, "sleeping"),
             (AgentRuntimeInventoryState::Interrupted, "interrupted"),
             (AgentRuntimeInventoryState::Exited, "exited"),
             (AgentRuntimeInventoryState::Reclaimed, "reclaimed"),
@@ -431,6 +432,7 @@ mod tests {
         for (_, label) in [
             (AgentRuntimeInventoryState::Reserved, "reserved"),
             (AgentRuntimeInventoryState::Live, "live"),
+            (AgentRuntimeInventoryState::Sleeping, "sleeping"),
             (AgentRuntimeInventoryState::Interrupted, "interrupted"),
             (AgentRuntimeInventoryState::Exited, "exited"),
             (AgentRuntimeInventoryState::Reclaimed, "reclaimed"),
@@ -442,7 +444,7 @@ mod tests {
         let bounded = strip(&runtime_lines(Some(&rows), 3).join("\n"));
         assert!(bounded.contains("scope-0"));
         assert!(bounded.contains("scope-1"));
-        assert!(bounded.contains("↓ 4 more"));
+        assert!(bounded.contains("↓ 5 more"));
         assert!(!bounded.contains("scope-2"));
         assert!(runtime_lines(Some(&rows), 0).is_empty());
     }

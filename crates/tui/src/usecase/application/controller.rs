@@ -8412,6 +8412,19 @@ mod tests {
         assert!(
             update(
                 &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("session sleep missing".into())),
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("session was not found")
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert!(
+            update(
+                &mut state,
                 AppEvent::Key(AppKey::SubmitOverview("session resume missing".into())),
             )
             .is_empty()
