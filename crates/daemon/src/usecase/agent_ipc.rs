@@ -1007,10 +1007,7 @@ impl AgentRuntime {
             }
             match candidate {
                 None => candidate = Some(record),
-                Some(old)
-                    if record.operation.operation_id.to_string()
-                        < old.operation.operation_id.to_string() =>
-                {
+                Some(old) if record.operation.operation_id < old.operation.operation_id => {
                     candidate = Some(record);
                 }
                 Some(_) => {}

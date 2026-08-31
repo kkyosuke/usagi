@@ -160,8 +160,8 @@ const DEFINITIONS: &[CommandDefinition] = &[
     CommandDefinition {
         info: CommandInfo {
             name: "session",
-            description: "Create, list, resume, select, or remove sessions",
-            usage: "session [create|list|overview|resume|remove] <name>",
+            description: "Create, list, resume, select, sleep, or remove sessions",
+            usage: "session [create|list|overview|remove|resume|sleep] <name>",
             long_description: "Manage the sessions that belong to this workspace.",
         },
         factory: |arguments| Command::Session { arguments },
@@ -476,6 +476,12 @@ mod tests {
                 .iter()
                 .all(|command| !command.description.is_empty() && !command.usage.is_empty())
         );
+        let session = definitions
+            .iter()
+            .find(|command| command.name == "session")
+            .expect("session command metadata");
+        assert!(session.description.contains("sleep"));
+        assert!(session.usage.contains("sleep"));
         assert_eq!(
             [
                 Command::Clean {
