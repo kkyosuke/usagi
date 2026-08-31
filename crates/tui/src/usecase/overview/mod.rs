@@ -69,6 +69,9 @@ pub enum SessionCommand {
     Resume {
         name: String,
     },
+    Sleep {
+        name: String,
+    },
     /// Open the session checklist instead of removing the currently selected row.
     SelectRemove {
         force: bool,
@@ -157,8 +160,8 @@ const DEFINITIONS: &[CommandDefinition] = &[
     CommandDefinition {
         info: CommandInfo {
             name: "session",
-            description: "Create, list, resume, select, or remove sessions",
-            usage: "session [create|list|overview|resume|remove] <name>",
+            description: "Create, list, resume, select, sleep, or remove sessions",
+            usage: "session [create|list|overview|remove|resume|sleep] <name>",
             long_description: "Manage the sessions that belong to this workspace.",
         },
         factory: |arguments| Command::Session { arguments },
@@ -191,7 +194,7 @@ pub fn parse_clean(arguments: &str) -> Result<CleanCommand, &'static str> {
 
 /// `session` が受け付ける workspace-level subcommand。実行の解釈は session
 /// handler が所有し、ここは palette の補完候補だけを一元化する。
-const SESSION_SUBCOMMANDS: &[&str] = &["create", "list", "overview", "remove", "resume"];
+const SESSION_SUBCOMMANDS: &[&str] = &["create", "list", "overview", "remove", "resume", "sleep"];
 
 /// Overview 固有コマンドの metadata を名前順に返す。
 #[must_use]
@@ -288,8 +291,13 @@ pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
                 name: rest.to_owned(),
             })
         }
-        "resume" if !rest.is_empty() => Err("session name must not contain whitespace"),
-        "create" | "resume" => Err("session name is required"),
+        "sleep" if !rest.is_empty() && !rest.contains(char::is_whitespace) => {
+            Ok(SessionCommand::Sleep {
+                name: rest.to_owned(),
+            })
+        }
+        "resume" | "sleep" if !rest.is_empty() => Err("session name must not contain whitespace"),
+        "create" | "resume" | "sleep" => Err("session name is required"),
         "remove" => parse_remove(rest),
         _ => Err("unknown session command"),
     }
@@ -468,6 +476,12 @@ mod tests {
                 .iter()
                 .all(|command| !command.description.is_empty() && !command.usage.is_empty())
         );
+        let session = definitions
+            .iter()
+            .find(|command| command.name == "session")
+            .expect("session command metadata");
+        assert!(session.description.contains("sleep"));
+        assert!(session.usage.contains("sleep"));
         assert_eq!(
             [
                 Command::Clean {
@@ -587,6 +601,17 @@ mod tests {
                 name: "feature-x".to_owned()
             })
         );
+        assert_eq!(
+            parse_session("sleep feature-x"),
+            Ok(SessionCommand::Sleep {
+                name: "feature-x".to_owned()
+            })
+        );
+        assert_eq!(
+            parse_session("sleep feature x"),
+            Err("session name must not contain whitespace")
+        );
+        assert_eq!(parse_session("sleep"), Err("session name is required"));
         assert_eq!(
             parse_session("remove feature-x --force"),
             Ok(SessionCommand::Remove {

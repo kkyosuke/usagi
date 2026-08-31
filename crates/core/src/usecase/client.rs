@@ -540,6 +540,9 @@ pub struct DispatchIntent {
 pub enum SessionAction {
     Create,
     Remove,
+    /// Stop quiescent Agents in the session while retaining exact provider
+    /// resume metadata and the worktree.
+    Sleep,
     /// Inspect or remove Git resources absent from daemon lifecycle state.
     Clean,
     List,

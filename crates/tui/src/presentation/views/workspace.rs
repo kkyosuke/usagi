@@ -1897,7 +1897,8 @@ pub(crate) const fn present_agent_phase(state: AgentRuntimeInventoryState) -> Op
         AgentRuntimeInventoryState::Reserved => Some(AgentPhase::Ready),
         AgentRuntimeInventoryState::Live => Some(AgentPhase::Running),
         AgentRuntimeInventoryState::Interrupted => Some(AgentPhase::Interrupted),
-        AgentRuntimeInventoryState::Exited
+        AgentRuntimeInventoryState::Sleeping
+        | AgentRuntimeInventoryState::Exited
         | AgentRuntimeInventoryState::Reclaimed
         | AgentRuntimeInventoryState::Unavailable => None,
     }

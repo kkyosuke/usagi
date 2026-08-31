@@ -1459,8 +1459,8 @@ scope、profile revision、current executable、config、concurrency を再検�
 daemon は managed session ごとに一つの Agent phase を lifecycle projection（`session_list` / `session_status` /
 overview の `agent_phase`）へ載せる。この phase の authority は **daemon が観測した runtime state** であり、
 エージェントが自分の lifecycle hook で報告した phase はその refinement にすぎない。本節がこの優先順位の正本である。
-projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / `ended` / `exited` /
-`interrupted` で、core の `AgentPhase` が token と parse の正本である。`none` と `interrupted` は daemon
+projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / `sleeping` / `ended` / `exited` /
+`interrupted` で、core の `AgentPhase` が token と parse の正本である。`none`、`sleeping`、`interrupted` は daemon
 観測専用であり、agent lifecycle hook からは報告できない。
 
 観測 state 由来の phase は次のとおり。
@@ -1470,6 +1470,7 @@ projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / 
 | `Running` | `running` | 4 |
 | `Reserved` | `ready` | 3 |
 | `ReconcileRequired(identity_unknown)` | `interrupted` | 3 |
+| `Sleeping` | `sleeping` | 3 |
 | `SpawnFailed` / その他の `ReconcileRequired` | `exited` | 2 |
 | `Exited` / `Reclaimed` | `ended` | 1 |
 
@@ -1712,8 +1713,11 @@ wire 表現は [4. daemon IPC](04-ipc.md#agent-concurrency-projection) が正本
 | supervisor `max_concurrency` | supervisor run の `ExecutionPolicy` が持つ dispatch の同時実行数 | 対象外 |
 
 **使用中（`in_use`）の定義は admission が数えるものと同一**である。すなわち reserved（spawn 前の予約）、
-running、reconcile 待ちの Agent runtime record を数え、exited / reclaimed / spawn 失敗の record は数えない。
-したがって `in_use == limit` の snapshot は「次の Agent launch は concurrency で拒否される」と同義である。
+running、reconcile 待ちの Agent runtime record を数え、sleeping / exited / reclaimed / spawn 失敗の record は数えない。
+上限は 16 である。`in_use == limit` で新しい launch を受けた場合、daemon は `ended` と報告済みで exact resume
+metadata を持つ live runtime のうち、operation identity が最古の 1 件を sleep へ移してから admission を再試行する。
+running / waiting / ready は自動選択せず、安全な候補がなければ従来どおり concurrency exhausted で拒否する。
+sleep は process と PTY ownership だけを解放し、session、worktree、provider conversation、resume source を削除しない。
 
 publish は権威側から行う。Agent runtime は record を変更する durable mutation の choke point で、自分の
 使用中 slot 数と上限を lock-free な gauge へ書き、broker はそれを読むだけである。この方向にする理由は

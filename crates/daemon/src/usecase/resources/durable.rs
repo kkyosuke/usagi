@@ -225,6 +225,7 @@ fn projected_state(state: TerminalRuntimeState, observed: Option<ChildIdentity>)
         }
         (
             TerminalRuntimeState::Interrupted
+            | TerminalRuntimeState::Sleeping
             | TerminalRuntimeState::Exited
             | TerminalRuntimeState::Reclaimed,
             _,

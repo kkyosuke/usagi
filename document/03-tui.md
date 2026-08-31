@@ -872,7 +872,7 @@ command の subcommand picker を開き、`←` は閉じる。`Prompt` は入�
 Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
 
-`session create <name>`、`session list`、`session overview`、`session resume <name>`、`session remove <name> [--force]` は
+`session create <name>`、`session list`、`session overview`、`session resume <name>`、`session sleep <name>`、`session remove <name> [--force]` は
 Overview の実行 port を通じて daemon IPC request になる。この実行 port は起動経路に依存せず、
 Welcome→Open・Welcome の Recent・direct な Workspace entry のいずれで開いた workspace でも同じ
 daemon-authoritative な port を通る。screen graph は workspace 起動ごとに port を新しく生成し、
@@ -891,11 +891,17 @@ launch admission や ownership の判断には使わない。metrics 未取得�
 
 live Agent の枠は対象 tab で `Ctrl-D` により Agent を終了して解放する。status modal 自体は読み取り専用で、Esc で閉じる。
 
+`session sleep <name>` は、対象 session の idle Agent process と PTY を止めて concurrency slot を解放する。
+実行できるのは daemon が `ready` または `ended` と観測し、exact provider resume metadata を保持する Agent だけである。
+running / waiting の Agent や再開情報を持たない Agent が 1 件でもあれば、process を止めず request 全体を拒否する。
+sleep は session、worktree、provider conversation を削除せず、phase を `sleeping` として表示する。
+
 `session resume <name>` はその session の provider conversation を明示的に再開する。TUI は新しい
 `OperationId` で pending Agent tab を作り、daemon が返す新しい完全な `TerminalRef` だけを同じ pending tab へ
 昇格する。この pending pane を伴う経路は controller の `ResumeAgent` effect だけが所有し、他の session command
 port は resume を受理しない。provider-native ID は受け取らず表示もしない。live Agent、resume metadata の欠落、
 scope/revision 不一致は安全な error として収束し、provider の last session や旧 PTY を推測しない。
+`sleeping` は明示的に中断された resumable history と同じ再開導線へ入り、resume 成功時は新しい PTY と runtime identity を得る。
 sidebar は daemon snapshot の `available` session に加えて、名前を占有し続ける `failed` session も
 失敗 stage に応じた状態付きで表示する。`failed` 行は使用不可（`can_use=false`）なので新しい pane の launch を提示せず、
 削除可能（`can_remove=true`）なので `x` / `X` の remove をそのまま受け付ける。ただし、その session に daemon 所有の
