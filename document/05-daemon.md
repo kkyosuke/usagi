@@ -2134,22 +2134,26 @@ shard entry があること**を前提にしている。したがって、retire
 どちらの経路からも到達できず、pool の slot を永久に占有する。pool は固定サイズなので、これが積み上がると
 最終的に **どの session でも Agent を起動できなくなる**。
 
-active generation は hydrate 時にこの取りこぼしを回収する。対象は次の 2 条件を **両方** 満たす claim だけである。
+active generation は hydrate 時にこの取りこぼしを回収する。対象は次の 3 条件を **すべて** 満たす claim だけである。
 
 | 条件 | 意味 |
 |---|---|
 | どの retained shard もその resource を説明しない | owner の真実に record が無く、exit を publish する主体が存在しない |
-| claim の owner が hydrate 中の generation でない | 自 generation の claim は outbox を経由して exactly-once で解放する |
+| `generations.json` が claim の owner を載せていない | その generation はもう行動できない。稼働中の generation を除外する |
+| outcome が `ambiguous` でない | child が存在し得る final は capacity を保持し続ける |
 
-`ambiguous` final は child が存在し得るため、この回収の対象外である（capacity を保持したまま残す）。
-claim は L1 で shard entry より先に durable になるため（[launch の書き込み順序](#launch-の書き込み順序)）、
-稼働中の owner にも「shard entry の無い claim」が commit 1 回分の幅で存在する。hydrate は他の generation が
-書いていない唯一の時点なので、そこでの「説明されない」は推測ではなく証明になる。回収件数は startup log に残す。
+**「説明されない」だけでは leak の証明にならない**。claim は L1 で shard entry より先に durable になるため
+（[launch の書き込み順序](#launch-の書き込み順序)）、稼働中の owner にも「shard entry の無い claim」が
+commit 1 回分の幅で存在する。とくに rollover 中の draining predecessor は、後継の active generation が hydrate
+している間ずっと稼働している。この 2 つを分けるのが registry であり、registry が載せていない generation だけが
+「もう publish できない」ことの証明になる。
 
-`usagi clean` も同じ取りこぼしを daemon の外から回収できる（[1. プロジェクト概要](01-overview.md#現在の実装状態)）。
-daemon が動いている可能性があるため、条件は hydrate より 1 つ厳しく、`generations.json` が owner を載せていない
-ことを追加で要求する。registry に載る generation は稼働中で launch の途中かもしれないためである。registry を
-読めない場合は何も retired と証明できないので、候補は 0 件になる。
+registry を読めなかった場合、この回収は **何も解放しない**（fail closed）。unknown な registry に対する回収は、
+稼働中 generation の in-flight claim を奪うことと区別できないためである。自 generation の claim も対象外で、
+outbox を経由して exactly-once に解放する契約を維持する。回収件数は startup log に残す。
+
+`usagi clean` も同じ条件で、同じ取りこぼしを daemon の外から回収できる
+（[1. プロジェクト概要](01-overview.md#現在の実装状態)）。
 
 ### child identity
 

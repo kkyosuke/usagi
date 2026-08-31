@@ -501,16 +501,24 @@ impl AllocatorDocument {
         Ok(())
     }
 
-    /// Every foreign claim still holding capacity that no owner shard accounts
-    /// for, given the resources the retained shards do account for.
+    /// Every claim still holding capacity that neither an owner shard nor the
+    /// generation registry can account for.
     ///
-    /// A claim is created before its owner's shard entry ([`super::durable`]), so
-    /// "no entry" is only proof of a leak once the owner can no longer be in that
-    /// window — which is why this is derived at startup, where the active
-    /// generation is the only process writing. Such a claim is unreachable by
-    /// every other release path: `super::drain` needs an outbox event the retired
-    /// owner can never publish, and [`Self::release_unowned`] needs a record that
-    /// is already gone. Left alone it holds a pool slot forever.
+    /// Two independent facts must both hold, because either one alone describes
+    /// ordinary state:
+    ///
+    /// * **`backed`** — no retained shard mentions the resource. A claim becomes
+    ///   durable one CAS *before* its owner's shard entry ([`super::durable`]), so
+    ///   a generation that is still running legitimately has an unbacked claim for
+    ///   the width of that window.
+    /// * **`registered`** — the generation registry does not list the owner. A
+    ///   listed generation may be mid-launch inside exactly that window, and a
+    ///   draining predecessor is listed for the whole of a rollover.
+    ///
+    /// Together they mean the owner can never publish again and nothing will ever
+    /// look at the claim: `super::drain` needs an outbox event the retired owner
+    /// cannot produce, and [`Self::release_unowned`] needs a record that is gone.
+    /// Left alone such a claim holds a pool slot forever.
     ///
     /// An [`OperationOutcome::Ambiguous`] final is excluded by construction: it
     /// means a child may exist and the platform cannot say, so it never releases
@@ -518,13 +526,13 @@ impl AllocatorDocument {
     #[must_use]
     pub fn unbacked(
         &self,
-        active: DaemonGeneration,
+        registered: &std::collections::BTreeSet<DaemonGeneration>,
         backed: &std::collections::BTreeSet<TerminalRef>,
     ) -> Vec<TerminalRef> {
         self.claims
             .iter()
             .filter(|claim| claim.state != ClaimState::Released)
-            .filter(|claim| claim.owner != active)
+            .filter(|claim| !registered.contains(&claim.owner))
             .filter(|claim| !backed.contains(&claim.resource))
             .filter(|claim| {
                 self.operation(&claim.operation)

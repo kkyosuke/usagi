@@ -404,7 +404,7 @@ fn open_runtime_state(
     generation: usagi_core::domain::id::DaemonGeneration,
     children: &Arc<SpawnedChildren>,
 ) -> std::io::Result<ShardedRuntimeState> {
-    ShardedRuntimeState::new(
+    let state = ShardedRuntimeState::new(
         generation,
         GenerationRole::Active,
         ResourceAllocator::new(
@@ -414,7 +414,35 @@ fn open_runtime_state(
         Box::new(ShardArchiveFiles::new(data_dir)?),
         Box::new(ObservedChildren(Arc::clone(children))),
         Box::new(SystemLogicalClock),
-    )
+    )?;
+    Ok(match registered_generations(data_dir, generation) {
+        // A registry this process cannot read proves nothing retired, so the
+        // reclaim stays closed rather than guessing against a live generation.
+        Some(registered) => state.with_registered_generations(registered),
+        None => state,
+    })
+}
+
+/// The generations `generations.json` still lists, plus this one.
+///
+/// This process is registering itself as it starts, so its own entry may not be
+/// durable yet; including it keeps the reclaim from ever considering the
+/// hydrating generation's own claims. An absent registry is a daemon that has
+/// never rolled over, which is a readable answer, not an unknown one.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=restart_hydrates_file_snapshot_before_dispatch_admission_and_preserves_ledger
+fn registered_generations(
+    data_dir: &Path,
+    generation: usagi_core::domain::id::DaemonGeneration,
+) -> Option<std::collections::BTreeSet<usagi_core::domain::id::DaemonGeneration>> {
+    let document = read_registry_document(data_dir).ok()?;
+    let mut registered = std::collections::BTreeSet::from([generation]);
+    registered.extend(
+        document
+            .into_iter()
+            .flat_map(|document| document.generations)
+            .map(|entry| entry.generation),
+    );
+    Some(registered)
 }
 
 /// Reads this generation's shard and every retained one, migrating the legacy

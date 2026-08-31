@@ -1810,6 +1810,12 @@ fn the_marker_round_trips_through_its_durable_form() {
     assert!(LegacySnapshots::default().is_empty());
 }
 
+/// The registry set a hydrate needs before it will reclaim anything: the
+/// generations still listed in `generations.json`.
+fn listing<const N: usize>(generations: [DaemonGeneration; N]) -> BTreeSet<DaemonGeneration> {
+    generations.into_iter().collect()
+}
+
 /// Drop every resource entry from `owner`'s shard while leaving the allocator
 /// exactly as it is. This is the durable shape the leak leaves behind: a claim
 /// whose owner's own truth no longer mentions the resource at all.
@@ -1845,7 +1851,11 @@ fn hydrate_reclaims_a_live_claim_no_retained_shard_accounts_for() {
     // and no record-driven release can ever see it again.
     forget_shard_resources(&world, old);
 
-    let hydrated = world.state(new, ObservedChildren::new()).hydrate().unwrap();
+    let hydrated = world
+        .state(new, ObservedChildren::new())
+        .with_registered_generations(listing([new]))
+        .hydrate()
+        .unwrap();
 
     assert_eq!(hydrated.reclaimed, 1);
     assert_eq!(
@@ -1887,7 +1897,11 @@ fn a_reclaimed_pool_slot_admits_the_launch_it_was_blocking() {
             )]));
     assert!(refused.is_err());
 
-    let hydrated = world.state(new, ObservedChildren::new()).hydrate().unwrap();
+    let hydrated = world
+        .state(new, ObservedChildren::new())
+        .with_registered_generations(listing([new]))
+        .hydrate()
+        .unwrap();
     assert_eq!(hydrated.reclaimed, 2);
 
     let admitted = terminal(new);
@@ -1921,9 +1935,11 @@ fn hydrate_keeps_an_unbacked_claim_the_hydrating_generation_still_owns() {
     forget_shard_resources(&world, owner);
 
     // The owner's own claims must travel its outbox so their exit is published
-    // and consumed exactly once; hydrate never short-circuits that.
+    // and consumed exactly once; hydrate never short-circuits that. The registry
+    // is supplied so this proves the owner rule, not the closed default.
     let hydrated = world
         .state(owner, ObservedChildren::new())
+        .with_registered_generations(listing([owner]))
         .hydrate()
         .unwrap();
 
@@ -1967,7 +1983,11 @@ fn hydrate_keeps_an_unbacked_ambiguous_final_holding_its_capacity() {
     );
     forget_shard_resources(&world, old);
 
-    let hydrated = world.state(new, ObservedChildren::new()).hydrate().unwrap();
+    let hydrated = world
+        .state(new, ObservedChildren::new())
+        .with_registered_generations(listing([new]))
+        .hydrate()
+        .unwrap();
 
     assert_eq!(hydrated.reclaimed, 0);
     assert_ne!(
@@ -1994,6 +2014,7 @@ fn only_the_active_generation_reclaims_unbacked_claims() {
 
     let hydrated = world
         .role(draining, GenerationRole::Draining, ObservedChildren::new())
+        .with_registered_generations(listing([draining]))
         .hydrate()
         .unwrap();
 
@@ -2001,5 +2022,112 @@ fn only_the_active_generation_reclaims_unbacked_claims() {
     assert_eq!(
         world.allocator().claim(&resource).unwrap().state,
         ClaimState::Live
+    );
+}
+
+/// The window this guards is real: a claim is durable one CAS *before* its
+/// owner's shard entry, so a generation that is still running has an unbacked
+/// claim for the width of that commit. During a rollover the draining
+/// predecessor is exactly such a generation, and the incoming active generation
+/// hydrates while it is still working. Releasing that claim would hand its pool
+/// slot to someone else while its child is alive.
+#[test]
+fn a_registered_generations_in_flight_claim_survives_the_successors_hydrate() {
+    let world = World::new();
+    let draining = DaemonGeneration::new();
+    let incoming = DaemonGeneration::new();
+    let resource = terminal(draining);
+    ShardedAgentStore::new(world.state(draining, ObservedChildren::new().with(81, "start-81")))
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            OperationId::new(),
+            RuntimeState::Running,
+            Some(process(81, "start-81")),
+        )]))
+        .unwrap();
+    // Stand in for the L1..L2 window: the claim exists, the shard entry does not.
+    forget_shard_resources(&world, draining);
+
+    let hydrated = world
+        .state(incoming, ObservedChildren::new())
+        .with_registered_generations(listing([incoming, draining]))
+        .hydrate()
+        .unwrap();
+
+    assert_eq!(hydrated.reclaimed, 0);
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Live
+    );
+}
+
+/// A state bound before the registry could be read must not guess. Reclaiming
+/// against an unknown registry would be indistinguishable from reclaiming a live
+/// generation's in-flight claim.
+#[test]
+fn an_unknown_registry_reclaims_nothing() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let new = DaemonGeneration::new();
+    let resource = terminal(old);
+    ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(91, "start-91")))
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            OperationId::new(),
+            RuntimeState::Running,
+            Some(process(91, "start-91")),
+        )]))
+        .unwrap();
+    forget_shard_resources(&world, old);
+
+    // `state` never names a registry, so the reclaim fails closed.
+    let hydrated = world.state(new, ObservedChildren::new()).hydrate().unwrap();
+
+    assert_eq!(hydrated.reclaimed, 0);
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Live
+    );
+}
+
+/// The reclaim publishes capacity only when the allocator write lands. A store
+/// that refuses the write must surface the failure and leave the claim exactly
+/// as it was, so the next startup sees the same leak and can try again — rather
+/// than reporting a slot that no document actually gave back.
+#[test]
+fn a_reclaim_that_cannot_be_saved_leaves_the_leaked_claim_alone() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let new = DaemonGeneration::new();
+    let resource = terminal(old);
+    ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(101, "start-101")))
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            OperationId::new(),
+            RuntimeState::Running,
+            Some(process(101, "start-101")),
+        )]))
+        .unwrap();
+    forget_shard_resources(&world, old);
+
+    let state = ShardedRuntimeState::new(
+        new,
+        GenerationRole::Active,
+        ResourceAllocator::new(
+            MemoryFile::faulty(&world.allocator, FileFault::WriteFails),
+            policy(2, 2),
+        ),
+        Box::new(world.archive.clone()),
+        Box::new(ObservedChildren::new()),
+        Box::new(FakeClock::at(10)),
+    )
+    .unwrap()
+    .with_registered_generations(listing([new]));
+
+    assert!(state.hydrate().unwrap_err().refusal().is_none());
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Live,
+        "a refused write must not publish capacity as released"
     );
 }

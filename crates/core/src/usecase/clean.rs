@@ -623,19 +623,30 @@ mod tests {
     /// be in exactly that window.
     #[test]
     fn only_a_claim_that_is_both_unbacked_and_unregistered_is_swept() {
-        let claim = |resource: &str, backed: bool, owner_registered: bool| ObservedCapacityClaim {
-            resource_id: resource.to_owned(),
-            owner: "gen-1".to_owned(),
-            pool: "agent".to_owned(),
-            backed,
-            owner_registered,
+        let claim = |owner: &str, resource: &str, backed: bool, owner_registered: bool| {
+            ObservedCapacityClaim {
+                resource_id: resource.to_owned(),
+                owner: owner.to_owned(),
+                pool: "agent".to_owned(),
+                backed,
+                owner_registered,
+            }
         };
+        let capacity = |owner: &str, resource: &str| CleanCandidate::Capacity {
+            resource_id: resource.to_owned(),
+            owner: owner.to_owned(),
+            pool: "agent".to_owned(),
+        };
+        // Deliberately out of order, and with two leaks sharing an owner, so the
+        // plan has to order by owner first and break the tie on resource id.
         let inventory = CleanInventory {
             claims: vec![
-                claim("leaked", false, false),
-                claim("backed", true, false),
-                claim("registered", false, true),
-                claim("ordinary", true, true),
+                claim("gen-2", "leaked-c", false, false),
+                claim("gen-1", "leaked-b", false, false),
+                claim("gen-1", "leaked-a", false, false),
+                claim("gen-1", "backed", true, false),
+                claim("gen-1", "registered", false, true),
+                claim("gen-1", "ordinary", true, true),
             ],
             processes: Vec::new(),
             registered: Vec::new(),
@@ -645,14 +656,14 @@ mod tests {
 
         assert_eq!(
             plan(&inventory),
-            vec![CleanCandidate::Capacity {
-                resource_id: "leaked".to_owned(),
-                owner: "gen-1".to_owned(),
-                pool: "agent".to_owned(),
-            }]
+            vec![
+                capacity("gen-1", "leaked-a"),
+                capacity("gen-1", "leaked-b"),
+                capacity("gen-2", "leaked-c"),
+            ]
         );
         // Releasing a provably dead claim discards nothing a user can lose.
-        assert!(!plan(&inventory)[0].requires_force());
+        assert!(plan(&inventory).iter().all(|c| !c.requires_force()));
     }
 
     #[test]
