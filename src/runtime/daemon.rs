@@ -2417,12 +2417,23 @@ impl DecisionWaker for AgentDecisionWaker<'_> {
             .dispatch_store()
             .workspace_for_agent(binding.worker.agent_id)?
             .ok_or_else(|| anyhow::anyhow!("parent workspace is unavailable"))?;
+        if runtime
+            .prompt(
+                workspace,
+                binding.worker.session_id,
+                &prompt,
+                PromptMode::Live,
+            )
+            .is_ok()
+        {
+            return Ok(());
+        }
         runtime
             .prompt(
                 workspace,
                 binding.worker.session_id,
                 &prompt,
-                PromptMode::Auto,
+                PromptMode::Queue,
             )
             .map_err(|error| anyhow::anyhow!(error.message))?;
         Ok(())
@@ -7580,9 +7591,8 @@ fn dispatch_session_action(
             let mode = match payload
                 .get("mode")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("auto")
+                .unwrap_or("live")
             {
-                "auto" => PromptMode::Auto,
                 "queue" => PromptMode::Queue,
                 "live" => PromptMode::Live,
                 _ => return Err(SessionRuntimeError::InvalidRequest),

@@ -147,7 +147,6 @@ pub struct ReportDelivery {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptMode {
-    Auto,
     Queue,
     Live,
 }
@@ -998,18 +997,16 @@ impl AgentRuntime {
         if matches!(mode, PromptMode::Live) && live.is_none() {
             return Err(ProtocolError::new(
                 ErrorCode::Unavailable,
-                "target session has no live agent",
+                "target session has no live agent; use session_dispatch to start it or mode=queue for intentional deferred delivery",
             ));
         }
         if matches!(mode, PromptMode::Queue) && live.is_some() {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
-                "target session already has a live agent; use auto or live",
+                "target session already has a live agent; use mode=live",
             ));
         }
-        if let Some(record) = live
-            && !matches!(mode, PromptMode::Queue)
-        {
+        if let Some(record) = live {
             let mut bytes = prompt.as_bytes().to_vec();
             bytes.push(b'\n');
             self.pty.select_terminal(&record.runtime.terminal);
@@ -2668,12 +2665,22 @@ impl AgentRuntime {
                 "A child report is ready (run {}). Read your session inbox, verify the result, aggregate all required children, then report only to your caller. Summary: {}",
                 message.run_id, message.summary
             );
-            let _ = self.prompt(
-                workspace,
-                delivered_to.session_id,
-                &notice,
-                PromptMode::Auto,
-            );
+            if self
+                .prompt(
+                    workspace,
+                    delivered_to.session_id,
+                    &notice,
+                    PromptMode::Live,
+                )
+                .is_err()
+            {
+                let _ = self.prompt(
+                    workspace,
+                    delivered_to.session_id,
+                    &notice,
+                    PromptMode::Queue,
+                );
+            }
         }
         Ok(ReportDelivery {
             delivered_to,
@@ -6520,7 +6527,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn queued_prompt_is_consumed_by_launch_and_auto_then_delivers_live() {
+    fn queued_prompt_is_explicitly_consumed_by_launch_and_live_only_delivers_live() {
         let mut runtime = runtime();
         let launch_intent = intent(None);
         let workspace = launch_intent.workspace;
@@ -6528,7 +6535,7 @@ mod tests {
         assert_eq!(runtime.session_phase(session), AgentPhase::Absent);
         assert_eq!(
             runtime
-                .prompt(workspace, Some(session), "  ", PromptMode::Auto)
+                .prompt(workspace, Some(session), "  ", PromptMode::Live)
                 .unwrap_err()
                 .code,
             ErrorCode::InvalidArgument
@@ -6540,8 +6547,22 @@ mod tests {
                 .code,
             ErrorCode::Unavailable
         );
+        assert_eq!(
+            runtime
+                .prompt(workspace, Some(session), "start me", PromptMode::Live)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        assert!(
+            runtime
+                .dispatch
+                .queued_prompt(workspace, Some(session))
+                .unwrap()
+                .is_none()
+        );
         let queued = runtime
-            .prompt(workspace, Some(session), "queued work", PromptMode::Auto)
+            .prompt(workspace, Some(session), "queued work", PromptMode::Queue)
             .unwrap();
         assert_eq!(queued.delivered_to, "queue");
         assert!(
@@ -6601,7 +6622,7 @@ mod tests {
         assert_eq!(runtime.caller_session(&credential), Some(session));
 
         let live = runtime
-            .prompt(workspace, Some(session), "follow up", PromptMode::Auto)
+            .prompt(workspace, Some(session), "follow up", PromptMode::Live)
             .unwrap();
         assert_eq!(live.delivered_to, "live");
         assert_eq!(pty(&runtime).writes, b"follow up\n");
@@ -6640,7 +6661,7 @@ mod tests {
         );
         assert!(
             runtime
-                .prompt(workspace, None, "  ", PromptMode::Auto)
+                .prompt(workspace, None, "  ", PromptMode::Live)
                 .is_err()
         );
     }
