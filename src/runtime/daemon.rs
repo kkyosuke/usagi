@@ -4122,46 +4122,62 @@ fn start_orphan_cleanup_worker(
     gate: AdmissionGate,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let all_workspaces = Arc::clone(workspaces);
     spawn_orphan_cleanup_worker(
-        move || {
-            for tenant in all_workspaces.all() {
-                let cleaned = with_active_cleanup_lease(&gate, || {
-                    let root = tenant.root().to_path_buf();
-                    let bound = ConnectionWorkspace {
-                        tenant,
-                        workspaces: Arc::clone(&all_workspaces),
-                    };
-                    if let Err(error) = clean_orphan_session_resources(&bound, None, true, false) {
-                        ErrorLog::record(&format!(
-                            "automatic orphan cleanup deferred for {}: {}",
-                            root.display(),
-                            error.safe_message()
-                        ));
-                    }
-                });
-                if !cleaned {
-                    break;
-                }
-            }
+        AutomaticOrphanCleanup {
+            workspaces: Arc::clone(workspaces),
+            gate,
         },
         shutdown,
         ORPHAN_CLEANUP_TICK,
     )
 }
 
-/// Runs one cleanup pass under the same active-control barrier as mutating IPC
-/// requests. A rollover closes admission and waits for a pass already in flight;
-/// a draining predecessor cannot start another pass.
-fn with_active_cleanup_lease<C>(gate: &AdmissionGate, clean: C) -> bool
+trait OrphanCleanupPass: Send {
+    fn run(&mut self);
+}
+
+impl<C> OrphanCleanupPass for C
 where
-    C: FnOnce(),
+    C: FnMut() + Send,
 {
-    let Ok(_lease) = gate.acquire(LeaseClass::ActiveControl) else {
-        return false;
-    };
-    clean();
-    true
+    fn run(&mut self) {
+        self();
+    }
+}
+
+struct AutomaticOrphanCleanup {
+    workspaces: Workspaces,
+    gate: AdmissionGate,
+}
+
+impl OrphanCleanupPass for AutomaticOrphanCleanup {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions
+    fn run(&mut self) {
+        for tenant in self.workspaces.all() {
+            let Some(_lease) = active_cleanup_lease(&self.gate) else {
+                break;
+            };
+            let root = tenant.root().to_path_buf();
+            let bound = ConnectionWorkspace {
+                tenant,
+                workspaces: Arc::clone(&self.workspaces),
+            };
+            if let Err(error) = clean_orphan_session_resources(&bound, None, true, false) {
+                ErrorLog::record(&format!(
+                    "automatic orphan cleanup deferred for {}: {}",
+                    root.display(),
+                    error.safe_message()
+                ));
+            }
+        }
+    }
+}
+
+/// Acquires the same active-control barrier as mutating IPC requests. A rollover
+/// closes admission and waits for a pass already in flight; a draining
+/// predecessor cannot start another pass.
+fn active_cleanup_lease(gate: &AdmissionGate) -> Option<AdmissionLease> {
+    gate.acquire(LeaseClass::ActiveControl).ok()
 }
 
 /// The maintenance loop with its effect and cadence injected for deterministic
@@ -4172,14 +4188,14 @@ fn spawn_orphan_cleanup_worker<C>(
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>>
 where
-    C: FnMut() + Send + 'static,
+    C: OrphanCleanupPass + 'static,
 {
     std::thread::Builder::new()
         .name("usagi-orphan-cleanup".to_string())
         .spawn(move || {
             let worker_health = shutdown.monitor_background_worker(BackgroundWorker::OrphanCleanup);
             while !shutdown.wait_for_tick(tick) {
-                clean();
+                clean.run();
             }
             worker_health.finish_planned();
         })
@@ -13133,7 +13149,7 @@ fn policy_client_for(
             policy.timeout_ms,
         )
     })?;
-    let data_dir = paths::data_dir().map_err(client_unavailable)?;
+    let data_dir = client_result(paths::data_dir())?;
     let build = current_build();
     // Reconnects target the already-running daemon; the initial bootstrap above
     // owns cold-start and rollover, so a plain connect that fails simply exhausts
@@ -13156,6 +13172,10 @@ fn client_unavailable(error: anyhow::Error) -> ClientError {
     let message = error.to_string();
     drop(error);
     ClientError::Unavailable(message)
+}
+
+fn client_result<T>(result: anyhow::Result<T>) -> Result<T, ClientError> {
+    result.map_err(client_unavailable)
 }
 
 /// Connect a resilient per-request client to the already-running generation
@@ -16055,9 +16075,11 @@ mod tests {
 
     #[test]
     fn unavailable_client_errors_preserve_the_safe_reason() {
+        let expected = PathBuf::from("available");
+        assert_eq!(client_result(Ok(expected.clone())), Ok(expected));
         assert!(matches!(
-            client_unavailable(anyhow::anyhow!("data directory unavailable")),
-            ClientError::Unavailable(message) if message == "data directory unavailable"
+            client_result::<PathBuf>(Err(anyhow::anyhow!("data directory unavailable"))),
+            Err(ClientError::Unavailable(message)) if message == "data directory unavailable"
         ));
     }
 
@@ -17545,20 +17567,14 @@ mod tests {
     #[test]
     fn automatic_orphan_cleanup_is_fenced_by_the_active_control_lease() {
         let gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
-        let calls = AtomicUsize::new(0);
-        assert!(with_active_cleanup_lease(&gate, || {
-            calls.fetch_add(1, Ordering::AcqRel);
-            assert_eq!(gate.outstanding(LeaseClass::ActiveControl), 1);
-        }));
-        assert_eq!(calls.load(Ordering::Acquire), 1);
+        let lease = active_cleanup_lease(&gate).expect("active generation admits cleanup");
+        assert_eq!(gate.outstanding(LeaseClass::ActiveControl), 1);
+        drop(lease);
         assert_eq!(gate.outstanding(LeaseClass::ActiveControl), 0);
 
         gate.close(LeaseClass::ActiveControl);
         gate.await_drain(LeaseClass::ActiveControl).unwrap();
-        assert!(!with_active_cleanup_lease(&gate, || {
-            calls.fetch_add(1, Ordering::AcqRel);
-        }));
-        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(active_cleanup_lease(&gate).is_none());
     }
 
     /// Prepares `<data>/daemon` with an acquired instance lock and a registered
