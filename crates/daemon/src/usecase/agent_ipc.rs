@@ -968,9 +968,7 @@ impl AgentRuntime {
                 "target session already has a live agent; use mode=live",
             ));
         }
-        if let Some(record) = live
-            && !matches!(mode, PromptMode::Queue)
-        {
+        if let Some(record) = live {
             let mut bytes = prompt.as_bytes().to_vec();
             bytes.push(b'\n');
             self.pty.select_terminal(&record.runtime.terminal);
