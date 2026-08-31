@@ -39,8 +39,8 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 `session_list` は durable session identity の軽量一覧、`session_status` は Git 観測を含む詳細一覧である。
 coordinator は session の生存を `session_status`、成果の統合を `session_pr` の `merged` で判定する。
 
-`session_prompt` の `mode` は `auto`（既定）/ `queue` / `live` である。`auto` と `live` は live Agent の
-PTY へ送り、live Agent が無ければエラーになる。停止中の Agent を起動して実行させる場合は
+`session_prompt` の `mode` は `live`（既定）/ `queue` である。`live` は live Agent の PTY へ送り、
+live Agent が無ければエラーになる。停止中の Agent を起動して実行させる場合は
 `session_dispatch` を使う。`queue` は次回の fresh launch まで待たせることを明示的に意図した場合だけ使い、
 live Agent がいる場合はエラーになる。
 

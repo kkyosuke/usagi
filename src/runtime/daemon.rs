@@ -6870,9 +6870,8 @@ fn dispatch_session_action(
             let mode = match payload
                 .get("mode")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("auto")
+                .unwrap_or("live")
             {
-                "auto" => PromptMode::Auto,
                 "queue" => PromptMode::Queue,
                 "live" => PromptMode::Live,
                 _ => return Err(SessionRuntimeError::InvalidRequest),
