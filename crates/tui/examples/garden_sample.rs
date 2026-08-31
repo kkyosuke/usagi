@@ -3,7 +3,78 @@ use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render_scrolled};
 
 fn main() {
-    let sessions = [
+    let sessions = sample_sessions();
+    scene(
+        "120x24 · spacious world left edge + notifications",
+        24,
+        120,
+        &sessions,
+        1,
+        false,
+    );
+    scene_scrolled(
+        "120x24 · spacious world right edge + notifications",
+        24,
+        120,
+        &sessions,
+        usize::MAX,
+        66,
+        false,
+    );
+    scene(
+        "120x24 · spacious world reduced motion",
+        24,
+        120,
+        &sessions,
+        1,
+        true,
+    );
+    scene("120x24 · session 0 件", 24, 120, &[], 1, false);
+    let mut open_projects = sessions[..2].to_vec();
+    "alpha / session-auth".clone_into(&mut open_projects[0].label);
+    "alpha / issue-647".clone_into(&mut open_projects[1].label);
+    let mut inactive = sample(
+        "06000000-0000-4000-8000-000000000007",
+        "beta / review-api",
+        SessionLifecycle::Available,
+        AgentPhase::Absent,
+    );
+    inactive.agents_observed = false;
+    inactive.agents.clear();
+    open_projects.push(inactive);
+    scene_in_scope(
+        "120x24 · 2 open projects world",
+        24,
+        120,
+        "2 open projects",
+        &open_projects,
+        0,
+        (1, false),
+    );
+    // 64x14 terminal の先頭 1 行は project bar、残る 13 行では 1 plot が見える。
+    // 左右端を出し、1 列ずつ横スクロールして全 session へ到達できることを眺める。
+    scene_scrolled(
+        "64x14 terminal · compact Garden left edge",
+        13,
+        64,
+        &sessions,
+        0,
+        1,
+        false,
+    );
+    scene_scrolled(
+        "64x14 terminal · compact Garden right edge",
+        13,
+        64,
+        &sessions,
+        usize::MAX,
+        1,
+        false,
+    );
+}
+
+fn sample_sessions() -> [GardenSession; 6] {
+    [
         sample_agents(
             "00000000-0000-4000-8000-000000000001",
             "session-auth",
@@ -44,51 +115,7 @@ fn main() {
             SessionLifecycle::Deleting,
             AgentPhase::Ended,
         ),
-    ];
-    scene("100x24 · 全 lifecycle", 24, 100, &sessions, 1, false);
-    scene("100x24 · reduced motion", 24, 100, &sessions, 1, true);
-    scene("100x24 · session 0 件", 24, 100, &[], 1, false);
-    let mut open_projects = sessions[..2].to_vec();
-    "alpha / session-auth".clone_into(&mut open_projects[0].label);
-    "alpha / issue-647".clone_into(&mut open_projects[1].label);
-    let mut inactive = sample(
-        "06000000-0000-4000-8000-000000000007",
-        "beta / review-api",
-        SessionLifecycle::Available,
-        AgentPhase::Absent,
-    );
-    inactive.agents_observed = false;
-    inactive.agents.clear();
-    open_projects.push(inactive);
-    scene_in_scope(
-        "100x24 · 2 open projects",
-        24,
-        100,
-        "2 open projects",
-        &open_projects,
-        0,
-        (1, false),
-    );
-    // 64x14 terminal の先頭 1 行は project bar、残る 13 行では 1 plot が見える。
-    // 左右端を出し、1 列ずつ横スクロールして全 session へ到達できることを眺める。
-    scene_scrolled(
-        "64x14 terminal · Garden left edge",
-        13,
-        64,
-        &sessions,
-        0,
-        1,
-        false,
-    );
-    scene_scrolled(
-        "64x14 terminal · Garden right edge",
-        13,
-        64,
-        &sessions,
-        usize::MAX,
-        1,
-        false,
-    );
+    ]
 }
 
 fn scene(

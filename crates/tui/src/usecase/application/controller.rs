@@ -1061,8 +1061,8 @@ pub struct AppState {
     /// behind an invisible overlay. The renderer injects this layout fact; the
     /// reducer uses it to admit both automatic and manual opening consistently.
     garden_available: bool,
-    /// Zero-based leftmost Garden plot column selected through renderer-owned scroll controls.
-    /// Presentation clamps it to the current column range before drawing, and
+    /// Renderer-owned zero-based horizontal Garden position selected through scroll controls.
+    /// Presentation clamps it to the current range before drawing, and
     /// sends the exact resulting target back instead of asking the reducer to
     /// derive terminal-dependent capacity.
     garden_scroll: usize,
@@ -1433,7 +1433,7 @@ impl AppState {
     pub const fn size(&self) -> Option<(u16, u16)> {
         self.size
     }
-    /// Zero-based leftmost plot column requested for the open Garden.
+    /// Renderer-owned zero-based horizontal position requested for the open Garden.
     #[must_use]
     pub const fn garden_scroll(&self) -> usize {
         self.garden_scroll
@@ -2034,7 +2034,7 @@ pub enum AppEvent {
 pub enum GardenClick {
     /// A horizontal scroll control or arrow key. The renderer has already clamped
     /// the target against the frame currently on screen, so this keeps the Garden
-    /// open and replaces the requested leftmost plot column exactly.
+    /// open and replaces the requested horizontal position exactly.
     Scroll(usize),
     /// A session's plot. Its stable project/session pair becomes the process
     /// shell's visit target; this reducer activates it only when `workspace`
