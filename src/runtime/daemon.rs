@@ -7272,6 +7272,7 @@ fn best_effort_merged_pr_head(
 #[allow(clippy::too_many_lines)]
 fn clean_orphan_session_resources(
     bound: &ConnectionWorkspace,
+    agent: &SharedAgentRuntime,
     apply: bool,
     force: bool,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
@@ -7336,7 +7337,12 @@ fn clean_orphan_session_resources(
             )
         })
         .collect::<Vec<_>>();
-    let described = git_candidates
+    let failed_reservations = agent
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .failed_reservation_ids()
+        .map_err(|_| SessionRuntimeError::Storage)?;
+    let mut described = git_candidates
         .iter()
         .map(|candidate| match candidate {
             CleanCandidate::Worktree {
@@ -7361,17 +7367,41 @@ fn clean_orphan_session_resources(
             _ => unreachable!(),
         })
         .collect::<Vec<_>>();
+    described.extend(failed_reservations.iter().map(|runtime| {
+        serde_json::json!({
+            "kind": "agent_reservation",
+            "name": runtime.as_str(),
+            "protected": true,
+        })
+    }));
     if !apply {
         return Ok(serde_json::json!({
             "mode": "dry_run",
             "candidates": described,
             "removed": 0,
-            "protected": git_candidates.iter().filter(|item| item.requires_force()).count(),
+            "protected": git_candidates.iter().filter(|item| item.requires_force()).count()
+                + failed_reservations.len(),
         }));
     }
 
     let mut removed = 0usize;
     let mut protected = 0usize;
+    if !failed_reservations.is_empty() {
+        if force {
+            removed += agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .clean_failed_reservations()
+                .map_err(|error| {
+                    SessionRuntimeError::DurableFailure(format!(
+                        "could not clean failed Agent reservations: {}",
+                        error.message
+                    ))
+                })?;
+        } else {
+            protected += failed_reservations.len();
+        }
+    }
     for candidate in &git_candidates {
         if candidate.requires_force() && !force {
             protected += 1;
@@ -7901,7 +7931,7 @@ fn dispatch_session_action(
             if force && !apply {
                 return Err(SessionRuntimeError::InvalidRequest);
             }
-            reply(clean_orphan_session_resources(bound, apply, force)?)
+            reply(clean_orphan_session_resources(bound, agent, apply, force)?)
         }
         SessionAction::Setup => bound
             .sessions()

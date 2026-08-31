@@ -1244,6 +1244,61 @@ impl RuntimeCoordinator {
         self.persist(store)
     }
 
+    /// Converts a launch reservation which is known not to have spawned a
+    /// process into its terminal failure state. This is used both by the
+    /// immediate launch error path and by explicit cleanup of an older leaked
+    /// admission whose dispatch run is already terminal.
+    pub fn fail_reserved_launch(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        store: &mut dyn RuntimeStore,
+    ) -> Result<bool, RuntimeError> {
+        let record = self.record(runtime)?;
+        if record.state != RuntimeState::Reserved || record.process.is_some() {
+            return Ok(false);
+        }
+        self.generation
+            .resolve_orphan(&runtime.terminal, ProcessObservation::Gone, false)
+            .map_err(RuntimeError::Generation)?;
+        let record = self.record_mut(runtime)?;
+        record.state = RuntimeState::SpawnFailed;
+        record.outcome = DurableOperationOutcome::SpawnUnavailable;
+        record.process = None;
+        self.persist(store)?;
+        Ok(true)
+    }
+
+    /// Force-clean counterpart for a failed admission restored after daemon
+    /// restart. The caller has already matched a terminal dispatch run and the
+    /// explicit clean command acknowledges the identity-unknown reservation.
+    pub fn clean_failed_launch(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        store: &mut dyn RuntimeStore,
+    ) -> Result<bool, RuntimeError> {
+        let record = self.record(runtime)?;
+        if record.process.is_some() {
+            return Ok(false);
+        }
+        let observation = match record.state {
+            RuntimeState::Reserved => ProcessObservation::Gone,
+            RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown) => {
+                ProcessObservation::Unknown
+            }
+            _ => return Ok(false),
+        };
+        let acknowledged = matches!(observation, ProcessObservation::Unknown);
+        self.generation
+            .resolve_orphan(&runtime.terminal, observation, acknowledged)
+            .map_err(RuntimeError::Generation)?;
+        let record = self.record_mut(runtime)?;
+        record.state = RuntimeState::SpawnFailed;
+        record.outcome = DurableOperationOutcome::SpawnUnavailable;
+        record.process = None;
+        self.persist(store)?;
+        Ok(true)
+    }
+
     pub fn terminal_snapshot(&self, runtime: &AgentRuntimeRef) -> Result<Snapshot, RuntimeError> {
         self.record(runtime)?;
         // The registry's typed failure is preserved: a fencing failure and a
@@ -2758,6 +2813,84 @@ mod tests {
             "the acknowledged terminal state is durable before removal"
         );
         assert!(store.0.last().unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn a_failed_pre_spawn_reservation_becomes_terminal_and_releases_capacity() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        let runtime_id = runtime.agent_runtime_id.as_str();
+        let record = coordinator.records.get_mut(&runtime_id).unwrap();
+        record.state = RuntimeState::Reserved;
+        record.process = None;
+
+        assert!(
+            coordinator
+                .fail_reserved_launch(&runtime, &mut store)
+                .unwrap()
+        );
+        let record = coordinator.record_for(&runtime).unwrap();
+        assert_eq!(record.state, RuntimeState::SpawnFailed);
+        assert_eq!(record.outcome, DurableOperationOutcome::SpawnUnavailable);
+        assert_eq!(coordinator.occupied_slots(), 0);
+        assert!(
+            !coordinator
+                .fail_reserved_launch(&runtime, &mut store)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn force_clean_repairs_only_a_processless_failed_launch() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        let runtime_id = runtime.agent_runtime_id.as_str();
+        coordinator.records.get_mut(&runtime_id).unwrap().state = RuntimeState::Reserved;
+
+        assert!(
+            !coordinator
+                .clean_failed_launch(&runtime, &mut store)
+                .unwrap()
+        );
+        coordinator.records.get_mut(&runtime_id).unwrap().process = None;
+        assert!(
+            coordinator
+                .clean_failed_launch(&runtime, &mut store)
+                .unwrap()
+        );
+        assert_eq!(
+            coordinator.record_for(&runtime).unwrap().state,
+            RuntimeState::SpawnFailed
+        );
+        assert!(
+            !coordinator
+                .clean_failed_launch(&runtime, &mut store)
+                .unwrap()
+        );
     }
 
     #[test]
