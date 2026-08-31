@@ -5372,7 +5372,7 @@ mod tests {
                 .iter()
                 .map(|integration| (integration.profile_id.as_str(), integration.revision))
                 .collect::<Vec<_>>(),
-            [("claude", 4), ("codex", 3), ("sakana-ai", 3)]
+            [("claude", 4), ("codex", 4), ("sakana-ai", 4)]
         );
         assert_eq!(
             doctor_reply_body(DaemonReply::Ok(serde_json::json!({"ok": true}))),
