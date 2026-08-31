@@ -5474,6 +5474,40 @@ fn is_director_new_click(
         && director_drawer::new_button_at(height, width, column, row, false)
 }
 
+/// Whether this press lands on the persistent Director button in the Home
+/// header that produced the current frame.
+///
+/// This is resolved before drawer-local input ownership. In particular, the
+/// CLI picker deliberately consumes every other user input, but must not make
+/// the visible close button inert.
+fn is_director_header_click(key: &Key, width: usize, home: &HomeProjection) -> bool {
+    let (column, row) = match key {
+        Key::Click { column, row }
+        | Key::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            column,
+            row,
+        }) => (*column, *row),
+        _ => return false,
+    };
+    home_header_action_at(width, home, column, row) == Some(HomeHeaderAction::Director)
+}
+
+/// Close an open Director drawer from its persistent header button before its
+/// exclusive picker consumes the press. Existing modals keep precedence, and a
+/// closed drawer continues through the ordinary Home header route.
+fn close_director_from_header(
+    runtime: &mut WorkspaceRuntime,
+    key: &Key,
+    width: usize,
+    home: &HomeProjection,
+) -> Option<Vec<Effect>> {
+    (runtime.state().overlay().is_none()
+        && runtime.state().director_drawer_open()
+        && is_director_header_click(key, width, home))
+    .then(|| runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer)))
+}
+
 fn is_director_new_pointer(
     key: &Key,
     runtime: &WorkspaceRuntime,
@@ -7604,9 +7638,19 @@ fn drive_workspace_controller(
             frame_material_key = None;
             continue;
         }
+        // The Home header stays above the overlaid Director drawer. Resolve its
+        // persistent toggle before the drawer picker gets a chance to consume
+        // the click, otherwise an open picker makes the visible close button
+        // inert.
+        let director_header_effects = drawn_material.as_ref().and_then(|material| {
+            close_director_from_header(&mut runtime, &key, material.width, &material.projection)
+        });
         let input_route = match garden_route {
             Some(GardenInputRoute::Local(effects)) => WorkspaceInputRoute::Garden(effects),
             Some(GardenInputRoute::Project(_)) => unreachable!("project visit returned above"),
+            None if director_header_effects.is_some() => {
+                WorkspaceInputRoute::Drawer(director_header_effects.expect("matched above"))
+            }
             None => route_workspace_input_before_reducer(
                 &mut ui,
                 &mut runtime,
@@ -9114,11 +9158,12 @@ mod tests {
         WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute, WorkspaceLoader,
         WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
         activate_workspace_responsive, adjust_project_bar_pointer, app_event_from_key,
-        close_exited_panes, compose_workspace_shell_frame, controller_terminal_view,
-        copy_terminal_selection, director_organization, dismiss_pr_modal_on_project_bar_click,
-        drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
-        garden_click_at, garden_fits, garden_shell_owned_wake, handle_terminal_pointer,
-        home_frame_material, intercept_live_terminal_control, is_user_activity,
+        close_director_from_header, close_exited_panes, compose_workspace_shell_frame,
+        controller_terminal_view, copy_terminal_selection, director_organization,
+        dismiss_pr_modal_on_project_bar_click, drain_session_completions,
+        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at, garden_fits,
+        garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
+        intercept_live_terminal_control, is_director_header_click, is_user_activity,
         key_to_terminal_bytes, key_to_terminal_bytes_for_mode, new_project_notice,
         open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
         prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
@@ -9144,6 +9189,7 @@ mod tests {
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::open::Open;
     use crate::presentation::views::welcome::MenuAction;
+    use crate::presentation::views::workspace::HomeProjection;
     use crate::presentation::widgets::strip_ansi;
     use crate::presentation::workspace_runtime::PaneRestoreTarget;
     use crate::usecase::application::agent_tab_intent::{
@@ -17401,6 +17447,54 @@ mod tests {
         assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
         assert!(term.copied.is_empty());
         assert!(browser.opened.is_empty());
+    }
+
+    #[test]
+    fn director_header_button_closes_the_drawer_while_the_picker_owns_input() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude, DefaultModel::OpenAi]),
+            DefaultModel::Claude,
+        );
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
+                .is_empty()
+        );
+        assert!(runtime.state().director_drawer_open());
+        assert!(matches!(
+            runtime.state().director_new(),
+            DirectorNew::Choosing(_)
+        ));
+
+        let home = HomeProjection::from_state(runtime.state(), "demo", Path::new("/work"), &[]);
+        let click = Key::Click { column: 99, row: 0 };
+        assert!(is_director_header_click(
+            &Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 99,
+                row: 0,
+            }),
+            100,
+            &home,
+        ));
+
+        // The picker is intentionally exclusive, so the frame loop must resolve
+        // the persistent header through this dedicated route first.
+        assert_eq!(
+            close_director_from_header(&mut runtime, &click, 100, &home),
+            Some(Vec::new())
+        );
+        assert!(!runtime.state().director_drawer_open());
+
+        // Once closed, the same visible button belongs to the ordinary Home
+        // route instead of this close-only priority seam.
+        let closed = HomeProjection::from_state(runtime.state(), "demo", Path::new("/work"), &[]);
+        assert_eq!(
+            close_director_from_header(&mut runtime, &click, 100, &closed),
+            None
+        );
     }
 
     #[test]
@@ -26424,7 +26518,7 @@ mod tests {
                 false,
                 Some(WorkspaceDrawerFocus::Director),
             ),
-            Geometry { cols: 56, rows: 17 }
+            Geometry { cols: 56, rows: 16 }
         );
         assert_eq!(
             foreground_terminal_geometry(

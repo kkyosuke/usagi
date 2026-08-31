@@ -561,7 +561,7 @@ provider 固有 ID、prompt、inbox 本文は表示しない。
 
 root scope（`session_id: None`）の Agent へ指示を出し、session を作らせる面を**指示モード**（英語 / identifier は
 `director`）と呼ぶ。この節が指示モードの名称と仕様の正本である。managed session の実作業を見る面
-（[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home の高さ一杯を使って右端へ重なる drawer として現れる。
+（[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home header の下から右端へ重なる drawer として現れる。
 
 Home header の右端には Unicode の chess queen を使う `[ ♛ Director ]` button を表示し、drawer title も
 `♛ Director` とする。glyph は直接描画し、狭幅でも
@@ -578,7 +578,7 @@ clip する場合も、この対比は変わらない。
 button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
 指示モードの open/closed state を toggle する。drawer の通常幅は端末幅の 60% とし、
 56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
-同時に保てない幅では全幅へ縮退し、完全に隠れる managed terminal は detach する。背景 Home は ANSI span ごと dim にする。
+同時に保てない幅では全幅へ縮退し、完全に隠れる managed terminal は detach する。背景 Home は header を残して ANSI span ごと dim にする。
 drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
 managed-session Closeup の right pane viewport とは別の pure geometry とする。背景に見えている managed Agent は
 その right pane viewport の attachment と出力 poll を維持し、dim 表示中も live output を描く。
