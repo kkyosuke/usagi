@@ -1144,6 +1144,12 @@ process-local の aggregate cell budget で bound し、超過分は古い scrol
 counter に計上する。checkpoint payload が frame budget を超える場合も payload 側の古い scrollback を
 落として収め、可視 grid だけでも収まらないときは部分的な screen を返さず fail closed とする。
 
+daemon-owned PTY では registry の VT screen が terminal endpoint でもある。child が `CSI 6n` で現在の
+cursor position を問い合わせた場合は、query を受理した時点の authoritative cursor から `CSI row;col R`
+を PTY へ返す。この terminal protocol reply は user input ではないため input ledger へ記録しない。
+Agent と generic terminal は同じ経路を使い、inline TUI が起動前の警告行を含む cursor origin を正しく
+取得できるようにする。
+
 terminal input は `(ClientId, TerminalRef, input sequence, RequestId)` で dedupe し、同じ input batch を
 別 connection から重複 write しない。input は queue capacity を予約してから enqueue し、ACK は全 byte が
 PTY endpoint に書き込まれた後だけ返す。partial write は ambiguous として扱う。

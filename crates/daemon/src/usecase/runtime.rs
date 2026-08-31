@@ -921,6 +921,18 @@ impl RuntimeCoordinator {
         data: Vec<u8>,
         journal: &mut dyn OutputJournal,
     ) -> Result<Output, RuntimeError> {
+        self.append_output_with_replies(runtime, data, journal)
+            .map(|(output, _)| output)
+    }
+
+    /// Journals PTY output and returns terminal-protocol replies for the
+    /// daemon-owned PTY endpoint without recording them as client input.
+    pub fn append_output_with_replies(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        data: Vec<u8>,
+        journal: &mut dyn OutputJournal,
+    ) -> Result<(Output, Vec<u8>), RuntimeError> {
         self.running(runtime)?;
         // Offsets only: journaling an accepted chunk must not capture a screen,
         // or every PTY chunk would pay for a full checkpoint.
@@ -942,7 +954,7 @@ impl RuntimeCoordinator {
         // registry takes the same allocation rather than a second copy of it.
         let Output { data, .. } = output;
         self.terminals
-            .append_output(&runtime.terminal, data)
+            .append_output_with_replies(&runtime.terminal, data)
             .map_err(RuntimeError::Terminal)
     }
 

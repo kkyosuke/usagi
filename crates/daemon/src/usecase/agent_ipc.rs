@@ -2582,10 +2582,17 @@ impl AgentRuntime {
             .coordinator
             .runtime_for_terminal(terminal)
             .ok_or_else(stale_terminal)?;
-        self.coordinator
-            .append_output(&runtime, bytes, &mut *self.journal)
-            .map(|_| ())
-            .map_err(map_runtime_error)
+        let (_, replies) = self
+            .coordinator
+            .append_output_with_replies(&runtime, bytes, &mut *self.journal)
+            .map_err(map_runtime_error)?;
+        if !replies.is_empty() {
+            self.pty.select_terminal(terminal);
+            // Output has already committed. A lost terminal reply must not
+            // recast that accepted output as a failed observer event.
+            let _ = self.pty.write_all(&replies);
+        }
+        Ok(())
     }
 
     /// Commits a verified Agent exit after the caller has drained output.
@@ -4789,6 +4796,25 @@ mod tests {
 
     fn pty_mut(runtime: &mut AgentRuntime) -> &mut Pty {
         runtime.pty.as_any_mut().downcast_mut::<Pty>().unwrap()
+    }
+
+    #[test]
+    fn agent_output_answers_cursor_position_queries_through_the_owned_pty() {
+        let mut agent = runtime();
+        let admission = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+
+        agent
+            .output(&admission.terminal, b"warning\r\n> \x1b[6n".to_vec())
+            .unwrap();
+
+        assert_eq!(pty(&agent).writes, b"\x1b[2;3R");
+        assert_eq!(pty(&agent).selected, Some(admission.terminal));
     }
 
     fn configured_scope(workspace: &std::path::Path) -> ResolvedAgentScope {
