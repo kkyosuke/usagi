@@ -89,6 +89,9 @@ pub enum TerminalRuntimeState {
     /// The previous owner and child are proved gone. History remains available
     /// for Agent resume, but this state holds no runtime capacity.
     Interrupted,
+    /// The Agent was intentionally stopped to free concurrency while retaining
+    /// an exact provider resume source.
+    Sleeping,
     Exited,
     Reclaimed,
     ReconcileRequired(TerminalReconcileState),

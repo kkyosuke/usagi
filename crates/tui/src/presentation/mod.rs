@@ -84,7 +84,8 @@ use crate::usecase::application::daemon_backend::{
     DecisionPort as BackendDecisionPort, Flow as BackendFlow, LaunchAgentRequest,
     OpenTerminalRequest, OverlayPort as BackendOverlayPort, RemoveSessionRequest,
     ReopenAgentRequest, ResumeAgentRequest, SessionCommandPort as BackendSessionCommandPort,
-    TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
+    SleepSessionRequest, TargetStorePort as BackendTargetStorePort,
+    WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
 use crate::usecase::application::pane::{PaneKind, PaneTab, TabSelection};
@@ -1072,6 +1073,7 @@ pub enum ControllerHostAction {
     Create(CreateSessionRequest, Completions),
     Refresh(WorkspaceId, Completions),
     Remove(RemoveSessionRequest, Completions),
+    Sleep(SleepSessionRequest, Completions),
     LaunchAgent(LaunchAgentRequest),
     ResumeAgent(ResumeAgentRequest),
     ReopenAgent(ReopenAgentRequest),
@@ -1124,6 +1126,17 @@ impl BackendSessionCommandPort for ControllerHost {
         if let Err(mpsc::SendError(ControllerHostAction::Remove(_, completions))) = self
             .0
             .send(ControllerHostAction::Remove(request, completions))
+        {
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                "session command host is unavailable",
+            ))));
+        }
+    }
+
+    fn sleep(&mut self, request: SleepSessionRequest, completions: Completions) {
+        if let Err(mpsc::SendError(ControllerHostAction::Sleep(_, completions))) = self
+            .0
+            .send(ControllerHostAction::Sleep(request, completions))
         {
             completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
                 "session command host is unavailable",
@@ -2186,6 +2199,10 @@ enum SessionBackendCompletion {
     },
     Remove {
         session: SessionId,
+        before: Vec<SessionId>,
+        completions: Completions,
+    },
+    Sleep {
         before: Vec<SessionId>,
         completions: Completions,
     },
@@ -3555,7 +3572,7 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
             {
                 ui.removing_session = None;
             }
-            SessionBackendCompletion::Remove { .. } => {}
+            SessionBackendCompletion::Remove { .. } | SessionBackendCompletion::Sleep { .. } => {}
         }
         if let Ok(result) = completion.result {
             adopt_session_snapshot(ui, result);
@@ -3663,6 +3680,10 @@ fn emit_session_command_result(
                 before,
                 completions,
                 ..
+            }
+            | SessionBackendCompletion::Sleep {
+                before,
+                completions,
             },
         ) => {
             completions.emit(AppEvent::Backend(BackendEvent::Sessions(
@@ -3682,7 +3703,11 @@ fn emit_session_command_result(
                 notice: Some(Notice::new(safe_session_error(message))),
             }));
         }
-        (Err(message), SessionBackendCompletion::Remove { completions, .. }) => {
+        (
+            Err(message),
+            SessionBackendCompletion::Remove { completions, .. }
+            | SessionBackendCompletion::Sleep { completions, .. },
+        ) => {
             completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
                 safe_session_error(message),
             ))));
@@ -6101,6 +6126,23 @@ fn drain_controller_host_actions(
                     ) {
                         ui.removing_session = Some(request.session);
                     }
+                } else {
+                    completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                        "selected session is no longer available",
+                    ))));
+                }
+            }
+            ControllerHostAction::Sleep(request, completions) => {
+                if let Some(name) = session_name_for(ui, request.session) {
+                    let before = ui.workspace.session_ids().to_vec();
+                    begin_session_command(
+                        ui,
+                        SessionCommand::Sleep { name },
+                        SessionBackendCompletion::Sleep {
+                            before,
+                            completions,
+                        },
+                    );
                 } else {
                     completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
                         "selected session is no longer available",
@@ -10528,6 +10570,7 @@ mod tests {
                 force: true,
                 force_delete_branch: false,
             },
+            Effect::SleepSession { workspace, session },
             Effect::LaunchAgent {
                 workspace,
                 session: Some(session),
@@ -10555,7 +10598,7 @@ mod tests {
         ] {
             backend.dispatch(effect);
         }
-        assert_eq!(actions.try_iter().count(), 9);
+        assert_eq!(actions.try_iter().count(), 10);
 
         for effect in [
             Effect::LoadNotes { target },
@@ -15195,6 +15238,7 @@ mod tests {
     enum ConcurrentSessionRequest {
         Create(u64),
         Remove,
+        Sleep,
     }
 
     struct BlockingSessionPort {
@@ -15269,6 +15313,13 @@ mod tests {
                     session,
                     force: false,
                     force_delete_branch: false,
+                },
+                completions,
+            ),
+            ConcurrentSessionRequest::Sleep => host.sleep(
+                crate::usecase::application::daemon_backend::SleepSessionRequest {
+                    workspace,
+                    session,
                 },
                 completions,
             ),
@@ -15487,6 +15538,7 @@ mod tests {
         for request in [
             ConcurrentSessionRequest::Create(1),
             ConcurrentSessionRequest::Remove,
+            ConcurrentSessionRequest::Sleep,
         ] {
             let completion = enqueue_session_request(&mut host, request, workspace, session);
             assert!(matches!(

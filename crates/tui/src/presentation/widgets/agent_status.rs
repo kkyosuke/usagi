@@ -34,8 +34,9 @@ pub const fn attention_rank(phase: AgentPhase) -> u8 {
         AgentPhase::Running => 1,
         AgentPhase::Ready => 2,
         AgentPhase::Interrupted => 3,
-        AgentPhase::Absent => 4,
-        AgentPhase::Ended | AgentPhase::Exited => 5,
+        AgentPhase::Sleeping => 4,
+        AgentPhase::Absent => 5,
+        AgentPhase::Ended | AgentPhase::Exited => 6,
     }
 }
 
@@ -58,6 +59,7 @@ pub const fn glyph(phase: AgentPhase) -> &'static str {
         AgentPhase::Running => "●",
         AgentPhase::Ready => "○",
         AgentPhase::Interrupted => "◌",
+        AgentPhase::Sleeping => "☾",
         AgentPhase::Absent => "·",
         AgentPhase::Ended | AgentPhase::Exited => "◦",
     }
@@ -71,6 +73,7 @@ pub fn style(phase: AgentPhase) -> Style {
         AgentPhase::Running => Role::Success.style().bold(),
         AgentPhase::Ready => Role::Accent.style(),
         AgentPhase::Interrupted => Role::Warning.style().dim(),
+        AgentPhase::Sleeping => Role::Accent.style().dim(),
         AgentPhase::Absent | AgentPhase::Ended | AgentPhase::Exited => Style::new().dim(),
     }
 }
@@ -83,6 +86,7 @@ pub const fn short_label(phase: AgentPhase) -> &'static str {
         AgentPhase::Running => "run",
         AgentPhase::Ready => "ready",
         AgentPhase::Interrupted => "int",
+        AgentPhase::Sleeping => "sleep",
         AgentPhase::Absent => "idle",
         AgentPhase::Ended | AgentPhase::Exited => "done",
     }
@@ -94,11 +98,12 @@ const SUMMARY_GAP: usize = 2;
 /// 要約に並べる phase の代表と、その順序。
 ///
 /// [`attention_rank`] と同じ順で、`Ended` / `Exited` は `done` の 1 項目に畳む。
-const SUMMARY_ORDER: [AgentPhase; 6] = [
+const SUMMARY_ORDER: [AgentPhase; 7] = [
     AgentPhase::Waiting,
     AgentPhase::Running,
     AgentPhase::Ready,
     AgentPhase::Interrupted,
+    AgentPhase::Sleeping,
     AgentPhase::Absent,
     AgentPhase::Ended,
 ];

@@ -124,6 +124,7 @@ fn runtime_line(runtime: &AgentRuntimeRow) -> String {
     let state = match runtime.state {
         AgentRuntimeInventoryState::Reserved => "reserved",
         AgentRuntimeInventoryState::Live => "live",
+        AgentRuntimeInventoryState::Sleeping => "sleeping",
         AgentRuntimeInventoryState::Interrupted => "interrupted",
         AgentRuntimeInventoryState::Exited => "exited",
         AgentRuntimeInventoryState::Reclaimed => "reclaimed",

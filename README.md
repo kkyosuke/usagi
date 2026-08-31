@@ -206,6 +206,9 @@ terminal new     # 外部ターミナルを開き、modal を閉じて Closeup �
 
 daemon 再起動などで Agent が中断した場合は、自動的に別の会話へ接続せず、保持された provider conversation を
 `session resume <name>` で明示的に再開する。
+終了済みの会話を保持したまま Agent process と PTY だけを止める場合は `session sleep <name>` を使う。
+同時起動枠は 16 で、枠が埋まった状態から新しく起動すると、exact resume 可能な終了済み Agent のうち最古の 1 件が
+自動的に sleep へ移る。session、worktree、provider conversation は削除されず、同じ `session resume <name>` で再開できる。
 
 ### 4. 状態と PR を確認する
 

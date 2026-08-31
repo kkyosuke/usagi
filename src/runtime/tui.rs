@@ -3300,7 +3300,7 @@ fn provider_resume_projection(
     Ok(Some((
         session,
         ProviderResumeProjection {
-            interrupted: phase == AgentPhase::Interrupted,
+            interrupted: matches!(phase, AgentPhase::Interrupted | AgentPhase::Sleeping),
             resumable,
             reason,
         },
@@ -3334,6 +3334,9 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 // controller's `ResumeAgent` effect owns that pending pane, so
                 // this attach-less port refuses instead of spawning blindly.
                 return Err("session resume must be handled by the TUI".to_owned());
+            }
+            SessionCommand::Sleep { name } => {
+                (SessionAction::Sleep, serde_json::json!({"name": name}))
             }
             SessionCommand::SelectRemove { .. } => {
                 return Err("session selection must be handled by the TUI".to_owned());
@@ -7474,6 +7477,23 @@ mod tests {
             ))
         );
         assert_eq!(provider_resume_projection(&json!({})).unwrap(), None);
+        assert_eq!(
+            provider_resume_projection(&json!({
+                "session_id": session,
+                "agent_phase": "sleeping",
+                "agent_resumable": true,
+                "agent_resume_reason": "explicit_resume_available",
+            }))
+            .unwrap(),
+            Some((
+                session,
+                ProviderResumeProjection {
+                    interrupted: true,
+                    resumable: true,
+                    reason: ProviderResumeReason::ExplicitResumeAvailable,
+                },
+            ))
+        );
         assert_eq!(
             provider_resume_projection(&json!({
                 "session_id": session,

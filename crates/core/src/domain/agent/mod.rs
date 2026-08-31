@@ -403,6 +403,7 @@ pub struct AgentResumableInventoryItem {
 pub enum AgentRuntimeInventoryState {
     Reserved,
     Live,
+    Sleeping,
     Interrupted,
     Exited,
     Reclaimed,

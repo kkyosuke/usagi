@@ -2267,6 +2267,11 @@ pub enum Effect {
         session: SessionId,
         operation_id: OperationId,
     },
+    /// Stop quiescent resumable Agents without removing their session.
+    SleepSession {
+        workspace: WorkspaceId,
+        session: SessionId,
+    },
     /// Clear one local continuation-scoped dismissal. This effect never asks
     /// the daemon to spawn or provider-resume a runtime.
     ReopenAgent {
@@ -4968,6 +4973,23 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
                 workspace: state.workspace,
                 session,
                 operation_id: OperationId::new(),
+            }]
+        }
+        overview::SessionCommand::Sleep { name } => {
+            state.overlay = None;
+            let Some(index) = state
+                .session_names
+                .iter()
+                .position(|candidate| candidate == &name)
+            else {
+                state.notice = Some(Notice::new("session was not found"));
+                return Vec::new();
+            };
+            let session = state.sessions[index];
+            state.notice = Some(Notice::new("Putting idle Agent to sleep"));
+            vec![Effect::SleepSession {
+                workspace: state.workspace,
+                session,
             }]
         }
         overview::SessionCommand::SelectRemove { .. } => {
@@ -8376,6 +8398,15 @@ mod tests {
                 ..
             }] if *actual_workspace == workspace && *actual_session == session
         ));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("session sleep feature-x".into())),
+            ),
+            vec![Effect::SleepSession { workspace, session }]
+        );
 
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         assert!(

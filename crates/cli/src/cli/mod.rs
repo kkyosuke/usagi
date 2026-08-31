@@ -379,6 +379,10 @@ pub enum SessionCommand {
     Remove {
         name: String,
     },
+    /// Stop resumable idle Agents without removing the session worktree.
+    Sleep {
+        name: String,
+    },
     /// Resume one exact target returned by `resume-inventory`. The target is a
     /// secret-free JSON object; provider-native IDs are never accepted.
     ResumeExact {
@@ -516,6 +520,9 @@ impl Run for Session {
             }
             SessionCommand::Remove { name } => {
                 (SessionAction::Remove, serde_json::json!({"name": name}))
+            }
+            SessionCommand::Sleep { name } => {
+                (SessionAction::Sleep, serde_json::json!({"name": name}))
             }
             SessionCommand::ResumeExact { target } => {
                 let target = serde_json::from_str(target).map_err(|_| {
@@ -927,6 +934,10 @@ mod tests {
             (
                 ["usagi", "session", "remove", "a"].as_slice(),
                 usagi_core::usecase::client::SessionAction::Remove,
+            ),
+            (
+                ["usagi", "session", "sleep", "a"].as_slice(),
+                usagi_core::usecase::client::SessionAction::Sleep,
             ),
             (
                 ["usagi", "session", "setup", "a", "echo ok"].as_slice(),

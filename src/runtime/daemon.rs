@@ -7157,6 +7157,7 @@ fn session_response_envelope(
                 SessionAction::Create => Some("session.created"),
                 SessionAction::Remove => Some("session.removed"),
                 SessionAction::Clean
+                | SessionAction::Sleep
                 | SessionAction::List
                 | SessionAction::Status
                 | SessionAction::Overview
@@ -7889,6 +7890,28 @@ fn dispatch_session_action(
                 payload,
                 merged_head_oid,
             )
+        }
+        SessionAction::Sleep => {
+            let name = string("name")?;
+            let id = named_session(name)?;
+            let slept = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .sleep_session(id)
+                .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            let mut snapshot = dispatch_session_action(
+                bound,
+                teardown,
+                agent,
+                pr_inventory,
+                SessionAction::List,
+                operation_id,
+                &serde_json::json!({}),
+            )?;
+            snapshot.body["slept"] = serde_json::json!(slept);
+            snapshot.body["slept_session"] = serde_json::json!(name);
+            snapshot.body["session_retained"] = serde_json::json!(true);
+            Ok(snapshot)
         }
         SessionAction::Clean => {
             let flag = |name| match payload.get(name) {

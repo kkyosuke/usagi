@@ -84,6 +84,13 @@ pub struct RemoveSessionRequest {
     pub force_delete_branch: bool,
 }
 
+/// A non-destructive Agent sleep request for one retained session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SleepSessionRequest {
+    pub workspace: WorkspaceId,
+    pub session: SessionId,
+}
+
 /// An Agent-launch request derived from [`Effect::LaunchAgent`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchAgentRequest {
@@ -138,6 +145,8 @@ pub trait SessionCommandPort {
     fn refresh(&mut self, workspace: WorkspaceId, completions: Completions);
     /// Remove a session and report the resulting snapshot.
     fn remove(&mut self, request: RemoveSessionRequest, completions: Completions);
+    /// Sleep resumable idle Agents and keep the session/worktree intact.
+    fn sleep(&mut self, _request: SleepSessionRequest, _completions: Completions) {}
 }
 
 /// Agent / generic-terminal / tab operations for the active workspace panes.
@@ -424,6 +433,10 @@ impl DaemonBackend {
                 },
                 self.completions(),
             ),
+            Effect::SleepSession { workspace, session } => self.sessions.sleep(
+                SleepSessionRequest { workspace, session },
+                self.completions(),
+            ),
             Effect::LaunchAgent {
                 workspace,
                 session,
@@ -565,6 +578,7 @@ mod tests {
         created: Vec<CreateSessionRequest>,
         refreshed: Vec<WorkspaceId>,
         removed: Vec<RemoveSessionRequest>,
+        slept: Vec<SleepSessionRequest>,
     }
 
     impl SessionCommandPort for FakeSessions {
@@ -588,6 +602,11 @@ mod tests {
 
         fn remove(&mut self, request: RemoveSessionRequest, completions: Completions) {
             self.removed.push(request);
+            completions.emit(AppEvent::Backend(BackendEvent::Sessions(Vec::new())));
+        }
+
+        fn sleep(&mut self, request: SleepSessionRequest, completions: Completions) {
+            self.slept.push(request);
             completions.emit(AppEvent::Backend(BackendEvent::Sessions(Vec::new())));
         }
     }
@@ -899,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_session_refluxes_the_emptied_snapshot() {
+    fn remove_and_sleep_session_reflux_the_emptied_snapshot() {
         let mut backend = backend();
         let flow = backend.dispatch(Effect::RemoveSession {
             workspace: WorkspaceId::new(),
@@ -908,6 +927,17 @@ mod tests {
             force_delete_branch: false,
         });
         assert_eq!(flow, Flow::Continue);
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::Sessions(sessions))] if sessions.is_empty()
+        ));
+        assert_eq!(
+            backend.dispatch(Effect::SleepSession {
+                workspace: WorkspaceId::new(),
+                session: SessionId::new(),
+            }),
+            Flow::Continue
+        );
         assert!(matches!(
             backend.drain_events().as_slice(),
             [AppEvent::Backend(BackendEvent::Sessions(sessions))] if sessions.is_empty()
@@ -1226,6 +1256,10 @@ mod tests {
         };
         assert_eq!(remove.clone(), remove);
         assert!(format!("{remove:?}").contains("RemoveSessionRequest"));
+
+        let sleep = SleepSessionRequest { workspace, session };
+        assert_eq!(sleep.clone(), sleep);
+        assert!(format!("{sleep:?}").contains("SleepSessionRequest"));
 
         let launch = LaunchAgentRequest {
             workspace,

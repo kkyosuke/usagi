@@ -524,17 +524,7 @@ fn notification(session: &GardenSession) -> (Style, String) {
         return (Style::new().dim(), "No agent activity.".to_owned());
     }
     if agents.len() == 1 {
-        return match agents[0].phase {
-            AgentPhase::Waiting => (Role::Warning.style(), "Agent needs your input.".to_owned()),
-            AgentPhase::Running => (Role::Success.style(), "Agent is working.".to_owned()),
-            AgentPhase::Interrupted => (Role::Warning.style(), "Agent was interrupted.".to_owned()),
-            AgentPhase::Ended | AgentPhase::Exited => {
-                (Role::Success.style(), "Agent completed.".to_owned())
-            }
-            AgentPhase::Ready | AgentPhase::Absent => {
-                (Style::new().dim(), "Agent is available.".to_owned())
-            }
-        };
+        return single_agent_notification(agents[0].phase);
     }
 
     let total = agents.len();
@@ -564,6 +554,13 @@ fn notification(session: &GardenSession) -> (Style, String) {
         return (
             Role::Warning.style(),
             format!("{interrupted}/{total} agents interrupted."),
+        );
+    }
+    let sleeping = count(AgentPhase::Sleeping);
+    if sleeping > 0 {
+        return (
+            Style::new().dim(),
+            format!("{sleeping}/{total} agents sleeping."),
         );
     }
     let completed = count(AgentPhase::Ended);
@@ -730,6 +727,21 @@ fn session_may_animate(session: &GardenSession) -> bool {
                         | AgentPhase::Ready
                 )
             }),
+    }
+}
+
+fn single_agent_notification(phase: AgentPhase) -> (Style, String) {
+    match phase {
+        AgentPhase::Waiting => (Role::Warning.style(), "Agent needs your input.".to_owned()),
+        AgentPhase::Running => (Role::Success.style(), "Agent is working.".to_owned()),
+        AgentPhase::Interrupted => (Role::Warning.style(), "Agent was interrupted.".to_owned()),
+        AgentPhase::Sleeping => (Style::new().dim(), "Agent is sleeping.".to_owned()),
+        AgentPhase::Ended | AgentPhase::Exited => {
+            (Role::Success.style(), "Agent completed.".to_owned())
+        }
+        AgentPhase::Ready | AgentPhase::Absent => {
+            (Style::new().dim(), "Agent is available.".to_owned())
+        }
     }
 }
 
@@ -1119,6 +1131,12 @@ fn agent_appearance(
             feature,
             ["", " /)/)", "( -.-)!", "c(\")(\")"],
         ),
+        AgentPhase::Sleeping => (
+            "sleeping",
+            Style::new().dim(),
+            feature,
+            [" zZ", " /)/)", "( -.-)", "c(\")(\")"],
+        ),
         AgentPhase::Ended | AgentPhase::Exited => (
             "done",
             Style::new().dim(),
@@ -1500,6 +1518,7 @@ mod tests {
             (AgentPhase::Waiting, "Agent needs your input."),
             (AgentPhase::Running, "Agent is working."),
             (AgentPhase::Interrupted, "Agent was interrupted."),
+            (AgentPhase::Sleeping, "Agent is sleeping."),
             (AgentPhase::Ended, "Agent completed."),
             (AgentPhase::Exited, "Agent completed."),
             (AgentPhase::Ready, "Agent is available."),
@@ -1535,6 +1554,10 @@ mod tests {
             (
                 phases(&[AgentPhase::Interrupted, AgentPhase::Ready]),
                 "1/2 agents interrupted.",
+            ),
+            (
+                phases(&[AgentPhase::Sleeping, AgentPhase::Ready]),
+                "1/2 agents sleeping.",
             ),
             (
                 phases(&[AgentPhase::Ended, AgentPhase::Exited]),

@@ -889,6 +889,84 @@ impl AgentRuntime {
 }
 
 impl AgentRuntime {
+    /// Sleeps every quiescent, exactly resumable Agent in one managed session.
+    /// The session and worktree are never removed. If any live runtime in the
+    /// session is running work or lacks resume metadata, the whole request is
+    /// refused before signalling a process.
+    pub fn sleep_session(&mut self, session: SessionId) -> Result<usize, ProtocolError> {
+        let records = self.coordinator.snapshot().records;
+        let live = records
+            .iter()
+            .filter(|record| {
+                record.runtime.session_id == Some(session)
+                    && record.state == super::runtime::RuntimeState::Running
+            })
+            .collect::<Vec<_>>();
+        if live.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                "session has no live Agent to sleep",
+            ));
+        }
+        if live.iter().any(|record| {
+            !matches!(
+                self.reported_phases.get(&record.runtime.agent_runtime_id),
+                Some(AgentPhase::Ready | AgentPhase::Ended)
+            ) || !self.resume_source_availability(record, &records).0
+        }) {
+            return Err(ProtocolError::new(
+                ErrorCode::Busy,
+                "session Agent is busy or has no exact provider resume metadata",
+            ));
+        }
+        let runtime_ids = live
+            .iter()
+            .map(|record| record.runtime.agent_runtime_id.as_str())
+            .collect::<BTreeSet<_>>();
+        self.sleep_runtime_ids(&runtime_ids)
+    }
+
+    /// Frees one slot at saturation by sleeping the oldest completed turn that
+    /// can be resumed exactly. Running, waiting, and merely ready Agents are
+    /// never selected automatically.
+    fn sleep_one_for_capacity(&mut self) -> Result<bool, ProtocolError> {
+        if !self.coordinator.concurrency().is_saturated() {
+            return Ok(false);
+        }
+        let mut records = self.coordinator.snapshot().records;
+        records.sort_by_key(|record| record.operation.operation_id.to_string());
+        let candidate = records.iter().find(|record| {
+            record.state == super::runtime::RuntimeState::Running
+                && self
+                    .reported_phases
+                    .get(&record.runtime.agent_runtime_id)
+                    .is_some_and(|phase| *phase == AgentPhase::Ended)
+                && self.resume_source_availability(record, &records).0
+        });
+        let Some(candidate) = candidate else {
+            return Ok(false);
+        };
+        let runtime_ids = [candidate.runtime.agent_runtime_id.as_str()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        self.sleep_runtime_ids(&runtime_ids).map(|count| count == 1)
+    }
+
+    fn sleep_runtime_ids(
+        &mut self,
+        runtime_ids: &BTreeSet<String>,
+    ) -> Result<usize, ProtocolError> {
+        let slept = self
+            .coordinator
+            .sleep_agents(runtime_ids, &mut *self.store, &mut *self.pty)
+            .map_err(map_runtime_error)?;
+        self.mcp_callers
+            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id.as_str()));
+        self.reported_phases
+            .retain(|runtime, _| !runtime_ids.contains(&runtime.as_str()));
+        Ok(slept)
+    }
+
     /// Resolves an authenticated MCP child to its owning managed session.
     #[must_use]
     pub fn caller_session(&self, credential: &str) -> Option<SessionId> {
@@ -1894,6 +1972,7 @@ impl AgentRuntime {
         let mut reserved_worker = worker.clone();
         reserved_worker.status = AgentStatus::Starting;
         reserved_worker.current_run = Some(operation);
+        self.sleep_one_for_capacity()?;
         self.dispatch
             .reserve_admission(
                 reserved_worker,
@@ -2119,6 +2198,7 @@ impl AgentRuntime {
             session_id: worker.session_id,
             agent_id: worker.agent_id,
         };
+        self.sleep_one_for_capacity()?;
         self.dispatch
             .reserve_admission(
                 worker.clone(),
@@ -2303,6 +2383,7 @@ impl AgentRuntime {
                 session_id: worker.session_id,
                 agent_id: worker.agent_id,
             });
+        self.sleep_one_for_capacity()?;
         self.dispatch
             .reserve_admission(
                 worker.clone(),
@@ -3147,6 +3228,7 @@ const fn integration_diagnosable_state(state: super::runtime::RuntimeState) -> b
             | super::runtime::RuntimeState::Running
             | super::runtime::RuntimeState::Exited
             | super::runtime::RuntimeState::Interrupted
+            | super::runtime::RuntimeState::Sleeping
             | super::runtime::RuntimeState::ReconcileRequired(
                 super::runtime::ReconcileState::IdentityUnknown
             )
@@ -3159,6 +3241,7 @@ const fn runtime_inventory_state(
     match state {
         super::runtime::RuntimeState::Reserved => AgentRuntimeInventoryState::Reserved,
         super::runtime::RuntimeState::Running => AgentRuntimeInventoryState::Live,
+        super::runtime::RuntimeState::Sleeping => AgentRuntimeInventoryState::Sleeping,
         super::runtime::RuntimeState::ReconcileRequired(
             super::runtime::ReconcileState::IdentityUnknown,
         )
@@ -3207,6 +3290,7 @@ fn is_resume_source_state(state: super::runtime::RuntimeState) -> bool {
         super::runtime::RuntimeState::Exited
             | super::runtime::RuntimeState::Reclaimed
             | super::runtime::RuntimeState::Interrupted
+            | super::runtime::RuntimeState::Sleeping
             | super::runtime::RuntimeState::ReconcileRequired(
                 super::runtime::ReconcileState::IdentityUnknown
             )
@@ -3368,6 +3452,7 @@ const fn runtime_phase(state: super::runtime::RuntimeState) -> (u8, AgentPhase) 
         | RuntimeState::ReconcileRequired(super::runtime::ReconcileState::IdentityUnknown) => {
             (3, AgentPhase::Interrupted)
         }
+        RuntimeState::Sleeping => (3, AgentPhase::Sleeping),
         RuntimeState::SpawnFailed | RuntimeState::ReconcileRequired(_) => (2, AgentPhase::Exited),
         RuntimeState::Exited | RuntimeState::Reclaimed => (1, AgentPhase::Ended),
     }
@@ -3385,8 +3470,8 @@ const fn reported_phase(phase: AgentPhase) -> (u8, AgentPhase) {
         AgentPhase::Absent => 0,
         AgentPhase::Ready => 3,
         AgentPhase::Running | AgentPhase::Waiting | AgentPhase::Ended => 3 + aggregation_rank,
+        AgentPhase::Sleeping | AgentPhase::Interrupted => aggregation_rank,
         AgentPhase::Exited => 4 + aggregation_rank,
-        AgentPhase::Interrupted => aggregation_rank,
     };
     (priority, phase)
 }
@@ -3404,7 +3489,10 @@ const fn durable_provider_phase(phase: AgentPhase) -> Option<ProviderResumePhase
         AgentPhase::Running | AgentPhase::Waiting | AgentPhase::Ended => {
             Some(ProviderResumePhase::Running)
         }
-        AgentPhase::Absent | AgentPhase::Exited | AgentPhase::Interrupted => None,
+        AgentPhase::Absent
+        | AgentPhase::Sleeping
+        | AgentPhase::Exited
+        | AgentPhase::Interrupted => None,
     }
 }
 
@@ -3867,6 +3955,148 @@ mod tests {
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
         )
+    }
+
+    #[test]
+    fn saturated_launch_sleeps_the_oldest_completed_resumable_agent() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let generation = DaemonGeneration::new();
+        let mut agent = AgentRuntime::new(
+            generation,
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty {
+                terminate_success: true,
+                ..Pty::default()
+            },
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        );
+        // A one-slot fixture exercises the shipping 16-slot policy without
+        // launching sixteen identical test processes.
+        let mut one_slot = RuntimeCoordinator::new(1, 64 * 1024, 64);
+        one_slot.activate_generation(generation).unwrap();
+        agent.coordinator = one_slot;
+        let first = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: None,
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        let first_runtime = agent
+            .coordinator
+            .runtime_for_terminal(&first.terminal)
+            .unwrap();
+        agent
+            .reported_phases
+            .insert(first_runtime.agent_runtime_id, AgentPhase::Ended);
+
+        let second = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: None,
+                },
+                &FakeScope(Ok(resolved)),
+            )
+            .unwrap();
+
+        let records = agent.coordinator.snapshot().records;
+        assert_eq!(agent.concurrency().in_use, 1);
+        assert!(records.iter().any(|record| {
+            record.runtime.terminal == first.terminal
+                && record.state == super::super::runtime::RuntimeState::Sleeping
+        }));
+        assert!(records.iter().any(|record| {
+            record.runtime.terminal == second.terminal
+                && record.state == super::super::runtime::RuntimeState::Running
+        }));
+        assert_eq!(agent.session_phase(session), AgentPhase::Running);
+        assert!(agent.inventory(workspace).runtimes.iter().any(|runtime| {
+            runtime.runtime.terminal == first.terminal
+                && runtime.state == AgentRuntimeInventoryState::Sleeping
+        }));
+    }
+
+    #[test]
+    fn manual_sleep_requires_an_idle_exact_resume_source_and_retains_the_session() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut agent = AgentRuntime::new(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty {
+                terminate_success: true,
+                ..Pty::default()
+            },
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        );
+        assert_eq!(
+            agent.sleep_session(session).unwrap_err().code,
+            ErrorCode::Unavailable
+        );
+
+        let admission = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: None,
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let runtime = agent
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap();
+        assert_eq!(
+            agent.sleep_session(session).unwrap_err().code,
+            ErrorCode::Busy
+        );
+
+        agent
+            .reported_phases
+            .insert(runtime.agent_runtime_id, AgentPhase::Ready);
+        let mut snapshot = agent.coordinator.snapshot();
+        let resume = snapshot.records[0].provider_resume.take().unwrap();
+        agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        assert_eq!(
+            agent.sleep_session(session).unwrap_err().code,
+            ErrorCode::Busy
+        );
+        agent
+            .coordinator
+            .record_provider_resume(&runtime, resume, &mut *agent.store)
+            .unwrap();
+
+        assert_eq!(agent.sleep_session(session), Ok(1));
+        assert_eq!(agent.session_phase(session), AgentPhase::Sleeping);
+        assert_eq!(agent.concurrency().in_use, 0);
+        assert!(agent.mcp_callers.is_empty());
+        assert!(
+            !agent
+                .reported_phases
+                .contains_key(&runtime.agent_runtime_id)
+        );
+        assert_eq!(
+            agent.sleep_session(session).unwrap_err().code,
+            ErrorCode::Unavailable
+        );
     }
 
     fn restart_runtime() -> AgentRuntime {
