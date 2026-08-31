@@ -933,16 +933,29 @@ impl AgentRuntime {
         if !self.coordinator.concurrency().is_saturated() {
             return Ok(false);
         }
-        let mut records = self.coordinator.snapshot().records;
-        records.sort_by_key(|record| record.operation.operation_id.to_string());
-        let candidate = records.iter().find(|record| {
-            record.state == super::runtime::RuntimeState::Running
+        let records = self.coordinator.snapshot().records;
+        let mut candidate = None;
+        for record in &records {
+            let eligible = record.state == super::runtime::RuntimeState::Running
                 && self
                     .reported_phases
                     .get(&record.runtime.agent_runtime_id)
                     .is_some_and(|phase| *phase == AgentPhase::Ended)
-                && self.resume_source_availability(record, &records).0
-        });
+                && self.resume_source_availability(record, &records).0;
+            if !eligible {
+                continue;
+            }
+            match candidate {
+                None => candidate = Some(record),
+                Some(old)
+                    if record.operation.operation_id.to_string()
+                        < old.operation.operation_id.to_string() =>
+                {
+                    candidate = Some(record);
+                }
+                Some(_) => {}
+            }
+        }
         let Some(candidate) = candidate else {
             return Ok(false);
         };
