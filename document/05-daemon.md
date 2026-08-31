@@ -1297,6 +1297,8 @@ validate
 | commit | runtime process identity と `Running` run/agent を保存する | commit 完了後だけ admission success を返す |
 | compensate | post-spawn の runtime/dispatch 保存失敗を safe failure または reconcile-required として保存する | exact terminal owner が process を terminate して reap する。terminate/reap を証明できなければ orphan-running として fail closed する |
 
+pre-spawn の terminal 登録までに失敗した launch は、dispatch admission を failed にする前に runtime reservation も `spawn_failed` へ終端化する。旧バージョンが残した不整合は通常の inventory では live / ready とみなさず、`clean --apply --force` だけが matching dispatch run の failed、runtime の `reserved` または daemon restart 後の `reconcile_required(identity_unknown)`、process identity 未設定を再検証して `spawn_failed` へ収束させる。`identity_unknown` の回収は明示された `--force` を process 不在の acknowledgement として扱う。いずれかが一致しない runtime は clean の候補にせず、process の不存在を暗黙に推測しない。
+
 同じ operation の retry は保存済み semantic key と outcome を replay し、異なる intent は
 `idempotency_conflict` になる。`Preparing` / `Starting` は成功 outcome ではなく、daemon restart 時に
 `Failed` / ownership unknown へ reconcile される。admission metadata を持たない legacy run、または runtime
