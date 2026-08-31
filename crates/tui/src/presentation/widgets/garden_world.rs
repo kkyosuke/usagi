@@ -35,6 +35,9 @@ const HOME_HEIGHT: usize = 4;
 const RABBIT_HEIGHT: usize = 4;
 const MAX_WORLD_AGENTS_PER_SESSION: usize = 6;
 const LIFESTYLE_CYCLE_TICKS: u64 = 100;
+const AMBIENT_PHASE_TICKS: u64 = 4;
+const AMBIENT_PHASES: u64 = 6;
+const TWINKLE: [char; 6] = ['.', '*', '+', '*', '.', '·'];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Point {
@@ -80,31 +83,6 @@ enum Activity {
     Interrupted,
     Working,
     Celebrating,
-}
-
-impl Activity {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Walking => "walking",
-            Self::Drinking => "drinking",
-            Self::Eating => "eating",
-            Self::Sleeping => "sleeping",
-            Self::Waiting => "waiting",
-            Self::Interrupted => "interrupted",
-            Self::Working => "running",
-            Self::Celebrating => "PR merged!",
-        }
-    }
-
-    fn label_style(self) -> Style {
-        match self {
-            Self::Walking | Self::Working => Role::Success.style().bold(),
-            Self::Drinking => Role::Info.style(),
-            Self::Eating | Self::Celebrating => Role::Success.style(),
-            Self::Waiting | Self::Interrupted => Role::Warning.style(),
-            Self::Sleeping => Style::new().dim(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,7 +306,7 @@ pub(super) fn render(
 ) -> Option<GardenFrame> {
     let layout = world_layout(height, width, sessions.len(), requested_scroll)?;
     let mut canvas = Canvas::new(layout.viewport_width, layout.world_height, layout.camera_x);
-    draw_meadow(&mut canvas, layout, workspace_name);
+    draw_meadow(&mut canvas, layout, workspace_name, tick, reduced_motion);
 
     let mut contents = draw_sessions(&mut canvas, layout, sessions, tick, reduced_motion);
     contents.rabbit_hitboxes.extend(contents.home_hitboxes);
@@ -459,17 +437,6 @@ fn draw_rabbits(
             .map(|row| display_width(row))
             .max()
             .unwrap_or(0);
-        let label_y = rabbit.motion.point.y - 1;
-        let label = rabbit.motion.activity.label();
-        let label_x = rabbit.motion.point.x
-            + i64::try_from(sprite_width.saturating_sub(display_width(label)) / 2)
-                .expect("activity label offset fits i64");
-        canvas.text(
-            label_x,
-            label_y,
-            label,
-            rabbit.motion.activity.label_style(),
-        );
         canvas.lines(rabbit.motion.point, sprite, rabbit.style);
         if let Some((column, row, hitbox_width, hitbox_height)) =
             clipped_rect(rabbit.motion.point, sprite_width, RABBIT_HEIGHT, layout)
@@ -510,16 +477,6 @@ pub(super) fn canonical_tick(
     if reduced_motion {
         return Some(0);
     }
-    let visible_animation = sessions.iter().any(|session| {
-        session_may_animate(session)
-            && expected
-                .hitboxes
-                .iter()
-                .any(|hitbox| hitbox.session_id == session.id)
-    });
-    if !visible_animation {
-        return Some(0);
-    }
     let mut canonical = tick;
     // The longest held world activity is twenty ticks. Looking back a little
     // further keeps canonicalization bounded while still folding every held pose.
@@ -540,33 +497,6 @@ pub(super) fn canonical_tick(
         canonical = candidate;
     }
     Some(canonical)
-}
-
-fn session_may_animate(session: &GardenSession) -> bool {
-    if !session.agents_observed {
-        return false;
-    }
-    if session.pr_merged {
-        return true;
-    }
-    if matches!(
-        session.agent_status,
-        Some(DispatchAgentStatus::Idle | DispatchAgentStatus::Exited | DispatchAgentStatus::Failed)
-    ) {
-        return false;
-    }
-    match session.lifecycle {
-        SessionLifecycle::Creating
-        | SessionLifecycle::Initializing
-        | SessionLifecycle::Deleting => true,
-        SessionLifecycle::Failed => false,
-        SessionLifecycle::Available => session.agents.iter().any(|agent| {
-            matches!(
-                agent.phase,
-                AgentPhase::Running | AgentPhase::Waiting | AgentPhase::Absent | AgentPhase::Ready
-            )
-        }),
-    }
 }
 
 fn places(index: usize, world_height: usize) -> Places {
@@ -764,7 +694,7 @@ fn rabbit_sprite(motion: Motion, tick: u64) -> [&'static str; RABBIT_HEIGHT] {
         Activity::Walking => match (motion.facing, tick.is_multiple_of(2)) {
             (Facing::Right, true) => ["", " /)/)  >", "( o.o)/", " /  \\"],
             (Facing::Right, false) => [" /)/) __", "( o.o)/", "  /  >", ""],
-            (Facing::Left, true) => ["", "<  (\\(\\", "\\(.o )", " /  \\"],
+            (Facing::Left, true) => ["", "< (\\(\\", "\\(.o )", " /  \\"],
             (Facing::Left, false) => ["__(\\(\\", " \\(.o )", " <  \\ ", ""],
         },
         Activity::Drinking => ["", " /)/)", "( . .)__", " /   \\~~"],
@@ -781,8 +711,15 @@ fn rabbit_sprite(motion: Motion, tick: u64) -> [&'static str; RABBIT_HEIGHT] {
     }
 }
 
-fn draw_meadow(canvas: &mut Canvas, layout: WorldLayout, workspace_name: &str) {
+fn draw_meadow(
+    canvas: &mut Canvas,
+    layout: WorldLayout,
+    workspace_name: &str,
+    tick: u64,
+    reduced_motion: bool,
+) {
     let seed = stable_hash(workspace_name);
+    let phase = usize::try_from(ambient_phase(tick, reduced_motion)).unwrap_or_default();
     let start = layout.camera_x;
     let end = (layout.camera_x + layout.viewport_width).min(layout.world_width);
     for world_x in start..end {
@@ -796,18 +733,31 @@ fn draw_meadow(canvas: &mut Canvas, layout: WorldLayout, workspace_name: &str) {
                 canvas.put_if_empty(
                     i64::try_from(world_x).expect("Garden x fits i64"),
                     i64::try_from(world_y).expect("Garden y fits i64"),
-                    if mixed.is_multiple_of(5) { '*' } else { '.' },
+                    TWINKLE[(phase + world_x + world_y) % TWINKLE.len()],
                     Style::new().dim(),
                 );
             } else if mixed.is_multiple_of(53) {
                 canvas.put_if_empty(
                     i64::try_from(world_x).expect("Garden x fits i64"),
                     i64::try_from(world_y).expect("Garden y fits i64"),
-                    'v',
+                    match (phase + world_x) % 4 {
+                        0 => 'v',
+                        1 => '\\',
+                        2 => '|',
+                        _ => '/',
+                    },
                     Role::Success.style().dim(),
                 );
             }
         }
+    }
+}
+
+const fn ambient_phase(tick: u64, reduced_motion: bool) -> u64 {
+    if reduced_motion {
+        0
+    } else {
+        (tick / AMBIENT_PHASE_TICKS) % AMBIENT_PHASES
     }
 }
 
@@ -907,10 +857,10 @@ fn home_status(session: &GardenSession) -> (String, Style) {
     }
     match session.lifecycle {
         SessionLifecycle::Creating | SessionLifecycle::Initializing => {
-            return ("growing".to_owned(), Role::Warning.style());
+            return (String::new(), Role::Warning.style());
         }
         SessionLifecycle::Deleting => {
-            return ("heading home".to_owned(), Style::new().dim());
+            return (String::new(), Style::new().dim());
         }
         SessionLifecycle::Failed => {
             let label = session.failure_summary.as_deref().map_or_else(
@@ -926,11 +876,11 @@ fn home_status(session: &GardenSession) -> (String, Style) {
     }
     if let Some(status) = session.agent_status {
         match status {
-            DispatchAgentStatus::Starting => {
-                return ("starting".to_owned(), Role::Accent.style().bold());
+            DispatchAgentStatus::Starting
+            | DispatchAgentStatus::Idle
+            | DispatchAgentStatus::Exited => {
+                return (String::new(), Style::new().dim());
             }
-            DispatchAgentStatus::Idle => return ("idle".to_owned(), Style::new().dim()),
-            DispatchAgentStatus::Exited => return ("stopped".to_owned(), Style::new().dim()),
             DispatchAgentStatus::Failed => {
                 return ("failed".to_owned(), Role::Danger.style().bold());
             }
@@ -940,7 +890,7 @@ fn home_status(session: &GardenSession) -> (String, Style) {
     if session.agents.is_empty() {
         return ("no agents".to_owned(), Style::new().dim());
     }
-    (agent_status::summary(&session.agents), Style::new().dim())
+    (String::new(), Style::new().dim())
 }
 
 fn draw_lifecycle_pose(
@@ -960,7 +910,7 @@ fn draw_lifecycle_pose(
     };
     let (sprite, style) = match session.lifecycle {
         SessionLifecycle::Creating | SessionLifecycle::Initializing if phase >= 3 => (
-            ["", "  /)/)", " _( . .)_", "__/   \\__"],
+            ["", "   /)/)", " _( . .)_", "__/   \\__"],
             Role::Warning.style(),
         ),
         SessionLifecycle::Creating | SessionLifecycle::Initializing => {
@@ -1026,30 +976,20 @@ fn clipped_rect(
 }
 
 fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -> String {
-    let running = sessions
+    let rabbits = sessions
         .iter()
         .filter(|session| {
-            session.lifecycle == SessionLifecycle::Available
-                && !matches!(
-                    session.agent_status,
-                    Some(
-                        DispatchAgentStatus::Starting
-                            | DispatchAgentStatus::Idle
-                            | DispatchAgentStatus::Exited
-                            | DispatchAgentStatus::Failed
-                    )
-                )
+            session.lifecycle == SessionLifecycle::Available && session.agents_observed
         })
-        .flat_map(|session| &session.agents)
-        .filter(|agent| agent.phase == AgentPhase::Running)
-        .count();
+        .map(|session| session.agents.len())
+        .sum::<usize>();
     let left = Role::Feature.style().bold().paint(&format!(
-        " usagi / {}",
+        " ✦ garden / {}",
         clip_to_width(workspace_name, width / 2)
     ));
     let right = Style::new()
         .dim()
-        .paint(&format!("{} sessions · {running} running ", sessions.len()));
+        .paint(&format!("{} plots · {rabbits} usagi ", sessions.len()));
     let gap = width.saturating_sub(display_width(&left) + display_width(&right));
     pad_to_width(&format!("{left}{}{right}", " ".repeat(gap)), width)
 }
@@ -1209,6 +1149,35 @@ mod tests {
             .join("\n")
     }
 
+    fn assert_rabbit_axis(name: &str, pose: &[&str]) {
+        let (ears_row, ears, ears_width) = pose
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                ["/)/)", "/)(/", "(\\(\\"]
+                    .into_iter()
+                    .find_map(|ears| line.find(ears).map(|column| (row, column, ears.len())))
+            })
+            .expect("rabbit illustration has ears");
+        let face = pose
+            .iter()
+            .skip(ears_row + 1)
+            .find(|line| {
+                ["o.o", ".o ", ". .", "-.-", "x.x", "^.^", "^o^", "_ _"]
+                    .into_iter()
+                    .any(|marker| line.contains(marker))
+            })
+            .expect("rabbit illustration has a face below its ears");
+        let face_left = face.find('(').expect("rabbit face has a left edge");
+        let face_right = face.rfind(')').expect("rabbit face has a right edge");
+        let ears_axis = ears * 2 + ears_width.saturating_sub(1);
+        let face_axis = face_left + face_right;
+        assert!(
+            ears_axis.abs_diff(face_axis) <= 1,
+            "{name} ears axis {ears_axis}/2 drifted from face axis {face_axis}/2: {pose:?}"
+        );
+    }
+
     #[test]
     fn spacious_terminals_use_the_world_but_compact_terminals_keep_plots() {
         assert!(fits(24, 100));
@@ -1247,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rabbit_eventually_walks_drinks_eats_and_sleeps() {
+    fn ordinary_activities_are_shown_by_pose_without_captions() {
         let active = session(SESSION_ID, "one");
         let sessions = std::slice::from_ref(&active);
         let text = (0..LIFESTYLE_CYCLE_TICKS)
@@ -1260,8 +1229,59 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        for activity in ["walking", "drinking", "eating", "sleeping"] {
-            assert!(text.contains(activity), "missing {activity}");
+        for activity in [
+            "walking", "drinking", "eating", "sleeping", "waiting", "running",
+        ] {
+            assert!(!text.contains(activity), "repeated pose as {activity}");
+        }
+    }
+
+    #[test]
+    fn every_world_illustration_keeps_its_ears_on_the_face_axis() {
+        for activity in [
+            Activity::Walking,
+            Activity::Drinking,
+            Activity::Eating,
+            Activity::Sleeping,
+            Activity::Waiting,
+            Activity::Interrupted,
+            Activity::Working,
+            Activity::Celebrating,
+        ] {
+            for facing in [Facing::Left, Facing::Right] {
+                for tick in 0..6 {
+                    let motion = super::Motion {
+                        point: Point { x: 0, y: 0 },
+                        facing,
+                        activity,
+                    };
+                    assert_rabbit_axis(
+                        &format!("{activity:?}/{facing:?}/{tick}"),
+                        &super::rabbit_sprite(motion, tick),
+                    );
+                }
+            }
+        }
+
+        for lifecycle in [
+            SessionLifecycle::Creating,
+            SessionLifecycle::Initializing,
+            SessionLifecycle::Deleting,
+            SessionLifecycle::Failed,
+        ] {
+            let mut value = session(SESSION_ID, "lifecycle");
+            value.lifecycle = lifecycle;
+            for tick in 0..6 {
+                let frame =
+                    render(24, 100, "atlas", &[value.clone()], 0, tick, false).expect("world fits");
+                let rows = frame
+                    .rows
+                    .iter()
+                    .map(|row| super::super::strip_ansi(row))
+                    .collect::<Vec<_>>();
+                let pose = rows.iter().map(String::as_str).collect::<Vec<_>>();
+                assert_rabbit_axis(&format!("{lifecycle:?}/{tick}"), &pose);
+            }
         }
     }
 
@@ -1374,12 +1394,13 @@ mod tests {
     }
 
     #[test]
-    fn terminal_dispatch_states_do_not_keep_the_world_clock_alive() {
+    fn terminal_dispatch_states_leave_only_the_ambient_world_clock_alive() {
         let mut idle = session(SESSION_ID, "idle");
         idle.agent_status = Some(DispatchAgentStatus::Idle);
         assert_eq!(
             canonical_tick(24, 100, std::slice::from_ref(&idle), 0, 73, false),
-            Some(0)
+            canonical_tick(24, 100, &[], 0, 73, false),
+            "an idle rabbit must not add motion beyond the meadow"
         );
 
         let mut foreground = session(SESSION_ID, "foreground");
@@ -1387,8 +1408,8 @@ mod tests {
         let background = session("00000000-0000-4000-8000-000000000002", "background");
         assert_eq!(
             canonical_tick(24, 80, &[foreground, background], 0, 73, false),
-            Some(0),
-            "an off-screen moving rabbit must not keep the visible frame clock alive"
+            canonical_tick(24, 80, &[], 0, 73, false),
+            "an off-screen rabbit must not add motion beyond the meadow"
         );
     }
 
@@ -1431,14 +1452,14 @@ mod tests {
             assert_eq!(super::home_status(&cached).0, expected);
         }
 
-        for (lifecycle, expected) in [
-            (SessionLifecycle::Creating, "growing"),
-            (SessionLifecycle::Initializing, "growing"),
-            (SessionLifecycle::Deleting, "heading home"),
+        for lifecycle in [
+            SessionLifecycle::Creating,
+            SessionLifecycle::Initializing,
+            SessionLifecycle::Deleting,
         ] {
             let mut transitional = session(SESSION_ID, "transition");
             transitional.lifecycle = lifecycle;
-            assert_eq!(super::home_status(&transitional).0, expected);
+            assert!(super::home_status(&transitional).0.is_empty());
         }
 
         let mut failed = session(SESSION_ID, "failed");
@@ -1452,11 +1473,11 @@ mod tests {
         assert_eq!(super::home_status(&available).0, "PR merged!");
         available.pr_merged = false;
         for (status, expected) in [
-            (DispatchAgentStatus::Starting, "starting"),
-            (DispatchAgentStatus::Idle, "idle"),
-            (DispatchAgentStatus::Exited, "stopped"),
+            (DispatchAgentStatus::Starting, ""),
+            (DispatchAgentStatus::Idle, ""),
+            (DispatchAgentStatus::Exited, ""),
             (DispatchAgentStatus::Failed, "failed"),
-            (DispatchAgentStatus::Running, "1 run"),
+            (DispatchAgentStatus::Running, ""),
         ] {
             available.agent_status = Some(status);
             assert_eq!(super::home_status(&available).0, expected);
@@ -1468,7 +1489,7 @@ mod tests {
             runtime_id: AgentRuntimeId::parse(AGENT_ID).expect("fixture agent id"),
             phase: AgentPhase::Interrupted,
         });
-        assert_eq!(super::home_status(&available).0, "1 int");
+        assert!(super::home_status(&available).0.is_empty());
         available.agents = [
             ("019b0c57-6c00-7000-8000-000000000001", AgentPhase::Ready),
             ("019b0c57-6c00-7000-8000-000000000002", AgentPhase::Sleeping),
@@ -1480,10 +1501,7 @@ mod tests {
             phase,
         })
         .collect();
-        assert_eq!(
-            super::home_status(&available).0,
-            "1 ready · 1 sleep · 1 idle"
-        );
+        assert!(super::home_status(&available).0.is_empty());
     }
 
     #[test]
@@ -1562,8 +1580,6 @@ mod tests {
             Activity::Interrupted
         );
 
-        assert_eq!(Activity::Interrupted.label(), "interrupted");
-        assert_eq!(Activity::Celebrating.label(), "PR merged!");
         assert_ne!(
             super::rabbit_sprite(motion(AgentPhase::Running, None, true, false), 0),
             super::rabbit_sprite(motion(AgentPhase::Running, None, true, false), 1)
@@ -1604,7 +1620,7 @@ mod tests {
             assert_eq!(frame.rows.len(), 24);
         }
         let reduced = render(24, 500, "atlas", &sessions, 0, 5, true).expect("world fits");
-        assert!(plain(&reduced.rows).contains("heading home"));
+        assert!(!plain(&reduced.rows).contains("heading home"));
 
         let statuses = [
             DispatchAgentStatus::Starting,
@@ -1624,7 +1640,7 @@ mod tests {
         })
         .collect::<Vec<_>>();
         let frame = render(24, 500, "atlas", &statuses, 0, 0, false).expect("world fits");
-        assert!(plain(&frame.rows).contains("0 running"));
+        assert!(!plain(&frame.rows).contains("running"));
 
         let mut available_canvas = super::Canvas::new(96, 21, 0);
         super::draw_lifecycle_pose(
@@ -1637,37 +1653,13 @@ mod tests {
     }
 
     #[test]
-    fn animation_eligibility_covers_session_and_agent_states() {
-        let mut value = session(SESSION_ID, "eligibility");
-        value.agents_observed = false;
-        assert!(!super::session_may_animate(&value));
-        value.agents_observed = true;
-        value.pr_merged = true;
-        assert!(super::session_may_animate(&value));
-        value.pr_merged = false;
+    fn a_static_rabbit_does_not_stop_the_ambient_meadow() {
+        let mut value = session(SESSION_ID, "static");
         value.agent_status = Some(DispatchAgentStatus::Exited);
-        assert!(!super::session_may_animate(&value));
-        value.agent_status = None;
-        for lifecycle in [
-            SessionLifecycle::Creating,
-            SessionLifecycle::Initializing,
-            SessionLifecycle::Deleting,
-        ] {
-            value.lifecycle = lifecycle;
-            assert!(super::session_may_animate(&value));
-        }
-        value.lifecycle = SessionLifecycle::Failed;
-        assert!(!super::session_may_animate(&value));
-        value.lifecycle = SessionLifecycle::Available;
-        value.agents[0].phase = AgentPhase::Sleeping;
-        assert!(!super::session_may_animate(&value));
-        value.agents[0].phase = AgentPhase::Interrupted;
-        assert!(!super::session_may_animate(&value));
-        value.agents[0].phase = AgentPhase::Ready;
-        assert!(super::session_may_animate(&value));
-
-        value.pr_merged = true;
-        assert!(canonical_tick(24, 100, &[value], 0, 7, false).is_some());
+        assert_ne!(
+            canonical_tick(24, 100, std::slice::from_ref(&value), 0, 0, false),
+            canonical_tick(24, 100, &[value], 0, 4, false)
+        );
     }
 
     #[test]
@@ -1683,12 +1675,15 @@ mod tests {
         );
 
         let seed = super::stable_hash(&value.agents[0].runtime_id.as_str());
+        // Pick the third sleeping frame.  It holds the same rabbit pose as the
+        // previous tick and stays inside the same four-tick ambient phase.
         let tick =
-            (71 + LIFESTYLE_CYCLE_TICKS - seed % LIFESTYLE_CYCLE_TICKS) % LIFESTYLE_CYCLE_TICKS;
+            (72 + LIFESTYLE_CYCLE_TICKS - seed % LIFESTYLE_CYCLE_TICKS) % LIFESTYLE_CYCLE_TICKS;
+        assert!(!tick.is_multiple_of(super::AMBIENT_PHASE_TICKS));
         assert_ne!(
             canonical_tick(24, 100, &[value], 0, tick, false),
             Some(tick),
-            "the second sleeping frame should reuse the first sleeping frame's tick"
+            "a held sleeping pose inside one ambient phase should reuse its first tick"
         );
     }
 

@@ -1042,15 +1042,18 @@ phase をそのまま保つ runtime-local phase を優先し、まだ観測し�
 （`reserved → ready`、`live → running`、`interrupted → interrupted`）で描く。inventory を 1 度も観測していない
 （起動直後・`daemon` surface を開いた直後の再取得中）間は、controller が持つ runtime-local phase がそのまま
 うさぎになる。workspace root の runtime と、Home に存在しない session の runtime は区画へ加えない。
-active project では `session list` の dispatch status も status 行へ重ねる。`starting` / `idle` / `exited` /
-`failed` は inventory の粗い `live → running` より強く、`starting` / `idle` / `stopped` / `failed` と表示する。
-dispatch が `running` の間だけは runtime-local の `waiting` / `interrupted` を保ち、より粗い running 表示で潰さない。
+active project では `session list` の dispatch status も pose へ重ねる。`starting` / `idle` / `exited` /
+`failed` は inventory の粗い `live → running` より強く、古い running pose をそれぞれ calm / stopped pose へ落とす。
+通常動作は絵を見れば分かるため `starting` / `idle` / `stopped` の action caption は重ねず、見逃せない `failed` だけを
+文字でも表示する。dispatch が `running` の間は runtime-local の `waiting` / `interrupted` pose を保ち、より粗い
+running pose で潰さない。
 
 複数 runtime は注目順（`waiting → running → ready → interrupted → sleep → idle → done`）に並べ、同 phase の
 tie-break を stable `AgentRuntimeId` 順にする。この順序と状態内訳の語彙は
 [Session sidebar rows](#session-sidebar-rows) の agent 行と共有する（同じ session の Agent が
-2 つの surface で違う数・違う順に見えることが無いよう、投影も 1 つに束ねる）。描画上限以降は末尾から畳むが、
-畳まれた runtime も巣穴の状態内訳には現れるため、描けなかった Agent が何をしているかは失われない。
+2 つの surface で違う数・違う順に見えることが無いよう、投影も 1 つに束ねる）。描画上限以降は末尾から畳む。
+compact fallback は畳んだ runtime も phase glyph に残し、spacious world は右の notification panel で全 Agent の件数を示す。
+うさぎの上や巣穴には pose と重複する `walking` / `4 wait · 1 run` のような action caption を表示しない。
 controller が runtime の `Ended` / `Exited` を観測した runtime（tab は残っており、inventory も保持している）は
 瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さないため描かない。
 巣穴の幅と hitbox は羽数で変えず、うさぎ 1 羽ぶんの hitbox は実際の移動先へ別に置く。session の選択状態は Garden に装飾せず、
@@ -1062,19 +1065,22 @@ spacious world の `Running` / `Ready` / `Absent` は 100 tick の生活 cycle �
 餌場へ歩く → carrot を食べる → 木陰へ歩く → 眠る → 巣穴へ戻る、の順で移動し、帰路では左向き、往路では右向きの
 sprite を使う。各 runtime の stable `AgentRuntimeId` から cycle の開始位置をずらすため、同じ phase のうさぎも一斉に
 同じ場所へ移動しない。compact fallback の `Running` は従来どおり hop・bound・sniff・dig・look の 5 動作を使う。
-うさぎ本体の色は ID から 5 色の palette の 1 色を選ぶ。状態ラベルの色は `Running` / `Waiting` などの意味色を保つ。
+うさぎ本体の色は ID から 5 色の palette の 1 色を選ぶ。
 同じ ID・tick・size・camera offset なら同じ位置・色・pose になり、refresh で見た目が飛ぶことはない。
 `Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
-土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は既存 frame tick を共有し、
-同じ pose を描く tick は canonical tick へ畳んで frame material の不要な再描画を抑える。
+土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は相対時刻ラベルの分単位の壁時計から
+分離し、shell の monotonic な 16 ms logical clock を 8 tick ずつ保持する約 8 fps の Garden clock で進める。同じ pose を
+描く tick は canonical tick へ畳み、frame key にはこの canonical tick を載せる。Garden の背面に隠れた mascot clock は
+key に入れないため、通常 Home は Garden のために毎秒再構築されない。
 composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
-全 pose を静止姿勢に固定し、lifecycle と Agent phase の状態ラベルだけを更新する。
+うさぎ・空・草の全 pose を静止姿勢に固定する。
 
 spacious world の背景は workspace 名と world 座標から決定的に配置した `.` / `*` / `v`、session の立札と巣穴、
 `~` の池、`Y` の餌場、`&` の木、小道で構成する。compact fallback は左の庭領域へ続く草地と薄い土の 2 層を使う。
-装飾は ASCII を基本とし、同じ workspace・session 順・端末幅・camera offset では refresh ごとに移動しない。
-compact fallback は状態ラベルに加え、`Ready` は足元の草、`Done` は `z`、`Failed` は枯れ草を小さく添える。これらは雰囲気の補助であり、
-状態の意味は引き続き文字ラベルと顔で伝える。footer は左にうさぎの click 操作、右に任意キーで起こす操作を分けて表示する。
+星は同じ cell で明滅し、草は同じ根元で小さく向きを変えるため、Agent の稼働状態を偽らず背景だけに ambient motion を足す。
+うさぎの各行は pose 全体で耳と顔の中心軸を揃え、左向き・右向き・各 lifecycle を切り替えても耳だけ横へずれない。
+compact fallback は `Ready` に足元の草、`Done` に `z`、`Failed` に枯れ草を小さく添える。通常動作は action caption を
+反復せず pose・顔・phase glyph で伝える。footer は左にうさぎの click 操作、右に任意キーで起こす操作を分けて表示する。
 
 ### inactive project の Agent 観測
 

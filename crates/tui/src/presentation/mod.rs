@@ -5820,19 +5820,15 @@ struct HomeFrameMaterial {
     force_remove_confirmation: Option<(String, bool)>,
     environment_editor: Option<crate::usecase::application::controller::EnvironmentEditor>,
     role_editor: Option<crate::usecase::application::controller::RoleEditor>,
-    /// Whole-second wall clock behind the sidebar's relative session times.
-    ///
-    /// Truncating to the second is what makes time material without making
-    /// every frame material: the coarsest thing the renderer derives from it
-    /// changes at minute granularity, so a one-second resolution can never be
-    /// late, and an idle Home redraws at most once per second because of it.
+    /// Minute-resolution wall clock behind relative session labels. Garden
+    /// animation has a separate monotonic logical clock and never reads this.
     now: DateTime<Utc>,
 }
 
 /// Cheap dependency vector for the owned Home projection. Equality is the
 /// admission gate to projection construction; each revision is advanced by its
 /// authoritative controller/daemon source, never by this cache.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FrameMaterialKey {
     height: usize,
     width: usize,
@@ -5875,11 +5871,11 @@ impl HomeFrameMaterial {
         self
     }
 
-    fn with_garden_reduced_motion(mut self, reduced_motion: bool) -> Self {
+    fn with_garden_animation(mut self, tick: u64, reduced_motion: bool) -> Self {
         self.projection = self.projection.with_garden_reduced_motion(reduced_motion);
-        self.now = self
+        self.projection = self
             .projection
-            .canonical_garden_now(self.height, self.width, self.now);
+            .with_garden_tick(self.height, self.width, tick);
         self
     }
 
@@ -5928,7 +5924,10 @@ fn home_frame_material(
         create_pending,
         now,
     )
-    .with_garden_reduced_motion(false)
+    .with_garden_animation(
+        widgets::garden::runtime_tick(runtime.state().mascot_tick()),
+        false,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5989,8 +5988,14 @@ fn home_frame_material_shared(
         role_editor: runtime.state().role_editor().cloned(),
         // Garden canonicalization happens only after every composition-owned
         // source (notably Agent inventory and reduced motion) is attached.
-        now: now.with_nanosecond(0).unwrap_or(now),
+        now: relative_time_clock(now),
     }
+}
+
+fn relative_time_clock(now: DateTime<Utc>) -> DateTime<Utc> {
+    now.with_second(0)
+        .and_then(|now| now.with_nanosecond(0))
+        .unwrap_or(now)
 }
 
 /// Compose the controller Home frame: [`render_home_at`] plus the shell
@@ -7108,6 +7113,10 @@ fn drive_workspace_controller(
     let mut root_terminal_view: Option<Arc<TerminalViewProjection>> = None;
     let mut root_terminal_generation = 0_u64;
     let mut director_material_key = None;
+    // The source key remembers the raw Garden cadence so a held pose is
+    // canonicalized once. The material key stores only the canonical visible
+    // tick and therefore names the frame actually sent to the terminal.
+    let mut frame_source_key: Option<FrameMaterialKey> = None;
     let mut frame_material_key: Option<FrameMaterialKey> = None;
     let mut allowed_sessions_revision = u64::MAX;
     let mut current_sessions = BTreeSet::new();
@@ -7127,6 +7136,7 @@ fn drive_workspace_controller(
                     deck.set_notice(error.to_string());
                     registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
                     drawn_material = None;
+                    frame_source_key = None;
                     frame_material_key = None;
                 }
             }
@@ -7143,12 +7153,14 @@ fn drive_workspace_controller(
                     if deck.add_overlay_open() {
                         deck.refresh_add(&registry);
                         drawn_material = None;
+                        frame_source_key = None;
                         frame_material_key = None;
                     }
                 }
                 Err(error) if deck.add_overlay_open() => {
                     deck.set_notice(error.to_string());
                     drawn_material = None;
+                    frame_source_key = None;
                     frame_material_key = None;
                 }
                 Err(_) => {}
@@ -7418,13 +7430,8 @@ fn drive_workspace_controller(
         for update in metrics_backend.drain_events() {
             metrics_projection.apply(update);
         }
-        let now = Utc::now();
-        // Relative session labels change at minute granularity. Keying the full
-        // Home frame by seconds caused needless full-material rebuilds.
-        let now = now
-            .with_second(0)
-            .and_then(|now| now.with_nanosecond(0))
-            .unwrap_or(now);
+        let now = relative_time_clock(Utc::now());
+        let garden_open = runtime.state().overlay() == Some(Overlay::Garden);
         let drives_tick_animation = ui.creating_session.is_some()
             || sessions.iter().any(|session| session.removing)
             || runtime
@@ -7434,12 +7441,14 @@ fn drive_workspace_controller(
                 .any(|tab| matches!(tab, PaneTab::Pending(_)));
         let animation = if garden_reduced_motion {
             0
+        } else if garden_open {
+            widgets::garden::runtime_tick(runtime.state().mascot_tick())
         } else if drives_tick_animation {
             runtime.state().mascot_tick()
         } else {
             widgets::mascot::canonical_tick(runtime.state().mascot_tick())
         };
-        let next_frame_key = FrameMaterialKey {
+        let next_source_key = FrameMaterialKey {
             height,
             width,
             controller: runtime.material_key(),
@@ -7460,10 +7469,7 @@ fn drive_workspace_controller(
             garden_observations,
             now,
         };
-        if frame_material_key.as_ref() != Some(&next_frame_key) {
-            let controller_may_be_noop = frame_material_key
-                .as_ref()
-                .is_some_and(|previous| previous.differs_only_by_controller(&next_frame_key));
+        if frame_source_key.as_ref() != Some(&next_source_key) {
             let material = home_frame_material_shared(
                 height,
                 width,
@@ -7486,21 +7492,34 @@ fn drive_workspace_controller(
             )
             .with_agent_inventory(ui.agent_inventory())
             .with_workspace_deck_garden(deck)
-            .with_garden_reduced_motion(garden_reduced_motion);
+            .with_garden_animation(animation, garden_reduced_motion);
+            let mut next_frame_key = next_source_key.clone();
+            if garden_open {
+                next_frame_key.animation = material
+                    .projection
+                    .garden_animation_tick()
+                    .unwrap_or(animation);
+            }
+            let frame_changed = frame_material_key.as_ref() != Some(&next_frame_key);
+            let controller_may_be_noop = frame_material_key
+                .as_ref()
+                .is_some_and(|previous| previous.differs_only_by_controller(&next_frame_key));
             // Skip only the drawing. A skipped tick has already run every drain
             // above and still runs restore admission, pane launches, and input
             // below, so nothing that makes progress depends on the redraw.
-            if !controller_may_be_noop || drawn_material.as_ref() != Some(&material) {
+            if frame_changed
+                && (!controller_may_be_noop || drawn_material.as_ref() != Some(&material))
+            {
                 let home = render_home_material(&material);
                 let frame = compose_workspace_shell_frame(deck, height, width, &home);
                 term.draw(&frame)?;
                 drawn_material = Some(material);
             }
+            frame_source_key = Some(next_source_key);
             frame_material_key = Some(next_frame_key);
         }
         // The other open projects' Agents, observed only while the Garden is the
         // frame. The active project keeps its own controller's richer phases.
-        let garden_open = runtime.state().overlay() == Some(Overlay::Garden);
         if garden_inventory.is_some()
             && garden_observation.begin_if_due(garden_open, restore_clock.elapsed())
         {
@@ -7563,12 +7582,14 @@ fn drive_workspace_controller(
             deck.open_add(&registry);
             registry_refresh_due = std::time::Duration::ZERO;
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
         if matches!(key, Key::Live(LiveTerminalAction::OpenWorkspaceSwitcher)) {
             deck.open_switcher();
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
@@ -7583,6 +7604,7 @@ fn drive_workspace_controller(
                 deck.open_switcher();
                 deck.set_notice("Save or cancel the current draft before switching.");
                 drawn_material = None;
+                frame_source_key = None;
                 frame_material_key = None;
                 continue;
             }
@@ -7599,6 +7621,7 @@ fn drive_workspace_controller(
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
@@ -7665,6 +7688,7 @@ fn drive_workspace_controller(
                                 {
                                     deck.set_notice(error.to_string());
                                     drawn_material = None;
+                                    frame_source_key = None;
                                     frame_material_key = None;
                                     continue;
                                 }
@@ -7676,6 +7700,7 @@ fn drive_workspace_controller(
                                     &prepared,
                                 ) {
                                     drawn_material = None;
+                                    frame_source_key = None;
                                     frame_material_key = None;
                                     continue;
                                 }
@@ -7690,6 +7715,7 @@ fn drive_workspace_controller(
                                     &first.workspace.path,
                                 ) {
                                     drawn_material = None;
+                                    frame_source_key = None;
                                     frame_material_key = None;
                                     continue;
                                 }
@@ -7740,6 +7766,7 @@ fn drive_workspace_controller(
                 }
             }
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
@@ -7806,6 +7833,7 @@ fn drive_workspace_controller(
                 deck.set_notice("That project is no longer open.");
                 garden_pointer_gesture = false;
                 drawn_material = None;
+                frame_source_key = None;
                 frame_material_key = None;
                 continue;
             };
@@ -7829,6 +7857,7 @@ fn drive_workspace_controller(
             }
             garden_pointer_gesture = false;
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
@@ -7992,6 +8021,7 @@ fn drive_workspace_controller(
                 // The modal drew over the frame the gate remembers, so the next
                 // tick must redraw even if no material changed underneath it.
                 drawn_material = None;
+                frame_source_key = None;
                 frame_material_key = None;
                 let effective =
                     usagi_core::usecase::settings::read_for_workspace_entry(context.settings);
@@ -10171,8 +10201,10 @@ mod tests {
         );
         let observed = render_home_material(&material);
         assert!(!observed.iter().any(|row| row.contains("project inactive")));
-        assert!(observed.iter().any(|row| row.contains("idle")));
-        assert!(observed.iter().any(|row| row.contains("0 running")));
+        assert!(observed.iter().any(|row| row.contains("2 plots · 1 usagi")));
+        assert!(observed.iter().any(|row| row.contains("-.-")));
+        assert!(observed.iter().any(|row| row.contains("Agent completed")));
+        assert!(!observed.iter().any(|row| row.contains("1 run")));
     }
 
     #[test]
@@ -14402,17 +14434,17 @@ mod tests {
         }
     }
 
-    /// Park until the wall clock has just crossed into a new second.
-    ///
-    /// The frame material carries the wall clock truncated to seconds, so a
-    /// second boundary redraws whatever the workspace is doing. A run that
-    /// starts here and finishes inside the same second sees no clock-driven
-    /// redraw, which is what makes the skipped tick it observes reproducible
-    /// rather than a matter of which phase of the second the run began in
-    /// (#567).
-    fn wait_for_a_fresh_wall_clock_second() {
-        let nanos = u64::from(Utc::now().nanosecond().min(999_999_999));
-        std::thread::sleep(std::time::Duration::from_nanos(1_000_000_000 - nanos));
+    /// Keep the short retry test away from the minute boundary that materially
+    /// updates relative-time labels. Most runs return immediately; a run in the
+    /// last ten seconds of a minute parks until the next one begins.
+    fn wait_for_a_stable_relative_time_minute() {
+        let now = Utc::now();
+        if now.second() < 50 {
+            return;
+        }
+        let remaining = std::time::Duration::from_secs(60 - u64::from(now.second()))
+            .saturating_sub(std::time::Duration::from_nanos(u64::from(now.nanosecond())));
+        std::thread::sleep(remaining);
     }
 
     /// #554 acceptance. The skip covers the drawing and nothing else: the
@@ -14422,7 +14454,7 @@ mod tests {
     /// happened to be material (#567).
     #[test]
     fn a_skipped_tick_still_admits_the_restore_retry() {
-        wait_for_a_fresh_wall_clock_second();
+        wait_for_a_stable_relative_time_minute();
         let log = Arc::new(RestoreAdmissionLog::default());
         let mut term = RetryDrivingTerminal {
             log: Arc::clone(&log),
@@ -14493,7 +14525,7 @@ mod tests {
         let sessions = vec![ProjectedSession::from_record(session, &record)];
         let root = PathBuf::from("/tmp/demo");
         let no_diffs = BTreeMap::new();
-        let clock = now();
+        let clock = super::relative_time_clock(now()) + Duration::seconds(10);
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
 
         let material = |runtime: &WorkspaceRuntime| {
@@ -14556,9 +14588,9 @@ mod tests {
         );
         assert_ne!(resized, base, "a resize did not redraw");
 
-        // The wall clock behind the sidebar's relative session times. It is
-        // material at whole-second resolution: sub-second jitter must not force
-        // a redraw, but a new second must.
+        // The wall clock behind relative session times is independent from the
+        // monotonic animation clock. Neither sub-second nor one-second changes
+        // rebuild an ordinary Home; the next minute does.
         let sub_second = home_frame_material(
             20,
             80,
@@ -14588,7 +14620,22 @@ mod tests {
             None,
             clock + Duration::seconds(1),
         );
-        assert_ne!(next_second, base, "the relative session times froze");
+        assert_eq!(next_second, base, "a wall-clock second forced a redraw");
+        let next_minute = home_frame_material(
+            20,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            health(),
+            &no_diffs,
+            None,
+            None,
+            clock + Duration::minutes(1),
+        );
+        assert_ne!(next_minute, base, "the relative session times froze");
 
         // Daemon metrics for the mascot sidecar.
         let metrics = home_frame_material(
@@ -14725,6 +14772,90 @@ mod tests {
             material(&quitting),
             confirming,
             "moving the quit confirmation's focus did not redraw"
+        );
+    }
+
+    #[test]
+    fn garden_motion_uses_the_logical_clock_inside_one_relative_time_minute() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let record = SessionRecord {
+            name: "alpha".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("/tmp/demo/alpha"),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let sessions = vec![ProjectedSession::from_record(session, &record)];
+        let root = PathBuf::from("/tmp/demo");
+        let no_diffs = BTreeMap::new();
+        let clock = super::relative_time_clock(now()) + Duration::seconds(10);
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let runtime_id = AgentRuntimeId::parse("00000000-0000-4000-8000-000000000001")
+            .expect("fixture runtime id");
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: WorktreeId::new(),
+        };
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::RuntimePhase {
+            runtime: AgentRuntimeRef {
+                agent_runtime_id: runtime_id,
+                terminal,
+                session_id: Some(session),
+            },
+            phase: usagi_core::domain::session_lifecycle::AgentPhase::Running,
+        }));
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let material = |runtime: &WorkspaceRuntime, wall_clock| {
+            home_frame_material(
+                24,
+                100,
+                runtime,
+                "demo",
+                &root,
+                &sessions,
+                None,
+                health(),
+                &no_diffs,
+                None,
+                None,
+                wall_clock,
+            )
+        };
+
+        let first = material(&runtime, clock);
+        assert!(first.projection.garden_sessions().is_some());
+        for _ in 0..7 {
+            let _ = runtime.apply_event(AppEvent::Tick);
+        }
+        assert_eq!(
+            material(&runtime, clock + Duration::milliseconds(900)),
+            first,
+            "the Garden rebuilt at the 16 ms input-pump cadence"
+        );
+
+        let _ = runtime.apply_event(AppEvent::Tick);
+        let advanced = material(&runtime, clock + Duration::seconds(1));
+        assert_eq!(
+            first.now, advanced.now,
+            "relative-time clock left its minute"
+        );
+        assert_ne!(
+            first.projection.garden_animation_tick(),
+            advanced.projection.garden_animation_tick(),
+            "the canonical Garden pose did not advance"
+        );
+        assert_ne!(
+            render_home_material(&first),
+            render_home_material(&advanced),
+            "the running pose froze inside one wall-clock minute"
         );
     }
 

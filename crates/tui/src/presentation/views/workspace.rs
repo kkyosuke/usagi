@@ -341,6 +341,10 @@ pub struct HomeProjection {
     garden_scroll: usize,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
+    /// Canonical Garden animation tick supplied by the composition root's
+    /// monotonic logical clock. `None` keeps pure renderer fixtures compatible
+    /// with an explicitly injected wall clock; production always supplies it.
+    garden_tick: Option<u64>,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
     daemon_runtimes: Option<Vec<daemon_modal::AgentRuntimeRow>>,
     /// Persisted Closeup action-modal input, when its overlay is open.
@@ -579,6 +583,7 @@ impl HomeProjection {
             garden_workspaces,
             garden_scroll: state.garden_scroll(),
             garden_motion: GardenMotion::Full,
+            garden_tick: None,
             daemon_runtimes: None,
             closeup_modal: None,
             create_draft,
@@ -608,6 +613,31 @@ impl HomeProjection {
         self
     }
 
+    /// Attach and canonicalize the Garden's monotonic animation clock after all
+    /// active/deck Agent projections are present. Identical visible poses fold
+    /// onto one value, so material equality can suppress their redraws.
+    #[must_use]
+    pub(crate) fn with_garden_tick(
+        mut self,
+        raw_height: usize,
+        raw_width: usize,
+        tick: u64,
+    ) -> Self {
+        let Some(sessions) = self.garden_sessions.as_deref() else {
+            return self;
+        };
+        let (height, width) = widgets::normalize_size(raw_height, raw_width);
+        self.garden_tick = widgets::garden::canonical_tick_scrolled(
+            height,
+            width,
+            sessions,
+            self.garden_scroll,
+            tick,
+            self.garden_motion.is_reduced(),
+        );
+        self
+    }
+
     /// Replace the active-only Garden with the process deck's ordered plots.
     /// This is inert while Garden is closed, so ordinary Home material does not
     /// retain inactive project rows.
@@ -633,28 +663,9 @@ impl HomeProjection {
         self.garden_sessions.as_deref()
     }
 
-    pub(crate) fn canonical_garden_now(
-        &self,
-        raw_height: usize,
-        raw_width: usize,
-        now: DateTime<Utc>,
-    ) -> DateTime<Utc> {
-        let Some(sessions) = self.garden_sessions.as_deref() else {
-            return now;
-        };
-        let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        let Some(tick) = widgets::garden::canonical_tick_scrolled(
-            height,
-            width,
-            sessions,
-            self.garden_scroll,
-            garden_tick(now),
-            self.garden_motion.is_reduced(),
-        ) else {
-            return now;
-        };
-        DateTime::from_timestamp(i64::try_from(tick).expect("Garden phases fit i64"), 0)
-            .expect("a Garden-cycle Unix timestamp is valid")
+    /// Canonical tick that materially identifies the visible Garden pose.
+    pub(crate) const fn garden_animation_tick(&self) -> Option<u64> {
+        self.garden_tick
     }
 
     /// Attach the name of a create request the daemon is still fulfilling, so the
@@ -934,6 +945,13 @@ impl HomeProjection {
     /// the create skeleton only become visible through those steps.
     #[must_use]
     pub fn collapse_animation_clock(mut self) -> Self {
+        // Garden replaces the whole Home surface. Its own canonical tick is the
+        // only animation material on screen, so a sidebar mascot tick must not
+        // invalidate the hidden frame underneath it.
+        if self.garden_sessions.is_some() {
+            self.mascot_tick = 0;
+            return self;
+        }
         let drives_a_per_tick_animation = self.create_pending.is_some()
             || self.sessions.iter().any(|session| session.removing)
             || self.pane_tabs.iter().any(|tab| tab.pending);
@@ -1968,7 +1986,7 @@ fn garden_frame(
         &home.garden_scope,
         sessions,
         home.garden_scroll,
-        garden_tick(now),
+        home.garden_tick.unwrap_or_else(|| garden_tick(now)),
         home.garden_motion.is_reduced(),
     )
 }
@@ -4935,9 +4953,9 @@ mod tests {
         assert!(text.contains("Garden · click a usagi"));
         assert!(text.contains("any key · wake"));
         assert!(text.contains("Notifications"));
-        assert!(text.contains("running"));
-        assert!(text.contains("waiting"));
-        assert!(text.contains("1 run · 1 done"));
+        assert!(!text.contains("running"));
+        assert!(!text.contains("waiting"));
+        assert!(!text.contains("1 run · 1 done"));
         assert!(!text.contains("> s0"));
         assert!(text.contains("failed · worktree missing"));
         assert!(text.contains("s0"));
@@ -5023,8 +5041,9 @@ mod tests {
             phase: AgentPhase::Running,
         }));
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        // 注意順（waiting が先）で数え上げ、Garden と sidebar が同じ言葉を使う。
-        assert!(text.contains("1 wait · 1 run"), "{text}");
+        // 注意順（waiting が先）の glyph だけを示し、pose と同じ action caption は重ねない。
+        assert!(text.contains("◆ ●"), "{text}");
+        assert!(!text.contains("1 wait · 1 run"), "{text}");
         assert!(!text.contains("no agents"));
     }
 
@@ -5110,7 +5129,9 @@ mod tests {
         let garden = home.garden_sessions.as_ref().expect("garden projection");
         assert_eq!(garden[0].agents, home.session_agents[&session]);
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        assert!(text.contains("1 run"), "{text}");
+        assert!(text.contains("1 plots · 1 usagi"), "{text}");
+        assert!(text.contains("o.o"), "{text}");
+        assert!(!text.contains("1 run"), "{text}");
         assert!(!text.contains("done"), "{text}");
     }
 
@@ -5447,11 +5468,11 @@ mod tests {
     }
 
     #[test]
-    fn the_garden_tick_advances_with_the_frame_clock() {
+    fn the_renderer_fixture_fallback_tick_advances_with_wall_seconds() {
         let base = now();
         assert_eq!(garden_tick(base), garden_tick(base));
-        // 1 秒で pose が 1 つ進み、Garden animation cycle で一周する。frame material の壁時計は秒へ
-        // 切り捨てられるので、これが観測できる最小の刻みである。
+        // Pure renderer fixtures can still inject a wall clock when no
+        // composition-owned logical tick is attached.
         assert_ne!(
             garden_tick(base),
             garden_tick(base + chrono::Duration::seconds(1))
@@ -5495,15 +5516,8 @@ mod tests {
             Path::new("/work"),
             &[projected_session(session, "running", "/work")],
         );
-        let epoch = DateTime::from_timestamp(0, 0).expect("Unix epoch");
         let canonical = (0..widgets::garden::ANIMATION_CYCLE_TICKS)
-            .map(|tick| {
-                home.canonical_garden_now(
-                    24,
-                    100,
-                    epoch + chrono::Duration::seconds(i64::try_from(tick).expect("tick fits i64")),
-                )
-            })
+            .map(|tick| home.clone().with_garden_tick(24, 100, tick).garden_tick)
             .collect::<Vec<_>>();
         assert!(
             canonical.windows(2).any(|ticks| ticks[0] != ticks[1]),
@@ -5516,15 +5530,14 @@ mod tests {
 
         let reduced = home.with_garden_reduced_motion(true);
         assert_eq!(
-            reduced.canonical_garden_now(24, 100, epoch),
-            reduced.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(5))
+            reduced.clone().with_garden_tick(24, 100, 0).garden_tick,
+            reduced.clone().with_garden_tick(24, 100, 5).garden_tick
         );
 
-        let ordinary_home_now = epoch + chrono::Duration::days(20_000);
         assert_eq!(
-            reduced.canonical_garden_now(13, 63, ordinary_home_now),
-            ordinary_home_now,
-            "a Garden that does not fit must preserve the ordinary Home clock"
+            reduced.with_garden_tick(13, 63, 5).garden_tick,
+            None,
+            "a Garden that does not fit must not attach an animation clock"
         );
     }
 
