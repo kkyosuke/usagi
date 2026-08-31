@@ -292,6 +292,51 @@ mod tests {
         assert!(error.to_string().contains("launched daemon was stopped"));
     }
 
+    #[test]
+    fn registration_on_the_final_observation_is_still_confirmed() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let launcher = TestLauncher::idle(&store);
+        let sleeper = DelayedRegistration {
+            store: &store,
+            sleeps: Cell::new(0),
+            register_after: MAX_POLLS,
+            pid: 4242,
+        };
+
+        assert_eq!(
+            launch_and_confirm(&store, &FixedProbe(true), &launcher, &sleeper).unwrap(),
+            4242
+        );
+        assert_eq!(sleeper.sleeps.get(), MAX_POLLS);
+        assert_eq!(launcher.aborts(), 0);
+    }
+
+    struct AbortErrorLauncher;
+
+    impl DaemonLauncher for AbortErrorLauncher {
+        fn launch(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn abort_launch(&self) -> std::io::Result<()> {
+            Err(std::io::Error::other("kill failed"))
+        }
+    }
+
+    #[test]
+    fn an_abort_failure_preserves_both_startup_and_cleanup_context() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+
+        let error =
+            launch_and_confirm(&store, &FixedProbe(true), &AbortErrorLauncher, &NoopSleeper)
+                .expect_err("a failed cleanup must not hide the startup timeout");
+
+        assert_eq!(
+            error.to_string(),
+            "daemon did not register within the startup window; the launched daemon could not be stopped: kill failed"
+        );
+    }
+
     struct ExitedLauncher;
 
     impl DaemonLauncher for ExitedLauncher {

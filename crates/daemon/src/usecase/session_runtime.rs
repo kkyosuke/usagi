@@ -3147,6 +3147,29 @@ mod tests {
     }
 
     #[test]
+    fn explicit_orphan_purge_rejects_a_registered_session() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+
+        let error = runtime
+            .handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({
+                    "name":"one",
+                    "force":true,
+                    "purge_orphan":true
+                }),
+            )
+            .unwrap_err();
+
+        assert_eq!(error, SessionRuntimeError::InvalidRequest);
+        assert_eq!(runtime.snapshot().unwrap()["sessions"][0]["name"], "one");
+    }
+
+    #[test]
     fn create_lists_overview_and_removes_a_durable_session() {
         let (_tmp, mut runtime) = runtime(FakeGit::ok());
         // An empty workspace has nothing only its owner can finish, so it may be
