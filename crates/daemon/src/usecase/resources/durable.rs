@@ -447,6 +447,7 @@ impl ShardedRuntimeState {
                 Ok(())
             })?;
         }
+        let reclaimed = self.reclaim_unbacked(&shards)?;
         let mut agents = Vec::new();
         let mut terminals = Vec::new();
         for document in &shards {
@@ -488,6 +489,7 @@ impl ShardedRuntimeState {
             agents,
             terminals,
             interrupted: interrupted_agents + interrupted_terminals,
+            reclaimed,
             migration,
         })
     }
@@ -626,6 +628,39 @@ impl ShardedRuntimeState {
         Ok(report.applied)
     }
 
+    /// Release every foreign claim no retained shard accounts for.
+    ///
+    /// This is the one release path that is not driven by a record, because the
+    /// leak it repairs is the *absence* of one: a retired generation whose shard
+    /// entry is gone while its claim still holds a pool slot can never publish an
+    /// exit, and nothing else will ever look at that claim again. Once enough of
+    /// them accumulate the pool is exhausted and no session can launch an Agent.
+    ///
+    /// Only the active generation does this, and only at hydrate. A claim is
+    /// written before its owner's shard entry, so a *running* owner legitimately
+    /// has an unbacked claim for the width of one commit; startup is where no
+    /// other generation is writing, so "unbacked" is proof rather than a guess.
+    fn reclaim_unbacked(&self, shards: &[ShardDocument]) -> Result<usize, ResourceFailure> {
+        if self.role != GenerationRole::Active {
+            return Ok(0);
+        }
+        let backed = shards
+            .iter()
+            .flat_map(|document| &document.resources)
+            .map(|entry| entry.resource.clone())
+            .collect::<BTreeSet<_>>();
+        let owner = self.owner;
+        let (released, _) = self.allocator.update(|document| {
+            let unbacked = document.unbacked(owner, &backed);
+            Ok(release_each(
+                document,
+                owner,
+                &unbacked.iter().collect::<Vec<_>>(),
+            ))
+        })?;
+        Ok(released)
+    }
+
     /// Release the claims of a retired generation's records this owner's truth
     /// reports as terminated. Nothing else about a foreign record is touched.
     fn release_retired(
@@ -735,6 +770,8 @@ pub struct HydratedState {
     pub terminals: TerminalStoreSnapshot,
     /// Records the reconcile fenced as `identity_unknown`.
     pub interrupted: usize,
+    /// Capacity claims released because no retained shard accounted for them.
+    pub reclaimed: usize,
     /// The migration this hydrate performed, when it was the first on this data
     /// directory.
     pub migration: Option<MigrationReport>,

@@ -1094,6 +1094,7 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
 | branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。daemon-owned PR inventory に merged PR の exact `headRefOid` があり、撤去後に完全修飾した `refs/heads/usagi/<name>` の HEAD と一致する場合だけ squash merge 済みと証明して `git branch -D` を使う（同名 tag は証明に使わない）。PR inventory を読めない場合は証明なしとして安全な `-d` に退避する。PR 後の commit や OID 不明・不一致は Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。client が worktree force と `DeletePlan.force_delete_branch` を対で送った remove だけは `git branch -D` で削除する。TUI では Switch の `X`、Closeup の `close -f`、削除失敗行を Enter で選んで破棄確認へ Yes と答えた recovery がこれを送る。`x` は送らないため安全な `-d` のままである。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
 | Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
+| generic terminal | Agent と同じ順序で、対象 `SessionId` の generic terminal も worktree 撤去より前に terminate/reap して record を除去する。session の shell terminal も worktree 内に cwd を持つ child と capacity claim を握るため、残すと `git worktree remove` が使用中で失敗し、claim は daemon の生存中ずっと pool を占有する。reap に失敗した場合は record を残して retry する。`SessionId` を持たない workspace-root terminal は対象外である |
 
 daemon 起動時は canonical な `.usagi/sessions/` 直下も走査し、lifecycle state に所有者がいない物理 entry を
 `Failed` / `Integrity` の recovery row として採用する。採用は attach authority を与えず、actual local branch、dirty、
@@ -2124,6 +2125,31 @@ E3  old shard CAS    consumed 以下の outbox を破棄          owner が自�
 
 duplicate、reorder、late delivery、consumer restart は同じ outcome に収束し、capacity 解放は 1 度だけである。
 別 owner の resource を名指した event、claim の無い resource の event は refuse され、他の resource を変更しない。
+
+### 説明されない claim の回収
+
+capacity の解放は証拠に基づく。通常の経路は definite failure か、owner generation が publish した exit を active
+consumer が apply することであり（[exit event の handoff](#exit-event-の-handoff)）、どちらも **claim に対応する
+shard entry があること**を前提にしている。したがって、retired generation の shard entry が失われた claim は
+どちらの経路からも到達できず、pool の slot を永久に占有する。pool は固定サイズなので、これが積み上がると
+最終的に **どの session でも Agent を起動できなくなる**。
+
+active generation は hydrate 時にこの取りこぼしを回収する。対象は次の 2 条件を **両方** 満たす claim だけである。
+
+| 条件 | 意味 |
+|---|---|
+| どの retained shard もその resource を説明しない | owner の真実に record が無く、exit を publish する主体が存在しない |
+| claim の owner が hydrate 中の generation でない | 自 generation の claim は outbox を経由して exactly-once で解放する |
+
+`ambiguous` final は child が存在し得るため、この回収の対象外である（capacity を保持したまま残す）。
+claim は L1 で shard entry より先に durable になるため（[launch の書き込み順序](#launch-の書き込み順序)）、
+稼働中の owner にも「shard entry の無い claim」が commit 1 回分の幅で存在する。hydrate は他の generation が
+書いていない唯一の時点なので、そこでの「説明されない」は推測ではなく証明になる。回収件数は startup log に残す。
+
+`usagi clean` も同じ取りこぼしを daemon の外から回収できる（[1. プロジェクト概要](01-overview.md#現在の実装状態)）。
+daemon が動いている可能性があるため、条件は hydrate より 1 つ厳しく、`generations.json` が owner を載せていない
+ことを追加で要求する。registry に載る generation は稼働中で launch の途中かもしれないためである。registry を
+読めない場合は何も retired と証明できないので、候補は 0 件になる。
 
 ### child identity
 

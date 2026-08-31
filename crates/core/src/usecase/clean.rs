@@ -30,6 +30,28 @@ pub struct DaemonWorkspaceData {
     pub sessions: Option<BTreeSet<String>>,
 }
 
+/// One capacity claim observed in the daemon's shared resource allocator.
+///
+/// A claim holds a slot in a fixed-size pool. The daemon releases one only
+/// against evidence — a definite failure, or an exit published by the owning
+/// generation — so a claim whose owner is gone before it could publish is
+/// unreachable by every normal path and holds its slot forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedCapacityClaim {
+    /// Opaque resource id, used to name the claim and to apply the release.
+    pub resource_id: String,
+    /// The generation that owns the claim.
+    pub owner: String,
+    /// The pool this claim holds a slot in, for rendering.
+    pub pool: String,
+    /// Whether any owner shard still accounts for the resource. A backed claim
+    /// is ordinary durable state and is never a candidate.
+    pub backed: bool,
+    /// Whether the generation registry still lists the owner. A listed owner may
+    /// be running and mid-launch, so its claims are never a candidate.
+    pub owner_registered: bool,
+}
+
 /// One worktree reported by Git.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedWorktree {
@@ -91,6 +113,7 @@ pub struct CleanInventory {
     pub daemon_data: Vec<DaemonWorkspaceData>,
     pub repositories: Vec<RepositoryInventory>,
     pub processes: Vec<ObservedProcess>,
+    pub claims: Vec<ObservedCapacityClaim>,
 }
 
 /// Observe the managed worktree and branch namespace for one repository.
@@ -179,6 +202,13 @@ pub enum CleanCandidate {
         name: String,
         requires_force: bool,
     },
+    /// A capacity claim whose owning generation is gone and which no owner shard
+    /// accounts for. Releasing it gives a pool slot back.
+    Capacity {
+        resource_id: String,
+        owner: String,
+        pool: String,
+    },
     /// A `usagi` helper process left behind by a build that no longer exists.
     Process {
         pid: u32,
@@ -197,7 +227,7 @@ impl CleanCandidate {
             Self::Worktree { requires_force, .. }
             | Self::Branch { requires_force, .. }
             | Self::Process { requires_force, .. } => *requires_force,
-            Self::Workspace { .. } | Self::Data { .. } => false,
+            Self::Workspace { .. } | Self::Data { .. } | Self::Capacity { .. } => false,
         }
     }
 }
@@ -226,6 +256,25 @@ pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
                 requires_force: process.role == HelperRole::Daemon,
             }),
     );
+
+    // Capacity comes right after processes and before any Git work: releasing a
+    // leaked pool slot is what lets the next launch succeed, and it touches only
+    // the allocator document.
+    let mut claims = inventory
+        .claims
+        .iter()
+        .filter(|claim| !claim.backed && !claim.owner_registered)
+        .collect::<Vec<_>>();
+    claims.sort_by(|left, right| {
+        left.owner
+            .cmp(&right.owner)
+            .then_with(|| left.resource_id.cmp(&right.resource_id))
+    });
+    candidates.extend(claims.into_iter().map(|claim| CleanCandidate::Capacity {
+        resource_id: claim.resource_id.clone(),
+        owner: claim.owner.clone(),
+        pool: claim.pool.clone(),
+    }));
 
     let lifecycle = inventory
         .daemon_data
@@ -568,9 +617,48 @@ mod tests {
     /// to do with the worktrees on disk (a workspace the daemon released, a
     /// document written before the sessions were recorded), so it must not be
     /// read as "none of these worktrees is linked".
+    /// A capacity claim is only a candidate when both of its release paths are
+    /// impossible. Either fact alone describes ordinary state: a running owner
+    /// writes its claim just before its shard entry, and a listed generation may
+    /// be in exactly that window.
+    #[test]
+    fn only_a_claim_that_is_both_unbacked_and_unregistered_is_swept() {
+        let claim = |resource: &str, backed: bool, owner_registered: bool| ObservedCapacityClaim {
+            resource_id: resource.to_owned(),
+            owner: "gen-1".to_owned(),
+            pool: "agent".to_owned(),
+            backed,
+            owner_registered,
+        };
+        let inventory = CleanInventory {
+            claims: vec![
+                claim("leaked", false, false),
+                claim("backed", true, false),
+                claim("registered", false, true),
+                claim("ordinary", true, true),
+            ],
+            processes: Vec::new(),
+            registered: Vec::new(),
+            daemon_data: Vec::new(),
+            repositories: Vec::new(),
+        };
+
+        assert_eq!(
+            plan(&inventory),
+            vec![CleanCandidate::Capacity {
+                resource_id: "leaked".to_owned(),
+                owner: "gen-1".to_owned(),
+                pool: "agent".to_owned(),
+            }]
+        );
+        // Releasing a provably dead claim discards nothing a user can lose.
+        assert!(!plan(&inventory)[0].requires_force());
+    }
+
     #[test]
     fn an_empty_session_list_does_not_authorise_removing_every_worktree() {
         let inventory = CleanInventory {
+            claims: Vec::new(),
             processes: Vec::new(),
             registered: Vec::new(),
             daemon_data: vec![DaemonWorkspaceData {
@@ -614,6 +702,7 @@ mod tests {
     #[test]
     fn plans_only_unlinked_managed_resources_in_stable_order() {
         let inventory = CleanInventory {
+            claims: Vec::new(),
             processes: Vec::new(),
             registered: vec![
                 RegisteredWorkspace {
@@ -699,6 +788,7 @@ mod tests {
     #[test]
     fn refuses_to_infer_git_orphans_without_readable_lifecycle_state() {
         let inventory = CleanInventory {
+            claims: Vec::new(),
             processes: Vec::new(),
             daemon_data: vec![DaemonWorkspaceData {
                 root: "/repo".into(),
@@ -726,6 +816,7 @@ mod tests {
     #[test]
     fn ignores_branch_mismatches_and_marks_unmerged_unchecked_branches_force_only() {
         let inventory = CleanInventory {
+            claims: Vec::new(),
             processes: Vec::new(),
             daemon_data: vec![DaemonWorkspaceData {
                 root: "/repo".into(),
@@ -760,6 +851,7 @@ mod tests {
     #[test]
     fn sorts_repositories_and_accepts_detached_managed_worktrees() {
         let inventory = CleanInventory {
+            claims: Vec::new(),
             processes: Vec::new(),
             daemon_data: vec![
                 DaemonWorkspaceData {

@@ -501,6 +501,39 @@ impl AllocatorDocument {
         Ok(())
     }
 
+    /// Every foreign claim still holding capacity that no owner shard accounts
+    /// for, given the resources the retained shards do account for.
+    ///
+    /// A claim is created before its owner's shard entry ([`super::durable`]), so
+    /// "no entry" is only proof of a leak once the owner can no longer be in that
+    /// window — which is why this is derived at startup, where the active
+    /// generation is the only process writing. Such a claim is unreachable by
+    /// every other release path: `super::drain` needs an outbox event the retired
+    /// owner can never publish, and [`Self::release_unowned`] needs a record that
+    /// is already gone. Left alone it holds a pool slot forever.
+    ///
+    /// An [`OperationOutcome::Ambiguous`] final is excluded by construction: it
+    /// means a child may exist and the platform cannot say, so it never releases
+    /// capacity.
+    #[must_use]
+    pub fn unbacked(
+        &self,
+        active: DaemonGeneration,
+        backed: &std::collections::BTreeSet<TerminalRef>,
+    ) -> Vec<TerminalRef> {
+        self.claims
+            .iter()
+            .filter(|claim| claim.state != ClaimState::Released)
+            .filter(|claim| claim.owner != active)
+            .filter(|claim| !backed.contains(&claim.resource))
+            .filter(|claim| {
+                self.operation(&claim.operation)
+                    .is_none_or(|record| record.outcome != OperationOutcome::Ambiguous)
+            })
+            .map(|claim| claim.resource.clone())
+            .collect()
+    }
+
     /// Apply one owner-published progress event (output, command completion).
     /// It advances the consumed revision without touching capacity.
     ///

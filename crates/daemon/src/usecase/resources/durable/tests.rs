@@ -1809,3 +1809,197 @@ fn the_marker_round_trips_through_its_durable_form() {
     assert_eq!(encoded["unknown"], 1);
     assert!(LegacySnapshots::default().is_empty());
 }
+
+/// Drop every resource entry from `owner`'s shard while leaving the allocator
+/// exactly as it is. This is the durable shape the leak leaves behind: a claim
+/// whose owner's own truth no longer mentions the resource at all.
+fn forget_shard_resources(world: &World, owner: DaemonGeneration) {
+    let mut document = world.shard(owner);
+    document.resources.clear();
+    world
+        .archive
+        .bytes(owner)
+        .set(&serde_json::to_string(&document).unwrap());
+}
+
+#[test]
+fn hydrate_reclaims_a_live_claim_no_retained_shard_accounts_for() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let new = DaemonGeneration::new();
+    let resource = terminal(old);
+    ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(41, "start-41")))
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            OperationId::new(),
+            RuntimeState::Running,
+            Some(process(41, "start-41")),
+        )]))
+        .unwrap();
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Live
+    );
+
+    // The retired owner's entry is gone, so no exit can ever be published for it
+    // and no record-driven release can ever see it again.
+    forget_shard_resources(&world, old);
+
+    let hydrated = world.state(new, ObservedChildren::new()).hydrate().unwrap();
+
+    assert_eq!(hydrated.reclaimed, 1);
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+    assert_eq!(world.allocator().pool_used(ResourceKind::Agent), 0);
+}
+
+#[test]
+fn a_reclaimed_pool_slot_admits_the_launch_it_was_blocking() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let new = DaemonGeneration::new();
+    // `policy(2, 2)` is the whole pool, so two leaked claims exhaust it.
+    for pid in [51, 52] {
+        let resource = terminal(old);
+        ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(pid, "start-leak")))
+            .save(agent_snapshot(vec![agent_record(
+                &resource,
+                OperationId::new(),
+                RuntimeState::Running,
+                Some(process(pid, "start-leak")),
+            )]))
+            .unwrap();
+    }
+    forget_shard_resources(&world, old);
+    assert_eq!(world.allocator().pool_used(ResourceKind::Agent), 2);
+
+    // Before the reclaim the pool is full and a fresh generation cannot launch.
+    let blocked = terminal(new);
+    let refused =
+        ShardedAgentStore::new(world.state(new, ObservedChildren::new().with(53, "start-53")))
+            .save(agent_snapshot(vec![agent_record(
+                &blocked,
+                OperationId::new(),
+                RuntimeState::Running,
+                Some(process(53, "start-53")),
+            )]));
+    assert!(refused.is_err());
+
+    let hydrated = world.state(new, ObservedChildren::new()).hydrate().unwrap();
+    assert_eq!(hydrated.reclaimed, 2);
+
+    let admitted = terminal(new);
+    ShardedAgentStore::new(world.state(new, ObservedChildren::new().with(54, "start-54")))
+        .save(agent_snapshot(vec![agent_record(
+            &admitted,
+            OperationId::new(),
+            RuntimeState::Running,
+            Some(process(54, "start-54")),
+        )]))
+        .unwrap();
+    assert_eq!(
+        world.allocator().claim(&admitted).unwrap().state,
+        ClaimState::Live
+    );
+}
+
+#[test]
+fn hydrate_keeps_an_unbacked_claim_the_hydrating_generation_still_owns() {
+    let world = World::new();
+    let owner = DaemonGeneration::new();
+    let resource = terminal(owner);
+    ShardedAgentStore::new(world.state(owner, ObservedChildren::new().with(61, "start-61")))
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            OperationId::new(),
+            RuntimeState::Running,
+            Some(process(61, "start-61")),
+        )]))
+        .unwrap();
+    forget_shard_resources(&world, owner);
+
+    // The owner's own claims must travel its outbox so their exit is published
+    // and consumed exactly once; hydrate never short-circuits that.
+    let hydrated = world
+        .state(owner, ObservedChildren::new())
+        .hydrate()
+        .unwrap();
+
+    assert_eq!(hydrated.reclaimed, 0);
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Live
+    );
+}
+
+#[test]
+fn hydrate_keeps_an_unbacked_ambiguous_final_holding_its_capacity() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let new = DaemonGeneration::new();
+    let resource = terminal(old);
+    // `Unproven` records an ambiguous final: a child may exist and the platform
+    // cannot say, so its capacity is never released.
+    ShardedAgentStore::new(world.state(old, ObservedChildren::new()))
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            OperationId::new(),
+            RuntimeState::Running,
+            None,
+        )]))
+        .unwrap();
+    assert_eq!(
+        world
+            .allocator()
+            .operation(
+                &world
+                    .allocator()
+                    .claim(&resource)
+                    .unwrap()
+                    .operation
+                    .clone()
+            )
+            .unwrap()
+            .outcome,
+        OperationOutcome::Ambiguous
+    );
+    forget_shard_resources(&world, old);
+
+    let hydrated = world.state(new, ObservedChildren::new()).hydrate().unwrap();
+
+    assert_eq!(hydrated.reclaimed, 0);
+    assert_ne!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+}
+
+#[test]
+fn only_the_active_generation_reclaims_unbacked_claims() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let draining = DaemonGeneration::new();
+    let resource = terminal(old);
+    ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(71, "start-71")))
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            OperationId::new(),
+            RuntimeState::Running,
+            Some(process(71, "start-71")),
+        )]))
+        .unwrap();
+    forget_shard_resources(&world, old);
+
+    let hydrated = world
+        .role(draining, GenerationRole::Draining, ObservedChildren::new())
+        .hydrate()
+        .unwrap();
+
+    assert_eq!(hydrated.reclaimed, 0);
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Live
+    );
+}
