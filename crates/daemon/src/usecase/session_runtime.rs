@@ -365,6 +365,26 @@ enum SessionRemoveStep {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RemoveOptions {
+    force: bool,
+    force_delete_branch: bool,
+    orphan: OrphanRemoveIntent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrphanRemoveIntent {
+    Protect,
+    Discard,
+    Purge,
+}
+
+impl OrphanRemoveIntent {
+    const fn discards(self) -> bool {
+        !matches!(self, Self::Protect)
+    }
+}
+
 /// Creates a session while holding the shared session lock only for the fast
 /// durable transitions. The heavy Git worktree build runs with the lock
 /// released so concurrent reads (session list, terminal poll, user-decision
@@ -1373,17 +1393,12 @@ impl SessionRuntime {
         // requested removal uses Git's safe `-d` mode unless the client pairs
         // `force_delete_branch` with `force`, which is what the TUI's forced
         // removals send.
-        let compensating = kind == RemoveKind::Compensating;
-        let force = compensating || force(payload)?;
-        let requested_force_delete_branch = force_delete_branch(payload)?;
-        if requested_force_delete_branch && !force {
-            return Err(SessionRuntimeError::InvalidRequest);
-        }
-        let force_delete_branch = compensating || requested_force_delete_branch;
+        let options = remove_options(kind, payload)?;
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
-        let semantic_key = remove_semantic_key(kind, &name, force, force_delete_branch);
+        let semantic_key =
+            remove_semantic_key(kind, &name, options.force, options.force_delete_branch);
         if let Some(existing) = before
             .operations
             .iter()
@@ -1394,8 +1409,8 @@ impl SessionRuntime {
                 existing,
                 kind,
                 &name,
-                force,
-                force_delete_branch,
+                options.force,
+                options.force_delete_branch,
                 &semantic_key,
             ) {
                 return Err(SessionRuntimeError::IdempotencyConflict);
@@ -1416,6 +1431,13 @@ impl SessionRuntime {
             .iter()
             .find(|session| session.name == name)
             .ok_or(SessionRuntimeError::UnknownSession)?;
+        let integrity_orphan = session
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.stage == FailureStage::Integrity);
+        if options.orphan == OrphanRemoveIntent::Purge && !integrity_orphan {
+            return Err(SessionRuntimeError::InvalidRequest);
+        }
         // A removal already in flight owns the worktree effect. Reporting its
         // operation instead of admitting a second one is what keeps a repeated
         // request (an impatient client, a retry with a fresh operation ID) from
@@ -1429,7 +1451,8 @@ impl SessionRuntime {
                 body: snapshot(&before, self.root_worktree_id),
             }));
         }
-        let orphan_branch = self.orphan_branch_for_remove(session, &name)?;
+        let orphan_branch =
+            self.orphan_branch_for_remove(session, &name, options.orphan.discards())?;
         let delete_branch = true;
         let session_id = session.session_id;
         let operation = journal(operation_id, self.generation, semantic_key);
@@ -1442,10 +1465,10 @@ impl SessionRuntime {
                     operation,
                     delete_plan: DeletePlan {
                         targets: vec![name.clone()],
-                        force,
+                        force: options.force,
                         delete_branch,
                         branch_name: orphan_branch.clone(),
-                        force_delete_branch,
+                        force_delete_branch: options.force_delete_branch,
                         merged_head_oid: merged_head_oid.clone(),
                     },
                 },
@@ -1469,10 +1492,10 @@ impl SessionRuntime {
                 session_container: self.session_container(),
                 session_root: self.session_root(&name),
                 name,
-                force,
+                force: options.force,
                 delete_branch,
                 branch_name: orphan_branch,
-                force_delete_branch,
+                force_delete_branch: options.force_delete_branch,
                 merged_head_oid,
             }),
         })
@@ -1791,6 +1814,7 @@ impl SessionRuntime {
         &self,
         session: &usagi_core::domain::session_lifecycle::ManagedSession,
         name: &str,
+        discard: bool,
     ) -> Result<Option<String>, SessionRuntimeError> {
         if !session
             .failure
@@ -1800,7 +1824,7 @@ impl SessionRuntime {
             return Ok(None);
         }
         let diagnosis = self.inspect_orphan(name);
-        if !diagnosis.safe_to_remove() {
+        if !discard && !diagnosis.safe_to_remove() {
             return Err(SessionRuntimeError::OrphanRecoveryBlocked(
                 diagnosis.summary(name),
             ));
@@ -2026,6 +2050,38 @@ fn force_delete_branch(payload: &Value) -> Result<bool, SessionRuntimeError> {
         Some(value) => value.as_bool().ok_or(SessionRuntimeError::InvalidRequest),
         None => Ok(false),
     }
+}
+
+/// Parse the explicit permission to discard a diagnosed integrity orphan. This is
+/// intentionally separate from ordinary worktree `force`: an integrity row can
+/// represent unregistered files or unmerged commits that need a stronger,
+/// target-specific acknowledgement.
+fn purge_orphan(payload: &Value) -> Result<bool, SessionRuntimeError> {
+    match payload.get("purge_orphan") {
+        Some(value) => value.as_bool().ok_or(SessionRuntimeError::InvalidRequest),
+        None => Ok(false),
+    }
+}
+
+fn remove_options(kind: RemoveKind, payload: &Value) -> Result<RemoveOptions, SessionRuntimeError> {
+    let compensating = kind == RemoveKind::Compensating;
+    let force = compensating || force(payload)?;
+    let purge_orphan = purge_orphan(payload)?;
+    let requested_force_delete_branch = force_delete_branch(payload)? || purge_orphan;
+    if requested_force_delete_branch && !force {
+        return Err(SessionRuntimeError::InvalidRequest);
+    }
+    Ok(RemoveOptions {
+        force,
+        force_delete_branch: compensating || requested_force_delete_branch,
+        orphan: if purge_orphan {
+            OrphanRemoveIntent::Purge
+        } else if compensating || requested_force_delete_branch {
+            OrphanRemoveIntent::Discard
+        } else {
+            OrphanRemoveIntent::Protect
+        },
+    })
 }
 
 /// Keep the actionable Git reason on one bounded display line. Session names
@@ -2293,6 +2349,7 @@ mod tests {
 
     struct OrphanSessionWorktreeIo {
         entries: Vec<String>,
+        linked: bool,
         remove_calls: Arc<AtomicUsize>,
     }
 
@@ -2308,7 +2365,7 @@ mod tests {
             false
         }
         fn is_linked_worktree(&self, _: &Path) -> bool {
-            true
+            self.linked
         }
         fn session_entries(&self, _: &Path) -> anyhow::Result<Vec<String>> {
             Ok(self.entries.clone())
@@ -2900,6 +2957,7 @@ mod tests {
             },
             OrphanSessionWorktreeIo {
                 entries: vec!["review".into()],
+                linked: true,
                 remove_calls: Arc::clone(&remove_calls),
             },
         )
@@ -2988,7 +3046,7 @@ mod tests {
     }
 
     #[test]
-    fn dirty_or_unmerged_orphans_refuse_even_forced_cleanup_with_guidance() {
+    fn dirty_or_unmerged_orphans_refuse_ordinary_force_with_guidance() {
         for (dirty, unmerged_commits, expected) in [
             (true, 0, "commit or stash local changes first"),
             (false, 3, "preserve the branch and open/merge a PR first"),
@@ -3007,6 +3065,7 @@ mod tests {
                 },
                 OrphanSessionWorktreeIo {
                     entries: vec!["review".into()],
+                    linked: true,
                     remove_calls: Arc::clone(&remove_calls),
                 },
             )
@@ -3018,8 +3077,7 @@ mod tests {
                     &operation(),
                     &json!({
                         "name":"review",
-                        "force":true,
-                        "force_delete_branch":true
+                        "force":true
                     }),
                 )
                 .unwrap_err();
@@ -3032,6 +3090,83 @@ mod tests {
                 "failed"
             );
         }
+    }
+
+    #[test]
+    fn explicit_orphan_purge_removes_unregistered_files_and_unmerged_work() {
+        for linked in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let remove_calls = Arc::new(AtomicUsize::new(0));
+            let git_calls = Arc::new(Mutex::new(Vec::new()));
+            let mut runtime = SessionRuntime::open(
+                tmp.path().join("repository"),
+                &tmp.path().join("daemon"),
+                DaemonGeneration::new(),
+                OrphanGit {
+                    branch: "usagi/protected-work",
+                    dirty: true,
+                    unmerged_commits: 3,
+                    calls: Arc::clone(&git_calls),
+                },
+                OrphanSessionWorktreeIo {
+                    entries: vec!["review".into()],
+                    linked,
+                    remove_calls: Arc::clone(&remove_calls),
+                },
+            )
+            .unwrap();
+
+            let removed = runtime
+                .handle(
+                    SessionAction::Remove,
+                    &operation(),
+                    &json!({
+                        "name":"review",
+                        "force":true,
+                        "purge_orphan":true
+                    }),
+                )
+                .unwrap();
+
+            assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+            assert_eq!(remove_calls.load(Ordering::SeqCst), 1);
+            let calls = git_calls.lock().unwrap();
+            assert!(
+                calls
+                    .iter()
+                    .any(|args| { args == &["branch", "-D", "--", "usagi/review"] })
+            );
+            if linked {
+                assert!(
+                    calls
+                        .iter()
+                        .any(|args| { args == &["branch", "-D", "--", "usagi/protected-work"] })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_orphan_purge_rejects_a_registered_session() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+
+        let error = runtime
+            .handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({
+                    "name":"one",
+                    "force":true,
+                    "purge_orphan":true
+                }),
+            )
+            .unwrap_err();
+
+        assert_eq!(error, SessionRuntimeError::InvalidRequest);
+        assert_eq!(runtime.snapshot().unwrap()["sessions"][0]["name"], "one");
     }
 
     #[test]

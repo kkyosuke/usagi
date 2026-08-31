@@ -187,8 +187,10 @@ recovery、runtime state の hydrate、serve する workspace の adopt を経�
 
 窓を短く取ると、**健全な daemon が起動している最中に「起動しなかった」と報告する**という最悪の
 結果になる。operator は失敗を告げられ、当然の次手であるもう一度の `start` は「すでに稼働中」で
-拒否され、実際には daemon が上がっている。窓は「遅いが健全」な場合に合わせて取り、本当に失敗した
-daemon は自分の error log に記録した理由で報告される。
+拒否され、実際には daemon が上がっている。窓は「遅いが健全」な場合に合わせて取る。それでも期限を
+超えた場合は、起動元が自分の spawn した child を停止・reap してから失敗を返すため、失敗報告後に
+同じ child が遅れて authority を登録しない。child が登録前に終了した場合は30秒を待たず終了状態を
+報告し、daemon 自身が error log に理由を残した場合は期限切れの診断へ載せる。
 
 > 期限切れの報告は error log の最後の entry を根拠にするため、待っている間に無関係な entry が
 > 書かれると、そちらを原因として表示することがある。表示される理由が状況と噛み合わないときは
@@ -1099,7 +1101,12 @@ workspace root の現在の `HEAD` に未統合な commit 件数だけを safe f
 投影しない）。actual branch が `usagi/` namespace の local branchで、worktree が clean、未統合 commit が 0 件の場合だけ
 通常の remove を受理し、actual branch と規約上の `usagi/<session-name>` branch を Git の安全な `-d` で回収する。
 dirty、未統合、detached、`usagi/` 外 branch、診断不能、linked worktree でない entry は remove のたびに再診断して拒否し、
-`force` でも保護を解除しない。利用者は変更を commit/stash し、branch を PR で基点へ統合してから再実行する。
+通常の `force` では保護を解除しない。利用者は変更を commit/stash し、branch を PR で基点へ統合してから再実行する。
+内容を破棄すると確認できた integrity orphan だけは、CLI の
+`usagi session remove <name> --force --purge-orphan`、MCP `session_remove` の
+`force: true, purge_orphan: true`、または TUI の破棄確認付き force removal で exact session target を回収できる。
+`purge_orphan` は integrity failure 以外へ指定できず、`force` との対が必須である。effect 直前の canonical
+path confinement は通常 remove と同じく再検証し、session container 外や保護 root を削除対象にしない。
 
 daemon 起動時にも session lifecycle の全 `SessionId` と Agent inventory を照合する。session record が既に無い
 Agent は旧 teardown が残した orphan として、terminal state の保存による capacity claim 解放を先行させてから durable

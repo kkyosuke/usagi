@@ -208,6 +208,10 @@ payload を成功応答としてエコーしない。
 | `session_list` にその session が `failed` で残る | teardown が失敗した。`failure.summary` に原因が入る。名前は保持されるため、その record を `session_remove` すれば同名 session を再作成できる |
 
 daemon を停止・crash させても teardown は失われない。次の daemon 起動時に `deleting` の record から再開される。
+daemon 起動時に `failed/integrity` として採用された orphan は通常の `force` でも診断不能な entry や未統合成果を
+保護する。内容を破棄すると別経路で確認した exact session に限り、`force: true` と
+`purge_orphan: true` を対で送ると回収できる。daemon は integrity row 以外への `purge_orphan` と単独指定を拒否し、
+filesystem effect の直前にも target confinement を再検証する。
 
 dispatch 系は credential から caller と current run を復元する。`session_dispatch` は session を作成または再利用し、
 その session worktree で worker PTY を起動して run/agent/binding を durable に保存する。worker の

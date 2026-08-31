@@ -158,7 +158,9 @@ store の更新は daemon 内で同期的に完了してから応答する。同
 ```
 
 `force` は変更を失う可能性があるため、dirty であることを別の信頼できる経路で確認し、破棄が意図された
-場合だけ指定する。
+場合だけ指定する。daemon が `failed/integrity` として採用した orphan のうち、未登録の物理 entry、
+dirty worktree、未マージ commit も含めて破棄すると確認できた exact session だけは
+`force: true, purge_orphan: true` を指定する。`purge_orphan` は通常 session には使えず、単独指定も拒否される。
 
 ## 制約
 
@@ -167,4 +169,5 @@ store の更新は daemon 内で同期的に完了してから応答する。同
 - session 名、worktree、branch の対応は daemon lifecycle state が権威を持つ。MCP server 側の cwd
   や名前だけを根拠に状態を補完しない。
 - `session_remove` の `force` は dirty worktree の保護だけを明示的に解除する。他 session や repository
-  root を削除対象へ広げない。
+  root を削除対象へ広げない。`purge_orphan` も指定名の integrity orphan だけに作用し、daemon は effect
+  直前に canonical session container と target を再検証する。
