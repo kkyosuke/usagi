@@ -737,6 +737,66 @@ impl AgentRuntime {
         &self.dispatch
     }
 
+    /// Runtime reservations whose matching dispatch admission has already
+    /// failed. They cannot be live tabs, but older failure paths may have left
+    /// their pre-spawn durable record behind.
+    pub fn failed_reservation_ids(&self) -> Result<Vec<AgentRuntimeId>, ProtocolError> {
+        let failed = self.failed_dispatch_ids()?;
+        Ok(self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| Self::is_failed_reservation(record, &failed))
+            .map(|record| record.runtime.agent_runtime_id)
+            .collect())
+    }
+
+    fn failed_dispatch_ids(&self) -> Result<BTreeSet<OperationId>, ProtocolError> {
+        Ok(self
+            .dispatch
+            .runs()
+            .map_err(map_dispatch_storage_error)?
+            .into_iter()
+            .filter(|run| run.status == RunStatus::Failed)
+            .map(|run| run.run_id)
+            .collect())
+    }
+
+    fn is_failed_reservation(
+        record: &super::runtime::DurableRuntimeRecord,
+        failed: &BTreeSet<OperationId>,
+    ) -> bool {
+        matches!(
+            record.state,
+            super::runtime::RuntimeState::Reserved
+                | super::runtime::RuntimeState::ReconcileRequired(
+                    super::runtime::ReconcileState::IdentityUnknown
+                )
+        ) && record.process.is_none()
+            && failed.contains(&record.operation.operation_id)
+    }
+
+    /// Explicitly repairs every failed pre-spawn reservation selected by
+    /// [`Self::failed_reservation_ids`].
+    pub fn clean_failed_reservations(&mut self) -> Result<usize, ProtocolError> {
+        let ids = self.failed_reservation_ids()?;
+        let records = self.coordinator.snapshot().records;
+        let mut cleaned = 0;
+        for runtime in records
+            .into_iter()
+            .filter(|record| ids.contains(&record.runtime.agent_runtime_id))
+            .map(|record| record.runtime)
+        {
+            cleaned += usize::from(
+                self.coordinator
+                    .clean_failed_launch(&runtime, &mut *self.store)
+                    .map_err(map_runtime_error)?,
+            );
+        }
+        Ok(cleaned)
+    }
+
     fn active_generation(&self) -> Result<DaemonGeneration, ProtocolError> {
         self.coordinator.active_generation().ok_or_else(|| {
             ProtocolError::new(
@@ -1000,17 +1060,25 @@ impl AgentRuntime {
     /// look alive, and never hides an interruption.
     #[must_use]
     pub fn session_phase(&self, session: SessionId) -> AgentPhase {
+        let failed = self.failed_dispatch_ids().unwrap_or_default();
         self.coordinator
             .snapshot()
             .records
             .into_iter()
             .filter(|record| record.runtime.session_id == Some(session))
-            .map(|record| self.record_phase(&record))
+            .map(|record| self.record_phase(&record, &failed))
             .max_by_key(|(priority, _)| *priority)
             .map_or(AgentPhase::Absent, |(_, phase)| phase)
     }
 
-    fn record_phase(&self, record: &super::runtime::DurableRuntimeRecord) -> (u8, AgentPhase) {
+    fn record_phase(
+        &self,
+        record: &super::runtime::DurableRuntimeRecord,
+        failed: &BTreeSet<OperationId>,
+    ) -> (u8, AgentPhase) {
+        if Self::is_failed_reservation(record, failed) {
+            return runtime_phase(super::runtime::RuntimeState::SpawnFailed);
+        }
         if record.state == super::runtime::RuntimeState::Running
             && let Some(phase) = self.reported_phases.get(&record.runtime.agent_runtime_id)
         {
@@ -1232,6 +1300,7 @@ impl AgentRuntime {
     ) -> Result<AgentIntegrationDiagnosis, ProtocolError> {
         let expected = expected_integration_revisions(expected)?;
         let records = self.coordinator.snapshot().records;
+        let failed = self.failed_dispatch_ids().unwrap_or_default();
         let mut outdated = records
             .iter()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
@@ -1254,7 +1323,7 @@ impl AgentRuntime {
                             super::runtime::RuntimeState::Reserved
                                 | super::runtime::RuntimeState::Running
                         ) {
-                            self.record_phase(record).1
+                            self.record_phase(record, &failed).1
                         } else {
                             runtime_phase(record.state).1
                         },
@@ -1359,6 +1428,7 @@ impl AgentRuntime {
     /// managed-session Agent runtimes.
     #[must_use]
     pub fn inventory(&self, workspace: WorkspaceId) -> AgentInventory {
+        let failed = self.failed_dispatch_ids().unwrap_or_default();
         let mut records = self
             .coordinator
             .snapshot()
@@ -1380,7 +1450,11 @@ impl AgentRuntime {
                     .map(|continuation| AgentRuntimeInventoryItem {
                         runtime: record.runtime.clone(),
                         continuation,
-                        state: runtime_inventory_state(record.state),
+                        state: if Self::is_failed_reservation(record, &failed) {
+                            AgentRuntimeInventoryState::Unavailable
+                        } else {
+                            runtime_inventory_state(record.state)
+                        },
                         resumed_from: record.resumed_from,
                     })
             })
@@ -2032,6 +2106,9 @@ impl AgentRuntime {
             semantic_key.to_owned(),
         ) {
             self.mcp_callers.remove(&credential);
+            let _ = self
+                .coordinator
+                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
             let _ = self.dispatch.fail_admission(operation);
             return Err(map_orchestration_error(error));
         }
@@ -2259,6 +2336,9 @@ impl AgentRuntime {
             &superseded,
         ) {
             self.mcp_callers.remove(&credential);
+            let _ = self
+                .coordinator
+                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
             let _ = self.dispatch.fail_admission(operation);
             return Err(map_orchestration_error(error));
         }
@@ -2448,6 +2528,9 @@ impl AgentRuntime {
             launch_semantic,
         ) {
             self.mcp_callers.remove(&credential);
+            let _ = self
+                .coordinator
+                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
             let _ = self.dispatch.fail_admission(operation);
             return Err(map_orchestration_error(error));
         }
@@ -9559,6 +9642,75 @@ mod tests {
             runtime.coordinator.record_for(&runtime_ref).unwrap().state,
             super::super::runtime::RuntimeState::SpawnFailed
         ));
+    }
+
+    #[test]
+    fn clean_never_selects_a_live_runtime_even_if_its_dispatch_run_is_failed() {
+        let operation = OperationId::new();
+        let mut runtime = runtime();
+        let admission = runtime
+            .launch(
+                &operation.to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        runtime.dispatch.fail_admission(operation).unwrap();
+
+        assert!(runtime.failed_reservation_ids().unwrap().is_empty());
+        assert_eq!(runtime.clean_failed_reservations().unwrap(), 0);
+        assert_eq!(
+            runtime
+                .coordinator
+                .record_for(
+                    &runtime
+                        .coordinator
+                        .runtime_for_terminal(&admission.terminal)
+                        .unwrap()
+                )
+                .unwrap()
+                .state,
+            super::super::runtime::RuntimeState::Running
+        );
+    }
+
+    #[test]
+    fn clean_repairs_a_failed_dispatch_reservation_and_hides_ghost_ready() {
+        let operation = OperationId::new();
+        let mut runtime = runtime();
+        let admission = runtime
+            .launch(
+                &operation.to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let session = admission.terminal.session_id.unwrap();
+        runtime.dispatch.fail_admission(operation).unwrap();
+        let mut snapshot = runtime.coordinator.snapshot();
+        snapshot.records[0].state = super::super::runtime::RuntimeState::ReconcileRequired(
+            super::super::runtime::ReconcileState::IdentityUnknown,
+        );
+        snapshot.records[0].process = None;
+        snapshot.generation.terminals[0].process = None;
+        snapshot.generation.terminals[0].state =
+            super::super::generation::TerminalState::IdentityUnknown;
+        runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 1024, 2).unwrap();
+
+        assert_eq!(runtime.failed_reservation_ids().unwrap().len(), 1);
+        assert_eq!(runtime.session_phase(session), AgentPhase::Exited);
+        assert_eq!(
+            runtime.inventory(admission.terminal.workspace_id).runtimes[0].state,
+            AgentRuntimeInventoryState::Unavailable
+        );
+        assert_eq!(runtime.clean_failed_reservations().unwrap(), 1);
+        assert!(runtime.failed_reservation_ids().unwrap().is_empty());
+        assert_eq!(
+            runtime.coordinator.snapshot().records[0].state,
+            super::super::runtime::RuntimeState::SpawnFailed
+        );
+        assert_eq!(runtime.close_session(session).unwrap(), 1);
+        assert!(runtime.coordinator.snapshot().records.is_empty());
     }
 
     fn handled(outcome: TerminalOutcome<Value>) -> Value {
