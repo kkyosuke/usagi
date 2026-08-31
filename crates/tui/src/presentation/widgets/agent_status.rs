@@ -126,14 +126,6 @@ fn summary_parts(agents: &[AgentStatus]) -> Vec<String> {
         .collect()
 }
 
-/// Agent 件数だけを注目順の `1 wait · 2 run` 形式にする。
-///
-/// Garden の巣穴など、glyph 列を置かない広い surface も並びと語彙を
-/// sidebar と共有できる。
-pub(super) fn summary(agents: &[AgentStatus]) -> String {
-    summary_parts(agents).join(" · ")
-}
-
 /// `width` 桁に収まる範囲で、Agent 1 つにつき記号 1 つを [`ordered`] の順に描く。
 ///
 /// 収まらなかったぶんは末尾の `+N` に畳む。`+N` すら置けない幅では、置ける桁数まで
