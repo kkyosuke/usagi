@@ -10098,7 +10098,7 @@ mod tests {
         let build = |deck: &WorkspaceDeck| {
             home_frame_material(
                 24,
-                100,
+                220,
                 &runtime,
                 "alpha",
                 &alpha.workspace.path,

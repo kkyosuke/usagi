@@ -26,7 +26,7 @@ pub struct AgentStatus {
 /// 注意を要する順の rank。小さいほど先に見せる。
 ///
 /// `waiting`（人の入力待ち）が最優先で、以降 `running` → `ready` →
-/// `interrupted` → `absent` → `done` と、放置してよいものほど後ろへ落ちる。
+/// `interrupted` → `sleeping` → `absent` → `done` と、放置してよいものほど後ろへ落ちる。
 #[must_use]
 pub const fn attention_rank(phase: AgentPhase) -> u8 {
     match phase {
@@ -124,6 +124,14 @@ fn summary_parts(agents: &[AgentStatus]) -> Vec<String> {
             (count > 0).then(|| format!("{count} {}", short_label(phase)))
         })
         .collect()
+}
+
+/// Agent 件数だけを注目順の `1 wait · 2 run` 形式にする。
+///
+/// Garden の巣穴など、glyph 列を置かない広い surface も並びと語彙を
+/// sidebar と共有できる。
+pub(super) fn summary(agents: &[AgentStatus]) -> String {
+    summary_parts(agents).join(" · ")
 }
 
 /// `width` 桁に収まる範囲で、Agent 1 つにつき記号 1 つを [`ordered`] の順に描く。
