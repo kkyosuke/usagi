@@ -3027,6 +3027,11 @@ const CUSTODY_TICK: Duration = Duration::from_secs(1);
 /// bounds the retry of a teardown whose durable finalization failed.
 const SESSION_TEARDOWN_TICK: Duration = Duration::from_secs(1);
 
+/// How often the active daemon removes safe Git resources that are no longer
+/// linked from a workspace lifecycle document. The manual command remains the
+/// only path for protected candidates.
+const ORPHAN_CLEANUP_TICK: Duration = Duration::from_mins(5);
+
 /// How long the accept loop waits after an accept error that may have left the
 /// connection queued. This is the error path only: an idle daemon parks on
 /// descriptor readiness and never reaches it.
@@ -3612,6 +3617,11 @@ fn spawn_ipc_server(
         Arc::clone(&shutdown),
     )?;
     background_workers.push(teardown_worker);
+    background_workers.push(start_orphan_cleanup_worker(
+        &workspaces,
+        fence.gate.clone(),
+        Arc::clone(&shutdown),
+    )?);
     // Workspaces adopted for a client that has gone away are given back, so a
     // daemon that served many of them over a day does not still own them all.
     background_workers.push(start_tenant_retire_worker(
@@ -4099,6 +4109,63 @@ where
                 // re-derives the pending set while a teardown whose
                 // finalization failed still needs retrying.
                 should_drain = signal.wait(tick) || retry_finalization;
+            }
+            worker_health.finish_planned();
+        })
+}
+
+/// Periodically applies only the non-force half of `clean` to every workspace
+/// whose fence this active generation still holds.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=automatic_orphan_cleanup_ticks_until_shutdown
+fn start_orphan_cleanup_worker(
+    workspaces: &Workspaces,
+    gate: AdmissionGate,
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let all_workspaces = Arc::clone(workspaces);
+    spawn_orphan_cleanup_worker(
+        move || {
+            // A predecessor keeps its workers while draining live PTYs, but it
+            // no longer has mutation authority over workspace Git resources.
+            if gate.role() != GenerationRole::Active {
+                return;
+            }
+            for tenant in all_workspaces.all() {
+                let root = tenant.root().to_path_buf();
+                let bound = ConnectionWorkspace {
+                    tenant,
+                    workspaces: Arc::clone(&all_workspaces),
+                };
+                if let Err(error) = clean_orphan_session_resources(&bound, None, true, false) {
+                    ErrorLog::record(&format!(
+                        "automatic orphan cleanup deferred for {}: {}",
+                        root.display(),
+                        error.safe_message()
+                    ));
+                }
+            }
+        },
+        shutdown,
+        ORPHAN_CLEANUP_TICK,
+    )
+}
+
+/// The maintenance loop with its effect and cadence injected for deterministic
+/// tests. Waiting before the first pass keeps daemon startup free of Git scans.
+fn spawn_orphan_cleanup_worker<C>(
+    mut clean: C,
+    shutdown: Arc<ShutdownRequest>,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    C: FnMut() + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("usagi-orphan-cleanup".to_string())
+        .spawn(move || {
+            let worker_health = shutdown.monitor_background_worker(BackgroundWorker::OrphanCleanup);
+            while !shutdown.wait_for_tick(tick) {
+                clean();
             }
             worker_health.finish_planned();
         })
@@ -7322,7 +7389,7 @@ fn best_effort_merged_pr_head(
 #[allow(clippy::too_many_lines)]
 fn clean_orphan_session_resources(
     bound: &ConnectionWorkspace,
-    agent: &SharedAgentRuntime,
+    agent: Option<&SharedAgentRuntime>,
     apply: bool,
     force: bool,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
@@ -7387,11 +7454,16 @@ fn clean_orphan_session_resources(
             )
         })
         .collect::<Vec<_>>();
-    let failed_reservations = agent
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .failed_reservation_ids()
-        .map_err(|_| SessionRuntimeError::Storage)?;
+    let failed_reservations = agent.map_or_else(
+        || Ok(Vec::new()),
+        |agent| {
+            agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .failed_reservation_ids()
+                .map_err(|_| SessionRuntimeError::Storage)
+        },
+    )?;
     let mut described = git_candidates
         .iter()
         .map(|candidate| match candidate {
@@ -7439,6 +7511,7 @@ fn clean_orphan_session_resources(
     if !failed_reservations.is_empty() {
         if force {
             removed += agent
+                .ok_or(SessionRuntimeError::InvalidRequest)?
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .clean_failed_reservations()
@@ -8003,7 +8076,12 @@ fn dispatch_session_action(
             if force && !apply {
                 return Err(SessionRuntimeError::InvalidRequest);
             }
-            reply(clean_orphan_session_resources(bound, agent, apply, force)?)
+            reply(clean_orphan_session_resources(
+                bound,
+                Some(agent),
+                apply,
+                force,
+            )?)
         }
         SessionAction::Setup => bound
             .sessions()
@@ -17411,6 +17489,43 @@ mod tests {
 
         assert_eq!(torn_down.lock().unwrap().as_slice(), ["one", "one"]);
         assert_eq!(pending_calls.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn automatic_orphan_cleanup_ticks_until_shutdown() {
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let stop = Arc::clone(&shutdown);
+        let worker = spawn_orphan_cleanup_worker(
+            move || {
+                if observed.fetch_add(1, Ordering::AcqRel) + 1 == 2 {
+                    stop.request();
+                }
+            },
+            Arc::clone(&shutdown),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        worker.join().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+
+        let already_stopped = Arc::new(ShutdownRequest::new());
+        already_stopped.request();
+        let untouched = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&untouched);
+        spawn_orphan_cleanup_worker(
+            move || {
+                observed.fetch_add(1, Ordering::AcqRel);
+            },
+            already_stopped,
+            Duration::from_millis(1),
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(untouched.load(Ordering::Acquire), 0);
     }
 
     /// Prepares `<data>/daemon` with an acquired instance lock and a registered

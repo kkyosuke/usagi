@@ -2155,6 +2155,10 @@ outbox を経由して exactly-once に解放する契約を維持する。回�
 `usagi clean` も同じ条件で、同じ取りこぼしを daemon の外から回収できる
 （[1. プロジェクト概要](01-overview.md#現在の実装状態)）。
 
+active daemon は 5 分ごとに保持中 workspace の orphan Git resource を再棚卸しし、merged branch と clean
+worktree だけを自動回収する。draining generation はこの effect を実行しない。dirty worktree、未マージ branch、
+failed Agent reservation など force を要する候補は自動回収せず、`usagi clean --apply --force` の明示を必要とする。
+
 ### child identity
 
 shard の record が持つ child identity は OS が答えた process-start token と process group であり、固定文字列・
