@@ -248,15 +248,21 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
             .map(|record| record.terminal.terminal_id.as_str())
             .collect()
     }
-    pub fn output(
-        &mut self,
-        terminal: &TerminalRef,
-        bytes: Vec<u8>,
-    ) -> Result<Value, ProtocolError> {
-        self.coordinator
-            .output(terminal, bytes)
-            .map(|output| json!({"event":"output", "output": output}))
-            .map_err(map_error)
+    pub fn output(&mut self, terminal: &TerminalRef, bytes: Vec<u8>) -> Result<Value, ProtocolError>
+    where
+        P: PtyWriter,
+    {
+        let (output, replies) = self
+            .coordinator
+            .output_with_replies(terminal, bytes)
+            .map_err(map_error)?;
+        if !replies.is_empty() {
+            self.pty.select_terminal(terminal);
+            // The output is already authoritative. A failed reply must not
+            // turn the committed observer event into an apparent output loss.
+            let _ = self.pty.write_all(&replies);
+        }
+        Ok(json!({"event":"output", "output": output}))
     }
     pub fn exit(&mut self, terminal: &TerminalRef, status: i32) -> Result<(), ProtocolError>
     where
@@ -802,6 +808,17 @@ mod tests {
         )
         .unwrap();
         (runtime, terminal)
+    }
+
+    #[test]
+    fn generic_output_answers_cursor_position_queries_through_the_owned_pty() {
+        let (mut runtime, terminal) = launched_runtime();
+
+        runtime
+            .output(&terminal, b"warning\r\n> \x1b[6n".to_vec())
+            .unwrap();
+
+        assert_eq!(runtime.pty.writes, b"\x1b[2;3R");
     }
 
     /// A runtime whose scope resolver admits exactly `scope`.

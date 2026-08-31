@@ -467,9 +467,20 @@ impl GenericTerminalCoordinator {
         terminal: &TerminalRef,
         bytes: Vec<u8>,
     ) -> Result<Output, GenericTerminalError> {
+        self.output_with_replies(terminal, bytes)
+            .map(|(output, _)| output)
+    }
+
+    /// Applies PTY output and returns protocol replies for the daemon-owned
+    /// endpoint without treating those replies as client input.
+    pub fn output_with_replies(
+        &mut self,
+        terminal: &TerminalRef,
+        bytes: Vec<u8>,
+    ) -> Result<(Output, Vec<u8>), GenericTerminalError> {
         self.running(terminal)?;
         self.terminals
-            .append_output(terminal, bytes)
+            .append_output_with_replies(terminal, bytes)
             .map_err(GenericTerminalError::Terminal)
     }
     pub fn resize(

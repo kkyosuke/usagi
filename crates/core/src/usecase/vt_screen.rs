@@ -5,8 +5,9 @@
 //! deliberately small VT interpreter: it covers what a login shell prompt and
 //! everyday commands such as `ls` emit — printable text, `CR` / `LF` / `BS` /
 //! `HT`, line wrap and scroll, cursor moves, line/display erase and SGR styling
-//! — and silently ignores window-title (OSC) sequences.  It is pure and holds no
-//! IO, so it is exercised entirely by unit tests.
+//! — and silently ignores window-title (OSC) sequences. It also produces the
+//! terminal replies required by cursor-position queries while remaining pure
+//! and holding no IO, so it is exercised entirely by unit tests.
 //!
 //! Alternate screen buffers used by full-screen terminal applications are
 //! supported. Scrollback is retained locally with a bounded history for the
@@ -362,9 +363,19 @@ impl VtScreen {
     /// Applies a chunk of raw PTY output.  Chunks may split a multibyte
     /// character; the trailing bytes are buffered until the next call.
     pub fn advance(&mut self, bytes: &[u8]) {
+        drop(self.advance_with_replies(bytes));
+    }
+
+    /// Applies raw PTY output and returns terminal-protocol bytes that the PTY
+    /// owner must write back to the child. Queries may span chunks because they
+    /// share this screen's incremental decoder state.
+    #[must_use]
+    pub fn advance_with_replies(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut replies = Vec::new();
         for &byte in bytes {
-            self.feed(byte);
+            self.feed(byte, &mut replies);
         }
+        replies
     }
 
     /// Clears the primary screen and its retained history for an explicit
@@ -607,7 +618,7 @@ impl VtScreen {
         (self.cursor_row, self.cursor_col)
     }
 
-    fn feed(&mut self, byte: u8) {
+    fn feed(&mut self, byte: u8, replies: &mut Vec<u8>) {
         if self.synchronized_output.is_some() && !self.replaying_synchronized_output {
             let (complete, over_limit) = {
                 let pending = self.synchronized_output.get_or_insert_default();
@@ -618,18 +629,18 @@ impl VtScreen {
                 )
             };
             if complete || over_limit {
-                self.commit_synchronized_output();
+                self.commit_synchronized_output(replies);
             }
             return;
         }
-        self.feed_parsed(byte);
+        self.feed_parsed(byte, replies);
     }
 
-    fn feed_parsed(&mut self, byte: u8) {
+    fn feed_parsed(&mut self, byte: u8, replies: &mut Vec<u8>) {
         match self.phase {
             Phase::Ground => self.ground(byte),
             Phase::Escape => self.escape(byte),
-            Phase::Csi => self.csi(byte),
+            Phase::Csi => self.csi(byte, replies),
             Phase::CsiOverflow => self.csi_overflow(byte),
             Phase::Osc => self.osc(byte),
             Phase::Charset => self.phase = Phase::Ground,
@@ -640,11 +651,11 @@ impl VtScreen {
     /// An update missing its closing marker takes this same path after the byte
     /// bound is reached, preferring a visible partial frame over unbounded
     /// retention.
-    fn commit_synchronized_output(&mut self) {
+    fn commit_synchronized_output(&mut self, replies: &mut Vec<u8>) {
         let pending = self.synchronized_output.take().unwrap_or_default();
         self.replaying_synchronized_output = true;
         for byte in pending {
-            self.feed_parsed(byte);
+            self.feed_parsed(byte, replies);
         }
         self.replaying_synchronized_output = false;
     }
@@ -718,7 +729,7 @@ impl VtScreen {
         }
     }
 
-    fn csi(&mut self, byte: u8) {
+    fn csi(&mut self, byte: u8, replies: &mut Vec<u8>) {
         match byte {
             0x20..=0x3f if self.params.len() < PARAMS_MAX => self.params.push(byte as char),
             0x20..=0x3f => {
@@ -726,7 +737,7 @@ impl VtScreen {
                 self.phase = Phase::CsiOverflow;
             }
             0x40..=0x7e => {
-                self.dispatch_csi(byte as char);
+                self.dispatch_csi(byte as char, replies);
                 self.phase = Phase::Ground;
             }
             _ => self.phase = Phase::Ground,
@@ -750,7 +761,7 @@ impl VtScreen {
         }
     }
 
-    fn dispatch_csi(&mut self, final_byte: char) {
+    fn dispatch_csi(&mut self, final_byte: char, replies: &mut Vec<u8>) {
         match final_byte {
             'A' => self.cursor_row = self.cursor_row.saturating_sub(self.param(0, 1)),
             'B' => self.cursor_row = (self.cursor_row + self.param(0, 1)).min(self.rows - 1),
@@ -772,6 +783,16 @@ impl VtScreen {
             'u' => self.restore_cursor(),
             'h' => self.set_private_modes(),
             'l' => self.reset_private_modes(),
+            // DSR cursor position report. Coordinates on the wire are
+            // one-based and cannot expose this parser's pending-wrap column.
+            'n' if self.params == "6" => replies.extend_from_slice(
+                format!(
+                    "\u{1b}[{};{}R",
+                    self.cursor_row.min(self.rows - 1) + 1,
+                    self.cursor_col.min(self.cols - 1) + 1
+                )
+                .as_bytes(),
+            ),
             // Unhandled finals leave the grid unchanged.
             _ => {}
         }
@@ -2023,6 +2044,28 @@ mod tests {
         assert_eq!(screen.cursor_style(), "\u{1b}[32m");
         screen.advance(b"\r");
         assert_eq!(screen.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn cursor_position_query_replies_from_the_authoritative_screen_across_chunks() {
+        let mut screen = VtScreen::new(4, 20);
+        screen.advance(b"warning\r\n> ");
+
+        assert!(screen.advance_with_replies(b"\x1b[6").is_empty());
+        assert_eq!(screen.advance_with_replies(b"n"), b"\x1b[2;3R");
+        assert_eq!(rows(&screen), vec!["warning", ">", "", ""]);
+        assert!(screen.advance_with_replies(b"\x1b[?6n\x1b[5n").is_empty());
+
+        let mut synchronized = VtScreen::new(4, 20);
+        assert!(
+            synchronized
+                .advance_with_replies(b"\x1b[?2026h\x1b[3;4H\x1b[6n")
+                .is_empty()
+        );
+        assert_eq!(
+            synchronized.advance_with_replies(b"\x1b[?2026l"),
+            b"\x1b[3;4R"
+        );
     }
 
     #[test]
