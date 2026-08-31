@@ -404,7 +404,7 @@ fn open_runtime_state(
     generation: usagi_core::domain::id::DaemonGeneration,
     children: &Arc<SpawnedChildren>,
 ) -> std::io::Result<ShardedRuntimeState> {
-    ShardedRuntimeState::new(
+    let state = ShardedRuntimeState::new(
         generation,
         GenerationRole::Active,
         ResourceAllocator::new(
@@ -414,7 +414,35 @@ fn open_runtime_state(
         Box::new(ShardArchiveFiles::new(data_dir)?),
         Box::new(ObservedChildren(Arc::clone(children))),
         Box::new(SystemLogicalClock),
-    )
+    )?;
+    Ok(match registered_generations(data_dir, generation) {
+        // A registry this process cannot read proves nothing retired, so the
+        // reclaim stays closed rather than guessing against a live generation.
+        Some(registered) => state.with_registered_generations(registered),
+        None => state,
+    })
+}
+
+/// The generations `generations.json` still lists, plus this one.
+///
+/// This process is registering itself as it starts, so its own entry may not be
+/// durable yet; including it keeps the reclaim from ever considering the
+/// hydrating generation's own claims. An absent registry is a daemon that has
+/// never rolled over, which is a readable answer, not an unknown one.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=restart_hydrates_file_snapshot_before_dispatch_admission_and_preserves_ledger
+fn registered_generations(
+    data_dir: &Path,
+    generation: usagi_core::domain::id::DaemonGeneration,
+) -> Option<std::collections::BTreeSet<usagi_core::domain::id::DaemonGeneration>> {
+    let document = read_registry_document(data_dir).ok()?;
+    let mut registered = std::collections::BTreeSet::from([generation]);
+    registered.extend(
+        document
+            .into_iter()
+            .flat_map(|document| document.generations)
+            .map(|entry| entry.generation),
+    );
+    Some(registered)
 }
 
 /// Reads this generation's shard and every retained one, migrating the legacy
@@ -436,6 +464,12 @@ fn hydrate_runtime_state(
             migration.marker.adopted,
             migration.marker.generations.len(),
             migration.marker.unknown
+        ));
+    }
+    if hydrated.reclaimed != 0 {
+        ErrorLog::record(&format!(
+            "daemon startup reclaimed {} leaked {what} capacity claim(s) no retained generation accounted for",
+            hydrated.reclaimed
         ));
     }
     if hydrated.interrupted != 0 {
@@ -3574,6 +3608,7 @@ fn spawn_ipc_server(
     let (teardown, teardown_worker) = start_session_teardown_worker(
         Arc::clone(&workspaces),
         Arc::clone(&agent),
+        Arc::clone(&terminal),
         Arc::clone(&shutdown),
     )?;
     background_workers.push(teardown_worker);
@@ -3929,6 +3964,7 @@ where
 fn start_session_teardown_worker(
     workspaces: Workspaces,
     agent: SharedAgentRuntime,
+    terminal: SharedTerminalRuntime,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<(Arc<TeardownSignal>, std::thread::JoinHandle<()>)> {
     let signal = Arc::new(TeardownSignal::new());
@@ -3936,6 +3972,7 @@ fn start_session_teardown_worker(
         WorkspacesTeardown { workspaces },
         AgentAndWorktreeTeardown {
             agent,
+            terminal,
             worktree: WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo),
         },
         Arc::clone(&signal),
@@ -3981,10 +4018,17 @@ impl TeardownJournal for WorkspacesTeardown {
     }
 }
 
-/// Orders session destruction so no Agent process or durable Agent inventory
-/// can outlive the worktree scope it belongs to.
+/// Orders session destruction so no Agent process, generic terminal, or durable
+/// inventory row can outlive the worktree scope it belongs to.
+///
+/// Both runtime kinds are closed before the worktree is touched, because both
+/// hold a PTY child whose cwd is inside that worktree and a claim in the shared
+/// capacity pool. A terminal left running keeps the checkout busy so
+/// `git worktree remove` fails, and keeps its pool slot for the life of the
+/// daemon.
 struct AgentAndWorktreeTeardown<E> {
     agent: SharedAgentRuntime,
+    terminal: SharedTerminalRuntime,
     worktree: E,
 }
 
@@ -3994,6 +4038,11 @@ impl<E: TeardownEffect> TeardownEffect for AgentAndWorktreeTeardown<E> {
         self.agent
             .lock()
             .map_err(|_| "agent owner is unavailable".to_owned())?
+            .close_session(teardown.session_id)
+            .map_err(|error| error.message)?;
+        self.terminal
+            .lock()
+            .map_err(|_| "terminal owner is unavailable".to_owned())?
             .close_session(teardown.session_id)
             .map_err(|error| error.message)?;
         self.worktree.tear_down(teardown)

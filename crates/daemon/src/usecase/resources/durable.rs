@@ -329,6 +329,11 @@ pub trait ShardArchive {
 pub struct ShardedRuntimeState {
     owner: DaemonGeneration,
     role: GenerationRole,
+    /// Generations the registry still lists, when the caller could read it.
+    /// `None` means "unknown", which disables claim reclamation entirely: a
+    /// generation that might still be running must never have its capacity
+    /// released out from under it.
+    registered: Option<BTreeSet<DaemonGeneration>>,
     shard: OwnerShard,
     allocator: ResourceAllocator,
     archive: Box<dyn ShardArchive + Send>,
@@ -357,12 +362,26 @@ impl ShardedRuntimeState {
         Ok(Self {
             owner,
             role,
+            registered: None,
             shard,
             allocator,
             archive,
             identity,
             clock,
         })
+    }
+
+    /// Name the generations the registry still lists, which is what makes leaked
+    /// capacity claims reclaimable at hydrate.
+    ///
+    /// Without this the reclaim fails closed and releases nothing. It is a
+    /// separate step from [`Self::new`] because the registry is a different
+    /// document with its own reader, and a state bound before it can be read is
+    /// still perfectly usable for everything else.
+    #[must_use]
+    pub fn with_registered_generations(mut self, registered: BTreeSet<DaemonGeneration>) -> Self {
+        self.registered = Some(registered);
+        self
     }
 
     /// The generation this state writes for.
@@ -447,6 +466,7 @@ impl ShardedRuntimeState {
                 Ok(())
             })?;
         }
+        let reclaimed = self.reclaim_unbacked(&shards)?;
         let mut agents = Vec::new();
         let mut terminals = Vec::new();
         for document in &shards {
@@ -488,6 +508,7 @@ impl ShardedRuntimeState {
             agents,
             terminals,
             interrupted: interrupted_agents + interrupted_terminals,
+            reclaimed,
             migration,
         })
     }
@@ -626,6 +647,45 @@ impl ShardedRuntimeState {
         Ok(report.applied)
     }
 
+    /// Release every claim neither an owner shard nor the generation registry
+    /// accounts for.
+    ///
+    /// This is the one release path that is not driven by a record, because the
+    /// leak it repairs is the *absence* of one: a retired generation whose shard
+    /// entry is gone while its claim still holds a pool slot can never publish an
+    /// exit, and nothing else will ever look at that claim again. Once enough of
+    /// them accumulate the pool is exhausted and no session can launch an Agent.
+    ///
+    /// Being unbacked is not on its own proof of a leak. A claim is durable one
+    /// CAS before its owner's shard entry, so a generation that is still running
+    /// has unbacked claims for the width of that window — and during a rollover a
+    /// draining predecessor is running for the whole of it. The registry is what
+    /// separates the two: a generation it does not list cannot act again. When the
+    /// registry is unknown this releases nothing ([`Self::with_registered_generations`]).
+    fn reclaim_unbacked(&self, shards: &[ShardDocument]) -> Result<usize, ResourceFailure> {
+        let Some(registered) = self.registered.as_ref() else {
+            return Ok(0);
+        };
+        if self.role != GenerationRole::Active {
+            return Ok(0);
+        }
+        let backed = shards
+            .iter()
+            .flat_map(|document| &document.resources)
+            .map(|entry| entry.resource.clone())
+            .collect::<BTreeSet<_>>();
+        let owner = self.owner;
+        let (released, _) = self.allocator.update(|document| {
+            let unbacked = document.unbacked(registered, &backed);
+            Ok(release_each(
+                document,
+                owner,
+                &unbacked.iter().collect::<Vec<_>>(),
+            ))
+        })?;
+        Ok(released)
+    }
+
     /// Release the claims of a retired generation's records this owner's truth
     /// reports as terminated. Nothing else about a foreign record is touched.
     fn release_retired(
@@ -735,6 +795,8 @@ pub struct HydratedState {
     pub terminals: TerminalStoreSnapshot,
     /// Records the reconcile fenced as `identity_unknown`.
     pub interrupted: usize,
+    /// Capacity claims released because no retained shard accounted for them.
+    pub reclaimed: usize,
     /// The migration this hydrate performed, when it was the first on this data
     /// directory.
     pub migration: Option<MigrationReport>,

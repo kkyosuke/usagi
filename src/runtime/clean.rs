@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use fs2::FileExt;
 use serde::Deserialize;
 use usagi_core::domain::daemon::DaemonRecord;
+use usagi_core::domain::id::DaemonGeneration;
 use usagi_core::infrastructure::git::{
     GitOutput, GitRunner, confined_git_command, delete_branch, list_worktrees, remove_worktree,
 };
@@ -17,12 +18,17 @@ use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::infrastructure::workspace_state;
 use usagi_core::usecase::clean::{
-    CleanCandidate, CleanInventory, DaemonWorkspaceData, HelperRole, ObservedProcess,
-    RegisteredWorkspace,
+    CleanCandidate, CleanInventory, DaemonWorkspaceData, HelperRole, ObservedCapacityClaim,
+    ObservedProcess, RegisteredWorkspace,
 };
+use usagi_daemon::infrastructure::resource_store::AllocatorFile;
 use usagi_daemon::infrastructure::unix_transport::ensure_private_dir;
 use usagi_daemon::usecase::authority::registry::RegistryDocument;
 use usagi_daemon::usecase::generation::GenerationRole;
+use usagi_daemon::usecase::resources::allocator::{
+    AllocatorDocument, CapacityPolicy, ClaimState, ResourceAllocator,
+};
+use usagi_daemon::usecase::resources::shard::ShardDocument;
 
 /// Discover and optionally remove orphan resources. Discovery is always done
 /// first, so an apply run prints the exact same plan it is about to execute.
@@ -188,6 +194,7 @@ fn discover() -> io::Result<Discovery> {
     }
     Ok(Discovery {
         inventory: CleanInventory {
+            claims: discover_capacity_claims(&daemon_dir),
             processes: discover_processes(&daemon_dir),
             registered,
             daemon_data,
@@ -232,12 +239,130 @@ fn apply_candidate(candidate: &CleanCandidate, storage: &Storage, force: bool) -
             ensure_unlinked(root, session)?;
             delete_branch(&SystemGit, root, name, force).map_err(io::Error::other)
         }
+        CleanCandidate::Capacity {
+            resource_id, owner, ..
+        } => release_capacity_claim(resource_id, owner),
         CleanCandidate::Process {
             pid,
             start_identity,
             ..
         } => reap_helper_process(*pid, start_identity),
     }
+}
+
+/// Read the shared allocator, every owner shard, and the generation registry,
+/// and describe each capacity claim they disagree about.
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=leaked_capacity_claims_are_classified_from_the_three_documents
+fn discover_capacity_claims(daemon_dir: &Path) -> Vec<ObservedCapacityClaim> {
+    let Some(allocator) = read_json::<AllocatorDocument>(&daemon_dir.join("allocations.json"))
+    else {
+        return Vec::new();
+    };
+    let shards = std::fs::read_dir(daemon_dir.join("shards"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| read_json::<ShardDocument>(&entry.path()))
+        .collect::<Vec<_>>();
+    let registry = read_json::<RegistryDocument>(&daemon_dir.join("generations.json"));
+    classify_capacity_claims(&allocator, &shards, registry.as_ref())
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=leaked_capacity_claims_are_classified_from_the_three_documents
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Decide, from the three documents alone, which claims are leaks.
+///
+/// A claim is a leak only when *both* of its release paths are impossible: no
+/// owner shard accounts for the resource, so no exit can ever be published for
+/// it, and the generation registry does not list the owner, so that generation
+/// is not running and can never publish again. Either fact alone is not enough
+/// — a claim is written just before its owner's shard entry, so a running owner
+/// briefly has an unbacked claim that is about to become ordinary state.
+fn classify_capacity_claims(
+    allocator: &AllocatorDocument,
+    shards: &[ShardDocument],
+    registry: Option<&RegistryDocument>,
+) -> Vec<ObservedCapacityClaim> {
+    let backed = shards
+        .iter()
+        .flat_map(|shard| &shard.resources)
+        .map(|entry| entry.resource.terminal_id.as_str().clone())
+        .collect::<BTreeSet<_>>();
+    // Without a readable registry nothing is provably retired, so every owner is
+    // treated as still listed and no claim becomes a candidate.
+    let listed = registry.map(|document| {
+        document
+            .generations
+            .iter()
+            .map(|entry| entry.generation.as_str().clone())
+            .collect::<BTreeSet<_>>()
+    });
+    allocator
+        .claims
+        .iter()
+        .filter(|claim| claim.state != ClaimState::Released)
+        .map(|claim| {
+            let owner = claim.owner.as_str().clone();
+            ObservedCapacityClaim {
+                backed: backed.contains(claim.resource.terminal_id.as_str().as_str()),
+                owner_registered: listed.as_ref().is_none_or(|listed| listed.contains(&owner)),
+                resource_id: claim.resource.terminal_id.as_str().clone(),
+                pool: claim.kind.pool().to_owned(),
+                owner,
+            }
+        })
+        .collect()
+}
+
+/// Release one leaked claim, re-proving it is still a leak under the allocator
+/// lock.
+///
+/// Discovery and application are separate moments and a daemon may have started
+/// in between, so the release is refused unless the claim is still the exact one
+/// that was planned: same resource, same owner, still holding capacity.
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=leaked_capacity_claims_are_classified_from_the_three_documents
+fn release_capacity_claim(resource_id: &str, owner: &str) -> io::Result<()> {
+    let data_dir = paths::data_dir().map_err(io::Error::other)?;
+    let daemon_dir = data_dir.join("daemon");
+    let registry = read_json::<RegistryDocument>(&daemon_dir.join("generations.json"));
+    if registry.is_none_or(|document| {
+        document
+            .generations
+            .iter()
+            .any(|entry| entry.generation.as_str() == owner)
+    }) {
+        return Err(io::Error::other(
+            "the claim's owning generation is registered again",
+        ));
+    }
+    let allocator = ResourceAllocator::new(
+        AllocatorFile::new(&data_dir)?,
+        // Releasing never admits, so the limits are never consulted here.
+        CapacityPolicy::new(0, 0),
+    );
+    allocator
+        .update(|document| {
+            let Some(resource) = document
+                .claims
+                .iter()
+                .find(|claim| {
+                    claim.resource.terminal_id.as_str() == resource_id
+                        && claim.owner.as_str() == owner
+                        && claim.state != ClaimState::Released
+                })
+                .map(|claim| claim.resource.clone())
+            else {
+                // Already released, by this run's daemon or an earlier pass.
+                return Ok(());
+            };
+            let active = DaemonGeneration::new();
+            document.release_unowned(active, &resource)
+        })
+        .map(|_| ())
+        .map_err(io::Error::other)
 }
 
 /// End one helper process, fenced on the identity observed when it was
@@ -494,6 +619,13 @@ fn describe(candidate: &CleanCandidate) -> String {
                 ""
             }
         ),
+        CleanCandidate::Capacity {
+            resource_id,
+            owner,
+            pool,
+        } => {
+            format!("{pool} capacity claim {resource_id} held by the retired generation {owner}")
+        }
         CleanCandidate::Process {
             pid,
             role,
@@ -731,9 +863,9 @@ impl GitRunner for SystemGit {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountedProcess, GitOutput, GitRunner, acquire_exclusive_fence, clean_exit_code,
-        collect_accounted_processes, describe, ensure_data_unlinked, ensure_managed_worktree,
-        parse_helper_processes, remove_daemon_data,
+        AccountedProcess, GitOutput, GitRunner, acquire_exclusive_fence, classify_capacity_claims,
+        clean_exit_code, collect_accounted_processes, describe, ensure_data_unlinked,
+        ensure_managed_worktree, parse_helper_processes, remove_daemon_data,
     };
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
@@ -874,6 +1006,105 @@ not a process line
         }
     }
 
+    /// The leak this repairs is an *absence*, so the classifier has to read three
+    /// documents that disagree: the allocator still holds the claim, no owner
+    /// shard mentions the resource, and the generation registry no longer lists
+    /// the owner. Only a claim that fails both release paths is a candidate.
+    #[test]
+    fn leaked_capacity_claims_are_classified_from_the_three_documents() {
+        use usagi_core::domain::id::{
+            OperationId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+        };
+        use usagi_daemon::usecase::resources::allocator::{
+            AllocatorDocument, ClaimState, ResourceClaim, ResourceKind,
+        };
+        use usagi_daemon::usecase::resources::shard::{
+            ResourceState, ShardDocument, ShardResource,
+        };
+
+        let retired = DaemonGeneration::new();
+        let live = DaemonGeneration::new();
+        let reference = |owner: DaemonGeneration| TerminalRef {
+            daemon_generation: owner,
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let claim =
+            |resource: &TerminalRef, owner: DaemonGeneration, state: ClaimState| ResourceClaim {
+                resource: resource.clone(),
+                kind: ResourceKind::Agent,
+                owner,
+                operation: OperationId::new(),
+                digest: "digest".to_owned(),
+                state,
+                revision: 2,
+            };
+
+        let leaked = reference(retired);
+        let backed = reference(retired);
+        let live_owner = reference(live);
+        let released = reference(retired);
+        let allocator = AllocatorDocument {
+            claims: vec![
+                claim(&leaked, retired, ClaimState::Live),
+                claim(&backed, retired, ClaimState::Live),
+                claim(&live_owner, live, ClaimState::Live),
+                claim(&released, retired, ClaimState::Released),
+            ],
+            ..AllocatorDocument::default()
+        };
+        let mut shard = ShardDocument::empty(retired);
+        shard.resources.push(ShardResource {
+            resource: backed.clone(),
+            kind: ResourceKind::Agent,
+            operation: OperationId::new(),
+            digest: "digest".to_owned(),
+            process: None,
+            state: ResourceState::Running,
+            payload: None,
+            revision: 1,
+        });
+        let registry = RegistryDocument {
+            generations: vec![GenerationEntry {
+                generation: live,
+                role: GenerationRole::Active,
+                endpoint: "generations/live/daemon.sock".to_owned(),
+                process: ProcessIdentity {
+                    pid: 7,
+                    start_identity: "live-start".to_owned(),
+                    process_group: 7,
+                },
+                expected_build: BuildIdentity::default(),
+                verified_build: None,
+                revision: 1,
+            }],
+            ..RegistryDocument::default()
+        };
+
+        let observed = classify_capacity_claims(&allocator, &[shard.clone()], Some(&registry));
+        let candidate = |resource: &TerminalRef| {
+            observed
+                .iter()
+                .find(|claim| claim.resource_id == resource.terminal_id.as_str())
+                .map(|claim| !claim.backed && !claim.owner_registered)
+        };
+        assert_eq!(candidate(&leaked), Some(true));
+        // Its owner's shard still accounts for it, so an exit can still arrive.
+        assert_eq!(candidate(&backed), Some(false));
+        // Its owner is registered, so it may be a launch mid-commit.
+        assert_eq!(candidate(&live_owner), Some(false));
+        // A released claim holds no slot and is not reported at all.
+        assert_eq!(candidate(&released), None);
+        assert_eq!(observed.len(), 3);
+        assert!(observed.iter().all(|claim| claim.pool == "agent"));
+
+        // An unreadable registry proves nothing retired, so nothing is swept.
+        let blind = classify_capacity_claims(&allocator, &[shard], None);
+        assert!(blind.iter().all(|claim| claim.owner_registered));
+    }
+
     #[test]
     fn clean_planner_classifies_all_effects() {
         let rendered = [
@@ -918,6 +1149,11 @@ not a process line
                 start_identity: "identity".into(),
                 requires_force: false,
             },
+            CleanCandidate::Capacity {
+                resource_id: "terminal-9".into(),
+                owner: "generation-3".into(),
+                pool: "agent".into(),
+            },
         ]
         .map(|candidate| describe(&candidate));
         assert!(rendered[0].starts_with("workspace "));
@@ -933,6 +1169,10 @@ not a process line
         assert_eq!(
             rendered[7],
             "bootstrap broker pid 4243 from the vanished build /gone/target/debug/usagi"
+        );
+        assert_eq!(
+            rendered[8],
+            "agent capacity claim terminal-9 held by the retired generation generation-3"
         );
     }
 
