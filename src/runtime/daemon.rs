@@ -4125,29 +4125,43 @@ fn start_orphan_cleanup_worker(
     let all_workspaces = Arc::clone(workspaces);
     spawn_orphan_cleanup_worker(
         move || {
-            // A predecessor keeps its workers while draining live PTYs, but it
-            // no longer has mutation authority over workspace Git resources.
-            if gate.role() != GenerationRole::Active {
-                return;
-            }
             for tenant in all_workspaces.all() {
-                let root = tenant.root().to_path_buf();
-                let bound = ConnectionWorkspace {
-                    tenant,
-                    workspaces: Arc::clone(&all_workspaces),
-                };
-                if let Err(error) = clean_orphan_session_resources(&bound, None, true, false) {
-                    ErrorLog::record(&format!(
-                        "automatic orphan cleanup deferred for {}: {}",
-                        root.display(),
-                        error.safe_message()
-                    ));
+                let cleaned = with_active_cleanup_lease(&gate, || {
+                    let root = tenant.root().to_path_buf();
+                    let bound = ConnectionWorkspace {
+                        tenant,
+                        workspaces: Arc::clone(&all_workspaces),
+                    };
+                    if let Err(error) = clean_orphan_session_resources(&bound, None, true, false) {
+                        ErrorLog::record(&format!(
+                            "automatic orphan cleanup deferred for {}: {}",
+                            root.display(),
+                            error.safe_message()
+                        ));
+                    }
+                });
+                if !cleaned {
+                    break;
                 }
             }
         },
         shutdown,
         ORPHAN_CLEANUP_TICK,
     )
+}
+
+/// Runs one cleanup pass under the same active-control barrier as mutating IPC
+/// requests. A rollover closes admission and waits for a pass already in flight;
+/// a draining predecessor cannot start another pass.
+fn with_active_cleanup_lease<C>(gate: &AdmissionGate, clean: C) -> bool
+where
+    C: FnOnce(),
+{
+    let Ok(_lease) = gate.acquire(LeaseClass::ActiveControl) else {
+        return false;
+    };
+    clean();
+    true
 }
 
 /// The maintenance loop with its effect and cadence injected for deterministic
@@ -17526,6 +17540,25 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(untouched.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn automatic_orphan_cleanup_is_fenced_by_the_active_control_lease() {
+        let gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
+        let calls = AtomicUsize::new(0);
+        assert!(with_active_cleanup_lease(&gate, || {
+            calls.fetch_add(1, Ordering::AcqRel);
+            assert_eq!(gate.outstanding(LeaseClass::ActiveControl), 1);
+        }));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert_eq!(gate.outstanding(LeaseClass::ActiveControl), 0);
+
+        gate.close(LeaseClass::ActiveControl);
+        gate.await_drain(LeaseClass::ActiveControl).unwrap();
+        assert!(!with_active_cleanup_lease(&gate, || {
+            calls.fetch_add(1, Ordering::AcqRel);
+        }));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
     }
 
     /// Prepares `<data>/daemon` with an acquired instance lock and a registered
