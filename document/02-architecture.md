@@ -992,8 +992,10 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   と `guard-workspace` は両 mode に配線する。root の guard は file write と unsafe shell/Git を deny し、OS sandbox
   も checkout と Git common dir の書き込みを拒否する。
 - **Codex inline hooks**: daemon が `features.hooks = true` と lifecycle hook のinline TOMLを起動引数へ渡す。
-  `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Stop` / `SessionEnd` を
-  Claude と同じphaseへ写し、Claudeの`Notification`とCodexの`PermissionRequest`はいずれも`waiting`を報告する。
+  `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` / `SessionEnd` を
+  Claude と同じphaseへ写し、Codex の `PostToolUse` は `waiting` を報告する。`approval_policy = "never"` の起動では
+  発火しない `PermissionRequest` と、Codex の hook event でない `Notification` は配線しない。inline hook は Codex
+  自身の通常の trust review を通し、daemon は hook trust を一括 bypass しない。
   新規会話の`SessionStart(startup)`だけはphase報告に加えてprovider session IDをcaptureし、resume/clear/compactでは
   phaseだけを報告する。
 - **`TMPDIR` 伝播**: agent child は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable

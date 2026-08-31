@@ -575,8 +575,11 @@ provision にだけ存在する daemon-minted credential の 2 つだけであ�
 path / provider を指定できず、daemon は credential から exact live runtime を逆引きする。成功 response は
 body を持たない。
 
-phase は wire に載る前に hook 側で検証する。usagi が配線した lifecycle event（`SessionStart` /
-`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd`）と phase の対応が hook input の
+phase は wire に載る前に hook 側で検証する。共通 validator の lifecycle vocabulary は `SessionStart` /
+`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd` である。
+Claude はこのうち `PreToolUse` を含む対応 event を、Codex は `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
+`PostToolUse` / `Stop` / `SessionEnd` だけを配線する。Codex は `approval_policy = "never"` で起動するため
+`PermissionRequest` は発火せず、`Notification` も Codex event ではない。event と phase の対応が hook input の
 `hook_event_name` と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
 
@@ -607,8 +610,9 @@ Agent history / exit history / dismissal の allocator・retention・GC は
 `agent_workspace_observation` は process-level の read-only view が別 workspace を観測する request で、名指しした
 `WorkspaceId` の `AgentInventory` と `session_statuses` を同じ応答で返す。status map は managed session の
 `SessionId` だけを key とし、値は dispatch store の closed `AgentStatus` である。同じ session に複数 Agent がある場合は
-current run を持つ Agent を優先し、`session list` と同じ選択になる。root Agent、provider-native identity、prompt、path は
-map に含めない。この request は mutation を持たないため、fresh connection で安全に retry できる。
+`running > starting > failed > idle > exited` の共通順位で決定的に集約し、`session list` と同じ値になる。root Agent、
+provider-native identity、prompt、path は map に含めない。この request は mutation を持たないため、fresh connection で
+安全に retry できる。
 
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで

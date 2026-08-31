@@ -33,7 +33,7 @@ use usagi_core::{
             InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
             OutdatedAgentRuntime, ProviderCaptureProvenance, ProviderKind, ProviderResumePhase,
             ProviderResumeReason, ProviderResumeRef, ProviderResumeStatus, ProviderSessionId,
-            RunStatus, WorkerRef,
+            RunStatus, WorkerRef, aggregate_agent_status,
         },
         id::{
             AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, CompletionFence, ConnectionId,
@@ -1489,8 +1489,7 @@ impl AgentRuntime {
 
     /// Returns one cross-project observation with both runtime detail and the
     /// dispatch terminal state used by `session list`. Multiple dispatch Agents
-    /// in one session follow the same preference as that list: an Agent owning a
-    /// current run wins, with durable store order breaking ties.
+    /// in one session use the same deterministic status precedence as that list.
     pub fn workspace_observation(
         &self,
         workspace: WorkspaceId,
@@ -1506,19 +1505,15 @@ impl AgentRuntime {
             };
             selected
                 .entry(session)
-                .and_modify(|current: &mut usagi_core::domain::agent::Agent| {
-                    if current.current_run.is_none() || agent.current_run.is_some() {
-                        current.clone_from(&agent);
-                    }
+                .and_modify(|current: &mut AgentStatus| {
+                    *current = aggregate_agent_status([*current, agent.status])
+                        .expect("two Agent statuses always aggregate");
                 })
-                .or_insert(agent);
+                .or_insert(agent.status);
         }
         Ok(AgentWorkspaceObservation {
             inventory: self.inventory(workspace),
-            session_statuses: selected
-                .into_iter()
-                .map(|(session, agent)| (session, agent.status))
-                .collect(),
+            session_statuses: selected,
         })
     }
 
@@ -4853,10 +4848,11 @@ mod tests {
     // ---- tests ---------------------------------------------------------------
 
     #[test]
-    fn workspace_observation_prefers_the_sessions_current_dispatch_agent() {
+    fn workspace_observation_aggregates_session_status_independent_of_store_order() {
         let runtime = runtime();
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
+        let terminal_session = SessionId::new();
         let idle = runtime
             .dispatch
             .upsert_agent_by_runtime_model(
@@ -4887,6 +4883,49 @@ mod tests {
                 Some(OperationId::new()),
             )
             .unwrap();
+        let starting = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("starting-after-running").unwrap(),
+            )
+            .unwrap();
+        runtime
+            .dispatch
+            .transition_agent(
+                starting.agent_id,
+                AgentStatus::Starting,
+                Some(OperationId::new()),
+            )
+            .unwrap();
+        let failed = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(terminal_session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("failed-before-idle").unwrap(),
+            )
+            .unwrap();
+        runtime
+            .dispatch
+            .transition_agent(failed.agent_id, AgentStatus::Failed, None)
+            .unwrap();
+        let terminal_idle = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(terminal_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("idle-after-failed").unwrap(),
+            )
+            .unwrap();
+        runtime
+            .dispatch
+            .transition_agent(terminal_idle.agent_id, AgentStatus::Idle, None)
+            .unwrap();
         let _root = runtime
             .dispatch
             .upsert_agent_by_runtime_model(
@@ -4901,7 +4940,10 @@ mod tests {
         assert_eq!(observation.inventory.workspace_id, workspace);
         assert_eq!(
             observation.session_statuses,
-            BTreeMap::from([(session, AgentStatus::Running)])
+            BTreeMap::from([
+                (session, AgentStatus::Running),
+                (terminal_session, AgentStatus::Failed),
+            ])
         );
         assert!(
             runtime

@@ -394,6 +394,17 @@ fn draw_sessions(
             draw_lifecycle_pose(canvas, session, places.burrow, tick, reduced_motion);
             continue;
         }
+        if !session.pr_merged
+            && let Some(
+                status @ (DispatchAgentStatus::Starting
+                | DispatchAgentStatus::Idle
+                | DispatchAgentStatus::Exited
+                | DispatchAgentStatus::Failed),
+            ) = session.agent_status
+        {
+            draw_dispatch_pose(canvas, session, places.burrow, status);
+            continue;
+        }
 
         let agents = agent_status::ordered(&session.agents);
         let visible_count = agents.len().min(MAX_WORLD_AGENTS_PER_SESSION);
@@ -551,7 +562,12 @@ fn session_may_animate(session: &GardenSession) -> bool {
     }
     if matches!(
         session.agent_status,
-        Some(DispatchAgentStatus::Idle | DispatchAgentStatus::Exited | DispatchAgentStatus::Failed)
+        Some(
+            DispatchAgentStatus::Starting
+                | DispatchAgentStatus::Idle
+                | DispatchAgentStatus::Exited
+                | DispatchAgentStatus::Failed
+        )
     ) {
         return false;
     }
@@ -998,6 +1014,45 @@ fn draw_lifecycle_pose(
     );
 }
 
+/// A non-running dispatch status belongs to the session as a whole. Draw one
+/// static pose beside its burrow instead of animating or targeting a stale
+/// runtime-local phase.
+fn draw_dispatch_pose(
+    canvas: &mut Canvas,
+    session: &GardenSession,
+    home: Point,
+    status: DispatchAgentStatus,
+) {
+    let feature = garden_rabbit_style(stable_hash(&session.id.as_str())).bold();
+    let (sprite, style) = match status {
+        DispatchAgentStatus::Starting => (["", " /)/)", "( . .)", r#"c(")(")v"#], feature),
+        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => {
+            ([" z", " /)/)", "( -.-)", r#"c(")(")"#], feature.dim())
+        }
+        DispatchAgentStatus::Failed => {
+            (["", " /)/)", "( x.x)", r#"c(")(")/"#], Role::Danger.style())
+        }
+        DispatchAgentStatus::Running => unreachable!("running uses per-runtime motion"),
+    };
+    let canvas_height = i64::try_from(canvas.height).expect("Garden canvas height fits i64");
+    let pose_y = if home.y
+        + i64::try_from(HOME_HEIGHT + RABBIT_HEIGHT).expect("Garden pose height fits i64")
+        <= canvas_height
+    {
+        home.y + i64::try_from(HOME_HEIGHT).expect("home height fits i64")
+    } else {
+        (home.y - i64::try_from(RABBIT_HEIGHT).expect("rabbit height fits i64")).max(0)
+    };
+    canvas.lines(
+        Point {
+            x: home.x + 8,
+            y: pose_y,
+        },
+        sprite,
+        style,
+    );
+}
+
 fn clipped_rect(
     origin: Point,
     width: usize,
@@ -1375,12 +1430,28 @@ mod tests {
 
     #[test]
     fn terminal_dispatch_states_do_not_keep_the_world_clock_alive() {
-        let mut idle = session(SESSION_ID, "idle");
-        idle.agent_status = Some(DispatchAgentStatus::Idle);
-        assert_eq!(
-            canonical_tick(24, 100, std::slice::from_ref(&idle), 0, 73, false),
-            Some(0)
-        );
+        for (status, expected) in [
+            (DispatchAgentStatus::Starting, "starting"),
+            (DispatchAgentStatus::Idle, "idle"),
+            (DispatchAgentStatus::Exited, "stopped"),
+            (DispatchAgentStatus::Failed, "failed"),
+        ] {
+            let mut value = session(SESSION_ID, "status");
+            value.agent_status = Some(status);
+            assert_eq!(
+                canonical_tick(24, 100, std::slice::from_ref(&value), 0, 73, false),
+                Some(0)
+            );
+            let first = render(24, 100, "atlas", std::slice::from_ref(&value), 0, 0, false)
+                .expect("world fits");
+            let later = render(24, 100, "atlas", &[value], 0, 73, false).expect("world fits");
+            assert_eq!(first, later, "{status:?} must be a static session pose");
+            assert!(plain(&first.rows).contains(expected), "{status:?}");
+            assert!(
+                first.hitboxes.iter().all(|hitbox| hitbox.agent.is_none()),
+                "{status:?} must not target a stale runtime phase"
+            );
+        }
 
         let mut foreground = session(SESSION_ID, "foreground");
         foreground.lifecycle = SessionLifecycle::Failed;

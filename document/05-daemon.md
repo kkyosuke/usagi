@@ -1340,7 +1340,7 @@ resume では active owner が foreign shard を書き換えないため、repla
 
 Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、kernel 由来の hook PID・parent PID・process group と exact live runtime の照合で structured capture 境界へ渡す。provider と同じ process group の hook に加えて、provider の direct child で inherited / self-led process group の hook を受理する。hook は MCP caller credential を継承せず、dispatch scope も取得しない。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
 
-この Codex 経路の互換条件は、lifecycle hooks、`SessionStart` command event、その共通 input field `session_id`、および daemon が指定する hook trust bypass を CLI が提供することである。managed policy による hooks 無効化、非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。hook input の `transcript_path` は deserialize 対象にせず、provider state / transcript / state database / 設定 / 履歴 file の場所や形式を推測・走査・parse する capture 経路も持たない。native ID/name は先頭 `-` の option-like 値を拒否し、`--last` / `--continue` の暗黙選択へ CLI parse が切り替わる余地を持たない。
+この Codex 経路の互換条件は、lifecycle hooks、`SessionStart` command event、その共通 input field `session_id`、および通常の hook trust review を CLI が提供することである。daemon は `--dangerously-bypass-hook-trust` を渡さず、初回または定義変更時は Codex が提示する hook を利用者が明示的に review する。managed policy による hooks 無効化、未 trust、非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。hook input の `transcript_path` は deserialize 対象にせず、provider state / transcript / state database / 設定 / 履歴 file の場所や形式を推測・走査・parse する capture 経路も持たない。native ID/name は先頭 `-` の option-like 値を拒否し、`--last` / `--continue` の暗黙選択へ CLI parse が切り替わる余地を持たない。
 
 workspace 単位の `AgentInventory` は root と managed session、同一 scope の複数 history を別 item として
 deterministic に返す。resumable projection は availability と非機密な reason に加えて、client が interrupted
@@ -1348,9 +1348,10 @@ history を provider 単位で表示できる closed vocabulary（`ProviderKind`
 これらは code-defined enum であり、provider-native ID / argv / cwd / transcript は返さない。metadata を保存していない
 record では両 field を省略し、名前・path・profile ID から provider を推測しない。
 cross-project view 用の `AgentWorkspaceObservation` はこの inventory に、同じ workspace の dispatch store から読んだ
-managed session ごとの `AgentStatus` を添える。同じ session に複数 Agent がある場合は current run を持つ Agent を
-`session list` と同じ規則で選び、root Agent は session status map へ載せない。これにより PTY record の粗い `Live` と
-dispatch の terminal state（`Idle` / `Exited` / `Failed`）を混同しない。
+managed session ごとの `AgentStatus` を添える。同じ session に複数 Agent がある場合は
+`running > starting > failed > idle > exited` の共通順位で決定的に集約し、`session list` と同じ値にする。root Agent は
+session status map へ載せない。これにより PTY record の粗い `Live` と dispatch の terminal state
+（`Idle` / `Exited` / `Failed`）を混同しない。
 `AgentResumeTarget` は continuation、source、workspace、optional session、worktree、source runtime incarnation、
 adapter revision だけを持つ。旧 schema record は continuation / source を合成せず、target 無しの unavailable item
 として起動可能なまま読む。
@@ -1490,8 +1491,9 @@ projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / 
 
 報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、kernel 由来の hook
 process identity で報告元 runtime に束縛される。Claude の command hook は exec form なので provider の direct child として
-照合でき、Codex の command hook を含む inherited process group も受理する。両 provider は同じphase写像を使い、
-Claude の `Notification` と Codex の `PermissionRequest` はどちらも `waiting` を報告する。反映は次の規則に従う。
+照合でき、Codex の command hook を含む inherited process group も受理する。両 provider は同じphase写像を使う。
+Claude の `PermissionRequest` / `Notification` と Codex の `PostToolUse` は `waiting` を報告する。Codex は
+`approval_policy = "never"` で起動するため `PermissionRequest` を配線しない。反映は次の規則に従う。
 
 | 報告 phase | projection | 集約重み | durable `ProviderResumePhase` |
 |---|---|---|---|
