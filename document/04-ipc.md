@@ -492,6 +492,8 @@ snapshot の session は `WorkspaceId`、`SessionId`、`WorktreeId`、lifecycle 
 
 `agent` kind は daemon 所有の Agent runtime に届く。client は producer-issued `OperationId` と、`WorkspaceId` / optional `SessionId`（省略時は workspace root）/ optional profile ID だけの launch intent を送る。worktree、checkout path、profile 既定値、argv、environment、secret は wire field ではなく、daemon が [managed session scope](05-daemon.md#authority-と-lifecycle) と code-defined adapter registry から解決する。profile を省略すると daemon の既定 policy が選ぶ。
 
+設定で opt-in した goal-driven workflow は、classic の `agent` を拡張せず専用の `agent_goal` kind を使う。intent は `WorkspaceId`、optional profile ID、16 KiB 以下の非空 UTF-8 `goal` だけを持ち、managed `SessionId` は受け付けない。daemon は必ず workspace root scope を解決し、goal を code-defined autonomous work contract と組み合わせた初回 prompt として durable launch request に保存する。既存の queued initial prompt が同じ root scope にあれば上書きせず safe error にする。classic client の wire shape と「prompt なしで Agent を開く」挙動は変わらない。
+
 daemon は intent の `(WorkspaceId, SessionId?)` を [available scope](05-daemon.md#authority-と-lifecycle) の完全一致に解決し、その worktree だけを launch に使う。`SessionId` を省略した intent は workspace root に解決し、cwd を trusted repository root にする。creating / deleting / failed / stale / mismatch の scope、未知 profile、canonical でない `OperationId` は PTY を spawn せず typed safe error になる。
 
 成功した launch は accepted response に producer `OperationId` と durable revision を返し、body に完全な `TerminalRef` と新しい `AgentContinuationRef` を載せる。この `TerminalRef` は operation・workspace・session・worktree・daemon generation・terminal incarnation を fence する。PTY exit を daemon が一度だけ記録すると、同じ semantic intent の再送は成功時に `completed: true` と同じ `TerminalRef` を持つ final response を返す。non-zero exit は安全な `unavailable` final として replay される。同じ `OperationId` を異なる intent で送ると `idempotency_conflict` になる。spawn failure・ambiguous・persist-after-spawn は fenced safe failure（`unavailable` / `ownership_unknown`）として durable に記録され、resend は同じ安全な失敗を replay する。replacement spawn や terminal の推測は行わない。
@@ -531,7 +533,7 @@ operation identity を持たないため、body がその final を相関させ�
 | `operation_id` | この答えが属する producer `OperationId` |
 | `semantic_digest` | 受理した intent の canonical semantic key の digest |
 
-canonical semantic key は launch では `(WorkspaceId, SessionId?, profile ID?)`、exact resume では target 全体
+canonical semantic key は classic launch では `(WorkspaceId, SessionId?, profile ID?)`、goal-driven launch では workspace-root classic key に goal の byte length と本文を加えた値、exact resume では target 全体
 （continuation・source・scope・worktree・runtime・adapter revision）から作る。key の書式は daemon と client が共有する
 1 か所（`usagi-core` の client vocabulary）が持ち、digest は domain-separated hash で
 [terminal input digest](#terminal-input-identity-と-cross-connection-replay) と衝突しない。

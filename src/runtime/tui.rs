@@ -50,9 +50,10 @@ use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
-    AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply,
-    DaemonRequest, MetricsAction, PrBatchRequest, PrDismissRequest, PrSnapshot, SessionAction,
-    TerminalAction, TerminalGeometry, TerminalLaneBudget, TerminalLaunchIntent, TerminalRequest,
+    AgentGoalIntent, AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics,
+    DaemonReply, DaemonRequest, MetricsAction, PrBatchRequest, PrDismissRequest, PrSnapshot,
+    SessionAction, TerminalAction, TerminalGeometry, TerminalLaneBudget, TerminalLaunchIntent,
+    TerminalRequest,
 };
 use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::note::Target as StoreTarget;
@@ -2106,6 +2107,16 @@ fn agent_launch_request(
     }
 }
 
+fn agent_goal_request(
+    operation: usagi_core::domain::id::OperationId,
+    intent: AgentGoalIntent,
+) -> DaemonRequest {
+    DaemonRequest::AgentGoal {
+        operation_id: operation.to_string(),
+        intent,
+    }
+}
+
 /// Correlate one Agent launch reply back to the pending operation that issued it.
 ///
 /// The reply is usable only when *every* fence agrees with the request: the
@@ -2123,10 +2134,37 @@ fn correlate_agent_launch(
     operation: usagi_core::domain::id::OperationId,
     intent: &AgentLaunchIntent,
 ) -> Result<AgentPaneAdmission, String> {
-    let expected = operation.to_string();
     let expected_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
         &usagi_core::usecase::client::agent_launch_semantic_key(intent),
     );
+    correlate_agent_response(
+        reply,
+        operation,
+        &expected_digest,
+        intent.workspace,
+        intent.session,
+    )
+}
+
+fn correlate_agent_goal(
+    reply: DaemonReply,
+    operation: usagi_core::domain::id::OperationId,
+    intent: &AgentGoalIntent,
+) -> Result<AgentPaneAdmission, String> {
+    let expected_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
+        &usagi_core::usecase::client::agent_goal_semantic_key(intent),
+    );
+    correlate_agent_response(reply, operation, &expected_digest, intent.workspace, None)
+}
+
+fn correlate_agent_response(
+    reply: DaemonReply,
+    operation: usagi_core::domain::id::OperationId,
+    expected_digest: &str,
+    workspace: WorkspaceId,
+    session: Option<SessionId>,
+) -> Result<AgentPaneAdmission, String> {
+    let expected = operation.to_string();
     let (body, final_reply) = match reply {
         // `Accepted` proves admission of this operation twice over: the envelope
         // identity the transport matched, and the body identity checked below.
@@ -2144,7 +2182,7 @@ fn correlate_agent_launch(
     if body
         .get("semantic_digest")
         .and_then(serde_json::Value::as_str)
-        != Some(expected_digest.as_str())
+        != Some(expected_digest)
     {
         return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
     }
@@ -2159,9 +2197,7 @@ fn correlate_agent_launch(
         return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
     }
     let admission = decode_agent_admission(&body, "agent launch")?;
-    if admission.terminal.workspace_id != intent.workspace
-        || admission.terminal.session_id != intent.session
-    {
+    if admission.terminal.workspace_id != workspace || admission.terminal.session_id != session {
         return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
     }
     Ok(admission)
@@ -2192,6 +2228,27 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             // daemon connection.
             .map_err(daemon_error_reason)?;
         correlate_agent_launch(reply, operation, &intent)
+    }
+
+    fn launch_goal(
+        &mut self,
+        operation: usagi_core::domain::id::OperationId,
+        workspace: WorkspaceId,
+        profile: Option<usagi_core::domain::agent::AgentProfileId>,
+        goal: &str,
+    ) -> Result<AgentPaneAdmission, String> {
+        let mut client =
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let intent = AgentGoalIntent {
+            workspace,
+            profile,
+            goal: goal.to_owned(),
+        };
+        let reply = client
+            .request(agent_goal_request(operation, intent.clone()))
+            .map_err(daemon_error_reason)?;
+        correlate_agent_goal(reply, operation, &intent)
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=structured_codex_identity_enables_one_explicit_new_runtime_resume
@@ -5200,25 +5257,26 @@ mod tests {
     const CLOCK_GRANULARITY_MS: u64 = 2;
 
     use super::{
-        AGENT_LAUNCH_UNCORRELATED, AgentLaunchIntent, AppEvent, AppKey, BackendTargetStorePort,
-        Completions, DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonReply, DaemonRequest,
-        DaemonRestoreConnectionPort, DoctorDiagnosisError, EnvScope, EnvironmentStorePort,
-        FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError,
-        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
-        RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget,
-        TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
-        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult, agent_inventory_request,
-        agent_launch_request, classify_terminal_input, correlate_agent_launch,
-        created_session_hook, current_agent_integrations, daemon_error_reason, decision_cadence,
-        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
-        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
-        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
-        provider_resume_projection, reduced_motion_from_environment, reply_geometry,
-        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
-        version_result_from_observation, workspace_open_error,
+        AGENT_LAUNCH_UNCORRELATED, AgentGoalIntent, AgentLaunchIntent, AppEvent, AppKey,
+        BackendTargetStorePort, Completions, DaemonAgentCommandPort, DaemonDecisionCommandPort,
+        DaemonReply, DaemonRequest, DaemonRestoreConnectionPort, DoctorDiagnosisError, EnvScope,
+        EnvironmentStorePort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection,
+        LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
+        RepoEnvironmentStore, RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start,
+        StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult, agent_goal_request,
+        agent_inventory_request, agent_launch_request, classify_terminal_input,
+        correlate_agent_goal, correlate_agent_launch, created_session_hook,
+        current_agent_integrations, daemon_error_reason, decision_cadence, decode_agent_admission,
+        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
+        decode_terminal_inventory, decode_terminal_poll, doctor_diagnosis_io_error,
+        doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
+        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
+        pr_snapshot_events, probe_path, provider_resume_projection,
+        reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
+        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
+        validate_workspace_directory, version_detail, version_result_from_observation,
+        workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -7174,6 +7232,55 @@ mod tests {
         assert_eq!(sent, intent);
     }
 
+    #[test]
+    fn agent_goal_request_and_reply_preserve_identity_digest_and_root_scope() {
+        let operation = OperationId::new();
+        let workspace = WorkspaceId::new();
+        let intent = AgentGoalIntent {
+            workspace,
+            profile: None,
+            goal: "prepare a PR".to_owned(),
+        };
+        let DaemonRequest::AgentGoal {
+            operation_id,
+            intent: sent,
+        } = agent_goal_request(operation, intent.clone())
+        else {
+            panic!("a Work Run is an AgentGoal request")
+        };
+        assert_eq!(operation_id, operation.to_string());
+        assert_eq!(sent, intent);
+
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let digest = usagi_core::infrastructure::ipc::agent_operation_digest(
+            &usagi_core::usecase::client::agent_goal_semantic_key(&intent),
+        );
+        let admission = correlate_agent_goal(
+            DaemonReply::Accepted {
+                operation_id: operation.to_string(),
+                revision: 1,
+                body: json!({
+                    "operation_id": operation.to_string(),
+                    "semantic_digest": digest,
+                    "terminal": terminal,
+                    "continuation": null,
+                    "resume_relation": null,
+                    "completed": false,
+                }),
+            },
+            operation,
+            &intent,
+        )
+        .unwrap();
+        assert_eq!(admission.terminal, terminal);
+    }
+
     fn launch_correlation_fixture() -> (OperationId, AgentLaunchIntent, TerminalRef, String, String)
     {
         let operation = OperationId::new();
@@ -8921,6 +9028,7 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,
+            work_mode: usagi_core::domain::settings::WorkMode::GoalDriven,
             env: usagi_core::domain::settings::EnvBindings::new(),
         };
         let storage = Storage::new(&global_dir);

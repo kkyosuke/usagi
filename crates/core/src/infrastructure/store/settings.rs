@@ -135,6 +135,7 @@ mod tests {
             issue_enabled: Some(false),
             memory_enabled: Some(true),
             team_template: Some(crate::domain::settings::TeamTemplate::Flat),
+            work_mode: Some(crate::domain::settings::WorkMode::GoalDriven),
             env: [("PROJECT".to_owned(), "usagi".to_owned())]
                 .into_iter()
                 .collect(),

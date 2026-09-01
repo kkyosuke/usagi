@@ -64,6 +64,12 @@ pub enum DirectorNewProjection {
         candidates: Vec<String>,
         selected: usize,
     },
+    /// Goal-driven New: one objective plus the provider that will own it.
+    GoalComposer {
+        candidates: Vec<String>,
+        selected: usize,
+        goal: String,
+    },
     /// No supported Agent CLI is installed.
     Empty,
     /// One confirmed root launch is fenced until its matching completion.
@@ -73,6 +79,8 @@ pub enum DirectorNewProjection {
 /// Pure material accepted by the drawer renderer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirectorDrawerProjection {
+    /// Whether this drawer represents the opt-in objective-driven workflow.
+    pub goal_driven: bool,
     pub conversations: Vec<DirectorConversation>,
     pub organization: Vec<DirectorOrganizationRow>,
     pub terminal_view: Option<TerminalViewProjection>,
@@ -260,22 +268,22 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
         selected,
     } = &projection.new
     {
-        let content_capacity = height.saturating_sub(rows.len() + 1);
-        rows.extend(picker_rows(candidates, *selected, content_capacity));
-        rows.truncate(height.saturating_sub(1));
-        rows.resize(height.saturating_sub(1), String::new());
-        rows.push(Style::new().dim().paint(if content_capacity == 0 {
-            PICKER_TOO_SHORT_HINT
-        } else {
-            PICKER_HINT
-        }));
-        return rows
-            .into_iter()
-            .map(|row| widgets::clip_to_width(&row, width))
-            .collect();
+        return provider_picker_body(width, height, rows, candidates, *selected);
+    }
+    if let DirectorNewProjection::GoalComposer {
+        candidates,
+        selected,
+        goal,
+    } = &projection.new
+    {
+        return goal_composer_body(width, height, rows, candidates, *selected, goal);
     }
 
-    let footer_hint = "Ctrl-O n / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close";
+    let footer_hint = if projection.goal_driven {
+        "Work Run · stop reason: output or Decision · Esc: close"
+    } else {
+        "Ctrl-O n / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close"
+    };
     let content_capacity = height.saturating_sub(rows.len() + 1);
     if matches!(projection.new, DirectorNewProjection::Empty) {
         let before = content_capacity.saturating_sub(3) / 2;
@@ -317,26 +325,7 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
             ));
         }
     } else if projection.conversations.is_empty() {
-        let before = content_capacity.saturating_sub(3) / 2;
-        rows.extend(std::iter::repeat_n(String::new(), before));
-        if content_capacity > before {
-            rows.push(Role::Accent.style().bold().paint("No conversations yet"));
-        }
-        if content_capacity > before + 1 {
-            rows.push(
-                Style::new()
-                    .dim()
-                    .paint("Conversation inventory is not connected."),
-            );
-        }
-        if content_capacity > before + 2 {
-            let detail = if matches!(projection.new, DirectorNewProjection::Launching) {
-                "Waiting for the daemon to start the conversation."
-            } else {
-                "Choose New to start a conversation."
-            };
-            rows.push(Style::new().dim().paint(detail));
-        }
+        empty_conversation_rows(&mut rows, projection, content_capacity);
     }
     rows.truncate(height.saturating_sub(1));
     rows.resize(height.saturating_sub(1), String::new());
@@ -345,6 +334,123 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
             .dim()
             .paint(projection.feedback.as_deref().unwrap_or(footer_hint)),
     );
+    rows.into_iter()
+        .map(|row| widgets::clip_to_width(&row, width))
+        .collect()
+}
+
+fn empty_conversation_rows(
+    rows: &mut Vec<String>,
+    projection: &DirectorDrawerProjection,
+    content_capacity: usize,
+) {
+    let before = content_capacity.saturating_sub(3) / 2;
+    rows.extend(std::iter::repeat_n(String::new(), before));
+    if content_capacity > before {
+        rows.push(
+            Role::Accent
+                .style()
+                .bold()
+                .paint(if projection.goal_driven {
+                    "No Work Runs yet"
+                } else {
+                    "No conversations yet"
+                }),
+        );
+    }
+    if content_capacity > before + 1 {
+        rows.push(Style::new().dim().paint(if projection.goal_driven {
+            "Work Run output and stop reasons appear here."
+        } else {
+            "Conversation inventory is not connected."
+        }));
+    }
+    if content_capacity <= before + 2 {
+        return;
+    }
+    let detail = if matches!(projection.new, DirectorNewProjection::Launching) {
+        if projection.goal_driven {
+            "Waiting for the daemon to start the Work Run."
+        } else {
+            "Waiting for the daemon to start the conversation."
+        }
+    } else if projection.goal_driven {
+        "Choose New, enter one goal, and start the Work Run."
+    } else {
+        "Choose New to start a conversation."
+    };
+    rows.push(Style::new().dim().paint(detail));
+}
+
+fn provider_picker_body(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    candidates: &[String],
+    selected: usize,
+) -> Vec<String> {
+    let content_capacity = height.saturating_sub(rows.len() + 1);
+    rows.extend(picker_rows(candidates, selected, content_capacity));
+    rows.truncate(height.saturating_sub(1));
+    rows.resize(height.saturating_sub(1), String::new());
+    rows.push(Style::new().dim().paint(if content_capacity == 0 {
+        PICKER_TOO_SHORT_HINT
+    } else {
+        PICKER_HINT
+    }));
+    rows.into_iter()
+        .map(|row| widgets::clip_to_width(&row, width))
+        .collect()
+}
+
+fn goal_composer_body(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    candidates: &[String],
+    selected: usize,
+    goal: &str,
+) -> Vec<String> {
+    let content_capacity = height.saturating_sub(rows.len() + 1);
+    if content_capacity > 0 {
+        rows.push(Role::Accent.style().bold().paint("Goal"));
+    }
+    if content_capacity > 1 {
+        let caret = widgets::block_caret(goal, goal.len(), &Style::new());
+        let available = content_capacity.saturating_sub(3);
+        let mut input = widgets::wrap_to_width(&caret, width)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if input.is_empty() {
+            input.push(caret);
+        }
+        rows.extend(
+            input
+                .into_iter()
+                .rev()
+                .take(available)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev(),
+        );
+    }
+    if content_capacity > 2 {
+        rows.push(Style::new().dim().paint("Provider (↑↓)"));
+    }
+    if content_capacity > 3 {
+        rows.extend(picker_rows(
+            candidates,
+            selected,
+            content_capacity.saturating_sub(3),
+        ));
+    }
+    rows.truncate(height.saturating_sub(1));
+    rows.resize(height.saturating_sub(1), String::new());
+    rows.push(Style::new().dim().paint(if goal.trim().is_empty() {
+        "Type a goal  ·  Enter: start when ready  ·  Esc: cancel"
+    } else {
+        "Enter: start Work Run  ·  ↑↓: provider  ·  Esc: cancel"
+    }));
     rows.into_iter()
         .map(|row| widgets::clip_to_width(&row, width))
         .collect()
@@ -387,7 +493,12 @@ fn selector_row(width: usize, projection: &DirectorDrawerProjection) -> String {
     } else {
         Role::Accent.style().bold().paint("[ New ]")
     };
-    let prefix = format!("Conversation  [{selected}]");
+    let subject = if projection.goal_driven {
+        "Work Run"
+    } else {
+        "Conversation"
+    };
+    let prefix = format!("{subject}  [{selected}]");
     let reserved = widgets::display_width(&new).saturating_add(2);
     let prefix = widgets::clip_to_width(&prefix, width.saturating_sub(reserved));
     let gap = width
@@ -561,8 +672,102 @@ mod tests {
     }
 
     #[test]
+    fn goal_composer_renders_objective_provider_and_terminal_condition() {
+        let projection = DirectorDrawerProjection {
+            goal_driven: true,
+            new: DirectorNewProjection::GoalComposer {
+                candidates: vec!["claude".into(), "codex".into()],
+                selected: 1,
+                goal: "Implement the work run".into(),
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(52, 12, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("Goal"));
+        assert!(body.contains("Implement the work run"));
+        assert!(body.contains("› codex"));
+        assert!(body.contains("Enter: start Work Run"));
+    }
+
+    #[test]
+    fn goal_driven_drawer_names_the_run_and_exposes_the_stop_reason_surfaces() {
+        let projection = DirectorDrawerProjection {
+            goal_driven: true,
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(64, 8, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(body.contains("Work Run  [No conversations]"));
+        assert!(body.contains("Work Run output and stop reasons appear here."));
+        assert!(body.contains("stop reason: output or Decision"));
+        assert!(!body.contains("Choose New to start a conversation."));
+    }
+
+    #[test]
+    fn goal_driven_empty_and_launching_states_render_their_distinct_guidance() {
+        let composer = DirectorDrawerProjection {
+            goal_driven: true,
+            new: DirectorNewProjection::GoalComposer {
+                candidates: vec!["claude".into()],
+                selected: 0,
+                goal: String::new(),
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(52, 12, &composer)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>();
+        assert!(body.iter().any(|row| row.contains("Type a goal")));
+
+        let launching = DirectorDrawerProjection {
+            goal_driven: true,
+            new: DirectorNewProjection::Launching,
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(52, 8, &launching)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>();
+        assert!(
+            body.iter()
+                .any(|row| row.contains("Waiting for the daemon to start the Work Run."))
+        );
+    }
+
+    #[test]
+    fn zero_width_goal_composer_keeps_its_row_contract() {
+        let projection = DirectorDrawerProjection {
+            goal_driven: true,
+            new: DirectorNewProjection::GoalComposer {
+                candidates: vec!["claude".into()],
+                selected: 0,
+                goal: String::new(),
+            },
+            ..DirectorDrawerProjection::default()
+        };
+
+        let body = drawer_body(0, 7, &projection);
+        assert_eq!(body.len(), 7);
+        assert!(body.iter().all(|row| display_width(row) == 0));
+
+        let compact = drawer_body(8, 3, &projection);
+        assert_eq!(compact.len(), 3);
+        assert!(compact.iter().all(|row| display_width(row) <= 8));
+    }
+
+    #[test]
     fn populated_projection_renders_selected_conversation_and_terminal_rows() {
         let projection = DirectorDrawerProjection {
+            goal_driven: false,
             conversations: vec![
                 DirectorConversation {
                     label: "older".to_owned(),
@@ -629,6 +834,7 @@ mod tests {
     fn retained_selection_rows_render_the_live_bottom_and_scrolled_windows() {
         let retained = (0..10).map(|row| format!("row {row}")).collect::<Vec<_>>();
         let projection = DirectorDrawerProjection {
+            goal_driven: false,
             conversations: vec![DirectorConversation {
                 label: "active".to_owned(),
                 selected: true,
@@ -689,6 +895,7 @@ mod tests {
     #[test]
     fn interrupted_detail_has_a_dedicated_body_row_and_feedback_owns_the_footer() {
         let projection = DirectorDrawerProjection {
+            goal_driven: false,
             conversations: vec![DirectorConversation {
                 label: "interrupted".to_owned(),
                 selected: true,
@@ -873,6 +1080,7 @@ mod tests {
     #[test]
     fn renderer_handles_tiny_resize_and_cjk_choice_without_style_leak() {
         let projection = DirectorDrawerProjection {
+            goal_driven: false,
             conversations: vec![DirectorConversation {
                 label: "会話の履歴".to_owned(),
                 selected: true,

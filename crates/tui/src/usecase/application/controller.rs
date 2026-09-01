@@ -20,7 +20,7 @@ use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
 };
 use usagi_core::domain::settings::{
-    AvailableModels, DefaultModel, EnvBindings, PrAutoOpen, format_env_bindings,
+    AvailableModels, DefaultModel, EnvBindings, PrAutoOpen, WorkMode, format_env_bindings,
 };
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
 use usagi_core::usecase::agent_phase::AgentPhaseAggregation;
@@ -83,6 +83,8 @@ pub enum Overlay {
 
 /// session name に許される最大文字数（表示・path 双方の実害を避ける上限）。
 const MAX_SESSION_NAME_LEN: usize = 64;
+/// Goal composer bound. The daemon repeats this limit before admitting work.
+pub const MAX_WORK_GOAL_BYTES: usize = usagi_core::usecase::client::MAX_AGENT_GOAL_BYTES;
 
 /// daemon へ送る前の、TUI-local な新規 session 入力。
 ///
@@ -1011,6 +1013,9 @@ pub struct AppState {
     /// availability is injected with [`AvailableModels`]; opening and moving
     /// this picker performs no daemon work.
     director_new: DirectorNew,
+    /// Goal composer source. It is populated only in goal-driven mode and is
+    /// moved into one daemon launch effect on confirmation.
+    director_goal: String,
     /// One root launch submitted from the picker. It remains fenced until the
     /// shell reports the matching completion, so repeated Enter cannot mint a
     /// second operation while the first request is in flight.
@@ -1082,6 +1087,8 @@ pub struct AppState {
     available_models: AvailableModels,
     /// The configured provider a Closeup `agent` without `-m` launches.
     default_model: DefaultModel,
+    /// Compatibility defaults to the historical conversation picker.
+    work_mode: WorkMode,
     ctrl_c_grace: bool,
     /// Focus of the exit prompt's three buttons. Opening the overlay resets it
     /// to [`ExitChoice::Quit`], so the historical `Ctrl-Q` + `Enter` still ends
@@ -1178,6 +1185,7 @@ impl AppState {
             root_terminal_drawer_open: false,
             workspace_drawer_focus: None,
             director_new: DirectorNew::Idle,
+            director_goal: String::new(),
             director_launching: None,
             note_editor: None,
             environment_editor: None,
@@ -1218,6 +1226,7 @@ impl AppState {
             closeup_action_forced: false,
             available_models: AvailableModels::all(),
             default_model: DefaultModel::default(),
+            work_mode: WorkMode::default(),
             ctrl_c_grace: false,
             exit_choice: ExitChoice::Quit,
             force_remove_confirmation: None,
@@ -1479,12 +1488,31 @@ impl AppState {
     pub const fn default_model(&self) -> DefaultModel {
         self.default_model
     }
+    /// Configured Director interaction model.
+    #[must_use]
+    pub const fn work_mode(&self) -> WorkMode {
+        self.work_mode
+    }
+    /// Current goal composer text. Empty in classic mode and after admission.
+    #[must_use]
+    pub fn director_goal(&self) -> &str {
+        &self.director_goal
+    }
     /// Apply the observed CLI availability and the configured default provider.
     /// The composition root supplies both, so this usecase performs no PATH or
     /// settings IO of its own.
     pub const fn set_agent_models(&mut self, available: AvailableModels, default: DefaultModel) {
         self.available_models = available;
         self.default_model = default;
+    }
+
+    /// Apply the effective workspace interaction setting. Returning to classic
+    /// drops a draft that was never submitted, but never touches a live Agent.
+    pub fn set_work_mode(&mut self, mode: WorkMode) {
+        self.work_mode = mode;
+        if mode == WorkMode::Classic {
+            self.director_goal.clear();
+        }
     }
 
     /// Convert the managed active session to the target vocabulary used at
@@ -2259,6 +2287,15 @@ pub enum Effect {
         session: Option<SessionId>,
         operation_id: OperationId,
         profile: Option<AgentProfileId>,
+    },
+    /// Start a workspace-root Director with one bounded goal and the daemon's
+    /// autonomous delivery contract. Classic Agent launch remains a separate
+    /// effect and request path.
+    LaunchGoal {
+        workspace: WorkspaceId,
+        operation_id: OperationId,
+        profile: Option<AgentProfileId>,
+        goal: String,
     },
     /// Explicit provider-native resume for an interrupted session. The daemon
     /// validates retained metadata and creates a new PTY/runtime.
@@ -3606,6 +3643,7 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         state.director_drawer_open = true;
         state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
         state.director_new = DirectorNew::Idle;
+        state.director_goal.clear();
         return Vec::new();
     }
     if matches!(key, AppKey::OpenDirectorNew) {
@@ -3689,6 +3727,38 @@ fn director_picker_shows_selection(state: &AppState) -> bool {
         .is_none_or(|(_, height)| director_picker_capacity(usize::from(height)) > 0)
 }
 
+fn update_goal_composer_text(state: &mut AppState, key: &AppKey) -> bool {
+    if state.work_mode != WorkMode::GoalDriven
+        || !matches!(state.director_new, DirectorNew::Choosing(_))
+    {
+        return false;
+    }
+    match key {
+        AppKey::Backspace => {
+            state.director_goal.pop();
+        }
+        AppKey::Char(character)
+            if state.director_goal.len() + character.len_utf8() <= MAX_WORK_GOAL_BYTES =>
+        {
+            state.director_goal.push(*character);
+        }
+        AppKey::Paste(value) => {
+            let remaining = MAX_WORK_GOAL_BYTES.saturating_sub(state.director_goal.len());
+            let end = value
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(value.len()))
+                .take_while(|index| *index <= remaining)
+                .last()
+                .unwrap_or(0);
+            state.director_goal.push_str(&value[..end]);
+        }
+        AppKey::Char(_) => {}
+        _ => return false,
+    }
+    true
+}
+
 fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if matches!(key, AppKey::ToggleRootTerminalDrawer) {
         state.root_terminal_drawer_open = true;
@@ -3705,6 +3775,10 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             .root_terminal_drawer_open
             .then_some(WorkspaceDrawerFocus::Terminal);
         state.director_new = DirectorNew::Idle;
+        state.director_goal.clear();
+        return Vec::new();
+    }
+    if update_goal_composer_text(state, &key) {
         return Vec::new();
     }
     match (state.director_new, key) {
@@ -3721,6 +3795,7 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
         }
         (DirectorNew::Choosing(_) | DirectorNew::Empty, AppKey::Escape) => {
             state.director_new = DirectorNew::Idle;
+            state.director_goal.clear();
             Vec::new()
         }
         (DirectorNew::Choosing(selected), AppKey::Up) => {
@@ -3752,17 +3827,29 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             Vec::new()
         }
         (DirectorNew::Choosing(selected), AppKey::Enter)
-            if state.director_launching.is_none() && director_picker_shows_selection(state) =>
+            if state.director_launching.is_none()
+                && director_picker_shows_selection(state)
+                && (state.work_mode == WorkMode::Classic
+                    || !state.director_goal.trim().is_empty()) =>
         {
             let operation_id = OperationId::new();
             state.director_new = DirectorNew::Idle;
             state.director_launching = Some(operation_id);
-            vec![Effect::LaunchAgent {
-                workspace: state.workspace,
-                session: None,
-                operation_id,
-                profile: Some(profile_for(selected)),
-            }]
+            if state.work_mode == WorkMode::GoalDriven {
+                vec![Effect::LaunchGoal {
+                    workspace: state.workspace,
+                    operation_id,
+                    profile: Some(profile_for(selected)),
+                    goal: std::mem::take(&mut state.director_goal),
+                }]
+            } else {
+                vec![Effect::LaunchAgent {
+                    workspace: state.workspace,
+                    session: None,
+                    operation_id,
+                    profile: Some(profile_for(selected)),
+                }]
+            }
         }
         // Empty, submitted, and unsupported drawer input are all inert. In
         // particular Enter while a root launch is fenced cannot mint a second
@@ -3776,6 +3863,7 @@ fn open_director_new(state: &mut AppState) {
     if state.director_launching.is_some() {
         return;
     }
+    state.director_goal.clear();
     state.director_new = if state.available_models.is_empty() {
         DirectorNew::Empty
     } else {
@@ -6627,6 +6715,78 @@ mod tests {
             (state.selected(), state.active(), state.route()),
             background
         );
+    }
+
+    #[test]
+    fn goal_driven_new_requires_one_goal_and_emits_only_the_goal_launch() {
+        let workspace = WorkspaceId::new();
+        let mut state = sized_home(workspace, Vec::new(), 100, 30);
+        state.set_agent_models(
+            AvailableModels::new([DefaultModel::OpenAi]),
+            DefaultModel::OpenAi,
+        );
+        state.set_work_mode(WorkMode::GoalDriven);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
+        assert_eq!(state.director_goal(), "");
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        for character in "目的を実装する".chars() {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
+        }
+        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::LaunchGoal {
+                workspace: actual,
+                profile: Some(profile),
+                goal,
+                ..
+            }] if *actual == workspace && profile.as_str() == "codex" && goal == "目的を実装する"
+        ));
+        assert_eq!(state.director_goal(), "");
+        assert!(state.director_launching().is_some());
+    }
+
+    #[test]
+    fn goal_composer_edits_utf8_within_the_daemon_bound_and_discards_drafts() {
+        let workspace = WorkspaceId::new();
+        let mut state = sized_home(workspace, Vec::new(), 100, 30);
+        state.set_work_mode(WorkMode::GoalDriven);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::Paste("x".repeat(MAX_WORK_GOAL_BYTES + 1))),
+        );
+        assert_eq!(state.director_goal().len(), MAX_WORK_GOAL_BYTES);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
+        assert_eq!(state.director_goal().len(), MAX_WORK_GOAL_BYTES);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('é')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste("é".to_owned())));
+        assert_eq!(state.director_goal().len(), MAX_WORK_GOAL_BYTES - 1);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.director_goal(), "");
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('z')));
+        assert_eq!(state.director_goal(), "");
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('z')));
+        state.set_work_mode(WorkMode::Classic);
+        assert_eq!(state.director_goal(), "");
+    }
+
+    #[test]
+    fn classic_remains_the_default_director_launch() {
+        let workspace = WorkspaceId::new();
+        let mut state = sized_home(workspace, Vec::new(), 100, 30);
+        assert_eq!(state.work_mode(), WorkMode::Classic);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [Effect::LaunchAgent { session: None, .. }]
+        ));
     }
 
     #[test]

@@ -157,6 +157,11 @@ impl WorkspaceRuntime {
         &self.state
     }
 
+    /// Apply the effective workspace Director interaction setting.
+    pub fn set_work_mode(&mut self, mode: usagi_core::domain::settings::WorkMode) {
+        self.state.set_work_mode(mode);
+    }
+
     /// The active target's pane state, for `HomeProjection::with_pane`.
     #[must_use]
     pub fn active_pane(&self) -> &PaneState {
@@ -473,9 +478,9 @@ impl WorkspaceRuntime {
             return self.handle_closeup_key(key);
         }
         // With no existing modal in front, the drawer owns every Home input.
-        // Its local New picker accepts only selection/confirmation/cancel keys;
-        // everything else is consumed without reaching sidebar, pane, or
-        // globals.
+        // Its local New surface accepts provider selection and, in goal-driven
+        // mode, bounded goal editing; everything else is consumed without
+        // reaching sidebar, pane, or globals.
         if self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director) {
             return match (self.state.director_new(), key) {
                 (DirectorNew::Choosing(_) | DirectorNew::Empty, Key::Up) => {
@@ -483,6 +488,15 @@ impl WorkspaceRuntime {
                 }
                 (DirectorNew::Choosing(_) | DirectorNew::Empty, Key::Down) => {
                     self.apply_event(AppEvent::Key(AppKey::Down))
+                }
+                (DirectorNew::Choosing(_), Key::Backspace) => {
+                    self.apply_event(AppEvent::Key(AppKey::Backspace))
+                }
+                (DirectorNew::Choosing(_), Key::Char(character)) => {
+                    self.apply_event(AppEvent::Key(AppKey::Char(character)))
+                }
+                (DirectorNew::Choosing(_), Key::Paste(value)) => {
+                    self.apply_event(AppEvent::Key(AppKey::Paste(value)))
                 }
                 (DirectorNew::Choosing(_) | DirectorNew::Empty, Key::Enter) => {
                     self.apply_event(AppEvent::Key(AppKey::Enter))
@@ -1753,6 +1767,13 @@ impl WorkspaceRuntime {
             } => {
                 let target = session.map_or(Target::Root(*workspace), Target::Session);
                 let _ = self.request_pane(target, *operation_id, PaneKind::Agent);
+            }
+            Effect::LaunchGoal {
+                workspace,
+                operation_id,
+                ..
+            } => {
+                let _ = self.request_pane(Target::Root(*workspace), *operation_id, PaneKind::Agent);
             }
             _ => {}
         }
@@ -4130,6 +4151,26 @@ mod tests {
             runtime.active_pane().tabs().last(),
             Some(PaneTab::Pending(pending)) if pending.kind == PaneKind::Agent
         ));
+        let goal_op = OperationId::new();
+        runtime.on_effect(&Effect::LaunchGoal {
+            workspace,
+            operation_id: goal_op,
+            profile: None,
+            goal: "prepare a PR".to_owned(),
+        });
+        assert!(matches!(
+            runtime
+                .panes()
+                .pane(Target::Root(workspace))
+                .and_then(|pane| pane.tabs().last()),
+            Some(PaneTab::Pending(pending)) if pending.operation == goal_op
+        ));
+
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        assert_eq!(
+            runtime.state().work_mode(),
+            usagi_core::domain::settings::WorkMode::GoalDriven
+        );
 
         // A non-pane effect leaves the tabs untouched.
         let before = runtime.active_pane().tabs().len();

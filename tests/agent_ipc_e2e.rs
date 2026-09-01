@@ -24,8 +24,8 @@ use usagi_core::domain::terminal_launch::{
 };
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::usecase::client::{
-    AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest,
-    IpcClient, McpCallerContext, SessionAction, TerminalAction, TerminalGeometry,
+    AgentGoalIntent, AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonReply,
+    DaemonRequest, IpcClient, McpCallerContext, SessionAction, TerminalAction, TerminalGeometry,
     TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::owner_routing::GenerationDirectory;
@@ -1016,6 +1016,84 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     assert_ne!(operation, resume_operation);
     wait_for_resume_completion(&mut reattached, &resume_operation, &resume_target);
     assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 2);
+}
+
+#[test]
+fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-goal-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("spawn-count");
+    write_codex(&bin, &count, 0);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let (workspace, _, _) = available_scope(&mut client);
+    let operation = OperationId::new().to_string();
+    let intent = AgentGoalIntent {
+        workspace,
+        profile: Some(AgentProfileId::new("codex").unwrap()),
+        goal: "implement the fixture goal and prepare a PR".to_owned(),
+    };
+    let request = || DaemonRequest::AgentGoal {
+        operation_id: operation.clone(),
+        intent: intent.clone(),
+    };
+
+    let DaemonReply::Accepted { body, .. } = client.request(request()).unwrap() else {
+        panic!("goal launch must be admitted before the fixture exits")
+    };
+    assert_eq!(body["operation_id"], operation);
+    assert_eq!(
+        body["semantic_digest"],
+        usagi_core::infrastructure::ipc::agent_operation_digest(
+            &usagi_core::usecase::client::agent_goal_semantic_key(&intent)
+        )
+    );
+    let terminal: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
+    assert_eq!(terminal.workspace_id, workspace);
+    assert_eq!(terminal.session_id, None);
+
+    let subscription = attach(&mut client, &terminal);
+    client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription,
+                input_seq: 0,
+                input_operation: None,
+                bytes: b"done\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match client.request(request()).unwrap() {
+            DaemonReply::Ok(body) if body["completed"] == true => break,
+            DaemonReply::Accepted { .. } => {}
+            reply @ DaemonReply::Ok(_) => panic!("unexpected goal replay: {reply:?}"),
+        }
+        assert!(Instant::now() < deadline, "fixture goal Agent did not exit");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fs::read_to_string(&count).unwrap().lines().count(), 1);
+
+    let mut changed = intent;
+    changed.goal = "a different goal".to_owned();
+    let error = client
+        .request(DaemonRequest::AgentGoal {
+            operation_id: operation,
+            intent: changed,
+        })
+        .unwrap_err();
+    let ClientError::Protocol(error) = error else {
+        panic!("changed goal must be a typed protocol refusal")
+    };
+    assert_eq!(error.code, ErrorCode::IdempotencyConflict);
 }
 
 #[test]
