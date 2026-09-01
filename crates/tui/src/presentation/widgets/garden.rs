@@ -107,6 +107,12 @@ pub struct GardenSession {
     /// remain the per-Agent detail, but a terminal dispatch state (idle,
     /// exited, or failed) overrides a stale/coarse `live -> running` badge.
     pub agent_status: Option<DispatchAgentStatus>,
+    /// Pending human decisions owned by this managed session.
+    ///
+    /// Only the active workspace can project this value. Inactive project
+    /// caches keep it at zero rather than claiming that an unobserved workspace
+    /// has no questions waiting for a person.
+    pub pending_decisions: usize,
     /// A short, non-blocking celebration after one of the session's PRs merges.
     pub pr_merged: bool,
 }
@@ -566,8 +572,19 @@ fn notification_rows(height: usize, width: usize, sessions: &[GardenSession]) ->
     rows
 }
 
+fn pending_decision_notification(count: usize) -> (Style, String) {
+    let noun = if count == 1 { "decision" } else { "decisions" };
+    (
+        Role::Warning.style(),
+        format!("{count} {noun} need your input."),
+    )
+}
+
 /// Choose one concise explanation for a Garden plot.
 fn notification(session: &GardenSession) -> (Style, String) {
+    if session.pending_decisions > 0 {
+        return pending_decision_notification(session.pending_decisions);
+    }
     if session.pr_merged {
         return (Role::Success.style(), "PR merged.".to_owned());
     }
@@ -838,13 +855,29 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
         })
         .map(|session| session.agents.len())
         .sum::<usize>();
+    let attention = sessions
+        .iter()
+        .filter(|session| needs_attention(session))
+        .count();
     let left = Role::Feature.style().bold().paint(&format!(
         " ✦ garden / {}",
         clip_to_width(workspace_name, width / 2)
     ));
-    let right = Style::new()
-        .dim()
-        .paint(&format!("{} plots · {rabbits} usagi ", sessions.len()));
+    let attention = if attention == 0 {
+        Role::Success.style().paint("all clear")
+    } else {
+        Role::Warning
+            .style()
+            .bold()
+            .paint(&format!("{attention} need attention"))
+    };
+    let right = format!(
+        "{} · {attention} · {} ",
+        Style::new()
+            .dim()
+            .paint(&format!("{} plots", sessions.len())),
+        Style::new().dim().paint(&format!("{rabbits} usagi"))
+    );
     let gap = width.saturating_sub(display_width(&left) + display_width(&right));
     pad_to_width(&format!("{left}{}{right}", " ".repeat(gap)), width)
 }
@@ -881,9 +914,12 @@ fn sky_line(width: usize, workspace_name: &str, tick: u64, reduced_motion: bool)
 
 fn footer_line(width: usize, scrollable: bool) -> String {
     let (left, right) = if scrollable {
-        (" Garden · ←/→ scroll · click", "Esc · return ")
+        (
+            " Garden Action Center · ←/→ scroll · click",
+            "Esc · return ",
+        )
     } else {
-        (" Garden · click a usagi", "any key · wake ")
+        (" Garden Action Center · click a usagi", "any key · wake ")
     };
     let left = Role::Feature.style().paint(left);
     let right = Style::new().dim().paint(right);
@@ -893,7 +929,7 @@ fn footer_line(width: usize, scrollable: bool) -> String {
 
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     let label = signpost(&session.label);
-    let ([status, ears, head, body, feet], rabbits) = if session.agents_observed {
+    let ([mut status, ears, head, body, feet], rabbits) = if session.agents_observed {
         match session.lifecycle {
             SessionLifecycle::Available if session.pr_merged => {
                 available_plot(session, tick, reduced_motion)
@@ -915,6 +951,20 @@ fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     } else {
         (inactive_plot(session), Vec::new())
     };
+    if session.pending_decisions > 0 {
+        let noun = if session.pending_decisions == 1 {
+            "decision"
+        } else {
+            "decisions"
+        };
+        status = centered(
+            PLOT_WIDTH,
+            &Role::Warning
+                .style()
+                .bold()
+                .paint(&format!("action · {} {noun}", session.pending_decisions)),
+        );
+    }
     Plot {
         rows: [label, status, ears, head, body, feet],
         rabbits,
@@ -958,6 +1008,22 @@ fn dispatch_plot(
         body,
         feet,
     ]
+}
+
+/// Whether one Garden plot currently needs a person's attention.
+///
+/// The result is deliberately a per-session bit, not a sum of symptoms. A
+/// pending decision commonly explains a waiting Agent, so adding both would
+/// inflate the Action Center count for one actual place the person needs to
+/// visit.
+fn needs_attention(session: &GardenSession) -> bool {
+    session.pending_decisions > 0
+        || session.lifecycle == SessionLifecycle::Failed
+        || session.agent_status == Some(DispatchAgentStatus::Failed)
+        || session
+            .agents
+            .iter()
+            .any(|agent| matches!(agent.phase, AgentPhase::Waiting | AgentPhase::Interrupted))
 }
 
 fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
@@ -1539,7 +1605,8 @@ mod tests {
             assert!(rabbits(&frame).is_empty(), "{status:?} has no Agent hitbox");
             let rows = plain(&frame);
             let text = rows.join("\n");
-            assert!(text.contains("1 plots · 1 usagi"), "{status:?}: {text}");
+            assert!(text.contains("1 plots"), "{status:?}: {text}");
+            assert!(text.contains("1 usagi"), "{status:?}: {text}");
             if status == DispatchAgentStatus::Failed {
                 assert!(text.contains("failed"), "{status:?}: {text}");
             } else {
@@ -1550,6 +1617,12 @@ mod tests {
                     "{status:?}: {text}"
                 );
             }
+            let attention = if status == DispatchAgentStatus::Failed {
+                "1 need attention"
+            } else {
+                "all clear"
+            };
+            assert!(text.contains(attention), "{status:?}: {text}");
         }
 
         let mut waiting = session(
@@ -1563,6 +1636,44 @@ mod tests {
         let text = plain(&frame).join("\n");
         assert!(text.contains("( o.o)?"));
         assert!(!text.contains("waiting"));
+        assert!(text.contains("1 need attention"));
+    }
+
+    #[test]
+    fn action_center_counts_sessions_once_and_prioritizes_pending_decisions() {
+        let mut waiting = session(
+            STEADY_ID,
+            "needs-human",
+            SessionLifecycle::Available,
+            AgentPhase::Waiting,
+        );
+        waiting.pending_decisions = 1;
+        let frame = render(24, 100, "x", &[waiting.clone()], 0, true).expect("garden fits");
+        assert!(plain(&frame).join("\n").contains("action · 1 decision"));
+
+        waiting.pending_decisions = 2;
+        let clear = session(
+            "10000000-0000-4000-8000-000000000001",
+            "clear",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        );
+
+        let frame = render(24, 100, "x", &[waiting, clear], 0, true).expect("garden fits");
+        let text = plain(&frame).join("\n");
+        assert!(text.contains("2 plots"));
+        assert!(text.contains("1 need attention"));
+        assert!(text.contains("2 usagi"));
+        assert!(text.contains("action · 2 decisions"));
+
+        let clear = session(
+            STEADY_ID,
+            "clear",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        );
+        let frame = render(24, 100, "x", &[clear], 0, true).expect("garden fits");
+        assert!(plain(&frame).join("\n").contains("all clear"));
     }
 
     fn only(lifecycle: SessionLifecycle, phase: AgentPhase, tick: u64) -> Vec<String> {
@@ -1600,6 +1711,7 @@ mod tests {
             selected: false,
             failure_summary: None,
             agents_observed: true,
+            pending_decisions: 0,
             pr_merged: false,
             agents: vec![GardenAgent {
                 runtime_id: AgentRuntimeId::parse(id).expect("fixture runtime id"),
@@ -2002,6 +2114,7 @@ mod tests {
             selected: false,
             failure_summary: None,
             agents_observed: true,
+            pending_decisions: 0,
             pr_merged: false,
             agents,
             agent_status: None,
@@ -2036,6 +2149,7 @@ mod tests {
             selected: false,
             failure_summary: None,
             agents_observed: true,
+            pending_decisions: 0,
             pr_merged: false,
             agents: vec![folded, running, waiting, hidden, ready],
             agent_status: None,
@@ -2137,6 +2251,7 @@ mod tests {
                 selected: false,
                 failure_summary: None,
                 agents_observed: true,
+                pending_decisions: 0,
                 pr_merged: false,
                 agents: Vec::new(),
                 agent_status: None,
@@ -2163,6 +2278,7 @@ mod tests {
                 selected: false,
                 failure_summary: None,
                 agents_observed: false,
+                pending_decisions: 0,
                 pr_merged: false,
                 agents: Vec::new(),
                 agent_status: None,
@@ -2191,6 +2307,7 @@ mod tests {
                 selected: false,
                 failure_summary: Some("old snapshot".to_owned()),
                 agents_observed: false,
+                pending_decisions: 0,
                 pr_merged: false,
                 agents: Vec::new(),
                 agent_status: None,
@@ -2621,6 +2738,7 @@ mod tests {
             selected: false,
             failure_summary: None,
             agents_observed: true,
+            pending_decisions: 0,
             pr_merged: false,
             agents,
             agent_status: None,

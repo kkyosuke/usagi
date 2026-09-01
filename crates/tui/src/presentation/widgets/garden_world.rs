@@ -882,6 +882,17 @@ fn home_status(session: &GardenSession) -> (String, Style) {
         }
         SessionLifecycle::Available => {}
     }
+    if session.pending_decisions > 0 {
+        let noun = if session.pending_decisions == 1 {
+            "decision"
+        } else {
+            "decisions"
+        };
+        return (
+            format!("action · {} {noun}", session.pending_decisions),
+            Role::Warning.style().bold(),
+        );
+    }
     if session.pr_merged {
         return ("PR merged!".to_owned(), Role::Success.style().bold());
     }
@@ -1111,9 +1122,9 @@ fn scroll_footer(
 
 fn footer_line(width: usize, pannable: bool) -> String {
     let left = Role::Feature.style().paint(if pannable {
-        " Garden · click a usagi · ←/→ pan"
+        " Garden Action Center · click a usagi · ←/→ pan"
     } else {
-        " Garden · click a usagi"
+        " Garden Action Center · click a usagi"
     });
     let right = Style::new().dim().paint("any key · wake ");
     let gap = width.saturating_sub(display_width(&left) + display_width(&right));
@@ -1173,6 +1184,7 @@ mod tests {
                 phase: AgentPhase::Running,
             }],
             agent_status: None,
+            pending_decisions: 0,
             pr_merged: false,
         }
     }
@@ -1538,6 +1550,11 @@ mod tests {
         assert_eq!(super::home_status(&failed).0, "failed · safe summary");
 
         let mut available = session(SESSION_ID, "available");
+        available.pending_decisions = 1;
+        assert_eq!(super::home_status(&available).0, "action · 1 decision");
+        available.pending_decisions = 2;
+        assert_eq!(super::home_status(&available).0, "action · 2 decisions");
+        available.pending_decisions = 0;
         available.pr_merged = true;
         assert_eq!(super::home_status(&available).0, "PR merged!");
         available.pr_merged = false;

@@ -9912,6 +9912,7 @@ mod tests {
     /// overlay, the very next frame *is* the garden, and a click resolved
     /// against that frame's own plots lands in the rabbit's Closeup.
     #[test]
+    #[allow(clippy::too_many_lines)] // End-to-end screen-saver timing and click ownership stay in one scenario.
     fn an_idle_home_grows_a_garden_whose_usagi_is_one_click_from_its_closeup() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -9992,7 +9993,10 @@ mod tests {
         let rows = render_home_material(&garden);
         let text = rows.join("\n");
         assert_eq!(rows.len(), 24);
-        assert!(text.contains("Garden · click a usagi") && text.contains("any key · wake"));
+        assert!(
+            text.contains("Garden Action Center · click a usagi")
+                && text.contains("any key · wake")
+        );
         assert!(text.contains("alpha"));
 
         // Every cell of the frame resolves through the same layout that drew it,
@@ -10201,7 +10205,8 @@ mod tests {
         );
         let observed = render_home_material(&material);
         assert!(!observed.iter().any(|row| row.contains("project inactive")));
-        assert!(observed.iter().any(|row| row.contains("2 plots · 1 usagi")));
+        assert!(observed.iter().any(|row| row.contains("2 plots")));
+        assert!(observed.iter().any(|row| row.contains("1 usagi")));
         assert!(observed.iter().any(|row| row.contains("-.-")));
         assert!(observed.iter().any(|row| row.contains("Agent completed")));
         assert!(!observed.iter().any(|row| row.contains("1 run")));
@@ -10241,6 +10246,7 @@ mod tests {
                             agents_observed: false,
                             agents: Vec::new(),
                             agent_status: None,
+                            pending_decisions: 0,
                             pr_merged: false,
                         },
                     )
@@ -10306,6 +10312,7 @@ mod tests {
                     agents_observed: false,
                     agents: Vec::new(),
                     agent_status: None,
+                    pending_decisions: 0,
                     pr_merged: false,
                 },
             )],
