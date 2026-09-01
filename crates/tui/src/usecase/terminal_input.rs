@@ -179,7 +179,7 @@ pub enum RuntimeEvent<B> {
 pub enum LiveTerminalAction {
     /// Open the process-level workspace add overlay (`Ctrl-O +`).
     OpenWorkspace,
-    /// Open the process-level all-project switcher (`Ctrl-O 0`).
+    /// Open the process-level project/session fuzzy finder (`Ctrl-O 0`).
     OpenWorkspaceSwitcher,
     /// Activate project tab 1 through 9 (`Ctrl-O 1` … `Ctrl-O 9`).
     ActivateWorkspace(u8),

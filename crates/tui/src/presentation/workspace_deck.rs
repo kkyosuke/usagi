@@ -170,6 +170,11 @@ pub enum OverlayIntent {
     Cancel,
     Add(Vec<PathBuf>),
     Activate(PathBuf),
+    Visit {
+        path: PathBuf,
+        workspace: WorkspaceId,
+        session: SessionId,
+    },
     Close(PathBuf),
 }
 
@@ -328,10 +333,11 @@ impl WorkspaceDeck {
         matches!(self.overlay, Some(DeckOverlay::Add(_)))
     }
 
-    /// Open the all-tab switcher with the active row selected.
+    /// Open the global project/session finder with the active project selected.
     pub fn open_switcher(&mut self) {
         self.overlay = Some(DeckOverlay::Switcher(ProjectSwitcher {
             selected: self.active_index(),
+            filter: String::new(),
         }));
         self.notice = None;
     }
@@ -702,13 +708,64 @@ impl AddWorkspace {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectSwitcher {
     selected: usize,
+    filter: String,
 }
 
 impl ProjectSwitcher {
+    fn visible(&self, slots: &[WorkspaceSlot]) -> Vec<FinderRow> {
+        let mut rows = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                fuzzy_score(&slot.label, &self.filter).map(|score| FinderRow {
+                    target: FinderTarget::Workspace {
+                        path: slot.path.clone(),
+                        index,
+                    },
+                    label: slot.label.clone(),
+                    context: None,
+                    score,
+                    order: index,
+                })
+            })
+            .collect::<Vec<_>>();
+        let project_count = slots.len();
+        rows.extend(slots.iter().enumerate().flat_map(|(project_index, slot)| {
+            slot.sessions
+                .iter()
+                .enumerate()
+                .filter_map(move |(session_index, session)| {
+                    let search = format!("{} / {}", slot.label, session.projected.label);
+                    fuzzy_score(&search, &self.filter).map(|score| FinderRow {
+                        target: FinderTarget::Session {
+                            path: slot.path.clone(),
+                            workspace: slot.workspace_id,
+                            session: session.projected.id,
+                        },
+                        label: session.projected.label.clone(),
+                        context: Some(slot.label.clone()),
+                        score,
+                        order: project_count + project_index * 10_000 + session_index,
+                    })
+                })
+        }));
+        if !self.filter.is_empty() {
+            rows.sort_by_key(|row| (row.score, row.order));
+        }
+        rows
+    }
+
     fn handle(&mut self, key: &Key, slots: &[WorkspaceSlot]) -> OverlayIntent {
         match key {
             Key::Up => self.selected = self.selected.saturating_sub(1),
-            Key::Down => self.selected = (self.selected + 1).min(slots.len().saturating_sub(1)),
+            Key::Down => {
+                self.selected =
+                    (self.selected + 1).min(self.visible(slots).len().saturating_sub(1));
+            }
+            Key::Backspace => {
+                self.filter.pop();
+                self.selected = 0;
+            }
             Key::Char(digit @ '1'..='9') => {
                 let index = digit.to_digit(10).unwrap_or(1) as usize - 1;
                 if let Some(slot) = slots.get(index) {
@@ -716,20 +773,101 @@ impl ProjectSwitcher {
                 }
             }
             Key::Enter => {
-                if let Some(slot) = slots.get(self.selected) {
-                    return OverlayIntent::Activate(slot.path.clone());
+                if let Some(row) = self.visible(slots).get(self.selected) {
+                    return row.intent();
                 }
             }
-            Key::Char('x') => {
-                if let Some(slot) = slots.get(self.selected) {
-                    return OverlayIntent::Close(slot.path.clone());
+            Key::CtrlD => {
+                if let Some(FinderRow {
+                    target: FinderTarget::Workspace { path, .. },
+                    ..
+                }) = self.visible(slots).get(self.selected)
+                {
+                    return OverlayIntent::Close(path.clone());
                 }
+            }
+            Key::Char(character) => {
+                self.filter.push(*character);
+                self.selected = 0;
+            }
+            Key::Paste(text) => {
+                self.filter.push_str(text);
+                self.selected = 0;
             }
             Key::Escape => return OverlayIntent::Cancel,
             _ => {}
         }
         OverlayIntent::Stay
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FinderTarget {
+    Workspace {
+        path: PathBuf,
+        index: usize,
+    },
+    Session {
+        path: PathBuf,
+        workspace: WorkspaceId,
+        session: SessionId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FinderRow {
+    target: FinderTarget,
+    label: String,
+    context: Option<String>,
+    score: usize,
+    order: usize,
+}
+
+impl FinderRow {
+    fn intent(&self) -> OverlayIntent {
+        match &self.target {
+            FinderTarget::Workspace { path, .. } => OverlayIntent::Activate(path.clone()),
+            FinderTarget::Session {
+                path,
+                workspace,
+                session,
+            } => OverlayIntent::Visit {
+                path: path.clone(),
+                workspace: *workspace,
+                session: *session,
+            },
+        }
+    }
+}
+
+/// Rank a case-insensitive subsequence match. Contiguous matches sort before
+/// gapped matches, then shorter gaps and earlier starts win. The caller keeps
+/// source order as the final stable tie-break.
+fn fuzzy_score(candidate: &str, query: &str) -> Option<usize> {
+    let query = query.to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+    let candidate = candidate.to_lowercase();
+    if let Some(start) = candidate.find(&query) {
+        return Some(start);
+    }
+
+    let mut positions = Vec::new();
+    let mut query_chars = query.chars();
+    let mut wanted = query_chars.next()?;
+    for (position, character) in candidate.chars().enumerate() {
+        if character == wanted {
+            positions.push(position);
+            let Some(next) = query_chars.next() else {
+                let start = positions[0];
+                let gaps = position + 1 - start - positions.len();
+                return Some(candidate.len() + gaps * 4 + start);
+            };
+            wanted = next;
+        }
+    }
+    None
 }
 
 /// Identity-bearing target for one cell range in the project bar.
@@ -966,35 +1104,57 @@ fn render_switcher(
     width: usize,
     base: &[String],
 ) -> Vec<String> {
-    let inner = modal::modal_inner_width(width, 56);
-    let rows = deck
-        .slots
+    let inner = modal::modal_inner_width(width, 64);
+    let visible = switcher.visible(&deck.slots);
+    let rows = visible
         .iter()
         .enumerate()
-        .map(|(index, slot)| {
-            let marker = modal::selection_marker(index == switcher.selected);
-            let active = if slot.workspace_id == deck.active {
-                "  active"
-            } else {
-                ""
+        .map(|(row_index, row)| {
+            let marker = modal::selection_marker(row_index == switcher.selected);
+            let text = match &row.target {
+                FinderTarget::Workspace { index, path } => {
+                    let active = if path == deck.active_path() {
+                        "  active"
+                    } else {
+                        ""
+                    };
+                    format!("  {marker} project  {}  {}{active}", index + 1, row.label)
+                }
+                FinderTarget::Session { .. } => format!(
+                    "  {marker} session     {} / {}",
+                    row.context.as_deref().unwrap_or_default(),
+                    row.label
+                ),
             };
-            let row = format!("  {marker} {}  {}{active}", index + 1, slot.label);
-            if index == switcher.selected {
-                Role::Accent.style().bold().paint(&row)
+            if row_index == switcher.selected {
+                Role::Accent.style().bold().paint(&text)
             } else {
-                row
+                text
             }
         })
         .collect::<Vec<_>>();
     let (start, end) = modal::list_window(rows.len(), switcher.selected, 10);
-    let mut body = modal::scroll_window(&rows, start, end);
+    let mut body = vec![modal::filter_line(
+        &switcher.filter,
+        switcher.filter.len(),
+        None,
+    )];
+    body.extend(modal::scroll_window(&rows, start, end));
     if let Some(notice) = deck.notice() {
         body.push(modal::error_line(notice, inner));
     }
     body.push(modal::footer(
-        "↑↓ / 1..9 / Enter switch / x close / Esc cancel",
+        "type fuzzy filter / ↑↓ / Enter open / Ctrl-D close project / Esc",
     ));
-    modal::render_body_over(height, width, base, "Projects", inner, 13, body)
+    modal::render_body_over(
+        height,
+        width,
+        base,
+        "Find project or session",
+        inner,
+        14,
+        body,
+    )
 }
 
 #[cfg(test)]
@@ -1260,7 +1420,7 @@ mod tests {
             OverlayIntent::Activate(PathBuf::from("/project-9"))
         );
         assert_eq!(
-            deck.handle_overlay_key(&Key::Char('x')),
+            deck.handle_overlay_key(&Key::CtrlD),
             OverlayIntent::Close(PathBuf::from("/project-9"))
         );
     }
@@ -1283,9 +1443,65 @@ mod tests {
         assert_eq!(deck.handle_overlay_key(&Key::Tab), OverlayIntent::Stay);
         assert_eq!(deck.handle_overlay_key(&Key::Escape), OverlayIntent::Cancel);
 
-        let mut empty = ProjectSwitcher { selected: 0 };
+        let mut empty = ProjectSwitcher {
+            selected: 0,
+            filter: String::new(),
+        };
         assert_eq!(empty.handle(&Key::Enter, &[]), OverlayIntent::Stay);
-        assert_eq!(empty.handle(&Key::Char('x'), &[]), OverlayIntent::Stay);
+        assert_eq!(empty.handle(&Key::CtrlD, &[]), OverlayIntent::Stay);
+    }
+
+    #[test]
+    fn finder_fuzzy_filters_sessions_and_returns_stable_identity() {
+        let alpha = snapshot_with_session("alpha", "/alpha", "build");
+        let beta = snapshot_with_session("beta", "/beta", "Review Queue");
+        let expected = OverlayIntent::Visit {
+            path: beta.workspace.path.clone(),
+            workspace: beta.workspace_id,
+            session: beta.session_ids[0],
+        };
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta]).unwrap();
+        deck.open_switcher();
+
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Char('r')),
+            OverlayIntent::Stay
+        );
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Paste("vw".to_owned())),
+            OverlayIntent::Stay
+        );
+        assert_eq!(deck.handle_overlay_key(&Key::Enter), expected);
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Backspace),
+            OverlayIntent::Stay
+        );
+        assert_eq!(deck.handle_overlay_key(&Key::Escape), OverlayIntent::Cancel);
+    }
+
+    #[test]
+    fn finder_ranks_contiguous_matches_before_gapped_matches() {
+        assert!(fuzzy_score("Review Queue", "REV").is_some());
+        assert!(fuzzy_score("ready event", "rev").is_some());
+        assert!(
+            fuzzy_score("Review Queue", "rev").unwrap()
+                < fuzzy_score("ready event", "rev").unwrap()
+        );
+        assert_eq!(fuzzy_score("cleanup", "xyz"), None);
+
+        let snapshots = [
+            snapshot_with_session("alpha", "/alpha", "ready event"),
+            snapshot_with_session("beta", "/beta", "Review Queue"),
+        ];
+        let deck = WorkspaceDeck::from_snapshots(&snapshots).unwrap();
+        let switcher = ProjectSwitcher {
+            selected: 0,
+            filter: "rev".to_owned(),
+        };
+        let visible = switcher.visible(deck.slots());
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].label, "Review Queue");
+        assert_eq!(visible[1].label, "ready event");
     }
 
     #[test]
@@ -1630,13 +1846,22 @@ mod tests {
     #[test]
     fn overlay_rendering_preserves_frame_size() {
         let alpha = snapshot("alpha", "/alpha");
-        let beta = snapshot("beta", "/beta");
+        let beta = snapshot_with_session("beta", "/beta", "review");
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta]).unwrap();
         deck.open_switcher();
         deck.set_notice("safe failure");
         let frame = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
         assert_eq!(frame.len(), 20);
-        assert!(frame.iter().any(|line| line.contains("Projects")));
+        assert!(
+            frame
+                .iter()
+                .any(|line| line.contains("Find project or session"))
+        );
+        assert!(
+            frame
+                .iter()
+                .any(|line| line.contains("session") && line.contains("beta / review"))
+        );
         deck.open_add(std::slice::from_ref(&alpha.workspace));
         let add = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
         assert!(add.iter().any(|line| line.contains("Ctrl-D close")));

@@ -128,8 +128,8 @@ Home の最上段には project tab bar を常時 1 行表示する。deck が 1
 |---|---|
 | `Ctrl-O` → `+` / `+ Open` click | Add workspace overlay。登録済み workspace を filter し、`Space` で複数選択、`Enter` で末尾へ追加する。`Tab` で Directory 入力へ切り替えると、未登録の既存ディレクトリを同じ open 経路で canonicalize・登録・追加する。表示中の open workspace は `Ctrl-D` で閉じる |
 | `Ctrl-O` → `1` … `9` / tab click | 1〜9 番目またはクリックした project tab を active にする |
-| `Ctrl-O` → `0` | 全件 switcher。`↑↓` / 数字 / `Enter` で切替し、10 件目以降にも到達できる |
-| switcher の `x` | 選択 project tab を deck から detach する。workspace 登録、session、daemon terminal は削除・終了しない |
+| `Ctrl-O` → `0` | 全 project / session の fuzzy finder。名前の部分一致または文字順一致で絞り、`↑↓` / `Enter` で project または session を開く。数字は従来どおり 1〜9 番目の project へ直接切り替える |
+| finder の `Ctrl-D` | 選択 project tab を deck から detach する。session row では何も変更せず、workspace 登録、session、daemon terminal は削除・終了しない |
 
 直接の `Ctrl+1` … `Ctrl+9` / `Ctrl++` は標準 binding にしない。legacy terminal では Control と数字・記号を一意に報告できないため、
 live PTY と management surface の両方で解決できる 1 秒の `Ctrl-O` leader を使う。leader がない plain digit / `+` は従来どおり live PTY へ
@@ -139,7 +139,7 @@ Add workspace overlay を表示している間は、global `workspaces.json` を
 usagi が `usagi open`、Welcome の New、または別の `+ Open` から登録した workspace は、現在の filter・選択・Directory
 入力を維持したまま候補へ反映する。overlay が閉じている間はこの再取得を行わず、Home の frame budget にファイル IO を置かない。
 
-Add は現在の Home composition を背面に保ち、既存 tab を checked で示す。checked row の `Ctrl-D` は switcher の `x` と同じ
+Add は現在の Home composition を背面に保ち、既存 tab を checked で示す。checked row の `Ctrl-D` は finder の project row と同じ
 project close を実行し、未追加 row では何もしない。filter 入力の plain `x` は従来どおり文字として扱う。選択した全 workspace の snapshot と settings を
 現在の composition を保ったまま背景 worker で準備し、`Opening workspace N / total…` の spinner を表示する。
 `Esc` は画面上の待機を取り消し、完了済みの late result を破棄して元の workspace authority を再申告する。
@@ -499,7 +499,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 |---|---|---|
 | `Ctrl-O` `+` | OpenWorkspace | Add workspace overlay を開く |
 | `Ctrl-O` `1` … `9` | ActivateWorkspace | 対応する project tab へ切り替える |
-| `Ctrl-O` `0` | OpenWorkspaceSwitcher | 全 project tab の switcher を開く |
+| `Ctrl-O` `0` | OpenWorkspaceSwitcher | 全 project / session の fuzzy finder を開く |
 | `Ctrl-O` `Ctrl-O` | Switch | Closeup から Switch へ戻る |
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ（[指示モード](#指示モードdirector-mode)が開いている間は New） |

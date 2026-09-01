@@ -7727,6 +7727,32 @@ fn drive_workspace_controller(
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
+                OverlayIntent::Visit {
+                    path,
+                    workspace,
+                    session,
+                } => {
+                    if path == deck.active_path() {
+                        deck.close_overlay();
+                        if workspace == runtime.state().workspace() {
+                            let _ = runtime.apply_event(AppEvent::VisitSession(session));
+                        }
+                    } else if workspace_has_unsaved_surface(&runtime) {
+                        deck.set_notice("Save or cancel the current draft before switching.");
+                    } else if let Some(prepared) =
+                        prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
+                        && prepare_activation_settings(
+                            &mut workspace_config,
+                            &mut loader,
+                            deck,
+                            &root_cwd,
+                            &prepared.workspace.path,
+                        )
+                    {
+                        deck.schedule_garden_visit(prepared.workspace.path.clone(), session);
+                        return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+                    }
+                }
                 OverlayIntent::Add(paths) => {
                     if !paths.is_empty() {
                         if workspace_has_unsaved_surface(&runtime) {

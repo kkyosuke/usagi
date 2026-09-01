@@ -78,7 +78,7 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
 | `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
 | `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
-| `Ctrl-O` → `0` | 全 project tab の switcher を開く（`x` は tab の detach） |
+| `Ctrl-O` → `0` | 全 project / session の fuzzy finder を開く（`Ctrl-D` は project tab の detach） |
 | `Ctrl-O t` | workspace root の Shell drawer を開閉する |
 | `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
 | `:` | Overview のコマンドパレットを開く |
