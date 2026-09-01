@@ -5,7 +5,8 @@
 「目的を一度入力すれば、PR が Ready for review になるか、明示的な人間判断が必要になるまで、再プロンプトなしで
 進む」goal-driven UI の target design である。Config、Goal Composer、goal-bound Director admission からなる v1 は実装済みで、
 現在仕様は [TUI](../03-tui.md#goal-driven-workflow) と [daemon](../05-daemon.md#agent-admission-transaction) を正本とする。
-本書の Active work、SupervisorRun projection、task DAG、独立 PR/CI verification は後続提案であり、未実装である。
+durable SupervisorRun のcompactな Active work bannerとDirector内task progressは実装済みである。本書の複数run一覧、
+選択可能な独立Run Closeup、GoalからSupervisorRunへの昇格、独立PR/CI verificationは後続提案である。
 
 現在の usagi は session、Agent、terminal、Director、Garden、durable decision、supervisor aggregate を個別に持つ。
 本提案はそれらを置き換えず、利用者が投入した 1 つの目的を **Work Run** として束ねる。画面の主語を
@@ -359,15 +360,15 @@ Agent が次を自己申告しても、それだけでは terminal success に�
 0. **goal-bound Director v1（実装済み）**: classic-default setting、Director 内 Goal Composer、goal を含む idempotent
    `AgentGoal` admission、固定 operating contract を接続する。既存 session / decision / PR surface を利用し、Run state は作らない。
 1. **実行ループを閉じる**: Ready → dispatch → completion → next/retry → verification → terminal を daemon 内で接続し、restart を跨ぐ production E2E を追加する。
-2. **read-only Run projection**: Home の `Active work` と Run Closeup を追加し、既存 supervisor run を観測できるようにする。操作は cancel と drill-down だけから始める。
+2. **read-only Run projection（一部実装済み）**: Home のcompact `Active work` bannerとDirector内task progressで既存 supervisor runを観測する。複数run一覧、選択可能な独立Run Closeup、cancel/drill-downは後続とする。
 3. **Goal を SupervisorRun へ昇格する**: v1 の Goal submit を idempotent supervisor start、visible defaults、Run-scoped team/policy snapshot へ接続し、root Agent conversation は Discuss detail にする。
 4. **判断と停止理由**: user decision と escalation を共通 component へ投影し、typed reason と許可 action を接続する。
 5. **PR completion**: canonical PR、CI、Draft/Ready を independent verifier と Completed 画面へ接続する。
 6. **復元と polish**: reopen、複数 Run、narrow terminal、keyboard/mouse、screen graph、Garden/PR への遷移を固定する。
 
-各段階は、未接続の action を表示しない。特に手順 1 が完了する前に SupervisorRun を作る Goal Composer や
-authoritative progress / Completed を表示して、進まない Run を動いているように見せない。v1 の Composer は既存
-daemon-owned root Agent を起動する面であり、Run/task progress を表示しない。
+各段階は、未接続の action を表示しない。Goal Composer は既存daemon-owned root Agentを起動する面のままで、
+それ自体をSupervisorRunとして表示しない。authoritative progressはdaemonに実在しworkspace ownershipを持つ
+SupervisorRunだけを対象にする。
 
 ## 受け入れ条件
 

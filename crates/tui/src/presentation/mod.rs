@@ -1241,6 +1241,8 @@ pub struct ControllerBackendComposition {
     /// observes the *other* open projects' Agent inventory, so it never shares
     /// a connection with this workspace's own lanes.
     pub garden_inventory: Box<dyn GardenInventoryPort>,
+    /// Dedicated read-only lane for daemon-owned `SupervisorRun` progress.
+    pub work_runs: Box<dyn WorkRunPort>,
     pub agent_tab_intents: Box<dyn AgentTabIntentPort>,
     pub external_terminal: Box<dyn ExternalTerminalPort>,
     pub metrics: Box<dyn MetricsPort>,
@@ -1269,6 +1271,31 @@ pub trait GardenInventoryPort: Send {
     /// Returns safe feedback when the daemon is unavailable or refuses the
     /// workspace. The Garden keeps the plot it has.
     fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String>;
+}
+
+/// Read-only daemon lane for one workspace's durable Work Runs.
+pub trait WorkRunPort: Send {
+    /// Return a bounded, redaction-safe snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe presentation error when the daemon cannot provide a
+    /// coherent snapshot for the requested workspace.
+    fn snapshot(
+        &mut self,
+        workspace: WorkspaceId,
+    ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>;
+}
+
+struct UnavailableWorkRunPort;
+
+impl WorkRunPort for UnavailableWorkRunPort {
+    fn snapshot(
+        &mut self,
+        _: WorkspaceId,
+    ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
+        Err("Work Run progress is unavailable".to_owned())
+    }
 }
 
 struct UnavailableGardenInventoryPort;
@@ -2025,6 +2052,47 @@ struct GardenObservationCompletion {
     inventories: Vec<AgentWorkspaceObservation>,
 }
 
+const WORK_RUN_OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2_000);
+const WORK_RUN_OBSERVATION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5_000);
+
+struct WorkRunObservationCompletion {
+    port: Box<dyn WorkRunPort>,
+    snapshot: Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct WorkRunObservation {
+    in_flight: bool,
+    next_due: std::time::Duration,
+}
+
+impl WorkRunObservation {
+    const fn new() -> Self {
+        Self {
+            in_flight: false,
+            next_due: std::time::Duration::ZERO,
+        }
+    }
+
+    fn begin_if_due(&mut self, now: std::time::Duration) -> bool {
+        if self.in_flight || now < self.next_due {
+            return false;
+        }
+        self.in_flight = true;
+        true
+    }
+
+    fn complete(&mut self, now: std::time::Duration, observed: bool) {
+        self.in_flight = false;
+        self.next_due = now
+            + if observed {
+                WORK_RUN_OBSERVATION_INTERVAL
+            } else {
+                WORK_RUN_OBSERVATION_BACKOFF
+            };
+    }
+}
+
 /// Admission for the Garden's cross-project observation lane.
 ///
 /// The lane exists only while the Garden is on screen: nothing else in Home
@@ -2096,6 +2164,21 @@ fn spawn_garden_observation_job(
             }
         }
         let _ = sender.send(GardenObservationCompletion { port, inventories });
+    });
+}
+
+fn spawn_work_run_observation_job(
+    mut port: Box<dyn WorkRunPort>,
+    workspace: WorkspaceId,
+    sender: Sender<WorkRunObservationCompletion>,
+) {
+    std::thread::spawn(move || {
+        let snapshot = port.snapshot(workspace).and_then(|snapshot| {
+            (snapshot.workspace_id == workspace)
+                .then_some(snapshot)
+                .ok_or_else(|| "daemon returned another workspace's Work Runs".to_owned())
+        });
+        let _ = sender.send(WorkRunObservationCompletion { port, snapshot });
     });
 }
 
@@ -4674,6 +4757,7 @@ fn director_drawer_projection(
         interrupted_detail,
         feedback,
         new: director_new_projection(runtime),
+        work_runs: Vec::new(),
     }
 }
 
@@ -5910,6 +5994,7 @@ struct FrameMaterialKey {
     /// The other projects' rabbits are draw material this loop owns, so their
     /// change has to reach the key that admits a rebuild.
     garden_observations: u64,
+    work_run_revision: u64,
     now: DateTime<Utc>,
 }
 
@@ -5928,6 +6013,7 @@ impl FrameMaterialKey {
             && self.animation == other.animation
             && self.create_pending == other.create_pending
             && self.garden_observations == other.garden_observations
+            && self.work_run_revision == other.work_run_revision
             && self.now == other.now
     }
 }
@@ -5935,6 +6021,14 @@ impl FrameMaterialKey {
 impl HomeFrameMaterial {
     fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
         self.projection = self.projection.with_agent_inventory(inventory);
+        self
+    }
+
+    fn with_work_runs(
+        mut self,
+        runs: &[usagi_core::domain::supervisor::SupervisorRunQuery],
+    ) -> Self {
+        self.projection = self.projection.with_work_runs(runs.to_vec());
         self
     }
 
@@ -7073,6 +7167,7 @@ fn drive_workspace_controller(
     // Cross-project Garden observation. Its dedicated port is parked here while
     // no round is in flight, exactly like the restore lane's.
     let mut garden_inventory = Some(composition.garden_inventory);
+    let mut work_run_port = Some(composition.work_runs);
     // Resident session-inventory lane. The frame loop only wakes and drains it;
     // the observation itself never runs here (#551).
     let mut session_refresh = composition.session_refresh;
@@ -7084,6 +7179,7 @@ fn drive_workspace_controller(
     let mut pending_session_refresh: Option<Completions> = None;
     let (restore_sender, restore_completions) = mpsc::channel();
     let (garden_sender, garden_completions) = mpsc::channel::<GardenObservationCompletion>();
+    let (work_run_sender, work_run_completions) = mpsc::channel::<WorkRunObservationCompletion>();
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     workspace.set_session_lifecycles(session_lifecycles);
@@ -7166,6 +7262,9 @@ fn drive_workspace_controller(
     let mut registry_refresh_due = std::time::Duration::ZERO;
     let mut garden_observation = GardenObservation::new();
     let mut garden_observations = 0_u64;
+    let mut work_run_observation = WorkRunObservation::new();
+    let mut work_runs = Vec::new();
+    let mut work_run_revision = 0_u64;
     // Filesystem hint for the inline create form. It is off the frame budget:
     // no scan happens while the form is closed (#554).
     let mut worktree_hint = SessionWorktreeHint::new(composition.session_worktrees);
@@ -7324,6 +7423,17 @@ fn drive_workspace_controller(
             garden_inventory = Some(completion.port);
             garden_observation.complete(restore_clock.elapsed(), observed);
         }
+        for completion in work_run_completions.try_iter().take(FRAME_EVENT_BUDGET) {
+            let observed = completion.snapshot.is_ok();
+            if let Ok(snapshot) = completion.snapshot
+                && snapshot.runs != work_runs
+            {
+                work_runs = snapshot.runs;
+                work_run_revision = work_run_revision.wrapping_add(1);
+            }
+            work_run_port = Some(completion.port);
+            work_run_observation.complete(restore_clock.elapsed(), observed);
+        }
         let (terminal_height, width) = term.size()?;
         let height = terminal_height.saturating_sub(PROJECT_BAR_ROWS);
         ui.set_terminal_size(height, width);
@@ -7476,10 +7586,12 @@ fn drive_workspace_controller(
             runtime.material_key(),
             ui.material_revision,
             director_terminal_generation,
+            work_run_revision,
         );
         if director_material_key != Some(next_director_key) {
             let drawer_projection =
-                director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref());
+                director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref())
+                    .with_work_runs(work_runs.clone());
             runtime.set_director_projection(drawer_projection);
             director_material_key = Some(next_director_key);
         }
@@ -7547,6 +7659,7 @@ fn drive_workspace_controller(
                 .as_ref()
                 .map(|create| create.name.clone()),
             garden_observations,
+            work_run_revision,
             now,
         };
         if frame_source_key.as_ref() != Some(&next_source_key) {
@@ -7571,6 +7684,7 @@ fn drive_workspace_controller(
                 now,
             )
             .with_agent_inventory(ui.agent_inventory())
+            .with_work_runs(&work_runs)
             .with_workspace_deck_garden(deck)
             .with_garden_animation(animation, garden_reduced_motion);
             let mut next_frame_key = next_source_key.clone();
@@ -7613,6 +7727,12 @@ fn drive_workspace_controller(
                     .expect("the Garden observation port was checked above");
                 spawn_garden_observation_job(port, targets, garden_sender.clone());
             }
+        }
+        if work_run_port.is_some() && work_run_observation.begin_if_due(restore_clock.elapsed()) {
+            let port = work_run_port
+                .take()
+                .expect("the Work Run observation port was checked above");
+            spawn_work_run_observation_job(port, workspace_id, work_run_sender.clone());
         }
         if restore_commands.is_some() && restore_retry.begin_if_due(restore_clock.elapsed()) {
             let port = restore_commands
@@ -8456,6 +8576,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
                 .unwrap_or_else(|| Box::new(UnavailableAgentCommandPort)),
             restore_connection: Box::new(UnavailableRestoreConnectionPort),
             garden_inventory: Box::new(UnavailableGardenInventoryPort),
+            work_runs: Box::new(UnavailableWorkRunPort),
             agent_tab_intents: Box::new(UnavailableAgentTabIntentPort),
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics: self
@@ -8856,6 +8977,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
             ),
             restore_connection: Box::new(UnavailableRestoreConnectionPort),
             garden_inventory: Box::new(UnavailableGardenInventoryPort),
+            work_runs: Box::new(UnavailableWorkRunPort),
             agent_tab_intents: Box::new(UnavailableAgentTabIntentPort),
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics,
@@ -20001,6 +20123,21 @@ mod tests {
         assert!(lane.begin_if_due(true, now));
     }
 
+    #[test]
+    fn work_run_observation_is_single_flight_and_bounded() {
+        let mut lane = super::WorkRunObservation::new();
+        let now = std::time::Duration::from_secs(1);
+        assert!(lane.begin_if_due(now));
+        assert!(!lane.begin_if_due(now));
+        lane.complete(now, true);
+        assert!(!lane.begin_if_due(now + super::WORK_RUN_OBSERVATION_INTERVAL / 2));
+        let next = now + super::WORK_RUN_OBSERVATION_INTERVAL;
+        assert!(lane.begin_if_due(next));
+        lane.complete(next, false);
+        assert!(!lane.begin_if_due(next + super::WORK_RUN_OBSERVATION_BACKOFF / 2));
+        assert!(lane.begin_if_due(next + super::WORK_RUN_OBSERVATION_BACKOFF));
+    }
+
     /// One round asks each *other* open project for its own inventory. An
     /// answer that names a different workspace is dropped rather than drawn in
     /// the plot that was asked about, and the port comes back either way.
@@ -28469,6 +28606,7 @@ mod tests {
                 // Owned by the loop unless a Garden round is in flight, which
                 // needs the screen saver to be up: these entries never open it.
                 garden_inventory: Box::new(self.port()),
+                work_runs: Box::new(super::UnavailableWorkRunPort),
                 agent_tab_intents: Box::new(self.port()),
                 external_terminal: Box::new(self.port()),
                 metrics: Box::new(self.port()),

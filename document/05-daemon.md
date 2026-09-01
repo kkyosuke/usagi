@@ -1653,6 +1653,11 @@ foreign scope、credential の欠落・偽造・失効は effect-zero の `owner
 process-local であるため daemon restart は明示的な失効境界であり、durable run と scheduler は継続する一方、control は
 新しい credential が同じ caller scope と client incarnation の組を証明するまで fail-closed になる。
 
+新規 run は上記caller ownershipとは別に、admission時にdaemonが検証した `WorkspaceId` をsnapshotへ保存する。
+local TUIの `supervisor_snapshot` はこの値がconnection workspaceと一致するrunだけを返す。workspace fieldを持たない
+旧snapshotは推測で補完せず非表示にする。TUI projectionは最大16件、512 KiB以下に制限し、観測がscheduler tickや
+control authorityを発生させることはない。
+
 tick は dispatch run ID と supervisor provenance を照合して terminal fact を reducer event として保存する。
 child terminal 後に parent が `Running` なら `AwaitingDecision` に遷移し、parent provenance と child run、
 safe completion summary、DAG state、decision generation を含む wake reservation を durable に保存してから

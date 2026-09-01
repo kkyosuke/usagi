@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use uuid::Uuid;
 
-use crate::domain::id::{AgentRuntimeId, OperationId, SessionId, WorktreeId};
+use crate::domain::id::{AgentRuntimeId, OperationId, SessionId, WorkspaceId, WorktreeId};
 
 /// A `UUIDv7` identity for one never-reused supervisor run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -301,6 +301,11 @@ pub struct SupervisorEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorRun {
     pub supervisor_run_id: SupervisorRunId,
+    /// Workspace that owns this run. Legacy snapshots created before the TUI
+    /// projection was introduced have no value and remain invisible to a
+    /// workspace-scoped observer rather than being guessed into one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<WorkspaceId>,
     pub root_caller_ref: String,
     pub root_task_digest: String,
     pub root_input_digest: String,
@@ -370,6 +375,7 @@ impl SupervisorRun {
     ) -> Self {
         Self {
             supervisor_run_id,
+            workspace_id: None,
             root_caller_ref,
             root_task_digest,
             root_input_digest,
@@ -472,7 +478,7 @@ impl SupervisorRun {
 }
 
 /// Query view that excludes task instructions and runtime command lines.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorRunQuery {
     pub supervisor_run_id: SupervisorRunId,
     pub state_revision: u64,
@@ -484,7 +490,16 @@ pub struct SupervisorRunQuery {
     pub tasks: Vec<TaskQuery>,
     pub provenance: Vec<RunProvenance>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+
+/// Bounded, redaction-safe workspace projection consumed by the local TUI.
+/// Workspace ownership is resolved by the daemon connection; callers cannot
+/// use this value to widen their scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorWorkspaceSnapshot {
+    pub workspace_id: WorkspaceId,
+    pub runs: Vec<SupervisorRunQuery>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskQuery {
     pub task_id: TaskId,
     pub parent_task_id: Option<TaskId>,
@@ -2047,5 +2062,20 @@ mod tests {
             run.event_id_status(OperationId::new()),
             AppliedEventStatus::Expired
         );
+    }
+
+    #[test]
+    fn legacy_run_without_workspace_stays_unscoped() {
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let mut value = serde_json::to_value(run).unwrap();
+        value.as_object_mut().unwrap().remove("workspace_id");
+        let decoded: SupervisorRun = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.workspace_id, None);
     }
 }

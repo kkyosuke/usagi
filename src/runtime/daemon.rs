@@ -5310,6 +5310,7 @@ fn start_ipc_accept_loop(
                                             let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                         },
+                                        Some("supervisor_snapshot") => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
                                         Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                         }
@@ -6045,7 +6046,7 @@ fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::i
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn dispatch_supervisor_tool(
     runtime: &SharedSupervisorRuntime,
-    caller: Result<String, usagi_core::infrastructure::ipc::ProtocolError>,
+    caller: Result<(String, WorkspaceId), usagi_core::infrastructure::ipc::ProtocolError>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -6117,7 +6118,7 @@ fn dispatch_supervisor_tool(
             ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
         })
         .and_then(|runtime| {
-            let caller = caller?;
+            let (caller, workspace) = caller?;
             match action {
                 SupervisorToolAction::Start => {
                     let input: StartPayload = serde_json::from_value(payload).map_err(|_| {
@@ -6127,8 +6128,9 @@ fn dispatch_supervisor_tool(
                         )
                     })?;
                     let started = runtime
-                        .start(
+                        .start_for_workspace(
                             &caller,
+                            workspace,
                             &operation_id,
                             input.root_task,
                             input.initial_task_dag,
@@ -6311,13 +6313,97 @@ fn dispatch_supervisor_tool(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=supervisor_snapshot_is_exactly_workspace_scoped
+fn dispatch_supervisor_snapshot(
+    runtime: &SharedSupervisorRuntime,
+    bound: &ConnectionWorkspace,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot;
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::DaemonRequest;
+
+    let result = (|| {
+        let Ok(DaemonRequest::SupervisorSnapshot {
+            workspace: requested,
+        }) = serde_json::from_value::<DaemonRequest>(body.clone())
+        else {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid supervisor snapshot request",
+            ));
+        };
+        let workspace = bound
+            .sessions()
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .snapshot()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+            })?
+            .get("workspace_id")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+            })?;
+        if requested != workspace {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "supervisor snapshot belongs to another workspace",
+            ));
+        }
+        let mut runs = runtime
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+            })?
+            .list_workspace(workspace)
+            .map_err(supervisor_error)?;
+        // The TUI draws current state only. Event provenance has its own
+        // capability-scoped MCP surface and is omitted here to keep the
+        // periodic projection small even for long-lived runs.
+        for run in &mut runs {
+            run.provenance.clear();
+        }
+        let mut snapshot = SupervisorWorkspaceSnapshot {
+            workspace_id: workspace,
+            runs,
+        };
+        loop {
+            let value = serde_json::to_value(&snapshot).map_err(|_| {
+                ProtocolError::new(ErrorCode::Internal, "supervisor snapshot encoding failed")
+            })?;
+            match bounded_supervisor_query(value) {
+                Ok(value) => return Ok(value),
+                Err(_) if !snapshot.runs.is_empty() => {
+                    snapshot.runs.pop();
+                }
+                Err(error) => return Err(supervisor_error(error)),
+            }
+        }
+    })();
+    match result {
+        Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
 fn authenticated_supervisor_caller(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     client: &usagi_core::domain::id::ClientId,
     body: &serde_json::Value,
-) -> Result<String, usagi_core::infrastructure::ipc::ProtocolError> {
+) -> Result<(String, WorkspaceId), usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 
     let credential = serde_json::from_value::<DaemonRequest>(body.clone())
@@ -6363,7 +6449,10 @@ fn authenticated_supervisor_caller(
             "supervisor caller does not belong to this workspace",
         ));
     }
-    Ok(supervisor_caller_descriptor(client, &authenticated.caller))
+    Ok((
+        supervisor_caller_descriptor(client, &authenticated.caller),
+        workspace,
+    ))
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
@@ -22314,7 +22403,12 @@ instructions = "{instructions}"
                             "supervisor caller provenance is unknown",
                         ))
                     },
-                    |caller| Ok(supervisor_caller_descriptor(&client, caller)),
+                    |caller| {
+                        Ok((
+                            supervisor_caller_descriptor(&client, caller),
+                            WorkspaceId::new(),
+                        ))
+                    },
                 );
                 dispatch_supervisor_tool(runtime, caller, request_id, &body, server)
             },
@@ -22574,6 +22668,93 @@ instructions = "{instructions}"
             ),
         );
         assert_eq!(cancelled, ResponseOutcome::Ok);
+    }
+
+    #[test]
+    fn supervisor_snapshot_is_exactly_workspace_scoped() {
+        use chrono::Utc;
+        use usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot;
+        use usagi_core::infrastructure::ipc::{EnvelopeKind, ErrorCode, ResponseOutcome};
+        use usagi_daemon::usecase::session_runtime::SessionRuntime;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        let sessions = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                repository.clone(),
+                &temporary.path().join("session-daemon"),
+                DaemonGeneration::new(),
+                AlwaysSuccessfulGit,
+                PermissiveSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        let workspace: WorkspaceId = serde_json::from_value(
+            sessions.lock().unwrap().snapshot().unwrap()["workspace_id"].clone(),
+        )
+        .unwrap();
+        let bound = bound_to(
+            &temporary.path().join("tenants"),
+            &repository,
+            sessions,
+            workspace,
+        );
+        let runtime = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("supervisor"),
+        )));
+        let visible = runtime
+            .lock()
+            .unwrap()
+            .start_for_workspace(
+                "caller",
+                workspace,
+                "start",
+                "root".into(),
+                Vec::new(),
+                None,
+                Utc::now(),
+            )
+            .unwrap();
+        let request_id = usagi_core::infrastructure::ipc::RequestId("snapshot".into());
+        let request =
+            serde_json::to_value(DaemonRequest::SupervisorSnapshot { workspace }).unwrap();
+        let reply = dispatch_supervisor_snapshot(
+            &runtime,
+            &bound,
+            request_id.clone(),
+            &request,
+            &session_test_hello(),
+        );
+        let EnvelopeKind::Response { outcome, body, .. } = reply.kind else {
+            panic!("supervisor snapshot returned a non-response envelope");
+        };
+        assert_eq!(outcome, ResponseOutcome::Ok);
+        let snapshot: SupervisorWorkspaceSnapshot = serde_json::from_value(body).unwrap();
+        assert_eq!(snapshot.workspace_id, workspace);
+        assert_eq!(snapshot.runs.len(), 1);
+        assert_eq!(
+            snapshot.runs[0].supervisor_run_id,
+            visible.supervisor_run_id
+        );
+        assert!(snapshot.runs[0].provenance.is_empty());
+
+        let foreign = serde_json::to_value(DaemonRequest::SupervisorSnapshot {
+            workspace: WorkspaceId::new(),
+        })
+        .unwrap();
+        let rejected = dispatch_supervisor_snapshot(
+            &runtime,
+            &bound,
+            request_id,
+            &foreign,
+            &session_test_hello(),
+        );
+        let EnvelopeKind::Response { outcome, .. } = rejected.kind else {
+            panic!("supervisor snapshot returned a non-response envelope");
+        };
+        assert!(
+            matches!(outcome, ResponseOutcome::Error(error) if error.code == ErrorCode::OwnershipUnknown)
+        );
     }
 
     #[test]

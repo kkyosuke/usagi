@@ -616,6 +616,12 @@ Agent history / exit history / dismissal の allocator・retention・GC は
 provider-native identity、prompt、path は map に含めない。この request は mutation を持たないため、fresh connection で
 安全に retry できる。
 
+`supervisor_snapshot` は local TUI が接続先 workspace の durable Work Run を観測する read-only request である。
+payload の `WorkspaceId` は connection が束縛する workspace と完全一致する場合だけ受理し、foreign workspace は
+`ownership_unknown` で拒否する。response は task instruction とevent provenanceを含まない `SupervisorRunQuery` の最大16件で、
+判断待ち、失敗、実行中、計画中、終了済みの順（同順位は新しい順）に並ぶ。response が supervisor query の
+512 KiB 上限に達する場合は低順位の末尾から落とす。TUI は専用background laneから再読し、fresh connectionへのretryが安全である。
+
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで
 構成する。

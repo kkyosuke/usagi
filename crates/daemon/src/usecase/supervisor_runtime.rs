@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use usagi_core::{
     domain::{
         agent::{InboxKind, RunStatus},
-        id::OperationId,
+        id::{OperationId, WorkspaceId},
         supervisor::{
             EscalationDecision, MAX_ARTIFACT_CONTRACT_BYTES, MAX_INITIAL_TASKS,
             MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES,
@@ -320,6 +320,58 @@ impl SupervisorRuntime {
         policy_selector: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
+        self.start_scoped(
+            caller,
+            None,
+            operation_id,
+            root_task,
+            initial_tasks,
+            policy_selector,
+            now,
+        )
+    }
+
+    /// Starts a run owned by one daemon-admitted workspace. This is the
+    /// production entry point; the unscoped wrapper remains for legacy callers
+    /// and deterministic domain fixtures.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when admission input is invalid or the durable run
+    /// cannot be initialized.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_for_workspace(
+        &self,
+        caller: &str,
+        workspace: WorkspaceId,
+        operation_id: &str,
+        root_task: String,
+        initial_tasks: Vec<InitialTask>,
+        policy_selector: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
+        self.start_scoped(
+            caller,
+            Some(workspace),
+            operation_id,
+            root_task,
+            initial_tasks,
+            policy_selector,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn start_scoped(
+        &self,
+        caller: &str,
+        workspace: Option<WorkspaceId>,
+        operation_id: &str,
+        root_task: String,
+        initial_tasks: Vec<InitialTask>,
+        policy_selector: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
         validate_start_input(
             operation_id,
             &root_task,
@@ -379,6 +431,7 @@ impl SupervisorRuntime {
             policy_revision,
             now,
         );
+        run.workspace_id = workspace;
         self.supervisor.initialize(&run)?;
         let root_id = TaskId::new("root")?;
         run = self.apply(
@@ -446,6 +499,18 @@ impl SupervisorRuntime {
             },
         )?;
         Ok(run.query())
+    }
+
+    /// Lists the bounded retained runs that explicitly belong to one
+    /// workspace. Legacy unscoped snapshots are excluded fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable supervisor index or a selected run
+    /// snapshot cannot be read consistently.
+    pub fn list_workspace(&self, workspace: WorkspaceId) -> Result<Vec<SupervisorRunQuery>> {
+        const MAX_TUI_WORK_RUNS: usize = 16;
+        self.supervisor.workspace_runs(workspace, MAX_TUI_WORK_RUNS)
     }
 
     /// Reads one caller-owned durable run.
@@ -1966,5 +2031,48 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(parsed.required_artifact_contract, "none");
+    }
+
+    #[test]
+    fn workspace_listing_exposes_only_explicitly_scoped_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let first = WorkspaceId::new();
+        let second = WorkspaceId::new();
+        let visible = runtime
+            .start_for_workspace(
+                "caller-a",
+                first,
+                "scoped-a",
+                "root".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        runtime
+            .start_for_workspace(
+                "caller-b",
+                second,
+                "scoped-b",
+                "root".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        runtime
+            .start("legacy", "unscoped", "root".into(), Vec::new(), None, now())
+            .unwrap();
+
+        let listed = runtime.list_workspace(first).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].supervisor_run_id, visible.supervisor_run_id);
+        assert!(
+            runtime
+                .list_workspace(WorkspaceId::new())
+                .unwrap()
+                .is_empty()
+        );
     }
 }
