@@ -7083,7 +7083,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Key(AppKey::Paste(
-                "first\r\nsecond\t\u{2028}\u{a0}\u{1b}[2J\u{7}third\u{202e} fourth".to_owned(),
+                "first\r\nsecond\t\u{2028}\u{a0} \u{1b}[2J\u{7}third\u{202e} fourth".to_owned(),
             )),
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('\u{9b}')));
@@ -7457,6 +7457,10 @@ mod tests {
 
     #[test]
     fn goal_composer_enter_requires_its_provider_to_be_visible() {
+        assert_eq!(
+            director_goal_composer_picker_capacity(0),
+            NORMALIZED_TERMINAL_ROWS - DIRECTOR_GOAL_COMPOSER_CHROME_ROWS
+        );
         assert_eq!(director_goal_composer_picker_capacity(11), 0);
         assert_eq!(director_goal_composer_picker_capacity(12), 1);
 
