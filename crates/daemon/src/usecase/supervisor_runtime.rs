@@ -971,6 +971,9 @@ impl SupervisorRuntime {
         {
             return Ok(None);
         }
+        let task_state = task.state;
+        let generation = task.generation;
+        let contract = task.required_artifact_contract.clone();
         let dispatch = self
             .dispatch
             .run(dispatch_run_id)?
@@ -985,31 +988,22 @@ impl SupervisorRuntime {
                 SupervisorEventSource::DispatchCompletion,
                 SupervisorEventKind::Running {
                     task_id: task_id.clone(),
-                    generation: task.generation,
+                    generation,
                 },
             )?;
         }
-        let task = run
-            .tasks
-            .get(&task_id)
-            .ok_or_else(|| anyhow::anyhow!("artifact supervisor task disappeared"))?;
-        if task.state == TaskState::Running {
+        if matches!(task_state, TaskState::Dispatched | TaskState::Running) {
             run = self.apply(
                 &run,
                 now,
                 SupervisorEventSource::DispatchCompletion,
                 SupervisorEventKind::SetTaskState {
                     task_id: task_id.clone(),
-                    generation: task.generation,
+                    generation,
                     state: TaskState::Succeeded,
                 },
             )?;
-        }
-        let task = run
-            .tasks
-            .get(&task_id)
-            .ok_or_else(|| anyhow::anyhow!("artifact supervisor task disappeared"))?;
-        if task.state != TaskState::Verifying {
+        } else if task_state != TaskState::Verifying {
             return Ok(None);
         }
         let result = match self.dispatch.binding(dispatch_run_id)? {
@@ -1024,8 +1018,8 @@ impl SupervisorRuntime {
         Ok(Some(ArtifactVerificationRequest {
             supervisor_run_id: run.supervisor_run_id,
             task_id,
-            generation: task.generation,
-            contract: task.required_artifact_contract.clone(),
+            generation,
+            contract,
             result,
         }))
     }
@@ -2147,11 +2141,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(run.tasks[0].state, TaskState::Dispatched);
+        let second_operation = OperationId::new();
+        scheduler
+            .dispatch
+            .upsert_run(DispatchRun {
+                run_id: second_operation,
+                agent_id: AgentId::new(),
+                prompt: "another goal".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            })
+            .unwrap();
+        scheduler
+            .start_for_workspace_root_dispatch(
+                "another-goal",
+                workspace,
+                &second_operation.to_string(),
+                "another finish".into(),
+                None,
+                &root_worker(workspace),
+                now(),
+            )
+            .unwrap();
+        let mut expected_pending = vec![operation, second_operation];
+        expected_pending.sort_by_key(ToString::to_string);
         assert_eq!(
             scheduler.pending_artifact_verifications().unwrap(),
-            vec![PendingArtifactVerification {
-                dispatch_run_id: operation
-            }]
+            expected_pending
+                .into_iter()
+                .map(|dispatch_run_id| PendingArtifactVerification { dispatch_run_id })
+                .collect::<Vec<_>>()
         );
 
         let request = scheduler
@@ -2252,6 +2272,23 @@ mod tests {
                 .to_string()
                 .contains("fence is stale")
         );
+
+        let mut duplicate = unexpectedly_running;
+        duplicate.supervisor_run_id = SupervisorRunId::new();
+        for task in duplicate.tasks.values_mut() {
+            task.supervisor_run_id = duplicate.supervisor_run_id;
+        }
+        for provenance in duplicate.provenance.values_mut() {
+            provenance.supervisor_run_id = duplicate.supervisor_run_id;
+        }
+        scheduler.supervisor.initialize(&duplicate).unwrap();
+        assert!(
+            scheduler
+                .prepare_artifact_verification(operation, now())
+                .unwrap_err()
+                .to_string()
+                .contains("multiple supervisor runs")
+        );
     }
 
     #[test]
@@ -2282,6 +2319,41 @@ mod tests {
                 &root_worker(workspace),
                 now(),
             )
+            .unwrap();
+        assert!(
+            scheduler
+                .prepare_artifact_verification(operation, now())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scheduler
+                .pending_artifact_verifications()
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut unsupported_state = scheduler
+            .supervisor
+            .load(started.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        unsupported_state
+            .tasks
+            .get_mut(&TaskId::new("root").unwrap())
+            .unwrap()
+            .state = TaskState::AwaitingDecision;
+        scheduler.supervisor.initialize(&unsupported_state).unwrap();
+        scheduler
+            .dispatch
+            .upsert_run(DispatchRun {
+                run_id: operation,
+                agent_id: AgentId::new(),
+                prompt: "goal".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            })
             .unwrap();
         assert!(
             scheduler
@@ -2327,11 +2399,12 @@ mod tests {
 
         let missing_dispatch = OperationId::new();
         let mut corrupt = wrong_contract;
-        corrupt
+        let corrupt_root = corrupt
             .tasks
             .get_mut(&TaskId::new("root").unwrap())
-            .unwrap()
-            .required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT.into();
+            .unwrap();
+        corrupt_root.required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT.into();
+        corrupt_root.state = TaskState::Dispatched;
         corrupt
             .provenance
             .get_mut(&TaskId::new("root").unwrap())
@@ -2682,6 +2755,12 @@ mod tests {
                 now(),
             )
             .unwrap();
+        assert!(
+            scheduler
+                .pending_artifact_verifications()
+                .unwrap()
+                .is_empty()
+        );
         let mut state = scheduler.load_state().unwrap();
         state.starts.insert(
             OperationId::new().to_string(),
@@ -2721,6 +2800,7 @@ mod tests {
             failed
         );
         assert!(scheduler.pending_goal_promotions().unwrap().is_empty());
+        assert!(scheduler.pending_delegated_promotions().unwrap().is_empty());
         assert_eq!(
             scheduler
                 .get("goal", goal.supervisor_run_id)
@@ -2932,6 +3012,19 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             attached
+        );
+        assert!(
+            scheduler
+                .attach_delegated_dispatch(
+                    root_operation,
+                    &child_operation.to_string(),
+                    "child work".into(),
+                    &delegated_worker(workspace),
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("provenance conflicts")
         );
 
         // A user-defined task whose ID happens to look similar is not a
@@ -3326,6 +3419,207 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             failed
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Each injected commit point proves that a reservation never reports an uncommitted transition.
+    fn goal_and_delegated_reservation_commit_failures_are_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let goal_operation = OperationId::new();
+        let goal = scheduler
+            .reserve_goal_for_workspace(
+                "goal",
+                workspace,
+                &goal_operation.to_string(),
+                "goal".into(),
+                None,
+                now(),
+            )
+            .unwrap();
+        scheduler.fail_apply_at(scheduler.apply_calls.get());
+        assert!(
+            scheduler
+                .fail_reserved_goal(&goal_operation.to_string(), "failed".into(), now())
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        let mut missing_root = scheduler
+            .supervisor
+            .load(goal.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        missing_root.tasks.clear();
+        scheduler.supervisor.initialize(&missing_root).unwrap();
+        assert!(
+            scheduler
+                .fail_reserved_goal(&goal_operation.to_string(), "failed".into(), now())
+                .unwrap_err()
+                .to_string()
+                .contains("root task is missing")
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let dispatch = DispatchStore::new(temp.path());
+        let root_operation = OperationId::new();
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: root_operation,
+                agent_id: AgentId::new(),
+                prompt: "root".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let root = scheduler
+            .start_for_workspace_root_dispatch(
+                "goal",
+                workspace,
+                &root_operation.to_string(),
+                "root".into(),
+                None,
+                &root_worker(workspace),
+                now(),
+            )
+            .unwrap();
+        let child_operation = OperationId::new();
+        scheduler.fail_apply_at(scheduler.apply_calls.get());
+        assert!(
+            scheduler
+                .reserve_delegated_dispatch(
+                    root_operation,
+                    &child_operation.to_string(),
+                    "child".into(),
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        scheduler
+            .reserve_delegated_dispatch(
+                root_operation,
+                &child_operation.to_string(),
+                "child".into(),
+                now(),
+            )
+            .unwrap();
+        scheduler.fail_apply_at(scheduler.apply_calls.get());
+        assert!(
+            scheduler
+                .fail_reserved_delegated_dispatch(&child_operation.to_string(), now())
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: child_operation,
+                agent_id: AgentId::new(),
+                prompt: "child".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        scheduler
+            .tick(root.supervisor_run_id, now(), &mut Waker::default())
+            .unwrap();
+        scheduler.fail_apply_at(scheduler.apply_calls.get());
+        assert!(
+            scheduler
+                .bind_reserved_delegated_dispatch(
+                    &child_operation.to_string(),
+                    &delegated_worker(workspace),
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        scheduler.fail_apply_at(scheduler.apply_calls.get() + 1);
+        assert!(
+            scheduler
+                .bind_reserved_delegated_dispatch(
+                    &child_operation.to_string(),
+                    &delegated_worker(workspace),
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+    }
+
+    #[test]
+    fn artifact_transition_commit_failures_remain_retryable() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        scheduler
+            .dispatch
+            .upsert_run(DispatchRun {
+                run_id: operation,
+                agent_id: AgentId::new(),
+                prompt: "goal".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            })
+            .unwrap();
+        scheduler
+            .start_for_workspace_root_dispatch(
+                "goal",
+                workspace,
+                &operation.to_string(),
+                "finish".into(),
+                None,
+                &root_worker(workspace),
+                now(),
+            )
+            .unwrap();
+
+        scheduler.fail_apply_at(scheduler.apply_calls.get());
+        assert!(
+            scheduler
+                .prepare_artifact_verification(operation, now())
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        scheduler.fail_apply_at(scheduler.apply_calls.get() + 1);
+        assert!(
+            scheduler
+                .prepare_artifact_verification(operation, now())
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        let request = scheduler
+            .prepare_artifact_verification(operation, now())
+            .unwrap()
+            .unwrap();
+        scheduler.fail_apply_at(scheduler.apply_calls.get());
+        assert!(
+            scheduler
+                .record_artifact_verification(
+                    &request,
+                    ArtifactVerification {
+                        passed: true,
+                        result_digest: "verified".into(),
+                        safe_summary: "verified".into(),
+                    },
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
         );
     }
 
