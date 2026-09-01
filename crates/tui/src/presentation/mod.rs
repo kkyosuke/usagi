@@ -4702,12 +4702,14 @@ fn controller_terminal_view(
     let selection = controls.selection_for(buffer);
     let (buffer, row_origin, total_rows) = ui.terminal_row_extent(&terminal, selection)?;
     let range = controls.visible_range(buffer, row_origin, total_rows, viewport_rows);
-    let rows = ui.terminal_row_window(
-        &terminal,
-        range.start,
-        range.end,
-        controls.selection_for(buffer),
-    )?;
+    let rows = ui
+        .terminal_row_window(
+            &terminal,
+            range.start,
+            range.end,
+            controls.selection_for(buffer),
+        )
+        .expect("terminal extent guarantees the same attached row window");
     let mut projection = controls.project_window(rows, range.start, total_rows);
     if let Some(error) = ui.terminal_error(&terminal) {
         projection.feedback = Some(error.to_owned());

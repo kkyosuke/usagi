@@ -387,6 +387,12 @@ mod tests {
         assert_eq!(selection.visual_tail(), None);
         assert_eq!(selection.visual_columns_at(0), None);
         assert!(!selection.invalidate_visual_rows());
+        assert!(!selection.apply_retained_row_motion(RetainedRowMotion::Up {
+            buffer: ActiveBuffer::Primary,
+            top: 0,
+            bottom: 0,
+            count: 0,
+        }));
     }
 
     #[derive(Default)]

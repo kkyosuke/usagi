@@ -968,6 +968,41 @@ mod tests {
     }
 
     #[test]
+    fn agent_row_motion_also_follows_a_pointer_press_before_it_becomes_a_drag() {
+        let mut controls = LiveTerminalControls::default();
+        let terminal = terminal();
+        controls.sync_focus(Some(&terminal));
+        let _ = controls.visible_range(TerminalBuffer::Alternate, 0, 4, 4);
+        controls.press_pointer(TerminalSelection::begin(
+            vec![
+                "header".into(),
+                "one".into(),
+                "two".into(),
+                "composer".into(),
+            ],
+            TerminalPoint { row: 2, column: 0 },
+        ));
+        let before = controls.revision();
+
+        controls.apply_retained_row_motions(
+            &terminal,
+            &[RetainedRowMotion::Up {
+                buffer: ActiveBuffer::Alternate,
+                top: 1,
+                bottom: 2,
+                count: 1,
+            }],
+        );
+
+        assert!(controls.revision() > before);
+        assert!(controls.drag_pointer(TerminalPoint { row: 1, column: 2 }));
+        assert_eq!(
+            controls.release_pointer(),
+            PointerRelease::Copy("two".into())
+        );
+    }
+
+    #[test]
     fn pointer_gesture_distinguishes_click_from_drag_before_selecting() {
         let viewport = vec!["hello".to_owned()];
         let anchor = TerminalPoint { row: 0, column: 0 };
