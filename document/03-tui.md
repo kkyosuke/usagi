@@ -649,8 +649,9 @@ Director drawer は同じ redaction-safe snapshot から progress bar、最大5�
 専用 background lane で更新する。観測失敗時は既存 snapshot を維持して5秒 backoffし、frame thread からIPCを行わない。
 workspace 所有情報を持たない旧 run は別 workspace へ推測せず表示しない。
 
-この表示は `supervisor_start` で作られた run の観測面であり、goal-driven `AgentGoal` launch 自体を暗黙に
-`SupervisorRun` へ昇格しない。進行中の worker は Organization / Session / Garden、明示判断は既存 decision notice/modal、
+この表示は workspace に属する `SupervisorRun` の観測面である。goal-driven `AgentGoal` launch は同じ operation ID で
+idempotent な run start へ接続され、応答再送でも同じ root Agent と Run へ収束する。Agent admission が失敗した場合は先に予約した
+Run を `Cancelled` へ補償し、実行中として残さない。進行中の worker は Organization / Session / Garden、明示判断は既存 decision notice/modal、
 PR は既存 PR inventory/modal、launch failure と Agent 停止理由は root pane の safe feedback と terminal output でも確認する。
 複数 run を選択する完全な Active work list、独立 PR/CI verifier、typed Stop reason action は
 [goal-driven Work Run 提案](proposals/18-goal-driven-work-run.md) の後続段階である。
