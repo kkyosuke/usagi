@@ -712,6 +712,59 @@ mod tests {
     }
 
     #[test]
+    fn goal_driven_empty_and_launching_states_render_their_distinct_guidance() {
+        let composer = DirectorDrawerProjection {
+            goal_driven: true,
+            new: DirectorNewProjection::GoalComposer {
+                candidates: vec!["claude".into()],
+                selected: 0,
+                goal: String::new(),
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(52, 12, &composer)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>();
+        assert!(body.iter().any(|row| row.contains("Type a goal")));
+
+        let launching = DirectorDrawerProjection {
+            goal_driven: true,
+            new: DirectorNewProjection::Launching,
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(52, 8, &launching)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>();
+        assert!(
+            body.iter()
+                .any(|row| row.contains("Waiting for the daemon to start the Work Run."))
+        );
+    }
+
+    #[test]
+    fn zero_width_goal_composer_keeps_its_row_contract() {
+        let projection = DirectorDrawerProjection {
+            goal_driven: true,
+            new: DirectorNewProjection::GoalComposer {
+                candidates: vec!["claude".into()],
+                selected: 0,
+                goal: String::new(),
+            },
+            ..DirectorDrawerProjection::default()
+        };
+
+        let body = drawer_body(0, 7, &projection);
+        assert_eq!(body.len(), 7);
+        assert!(body.iter().all(|row| display_width(row) == 0));
+
+        let compact = drawer_body(8, 3, &projection);
+        assert_eq!(compact.len(), 3);
+        assert!(compact.iter().all(|row| display_width(row) <= 8));
+    }
+
+    #[test]
     fn populated_projection_renders_selected_conversation_and_terminal_rows() {
         let projection = DirectorDrawerProjection {
             goal_driven: false,

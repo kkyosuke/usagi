@@ -7377,6 +7377,41 @@ mod tests {
     }
 
     #[test]
+    fn goal_readiness_defaults_profile_and_rejects_semantic_conflict() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let operation = OperationId::new().to_string();
+        let mut intent = AgentGoalIntent {
+            workspace: WorkspaceId::new(),
+            profile: None,
+            goal: "use the default profile".into(),
+        };
+        let readiness = runtime
+            .prepare_goal_launch_readiness(&operation, &intent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(readiness.product(), "claude");
+        runtime
+            .launch_goal_after_readiness(
+                &operation,
+                &intent,
+                &FakeScope(Ok(scope())),
+                Some(&readiness),
+            )
+            .unwrap();
+
+        intent.goal = "a different goal".into();
+        assert_eq!(
+            runtime
+                .prepare_goal_launch_readiness(&operation, &intent)
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+    }
+
+    #[test]
     fn root_prompt_selects_the_agent_in_its_exact_workspace() {
         let mut runtime = runtime();
         let first = root_intent(None);
