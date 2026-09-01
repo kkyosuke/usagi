@@ -841,7 +841,15 @@ mod tests {
                 action: LiveTerminalAction::Switch,
             },
             Case {
+                follow_up: key(KeyCode::Char('o')),
+                action: LiveTerminalAction::Switch,
+            },
+            Case {
                 follow_up: ctrl('a'),
+                action: LiveTerminalAction::OpenCloseupModal,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('a')),
                 action: LiveTerminalAction::OpenCloseupModal,
             },
             Case {
