@@ -2149,53 +2149,22 @@ pub fn render_home_at(
     let mut frame = Vec::with_capacity(height);
     frame.push(home_header_line(width, home));
     frame.push(home_notice_banner(width, home));
-    if let Some(drawer) = &home.director_drawer {
-        // Director owns the right side. Give the concurrently visible managed
-        // terminal the complete band to its left instead of retaining Home's
-        // sidebar split and wrapping output underneath the drawer.
-        let director_geometry = director_drawer::geometry(height, width);
-        let terminal_width = director_geometry.left;
-        let root_terminal_width = if director_geometry.full_width {
+    let director_geometry = home
+        .director_drawer
+        .as_ref()
+        .map(|_| director_drawer::geometry(height, width));
+    let root_terminal_width = director_geometry.map_or(width, |geometry| {
+        if geometry.full_width {
             width
         } else {
-            terminal_width
-        };
-        let body_height = home
-            .root_terminal_drawer
-            .as_ref()
-            .map_or(full_body_height, |_| {
-                root_terminal_drawer::geometry_for(height, width, root_terminal_width)
-                    .top
-                    .saturating_sub(CHROME_ROWS)
-            });
-        let right =
-            dim_inactive_right_pane(true, home_right_pane(body_height, terminal_width, home));
-        frame.extend(right.into_iter().map(|line| {
-            let prefix = widgets::modal::columns(&line, 0, terminal_width);
-            format!(
-                "{prefix}{}",
-                " ".repeat(width.saturating_sub(terminal_width))
-            )
-        }));
-        frame.truncate(height);
-        frame.resize_with(height, || " ".repeat(width));
-        let mut frame = director_drawer::render_over(height, width, &frame, drawer);
-        if let Some(terminal) = &home.root_terminal_drawer {
-            frame = root_terminal_drawer::render_over_for(
-                height,
-                width,
-                root_terminal_width,
-                &frame,
-                terminal,
-            );
+            geometry.left
         }
-        return render_home_modals(height, width, home, frame, now);
-    }
+    });
     let body_height = home
         .root_terminal_drawer
         .as_ref()
         .map_or(full_body_height, |_| {
-            root_terminal_drawer::geometry(height, width)
+            root_terminal_drawer::geometry_for(height, width, root_terminal_width)
                 .top
                 .saturating_sub(CHROME_ROWS)
         });
@@ -2212,11 +2181,18 @@ pub fn render_home_at(
     ));
     frame.truncate(height);
     frame.resize_with(height, || " ".repeat(width));
-    let frame = if let Some(drawer) = &home.root_terminal_drawer {
-        root_terminal_drawer::render_over(height, width, &frame, drawer)
-    } else {
-        frame
-    };
+    if let Some(drawer) = &home.director_drawer {
+        frame = director_drawer::render_over(height, width, &frame, drawer);
+    }
+    if let Some(drawer) = &home.root_terminal_drawer {
+        frame = root_terminal_drawer::render_over_for(
+            height,
+            width,
+            root_terminal_width,
+            &frame,
+            drawer,
+        );
+    }
     render_home_modals(height, width, home, frame, now)
 }
 
@@ -3165,7 +3141,7 @@ mod tests {
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
-        DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
+        self, DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
     };
     use crate::presentation::views::root_terminal_drawer::{
         ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
@@ -4379,11 +4355,25 @@ mod tests {
                 terminal,
             },
         );
+        let sessions = [projected_session(
+            session,
+            "selected-session",
+            "/work/session",
+        )];
+        let mut concurrent_state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut concurrent_state,
+            AppEvent::Key(AppKey::ToggleRootTerminalDrawer),
+        );
+        let _ = update(
+            &mut concurrent_state,
+            AppEvent::Key(AppKey::ToggleDirectorDrawer),
+        );
         let concurrent =
-            HomeProjection::from_state(&terminal_state, "atlas", Path::new("/work"), &[])
+            HomeProjection::from_state(&concurrent_state, "atlas", Path::new("/work"), &sessions)
                 .with_pane(&pane)
                 .with_terminal_view(Some(TerminalViewProjection {
-                    rows: vec!["selected session agent output".to_owned()],
+                    rows: vec!["session output".to_owned()],
                     row_offset: 0,
                     total_rows: 1,
                     scroll: 0,
@@ -4394,11 +4384,42 @@ mod tests {
         let concurrent_text = render_home(30, 160, &concurrent).join("\n");
         assert!(concurrent_text.contains("director agent output"));
         assert!(concurrent_text.contains("workspace shell output"));
-        assert!(concurrent_text.contains("selected session agent output"));
+        assert!(concurrent_text.contains("session output"));
 
         let narrow_text = render_home(30, 79, &concurrent).join("\n");
         assert!(narrow_text.contains("director agent output"));
         assert!(narrow_text.contains("workspace shell output"));
+    }
+
+    #[test]
+    fn director_drawer_preserves_the_normal_home_background() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let sessions = [projected_session(
+            session,
+            "visible-session",
+            "/work/session",
+        )];
+        let closed_state = AppState::home(workspace, vec![session]);
+        let closed =
+            HomeProjection::from_state(&closed_state, "atlas", Path::new("/work"), &sessions);
+
+        let mut open_state = closed_state;
+        let _ = update(&mut open_state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        let open = HomeProjection::from_state(&open_state, "atlas", Path::new("/work"), &sessions)
+            .with_director_drawer(DirectorDrawerProjection::default());
+
+        let width = 100;
+        let closed_frame = render_home(20, width, &closed);
+        let open_frame = render_home(20, width, &open);
+        let background_width = director_drawer::geometry(20, width).left;
+        for (closed_row, open_row) in closed_frame.iter().zip(&open_frame) {
+            assert_eq!(
+                strip(&modal::columns(open_row, 0, background_width)),
+                strip(&modal::columns(closed_row, 0, background_width)),
+            );
+        }
+        assert!(strip(&open_frame.join("\n")).contains("+ new session"));
     }
 
     #[test]
