@@ -1059,6 +1059,9 @@ pub struct AppState {
     /// independent from Director and preserves the managed Home state beneath
     /// both drawers.
     root_terminal_drawer_open: bool,
+    /// Whether the open workspace terminal keeps the same drawer UI but uses
+    /// the full available screen height.
+    root_terminal_full_height: bool,
     /// The open drawer that owns root-pane input. `None` iff both drawers are
     /// closed; the reducer keeps this invariant through every transition.
     workspace_drawer_focus: Option<WorkspaceDrawerFocus>,
@@ -1237,6 +1240,7 @@ impl AppState {
             overlay: None,
             director_drawer_open: false,
             root_terminal_drawer_open: false,
+            root_terminal_full_height: false,
             workspace_drawer_focus: None,
             director_new: DirectorNew::Idle,
             director_goal: String::new(),
@@ -1307,6 +1311,11 @@ impl AppState {
     #[must_use]
     pub const fn root_terminal_drawer_open(&self) -> bool {
         self.root_terminal_drawer_open
+    }
+    /// Whether the workspace terminal occupies the full available height.
+    #[must_use]
+    pub const fn root_terminal_full_height(&self) -> bool {
+        self.root_terminal_full_height
     }
     /// Whether either workspace-global drawer is frontmost.
     #[must_use]
@@ -1902,9 +1911,9 @@ pub enum AppKey {
     CtrlA,
     /// Ctrl-O returns Closeup to Switch. It has no effect while already in Switch.
     CtrlO,
-    /// Ctrl-O Ctrl-N selects the next Closeup tab when a live pane owns input.
+    /// Ctrl-O f / Ctrl-O Ctrl-F selects the next Closeup tab.
     CtrlN,
-    /// Ctrl-O p selects the previous Closeup tab when a live pane owns input.
+    /// Ctrl-O p / Ctrl-O Ctrl-P selects the previous Closeup tab.
     CtrlP,
     /// Home navigation. Inside a create form it is deliberately inert: this
     /// string-only reducer has no byte cursor, and must never reopen the form.
@@ -1926,6 +1935,8 @@ pub enum AppKey {
     /// `Ctrl-O t` retained for compatibility). Opening explicitly asks the
     /// daemon to open or reuse the trusted root shell.
     ToggleRootTerminalDrawer,
+    /// Toggle the open workspace terminal between drawer and full-height modes.
+    ToggleRootTerminalFullHeight,
     /// Open a new tab in the already-open workspace-root terminal drawer.
     OpenRootTerminal,
     /// Open the Director mode drawer and its explicit New CLI picker.
@@ -1940,7 +1951,7 @@ pub enum AppKey {
     OpenNotes,
     /// Open the active target's environment editor.
     OpenEnvironment,
-    /// Open the active target's Pull Request list overlay (`Ctrl-O Ctrl-P` in Closeup).
+    /// Open the active target's Pull Request list overlay (`Ctrl-O v` in Closeup).
     OpenPrs,
     /// Open the active target's Markdown preview overlay.
     OpenPreview,
@@ -3426,6 +3437,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::RootTerminalDrawerEmptied => {
             state.root_terminal_drawer_open = false;
+            state.root_terminal_full_height = false;
             if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Terminal) {
                 state.workspace_drawer_focus = state
                     .director_drawer_open
@@ -3764,6 +3776,7 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     }
     if matches!(key, AppKey::ToggleRootTerminalDrawer) {
         state.root_terminal_drawer_open = true;
+        state.root_terminal_full_height = false;
         state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Terminal);
         return vec![Effect::OpenTerminal {
             target: Target::Root(state.workspace),
@@ -4651,6 +4664,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::OpenQuitConfirmation
         | AppKey::ToggleDirectorDrawer
         | AppKey::ToggleRootTerminalDrawer
+        | AppKey::ToggleRootTerminalFullHeight
         | AppKey::OpenRootTerminal
         | AppKey::OpenDirectorNew
         | AppKey::OpenNotes
@@ -4676,18 +4690,25 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
     match key {
         AppKey::ToggleRootTerminalDrawer => {
             state.root_terminal_drawer_open = false;
+            state.root_terminal_full_height = false;
             state.workspace_drawer_focus = state
                 .director_drawer_open
                 .then_some(WorkspaceDrawerFocus::Director);
             Vec::new()
         }
+        AppKey::ToggleRootTerminalFullHeight => {
+            state.root_terminal_full_height = !state.root_terminal_full_height;
+            Vec::new()
+        }
         AppKey::ToggleDirectorDrawer => {
+            state.root_terminal_full_height = false;
             state.director_drawer_open = true;
             state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
             state.director_new = DirectorNew::Idle;
             Vec::new()
         }
         AppKey::OpenDirectorNew => {
+            state.root_terminal_full_height = false;
             state.director_drawer_open = true;
             state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
             open_director_new(state);
@@ -7055,6 +7076,7 @@ mod tests {
 
         let effects = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
         assert!(state.root_terminal_drawer_open());
+        assert!(!state.root_terminal_full_height());
         assert!(!state.director_drawer_open());
         assert_eq!(
             effects.as_slice(),
@@ -7067,6 +7089,22 @@ mod tests {
                 arguments: "open".to_owned(),
             }]
         );
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::ToggleRootTerminalFullHeight)
+            )
+            .is_empty()
+        );
+        assert!(state.root_terminal_full_height());
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::ToggleRootTerminalFullHeight)
+            )
+            .is_empty()
+        );
+        assert!(!state.root_terminal_full_height());
         for key in [AppKey::Up, AppKey::OpenOverview, AppKey::Escape] {
             assert!(update(&mut state, AppEvent::Key(key)).is_empty());
             assert!(state.root_terminal_drawer_open());
@@ -7081,7 +7119,13 @@ mod tests {
             );
         }
 
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::ToggleRootTerminalFullHeight),
+        );
+        assert!(state.root_terminal_full_height());
         assert!(update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)).is_empty());
+        assert!(!state.root_terminal_full_height());
         assert!(state.root_terminal_drawer_open());
         assert!(state.director_drawer_open());
         assert_eq!(

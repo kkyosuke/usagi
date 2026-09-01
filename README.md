@@ -79,13 +79,15 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
 | `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
 | `Ctrl-O` → `0` | 全 project / session の fuzzy finder を開く（`Ctrl-D` は project tab の detach） |
-| `Ctrl-O t` | workspace root の Shell drawer を開閉する |
-| `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
+| `Ctrl-O t` / `Ctrl-O Ctrl-T` | workspace root の Shell drawer を開閉する |
+| `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
+| `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
 
-直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
+leader 後の文字 shortcut は、2 打目の `Ctrl` の有無を同一視する。たとえば `Ctrl-O n` と
+`Ctrl-O Ctrl-N` は同じ操作になる。直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
 live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。TUI を離れる操作は
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
@@ -214,7 +216,7 @@ daemon 再起動などで Agent が中断した場合は、自動的に別の会
 ### 4. 状態と PR を確認する
 
 session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。Switch の `p`、
-Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開き、`d` で diff、
+Closeup の `Ctrl-O v`（または `Ctrl-O Ctrl-V`）、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開き、`d` で diff、
 `n` で session の scratchpad を開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
 検知した PR を選択した一覧を自動で開く。PR 一覧は repository 見出しの下へ番号・状態・title をまとめ、
 上部の All / Open / Closed / Merged を `←→`、PR を `↑↓` で選ぶ。枠外のクリックで閉じ、PR を選んで

@@ -4327,6 +4327,7 @@ mod tests {
             tabs: Vec::new(),
             pending: false,
             feedback: None,
+            full_height: false,
         };
         let closed_terminal =
             HomeProjection::from_state(&closed_state, "atlas", Path::new("/work"), &[])

@@ -212,6 +212,9 @@ pub enum LiveTerminalAction {
     /// Toggle the bottom workspace-root generic terminal drawer (`Ctrl-O Ctrl-T`,
     /// with `Ctrl-O t` retained for compatibility).
     RootTerminal,
+    /// Toggle the workspace-root terminal between its drawer height and the
+    /// full available screen height (`Ctrl-O z`).
+    RootTerminalFullHeight,
     /// Open a new terminal tab in the workspace-root drawer (`Ctrl-O n`).
     NewRootTerminal,
     /// Close the active tab.
@@ -342,13 +345,8 @@ impl LiveInputClassifier {
     fn classify_bytes(&mut self, leader_alive: bool, bytes: Vec<u8>) -> LiveInputOutput {
         self.leader_at = None;
         if leader_alive {
-            if bytes == [7] {
-                return LiveInputOutput::Action(LiveTerminalAction::Director);
-            }
-            if bytes == [20] {
-                return LiveInputOutput::Action(LiveTerminalAction::RootTerminal);
-            }
-            return LiveInputOutput::Swallowed;
+            return control_byte_prefix_action(&bytes)
+                .map_or(LiveInputOutput::Swallowed, LiveInputOutput::Action);
         }
         global_control_bytes(&bytes).map_or(
             LiveInputOutput::Passthrough(bytes),
@@ -368,9 +366,6 @@ impl LiveInputClassifier {
         }
         if leader_alive {
             self.leader_at = None;
-            if matches!(key.code, KeyCode::Char('g')) && key.modifiers == Modifiers::default() {
-                return LiveInputOutput::Passthrough(encode_key(key));
-            }
             return prefix_action(key).map_or(LiveInputOutput::Swallowed, LiveInputOutput::Action);
         }
         if is_ctrl_o(key) {
@@ -419,57 +414,40 @@ fn is_ctrl_o(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('o')) && is_only_control(key.modifiers))
 }
 
-fn is_ctrl_a(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('\u{1}'))
-        || (matches!(key.code, KeyCode::Char('a')) && is_only_control(key.modifiers))
-}
-
-fn is_ctrl_n(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('\u{e}'))
-        || (matches!(key.code, KeyCode::Char('n')) && is_only_control(key.modifiers))
-}
-
-fn is_ctrl_p(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('\u{10}'))
-        || (matches!(key.code, KeyCode::Char('p')) && is_only_control(key.modifiers))
-}
-
-fn is_ctrl_x(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('\u{18}'))
-        || (matches!(key.code, KeyCode::Char('x')) && is_only_control(key.modifiers))
-}
-
-fn is_ctrl_g(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('\u{7}'))
-        || (matches!(key.code, KeyCode::Char('g')) && is_only_control(key.modifiers))
-}
-
-fn is_ctrl_t(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('\u{14}'))
-        || (matches!(key.code, KeyCode::Char('t')) && is_only_control(key.modifiers))
-}
-
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
-    if is_ctrl_o(key) {
+    if letter_with_optional_control(key, 'o', '\u{0f}') {
         return Some(LiveTerminalAction::Switch);
     }
-    if is_ctrl_a(key) {
+    if letter_with_optional_control(key, 'a', '\u{1}') {
         return Some(LiveTerminalAction::OpenCloseupModal);
     }
-    if is_ctrl_n(key) {
+    if letter_with_optional_control(key, 'f', '\u{6}') {
         return Some(LiveTerminalAction::NextTab);
     }
-    if is_ctrl_p(key) {
+    if letter_with_optional_control(key, 'v', '\u{16}') {
         return Some(LiveTerminalAction::OpenPullRequests);
     }
-    if is_ctrl_x(key) {
+    if letter_with_optional_control(key, 'x', '\u{18}') {
         return Some(LiveTerminalAction::CloseTab);
     }
-    if is_ctrl_g(key) {
+    if letter_with_optional_control(key, 'g', '\u{7}') {
         return Some(LiveTerminalAction::Director);
     }
-    if is_ctrl_t(key) {
+    if letter_with_optional_control(key, 't', '\u{14}') {
         return Some(LiveTerminalAction::RootTerminal);
+    }
+    for (letter, control, action) in [
+        ('n', '\u{e}', LiveTerminalAction::DirectorNew),
+        ('p', '\u{10}', LiveTerminalAction::PreviousTab),
+        ('r', '\u{12}', LiveTerminalAction::ResumeTab),
+        ('u', '\u{15}', LiveTerminalAction::ScrollUp),
+        ('d', '\u{4}', LiveTerminalAction::ScrollDown),
+        ('b', '\u{2}', LiveTerminalAction::ScrollBottom),
+        ('z', '\u{1a}', LiveTerminalAction::RootTerminalFullHeight),
+    ] {
+        if letter_with_optional_control(key, letter, control) {
+            return Some(action);
+        }
     }
     // `+` is physically Shift+= on common layouts. Crossterm may retain that
     // Shift bit even though the semantic character is already `+`.
@@ -496,16 +474,37 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
             u8::try_from(digit.to_digit(10).unwrap_or(1)).unwrap_or(1),
         )),
         KeyCode::Char(',') => Some(LiveTerminalAction::OpenGarden),
-        KeyCode::Char('n') => Some(LiveTerminalAction::DirectorNew),
-        KeyCode::Char('t') => Some(LiveTerminalAction::RootTerminal),
-        KeyCode::Char('p') => Some(LiveTerminalAction::PreviousTab),
-        KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
-        KeyCode::Char('r') => Some(LiveTerminalAction::ResumeTab),
         KeyCode::Char(']') => Some(LiveTerminalAction::MoveTabNext),
         KeyCode::Char('[') => Some(LiveTerminalAction::MoveTabPrevious),
-        KeyCode::Char('u') | KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
-        KeyCode::Char('d') | KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
-        KeyCode::Char('b') | KeyCode::End => Some(LiveTerminalAction::ScrollBottom),
+        KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
+        KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
+        KeyCode::End => Some(LiveTerminalAction::ScrollBottom),
+        _ => None,
+    }
+}
+
+fn letter_with_optional_control(key: &KeyEvent, letter: char, control: char) -> bool {
+    matches!(key.code, KeyCode::Char(character) if character == control)
+        || (matches!(key.code, KeyCode::Char(character) if character == letter)
+            && (key.modifiers == Modifiers::default() || is_only_control(key.modifiers)))
+}
+
+fn control_byte_prefix_action(bytes: &[u8]) -> Option<LiveTerminalAction> {
+    match bytes {
+        [1] => Some(LiveTerminalAction::OpenCloseupModal),
+        [2] => Some(LiveTerminalAction::ScrollBottom),
+        [4] => Some(LiveTerminalAction::ScrollDown),
+        [6] => Some(LiveTerminalAction::NextTab),
+        [7] => Some(LiveTerminalAction::Director),
+        [14] => Some(LiveTerminalAction::DirectorNew),
+        [15] => Some(LiveTerminalAction::Switch),
+        [16] => Some(LiveTerminalAction::PreviousTab),
+        [18] => Some(LiveTerminalAction::ResumeTab),
+        [20] => Some(LiveTerminalAction::RootTerminal),
+        [21] => Some(LiveTerminalAction::ScrollUp),
+        [22] => Some(LiveTerminalAction::OpenPullRequests),
+        [24] => Some(LiveTerminalAction::CloseTab),
+        [26] => Some(LiveTerminalAction::RootTerminalFullHeight),
         _ => None,
     }
 }
@@ -847,7 +846,7 @@ mod tests {
             },
             Case {
                 follow_up: ctrl('n'),
-                action: LiveTerminalAction::NextTab,
+                action: LiveTerminalAction::DirectorNew,
             },
             Case {
                 follow_up: key(KeyCode::Char('n')),
@@ -871,7 +870,7 @@ mod tests {
             },
             Case {
                 follow_up: ctrl('p'),
-                action: LiveTerminalAction::OpenPullRequests,
+                action: LiveTerminalAction::PreviousTab,
             },
             Case {
                 follow_up: key(KeyCode::Char('p')),
@@ -879,6 +878,10 @@ mod tests {
             },
             Case {
                 follow_up: ctrl('g'),
+                action: LiveTerminalAction::Director,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('g')),
                 action: LiveTerminalAction::Director,
             },
             Case {
@@ -904,6 +907,10 @@ mod tests {
                 action: LiveTerminalAction::ResumeTab,
             },
             Case {
+                follow_up: ctrl('r'),
+                action: LiveTerminalAction::ResumeTab,
+            },
+            Case {
                 follow_up: key(KeyCode::Char(']')),
                 action: LiveTerminalAction::MoveTabNext,
             },
@@ -916,11 +923,19 @@ mod tests {
                 action: LiveTerminalAction::ScrollUp,
             },
             Case {
+                follow_up: ctrl('u'),
+                action: LiveTerminalAction::ScrollUp,
+            },
+            Case {
                 follow_up: key(KeyCode::Up),
                 action: LiveTerminalAction::ScrollUp,
             },
             Case {
                 follow_up: key(KeyCode::Char('d')),
+                action: LiveTerminalAction::ScrollDown,
+            },
+            Case {
+                follow_up: ctrl('d'),
                 action: LiveTerminalAction::ScrollDown,
             },
             Case {
@@ -930,6 +945,34 @@ mod tests {
             Case {
                 follow_up: key(KeyCode::Char('b')),
                 action: LiveTerminalAction::ScrollBottom,
+            },
+            Case {
+                follow_up: ctrl('b'),
+                action: LiveTerminalAction::ScrollBottom,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('z')),
+                action: LiveTerminalAction::RootTerminalFullHeight,
+            },
+            Case {
+                follow_up: ctrl('z'),
+                action: LiveTerminalAction::RootTerminalFullHeight,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('f')),
+                action: LiveTerminalAction::NextTab,
+            },
+            Case {
+                follow_up: ctrl('f'),
+                action: LiveTerminalAction::NextTab,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('v')),
+                action: LiveTerminalAction::OpenPullRequests,
+            },
+            Case {
+                follow_up: ctrl('v'),
+                action: LiveTerminalAction::OpenPullRequests,
             },
             Case {
                 follow_up: key(KeyCode::End),
@@ -1013,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn director_chord_distinguishes_ctrl_g_from_plain_g() {
+    fn director_chord_accepts_ctrl_g_and_plain_g() {
         for follow_up in [
             ctrl('g'),
             key(KeyCode::Char('\u{7}')),
@@ -1037,7 +1080,7 @@ mod tests {
         );
         assert_eq!(
             classifier.classify(Duration::from_millis(1), key(KeyCode::Char('g'))),
-            LiveInputOutput::Passthrough(b"g".to_vec())
+            LiveInputOutput::Action(LiveTerminalAction::Director)
         );
     }
 
@@ -1083,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_leader_consumes_every_global_control_form_and_resets() {
+    fn pending_leader_consumes_unassigned_global_control_forms_and_resets() {
         let follow_ups = [
             ctrl('c'),
             key(KeyCode::Char('\u{3}')),
@@ -1091,9 +1134,6 @@ mod tests {
             ctrl('q'),
             key(KeyCode::Char('\u{11}')),
             LiveInput::Raw(vec![17]),
-            ctrl('d'),
-            key(KeyCode::Char('\u{4}')),
-            LiveInput::Raw(vec![4]),
         ];
         for follow_up in follow_ups {
             let mut classifier = LiveInputClassifier::default();
@@ -1251,12 +1291,12 @@ mod tests {
             LiveInputOutput::Swallowed
         );
         assert_eq!(
-            classifier.classify(Duration::from_millis(1), key(KeyCode::Char('z'))),
+            classifier.classify(Duration::from_millis(1), key(KeyCode::Char('y'))),
             LiveInputOutput::Swallowed
         );
         assert_eq!(
-            classifier.classify(Duration::from_millis(2), key(KeyCode::Char('z'))),
-            LiveInputOutput::Passthrough(b"z".to_vec())
+            classifier.classify(Duration::from_millis(2), key(KeyCode::Char('y'))),
+            LiveInputOutput::Passthrough(b"y".to_vec())
         );
     }
 

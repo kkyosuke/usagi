@@ -872,25 +872,16 @@ fn drawer_agent_owns_escape(runtime: &WorkspaceRuntime) -> bool {
 
 /// Retarget `Ctrl-O` follow-ups whose meaning differs in an open drawer.
 ///
-/// A root terminal drawer maps plain `Ctrl-O n` to a new terminal tab. In the
-/// Director drawer, `Ctrl-O Ctrl-N` opens the CLI picker and conversation
-/// cycling takes plain `Ctrl-O n` in its place. Outside those drawers both
-/// chords keep their managed-pane meaning, so the retargeting is applied once,
-/// before any consumer of the key observes it.
+/// A root terminal drawer maps both `Ctrl-O n` and `Ctrl-O Ctrl-N` to a new
+/// terminal tab. The classifier has already normalized the optional Control
+/// modifier before this context-specific retargeting.
 fn retarget_drawer_chords(runtime: &WorkspaceRuntime, key: Key) -> Key {
     if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal)
         && matches!(key, Key::Live(LiveTerminalAction::DirectorNew))
     {
         return Key::Live(LiveTerminalAction::NewRootTerminal);
     }
-    if runtime.state().workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Director) {
-        return key;
-    }
-    match key {
-        Key::Live(LiveTerminalAction::NextTab) => Key::Live(LiveTerminalAction::DirectorNew),
-        Key::Live(LiveTerminalAction::DirectorNew) => Key::Live(LiveTerminalAction::NextTab),
-        other => other,
-    }
+    key
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -4009,6 +4000,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
         LiveTerminalAction::RootTerminal => Some(AppKey::ToggleRootTerminalDrawer),
+        LiveTerminalAction::RootTerminalFullHeight => Some(AppKey::ToggleRootTerminalFullHeight),
         LiveTerminalAction::NewRootTerminal => Some(AppKey::OpenRootTerminal),
         LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
         LiveTerminalAction::OpenWorkspace
@@ -4074,6 +4066,7 @@ fn foreground_terminal_geometry(
     width: usize,
     director_open: bool,
     root_terminal_open: bool,
+    root_terminal_full_height: bool,
     focus: Option<WorkspaceDrawerFocus>,
 ) -> Geometry {
     if director_open && focus == Some(WorkspaceDrawerFocus::Director) {
@@ -4090,7 +4083,12 @@ fn foreground_terminal_geometry(
         } else {
             width
         };
-        let viewport = root_terminal_drawer::terminal_viewport_for(height, width, available_width);
+        let viewport = root_terminal_drawer::terminal_viewport_for_mode(
+            height,
+            width,
+            available_width,
+            root_terminal_full_height,
+        );
         Geometry {
             cols: u16::try_from(viewport.cols.min(usize::from(u16::MAX)))
                 .expect("clamped root-terminal drawer width fits u16"),
@@ -4126,6 +4124,9 @@ fn visible_managed_background_terminal(
     let terminal = runtime.director_background_terminal()?;
     let director_open = runtime.state().director_drawer_open();
     let root_open = runtime.state().root_terminal_drawer_open();
+    if root_open && runtime.state().root_terminal_full_height() {
+        return None;
+    }
     if director_open && director_drawer::geometry(height, width).full_width {
         return None;
     }
@@ -4162,6 +4163,7 @@ fn visible_workspace_terminals(
             width,
             runtime.state().director_drawer_open(),
             runtime.state().root_terminal_drawer_open(),
+            runtime.state().root_terminal_full_height(),
             runtime.state().workspace_drawer_focus(),
         ),
     );
@@ -4181,6 +4183,7 @@ fn visible_workspace_terminals(
             width,
             true,
             false,
+            false,
             Some(WorkspaceDrawerFocus::Director),
         ),
     );
@@ -4191,6 +4194,7 @@ fn visible_workspace_terminals(
             width,
             runtime.state().director_drawer_open(),
             true,
+            runtime.state().root_terminal_full_height(),
             Some(WorkspaceDrawerFocus::Terminal),
         ),
     );
@@ -5390,7 +5394,7 @@ fn handle_terminal_pointer(
         if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director) {
             director_drawer::terminal_point_at(height, width, rows_len, scroll, column, row)
         } else if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal) {
-            root_terminal_drawer::terminal_point_at_for(
+            root_terminal_drawer::terminal_point_at_for_mode(
                 height,
                 width,
                 root_terminal_available_width(
@@ -5398,6 +5402,7 @@ fn handle_terminal_pointer(
                     width,
                     runtime.state().director_drawer_open(),
                 ),
+                runtime.state().root_terminal_full_height(),
                 rows_len,
                 scroll,
                 column,
@@ -5669,9 +5674,14 @@ fn intercept_live_terminal_control(
         && let Key::Click { column, row } = key
     {
         let projection = runtime.root_terminal_projection(None);
-        if let Some(index) =
-            root_terminal_drawer::tab_at(height, width, &projection.tabs, *column, *row)
-        {
+        if let Some(index) = root_terminal_drawer::tab_at_for_mode(
+            height,
+            width,
+            &projection.tabs,
+            runtime.state().root_terminal_full_height(),
+            *column,
+            *row,
+        ) {
             if let Some(selection) = runtime.root_terminal_selection_at(index) {
                 let _ = runtime.select_tab_selection(selection);
             }
@@ -5729,7 +5739,7 @@ fn intercept_live_terminal_control(
                 } else if runtime.state().workspace_drawer_focus()
                     == Some(WorkspaceDrawerFocus::Terminal)
                 {
-                    root_terminal_drawer::terminal_point_at_for(
+                    root_terminal_drawer::terminal_point_at_for_mode(
                         height,
                         width,
                         root_terminal_available_width(
@@ -5737,6 +5747,7 @@ fn intercept_live_terminal_control(
                             width,
                             runtime.state().director_drawer_open(),
                         ),
+                        runtime.state().root_terminal_full_height(),
                         0,
                         0,
                         *column,
@@ -7341,6 +7352,7 @@ fn drive_workspace_controller(
             width,
             runtime.state().director_drawer_open(),
             runtime.state().root_terminal_drawer_open(),
+            runtime.state().root_terminal_full_height(),
             runtime.state().workspace_drawer_focus(),
         );
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
@@ -7629,8 +7641,8 @@ fn drive_workspace_controller(
             );
         }
         drain_pane_launches(&mut ui, geometry);
-        // Director mode owns `Ctrl-O Ctrl-N` as New; the swap happens once here
-        // so PTY forwarding, pane controls, and the reducer all see one key.
+        // Contextual New is retargeted once here so PTY forwarding, pane
+        // controls, and the reducer all see one normalized key.
         let raw_key = retarget_drawer_chords(&runtime, term.read_key()?);
         if dismiss_pr_modal_on_project_bar_click(&mut runtime, &raw_key) {
             continue;
@@ -9782,6 +9794,10 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::RootTerminal)),
             Some(AppEvent::Key(AppKey::ToggleRootTerminalDrawer))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::RootTerminalFullHeight)),
+            Some(AppEvent::Key(AppKey::ToggleRootTerminalFullHeight))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::QuitConfirmation)),
@@ -18547,7 +18563,14 @@ mod tests {
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         ui.start_terminal_session(
             terminal,
-            foreground_terminal_geometry(20, 80, true, false, Some(WorkspaceDrawerFocus::Director)),
+            foreground_terminal_geometry(
+                20,
+                80,
+                true,
+                false,
+                false,
+                Some(WorkspaceDrawerFocus::Director),
+            ),
         );
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
@@ -21243,6 +21266,7 @@ mod tests {
             100,
             true,
             false,
+            false,
             Some(WorkspaceDrawerFocus::Director),
         );
 
@@ -21394,6 +21418,7 @@ mod tests {
                     width,
                     true,
                     false,
+                    false,
                     Some(WorkspaceDrawerFocus::Director),
                 ),
             ),
@@ -21460,6 +21485,7 @@ mod tests {
             24,
             100,
             true,
+            false,
             false,
             Some(WorkspaceDrawerFocus::Director),
         );
@@ -23022,11 +23048,11 @@ mod tests {
         assert!(!empty_runtime.state().director_drawer_open());
     }
 
-    /// Director mode gives `Ctrl-O Ctrl-N` to New and moves conversation cycling
-    /// to the plain follow-up `Ctrl-O n`. Outside the drawer both chords keep
-    /// their managed-pane meaning.
+    /// The classifier already maps both forms of `n` to New and both forms of
+    /// `f` to Next. Director keeps those actions unchanged; only the workspace
+    /// terminal retargets New to a new terminal tab.
     #[test]
-    fn director_mode_retargets_the_new_and_next_tab_chords() {
+    fn drawer_context_keeps_new_and_next_distinct_after_modifier_normalization() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
@@ -23052,14 +23078,14 @@ mod tests {
         );
         assert!(runtime.state().director_drawer_open());
 
-        // Open drawer: the two chords swap, and nothing else moves.
+        // Director keeps the normalized actions unchanged.
         assert_eq!(
             retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
-            Key::Live(LiveTerminalAction::DirectorNew)
+            Key::Live(LiveTerminalAction::NextTab)
         );
         assert_eq!(
             retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
-            Key::Live(LiveTerminalAction::NextTab)
+            Key::Live(LiveTerminalAction::DirectorNew)
         );
         for key in [
             Key::Live(LiveTerminalAction::PreviousTab),
@@ -23070,9 +23096,9 @@ mod tests {
             assert_eq!(retarget_drawer_chords(&runtime, key.clone()), key);
         }
 
-        // The retargeted chord reaches the reducer as New, exactly as the frame
-        // loop dispatches it.
-        let retargeted = retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab));
+        // New reaches the reducer without a context-specific swap.
+        let retargeted =
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew));
         assert!(runtime.handle_key(retargeted).is_empty());
         assert!(matches!(
             runtime.state().director_new(),
@@ -27350,6 +27376,7 @@ mod tests {
                 100,
                 true,
                 false,
+                false,
                 Some(WorkspaceDrawerFocus::Director),
             ),
             Geometry { cols: 56, rows: 16 }
@@ -27360,12 +27387,13 @@ mod tests {
                 100,
                 false,
                 true,
+                false,
                 Some(WorkspaceDrawerFocus::Terminal),
             ),
             Geometry { cols: 96, rows: 7 }
         );
         assert_eq!(
-            foreground_terminal_geometry(24, 100, false, false, None),
+            foreground_terminal_geometry(24, 100, false, false, false, None),
             terminal_geometry(24, 100)
         );
     }

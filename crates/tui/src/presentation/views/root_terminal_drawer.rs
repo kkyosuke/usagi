@@ -26,6 +26,7 @@ pub struct RootTerminalDrawerProjection {
     pub tabs: Vec<RootTerminalTabProjection>,
     pub pending: bool,
     pub feedback: Option<String>,
+    pub full_height: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,8 +65,28 @@ pub fn geometry_for(
     raw_width: usize,
     available_width: usize,
 ) -> RootTerminalDrawerGeometry {
+    geometry_for_mode(raw_height, raw_width, available_width, false)
+}
+
+/// Compute the workspace-terminal geometry for drawer or full-height mode.
+#[must_use]
+pub fn geometry_for_mode(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+    full_height: bool,
+) -> RootTerminalDrawerGeometry {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let width = width.min(available_width);
+    if full_height {
+        return RootTerminalDrawerGeometry {
+            left: 0,
+            top: 0,
+            width,
+            height,
+            full_height: true,
+        };
+    }
     let available = height.saturating_sub(1);
     let desired = height.saturating_mul(11) / 20;
     let coexist_height = desired
@@ -98,7 +119,17 @@ pub fn terminal_viewport_for(
     raw_width: usize,
     available_width: usize,
 ) -> RootTerminalViewport {
-    let drawer = geometry_for(raw_height, raw_width, available_width);
+    terminal_viewport_for_mode(raw_height, raw_width, available_width, false)
+}
+
+#[must_use]
+pub fn terminal_viewport_for_mode(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+    full_height: bool,
+) -> RootTerminalViewport {
+    let drawer = geometry_for_mode(raw_height, raw_width, available_width, full_height);
     RootTerminalViewport {
         // modal::boxed: borders + two padding rows; body: tab strip + footer.
         rows: drawer.height.saturating_sub(6),
@@ -136,8 +167,32 @@ pub fn terminal_point_at_for(
     column: u16,
     row: u16,
 ) -> Option<TerminalPoint> {
-    let drawer = geometry_for(raw_height, raw_width, available_width);
-    let viewport = terminal_viewport_for(raw_height, raw_width, available_width);
+    terminal_point_at_for_mode(
+        raw_height,
+        raw_width,
+        available_width,
+        false,
+        rows_len,
+        scroll,
+        column,
+        row,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn terminal_point_at_for_mode(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+    full_height: bool,
+    rows_len: usize,
+    scroll: usize,
+    column: u16,
+    row: u16,
+) -> Option<TerminalPoint> {
+    let drawer = geometry_for_mode(raw_height, raw_width, available_width, full_height);
+    let viewport = terminal_viewport_for_mode(raw_height, raw_width, available_width, full_height);
     let column = usize::from(column).checked_sub(2)?;
     let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(3))?;
     if column >= viewport.cols || content_row >= viewport.rows {
@@ -159,7 +214,19 @@ pub fn tab_at(
     column: u16,
     row: u16,
 ) -> Option<usize> {
-    let drawer = geometry(raw_height, raw_width);
+    tab_at_for_mode(raw_height, raw_width, tabs, false, column, row)
+}
+
+#[must_use]
+pub fn tab_at_for_mode(
+    raw_height: usize,
+    raw_width: usize,
+    tabs: &[RootTerminalTabProjection],
+    full_height: bool,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let drawer = geometry_for_mode(raw_height, raw_width, usize::MAX, full_height);
     if usize::from(row) != drawer.top.saturating_add(2) {
         return None;
     }
@@ -197,8 +264,24 @@ pub fn render_over_for(
     base: &[String],
     projection: &RootTerminalDrawerProjection,
 ) -> Vec<String> {
+    render_over_for_mode(raw_height, raw_width, available_width, base, projection)
+}
+
+#[must_use]
+pub fn render_over_for_mode(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+    base: &[String],
+    projection: &RootTerminalDrawerProjection,
+) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let drawer = geometry_for(raw_height, raw_width, available_width);
+    let drawer = geometry_for_mode(
+        raw_height,
+        raw_width,
+        available_width,
+        projection.full_height,
+    );
     let mut frame = (0..height)
         .map(|row| {
             let line = modal::columns(base.get(row).map_or("", String::as_str), 0, width);
@@ -220,7 +303,9 @@ pub fn render_over_for(
     let footer = projection
         .feedback
         .as_deref()
-        .unwrap_or("Ctrl-O Ctrl-T: close  ·  Ctrl-O u/d/b: scroll  ·  Ctrl-O x: close terminal");
+        .unwrap_or(
+            "Ctrl-O z: drawer/full  ·  Ctrl-O Ctrl-T: close  ·  Ctrl-O u/d/b: scroll  ·  Ctrl-O x: close terminal",
+        );
     let terminal_height = body_height.saturating_sub(1);
     let tab_strip = render_tab_strip(&projection.tabs, inner_width);
     let body = if let Some(view) = &projection.terminal_view {
@@ -305,6 +390,16 @@ mod tests {
         let bounded = geometry_for(30, 100, 40);
         assert_eq!(bounded.width, 40);
         assert_eq!(bounded.left, 0);
+
+        let full = geometry_for_mode(30, 100, 40, true);
+        assert_eq!(full.top, 0);
+        assert_eq!(full.height, 30);
+        assert_eq!(full.width, 40);
+        assert!(full.full_height);
+        assert_eq!(
+            terminal_viewport_for_mode(30, 100, 40, true),
+            RootTerminalViewport { rows: 24, cols: 36 }
+        );
     }
 
     #[test]
@@ -381,6 +476,7 @@ mod tests {
             ],
             pending: false,
             feedback: None,
+            full_height: false,
         };
         let frame = render_over(30, 100, &base, &projection);
         assert_eq!(frame.len(), 30);
@@ -392,6 +488,18 @@ mod tests {
                 .any(|line| strip_ansi(line).contains("root output"))
         );
         assert!(frame.iter().all(|line| display_width(line) == 100));
+
+        let full = render_over(
+            30,
+            100,
+            &base,
+            &RootTerminalDrawerProjection {
+                full_height: true,
+                ..projection.clone()
+            },
+        );
+        assert!(strip_ansi(&full[0]).contains("Workspace Terminal"));
+        assert!(!strip_ansi(&full[0]).contains("background 0"));
 
         let bounded_base = (0..30)
             .map(|row| format!("{}right background {row}", " ".repeat(50)))
@@ -428,6 +536,7 @@ mod tests {
                     tabs: Vec::new(),
                     pending,
                     feedback: Some("terminal feedback".to_owned()),
+                    full_height: false,
                 },
             );
             assert!(frame.iter().any(|line| strip_ansi(line).contains(message)));
