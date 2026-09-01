@@ -1604,6 +1604,24 @@ struct PendingWorkspaceCreate {
     cancelled: bool,
 }
 
+/// A selected workspace path that disappeared before it could be opened.
+/// The prompt owns only entry-screen state; the loader revalidates the paths
+/// before any registry mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MissingWorkspacePrompt {
+    paths: Vec<PathBuf>,
+    confirmation: modal::ConfirmationModal,
+}
+
+impl MissingWorkspacePrompt {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            confirmation: modal::ConfirmationModal::new(),
+        }
+    }
+}
+
 /// Open 画面のキー処理結果。
 enum OpenStep {
     Stay,
@@ -9037,6 +9055,7 @@ struct EntryFrameMaterial {
     height: usize,
     width: usize,
     form: EntryForm,
+    missing_workspace: Option<MissingWorkspacePrompt>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -9067,17 +9086,53 @@ impl EntryFrameMaterial {
             height,
             width,
             form,
+            missing_workspace: None,
         }
     }
 
+    fn with_missing_workspace(mut self, prompt: Option<&MissingWorkspacePrompt>) -> Self {
+        self.missing_workspace = prompt.cloned();
+        self
+    }
+
     fn render(&self, now: DateTime<Utc>) -> Vec<String> {
-        match &self.form {
+        let base = match &self.form {
             EntryForm::Welcome(welcome) => welcome::render(self.height, self.width, welcome, now),
             EntryForm::Open(open) => render_open(self.height, self.width, open, now),
             EntryForm::New(form) => new::render(self.height, self.width, form),
             EntryForm::Config(form) => config::render(self.height, self.width, form),
+        };
+        match self.missing_workspace.as_ref() {
+            Some(prompt) => render_missing_workspace_prompt(self.height, self.width, &base, prompt),
+            None => base,
         }
     }
+}
+
+fn render_missing_workspace_prompt(
+    height: usize,
+    width: usize,
+    base: &[String],
+    prompt: &MissingWorkspacePrompt,
+) -> Vec<String> {
+    let heading = if prompt.paths.len() == 1 {
+        prompt.paths[0].display().to_string()
+    } else {
+        format!(
+            "{} workspace directories no longer exist",
+            prompt.paths.len()
+        )
+    };
+    let message = if prompt.paths.len() == 1 {
+        "Remove its registry entry? No workspace data is deleted."
+    } else {
+        "Remove their registry entries? No workspace data is deleted."
+    };
+    let mut view = ConfirmationView::confirmation("Workspace not found", 64, heading, message);
+    view.confirm_label = "remove";
+    view.cancel_label = "cancel";
+    view.hints = "Enter/y: remove   Esc/n: cancel   ←→/Tab: choose";
+    modal::render_confirmation_over(height, width, base, prompt.confirmation, view)
 }
 
 /// Production screen graph entry. Every Welcome/Open/Recent/New path creates
@@ -9155,6 +9210,7 @@ pub fn run_screen_graph_with_backend_and_notice(
     let mut drawn_material: Option<EntryFrameMaterial> = None;
     let mut next_create_token = 1_u64;
     let mut pending_create: Option<PendingWorkspaceCreate> = None;
+    let mut missing_workspace_prompt: Option<MissingWorkspacePrompt> = None;
     loop {
         let mut created_snapshot = None;
         while let Some(completion) = loader.take_create_completion() {
@@ -9210,12 +9266,59 @@ pub fn run_screen_graph_with_backend_and_notice(
             &open,
             &new_form,
             &config_form,
-        );
+        )
+        .with_missing_workspace(missing_workspace_prompt.as_ref());
         if drawn_material.as_ref() != Some(&material) {
             term.draw(&material.render(now))?;
             drawn_material = Some(material);
         }
         let key = term.read_key()?;
+        let explicit_remove = matches!(&key, Key::Char('y' | 'Y'));
+        if let Some(prompt) = missing_workspace_prompt.as_mut() {
+            match key {
+                Key::Left | Key::Right | Key::Tab => {
+                    prompt.confirmation.toggle();
+                }
+                Key::Char('y' | 'Y') | Key::Enter
+                    if explicit_remove || prompt.confirmation.is_confirm_selected() =>
+                {
+                    let paths = prompt.paths.clone();
+                    missing_workspace_prompt = None;
+                    let candidates = registry
+                        .iter()
+                        .filter(|workspace| paths.contains(&workspace.path))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let removed = loader.cleanup_missing(&candidates)?;
+                    open.remove_paths(&removed);
+                    welcome.remove_paths(&removed);
+                    remove_registry_paths(&mut registry, &removed);
+                    let notice = if removed.is_empty() {
+                        "Workspace changed while confirming; nothing was removed. Try again."
+                            .to_owned()
+                    } else if removed.len() == 1 {
+                        "Workspace registration removed.".to_owned()
+                    } else {
+                        format!("{} workspace registrations removed.", removed.len())
+                    };
+                    if screen == Screen::Welcome {
+                        welcome.set_notice(Some(notice));
+                    } else {
+                        // Missing-workspace prompts are only created by Welcome
+                        // and Open actions, so every non-Welcome prompt belongs
+                        // to the Open screen.
+                        open.set_notice(Some(notice));
+                    }
+                }
+                Key::Char('n' | 'N') | Key::Escape | Key::Enter => {
+                    missing_workspace_prompt = None;
+                }
+                Key::Quit | Key::CtrlQ => return Ok(Exit::Quit),
+                _ => {}
+            }
+            drawn_material = None;
+            continue;
+        }
         match screen {
             Screen::Welcome => match step_welcome(&mut welcome, key) {
                 WelcomeStep::Stay => {}
@@ -9242,6 +9345,17 @@ pub fn run_screen_graph_with_backend_and_notice(
                     let paths = recent_paths(recent);
                     if paths.is_empty() {
                         continue;
+                    }
+                    match loader.missing_paths(&paths) {
+                        Ok(missing) if !missing.is_empty() => {
+                            missing_workspace_prompt = Some(MissingWorkspacePrompt::new(missing));
+                            continue;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            welcome.set_notice(Some(error.to_string()));
+                            continue;
+                        }
                     }
                     // A workspace this daemon does not serve keeps the switcher on
                     // screen with the reason, so another Recent entry can be tried.
@@ -9287,6 +9401,17 @@ pub fn run_screen_graph_with_backend_and_notice(
                 OpenStep::Quit => return Ok(Exit::Quit),
                 OpenStep::Back => screen = Screen::Welcome,
                 OpenStep::Choose(paths) => {
+                    match loader.missing_paths(&paths) {
+                        Ok(missing) if !missing.is_empty() => {
+                            missing_workspace_prompt = Some(MissingWorkspacePrompt::new(missing));
+                            continue;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            open.set_notice(Some(error.to_string()));
+                            continue;
+                        }
+                    }
                     // Same contract as Recent: the list stays up with the reason so
                     // the workspace this daemon does serve can be chosen instead.
                     let (snapshots, snapshot, deck) =
@@ -9599,8 +9724,8 @@ mod tests {
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
         FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort,
         Geometry, GitDiff, IdleWatch, LaunchAgentRequest, MAX_BACKGROUND_EXITS_PER_FRAME,
-        MetricsPort, MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics,
-        NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort,
+        MetricsPort, MetricsPortFactory, MissingWorkspacePrompt, NewStep, NoDesktopNotifications,
+        NoMetrics, NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort,
         PrModalClickRoute, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
         SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
@@ -9626,10 +9751,10 @@ mod tests {
         prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
         prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
         remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
-        reset_projection_build_counts, restore_open_panes, restore_prepared_workspace,
-        retarget_drawer_chords, route_garden_input, route_pr_modal_click,
-        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
-        run_screen_graph_with_backend_and_notice, run_with_settings,
+        render_missing_workspace_prompt, reset_projection_build_counts, restore_open_panes,
+        restore_prepared_workspace, retarget_drawer_chords, route_garden_input,
+        route_pr_modal_click, route_workspace_input_before_reducer, run as run_from_start,
+        run_screen_graph_with_backend, run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -24713,6 +24838,10 @@ mod tests {
         activate_error: Option<&'static str>,
         cleanup_removed: Vec<PathBuf>,
         cleanup_calls: usize,
+        cleanup_candidates: Vec<Vec<PathBuf>>,
+        missing: Vec<PathBuf>,
+        missing_error: Option<io::ErrorKind>,
+        missing_calls: Vec<Vec<PathBuf>>,
         unregistered: Vec<PathBuf>,
         unregister_calls: usize,
         created: Vec<NewRequest>,
@@ -24819,8 +24948,26 @@ mod tests {
             }
         }
 
-        fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
+        fn missing_paths(&mut self, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+            self.missing_calls.push(paths.to_vec());
+            if let Some(kind) = self.missing_error {
+                return Err(io::Error::new(kind, "workspace path could not be checked"));
+            }
+            Ok(paths
+                .iter()
+                .filter(|path| self.missing.contains(path))
+                .cloned()
+                .collect())
+        }
+
+        fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
             self.cleanup_calls += 1;
+            self.cleanup_candidates.push(
+                workspaces
+                    .iter()
+                    .map(|workspace| workspace.path.clone())
+                    .collect(),
+            );
             Ok(self.cleanup_removed.clone())
         }
 
@@ -26911,6 +27058,309 @@ mod tests {
         assert!(term.frames[0].join("\n").contains("Menu"));
         assert!(term.frames[1].join("\n").contains("Open Workspace"));
         assert!(term.frames[2].join("\n").contains("alpha-session"));
+    }
+
+    #[test]
+    fn missing_open_selection_confirms_registry_only_removal() {
+        let alpha = ws("alpha");
+        let mut term =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('y'), Key::Quit]);
+        let mut loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            cleanup_removed: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(
+                &mut term,
+                vec![alpha.clone()],
+                Vec::new(),
+                now(),
+                &mut loader,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            frames.iter().any(|frame| {
+                frame.contains("Workspace not found")
+                    && frame.contains("/tmp/alpha")
+                    && frame.contains("remove")
+                    && frame.contains("cancel")
+                    && frame.contains("No workspace data is deleted")
+            }),
+            "missing-workspace prompt was not rendered: {frames:#?}"
+        );
+        assert_eq!(loader.opened, Vec::<PathBuf>::new());
+        assert_eq!(loader.cleanup_calls, 1);
+        assert_eq!(loader.cleanup_candidates, vec![vec![alpha.path]]);
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("No workspaces yet"))
+        );
+    }
+
+    #[test]
+    fn missing_workspace_prompt_summarizes_multiple_paths() {
+        let prompt = MissingWorkspacePrompt::new(vec!["/tmp/alpha".into(), "/tmp/beta".into()]);
+        let frame = render_missing_workspace_prompt(24, 80, &vec![String::new(); 24], &prompt);
+        let rendered = strip_ansi(&frame.join("\n"));
+
+        assert!(rendered.contains("2 workspace directories no longer exist"));
+        assert!(rendered.contains("Remove their registry entries?"));
+    }
+
+    #[test]
+    fn missing_workspace_prompt_keyboard_controls_are_complete() {
+        let alpha = ws("alpha");
+        let mut cancel_term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Right,
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut cancel_loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+        run(
+            &mut cancel_term,
+            vec![alpha.clone()],
+            Vec::new(),
+            now(),
+            &mut cancel_loader,
+        )
+        .unwrap();
+        assert_eq!(cancel_loader.cleanup_calls, 0);
+
+        let mut enter_term =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Enter, Key::Quit]);
+        let mut enter_loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            cleanup_removed: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+        run(
+            &mut enter_term,
+            vec![alpha.clone()],
+            Vec::new(),
+            now(),
+            &mut enter_loader,
+        )
+        .unwrap();
+        assert_eq!(enter_loader.cleanup_calls, 1);
+
+        let mut quit_term =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('x'), Key::Quit]);
+        let mut quit_loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(
+                &mut quit_term,
+                vec![alpha],
+                Vec::new(),
+                now(),
+                &mut quit_loader,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(quit_loader.cleanup_calls, 0);
+    }
+
+    #[test]
+    fn missing_recent_can_cancel_without_mutating_the_registry() {
+        let alpha = ws("alpha");
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('n'), Key::Quit]);
+        let mut loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(
+                &mut term,
+                vec![alpha],
+                vec![recent("alpha")],
+                now(),
+                &mut loader,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(loader.cleanup_calls, 0);
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Workspace not found"))
+        );
+        assert!(term.frames.last().unwrap().join("\n").contains("alpha"));
+
+        let alpha = ws("alpha");
+        let mut confirm_term =
+            FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('y'), Key::Quit]);
+        let mut confirm_loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            cleanup_removed: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+        run(
+            &mut confirm_term,
+            vec![alpha],
+            vec![recent("alpha")],
+            now(),
+            &mut confirm_loader,
+        )
+        .unwrap();
+        let final_frame = confirm_term.frames.last().unwrap().join("\n");
+        assert!(final_frame.contains("No recent workspace"));
+        assert!(!final_frame.contains("alpha"));
+    }
+
+    #[test]
+    fn missing_unite_member_is_preflighted_before_any_workspace_opens() {
+        let alpha = ws("alpha");
+        let beta = ws("beta");
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Tab,
+            Key::Char(' '),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Char('y'),
+            Key::Quit,
+        ]);
+        let mut loader = FakeLoader {
+            missing: vec![alpha.path.clone(), beta.path.clone()],
+            cleanup_removed: vec![alpha.path.clone(), beta.path.clone()],
+            ..FakeLoader::default()
+        };
+
+        run(
+            &mut term,
+            vec![alpha.clone(), beta.clone()],
+            Vec::new(),
+            now(),
+            &mut loader,
+        )
+        .unwrap();
+
+        assert_eq!(loader.opened, Vec::<PathBuf>::new());
+        assert_eq!(
+            loader.missing_calls[0],
+            vec![alpha.path.clone(), beta.path.clone()]
+        );
+        assert_eq!(loader.cleanup_candidates, vec![vec![alpha.path, beta.path]]);
+        assert!(term.frames.iter().any(|frame| {
+            frame
+                .join("\n")
+                .contains("2 workspace registrations removed")
+        }));
+    }
+
+    #[test]
+    fn unreadable_recent_reports_the_error_without_a_removal_prompt() {
+        let alpha = ws("alpha");
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Quit]);
+        let mut loader = FakeLoader {
+            missing_error: Some(io::ErrorKind::PermissionDenied),
+            ..FakeLoader::default()
+        };
+
+        run(
+            &mut term,
+            vec![alpha],
+            vec![recent("alpha")],
+            now(),
+            &mut loader,
+        )
+        .unwrap();
+
+        assert_eq!(loader.cleanup_calls, 0);
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("workspace path could not be checked"))
+        );
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame.contains("Workspace not found"))
+        );
+    }
+
+    #[test]
+    fn restored_or_unreadable_workspace_is_not_unregistered() {
+        let alpha = ws("alpha");
+        let mut restored_term =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('y'), Key::Quit]);
+        let mut restored = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            cleanup_removed: Vec::new(),
+            ..FakeLoader::default()
+        };
+        run(
+            &mut restored_term,
+            vec![alpha.clone()],
+            Vec::new(),
+            now(),
+            &mut restored,
+        )
+        .unwrap();
+        assert_eq!(restored.cleanup_calls, 1);
+        assert!(restored_term.frames.iter().any(|frame| {
+            frame
+                .join("\n")
+                .contains("Workspace changed while confirming")
+        }));
+
+        let mut unreadable_term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Quit]);
+        let mut unreadable = FakeLoader {
+            missing_error: Some(io::ErrorKind::PermissionDenied),
+            ..FakeLoader::default()
+        };
+        run(
+            &mut unreadable_term,
+            vec![alpha],
+            Vec::new(),
+            now(),
+            &mut unreadable,
+        )
+        .unwrap();
+        assert_eq!(unreadable.cleanup_calls, 0);
+        let frames = unreadable_term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("workspace path could not be checked"))
+        );
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame.contains("Workspace not found"))
+        );
     }
 
     #[test]

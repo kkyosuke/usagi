@@ -290,6 +290,8 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 `usagi clean` は dry-run で候補だけを表示する。`--apply` は欠損 path の workspace 登録、欠損 workspace の
 daemon data、lifecycle に存在しない `usagi/*` branch と `.usagi/sessions/*` worktree を削除する。dirty worktree と
 未マージ branch は `--apply --force` を明示した場合だけ削除し、daemon が使用中の workspace はスキップする。
+Open、Recent、Unite で元ディレクトリが消えた workspace を選ぶと、その場で登録解除の確認を表示する。
+`Remove` が削除するのは workspace registry entry だけで、daemon data は `usagi clean --apply` の対象として残す。
 
 加えて、消滅した daemon generation が握ったままの capacity claim も回収する。claim は Agent と terminal の
 固定サイズ pool を占有するため、取りこぼしが積み上がると pool が枯渇して**どの session でも Agent を起動できなくなる**。
