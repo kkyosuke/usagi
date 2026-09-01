@@ -9722,8 +9722,8 @@ mod tests {
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
         FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort,
         Geometry, GitDiff, IdleWatch, LaunchAgentRequest, MAX_BACKGROUND_EXITS_PER_FRAME,
-        MetricsPort, MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics,
-        NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort,
+        MetricsPort, MetricsPortFactory, MissingWorkspacePrompt, NewStep, NoDesktopNotifications,
+        NoMetrics, NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort,
         PrModalClickRoute, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
         SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
@@ -9749,10 +9749,10 @@ mod tests {
         prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
         prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
         remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
-        reset_projection_build_counts, restore_open_panes, restore_prepared_workspace,
-        retarget_drawer_chords, route_garden_input, route_pr_modal_click,
-        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
-        run_screen_graph_with_backend_and_notice, run_with_settings,
+        render_missing_workspace_prompt, reset_projection_build_counts, restore_open_panes,
+        restore_prepared_workspace, retarget_drawer_chords, route_garden_input,
+        route_pr_modal_click, route_workspace_input_before_reducer, run as run_from_start,
+        run_screen_graph_with_backend, run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -27104,6 +27104,16 @@ mod tests {
                 .iter()
                 .any(|frame| frame.contains("No workspaces yet"))
         );
+    }
+
+    #[test]
+    fn missing_workspace_prompt_summarizes_multiple_paths() {
+        let prompt = MissingWorkspacePrompt::new(vec!["/tmp/alpha".into(), "/tmp/beta".into()]);
+        let frame = render_missing_workspace_prompt(24, 80, &vec![String::new(); 24], &prompt);
+        let rendered = strip_ansi(&frame.join("\n"));
+
+        assert!(rendered.contains("2 workspace directories no longer exist"));
+        assert!(rendered.contains("Remove their registry entries?"));
     }
 
     #[test]

@@ -4053,6 +4053,7 @@ fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
 
 /// Determine whether a registered workspace directory is absent without
 /// turning an unreadable path into cleanup authority.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=workspace_directory_validation_projects_metadata_errors
 fn workspace_directory_missing(path: &Path) -> std::io::Result<bool> {
     match std::fs::metadata(path) {
         Ok(metadata) => Ok(!metadata.is_dir()),

@@ -174,7 +174,7 @@ impl Welcome {
                 Recent::Workspace(overview) => (!paths.contains(&overview.workspace.path))
                     .then_some(Recent::Workspace(overview)),
                 Recent::Unite(unite) => {
-                    let updated_at = unite.updated_at();
+                    let updated_at = unite.updated_at()?;
                     let members = unite
                         .members()
                         .iter()
@@ -183,12 +183,10 @@ impl Welcome {
                         .collect::<Vec<_>>();
                     if members.is_empty() {
                         None
-                    } else if let Some(updated_at) = updated_at {
+                    } else {
                         Some(Recent::Unite(UniteOverview::with_updated_at(
                             members, updated_at,
                         )))
-                    } else {
-                        Some(Recent::Unite(UniteOverview::new(members)))
                     }
                 }
             })
@@ -640,6 +638,26 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(names, ["delta", "alpha", "unite"]);
+    }
+
+    #[test]
+    fn remove_paths_updates_workspace_and_unite_recents() {
+        let mut welcome = Welcome::new(vec![
+            workspace("solo", 1),
+            unite(&[("alpha", 2), ("beta", 3)]),
+            unite(&[("gone", 4)]),
+            unite(&[]),
+        ]);
+
+        welcome.remove_paths(&["/tmp/solo".into(), "/tmp/beta".into(), "/tmp/gone".into()]);
+
+        assert_eq!(welcome.recent().len(), 1);
+        let Recent::Unite(unite) = &welcome.recent()[0] else {
+            panic!("surviving recent should remain a unite");
+        };
+        assert_eq!(unite.members().len(), 1);
+        assert_eq!(unite.members()[0].workspace.name, "alpha");
+        assert_eq!(unite.updated_at(), Some(now() - Duration::minutes(2)));
     }
 
     #[test]
