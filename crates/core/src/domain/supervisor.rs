@@ -1608,30 +1608,31 @@ mod tests {
 
     #[test]
     fn failed_verification_escalates_and_records_safe_evidence() {
-        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
-        let mut task = task(run.supervisor_run_id, "verify", &[]);
-        task.state = TaskState::Verifying;
-        run.tasks.insert(task.task_id.clone(), task);
-        let id = TaskId::new("verify").unwrap();
-        reduce(
-            &mut run,
-            &event(
-                1,
-                SupervisorEventKind::VerificationResult {
-                    task_id: id,
-                    generation: 1,
-                    passed: false,
-                    result_digest: "mismatch".into(),
-                    safe_summary: "head commit did not match".into(),
-                },
-            ),
-        )
-        .unwrap();
-        assert_eq!(run.state, SupervisorRunState::Escalated);
-        assert_eq!(
-            run.escalation.as_ref().unwrap().safe_evidence,
-            "head commit did not match"
-        );
+        for (safe_summary, expected) in [
+            ("head commit did not match", "head commit did not match"),
+            ("", "mismatch"),
+        ] {
+            let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+            let mut task = task(run.supervisor_run_id, "verify", &[]);
+            task.state = TaskState::Verifying;
+            run.tasks.insert(task.task_id.clone(), task);
+            reduce(
+                &mut run,
+                &event(
+                    1,
+                    SupervisorEventKind::VerificationResult {
+                        task_id: TaskId::new("verify").unwrap(),
+                        generation: 1,
+                        passed: false,
+                        result_digest: "mismatch".into(),
+                        safe_summary: safe_summary.into(),
+                    },
+                ),
+            )
+            .unwrap();
+            assert_eq!(run.state, SupervisorRunState::Escalated);
+            assert_eq!(run.escalation.as_ref().unwrap().safe_evidence, expected);
+        }
     }
 
     #[test]

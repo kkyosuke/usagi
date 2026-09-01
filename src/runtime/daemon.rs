@@ -3525,6 +3525,7 @@ fn spawn_ipc_server(
             "supervisor startup reconciliation deferred: {error}"
         ));
     }
+    background_workers.push(start_goal_artifact_recovery(Arc::clone(&supervisor))?);
     background_workers.push(start_agent_observer(
         Arc::downgrade(&agent),
         agent_observations,
@@ -6030,6 +6031,7 @@ fn project_reported_pr(
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=only_an_open_non_draft_pr_with_passing_checks_satisfies_the_contract
 fn verify_completed_goal_artifact(
     supervisor: &SharedSupervisorRuntime,
     dispatch_run_id: Option<usagi_core::domain::id::OperationId>,
@@ -6060,6 +6062,45 @@ fn verify_completed_goal_artifact(
         .record_artifact_verification(&request, verification, chrono::Utc::now())
         .map_err(supervisor_error)?;
     Ok(())
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
+fn start_goal_artifact_recovery(
+    supervisor: SharedSupervisorRuntime,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("usagi-goal-artifact-recovery".to_owned())
+        .spawn(move || {
+            if let Err(error) = reconcile_pending_goal_artifacts(&supervisor) {
+                ErrorLog::record(&format!(
+                    "Goal artifact verification reconciliation deferred: {error}"
+                ));
+            }
+        })
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=artifact_preparation_rejects_nonterminal_wrong_contract_and_corrupt_membership
+fn reconcile_pending_goal_artifacts(supervisor: &SharedSupervisorRuntime) -> anyhow::Result<usize> {
+    let pending = supervisor
+        .lock()
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+        .pending_artifact_verifications()?;
+    let mut reconciled = 0;
+    let mut first_failure = None;
+    for item in pending {
+        if let Err(error) = verify_completed_goal_artifact(supervisor, Some(item.dispatch_run_id)) {
+            first_failure.get_or_insert_with(|| {
+                anyhow::anyhow!(
+                    "artifact verification {} remains pending: {}",
+                    item.dispatch_run_id,
+                    error.message
+                )
+            });
+        } else {
+            reconciled += 1;
+        }
+    }
+    first_failure.map_or(Ok(reconciled), Err)
 }
 
 fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
@@ -8741,6 +8782,7 @@ fn reserve_goal_supervisor_run(
         .map_err(supervisor_error)
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=goal_supervisor_promotion_maps_a_poisoned_owner_to_unavailable
 fn bind_goal_supervisor_run(
     supervisor: &SharedSupervisorRuntime,
     operation_id: &str,
@@ -8761,6 +8803,7 @@ fn bind_goal_supervisor_run(
         .map_err(supervisor_error)
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=delegated_dispatch_is_reserved_before_spawn_and_reconciled_by_exact_operation
 fn bind_delegated_supervisor_dispatch(
     supervisor: &SharedSupervisorRuntime,
     operation_id: &str,
@@ -8794,6 +8837,7 @@ fn start_goal_supervisor_run(
 /// pending; definite Agent failures close the reservation; successful outcomes
 /// bind the persisted runtime fence without spawning anything.
 #[allow(clippy::too_many_lines)] // Root and delegated reservations share one best-effort reconciliation pass.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn reconcile_pending_supervisor_promotions(
     supervisor: &SharedSupervisorRuntime,
     agent: &SharedAgentRuntime,

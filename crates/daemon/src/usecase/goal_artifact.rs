@@ -88,16 +88,18 @@ impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
         ) {
             return rejected("pull request checks are not passing");
         }
-        let checks = match view.checks {
-            Some(PrChecksState::Passing) => "passing",
-            Some(PrChecksState::Failing) => "failing",
-            Some(PrChecksState::Pending) => "pending",
-            None => "not_configured",
-        };
-        let safe_summary = if view.checks == Some(PrChecksState::Passing) {
-            "open review-ready pull request verified with passing checks"
+        // Failing and pending returned above. Keep the accepted-state mapping
+        // closed over only the two values which can actually reach evidence.
+        let (checks, safe_summary) = if view.checks == Some(PrChecksState::Passing) {
+            (
+                "passing",
+                "open review-ready pull request verified with passing checks",
+            )
         } else {
-            "open review-ready pull request verified with no configured checks"
+            (
+                "not_configured",
+                "open review-ready pull request verified with no configured checks",
+            )
         };
         ArtifactVerification {
             passed: true,
@@ -183,6 +185,16 @@ mod tests {
                     Some(&result(Some("https://github.com/acme/repo/pull/42")))
                 )
                 .passed
+        );
+        let mut malformed = GoalArtifactVerifier::new(Runner([Ok("not json".into())].into()));
+        let malformed = malformed.verify(
+            GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            Some(&result(Some("https://github.com/acme/repo/pull/42"))),
+        );
+        assert!(!malformed.passed);
+        assert_eq!(
+            malformed.safe_summary,
+            "pull request verification returned an invalid response"
         );
         let mut never_called = GoalArtifactVerifier::new(Runner(VecDeque::new()));
         for (contract, result) in [
