@@ -7358,7 +7358,7 @@ mod tests {
 
         let mut queued = self::runtime();
         queued
-            .prompt(workspace, None, "already queued", PromptMode::Auto)
+            .prompt(workspace, None, "already queued", PromptMode::Queue)
             .unwrap();
         intent.goal = "do not replace the queue".into();
         assert_eq!(
