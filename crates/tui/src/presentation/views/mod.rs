@@ -22,4 +22,5 @@ pub mod scratchpad_modal;
 pub mod splash;
 pub mod text_overlay;
 pub mod welcome;
+pub mod work_run;
 pub mod workspace;

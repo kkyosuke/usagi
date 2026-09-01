@@ -21,7 +21,7 @@ use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
 };
-use usagi_core::domain::supervisor::{SupervisorRunQuery, SupervisorRunState, TaskState};
+use usagi_core::domain::supervisor::SupervisorRunState;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
 use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
@@ -44,6 +44,7 @@ use crate::presentation::views::root_terminal_drawer::{
     self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
 };
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
+use crate::presentation::views::work_run::{WorkRunFreshness, WorkRunProgress, WorkRunProjection};
 use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
@@ -368,7 +369,7 @@ pub struct HomeProjection {
     /// conversation selector and terminal rows through
     /// [`Self::with_director_drawer`].
     director_drawer: Option<DirectorDrawerProjection>,
-    work_runs: Vec<SupervisorRunQuery>,
+    work_runs: WorkRunProjection,
     /// Frontmost bottom-anchored workspace-root generic terminal drawer.
     root_terminal_drawer: Option<RootTerminalDrawerProjection>,
 }
@@ -645,7 +646,7 @@ impl HomeProjection {
             director_drawer: state
                 .director_drawer_open()
                 .then(DirectorDrawerProjection::default),
-            work_runs: Vec::new(),
+            work_runs: WorkRunProjection::default(),
             root_terminal_drawer: state
                 .root_terminal_drawer_open()
                 .then(RootTerminalDrawerProjection::default),
@@ -970,19 +971,10 @@ impl HomeProjection {
         self
     }
 
-    /// Attach daemon-owned Work Runs as observational draw material.
+    /// Attach the shared daemon-owned Work Run observation without deriving a
+    /// second ordering, progress count, or freshness interpretation for Home.
     #[must_use]
-    pub fn with_work_runs(mut self, mut runs: Vec<SupervisorRunQuery>) -> Self {
-        runs.sort_by_key(|run| {
-            let priority = match run.state {
-                SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated => 0,
-                SupervisorRunState::Failed => 1,
-                SupervisorRunState::Running | SupervisorRunState::Verifying => 2,
-                SupervisorRunState::Planning => 3,
-                SupervisorRunState::Succeeded | SupervisorRunState::Cancelled => 4,
-            };
-            (priority, std::cmp::Reverse(run.supervisor_run_id))
-        });
+    pub fn with_work_runs(mut self, runs: WorkRunProjection) -> Self {
         self.work_runs = runs;
         self
     }
@@ -2350,26 +2342,33 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
             width,
         );
     }
-    let Some(run) = home.work_runs.first() else {
+    let Some(run) = home.work_runs.primary() else {
+        if home.work_runs.freshness() == WorkRunFreshness::Unavailable {
+            return widgets::clip_to_width(
+                &Role::Warning
+                    .style()
+                    .bold()
+                    .paint("  ⚠ Work Run progress unavailable"),
+                width,
+            );
+        }
         return header_spacer(width);
     };
-    let done = run
-        .tasks
-        .iter()
-        .filter(|task| task.state == TaskState::Succeeded)
-        .count();
-    let active = run
-        .tasks
-        .iter()
-        .filter(|task| matches!(task.state, TaskState::Dispatched | TaskState::Running))
-        .count();
+    let progress = WorkRunProgress::from_run(run);
     let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
+    let observation = if home.work_runs.freshness() == WorkRunFreshness::Unavailable {
+        "⚠ Stale work"
+    } else {
+        "● Active work"
+    };
     widgets::clip_to_width(
         &format!(
-            "  ● Active work #{short_id} · {} · {done}/{} tasks · {active}/{} agents · Director for details",
+            "  {observation} #{short_id} · {} · {}/{} tasks · {}/{} agents · Director for details",
             work_run_state_label(run.state),
-            run.tasks.len(),
-            run.policy.max_concurrency,
+            progress.succeeded_tasks,
+            progress.total_tasks,
+            progress.active_agents,
+            progress.max_agents,
         ),
         width,
     )
@@ -3184,14 +3183,15 @@ mod tests {
         DECISION_NOTICE_ICON, DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction,
         HomeProjection, LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession,
         SESSION_ROW_LINES, SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED,
-        Workspace, abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
-        garden_click_at, garden_fits, garden_frame, garden_scroll_action, garden_tick,
-        health_badge, health_reason_label, home_header_action_at, home_header_layout,
-        home_left_pane, home_notice_banner, home_row_height, home_row_lines_at,
-        home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
-        pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
-        right_pane_tab_at, role_identity, short_id, sidebar_agent_line, sidebar_metadata,
-        sidecar_labels, terminal_point_at, with_footer_gap, work_run_state_label,
+        WorkRunProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
+        feedback_label, format_memory, garden_click_at, garden_fits, garden_frame,
+        garden_scroll_action, garden_tick, health_badge, health_reason_label,
+        home_header_action_at, home_header_layout, home_left_pane, home_notice_banner,
+        home_row_height, home_row_lines_at, home_viewport_start, load_style,
+        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
+        render_home_at, resume_label, right_pane_tab_at, role_identity, short_id,
+        sidebar_agent_line, sidebar_metadata, sidecar_labels, terminal_point_at, with_footer_gap,
+        work_run_state_label,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -3276,7 +3276,7 @@ mod tests {
         })
         .collect();
         let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
-            .with_work_runs(vec![run.clone()]);
+            .with_work_runs(WorkRunProjection::fresh(vec![run.clone()]));
         let banner = widgets::strip_ansi(&home_notice_banner(100, &home));
         assert!(banner.contains("Active work"));
         assert!(banner.contains("Working"));
@@ -3308,7 +3308,7 @@ mod tests {
             ]
         );
         let sorted = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
-            .with_work_runs(
+            .with_work_runs(WorkRunProjection::fresh(
                 states
                     .into_iter()
                     .map(|state| SupervisorRunQuery {
@@ -3317,15 +3317,28 @@ mod tests {
                         ..run.clone()
                     })
                     .collect(),
-            );
+            ));
         assert!(matches!(
-            sorted.work_runs[0].state,
+            sorted.work_runs.runs()[0].state,
             SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated
         ));
         assert!(matches!(
-            sorted.work_runs.last().unwrap().state,
+            sorted.work_runs.runs().last().unwrap().state,
             SupervisorRunState::Succeeded | SupervisorRunState::Cancelled
         ));
+
+        let cached_home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
+            .with_work_runs(WorkRunProjection::fresh(vec![run]).unavailable());
+        let cached_banner = widgets::strip_ansi(&home_notice_banner(100, &cached_home));
+        assert!(cached_banner.contains("Stale work"));
+        assert!(!cached_banner.contains("● Active work"));
+
+        let unavailable = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
+            .with_work_runs(WorkRunProjection::default().unavailable());
+        assert!(
+            widgets::strip_ansi(&home_notice_banner(100, &unavailable))
+                .contains("Work Run progress unavailable")
+        );
     }
 
     #[test]
@@ -4419,7 +4432,7 @@ mod tests {
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::default(),
-            work_runs: Vec::new(),
+            work_runs: WorkRunProjection::default(),
         };
 
         let closed_state = AppState::home(workspace, Vec::new());

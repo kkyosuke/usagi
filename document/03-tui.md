@@ -625,9 +625,11 @@ conversation だけで、managed Closeup の tab count・identity・selection �
 
 実効 Workspace 設定の Workflow が `goal-driven` の場合、New は CLI だけの picker ではなく Goal Composer を開く。
 Composer は必須の `Goal` と install 済み provider の選択を同じ drawer に表示し、通常文字、Backspace、bracketed paste を
-Goal が所有する。`↑` / `↓` は provider だけを循環し、`Esc` は draft を破棄して conversation へ戻る。空または空白だけの
-Goal と Goal 欄を描けない高さは launch を発行しない。TUI は 16 KiB を超える入力部分を受け付けず、上限までの完全な
-UTF-8 境界だけを保持する。daemon も 16 KiB 超の request と非空条件を admission 前に再検証する。
+Goal が所有する。paste 内の改行・tabを含む区切り whitespace は単一 field の可視 space へ正規化し、その他の terminal control と bidi control は
+保存しない。`↑` / `↓` は provider だけを循環し、`Esc` は draft を破棄して conversation へ戻る。空または空白だけの
+Goal、または選択中 provider を描けない高さは launch を発行せず、footer に `Terminal too short to choose provider` を出す。
+TUI は 16 KiB を超える入力部分を受け付けず、上限までの完全な UTF-8 境界だけを保持する。daemon も 16 KiB 超の request と
+非空条件を admission 前に再検証する。
 
 `Enter` は fresh operation、workspace root、explicit profile、Goal を持つ専用の `agent_goal` request を 1 件発行する。
 この request は classic `agent` request と別の wire variant であり、classic の semantic key や初期 prompt を変更しない。
@@ -646,7 +648,10 @@ daemon は利用者の Goal を次の固定 operating contract と結合し、`L
 Work Run の前面は既存 Director drawer である。daemon が workspace に属する durable `SupervisorRun` を保持すると、
 Home の notice band は最優先 run の状態、成功 task 数、実行中 task 数と concurrency 上限を `Active work` として表示する。
 Director drawer は同じ redaction-safe snapshot から progress bar、最大5件の task state、停止理由を描き、2秒 cadence の
-専用 background lane で更新する。観測失敗時は既存 snapshot を維持して5秒 backoffし、frame thread からIPCを行わない。
+専用 background lane で更新する。実行中 Agent 数は supervisor admission と同じ `Dispatched | Running` task の数を正本とし、
+Home と Director は共通 projection から同じ並び順・集計を読む。観測失敗時は既存 snapshot を維持して `Stale` と明示し、
+初回から取得不能なら `Work Run progress unavailable` と authoritative `Failed` を描き分けて5秒 backoffする。frame thread から
+IPCは行わない。
 workspace 所有情報を持たない旧 run は別 workspace へ推測せず表示しない。
 
 この表示は workspace に属する `SupervisorRun` の観測面である。goal-driven `AgentGoal` launch は同じ operation ID で
@@ -654,7 +659,7 @@ idempotent な run start へ接続され、応答再送でも同じ root Agent �
 束縛され、Agentの終了に伴ってtaskとRunの進捗もterminalへ収束する。Agent admission が失敗した場合はRunを作らない。
 進行中の worker は Organization / Session / Garden、明示判断は既存 decision notice/modal、
 PR は既存 PR inventory/modal、launch failure と Agent 停止理由は root pane の safe feedback と terminal output でも確認する。
-複数 run を選択する完全な Active work list、独立 PR/CI verifier、typed Stop reason action は
+複数 run を選択する完全な Active work list、typed Stop reason action は
 [goal-driven Work Run 提案](proposals/18-goal-driven-work-run.md) の後続段階である。
 
 成功時は root `AgentTabIntent` の order への追加と新 conversation の selection を 1 回の CAS mutation で commit

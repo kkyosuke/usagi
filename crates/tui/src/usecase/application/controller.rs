@@ -3812,6 +3812,9 @@ pub(crate) const NORMALIZED_TERMINAL_ROWS: usize = 24;
 /// Mirrors `views::director_drawer`'s `PICKER_CHROME_ROWS`; the assertion there
 /// keeps the launch gate and the render agreeing on the geometry.
 pub(crate) const DIRECTOR_PICKER_CHROME_ROWS: usize = 8;
+/// Goal label, input, and provider label consume three additional rows before
+/// Goal Composer can show the selected provider.
+pub(crate) const DIRECTOR_GOAL_COMPOSER_CHROME_ROWS: usize = DIRECTOR_PICKER_CHROME_ROWS + 3;
 
 /// Candidate rows the New picker can draw at `height` terminal rows.
 ///
@@ -3828,13 +3831,75 @@ pub(crate) fn director_picker_capacity(height: usize) -> usize {
     height.saturating_sub(DIRECTOR_PICKER_CHROME_ROWS)
 }
 
+/// Provider rows the Goal Composer can draw at `height` terminal rows.
+#[must_use]
+pub(crate) fn director_goal_composer_picker_capacity(height: usize) -> usize {
+    let height = if height == 0 {
+        NORMALIZED_TERMINAL_ROWS
+    } else {
+        height
+    };
+    height.saturating_sub(DIRECTOR_GOAL_COMPOSER_CHROME_ROWS)
+}
+
 /// Whether the drawer can currently draw the highlighted candidate row. An
 /// unobserved terminal size keeps the picker usable: the renderer normalizes the
 /// same way, so the first frame is never gated on a resize event.
 fn director_picker_shows_selection(state: &AppState) -> bool {
-    state
-        .size
-        .is_none_or(|(_, height)| director_picker_capacity(usize::from(height)) > 0)
+    state.size.is_none_or(|(_, height)| {
+        let height = usize::from(height);
+        if state.work_mode == WorkMode::GoalDriven {
+            director_goal_composer_picker_capacity(height) > 0
+        } else {
+            director_picker_capacity(height) > 0
+        }
+    })
+}
+
+/// Unicode bidi controls can reorder surrounding labels without being visible.
+/// They are not accepted in a single-field terminal composer even though Rust
+/// does not classify every one of them as a control character.
+const fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// Append one paste/key stream to the Goal `SSoT`.
+///
+/// Goal Composer is a single logical field: line-breaking controls become one
+/// visible separator, all other terminal/control and bidi formatting bytes are
+/// discarded, and the daemon's byte limit is applied on UTF-8 boundaries.
+fn append_goal_text(goal: &mut String, characters: impl IntoIterator<Item = char>) {
+    let mut normalized_separator = false;
+    for character in characters {
+        let character = if character == ' ' {
+            if normalized_separator {
+                continue;
+            }
+            character
+        } else if character.is_whitespace() {
+            normalized_separator = true;
+            if goal.chars().last().is_some_and(char::is_whitespace) {
+                continue;
+            }
+            ' '
+        } else if character.is_control() || is_bidi_control(character) {
+            continue;
+        } else {
+            normalized_separator = false;
+            character
+        };
+        if goal.len() + character.len_utf8() > MAX_WORK_GOAL_BYTES {
+            break;
+        }
+        goal.push(character);
+    }
 }
 
 fn update_goal_composer_text(state: &mut AppState, key: &AppKey) -> bool {
@@ -3847,23 +3912,10 @@ fn update_goal_composer_text(state: &mut AppState, key: &AppKey) -> bool {
         AppKey::Backspace => {
             state.director_goal.pop();
         }
-        AppKey::Char(character)
-            if state.director_goal.len() + character.len_utf8() <= MAX_WORK_GOAL_BYTES =>
-        {
-            state.director_goal.push(*character);
-        }
+        AppKey::Char(character) => append_goal_text(&mut state.director_goal, [*character]),
         AppKey::Paste(value) => {
-            let remaining = MAX_WORK_GOAL_BYTES.saturating_sub(state.director_goal.len());
-            let end = value
-                .char_indices()
-                .map(|(index, _)| index)
-                .chain(std::iter::once(value.len()))
-                .take_while(|index| *index <= remaining)
-                .last()
-                .unwrap_or(0);
-            state.director_goal.push_str(&value[..end]);
+            append_goal_text(&mut state.director_goal, value.chars());
         }
-        AppKey::Char(_) => {}
         _ => return false,
     }
     true
@@ -7022,6 +7074,26 @@ mod tests {
     }
 
     #[test]
+    fn goal_composer_normalizes_paste_and_rejects_terminal_controls() {
+        let workspace = WorkspaceId::new();
+        let mut state = sized_home(workspace, Vec::new(), 100, 30);
+        state.set_work_mode(WorkMode::GoalDriven);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::Paste(
+                "first\r\nsecond\t\u{2028}\u{a0}\u{1b}[2J\u{7}third\u{202e} fourth".to_owned(),
+            )),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('\u{9b}')));
+
+        assert_eq!(state.director_goal(), "first second [2Jthird fourth");
+        assert!(!state.director_goal().chars().any(char::is_control));
+        assert!(!state.director_goal().chars().any(is_bidi_control));
+    }
+
+    #[test]
     fn classic_remains_the_default_director_launch() {
         let workspace = WorkspaceId::new();
         let mut state = sized_home(workspace, Vec::new(), 100, 30);
@@ -7381,6 +7453,42 @@ mod tests {
             },
         );
         assert_eq!(update(&mut state, AppEvent::Key(AppKey::Enter)).len(), 1);
+    }
+
+    #[test]
+    fn goal_composer_enter_requires_its_provider_to_be_visible() {
+        assert_eq!(director_goal_composer_picker_capacity(11), 0);
+        assert_eq!(director_goal_composer_picker_capacity(12), 1);
+
+        let workspace = WorkspaceId::new();
+        for (height, launches) in [(11_u16, 0_usize), (12, 1)] {
+            let mut state = AppState::home(workspace, Vec::new());
+            state.set_agent_models(
+                AvailableModels::new([DefaultModel::OpenAi]),
+                DefaultModel::OpenAi,
+            );
+            state.set_work_mode(WorkMode::GoalDriven);
+            let _ = update(&mut state, AppEvent::Resize { width: 80, height });
+            let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
+            let _ = update(
+                &mut state,
+                AppEvent::Key(AppKey::Paste("finish the PR".to_owned())),
+            );
+            let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+            assert_eq!(
+                effects
+                    .iter()
+                    .filter(|effect| matches!(effect, Effect::LaunchGoal { .. }))
+                    .count(),
+                launches,
+                "height {height}"
+            );
+            assert_eq!(state.director_launching().is_some(), launches == 1);
+            assert_eq!(
+                matches!(state.director_new(), DirectorNew::Choosing(_)),
+                launches == 0
+            );
+        }
     }
 
     #[test]
