@@ -1320,9 +1320,10 @@ ownership を証明できない incomplete record も新しい child を spawn �
 別である。`AgentGoal` は workspace root だけを対象にし、非空かつ 16 KiB 以下の Goal を固定 operating contract と結合して
 `LaunchRequest.initial_prompt` に保存する。semantic key は workspace、profile、root scope に Goal の長さと本文を加えるため、
 同じ operation / Goal の retry は同じ admission を replay し、別 Goal は spawn 前に `idempotency_conflict` になる。
-readiness と semantic conflict の検証後、daemon は同じ operation ID を使って workspace 所有の `SupervisorRun` を先に永続化する。
-その後の Agent admission が失敗した場合は Run を `Cancelled` へ補償する。成功応答は `supervisor_run_id` を含み、応答喪失後の
-再送は Agent と Run の両方で同じ実体を返す。
+readiness と semantic conflict の検証後、daemon はAgentをdurable admissionし、そのdispatchを同じoperation IDでworkspace所有
+`SupervisorRun` のroot taskへ束縛する。Agent admission が失敗した場合はRunを作らない。Run永続化または束縛の途中で応答できない場合も、
+再送は既存Agent admissionをreplayして同じRunとroot provenanceへ収束する。成功応答は `supervisor_run_id` を含み、Agentのterminal
+dispatchをSupervisorが観測するとroot taskとRunもterminalへ遷移する。
 同 scope に既存の queued prompt がある場合はどちらを実行するか推測せず拒否する。通常 launch は従来どおり queued prompt
 だけを consume し、Goal mode の有効化・無効化で classic Agent admission の意味は変わらない。
 

@@ -114,6 +114,10 @@ pub trait SessionScopeResolver {
 pub struct AgentAdmission {
     pub operation_id: String,
     pub revision: u64,
+    /// Exact daemon-owned runtime admitted for this operation. Presentation
+    /// layers expose only its terminal, while supervisor composition uses the
+    /// full fence to bind the root task without inventing provenance.
+    pub runtime: AgentRuntimeRef,
     pub terminal: TerminalRef,
     /// Stable public lineage shared by the source and replacement. It is absent
     /// only when replaying a legacy durable record which predates exact resume.
@@ -2200,6 +2204,7 @@ impl AgentRuntime {
         Ok(AgentAdmission {
             operation_id: operation.to_string(),
             revision: 1,
+            runtime: authorization.runtime.clone(),
             terminal,
             continuation: self
                 .coordinator
@@ -2430,6 +2435,7 @@ impl AgentRuntime {
         Ok(AgentAdmission {
             operation_id: operation_id.to_owned(),
             revision: 1,
+            runtime: authorization.runtime.clone(),
             terminal,
             continuation: Some(target.continuation),
             resume_relation: Some(AgentResumeRelation {
@@ -2631,6 +2637,7 @@ impl AgentRuntime {
         Ok(AgentAdmission {
             operation_id: operation_id.to_owned(),
             revision: 1,
+            runtime: authorization.runtime.clone(),
             terminal,
             continuation: self
                 .coordinator
@@ -3526,6 +3533,7 @@ fn durable_operation_outcome(
             Ok(AgentAdmission {
                 operation_id: record.operation.operation_id.to_string(),
                 revision: 1,
+                runtime: record.runtime.clone(),
                 terminal: record.runtime.terminal.clone(),
                 continuation: record.continuation,
                 resume_relation: durable_resume_relation(record),
@@ -3536,6 +3544,7 @@ fn durable_operation_outcome(
         DurableOperationOutcome::Completed => Ok(AgentAdmission {
             operation_id: record.operation.operation_id.to_string(),
             revision: 1,
+            runtime: record.runtime.clone(),
             terminal: record.runtime.terminal.clone(),
             continuation: record.continuation,
             resume_relation: durable_resume_relation(record),
