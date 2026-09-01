@@ -1071,6 +1071,11 @@ mod tests {
     #[test]
     fn escalation_is_quiescent_but_not_finished_history() {
         assert!(SupervisorRunState::Escalated.blocks_ordinary_events());
+        #[allow(deprecated)]
+        {
+            assert!(SupervisorRunState::Escalated.terminal());
+            assert!(!SupervisorRunState::Running.terminal());
+        }
         assert!(!SupervisorRunState::Escalated.is_finished());
         assert!(SupervisorRunState::Succeeded.is_finished());
         assert!(SupervisorRunState::Failed.is_finished());
