@@ -4,6 +4,12 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Maximum automatically managed pull requests retained for one session.
+///
+/// User-owned pinned or dismissed entries are never evicted. When they occupy
+/// the whole allowance, later automatic discoveries are ignored.
+pub const PR_INVENTORY_ENTRIES_MAX: usize = 256;
+
 /// Canonical GitHub pull-request identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PrIdentity(String);
@@ -54,11 +60,23 @@ pub fn canonicalize(candidate: &str) -> Option<PrIdentity> {
         return None;
     }
     let path = &rest[authority_end..];
-    let path = path.split(['?', '#']).next()?;
+    let mut suffix_start = path.len();
+    for (index, byte) in path.bytes().enumerate() {
+        if byte == b'?' || byte == b'#' {
+            suffix_start = index;
+            break;
+        }
+    }
+    let path = &path[..suffix_start];
     let mut parts = path.split('/').filter(|part| !part.is_empty());
     let owner = parts.next()?;
     let repo = parts.next()?;
-    if !valid_path_part(owner) || !valid_path_part(repo) || parts.next()? != "pull" {
+    if owner.len() > 39
+        || repo.len() > 100
+        || !valid_path_part(owner)
+        || !valid_path_part(repo)
+        || parts.next()? != "pull"
+    {
         return None;
     }
     let number = parts.next()?;
@@ -266,7 +284,7 @@ impl PrInventory {
         &mut self,
         identities: impl IntoIterator<Item = (PrIdentity, bool)>,
     ) -> bool {
-        let mut changed = false;
+        let mut changed = self.prune_automatic_entries();
         for (identity, auto_open) in identities {
             if let Some(entry) = self.entries.get_mut(&identity) {
                 if auto_open && !entry.auto_open {
@@ -274,6 +292,11 @@ impl PrInventory {
                     changed = true;
                 }
             } else {
+                if self.entries.len() >= PR_INVENTORY_ENTRIES_MAX
+                    && !self.evict_one_automatic_entry()
+                {
+                    continue;
+                }
                 self.entries.insert(
                     identity.clone(),
                     PrEntry {
@@ -296,6 +319,36 @@ impl PrInventory {
             self.revision += 1;
         }
         changed
+    }
+
+    /// Applies the current automatic-entry retention policy to a snapshot
+    /// loaded from an older build. User-owned entries are never discarded.
+    pub fn enforce_retention(&mut self) -> bool {
+        if !self.prune_automatic_entries() {
+            return false;
+        }
+        self.revision += 1;
+        true
+    }
+
+    fn prune_automatic_entries(&mut self) -> bool {
+        let mut changed = false;
+        while self.entries.len() > PR_INVENTORY_ENTRIES_MAX {
+            if !self.evict_one_automatic_entry() {
+                break;
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn evict_one_automatic_entry(&mut self) -> bool {
+        let candidate = self
+            .entries
+            .iter()
+            .find(|(_, entry)| !entry.pinned && entry.state != PrState::Dismissed)
+            .map(|(identity, _)| identity.clone());
+        candidate.is_some_and(|identity| self.entries.remove(&identity).is_some())
     }
 
     /// Applies the safe subset returned by `gh pr view`. User-owned entries
@@ -400,9 +453,17 @@ mod tests {
             "https://github.com/o/r/pull/999999999999999999999999",
             "https://github.com/o%zz/r/pull/1",
             "https://github.com/o/r/issues/1",
+            "https://github.com",
+            "https://github.com/o",
+            "https://github.com/o/r",
+            "https://github.com/o/r/pull",
         ] {
             assert!(canonicalize(value).is_none(), "{value}");
         }
+        assert!(canonicalize(&format!("https://github.com/{}/r/pull/1", "o".repeat(40))).is_none());
+        assert!(
+            canonicalize(&format!("https://github.com/o/{}/pull/1", "r".repeat(101))).is_none()
+        );
     }
     #[test]
     fn rejects_non_numeric_numbers_and_ignores_invalid_or_non_utf8_bytes() {
@@ -478,6 +539,98 @@ mod tests {
         assert!(!inventory.discover([id]));
         assert_eq!(inventory.revision, 2);
     }
+
+    #[test]
+    fn discovery_is_bounded_and_never_evicts_user_owned_entries() {
+        let dismissed = canonicalize("https://github.com/o/r/pull/1").unwrap();
+        let pinned = canonicalize("https://github.com/o/r/pull/2").unwrap();
+        let mut inventory = PrInventory::default();
+        inventory.discover([dismissed.clone(), pinned.clone()]);
+        inventory.set_user_state(&dismissed, PrState::Dismissed, true);
+        inventory.set_user_state(&pinned, PrState::Open, true);
+        for number in 3..=PR_INVENTORY_ENTRIES_MAX {
+            inventory.discover([
+                canonicalize(&format!("https://github.com/o/r/pull/{number}")).unwrap(),
+            ]);
+        }
+        let first_automatic = inventory
+            .entries
+            .iter()
+            .find(|(_, entry)| !entry.pinned && entry.state != PrState::Dismissed)
+            .map(|(identity, _)| identity.clone())
+            .unwrap();
+        let newest = canonicalize(&format!(
+            "https://github.com/o/r/pull/{}",
+            PR_INVENTORY_ENTRIES_MAX + 1
+        ))
+        .unwrap();
+
+        assert!(inventory.discover([newest.clone()]));
+        assert_eq!(inventory.entries.len(), PR_INVENTORY_ENTRIES_MAX);
+        assert!(inventory.entries.contains_key(&dismissed));
+        assert!(inventory.entries.contains_key(&pinned));
+        assert!(!inventory.entries.contains_key(&first_automatic));
+        assert!(inventory.entries.contains_key(&newest));
+    }
+
+    #[test]
+    fn protected_overflow_is_preserved_and_refuses_more_automatic_state() {
+        let mut inventory = PrInventory::default();
+        for number in 1..=PR_INVENTORY_ENTRIES_MAX + 1 {
+            let identity = canonicalize(&format!("https://github.com/o/r/pull/{number}")).unwrap();
+            inventory.entries.insert(
+                identity.clone(),
+                PrEntry {
+                    identity,
+                    title: None,
+                    state: PrState::Dismissed,
+                    head_oid: None,
+                    pinned: true,
+                    refresh: PrRefreshState::Idle,
+                    draft: false,
+                    checks: None,
+                    review: None,
+                    auto_open: false,
+                },
+            );
+        }
+        let revision = inventory.revision;
+        let extra = canonicalize("https://github.com/o/r/pull/9999").unwrap();
+
+        assert!(!inventory.enforce_retention());
+        assert!(!inventory.discover_with_auto_open([(extra.clone(), true)]));
+        assert_eq!(inventory.revision, revision);
+        assert_eq!(inventory.entries.len(), PR_INVENTORY_ENTRIES_MAX + 1);
+        assert!(!inventory.entries.contains_key(&extra));
+    }
+
+    #[test]
+    fn legacy_automatic_overflow_is_pruned_to_the_current_limit() {
+        let mut inventory = PrInventory::default();
+        for number in 1..=PR_INVENTORY_ENTRIES_MAX + 1 {
+            let identity = canonicalize(&format!("https://github.com/o/r/pull/{number}")).unwrap();
+            inventory.entries.insert(
+                identity.clone(),
+                PrEntry {
+                    identity,
+                    title: None,
+                    state: PrState::Open,
+                    head_oid: None,
+                    pinned: false,
+                    refresh: PrRefreshState::Idle,
+                    draft: false,
+                    checks: None,
+                    review: None,
+                    auto_open: false,
+                },
+            );
+        }
+
+        assert!(inventory.enforce_retention());
+        assert_eq!(inventory.entries.len(), PR_INVENTORY_ENTRIES_MAX);
+        assert_eq!(inventory.revision, 1);
+    }
+
     #[test]
     fn closed_round_trips() {
         let mut inventory = PrInventory::default();

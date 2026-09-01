@@ -13,7 +13,7 @@
 //! processes writing the same path never clobber each other.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -518,6 +518,40 @@ pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     Ok(Some(value))
 }
 
+/// Read and deserialize a JSON file only when its bytes fit `max_bytes`.
+///
+/// A limited reader consumes at most one sentinel byte beyond the allowance,
+/// so a concurrently growing file remains bounded and is still rejected.
+///
+/// # Errors
+///
+/// Returns an error when the file exceeds `max_bytes`, cannot be read, or is not
+/// valid JSON for `T`.
+pub fn read_bounded<T: DeserializeOwned>(path: &Path, max_bytes: usize) -> Result<Option<T>> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).context(format!("failed to read {}", path.display()));
+        }
+    };
+    let limit = max_bytes.saturating_add(1);
+    // Do not trust a racy metadata length as an allocation request. The limited
+    // reader grows this buffer only for bytes it actually consumes.
+    let mut bytes = Vec::new();
+    file.take(limit as u64)
+        .read_to_end(&mut bytes)
+        .context(format!("failed to read {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() <= max_bytes,
+        "{} exceeds the {max_bytes}-byte JSON limit",
+        path.display()
+    );
+    let value =
+        serde_json::from_slice(&bytes).context(format!("failed to parse {}", path.display()))?;
+    Ok(Some(value))
+}
+
 /// Serialize `value` to pretty JSON and write it durably and atomically to `path`
 /// (temp file + fsync + rename), creating `dir` (the directory that contains
 /// `path`) first. For source-of-truth JSON; a rebuildable cache uses
@@ -529,6 +563,83 @@ pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 /// or the temp file cannot be written or renamed onto `path`.
 pub fn write_atomic<T: Serialize>(dir: &Path, path: &Path, value: &T) -> Result<()> {
     write_json(dir, path, value, true)
+}
+
+/// Serialize and atomically write `value` only when its complete JSON document
+/// fits `max_bytes`. An oversized value leaves the previous file untouched.
+///
+/// # Errors
+///
+/// Returns an error when serialization exceeds `max_bytes` or the atomic write
+/// fails.
+pub(crate) fn write_atomic_bounded(
+    dir: &Path,
+    path: &Path,
+    value: &dyn BoundedJsonValue,
+    max_bytes: usize,
+) -> Result<()> {
+    if max_bytes == 0 {
+        anyhow::bail!("{} exceeds the 0-byte JSON limit", path.display());
+    }
+    let mut writer = BoundedJsonWriter::new(max_bytes - 1);
+    if let Err(error) = value.write_pretty(&mut writer) {
+        if writer.exceeded {
+            anyhow::bail!("{} exceeds the {max_bytes}-byte JSON limit", path.display());
+        }
+        return Err(error).context(format!("failed to serialize {}", path.display()));
+    }
+    writer
+        .flush()
+        .expect("flushing an in-memory JSON buffer cannot fail");
+    writer.bytes.push(b'\n');
+    fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
+    write_atomically(path, &writer.bytes, true)
+}
+
+/// Object-safe serialization boundary keeps the byte/error handling in one
+/// non-generic function instead of duplicating its branches per value type.
+pub(crate) trait BoundedJsonValue {
+    fn write_pretty(&self, writer: &mut dyn Write) -> serde_json::Result<()>;
+}
+
+impl<T: Serialize> BoundedJsonValue for T {
+    fn write_pretty(&self, writer: &mut dyn Write) -> serde_json::Result<()> {
+        serde_json::to_writer_pretty(writer, self)
+    }
+}
+
+/// JSON serializer sink that stops retaining bytes at the configured ceiling.
+/// This makes rejection itself bounded instead of first materializing an
+/// arbitrarily large document only to measure it afterwards.
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    exceeded: bool,
+}
+
+impl BoundedJsonWriter {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.max_bytes.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::other("bounded JSON buffer is full"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Like [`write_atomic`] but for a rebuildable derived cache: the write is atomic
@@ -649,6 +760,17 @@ pub fn write_versioned<T: Serialize + ?Sized>(dir: &Path, path: &Path, payload: 
 mod tests {
     use super::*;
 
+    struct SerializationFailure;
+
+    impl serde::Serialize for SerializationFailure {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("injected serialization failure"))
+        }
+    }
+
     #[test]
     fn write_text_atomic_writes_and_replaces_in_place() {
         let dir = tempfile::tempdir().unwrap();
@@ -691,6 +813,56 @@ mod tests {
             .filter(|name| name.to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftover.is_empty(), "temp files left behind: {leftover:?}");
+    }
+
+    #[test]
+    fn bounded_json_refuses_oversized_reads_and_preserves_the_previous_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bounded.json");
+        write_atomic(dir.path(), &path, &vec!["kept"]).unwrap();
+        let original = fs::read(&path).unwrap();
+
+        assert!(read_bounded::<Vec<String>>(&path, original.len() - 1).is_err());
+        assert!(
+            write_atomic_bounded(dir.path(), &path, &vec!["too large"], original.len() - 1)
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            read_bounded::<Vec<String>>(&path, original.len()).unwrap(),
+            Some(vec!["kept".to_owned()])
+        );
+
+        let blocking_file = dir.path().join("not-a-directory");
+        fs::write(&blocking_file, "x").unwrap();
+        assert!(read_bounded::<serde_json::Value>(&blocking_file.join("child.json"), 32).is_err());
+        let directory = dir.path().join("directory.json");
+        fs::create_dir(&directory).unwrap();
+        assert!(read_bounded::<serde_json::Value>(&directory, 32).is_err());
+
+        let malformed = dir.path().join("malformed.json");
+        fs::write(&malformed, "{").unwrap();
+        assert!(read_bounded::<serde_json::Value>(&malformed, 32).is_err());
+
+        assert!(
+            write_atomic_bounded(dir.path(), &path, &SerializationFailure, original.len()).is_err()
+        );
+        assert!(write_atomic_bounded(dir.path(), &path, &vec!["x"], 0).is_err());
+
+        let mut bounded = BoundedJsonWriter::new(4);
+        assert!(bounded.write_all(b"12345").is_err());
+        assert!(bounded.bytes.is_empty());
+        assert!(bounded.exceeded);
+
+        assert!(write_atomic(dir.path(), &path, &SerializationFailure).is_err());
+        assert!(
+            write_atomic(
+                &blocking_file,
+                &blocking_file.join("unwritable.json"),
+                &serde_json::Value::Null,
+            )
+            .is_err()
+        );
     }
 
     #[test]
