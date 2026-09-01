@@ -2207,6 +2207,15 @@ mod tests {
         wide.advance("A界BC\x1b[4D\x1b[P".as_bytes());
         assert_eq!(rows(&wide), vec!["A BC"]);
         assert!(wide.grid()[0].iter().all(|cell| !cell.continuation()));
+
+        let mut continuation = VtScreen::new(1, 8);
+        continuation.advance("A界BC\x1b[3D\x1b[P".as_bytes());
+        assert_eq!(rows(&continuation), vec!["A BC"]);
+        assert!(
+            continuation.grid()[0]
+                .iter()
+                .all(|cell| !cell.continuation())
+        );
     }
 
     #[test]
