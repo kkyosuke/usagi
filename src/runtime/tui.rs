@@ -4053,9 +4053,14 @@ fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
 
 /// Determine whether a registered workspace directory is absent without
 /// turning an unreadable path into cleanup authority.
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=workspace_directory_validation_projects_metadata_errors
 fn workspace_directory_missing(path: &Path) -> std::io::Result<bool> {
-    match std::fs::metadata(path) {
+    classify_workspace_directory(std::fs::metadata(path))
+}
+
+fn classify_workspace_directory(
+    metadata: std::io::Result<std::fs::Metadata>,
+) -> std::io::Result<bool> {
+    match metadata {
         Ok(metadata) => Ok(!metadata.is_dir()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(error),
@@ -5319,17 +5324,17 @@ mod tests {
         StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
         TerminalSnapshotMode, TerminalSubscription, VersionProbeResult, agent_goal_request,
         agent_inventory_request, agent_launch_request, classify_terminal_input,
-        correlate_agent_goal, correlate_agent_launch, created_session_hook,
-        current_agent_integrations, daemon_error_reason, decision_cadence, decode_agent_admission,
-        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
-        decode_terminal_inventory, decode_terminal_poll, doctor_diagnosis_io_error,
-        doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
-        pr_snapshot_events, probe_path, provider_resume_projection,
-        reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
-        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
-        validate_workspace_directory, version_detail, version_result_from_observation,
-        workspace_directory_missing, workspace_open_error,
+        classify_workspace_directory, correlate_agent_goal, correlate_agent_launch,
+        created_session_hook, current_agent_integrations, daemon_error_reason, decision_cadence,
+        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
+        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
+        provider_resume_projection, reduced_motion_from_environment, reply_geometry,
+        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
+        version_result_from_observation, workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -8444,6 +8449,15 @@ mod tests {
         let replacement_file = temporary.path().join("replacement");
         std::fs::write(&replacement_file, "not a directory").unwrap();
         assert!(workspace_directory_missing(&replacement_file).unwrap());
+        assert_eq!(
+            classify_workspace_directory(Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            )))
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]
