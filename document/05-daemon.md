@@ -1675,6 +1675,9 @@ tick 時点で `Ready` task に dispatch reservation が無い場合は、schedu
 `supervisor-scheduler.json` は start reservation を最大256件、wake reservation を最大512件に制限する。
 終了 run の start と配送済み wake は固定長 tombstone へ移して retry を `expired` として effect-zero にし、
 live run / 未配送 wake だけで上限へ達した場合はそれらを捨てず、新規 start / wake を capacity error で拒否する。
+ここで終了 run は `Succeeded` / `Failed` / `Cancelled` だけを指す。`Escalated` は通常eventをfenceする休止状態だが、
+人間の判断で再開できるlive stateなので、run retentionとstart reservationのどちらからも回収しない。終了判定の正本は
+core domainの `SupervisorRunState::is_finished` であり、storeとschedulerが共用する。
 `supervisor_start` は初期 task 128件、依存128件、Task ID 128 UTF-8 bytes、instruction / root task 16 KiB、
 artifact contract 4 KiB、idempotency key / policy selector 256 bytes を上限とし、永続化前に検証する。
 
@@ -1696,9 +1699,9 @@ read-only response はすべて 512 KiB 以下とし、1 run の安全な projec
 
 `Dispatch` reducer event は policy admission と同時に dispatch reservation を保存する。dispatch budget、concurrency、depth のいずれかを超える event は worker effect へ進まず、safe evidence と resume/cancel の選択肢を持つ durable `EscalationRecord` を保存して run を `Escalated` にする。escalation を scheduler が自律的に解除することはない。
 
-failure は policy の attempt 上限内だけ `Retrying` へ遷移し、generation と `retry_at` を保存する。scheduler は deadline 後にだけ `RetryReady` event を保存するため、restart や duplicate completion は retry を早めない。run/task の cancel event は未完了 node を `Cancelled` にし、terminal run への late completion は reducer が拒否する。
+failure は policy の attempt 上限内だけ `Retrying` へ遷移し、generation と `retry_at` を保存する。scheduler は deadline 後にだけ `RetryReady` event を保存するため、restart や duplicate completion は retry を早めない。run/task の cancel event は未完了 node を `Cancelled` にし、finishedまたはquiescentなrunへの late completion は reducer が拒否する。
 
-artifact contract が `none` 以外の worker completion は `Succeeded` ではなく `Verifying` へ遷移する。独立 verifier が保存した digest を伴う `VerificationResult` が passed の場合だけ `Succeeded` となる。failed verification は escalation record を保存するため、worker の summary や PR URL 単独では success gate を通らない。
+artifact contract がcore domainで定義するno-verification sentinel以外の worker completionは `Succeeded` ではなく `Verifying` へ遷移する。Goalのreview-ready PR契約も同じdomain vocabularyに置く。独立 verifier が保存した digest を伴う `VerificationResult` が passed の場合だけ `Succeeded` となる。failed verification は escalation record を保存するため、worker の summary や PR URL 単独では success gate を通らない。
 
 ## metrics observer
 

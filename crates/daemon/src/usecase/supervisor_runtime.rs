@@ -21,9 +21,9 @@ use usagi_core::{
         supervisor::{
             EscalationDecision, MAX_ARTIFACT_CONTRACT_BYTES, MAX_INITIAL_TASKS,
             MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES,
-            RunProvenance, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
-            SupervisorRun, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskId,
-            TaskNode, TaskState,
+            NO_ARTIFACT_CONTRACT, RunProvenance, SupervisorEvent, SupervisorEventKind,
+            SupervisorEventSource, SupervisorRun, SupervisorRunId, SupervisorRunQuery,
+            SupervisorRunState, TaskId, TaskNode, TaskState,
         },
     },
     infrastructure::{
@@ -264,7 +264,7 @@ fn validate_start_input(
 
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=start_rejects_an_unresolvable_initial_dag
 fn default_artifact_contract() -> String {
-    "none".into()
+    NO_ARTIFACT_CONTRACT.into()
 }
 
 fn push_semantic_component(key: &mut String, value: &str) {
@@ -549,7 +549,7 @@ impl SupervisorRuntime {
             if root.parent_task_id.is_some()
                 || !root.dependencies.is_empty()
                 || root.instruction_body != root_task
-                || root.required_artifact_contract != "none"
+                || root.required_artifact_contract != NO_ARTIFACT_CONTRACT
             {
                 anyhow::bail!("supervisor root task conflicts with its start reservation");
             }
@@ -565,7 +565,7 @@ impl SupervisorRuntime {
                         None,
                         BTreeSet::new(),
                         root_task,
-                        "none".into(),
+                        NO_ARTIFACT_CONTRACT.into(),
                     ),
                 },
             )?;
@@ -1076,7 +1076,7 @@ impl SupervisorRuntime {
         for (key, reservation) in &state.starts {
             match self.supervisor.load(reservation.supervisor_run_id)? {
                 None => recyclable.push((None, key.clone())),
-                Some(run) if run.state.terminal() => {
+                Some(run) if run.state.is_finished() => {
                     recyclable.push((run.terminal_at.or(Some(run.updated_at)), key.clone()));
                 }
                 Some(_) => {}
@@ -1807,6 +1807,27 @@ mod tests {
         );
 
         let first_id = state.starts["start-0"].supervisor_run_id;
+        let mut escalated = scheduler.supervisor.load(first_id).unwrap().unwrap();
+        escalated.state = SupervisorRunState::Escalated;
+        escalated.terminal_at = Some(now());
+        json_file::write_atomic(
+            scheduler
+                .supervisor
+                .snapshot_path(first_id)
+                .parent()
+                .unwrap(),
+            &scheduler.supervisor.snapshot_path(first_id),
+            &escalated,
+        )
+        .unwrap();
+        assert!(
+            scheduler
+                .ensure_start_capacity(&mut state)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+
         let mut finished = scheduler.supervisor.load(first_id).unwrap().unwrap();
         finished.state = SupervisorRunState::Succeeded;
         finished.terminal_at = Some(now());
