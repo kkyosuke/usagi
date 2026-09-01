@@ -410,6 +410,17 @@ fn project_garden_sessions(
             .iter()
             .map(|session| (session.id, session.label.as_str()))
             .collect::<BTreeMap<_, _>>();
+        let pending_decisions = state
+            .decisions()
+            .iter()
+            .filter(|decision| {
+                decision.status == usagi_core::domain::user_decision::UserDecisionStatus::Pending
+            })
+            .filter_map(|decision| decision.owner.session_id)
+            .fold(BTreeMap::new(), |mut counts, session| {
+                *counts.entry(session).or_insert(0_usize) += 1;
+                counts
+            });
         sessions
             .iter()
             .map(|session| widgets::garden::GardenSession {
@@ -419,6 +430,10 @@ fn project_garden_sessions(
                 selected: state.selected() == Selection::Target(Target::Session(session.id)),
                 failure_summary: session.failure_summary.clone(),
                 agents_observed: true,
+                pending_decisions: pending_decisions
+                    .get(&session.id)
+                    .copied()
+                    .unwrap_or_default(),
                 pr_merged: state.celebrates_pr_merge(session.id),
                 agents: session_agents.get(&session.id).cloned().unwrap_or_default(),
                 agent_status: state
@@ -4108,6 +4123,55 @@ mod tests {
     }
 
     #[test]
+    fn garden_projects_pending_decisions_to_their_owned_session() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let decision = usagi_core::domain::user_decision::UserDecision {
+            decision_id: UserDecisionId::new(),
+            owner: usagi_core::domain::user_decision::UserDecisionOwner {
+                workspace_id: workspace,
+                session_id: Some(session),
+                caller: usagi_core::domain::agent::CallerRef {
+                    session_id: Some(session),
+                    agent_id: usagi_core::domain::id::AgentId::new(),
+                },
+                run_id: OperationId::new(),
+            },
+            title: "confirm".to_owned(),
+            prompt: "continue?".to_owned(),
+            options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                id: "ok".to_owned(),
+                label: "OK".to_owned(),
+                description: None,
+            }],
+            allow_freeform: false,
+            expires_at: None,
+            idempotency_key: None,
+            status: usagi_core::domain::user_decision::UserDecisionStatus::Pending,
+            answer: None,
+            created_at: now(),
+            resolved_at: None,
+        };
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![decision],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenGarden));
+
+        let projected = projected_session(session, "review", "/work/review");
+        let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &[projected]);
+        let sessions = home.garden_sessions().expect("Garden is open");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].pending_decisions, 1);
+    }
+
+    #[test]
     fn home_header_narrow_width_clips_button_and_never_exposes_phantom_hits() {
         let state = AppState::home(WorkspaceId::new(), Vec::new());
         let home =
@@ -4950,7 +5014,8 @@ mod tests {
             .join("\n");
         assert_eq!(frame.len(), 24);
         // Garden が Home を置き換えている（sidebar ではなく庭の footer が出る）。
-        assert!(text.contains("Garden · click a usagi"));
+        assert!(text.contains("Garden Action Center"));
+        assert!(text.contains("click"));
         assert!(text.contains("any key · wake"));
         assert!(text.contains("Notifications"));
         assert!(!text.contains("running"));
@@ -5129,7 +5194,8 @@ mod tests {
         let garden = home.garden_sessions.as_ref().expect("garden projection");
         assert_eq!(garden[0].agents, home.session_agents[&session]);
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        assert!(text.contains("1 plots · 1 usagi"), "{text}");
+        assert!(text.contains("1 plots"), "{text}");
+        assert!(text.contains("1 usagi"), "{text}");
         assert!(text.contains("o.o"), "{text}");
         assert!(!text.contains("1 run"), "{text}");
         assert!(!text.contains("done"), "{text}");
@@ -5207,6 +5273,7 @@ mod tests {
                     agents_observed: false,
                     agents: Vec::new(),
                     agent_status: None,
+                    pending_decisions: 0,
                     pr_merged: false,
                 },
             )],
@@ -5287,6 +5354,7 @@ mod tests {
                         agents_observed: false,
                         agents: Vec::new(),
                         agent_status: None,
+                        pending_decisions: 0,
                         pr_merged: false,
                     },
                 )

@@ -179,6 +179,7 @@ fn sample(
         failure_summary: (lifecycle == SessionLifecycle::Failed)
             .then(|| "safe sample failure".to_owned()),
         agents_observed: true,
+        pending_decisions: 0,
         pr_merged: false,
         agents: vec![GardenAgent {
             runtime_id: AgentRuntimeId::parse(id).expect("sample IDs are canonical UUIDs"),
@@ -201,6 +202,7 @@ fn sample_agents(
         selected: true,
         failure_summary: None,
         agents_observed: true,
+        pending_decisions: 0,
         pr_merged: false,
         agents: agents
             .iter()

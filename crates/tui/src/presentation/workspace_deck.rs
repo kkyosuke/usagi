@@ -82,6 +82,7 @@ impl CachedGardenSession {
                 Vec::new()
             },
             agent_status: observed.then_some(self.agent_status).flatten(),
+            pending_decisions: 0,
             pr_merged: false,
         }
     }
@@ -1371,6 +1372,7 @@ mod tests {
             agents_observed: true,
             agents: Vec::new(),
             agent_status: None,
+            pending_decisions: 0,
             pr_merged: false,
         }];
 

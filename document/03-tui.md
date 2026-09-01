@@ -22,6 +22,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Session sidebar rows](#session-sidebar-rows)
 - [Overview と modal](#overview-と-modal)
 - [session garden](#session-garden)
+  - [Garden Action Center](#garden-action-center)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
   - [daemon health indicator](#daemon-health-indicator)
@@ -997,6 +998,24 @@ Garden 内から到達できる。pan button は左右 1 cell の padding を含
 
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
 自動で開く。
+
+### Garden Action Center
+
+Garden は独立した通知画面を開かず、区画そのものを Action Center として使う。header は session 数と
+うさぎの数に加えて、対応が必要な session 数を `N need attention` で表示する。対象が無ければ
+`all clear` と表示する。1 session に pending decision と waiting Agent が同時にあっても 1 件として数え、
+同じ対応先を症状の数だけ重複計上しない。
+
+| 対応が必要な状態 | Garden での投影 |
+|---|---|
+| active project の pending user decision | owner session の status 行へ `action · N decisions` を最優先で表示する |
+| session lifecycle または dispatch の failure | failure pose / `failed` status を保ち、header の attention 件数へ加える |
+| `waiting` / `interrupted` Agent | 既存のうさぎの pose と status を保ち、header の attention 件数へ加える |
+
+区画またはうさぎの click は従来どおり該当 project / session の Closeup へ移動する。Action Center は
+別の route、modal、永続 unread store を持たず、daemon / controller の現在の projection から毎 frame 導出する。
+inactive project の pending decision は resident controller がなく観測していないため 0 件と断定せず、attention
+件数にも加えない。inactive project で観測できる Agent membership と cached lifecycle だけを従来どおり使う。
 
 ### notification panel
 
