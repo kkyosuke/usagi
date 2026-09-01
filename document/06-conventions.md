@@ -443,7 +443,8 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 ### 手順
 
 1. リリースしたい変更を `main` にマージする。
-2. ルート `Cargo.toml` の `version` を上げる PR を作成し `main` にマージする（`create-release-pr.yml` の手動実行でも作成できる）。
+2. `create-release-pr.yml` を手動実行して、ルート `Cargo.toml` の `version` を上げる PR を作成する。
+   PR の CI は自動で開始され、required checks がすべて成功すると squash merge される。
 3. 以降は自動で進む:
    - `auto-release.yml` が `main` へのルート `Cargo.toml` 変更 push を検知し、version が前コミットから変わっていれば `v<version>` タグを対象にリリースを起動する。
    - reusable な `release.yml` が呼ばれ、上表の要件で 3 プラットフォームのバイナリをビルドし、`v<version>` タグと GitHub Release を作成して成果物を添付する。
@@ -454,7 +455,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/create-release-pr.yml` | 手動（`workflow_dispatch`） | `major` / `minor` / `patch` から選び、ルート `Cargo.toml` の現在版から次版を算出してリリース PR を作成する |
+| `.github/workflows/create-release-pr.yml` | 手動（`workflow_dispatch`） | `major` / `minor` / `patch` から次版を算出してリリース PR を作り、PR の CI を開始して auto-merge を設定する |
 | `.github/workflows/auto-release.yml` | `main` へのルート `Cargo.toml` 変更 push | version 変更を検知し `release.yml` を呼び出す |
 | `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v2 のビルド（`--features production`）・SHA-256 / version artifact 生成・GitHub Release 作成 |
 
@@ -464,3 +465,8 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 `scripts/ci/next-release-version.sh` が `major` / `minor` / `patch` の選択と現在の SemVer を検証して算出した値だけを
 manifest・PR title・branch に使う。
 生成する title と branch もそれぞれ Conventional Commits と `<type>/<説明>` の規約に従う。
+
+リポジトリ secret の `RELEASE_PR_TOKEN` には、対象リポジトリに限定した fine-grained PAT を設定する。必要な repository
+permissions は `Contents: Read and write` と `Pull requests: Read and write` である。release PR の作成と auto-merge の予約には
+この token を使い、`GITHUB_TOKEN` が作成した PR の workflow が承認待ちになること、および merge 後の `main` push で
+`auto-release.yml` が発火しないことを避ける。secret が未設定なら version の更新前に workflow を失敗させる。
