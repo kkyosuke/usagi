@@ -22501,6 +22501,22 @@ instructions = "{instructions}"
             cancelled.terminal_reason.as_deref(),
             Some("goal Director launch was not admitted")
         );
+
+        let poisoned = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("poisoned"),
+        )));
+        let poison_owner = Arc::clone(&poisoned);
+        std::thread::spawn(move || {
+            let _guard = poison_owner.lock().unwrap();
+            panic!("poison supervisor runtime for the unavailable-path fixture");
+        })
+        .join()
+        .unwrap_err();
+        let error = start_goal_supervisor_run(&poisoned, &operation, &intent).unwrap_err();
+        assert_eq!(
+            error.code,
+            usagi_core::infrastructure::ipc::ErrorCode::Unavailable
+        );
     }
 
     #[test]
