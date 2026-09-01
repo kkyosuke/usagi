@@ -16,14 +16,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use usagi_core::{
     domain::{
-        agent::{InboxKind, RunStatus},
+        agent::{InboxKind, RunStatus, StructuredResult},
         id::{AgentRuntimeRef, OperationId, WorkspaceId},
         supervisor::{
-            EscalationDecision, MAX_ARTIFACT_CONTRACT_BYTES, MAX_INITIAL_TASKS,
-            MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES,
-            NO_ARTIFACT_CONTRACT, RunProvenance, SupervisorEvent, SupervisorEventKind,
-            SupervisorEventSource, SupervisorRun, SupervisorRunId, SupervisorRunQuery,
-            SupervisorRunState, TaskId, TaskNode, TaskState,
+            EscalationDecision, GOAL_REVIEW_READY_ARTIFACT_CONTRACT, MAX_ARTIFACT_CONTRACT_BYTES,
+            MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_TEXT_BYTES,
+            MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT, RunProvenance, SupervisorEvent,
+            SupervisorEventKind, SupervisorEventSource, SupervisorRun, SupervisorRunId,
+            SupervisorRunQuery, SupervisorRunState, TaskId, TaskNode, TaskState,
         },
     },
     infrastructure::{
@@ -57,6 +57,46 @@ pub struct DecisionWake {
 pub struct WakeOutcome {
     pub kind: InboxKind,
     pub summary: String,
+}
+
+/// Redaction-safe result produced outside the supervisor lock by an independent
+/// artifact verifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactVerification {
+    pub passed: bool,
+    pub result_digest: String,
+    pub safe_summary: String,
+}
+
+/// Provider boundary used after a worker completion has moved a contracted
+/// task into `Verifying`. Worker-controlled output is input, never authority.
+pub trait ArtifactVerifier {
+    fn verify(&mut self, contract: &str, result: Option<&StructuredResult>)
+    -> ArtifactVerification;
+}
+
+/// Exact task fence and worker-reported candidate prepared under the supervisor
+/// lock, then independently verified without holding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactVerificationRequest {
+    pub supervisor_run_id: SupervisorRunId,
+    pub task_id: TaskId,
+    pub generation: u64,
+    pub contract: String,
+    pub result: Option<StructuredResult>,
+}
+
+/// Durable Goal operation whose reserved root still needs exact provenance.
+/// Durable child operation whose reserved DAG node still needs exact
+/// provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingGoalPromotion {
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDelegatedPromotion {
+    pub operation_id: String,
 }
 
 /// Composition-root adapter. Implementations use the persisted parent
@@ -96,6 +136,8 @@ struct KeyTombstones {
 
 const TOMBSTONE_WORDS: usize = 512;
 const TOMBSTONE_HASHES: u64 = 4;
+const DELEGATED_TASK_PREFIX: &str = "delegated-";
+const DELEGATED_TASK_DIGEST_PREFIX: &str = "delegated-operation:";
 #[cfg(not(test))]
 const MAX_START_RESERVATIONS: usize = 256;
 #[cfg(test)]
@@ -218,6 +260,7 @@ fn bounded_nonempty(name: &str, value: &str, max: usize) -> Result<()> {
 fn validate_start_input(
     operation_id: &str,
     root_task: &str,
+    root_artifact_contract: &str,
     initial_tasks: &[InitialTask],
     policy_selector: Option<&str>,
 ) -> Result<()> {
@@ -227,6 +270,11 @@ fn validate_start_input(
         MAX_SUPERVISOR_KEY_BYTES,
     )?;
     bounded_nonempty("supervisor root task", root_task, MAX_SUPERVISOR_TEXT_BYTES)?;
+    bounded_nonempty(
+        "supervisor root artifact contract",
+        root_artifact_contract,
+        MAX_ARTIFACT_CONTRACT_BYTES,
+    )?;
     if initial_tasks.len() > MAX_INITIAL_TASKS {
         anyhow::bail!("invalid initial task count: maximum is {MAX_INITIAL_TASKS}");
     }
@@ -271,6 +319,19 @@ fn push_semantic_component(key: &mut String, value: &str) {
     key.push_str(&value.len().to_string());
     key.push(':');
     key.push_str(value);
+}
+
+fn delegated_task_id(operation: OperationId) -> Result<TaskId> {
+    TaskId::new(format!("{DELEGATED_TASK_PREFIX}{operation}")).map_err(anyhow::Error::msg)
+}
+
+fn delegated_task_digest(operation: OperationId) -> String {
+    format!("{DELEGATED_TASK_DIGEST_PREFIX}{operation}")
+}
+
+fn is_delegated_reservation(task: &TaskNode, operation: OperationId) -> bool {
+    task.task_id.0 == format!("{DELEGATED_TASK_PREFIX}{operation}")
+        && task.instruction_digest == delegated_task_digest(operation)
 }
 
 /// The single daemon-owned scheduler runtime. It is intentionally independent
@@ -325,6 +386,7 @@ impl SupervisorRuntime {
             None,
             operation_id,
             root_task,
+            NO_ARTIFACT_CONTRACT,
             initial_tasks,
             policy_selector,
             now,
@@ -355,16 +417,45 @@ impl SupervisorRuntime {
             Some(workspace),
             operation_id,
             root_task,
+            NO_ARTIFACT_CONTRACT,
             initial_tasks,
             policy_selector,
             now,
         )
     }
 
-    /// Starts a workspace-owned run and binds its root task to an already
-    /// admitted workspace-root Agent dispatch. Holding the daemon's shared
-    /// runtime lock across this method prevents the scheduler from observing a
-    /// transient unassigned root between start and dispatch provenance.
+    /// Durably reserves the Goal run before the Agent process is spawned. This
+    /// is the first phase of Goal admission and makes the run ID available even
+    /// if binding must be reconciled after a daemon restart.
+    ///
+    /// # Errors
+    /// Returns an error when the Goal contract or durable start cannot be
+    /// admitted.
+    pub fn reserve_goal_for_workspace(
+        &self,
+        caller: &str,
+        workspace: WorkspaceId,
+        operation_id: &str,
+        root_task: String,
+        policy_selector: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
+        self.start_scoped(
+            caller,
+            Some(workspace),
+            operation_id,
+            root_task,
+            GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            Vec::new(),
+            policy_selector,
+            now,
+        )
+    }
+
+    /// Starts a Goal run and binds its root task to an already admitted
+    /// workspace-root Agent dispatch. Production reserves before spawn and
+    /// calls [`Self::bind_reserved_workspace_root_dispatch`] afterwards; this
+    /// composed entry point remains useful to exact-retry callers and tests.
     ///
     /// Retrying after any durable partial write is safe: `start_for_workspace`
     /// reuses the run and an exact existing root provenance is returned as-is.
@@ -385,29 +476,52 @@ impl SupervisorRuntime {
         worker: &AgentRuntimeRef,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
-        if worker.terminal.workspace_id != workspace || worker.session_id.is_some() {
-            anyhow::bail!("supervisor root worker is outside the workspace root scope");
-        }
+        self.reserve_goal_for_workspace(
+            caller,
+            workspace,
+            operation_id,
+            root_task,
+            policy_selector,
+            now,
+        )?;
+        self.bind_reserved_workspace_root_dispatch(operation_id, worker, now)
+    }
+
+    /// Binds the exact Agent fence to a previously reserved Goal root. The
+    /// operation ID is the durable join key; caller text and Goal content are
+    /// never reconstructed by the recovery path.
+    ///
+    /// # Errors
+    /// Returns an error when the reservation, worker scope, dispatch run, or
+    /// existing provenance conflicts.
+    pub fn bind_reserved_workspace_root_dispatch(
+        &self,
+        operation_id: &str,
+        worker: &AgentRuntimeRef,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
         let dispatch_run_id = OperationId::parse(operation_id)
             .map_err(|_| anyhow::anyhow!("supervisor root dispatch operation is invalid"))?;
         if self.dispatch.run(dispatch_run_id)?.is_none() {
             anyhow::bail!("supervisor root dispatch does not exist");
         }
-        let started = self.start_for_workspace(
-            caller,
-            workspace,
-            operation_id,
-            root_task,
-            Vec::new(),
-            policy_selector,
-            now,
-        )?;
-        let mut run = self.load_started_run(started.supervisor_run_id)?;
+        let state = self.load_state()?;
+        let reservation = state
+            .starts
+            .get(operation_id)
+            .ok_or_else(|| anyhow::anyhow!("supervisor root reservation does not exist"))?;
+        let mut run = self.load_started_run(reservation.supervisor_run_id)?;
+        if run.workspace_id != Some(worker.terminal.workspace_id) || worker.session_id.is_some() {
+            anyhow::bail!("supervisor root worker is outside the workspace root scope");
+        }
         let root_id = TaskId::new("root")?;
         let root = run
             .tasks
             .get(&root_id)
             .ok_or_else(|| anyhow::anyhow!("supervisor root task is missing"))?;
+        if root.required_artifact_contract != GOAL_REVIEW_READY_ARTIFACT_CONTRACT {
+            anyhow::bail!("supervisor root reservation is not a Goal run");
+        }
         let root_generation = root.generation;
         let provenance = RunProvenance {
             supervisor_run_id: run.supervisor_run_id,
@@ -461,6 +575,470 @@ impl SupervisorRuntime {
             .ok_or_else(|| anyhow::anyhow!("supervisor run disappeared during root binding"))
     }
 
+    /// Lists Goal reservations whose root dispatch still needs provenance. The
+    /// operation ID is returned from durable scheduler metadata rather than
+    /// inferred from mutable Agent state.
+    ///
+    /// # Errors
+    /// Returns an error when scheduler metadata or a referenced run is invalid.
+    pub fn pending_goal_promotions(&self) -> Result<Vec<PendingGoalPromotion>> {
+        let state = self.load_state()?;
+        let mut pending = Vec::new();
+        for (operation_id, reservation) in state.starts {
+            let Some(run) = self.supervisor.load(reservation.supervisor_run_id)? else {
+                continue;
+            };
+            if run.workspace_id.is_none() {
+                continue;
+            }
+            let root = TaskId::new("root")?;
+            if run.tasks.get(&root).is_some_and(|task| {
+                task.required_artifact_contract == GOAL_REVIEW_READY_ARTIFACT_CONTRACT
+            }) && !run.provenance.contains_key(&root)
+                && !run.state.is_finished()
+            {
+                pending.push(PendingGoalPromotion { operation_id });
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Marks a pre-spawn Goal reservation failed after Agent admission proves a
+    /// definite failure. Ambiguous/post-spawn failures must remain pending for
+    /// reconciliation instead.
+    ///
+    /// # Errors
+    /// Returns an error when the durable reservation cannot be loaded or
+    /// transitioned.
+    pub fn fail_reserved_goal(
+        &self,
+        operation_id: &str,
+        reason: String,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
+        let state = self.load_state()?;
+        let reservation = state
+            .starts
+            .get(operation_id)
+            .ok_or_else(|| anyhow::anyhow!("supervisor goal reservation does not exist"))?;
+        let run = self.load_started_run(reservation.supervisor_run_id)?;
+        if run.state.is_finished() {
+            return Ok(run.query());
+        }
+        Ok(self
+            .apply(
+                &run,
+                now,
+                SupervisorEventSource::DispatchFailure,
+                SupervisorEventKind::SetRunState {
+                    state: SupervisorRunState::Failed,
+                    terminal_reason: Some(reason),
+                },
+            )?
+            .query())
+    }
+
+    /// Persists a delegated task before its Agent spawn. `None` means the
+    /// parent dispatch is not supervised and classic delegation is unchanged.
+    ///
+    /// # Errors
+    /// Returns an error for a conflicting child operation or durable reducer
+    /// failure.
+    pub fn reserve_delegated_dispatch(
+        &self,
+        parent_dispatch_run: OperationId,
+        child_operation_id: &str,
+        instruction: String,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SupervisorRunQuery>> {
+        bounded_nonempty(
+            "delegated supervisor instruction",
+            &instruction,
+            MAX_SUPERVISOR_TEXT_BYTES,
+        )?;
+        let child_dispatch_run = OperationId::parse(child_operation_id)
+            .map_err(|_| anyhow::anyhow!("delegated dispatch operation is invalid"))?;
+        let mut matches = self.supervisor.runs()?.into_iter().filter_map(|run| {
+            let task = run
+                .provenance
+                .iter()
+                .find(|(_, provenance)| provenance.dispatch_run_id == parent_dispatch_run)
+                .map(|(task, _)| task.clone());
+            task.map(|task| (run, task))
+        });
+        let Some((mut run, parent_task_id)) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            anyhow::bail!("parent dispatch belongs to multiple supervisor runs");
+        }
+        let task_id = delegated_task_id(child_dispatch_run)?;
+        if let Some(existing) = run.tasks.get(&task_id) {
+            if !is_delegated_reservation(existing, child_dispatch_run)
+                || existing.parent_task_id.as_ref() != Some(&parent_task_id)
+                || existing.instruction_body != instruction
+                || existing.required_artifact_contract != NO_ARTIFACT_CONTRACT
+            {
+                anyhow::bail!("delegated task conflicts with its existing supervisor task");
+            }
+            return Ok(Some(run.query()));
+        }
+        let mut task = task_node(
+            &run,
+            task_id,
+            Some(parent_task_id),
+            BTreeSet::new(),
+            instruction,
+            NO_ARTIFACT_CONTRACT.into(),
+        );
+        task.instruction_digest = delegated_task_digest(child_dispatch_run);
+        run = self.apply(
+            &run,
+            now,
+            SupervisorEventSource::Admission,
+            SupervisorEventKind::AddTask { task },
+        )?;
+        Ok(Some(run.query()))
+    }
+
+    /// Pending delegated task reservations recoverable from their stable task
+    /// IDs and daemon-only origin marker.
+    ///
+    /// # Errors
+    /// Returns an error when retained supervisor state is malformed.
+    pub fn pending_delegated_promotions(&self) -> Result<Vec<PendingDelegatedPromotion>> {
+        let mut pending = Vec::new();
+        for run in self.supervisor.runs()? {
+            if run.state.is_finished() {
+                continue;
+            }
+            for task in run
+                .tasks
+                .values()
+                .filter(|task| task.assigned_dispatch_run.is_none() && !task.state.terminal())
+            {
+                let Some(operation_id) = task.task_id.0.strip_prefix(DELEGATED_TASK_PREFIX) else {
+                    continue;
+                };
+                let Ok(operation) = OperationId::parse(operation_id) else {
+                    continue;
+                };
+                if !is_delegated_reservation(task, operation) {
+                    continue;
+                }
+                pending.push(PendingDelegatedPromotion {
+                    operation_id: operation_id.into(),
+                });
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Marks a reserved delegated task failed after a definite spawn failure.
+    ///
+    /// # Errors
+    /// Returns an error when no exact reservation exists or reducer state is
+    /// inconsistent.
+    pub fn fail_reserved_delegated_dispatch(
+        &self,
+        child_operation_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SupervisorRunQuery>> {
+        let operation = OperationId::parse(child_operation_id)
+            .map_err(|_| anyhow::anyhow!("delegated dispatch operation is invalid"))?;
+        let task_id = delegated_task_id(operation)?;
+        let Some(run) = self.supervisor.runs()?.into_iter().find(|run| {
+            run.tasks
+                .get(&task_id)
+                .is_some_and(|task| is_delegated_reservation(task, operation))
+        }) else {
+            return Ok(None);
+        };
+        let task = run
+            .tasks
+            .get(&task_id)
+            .ok_or_else(|| anyhow::anyhow!("delegated supervisor task disappeared"))?;
+        if task.state.terminal() {
+            return Ok(Some(run.query()));
+        }
+        let run = self.apply(
+            &run,
+            now,
+            SupervisorEventSource::DispatchFailure,
+            SupervisorEventKind::Cancel {
+                task_id: Some(task_id),
+                reason: "delegated Agent admission failed before dispatch".into(),
+            },
+        )?;
+        Ok(Some(run.query()))
+    }
+
+    /// Adds and binds a child dispatch beneath the exact supervised parent
+    /// dispatch. A caller outside a Supervisor Run is a no-op, preserving
+    /// classic delegation semantics.
+    ///
+    /// # Errors
+    /// Returns an error for conflicting replay, cross-workspace provenance, or
+    /// durable reducer failure.
+    pub fn attach_delegated_dispatch(
+        &self,
+        parent_dispatch_run: OperationId,
+        child_operation_id: &str,
+        instruction: String,
+        worker: &AgentRuntimeRef,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SupervisorRunQuery>> {
+        if self
+            .reserve_delegated_dispatch(parent_dispatch_run, child_operation_id, instruction, now)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        self.bind_reserved_delegated_dispatch(child_operation_id, worker, now)
+    }
+
+    /// Binds one admitted child Agent using only its exact durable reservation.
+    /// Parent provenance and instruction remain single-sourced in the DAG.
+    ///
+    /// # Errors
+    /// Returns an error for missing dispatch state, conflicting provenance,
+    /// cross-workspace ownership, or reducer persistence failure.
+    pub fn bind_reserved_delegated_dispatch(
+        &self,
+        child_operation_id: &str,
+        worker: &AgentRuntimeRef,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SupervisorRunQuery>> {
+        let child_dispatch_run = OperationId::parse(child_operation_id)
+            .map_err(|_| anyhow::anyhow!("delegated dispatch operation is invalid"))?;
+        if self.dispatch.run(child_dispatch_run)?.is_none() {
+            anyhow::bail!("delegated dispatch does not exist");
+        }
+        let task_id = delegated_task_id(child_dispatch_run)?;
+        let mut matches = self.supervisor.runs()?.into_iter().filter(|run| {
+            run.tasks
+                .get(&task_id)
+                .is_some_and(|task| is_delegated_reservation(task, child_dispatch_run))
+        });
+        let Some(mut run) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            anyhow::bail!("delegated dispatch belongs to multiple supervisor runs");
+        }
+        if run.workspace_id != Some(worker.terminal.workspace_id) || worker.session_id.is_none() {
+            anyhow::bail!("delegated worker is outside the supervisor workspace");
+        }
+        let task = run
+            .tasks
+            .get(&task_id)
+            .ok_or_else(|| anyhow::anyhow!("delegated supervisor task is missing"))?;
+        let parent_task_id = task
+            .parent_task_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("delegated supervisor task has no parent"))?;
+        let parent_dispatch_run = run
+            .provenance
+            .get(&parent_task_id)
+            .ok_or_else(|| anyhow::anyhow!("delegated parent provenance is missing"))?
+            .dispatch_run_id;
+        if run.state == SupervisorRunState::Escalated
+            && let Some(escalation) = run.escalation.as_ref()
+            && escalation.blocking_task_id.as_ref() == Some(&task_id)
+            && escalation.reason == "no worker dispatch reservation was produced for a ready task"
+        {
+            let escalation_id = escalation.escalation_id;
+            run = self.apply(
+                &run,
+                now,
+                SupervisorEventSource::Admission,
+                SupervisorEventKind::ResolveEscalation {
+                    escalation_id,
+                    decision: EscalationDecision::Resume,
+                },
+            )?;
+        }
+        let task = run
+            .tasks
+            .get(&task_id)
+            .ok_or_else(|| anyhow::anyhow!("delegated supervisor task is missing"))?;
+        let provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: task_id.clone(),
+            parent_task_id: Some(parent_task_id),
+            parent_dispatch_run: Some(parent_dispatch_run),
+            dispatch_run_id: child_dispatch_run,
+            worker_session_id: worker.session_id,
+            worker_agent_id: worker.agent_runtime_id,
+            worker_worktree_id: worker.terminal.worktree_id,
+            generation: task.generation,
+        };
+        if let Some(existing) = run.provenance.get(&task_id) {
+            if existing == &provenance {
+                return Ok(Some(run.query()));
+            }
+            anyhow::bail!("delegated dispatch provenance conflicts with the existing task");
+        }
+        let generation = task.generation;
+        run = self.apply(
+            &run,
+            now,
+            SupervisorEventSource::Admission,
+            SupervisorEventKind::Dispatch {
+                task_id,
+                generation,
+                provenance,
+            },
+        )?;
+        Ok(Some(run.query()))
+    }
+
+    /// Moves a completed contracted dispatch to `Verifying` and captures its
+    /// committed structured result under an exact task generation fence.
+    ///
+    /// # Errors
+    /// Returns an error when dispatch/supervisor durable state is inconsistent.
+    pub fn prepare_artifact_verification(
+        &self,
+        dispatch_run_id: OperationId,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ArtifactVerificationRequest>> {
+        let mut found = self.supervisor.runs()?.into_iter().filter_map(|run| {
+            let task = run
+                .provenance
+                .iter()
+                .find(|(_, provenance)| provenance.dispatch_run_id == dispatch_run_id)
+                .map(|(task, _)| task.clone());
+            task.map(|task| (run, task))
+        });
+        let Some((mut run, task_id)) = found.next() else {
+            return Ok(None);
+        };
+        if found.next().is_some() {
+            anyhow::bail!("dispatch belongs to multiple supervisor runs");
+        }
+        let task = run
+            .tasks
+            .get(&task_id)
+            .ok_or_else(|| anyhow::anyhow!("supervisor task is missing"))?;
+        if task.required_artifact_contract != GOAL_REVIEW_READY_ARTIFACT_CONTRACT
+            || run.state != SupervisorRunState::Running
+        {
+            return Ok(None);
+        }
+        let dispatch = self
+            .dispatch
+            .run(dispatch_run_id)?
+            .ok_or_else(|| anyhow::anyhow!("artifact dispatch is missing"))?;
+        if dispatch.status != RunStatus::Completed {
+            return Ok(None);
+        }
+        if task.state == TaskState::Dispatched {
+            run = self.apply(
+                &run,
+                now,
+                SupervisorEventSource::DispatchCompletion,
+                SupervisorEventKind::Running {
+                    task_id: task_id.clone(),
+                    generation: task.generation,
+                },
+            )?;
+        }
+        let task = run
+            .tasks
+            .get(&task_id)
+            .ok_or_else(|| anyhow::anyhow!("artifact supervisor task disappeared"))?;
+        if task.state == TaskState::Running {
+            run = self.apply(
+                &run,
+                now,
+                SupervisorEventSource::DispatchCompletion,
+                SupervisorEventKind::SetTaskState {
+                    task_id: task_id.clone(),
+                    generation: task.generation,
+                    state: TaskState::Succeeded,
+                },
+            )?;
+        }
+        let task = run
+            .tasks
+            .get(&task_id)
+            .ok_or_else(|| anyhow::anyhow!("artifact supervisor task disappeared"))?;
+        if task.state != TaskState::Verifying {
+            return Ok(None);
+        }
+        let result = match self.dispatch.binding(dispatch_run_id)? {
+            Some(binding) => self
+                .dispatch
+                .inbox(&binding.caller)?
+                .into_iter()
+                .find(|message| message.run_id == dispatch_run_id)
+                .and_then(|message| message.result),
+            None => None,
+        };
+        Ok(Some(ArtifactVerificationRequest {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id,
+            generation: task.generation,
+            contract: task.required_artifact_contract.clone(),
+            result,
+        }))
+    }
+
+    /// Commits one independently obtained verification result and finalizes the
+    /// run only when every tracked task has succeeded.
+    ///
+    /// # Errors
+    /// Returns an error when the request fence is stale or durable state cannot
+    /// be updated.
+    pub fn record_artifact_verification(
+        &self,
+        request: &ArtifactVerificationRequest,
+        verification: ArtifactVerification,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
+        bounded_nonempty(
+            "artifact verification digest",
+            &verification.result_digest,
+            MAX_SUPERVISOR_KEY_BYTES,
+        )?;
+        if verification.safe_summary.len() > MAX_SUPERVISOR_TEXT_BYTES {
+            anyhow::bail!(
+                "invalid artifact verification summary: maximum is {MAX_SUPERVISOR_TEXT_BYTES} UTF-8 bytes"
+            );
+        }
+        let run = self.load_started_run(request.supervisor_run_id)?;
+        let task = run
+            .tasks
+            .get(&request.task_id)
+            .ok_or_else(|| anyhow::anyhow!("artifact verification task is missing"))?;
+        if task.generation == request.generation
+            && task.required_artifact_contract == request.contract
+            && (run.state != SupervisorRunState::Running || task.state != TaskState::Verifying)
+        {
+            return Ok(run.query());
+        }
+        if task.generation != request.generation
+            || task.required_artifact_contract != request.contract
+            || task.state != TaskState::Verifying
+        {
+            anyhow::bail!("artifact verification fence is stale");
+        }
+        let run = self.apply(
+            &run,
+            now,
+            SupervisorEventSource::Verification,
+            SupervisorEventKind::VerificationResult {
+                task_id: request.task_id.clone(),
+                generation: request.generation,
+                passed: verification.passed,
+                result_digest: verification.result_digest,
+                safe_summary: verification.safe_summary,
+            },
+        )?;
+        Ok(self.finalize_terminal_tasks(run, now)?.query())
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn start_scoped(
         &self,
@@ -468,6 +1046,7 @@ impl SupervisorRuntime {
         workspace: Option<WorkspaceId>,
         operation_id: &str,
         root_task: String,
+        root_artifact_contract: &str,
         initial_tasks: Vec<InitialTask>,
         policy_selector: Option<String>,
         now: DateTime<Utc>,
@@ -475,12 +1054,14 @@ impl SupervisorRuntime {
         validate_start_input(
             operation_id,
             &root_task,
+            root_artifact_contract,
             &initial_tasks,
             policy_selector.as_deref(),
         )?;
         let mut semantic_key = String::new();
         push_semantic_component(&mut semantic_key, caller);
         push_semantic_component(&mut semantic_key, &root_task);
+        push_semantic_component(&mut semantic_key, root_artifact_contract);
         push_semantic_component(&mut semantic_key, &initial_tasks.len().to_string());
         for task in &initial_tasks {
             push_semantic_component(&mut semantic_key, &task.task_id);
@@ -549,7 +1130,7 @@ impl SupervisorRuntime {
             if root.parent_task_id.is_some()
                 || !root.dependencies.is_empty()
                 || root.instruction_body != root_task
-                || root.required_artifact_contract != NO_ARTIFACT_CONTRACT
+                || root.required_artifact_contract != root_artifact_contract
             {
                 anyhow::bail!("supervisor root task conflicts with its start reservation");
             }
@@ -565,7 +1146,7 @@ impl SupervisorRuntime {
                         None,
                         BTreeSet::new(),
                         root_task,
-                        NO_ARTIFACT_CONTRACT.into(),
+                        root_artifact_contract.into(),
                     ),
                 },
             )?;
@@ -1183,6 +1764,21 @@ mod tests {
         )
         .unwrap()
     }
+    fn delegated_worker(workspace: WorkspaceId) -> AgentRuntimeRef {
+        let session = SessionId::new();
+        AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: Some(session),
+                worktree_id: WorktreeId::new(),
+            },
+            Some(session),
+        )
+        .unwrap()
+    }
     fn task(run: SupervisorRunId, id: &str, parent: Option<&str>) -> TaskNode {
         TaskNode {
             task_id: TaskId::new(id).unwrap(),
@@ -1242,6 +1838,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One lifecycle fixture covers verification, escalation, resume, and late-result fencing.
     fn workspace_root_dispatch_is_bound_idempotently_and_completes_the_run() {
         let temp = tempfile::tempdir().unwrap();
         let scheduler = SupervisorRuntime::new(temp.path());
@@ -1260,12 +1857,11 @@ mod tests {
             .unwrap();
         let worker = root_worker(workspace);
         let unbound = scheduler
-            .start_for_workspace(
+            .reserve_goal_for_workspace(
                 "goal-composer",
                 workspace,
                 &operation.to_string(),
                 "finish the requested work".into(),
-                Vec::new(),
                 Some("standard".into()),
                 now(),
             )
@@ -1336,8 +1932,99 @@ mod tests {
             .get("goal-composer", first.supervisor_run_id)
             .unwrap()
             .unwrap();
+        assert_eq!(completed.tasks[0].state, TaskState::Verifying);
+        assert_eq!(completed.state, SupervisorRunState::Running);
+        let request = scheduler
+            .prepare_artifact_verification(operation, now())
+            .unwrap()
+            .unwrap();
+        for invalid in [
+            ArtifactVerification {
+                passed: true,
+                result_digest: String::new(),
+                safe_summary: "verified".into(),
+            },
+            ArtifactVerification {
+                passed: true,
+                result_digest: "verified".into(),
+                safe_summary: "x".repeat(MAX_SUPERVISOR_TEXT_BYTES + 1),
+            },
+        ] {
+            assert!(
+                scheduler
+                    .record_artifact_verification(&request, invalid, now())
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            scheduler
+                .get("goal-composer", first.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .tasks[0]
+                .state,
+            TaskState::Verifying
+        );
+        let rejected = scheduler
+            .record_artifact_verification(
+                &request,
+                ArtifactVerification {
+                    passed: false,
+                    result_digest: "provider-unavailable".into(),
+                    safe_summary: "pull request verification provider is unavailable".into(),
+                },
+                now(),
+            )
+            .unwrap();
+        assert_eq!(rejected.state, SupervisorRunState::Escalated);
+        assert_eq!(
+            rejected.escalation.as_ref().unwrap().safe_evidence,
+            "pull request verification provider is unavailable"
+        );
+        assert!(
+            scheduler
+                .prepare_artifact_verification(operation, now())
+                .unwrap()
+                .is_none()
+        );
+        scheduler
+            .resolve_escalation(
+                "goal-composer",
+                first.supervisor_run_id,
+                rejected.escalation.unwrap().escalation_id,
+                EscalationDecision::Resume,
+                now(),
+            )
+            .unwrap();
+        let retry = scheduler
+            .prepare_artifact_verification(operation, now())
+            .unwrap()
+            .unwrap();
+        let completed = scheduler
+            .record_artifact_verification(
+                &retry,
+                ArtifactVerification {
+                    passed: true,
+                    result_digest: "verified".into(),
+                    safe_summary: "verified".into(),
+                },
+                now(),
+            )
+            .unwrap();
         assert_eq!(completed.tasks[0].state, TaskState::Succeeded);
         assert_eq!(completed.state, SupervisorRunState::Succeeded);
+        let late = scheduler
+            .record_artifact_verification(
+                &retry,
+                ArtifactVerification {
+                    passed: false,
+                    result_digest: "late-provider-result".into(),
+                    safe_summary: "late provider result".into(),
+                },
+                now(),
+            )
+            .unwrap();
+        assert_eq!(late, completed);
     }
 
     #[test]
@@ -1469,12 +2156,11 @@ mod tests {
         missing_root.fail_apply_at(0);
         assert!(
             missing_root
-                .start_for_workspace(
+                .reserve_goal_for_workspace(
                     "caller",
                     workspace,
                     &missing_root_operation.to_string(),
                     "root".into(),
-                    Vec::new(),
                     None,
                     now(),
                 )
@@ -1504,7 +2190,7 @@ mod tests {
 
     #[test]
     fn workspace_root_dispatch_propagates_each_binding_write_failure() {
-        for (escalate_before_binding, failed_apply) in [(false, 2), (true, 3)] {
+        for (escalate_before_binding, failed_apply) in [(false, 2), (true, 3), (true, 4)] {
             let temp = tempfile::tempdir().unwrap();
             let scheduler = SupervisorRuntime::new(temp.path());
             let dispatch = DispatchStore::new(temp.path());
@@ -1521,12 +2207,11 @@ mod tests {
                 })
                 .unwrap();
             let started = scheduler
-                .start_for_workspace(
+                .reserve_goal_for_workspace(
                     "caller",
                     workspace,
                     &operation.to_string(),
                     "root".into(),
-                    Vec::new(),
                     None,
                     now(),
                 )
@@ -1554,6 +2239,252 @@ mod tests {
                     .contains("injected supervisor apply failure")
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One recovery fixture keeps reservation, collision, escalation, and exact replay assertions together.
+    fn delegated_dispatch_is_reserved_before_spawn_and_reconciled_by_exact_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let dispatch = DispatchStore::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let root_operation = OperationId::new();
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: root_operation,
+                agent_id: AgentId::new(),
+                prompt: "root".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let root = scheduler
+            .start_for_workspace_root_dispatch(
+                "goal-composer",
+                workspace,
+                &root_operation.to_string(),
+                "root work".into(),
+                None,
+                &root_worker(workspace),
+                now(),
+            )
+            .unwrap();
+        let before_oversized = scheduler
+            .get("goal-composer", root.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            scheduler
+                .reserve_delegated_dispatch(
+                    root_operation,
+                    &OperationId::new().to_string(),
+                    "x".repeat(MAX_SUPERVISOR_TEXT_BYTES + 1),
+                    now(),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            scheduler
+                .get("goal-composer", root.supervisor_run_id)
+                .unwrap()
+                .unwrap(),
+            before_oversized
+        );
+        let child_operation = OperationId::new();
+        let reserved = scheduler
+            .reserve_delegated_dispatch(
+                root_operation,
+                &child_operation.to_string(),
+                "child work".into(),
+                now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(reserved.tasks.len(), 2);
+        assert_eq!(reserved.provenance.len(), 1);
+        assert_eq!(
+            scheduler
+                .reserve_delegated_dispatch(
+                    root_operation,
+                    &child_operation.to_string(),
+                    "child work".into(),
+                    now(),
+                )
+                .unwrap()
+                .unwrap(),
+            reserved
+        );
+        assert!(
+            scheduler
+                .reserve_delegated_dispatch(
+                    root_operation,
+                    &child_operation.to_string(),
+                    "different child work".into(),
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts")
+        );
+        let pending = scheduler.pending_delegated_promotions().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation_id, child_operation.to_string());
+
+        scheduler
+            .tick(root.supervisor_run_id, now(), &mut Waker::default())
+            .unwrap();
+        assert_eq!(
+            scheduler
+                .get("goal-composer", root.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SupervisorRunState::Escalated
+        );
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: child_operation,
+                agent_id: AgentId::new(),
+                prompt: "child".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        assert!(
+            scheduler
+                .attach_delegated_dispatch(
+                    root_operation,
+                    &child_operation.to_string(),
+                    "child work".into(),
+                    &root_worker(workspace),
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("outside the supervisor workspace")
+        );
+        let worker = delegated_worker(workspace);
+        let attached = scheduler
+            .attach_delegated_dispatch(
+                root_operation,
+                &child_operation.to_string(),
+                "child work".into(),
+                &worker,
+                now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(attached.state, SupervisorRunState::Running);
+        assert!(attached.escalation.is_none());
+        assert_eq!(attached.tasks.len(), 2);
+        assert_eq!(attached.provenance.len(), 2);
+        assert!(
+            attached
+                .provenance
+                .iter()
+                .any(|item| item.parent_dispatch_run == Some(root_operation))
+        );
+        assert_eq!(
+            scheduler
+                .attach_delegated_dispatch(
+                    root_operation,
+                    &child_operation.to_string(),
+                    "child work".into(),
+                    &worker,
+                    now(),
+                )
+                .unwrap()
+                .unwrap(),
+            attached
+        );
+
+        // A user-defined task whose ID happens to look similar is not a
+        // daemon reservation because it does not carry the origin marker.
+        let fake_operation = OperationId::new();
+        let run = scheduler
+            .supervisor
+            .load(root.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        scheduler
+            .apply(
+                &run,
+                now(),
+                SupervisorEventSource::Admission,
+                SupervisorEventKind::AddTask {
+                    task: task_node(
+                        &run,
+                        delegated_task_id(fake_operation).unwrap(),
+                        Some(TaskId::new("root").unwrap()),
+                        BTreeSet::new(),
+                        "ordinary task".into(),
+                        NO_ARTIFACT_CONTRACT.into(),
+                    ),
+                },
+            )
+            .unwrap();
+        assert!(scheduler.pending_delegated_promotions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn definite_delegated_spawn_failure_closes_the_pending_reservation() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let dispatch = DispatchStore::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let root_operation = OperationId::new();
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: root_operation,
+                agent_id: AgentId::new(),
+                prompt: "root".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        scheduler
+            .start_for_workspace_root_dispatch(
+                "goal-composer",
+                workspace,
+                &root_operation.to_string(),
+                "root work".into(),
+                None,
+                &root_worker(workspace),
+                now(),
+            )
+            .unwrap();
+        let child_operation = OperationId::new();
+        scheduler
+            .reserve_delegated_dispatch(
+                root_operation,
+                &child_operation.to_string(),
+                "child work".into(),
+                now(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let failed = scheduler
+            .fail_reserved_delegated_dispatch(&child_operation.to_string(), now())
+            .unwrap()
+            .unwrap();
+        let child = failed
+            .tasks
+            .iter()
+            .find(|task| task.task_id.0 == format!("delegated-{child_operation}"))
+            .unwrap();
+        assert_eq!(child.state, TaskState::Cancelled);
+        assert!(scheduler.pending_delegated_promotions().unwrap().is_empty());
+        assert_eq!(
+            scheduler
+                .fail_reserved_delegated_dispatch(&child_operation.to_string(), now())
+                .unwrap()
+                .unwrap(),
+            failed
+        );
     }
 
     #[test]
@@ -1672,24 +2603,38 @@ mod tests {
         validate_start_input(
             "operation",
             &exact_root,
+            NO_ARTIFACT_CONTRACT,
             std::slice::from_ref(&task),
             Some("policy"),
         )
         .unwrap();
         assert!(
-            validate_start_input("operation", &(exact_root + "x"), &[task], None)
-                .unwrap_err()
-                .to_string()
-                .contains("root task")
+            validate_start_input(
+                "operation",
+                &(exact_root + "x"),
+                NO_ARTIFACT_CONTRACT,
+                &[task],
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("root task")
         );
         assert!(
-            validate_start_input(&"x".repeat(MAX_SUPERVISOR_KEY_BYTES + 1), "root", &[], None,)
-                .is_err()
+            validate_start_input(
+                &"x".repeat(MAX_SUPERVISOR_KEY_BYTES + 1),
+                "root",
+                NO_ARTIFACT_CONTRACT,
+                &[],
+                None,
+            )
+            .is_err()
         );
         assert!(
             validate_start_input(
                 "operation",
                 "root",
+                NO_ARTIFACT_CONTRACT,
                 &vec![
                     InitialTask {
                         task_id: "task".into(),
@@ -1752,9 +2697,24 @@ mod tests {
                 required_artifact_contract: "x".repeat(MAX_ARTIFACT_CONTRACT_BYTES + 1),
             },
         ] {
-            assert!(validate_start_input("operation", "root", &[invalid], None).is_err());
+            assert!(
+                validate_start_input("operation", "root", NO_ARTIFACT_CONTRACT, &[invalid], None,)
+                    .is_err()
+            );
         }
-        assert!(validate_start_input("operation", "root", &[], Some("")).is_err());
+        assert!(
+            validate_start_input("operation", "root", NO_ARTIFACT_CONTRACT, &[], Some("")).is_err()
+        );
+        assert!(
+            validate_start_input(
+                "operation",
+                "root",
+                &"x".repeat(MAX_ARTIFACT_CONTRACT_BYTES + 1),
+                &[],
+                None,
+            )
+            .is_err()
+        );
 
         let temp = tempfile::tempdir().unwrap();
         let scheduler = SupervisorRuntime::new(temp.path());

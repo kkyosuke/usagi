@@ -291,6 +291,8 @@ pub enum SupervisorEventKind {
         generation: u64,
         passed: bool,
         result_digest: String,
+        #[serde(default)]
+        safe_summary: String,
     },
     /// Cancelling is a reducer fact so late dispatch completion cannot revive
     /// the task or run.
@@ -663,6 +665,7 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
             generation,
             passed,
             result_digest,
+            safe_summary,
         } => {
             verification_result(
                 &mut next,
@@ -670,6 +673,7 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
                 *generation,
                 *passed,
                 result_digest,
+                safe_summary,
                 event,
             )?;
         }
@@ -927,6 +931,7 @@ fn verification_result(
     generation: u64,
     passed: bool,
     digest: &str,
+    safe_summary: &str,
     event: &SupervisorEvent,
 ) -> Result<(), SupervisorError> {
     let task = run
@@ -949,7 +954,11 @@ fn verification_result(
             event.event_id,
             Some(task_id.clone()),
             "artifact verification failed".into(),
-            digest.into(),
+            if safe_summary.is_empty() {
+                digest.into()
+            } else {
+                safe_summary.into()
+            },
             vec!["resume".into(), "cancel".into()],
             event.observed_at,
         );
@@ -1464,6 +1473,7 @@ mod tests {
                     generation: 1,
                     passed: true,
                     result_digest: "verified".into(),
+                    safe_summary: String::new(),
                 },
             ),
         )
@@ -1612,12 +1622,34 @@ mod tests {
                     generation: 1,
                     passed: false,
                     result_digest: "mismatch".into(),
+                    safe_summary: "head commit did not match".into(),
                 },
             ),
         )
         .unwrap();
         assert_eq!(run.state, SupervisorRunState::Escalated);
-        assert_eq!(run.escalation.as_ref().unwrap().safe_evidence, "mismatch");
+        assert_eq!(
+            run.escalation.as_ref().unwrap().safe_evidence,
+            "head commit did not match"
+        );
+    }
+
+    #[test]
+    fn legacy_verification_event_defaults_the_safe_summary() {
+        let legacy = serde_json::json!({
+            "VerificationResult": {
+                "task_id": "verify",
+                "generation": 1,
+                "passed": false,
+                "result_digest": "legacy-digest"
+            }
+        });
+        let decoded: SupervisorEventKind = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            decoded,
+            SupervisorEventKind::VerificationResult { safe_summary, .. }
+                if safe_summary.is_empty()
+        ));
     }
 
     #[test]
@@ -1674,6 +1706,7 @@ mod tests {
                 1,
                 true,
                 "digest",
+                "",
                 &event(
                     1,
                     SupervisorEventKind::SetRunState {
@@ -1691,6 +1724,7 @@ mod tests {
                 2,
                 true,
                 "digest",
+                "",
                 &event(
                     1,
                     SupervisorEventKind::SetRunState {
@@ -1743,6 +1777,7 @@ mod tests {
                         generation: 1,
                         passed: true,
                         result_digest: "untrusted".into(),
+                        safe_summary: String::new(),
                     },
                 ),
             ),
