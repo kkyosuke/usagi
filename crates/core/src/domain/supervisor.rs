@@ -60,6 +60,20 @@ pub const MAX_TASK_DEPENDENCIES: usize = 128;
 pub const MAX_SUPERVISOR_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_ARTIFACT_CONTRACT_BYTES: usize = 4 * 1024;
 pub const MAX_SUPERVISOR_KEY_BYTES: usize = 256;
+/// Artifact contract used when a task has no independently verified output.
+pub const NO_ARTIFACT_CONTRACT: &str = "none";
+/// Contract for a Goal whose terminal condition is a review-ready pull request
+/// with all required checks passing.
+pub const GOAL_REVIEW_READY_ARTIFACT_CONTRACT: &str = "goal_review_ready_pr_v1";
+
+/// Whether a task completion report must be followed by independent artifact
+/// verification. This is the single authority for interpreting the persisted
+/// string contract; adapters may add contract-specific verifiers without
+/// duplicating the no-verification sentinel.
+#[must_use]
+pub fn requires_artifact_verification(contract: &str) -> bool {
+    contract != NO_ARTIFACT_CONTRACT
+}
 
 impl TaskId {
     /// Creates an opaque task key.
@@ -97,12 +111,30 @@ pub enum SupervisorRunState {
     Escalated,
 }
 impl SupervisorRunState {
+    /// Whether ordinary reducer events are fenced until an escalation is
+    /// explicitly resolved. `Escalated` is quiescent but remains resumable.
     #[must_use]
-    pub const fn terminal(self) -> bool {
+    pub const fn blocks_ordinary_events(self) -> bool {
         matches!(
             self,
             Self::Succeeded | Self::Failed | Self::Cancelled | Self::Escalated
         )
+    }
+
+    /// Compatibility alias for callers compiled against the original API.
+    /// This does not mean the run can be discarded: use [`Self::is_finished`]
+    /// for retention and idempotency decisions.
+    #[deprecated(note = "use blocks_ordinary_events or is_finished for the intended policy")]
+    #[must_use]
+    pub const fn terminal(self) -> bool {
+        self.blocks_ordinary_events()
+    }
+
+    /// Whether the run is immutable history and can be removed by retention or
+    /// have its start-idempotency reservation recycled.
+    #[must_use]
+    pub const fn is_finished(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
     }
 }
 
@@ -569,7 +601,8 @@ impl std::error::Error for SupervisorError {}
 /// # Errors
 ///
 /// Returns a typed rejection without changing `run` when the event is stale,
-/// out of sequence, invalid for its task/provenance, or mutates a terminal run.
+/// out of sequence, invalid for its task/provenance, or mutates a finished or
+/// explicitly quiescent run.
 pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), SupervisorError> {
     match run.event_id_status(event.event_id) {
         AppliedEventStatus::Recent => return Ok(()),
@@ -583,7 +616,8 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
             actual: event.sequence,
         });
     }
-    if run.state.terminal() && !matches!(event.kind, SupervisorEventKind::ResolveEscalation { .. })
+    if run.state.blocks_ordinary_events()
+        && !matches!(event.kind, SupervisorEventKind::ResolveEscalation { .. })
     {
         return Err(SupervisorError::TerminalRun);
     }
@@ -615,7 +649,7 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
             terminal_reason,
         } => {
             next.state = *state;
-            if state.terminal() {
+            if state.blocks_ordinary_events() {
                 next.terminal_at = Some(event.observed_at);
                 next.terminal_reason.clone_from(terminal_reason);
             }
@@ -855,7 +889,9 @@ fn set_task(
         task.state = TaskState::Retrying;
         return Ok(());
     }
-    if state == TaskState::Succeeded && task.required_artifact_contract != "none" {
+    if state == TaskState::Succeeded
+        && requires_artifact_verification(&task.required_artifact_contract)
+    {
         task.state = TaskState::Verifying;
         return Ok(());
     }
@@ -1022,7 +1058,7 @@ mod tests {
             dependencies: deps.iter().map(|v| TaskId::new(*v).unwrap()).collect(),
             instruction_digest: "digest".into(),
             instruction_body: "secret prompt".into(),
-            required_artifact_contract: "none".into(),
+            required_artifact_contract: NO_ARTIFACT_CONTRACT.into(),
             attempt: 1,
             generation: 1,
             assigned_dispatch_run: None,
@@ -1030,6 +1066,25 @@ mod tests {
             verification_digest: None,
             state: TaskState::Pending,
         }
+    }
+
+    #[test]
+    fn escalation_is_quiescent_but_not_finished_history() {
+        assert!(SupervisorRunState::Escalated.blocks_ordinary_events());
+        #[allow(deprecated)]
+        {
+            assert!(SupervisorRunState::Escalated.terminal());
+            assert!(!SupervisorRunState::Running.terminal());
+        }
+        assert!(!SupervisorRunState::Escalated.is_finished());
+        assert!(SupervisorRunState::Succeeded.is_finished());
+        assert!(SupervisorRunState::Failed.is_finished());
+        assert!(SupervisorRunState::Cancelled.is_finished());
+        assert!(!SupervisorRunState::Running.is_finished());
+        assert!(!requires_artifact_verification(NO_ARTIFACT_CONTRACT));
+        assert!(requires_artifact_verification(
+            GOAL_REVIEW_READY_ARTIFACT_CONTRACT
+        ));
     }
     fn event(seq: u64, kind: SupervisorEventKind) -> SupervisorEvent {
         SupervisorEvent {

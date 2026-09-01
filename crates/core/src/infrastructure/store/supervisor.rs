@@ -188,8 +188,8 @@ impl SupervisorStore {
 
     /// Delete the finished runs past [`RUN_RETENTION`], oldest first.
     ///
-    /// Only terminal runs are eligible: a run still planning, running, verifying
-    /// or waiting on a person is live state, whatever its age. Each removal takes
+    /// Only finished runs are eligible: a run still planning, running, verifying,
+    /// escalated, or otherwise waiting on a person is live state, whatever its age. Each removal takes
     /// the snapshot, journal and checkpoint together, and the snapshot goes last
     /// so an interrupted prune leaves a run that [`Self::runs`] can still read
     /// and that the next prune will finish.
@@ -210,7 +210,7 @@ impl SupervisorStore {
         let mut finished: Vec<(DateTime<Utc>, SupervisorRunId)> = self
             .runs()?
             .into_iter()
-            .filter(|run| run.state.terminal())
+            .filter(|run| run.state.is_finished())
             .map(|run| {
                 (
                     run.terminal_at.unwrap_or(run.updated_at),
@@ -1490,13 +1490,16 @@ mod tests {
 
         // The oldest run of all, still waiting on a person. Age is not what
         // makes a run eligible; being finished is.
-        let live = SupervisorRun::new(
+        let mut live = SupervisorRun::new(
             "caller".into(),
             "task".into(),
             "input".into(),
             "policy".into(),
             now(),
         );
+        live.state = SupervisorRunState::Escalated;
+        live.terminal_at = Some(live.created_at);
+        live.terminal_reason = Some("waiting for a human decision".into());
         let live_id = live.supervisor_run_id;
         store.initialize(&live).unwrap();
 
@@ -1516,7 +1519,7 @@ mod tests {
         }
 
         let kept = store.runs().unwrap();
-        let kept_finished = kept.iter().filter(|run| run.state.terminal()).count();
+        let kept_finished = kept.iter().filter(|run| run.state.is_finished()).count();
         assert!(
             kept_finished <= RUN_RETENTION,
             "supervisor history grew past its bound: {kept_finished}"
