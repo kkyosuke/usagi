@@ -1036,6 +1036,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             ),
             restore_connection: Box::new(restore_connection),
             garden_inventory: Box::new(DaemonGardenInventoryPort),
+            work_runs: Box::new(DaemonWorkRunPort),
             agent_tab_intents: Box::new(UserAgentTabIntentPort::new()),
             external_terminal: Box::new(PlatformExternalTerminalPort {
                 reaper: self.helper_reaper.clone(),
@@ -2021,6 +2022,29 @@ impl presentation::GardenInventoryPort for DaemonGardenInventoryPort {
                 serde_json::from_value(body).map_err(|_| {
                     "daemon returned an invalid Agent workspace observation".to_owned()
                 })
+            }
+        }
+    }
+}
+
+struct DaemonWorkRunPort;
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=agent_ipc_e2e
+impl presentation::WorkRunPort for DaemonWorkRunPort {
+    fn snapshot(
+        &mut self,
+        workspace: WorkspaceId,
+    ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
+        let mut client =
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        match client
+            .request(usagi_core::usecase::client::DaemonRequest::SupervisorSnapshot { workspace })
+            .map_err(|_| "Work Run progress is unavailable".to_owned())?
+        {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                serde_json::from_value(body)
+                    .map_err(|_| "daemon returned invalid Work Run progress".to_owned())
             }
         }
     }

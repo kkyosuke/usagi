@@ -9,6 +9,7 @@ use crate::presentation::theme::{Role, Style};
 use crate::presentation::views::workspace::TerminalViewProjection;
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::terminal_selection::TerminalPoint;
+use usagi_core::domain::supervisor::{SupervisorRunQuery, SupervisorRunState, TaskState};
 
 /// Desired lower bound while the drawer can coexist with a visible background.
 pub const MIN_DRAWER_WIDTH: usize = 56;
@@ -89,6 +90,33 @@ pub struct DirectorDrawerProjection {
     /// Drawer feedback used when the selected conversation has no live terminal.
     pub feedback: Option<String>,
     pub new: DirectorNewProjection,
+    /// Daemon-owned, redaction-safe progress. Ordering is canonicalized here so
+    /// the first item is the run that most needs attention.
+    pub work_runs: Vec<SupervisorRunQuery>,
+}
+
+impl DirectorDrawerProjection {
+    #[must_use]
+    pub fn with_work_runs(mut self, mut runs: Vec<SupervisorRunQuery>) -> Self {
+        runs.sort_by_key(|run| {
+            (
+                work_run_priority(run.state),
+                std::cmp::Reverse(run.supervisor_run_id),
+            )
+        });
+        self.work_runs = runs;
+        self
+    }
+}
+
+const fn work_run_priority(state: SupervisorRunState) -> u8 {
+    match state {
+        SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated => 0,
+        SupervisorRunState::Failed => 1,
+        SupervisorRunState::Running | SupervisorRunState::Verifying => 2,
+        SupervisorRunState::Planning => 3,
+        SupervisorRunState::Succeeded | SupervisorRunState::Cancelled => 4,
+    }
 }
 
 /// Right-anchored drawer rectangle in terminal cells.
@@ -279,6 +307,10 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
         return goal_composer_body(width, height, rows, candidates, *selected, goal);
     }
 
+    if let Some(run) = projection.work_runs.first() {
+        rows.extend(work_run_rows(width, run));
+    }
+
     let footer_hint = if projection.goal_driven {
         "Work Run · stop reason: output or Decision · Esc: close"
     } else {
@@ -337,6 +369,104 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
     rows.into_iter()
         .map(|row| widgets::clip_to_width(&row, width))
         .collect()
+}
+
+fn work_run_rows(width: usize, run: &SupervisorRunQuery) -> Vec<String> {
+    let total = run.tasks.len();
+    let done = run
+        .tasks
+        .iter()
+        .filter(|task| task.state == TaskState::Succeeded)
+        .count();
+    let active = run
+        .tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.state,
+                TaskState::Dispatched
+                    | TaskState::Running
+                    | TaskState::AwaitingDecision
+                    | TaskState::Retrying
+                    | TaskState::Verifying
+            )
+        })
+        .count();
+    let state = run_state_label(run.state);
+    let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
+    let bar_width = width.saturating_sub(29).clamp(4, 16);
+    let bar = crate::presentation::widgets::loading::progress_bar(done, total, bar_width);
+    let mut rows = vec![
+        Role::Accent
+            .style()
+            .bold()
+            .paint(&format!("Active work  #{short_id}  {state}")),
+        format!(
+            "Progress  {bar}  {done}/{total} tasks  Agents {active}/{}",
+            run.policy.max_concurrency
+        ),
+    ];
+    for task in run.tasks.iter().take(5) {
+        let icon = match task.state {
+            TaskState::Succeeded => "✓",
+            TaskState::Dispatched | TaskState::Running => "●",
+            TaskState::AwaitingDecision => "!",
+            TaskState::Retrying | TaskState::Verifying => "◐",
+            TaskState::Failed | TaskState::Blocked => "×",
+            TaskState::Cancelled => "−",
+            TaskState::Pending | TaskState::Ready => "◌",
+        };
+        rows.push(format!(
+            "{icon} {}  {}",
+            task.task_id.0,
+            task_state_label(task.state)
+        ));
+    }
+    if run.tasks.len() > 5 {
+        rows.push(
+            Style::new()
+                .dim()
+                .paint(&format!("… {} more tasks", run.tasks.len() - 5)),
+        );
+    }
+    let stop = run
+        .escalation
+        .as_ref()
+        .map(|escalation| escalation.reason.as_str())
+        .or(run.terminal_reason.as_deref())
+        .unwrap_or("—");
+    rows.push(format!("Stop reason: {stop}"));
+    rows.push(Style::new().dim().paint(&"─".repeat(width)));
+    rows
+}
+
+const fn run_state_label(state: SupervisorRunState) -> &'static str {
+    match state {
+        SupervisorRunState::Planning => "Planning",
+        SupervisorRunState::Running => "Working",
+        SupervisorRunState::WaitingForDecision => "Waiting for you",
+        SupervisorRunState::Verifying => "Verifying",
+        SupervisorRunState::Succeeded => "Completed",
+        SupervisorRunState::Failed => "Failed",
+        SupervisorRunState::Cancelled => "Cancelled",
+        SupervisorRunState::Escalated => "Needs attention",
+    }
+}
+
+const fn task_state_label(state: TaskState) -> &'static str {
+    match state {
+        TaskState::Pending => "waiting",
+        TaskState::Ready => "ready",
+        TaskState::Dispatched => "starting",
+        TaskState::Running => "working",
+        TaskState::AwaitingDecision => "waiting for you",
+        TaskState::Retrying => "retrying",
+        TaskState::Verifying => "verifying",
+        TaskState::Succeeded => "done",
+        TaskState::Failed => "failed",
+        TaskState::Cancelled => "cancelled",
+        TaskState::Blocked => "blocked",
+    }
 }
 
 fn empty_conversation_rows(
@@ -511,6 +641,40 @@ fn selector_row(width: usize, projection: &DirectorDrawerProjection) -> String {
 mod tests {
     use super::*;
     use crate::presentation::widgets::{display_width, strip_ansi};
+    use chrono::Utc;
+    use std::collections::BTreeSet;
+    use usagi_core::domain::id::OperationId;
+    use usagi_core::domain::supervisor::{
+        EscalationRecord, ExecutionPolicy, SupervisorRunId, TaskId, TaskQuery,
+    };
+
+    fn work_run() -> SupervisorRunQuery {
+        SupervisorRunQuery {
+            supervisor_run_id: SupervisorRunId::new(),
+            state_revision: 3,
+            state: SupervisorRunState::Running,
+            terminal_at: None,
+            terminal_reason: None,
+            policy: ExecutionPolicy::default(),
+            escalation: None,
+            tasks: [TaskState::Succeeded, TaskState::Running, TaskState::Pending]
+                .into_iter()
+                .enumerate()
+                .map(|(index, state)| TaskQuery {
+                    task_id: TaskId::new(format!("task-{index}")).unwrap(),
+                    parent_task_id: None,
+                    dependencies: BTreeSet::new(),
+                    instruction_digest: format!("digest-{index}"),
+                    required_artifact_contract: "none".into(),
+                    attempt: 1,
+                    generation: 1,
+                    assigned_dispatch_run: None,
+                    state,
+                })
+                .collect(),
+            provenance: Vec::new(),
+        }
+    }
 
     #[test]
     fn geometry_clamps_normal_boundary_and_wide_sizes() {
@@ -712,6 +876,120 @@ mod tests {
     }
 
     #[test]
+    fn director_drawer_renders_daemon_owned_task_progress_in_both_modes() {
+        for goal_driven in [false, true] {
+            let projection = DirectorDrawerProjection {
+                goal_driven,
+                work_runs: vec![work_run()],
+                ..DirectorDrawerProjection::default()
+            };
+            let body = drawer_body(72, 16, &projection)
+                .into_iter()
+                .map(|row| strip_ansi(&row))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(body.contains("Active work"));
+            assert!(body.contains("1/3 tasks"));
+            assert!(body.contains("Agents 1/4"));
+            assert!(body.contains("✓ task-0  done"));
+            assert!(body.contains("● task-1  working"));
+            assert!(body.contains("Stop reason: —"));
+        }
+    }
+
+    #[test]
+    fn work_run_projection_covers_every_priority_state_and_task_badge() {
+        let run_states = [
+            SupervisorRunState::Planning,
+            SupervisorRunState::Running,
+            SupervisorRunState::WaitingForDecision,
+            SupervisorRunState::Verifying,
+            SupervisorRunState::Succeeded,
+            SupervisorRunState::Failed,
+            SupervisorRunState::Cancelled,
+            SupervisorRunState::Escalated,
+        ];
+        let expected_priorities = [3, 2, 0, 2, 4, 1, 4, 0];
+        assert_eq!(run_states.map(work_run_priority), expected_priorities,);
+        let projection = DirectorDrawerProjection::default().with_work_runs(
+            run_states
+                .into_iter()
+                .map(|state| {
+                    let mut run = work_run();
+                    run.state = state;
+                    run
+                })
+                .collect(),
+        );
+        assert_eq!(
+            projection
+                .work_runs
+                .iter()
+                .map(|run| work_run_priority(run.state))
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1, 2, 2, 3, 4, 4]
+        );
+        assert_eq!(
+            run_states.map(run_state_label),
+            [
+                "Planning",
+                "Working",
+                "Waiting for you",
+                "Verifying",
+                "Completed",
+                "Failed",
+                "Cancelled",
+                "Needs attention",
+            ]
+        );
+
+        let task_states = [
+            TaskState::Pending,
+            TaskState::Ready,
+            TaskState::Dispatched,
+            TaskState::Running,
+            TaskState::AwaitingDecision,
+            TaskState::Retrying,
+            TaskState::Verifying,
+            TaskState::Succeeded,
+            TaskState::Failed,
+            TaskState::Cancelled,
+            TaskState::Blocked,
+        ];
+        for state in task_states {
+            let mut run = work_run();
+            run.tasks.truncate(1);
+            run.tasks[0].state = state;
+            assert!(
+                work_run_rows(60, &run)
+                    .iter()
+                    .any(|row| { strip_ansi(row).contains(task_state_label(state)) })
+            );
+        }
+
+        let mut verbose = work_run();
+        let template = verbose.tasks[0].clone();
+        verbose.tasks = (0..7)
+            .map(|index| TaskQuery {
+                task_id: TaskId::new(format!("many-{index}")).unwrap(),
+                ..template.clone()
+            })
+            .collect();
+        verbose.escalation = Some(EscalationRecord {
+            escalation_id: OperationId::new(),
+            reason: "choose a recovery".into(),
+            blocking_task_id: None,
+            safe_evidence: "bounded".into(),
+            choices: vec!["resume".into()],
+            created_at: Utc::now(),
+        });
+        let rows = work_run_rows(60, &verbose).join("\n");
+        assert!(rows.contains("… 2 more tasks"));
+        assert!(rows.contains("Stop reason: choose a recovery"));
+    }
+
+    #[test]
     fn goal_driven_empty_and_launching_states_render_their_distinct_guidance() {
         let composer = DirectorDrawerProjection {
             goal_driven: true,
@@ -793,6 +1071,7 @@ mod tests {
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::Ready,
+            work_runs: Vec::new(),
         };
         let frame = render_over(12, 80, &vec![String::new(); 12], &projection);
         let text = frame
@@ -850,6 +1129,7 @@ mod tests {
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::Ready,
+            work_runs: Vec::new(),
         };
         let body = drawer_body(52, 9, &projection)
             .into_iter()
@@ -905,6 +1185,7 @@ mod tests {
             interrupted_detail: Some("identity unavailable".to_owned()),
             feedback: Some("resume failed safely".to_owned()),
             new: DirectorNewProjection::Ready,
+            work_runs: Vec::new(),
         };
         let body = drawer_body(52, 9, &projection)
             .into_iter()
@@ -1090,6 +1371,7 @@ mod tests {
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::Ready,
+            work_runs: Vec::new(),
         };
         for (height, width) in [(0, 0), (1, 1), (3, 8), (12, 56), (24, 200)] {
             let frame = render_over(height, width, &[], &projection);

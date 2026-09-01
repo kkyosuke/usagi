@@ -119,6 +119,9 @@ pub enum DaemonRequest {
     /// per-session dispatch status. Process-level cross-project views use this
     /// instead of treating a coarse live PTY as proof that dispatch is running.
     AgentWorkspaceObservation { workspace: WorkspaceId },
+    /// Read the redaction-safe durable Work Runs owned by the connection's
+    /// workspace. This TUI-only observation never accepts an Agent credential.
+    SupervisorSnapshot { workspace: WorkspaceId },
     /// Diagnose launch-time hook/MCP integration revisions against the invoking
     /// binary without exposing rendered configuration or provider identity.
     DiagnoseAgents {
@@ -1696,6 +1699,7 @@ impl RetryEligibility {
             | DaemonRequest::Metrics { .. }
             | DaemonRequest::AgentInventory { .. }
             | DaemonRequest::AgentWorkspaceObservation { .. }
+            | DaemonRequest::SupervisorSnapshot { .. }
             | DaemonRequest::DiagnoseAgents { .. }
             | DaemonRequest::Tenant {
                 action: TenantAction::Inventory,

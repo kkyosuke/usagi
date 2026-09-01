@@ -643,12 +643,17 @@ daemon は利用者の Goal を次の固定 operating contract と結合し、`L
 - 通常の不確実性や回復可能な failure では質問せず、blocking choice だけを durable user-decision tool へ送る。
 - 停止時は安全な理由と回復 action を root conversation に出し、PR は自動 merge しない。
 
-この v1 で Work Run の前面は既存 Director drawer である。drawer の selector は `Work Run`、footer は停止理由の参照先を
-`output or Decision` と表示する。進行中の worker は Organization / Session / Garden、明示判断は既存 decision notice/modal、
-PR は既存 PR inventory/modal、launch failure と Agent 停止理由は root pane の safe feedback と terminal output で確認する。
-SupervisorRun を正本にした Active work 一覧、task DAG、独立 PR/CI verifier、typed Stop reason
-projection は [goal-driven Work Run 提案](proposals/18-goal-driven-work-run.md) の後続段階であり、v1 がそれらの完了を
-装うことはない。
+Work Run の前面は既存 Director drawer である。daemon が workspace に属する durable `SupervisorRun` を保持すると、
+Home の notice band は最優先 run の状態、成功 task 数、実行中 task 数と concurrency 上限を `Active work` として表示する。
+Director drawer は同じ redaction-safe snapshot から progress bar、最大5件の task state、停止理由を描き、2秒 cadence の
+専用 background lane で更新する。観測失敗時は既存 snapshot を維持して5秒 backoffし、frame thread からIPCを行わない。
+workspace 所有情報を持たない旧 run は別 workspace へ推測せず表示しない。
+
+この表示は `supervisor_start` で作られた run の観測面であり、goal-driven `AgentGoal` launch 自体を暗黙に
+`SupervisorRun` へ昇格しない。進行中の worker は Organization / Session / Garden、明示判断は既存 decision notice/modal、
+PR は既存 PR inventory/modal、launch failure と Agent 停止理由は root pane の safe feedback と terminal output でも確認する。
+複数 run を選択する完全な Active work list、独立 PR/CI verifier、typed Stop reason action は
+[goal-driven Work Run 提案](proposals/18-goal-driven-work-run.md) の後続段階である。
 
 成功時は root `AgentTabIntent` の order への追加と新 conversation の selection を 1 回の CAS mutation で commit
 してから pending slot を live にする。write / CAS / future-schema failure、profile rejection、daemon 不通、
