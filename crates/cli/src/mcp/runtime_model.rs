@@ -71,6 +71,12 @@ impl RuntimeModelSnapshot {
         json!({"oneOf": self.new_agent_branches().collect::<Vec<_>>()})
     }
 
+    /// Whether this server can advertise a valid new-worker selector.
+    #[must_use]
+    pub fn can_create_agent(&self) -> bool {
+        !self.runtimes.is_empty()
+    }
+
     fn new_agent_branches(&self) -> impl Iterator<Item = Value> + '_ {
         self.runtimes.iter().map(|entry| {
             json!({
@@ -213,11 +219,9 @@ mod tests {
     }
 
     #[test]
-    fn default_workspace_config_has_no_runtime_allowlists() {
-        assert_eq!(
-            WorkspaceAgentConfig::default(),
-            WorkspaceAgentConfig::from_allowlists(vec![], vec![])
-        );
+    fn default_workspace_config_can_delegate_to_claudes_provider_default() {
+        assert!(WorkspaceAgentConfig::default().allows("claude", "default"));
+        assert!(!WorkspaceAgentConfig::default().allows("codex", "default"));
     }
 
     #[test]
@@ -305,7 +309,7 @@ mod tests {
         std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [valid").unwrap();
         assert_eq!(
             WorkspaceAgentConfig::read(workspace.path()),
-            WorkspaceAgentConfig::default()
+            WorkspaceAgentConfig::empty()
         );
     }
 

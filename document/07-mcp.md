@@ -136,6 +136,8 @@ MCP server は起動時に Global と Workspace の `issue_enabled` / `memory_en
 `memory_enabled = false` では `memory_*` の adapter を descriptor registry に登録しない。無効な tool は `tools/list` に
 現れず、名前を直接 `tools/call` しても `Method not found` となり、store / daemon の effect を起こさない。
 session / agent など無効化対象ではない MCP tool は引き続き公開する。
+`session_delegate_brief` は executable を含む runtime/model が 1 組以上ある場合だけ公開する。selector が空なら
+不正な `oneOf: []` schema を生成せず tool 自体を省き、直接 call も `Method not found` にする。
 設定変更を反映するには MCP client の再接続または server の再起動が必要である。設定の保存先と継承規則は
 [TUI の settings scope](03-tui.md#settings-scope-と-workspace-entry)を正本とする。Global または Workspace の
 設定が読み取れない場合は、既定の有効値へ黙って戻さず MCP serve loop の開始前に失敗する。
@@ -160,23 +162,21 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
-| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
-| `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
+| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get/list で観測する。agent 経路は作成した owner/run の decision だけを操作できる |
+| `issue_*` / `memory_*` | issue は trusted workspace root、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 
-`user_decision_request` の同期応答待ちは decision ごとの process-local 通知へ登録し、resolve / cancel / expire の
-durable transition で起床する。待機中の client が切断された場合、または planned rollover が ActiveControl barrier を閉じた
-場合は connection worker を bounded time 内に終了して、handoff の lease drain を塞がない。shutdown / retirement も同じ
-cancellation contract を使う。これらは durable な `Pending` record を回答・取消・削除しないため、caller は再接続後に get /
-list、または同じ idempotency key の request で同じ decision を観測できる。状態変化がない間に decision store を一定間隔で
-再読込しない。
+`user_decision_request` は connection deadline 内に人間の回答を待たず、作成済み `Pending` record を直ちに返す。
+caller は同じ credential で get / list を polling し、terminal decision を get した時点で durable outbox を ACK する。
+同じ idempotency key の request は同じ decision に収束する。これにより人間の応答時間が MCP connection や caller
+credential の寿命を壊さず、daemon rollover / restart 後も store から継続できる。
 
 decision request は title 256 bytes、prompt/freeform 16 KiB、option 32 件（ID 128 bytes、label 256 bytes、description
 2 KiB）、idempotency key 256 bytes を上限とする。空の選択肢で freeform も許可しない回答不能 request、重複 option ID、
 NUL、作成時刻以前または7日を超える deadline は durable write 前に拒否する。deadline 省略時は daemon が24時間を設定する。
 MCP schema は同じ値を文字数上限と UTF-8 byte 上限の両方で公開し、domain/store も UTF-8 byte 数で再検証する。
-上限超過は decision、outbox、waiter を作らず `InvalidArgument` になり、既存の durable document に違反があれば
+上限超過は decision と outbox を作らず `InvalidArgument` になり、既存の durable document に違反があれば
 再起動後も巨大な値を再公開せず fail closed にする。
 
 件数上限とは別に、caller-controlled な prompt / option / answer を含む `user-decisions.json` の pretty JSON は
@@ -240,6 +240,8 @@ workspace の `.usagi/config.toml` に対応する model allowlist があり、p
 だけが MCP schema に現れる。daemon が provision した MCP child は `USAGI_WORKSPACE_ROOT` の trusted root から
 allowlist を読み、session worktree の cwd に machine-local config がなくても workspace と同じ schema を公開する。
 daemon の spawn 直前の再検証も同じ workspace root を権威とし、session worktree は worker の cwd としてだけ使う。
+workspace config 自体が未作成なら `claude/default` を安全な provider-default として使う。config が存在するのに
+読めない、または runtime/model 設定が不正な場合は空へ fail closed し、暗黙の fallback は行わない。
 `sakana-ai` の実行コマンドは `codex-fugu` である。
 
 ### delegation の atomicity
@@ -284,9 +286,11 @@ cancel と escalation resolution は run 作成時に daemon が記録したこ�
 
 issue / memory の store 系 tool は、CLI 面と同じ `usagi-core` usecase に store root と実時計を
 束縛する薄い adapter である。daemon が起動した Agent の MCP child は、OS process lineage で claim した
-credential と同時に caller session の exact worktree を受け取り、その認証済み path を接続中の store root に固定する。
-provider が MCP child を workspace root など別の cwd から起動しても保存先は変わらない。手動の未認証、または
-store root を返さない旧 daemon と接続した `usagi mcp` は、互換経路として従来どおり cwd を使う。成功時は usecase の結果 JSON を MCP の text content に入れて
+credential と同時に issue 用の exact trusted root と memory 用の workspace 共有 root を受け取り、接続中は固定する。
+issue root は caller session の worktree（root caller は workspace）、memory root は Git 追跡外の daemon data home
+`agent-memory/<workspace-id>` であり、同じ workspace の root/session caller が共有する。provider が MCP child を
+別の cwd から起動しても保存先は変わらない。手動の未認証、または store root を返さない旧 daemon と接続した
+`usagi mcp` は、互換経路として従来どおり cwd を両方に使う。成功時は usecase の結果 JSON を MCP の text content に入れて
 返し、作成・更新・削除は応答前に store root 配下の source Markdown へ永続化される。派生 index / TOC
 の refresh failure は committed source の成功応答を error に変えず、dirty marker により次の
 read で自己修復する。commit point、retry、issue number 採番 authority の正本は

@@ -1054,10 +1054,8 @@ flag を直接書くだけ（async-signal-safe だが condvar を notify でき�
 
 decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
 atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。
-同期 `user_decision_request` の waiter はこの maintenance tick で store を再読込しない。resolve / cancel / expire は
-decision 単位の通知で waiter を即時に起こし、状態変化がない間は connection の切断と ActiveControl barrier の close を
-最大 250 ms 間隔で非破壊観測する。planned rollover は barrier を閉じた時点で waiter を終了させて lease を解放してから
-drain を完了し、shutdown / retirement は connection 自体も閉じる。いずれも durable な `Pending` record を変更しない。
+`user_decision_request` は pending record の作成後すぐ応答するため、人間待ちの connection waiter は持たない。
+resolve / cancel / expire は durable state と outbox を更新し、caller が get で terminal state を観測したとき ACK する。
 
 ## session teardown worker
 
@@ -1659,6 +1657,11 @@ safe completion summary、DAG state、decision generation を含む wake reserva
 parent wake effect を実行する。reservation は child run と parent generation で一意なので、duplicate event、
 ACK loss、daemon restart は同じ wake を二重に作らない。parent runtime の再解決・restart は wake adapter が
 保存済み provenance だけを使って行い、session 名から target を推測しない。
+
+tick 時点で `Ready` task に dispatch reservation が無い場合は、scheduler が生存しているように見える
+`Running` を維持しない。runtime/model selector または admission が worker run を割り当てなかったことを示す
+`DispatchFailure` event と resume/cancel の durable escalation を保存する。operator は events/get から停止理由を
+観測でき、selector を修復するまで自動 retry は行わない。
 
 `supervisor-scheduler.json` は start reservation を最大256件、wake reservation を最大512件に制限する。
 終了 run の start と配送済み wake は固定長 tombstone へ移して retry を `expired` として effect-zero にし、

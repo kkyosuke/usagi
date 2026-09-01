@@ -214,7 +214,7 @@ fn root_deny_reason(
                 .map(|command| {
                     format!(
                         "ワークスペースルートでは read-only allowlist 外の shell command を実行できません（{command}）。\
-                         Git は `git --no-pager --no-optional-locks <subcommand>` を使い、diff 系には \
+                         Git は read-only subcommand を使い、diff/show/patch 付き log には \
                          `--no-ext-diff --no-textconv` も指定してください。"
                     )
                 })
