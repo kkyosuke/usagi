@@ -683,6 +683,10 @@ pub struct TerminalRegistry {
     checkpoint_bytes_limit: usize,
     screen_cells_limit: usize,
     screen_cells_aggregate_limit: usize,
+    /// Production registries share the process counter. Test-only budget
+    /// overrides account this registry alone so parallel fixtures cannot spend
+    /// one another's deliberately tiny ceilings.
+    screen_cells_process_shared: bool,
     /// Cross-connection input operation finals. It lives beside `entries`
     /// instead of inside one, so reusing an operation identity for a second
     /// terminal is detected as a conflict rather than written twice.
@@ -699,6 +703,7 @@ impl TerminalRegistry {
             checkpoint_bytes_limit: CHECKPOINT_BYTES_MAX,
             screen_cells_limit: SCREEN_CELLS_PER_TERMINAL_MAX,
             screen_cells_aggregate_limit: SCREEN_CELLS_AGGREGATE_MAX,
+            screen_cells_process_shared: true,
             operations: InputOperationLedger::new(InputOperationBounds::default()),
         }
     }
@@ -741,6 +746,7 @@ impl TerminalRegistry {
     ) -> Self {
         self.screen_cells_limit = per_terminal;
         self.screen_cells_aggregate_limit = process_aggregate;
+        self.screen_cells_process_shared = false;
         self
     }
 
@@ -1384,10 +1390,18 @@ impl TerminalRegistry {
         self.entries.remove(&key(reference)).is_some()
     }
 
-    const fn screen_budgets(&self) -> ScreenBudgets {
+    fn screen_budgets(&self) -> ScreenBudgets {
         ScreenBudgets {
             per_terminal: self.screen_cells_limit,
             process_aggregate: self.screen_cells_aggregate_limit,
+            retained_cells: if self.screen_cells_process_shared {
+                RETAINED_SCREEN_CELLS.load(Ordering::Relaxed)
+            } else {
+                self.entries
+                    .values()
+                    .map(|entry| counted(entry.screen_cells))
+                    .sum()
+            },
         }
     }
 
@@ -1529,6 +1543,9 @@ fn lock_screen_budget(process_shared: bool) -> Option<MutexGuard<'static, ()>> {
 struct ScreenBudgets {
     per_terminal: usize,
     process_aggregate: usize,
+    /// Accounted cells before the current mutation. This is process-global in
+    /// production and registry-local for an injected test budget.
+    retained_cells: u64,
 }
 
 /// Refuses a visible grid that cannot fit before `VtScreen` allocates or a PTY
@@ -1541,8 +1558,8 @@ fn ensure_screen_geometry_fits(
 ) -> Result<(), RegistryError> {
     let (rows, cols) = screen_dimensions(geometry);
     let visible = rows.saturating_mul(cols);
-    let retained_elsewhere = RETAINED_SCREEN_CELLS
-        .load(Ordering::Relaxed)
+    let retained_elsewhere = budgets
+        .retained_cells
         .saturating_sub(counted(current_cells));
     let aggregate_available = counted(budgets.process_aggregate).saturating_sub(retained_elsewhere);
     let fits = visible <= budgets.per_terminal && counted(visible) <= aggregate_available;
@@ -1554,10 +1571,11 @@ fn ensure_screen_geometry_fits(
 /// fits both the per-terminal budget and whatever the process aggregate ceiling
 /// leaves after the other terminals' current retention.
 fn enforce_screen_budget(entry: &mut Entry, budgets: ScreenBudgets) {
+    let previous_cells = entry.screen_cells;
     let cells = account_screen(entry);
-    let others = RETAINED_SCREEN_CELLS
-        .load(Ordering::Relaxed)
-        .saturating_sub(counted(cells));
+    let others = budgets
+        .retained_cells
+        .saturating_sub(counted(previous_cells));
     let aggregate_share =
         usize::try_from(counted(budgets.process_aggregate).saturating_sub(others)).unwrap_or(0);
     let budget = budgets.per_terminal.min(aggregate_share);
@@ -2168,8 +2186,7 @@ mod tests {
 
     #[test]
     fn registration_refuses_a_visible_grid_beyond_the_remaining_process_budget() {
-        let before = output_pipeline_counters().retained_screen_cells;
-        let ceiling = usize::try_from(before).unwrap().saturating_add(32);
+        let ceiling = 32;
         let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
             .with_screen_cell_budgets(usize::MAX, ceiling);
         for _ in 0..2 {
