@@ -1320,10 +1320,18 @@ footer 行は body-composition kit の `footer` helper を通す。
 |---|---|---|
 | open の Unregister workspace | Yes/No ボタン（既定） | `Enter/y: yes   Esc/n: no   ←→/Tab: choose` |
 | open の registry cleanup | compact（ボタンなし） | `y: remove   n/Esc: cancel` |
+| 欠損 workspace の選択 | `Remove` / `Cancel` ボタン | `Enter/y: remove   Esc/n: cancel   ←→/Tab: choose` |
 
 ボタン付き variant の Yes/No 選択状態は `ConfirmationModal` が持ち、compact variant は選択状態を
 持たない（state 引数を読まない）。open の cleanup は list 本文に手組みしていた `y/n` prompt を廃し、
 unregister と同じ overlay 経路で合成する。
+
+Open、Recent、Unite は選択 path を開く前に同じ read-only preflight を通す。`NotFound` または
+directory ではない path があれば
+対象 path（複数なら件数）を `Workspace not found` confirmation に表示し、通常の open はまだ開始しない。
+`Remove` は effect 直前に欠損を再検証して workspace registry entry だけを削除する。ディレクトリが
+復活していれば登録を保ち、permission error など `NotFound` 以外の観測失敗は削除 authority にしない。
+daemon lifecycle data の削除はこの確認に含めず、`clean --apply` の責務に保つ。
 
 Home の [exit prompt](#workspace-の離脱と終了) は 2 択ではないため `render_choice_over` を使うが、
 ボタンの幅と focus 表示は `confirmation_buttons` と同じ `choice_buttons` を通るので、2 択と 3 択の

@@ -198,6 +198,18 @@ pub trait WorkspaceLoader: Send {
     /// Take a completed global workspace-registry read without waiting.
     fn take_registry_refresh(&mut self) -> Option<io::Result<Vec<Workspace>>>;
 
+    /// Return the selected paths whose workspace directories no longer exist.
+    /// A caller uses this read-only preflight before attempting to open an
+    /// entry, so a missing workspace can be handled in the entry UI instead of
+    /// escaping as a process-level IO error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a path cannot be classified safely. In
+    /// particular, permission failures are not treated as evidence that a
+    /// directory is missing.
+    fn missing_paths(&mut self, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>>;
+
     /// Remove entries that no longer point at directories and return the paths
     /// removed from the core-owned workspace registry. The caller has already
     /// obtained explicit user confirmation before invoking this operation.

@@ -4051,6 +4051,22 @@ fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Determine whether a registered workspace directory is absent without
+/// turning an unreadable path into cleanup authority.
+fn workspace_directory_missing(path: &Path) -> std::io::Result<bool> {
+    classify_workspace_directory(std::fs::metadata(path))
+}
+
+fn classify_workspace_directory(
+    metadata: std::io::Result<std::fs::Metadata>,
+) -> std::io::Result<bool> {
+    match metadata {
+        Ok(metadata) => Ok(!metadata.is_dir()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 /// Classify what currently exists at `path` for New-project pre-validation.
 /// Metadata is resolved through symlinks; anything unreadable (including a
 /// missing path or a broken link) is treated as [`WorkspaceProbe::Missing`],
@@ -4233,12 +4249,27 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         crate::runtime::daemon::declare_opened_workspace(path).map(|_| ())
     }
 
-    fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
-        let missing = workspaces
+    fn missing_paths(&mut self, paths: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
+        paths
             .iter()
-            .filter(|workspace| !workspace.path.is_dir())
-            .map(|workspace| workspace.path.clone())
-            .collect::<Vec<_>>();
+            .filter_map(|path| match workspace_directory_missing(path) {
+                Ok(true) => Some(Ok(path.clone())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
+    fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
+        // Re-check at effect time. A directory may have been restored while the
+        // confirmation modal was open; unreadable paths do not authorize a
+        // registry mutation.
+        let missing = self.missing_paths(
+            &workspaces
+                .iter()
+                .map(|workspace| workspace.path.clone())
+                .collect::<Vec<_>>(),
+        )?;
         Ok(workspace_usecase::remove(&self.storage, &missing)
             .map_err(io_error)?
             .into_iter()
@@ -5293,17 +5324,17 @@ mod tests {
         StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
         TerminalSnapshotMode, TerminalSubscription, VersionProbeResult, agent_goal_request,
         agent_inventory_request, agent_launch_request, classify_terminal_input,
-        correlate_agent_goal, correlate_agent_launch, created_session_hook,
-        current_agent_integrations, daemon_error_reason, decision_cadence, decode_agent_admission,
-        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
-        decode_terminal_inventory, decode_terminal_poll, doctor_diagnosis_io_error,
-        doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
-        pr_snapshot_events, probe_path, provider_resume_projection,
-        reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
-        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
-        validate_workspace_directory, version_detail, version_result_from_observation,
-        workspace_open_error,
+        classify_workspace_directory, correlate_agent_goal, correlate_agent_launch,
+        created_session_hook, current_agent_integrations, daemon_error_reason, decision_cadence,
+        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
+        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
+        provider_resume_projection, reduced_motion_from_environment, reply_geometry,
+        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
+        version_result_from_observation, workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -8411,6 +8442,21 @@ mod tests {
         assert_eq!(
             validate_workspace_directory(&missing).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
+        );
+        assert!(workspace_directory_missing(&missing).unwrap());
+        assert!(!workspace_directory_missing(temporary.path()).unwrap());
+
+        let replacement_file = temporary.path().join("replacement");
+        std::fs::write(&replacement_file, "not a directory").unwrap();
+        assert!(workspace_directory_missing(&replacement_file).unwrap());
+        assert_eq!(
+            classify_workspace_directory(Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            )))
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::PermissionDenied
         );
     }
 
