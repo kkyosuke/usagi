@@ -3510,6 +3510,11 @@ fn spawn_ipc_server(
     )?;
     reconcile_removed_session_agents(&data_dir.join("daemon"), &agent)?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
+    if let Err(error) = reconcile_pending_supervisor_promotions(&supervisor, &agent) {
+        ErrorLog::record(&format!(
+            "supervisor promotion reconciliation deferred: {error}"
+        ));
+    }
     if let Ok(runtime) = supervisor.lock()
         && let Err(error) = runtime.tick_all(
             chrono::Utc::now(),
@@ -3520,6 +3525,7 @@ fn spawn_ipc_server(
             "supervisor startup reconciliation deferred: {error}"
         ));
     }
+    background_workers.push(start_goal_artifact_recovery(Arc::clone(&supervisor))?);
     background_workers.push(start_agent_observer(
         Arc::downgrade(&agent),
         agent_observations,
@@ -4728,6 +4734,14 @@ fn start_agent_observer(
                         // A candidate the output never terminated is only
                         // creditable once nothing more can arrive for it.
                         projection.submit_closed(reference.terminal_id, reference.session_id);
+                        if let Some(agent) = agent.upgrade()
+                            && let Err(error) =
+                                reconcile_pending_supervisor_promotions(&supervisor, &agent)
+                        {
+                            ErrorLog::record(&format!(
+                                "supervisor promotion reconciliation deferred: {error}"
+                            ));
+                        }
                         if let (Some(agent), Ok(runtime)) = (agent.upgrade(), supervisor.lock())
                             && let Err(error) = runtime.tick_all(
                                 chrono::Utc::now(),
@@ -5220,14 +5234,14 @@ fn start_ipc_accept_loop(
                                         Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, peer_process, request_id, &body, hello),
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
-                                        Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
+                                        Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
                                         Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions }, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, supervisor: &supervisor }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
                                             let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
@@ -5419,6 +5433,7 @@ struct DispatchToolContext<'a> {
     bound: &'a ConnectionWorkspace,
     pr_inventory: &'a SharedPrInventory,
     decisions: &'a UserDecisionStore,
+    supervisor: &'a SharedSupervisorRuntime,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
@@ -5451,6 +5466,7 @@ fn dispatch_dispatch_tool(
             context.agent,
             context.bound,
             context.pr_inventory,
+            context.supervisor,
             request_id,
             body,
             hello,
@@ -5473,6 +5489,7 @@ fn dispatch_agent_tool(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     pr_inventory: &SharedPrInventory,
+    supervisor: &SharedSupervisorRuntime,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -5588,6 +5605,7 @@ fn dispatch_agent_tool(
                 "agent caller does not belong to this workspace",
             ));
         }
+        let parent_dispatch_run = authenticated.run_id;
         let caller = authenticated.caller;
         let store = runtime.dispatch_store();
         let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {
@@ -5708,6 +5726,7 @@ fn dispatch_agent_tool(
                         )
                     })?;
                 let scope = bound.scope_resolver();
+                let task_instruction = input.prompt.clone();
                 let dispatch_intent = DispatchIntent {
                     workspace,
                     session_name: session_name.clone(),
@@ -5715,13 +5734,73 @@ fn dispatch_agent_tool(
                     agent: selected,
                     prompt: input.prompt,
                 };
+                let supervised = supervisor
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "supervisor runtime is unavailable",
+                        )
+                    })?
+                    .reserve_delegated_dispatch(
+                        parent_dispatch_run,
+                        &operation_id,
+                        task_instruction.clone(),
+                        chrono::Utc::now(),
+                    )
+                    .map_err(supervisor_error)?
+                    .is_some();
                 let admission = dispatch_agent_after_preflight(
                     agent,
                     &operation_id,
                     &dispatch_intent,
                     session_id,
                     &scope,
-                )?;
+                );
+                let admission = match admission {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        if supervised && error.code != ErrorCode::OwnershipUnknown {
+                            let failed = supervisor
+                                .lock()
+                                .map_err(|_| {
+                                    ProtocolError::new(
+                                        ErrorCode::Unavailable,
+                                        "supervisor runtime is unavailable",
+                                    )
+                                })?
+                                .fail_reserved_delegated_dispatch(
+                                    &operation_id,
+                                    chrono::Utc::now(),
+                                );
+                            if let Err(failure) = failed {
+                                ErrorLog::record(&format!(
+                                    "delegated Supervisor failure reconciliation deferred: {failure}"
+                                ));
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
+                if supervised
+                    && let Err(error) = bind_delegated_supervisor_dispatch(
+                        supervisor,
+                        &admission.operation_id,
+                        &admission.runtime,
+                    )
+                {
+                    // The Agent admission is already durable. Returning an
+                    // error here would invite a retry to launch duplicate work;
+                    // startup/observer reconciliation binds the exact operation.
+                    ErrorLog::record(&format!("delegated Supervisor promotion deferred: {error}"));
+                    if let Err(reconcile) =
+                        reconcile_pending_supervisor_promotions(supervisor, agent)
+                    {
+                        ErrorLog::record(&format!(
+                            "delegated Supervisor promotion reconciliation deferred: {reconcile}"
+                        ));
+                    }
+                }
                 runtime = agent.lock().map_err(|_| {
                     ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
                 })?;
@@ -5863,6 +5942,10 @@ fn dispatch_agent_tool(
                     .and_then(|result| result.pr.as_deref());
                 project_reported_pr(pr_inventory, delivery.worker.session_id, reported_pr)
                     .inspect_err(|_| ErrorLog::record("reported PR projection failed"))?;
+                verify_completed_goal_artifact(
+                    supervisor,
+                    delivery.committed.as_ref().map(|message| message.run_id),
+                )?;
                 Ok((
                     ResponseOutcome::Ok,
                     serde_json::json!({"delivered_to": delivery.delivered_to}),
@@ -5946,6 +6029,78 @@ fn project_reported_pr(
         .observe_reported(session, candidate)
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "PR projection is unavailable"))?;
     Ok(())
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=only_an_open_non_draft_pr_with_passing_checks_satisfies_the_contract
+fn verify_completed_goal_artifact(
+    supervisor: &SharedSupervisorRuntime,
+    dispatch_run_id: Option<usagi_core::domain::id::OperationId>,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    use usagi_daemon::usecase::{
+        goal_artifact::GoalArtifactVerifier, supervisor_runtime::ArtifactVerifier,
+    };
+
+    let Some(dispatch_run_id) = dispatch_run_id else {
+        return Ok(());
+    };
+    let request = supervisor
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
+        .prepare_artifact_verification(dispatch_run_id, chrono::Utc::now())
+        .map_err(supervisor_error)?;
+    let Some(request) = request else {
+        return Ok(());
+    };
+    // The provider process runs outside the supervisor mutex. A slow or broken
+    // remote can delay only this report request, never task/run observation.
+    let verification =
+        GoalArtifactVerifier::new(GhProcess).verify(&request.contract, request.result.as_ref());
+    supervisor
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
+        .record_artifact_verification(&request, verification, chrono::Utc::now())
+        .map_err(supervisor_error)?;
+    Ok(())
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
+fn start_goal_artifact_recovery(
+    supervisor: SharedSupervisorRuntime,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("usagi-goal-artifact-recovery".to_owned())
+        .spawn(move || {
+            if let Err(error) = reconcile_pending_goal_artifacts(&supervisor) {
+                ErrorLog::record(&format!(
+                    "Goal artifact verification reconciliation deferred: {error}"
+                ));
+            }
+        })
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=artifact_preparation_rejects_nonterminal_wrong_contract_and_corrupt_membership
+fn reconcile_pending_goal_artifacts(supervisor: &SharedSupervisorRuntime) -> anyhow::Result<usize> {
+    let pending = supervisor
+        .lock()
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+        .pending_artifact_verifications()?;
+    let mut reconciled = 0;
+    let mut first_failure = None;
+    for item in pending {
+        if let Err(error) = verify_completed_goal_artifact(supervisor, Some(item.dispatch_run_id)) {
+            first_failure.get_or_insert_with(|| {
+                anyhow::anyhow!(
+                    "artifact verification {} remains pending: {}",
+                    item.dispatch_run_id,
+                    error.message
+                )
+            });
+        } else {
+            reconciled += 1;
+        }
+    }
+    first_failure.map_or(Ok(reconciled), Err)
 }
 
 fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
@@ -7067,12 +7222,17 @@ fn dispatch_metrics(
     }
 }
 
+struct SessionDispatchContext<'a> {
+    bound: &'a ConnectionWorkspace,
+    teardown: &'a TeardownSignal,
+    agent: &'a SharedAgentRuntime,
+    pr_inventory: &'a SharedPrInventory,
+    supervisor: &'a SharedSupervisorRuntime,
+}
+
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 fn dispatch_session(
-    bound: &ConnectionWorkspace,
-    teardown: &TeardownSignal,
-    agent: &SharedAgentRuntime,
-    pr_inventory: &SharedPrInventory,
+    context: &SessionDispatchContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -7091,15 +7251,7 @@ fn dispatch_session(
     let Some((action, operation_id, payload)) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
-    let result = dispatch_session_action(
-        bound,
-        teardown,
-        agent,
-        pr_inventory,
-        action,
-        &operation_id,
-        &payload,
-    );
+    let result = dispatch_session_action(context, action, &operation_id, &payload);
     session_response_envelope(action, result, request_id, hello)
 }
 
@@ -7531,10 +7683,7 @@ fn clean_orphan_session_resources(
 #[allow(clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn dispatch_session_action(
-    bound: &ConnectionWorkspace,
-    teardown: &TeardownSignal,
-    agent: &SharedAgentRuntime,
-    pr_inventory: &SharedPrInventory,
+    context: &SessionDispatchContext<'_>,
     action: usagi_core::usecase::client::SessionAction,
     operation_id: &str,
     payload: &serde_json::Value,
@@ -7543,6 +7692,11 @@ fn dispatch_session_action(
     use usagi_core::usecase::client::SessionAction;
     use usagi_core::usecase::{issue, note};
     use usagi_daemon::usecase::agent_ipc::PromptMode;
+
+    let bound = context.bound;
+    let teardown = context.teardown;
+    let agent = context.agent;
+    let pr_inventory = context.pr_inventory;
 
     let reply = |body: serde_json::Value| {
         let revision = bound
@@ -7846,13 +8000,7 @@ fn dispatch_session_action(
             };
             reply(serde_json::json!({"session_id": scope.session_id, "scratchpad": body}))
         }
-        SessionAction::DelegateBrief => reply(delegate_brief(
-            bound,
-            teardown,
-            agent,
-            operation_id,
-            payload,
-        )?),
+        SessionAction::DelegateBrief => reply(delegate_brief(context, operation_id, payload)?),
         SessionAction::DelegateIssue => {
             let authenticated = payload
                 .get("_caller_credential")
@@ -8011,10 +8159,7 @@ fn dispatch_session_action(
                 .sleep_session(id)
                 .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
             let mut snapshot = dispatch_session_action(
-                bound,
-                teardown,
-                agent,
-                pr_inventory,
+                context,
                 SessionAction::List,
                 operation_id,
                 &serde_json::json!({}),
@@ -8238,15 +8383,20 @@ fn required_payload_string<'a>(
 /// a restart. A dispatch whose spawn outcome is *unknown* is deliberately not
 /// rolled back: the worktree may already hold a running worker, so the caller
 /// gets the session and run identity to reconcile instead.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
+#[allow(clippy::too_many_lines)] // Atomic create, reservation, spawn, compensation, and recovery stay visible as one transaction.
 fn delegate_brief(
-    bound: &ConnectionWorkspace,
-    teardown: &TeardownSignal,
-    agent: &SharedAgentRuntime,
+    context: &SessionDispatchContext<'_>,
     operation_id: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
     use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
+
+    let bound = context.bound;
+    let teardown = context.teardown;
+    let agent = context.agent;
+    let supervisor = context.supervisor;
 
     let brief = required_payload_string(payload, "brief")?;
     let suffix = operation_id
@@ -8264,7 +8414,7 @@ fn delegate_brief(
     let (runtime, model) = new_agent_selector(payload.get("agent"))?;
 
     let credential = required_payload_string(payload, "_caller_credential")?;
-    let (workspace, caller, repository_root) = {
+    let (workspace, parent_dispatch_run, caller, repository_root) = {
         let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
         let authenticated = runtime
             .mcp_dispatch_context(credential)
@@ -8285,6 +8435,7 @@ fn delegate_brief(
         }
         (
             workspace,
+            authenticated.run_id,
             authenticated.caller,
             sessions.repository_root().to_path_buf(),
         )
@@ -8325,13 +8476,34 @@ fn delegate_brief(
         session_name: name.clone(),
         caller,
         agent: DispatchAgentIntent::New { runtime, model },
-        prompt,
+        prompt: prompt.clone(),
     };
+    let supervised = supervisor
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .reserve_delegated_dispatch(
+            parent_dispatch_run,
+            operation_id,
+            prompt.clone(),
+            chrono::Utc::now(),
+        )
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .is_some();
     let admission =
         dispatch_agent_after_preflight(agent, operation_id, &dispatch_intent, id, &scope);
     let admission = match admission {
         Ok(admission) => admission,
         Err(error) => {
+            if supervised
+                && error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
+                && let Ok(runtime) = supervisor.lock()
+                && let Err(failure) =
+                    runtime.fail_reserved_delegated_dispatch(operation_id, chrono::Utc::now())
+            {
+                ErrorLog::record(&format!(
+                    "delegated Supervisor failure reconciliation deferred: {failure}"
+                ));
+            }
             return Err(compensate_delegation(
                 bound.sessions(),
                 teardown,
@@ -8342,6 +8514,22 @@ fn delegate_brief(
             ));
         }
     };
+    if supervised
+        && let Err(error) = bind_delegated_supervisor_dispatch(
+            supervisor,
+            &admission.operation_id,
+            &admission.runtime,
+        )
+    {
+        // The child Agent is already durable; exact-operation reconciliation
+        // finishes the promotion without asking the caller to retry the spawn.
+        ErrorLog::record(&format!("delegated Supervisor promotion deferred: {error}"));
+        if let Err(reconcile) = reconcile_pending_supervisor_promotions(supervisor, agent) {
+            ErrorLog::record(&format!(
+                "delegated Supervisor promotion reconciliation deferred: {reconcile}"
+            ));
+        }
+    }
     Ok(serde_json::json!({
         "name": name,
         "session_id": id,
@@ -8489,7 +8677,13 @@ fn admit_agent_dispatch_request(
             }
         })?;
     run_agent_readiness(agent, preflight.as_ref())?;
-    let admission =
+    let reserved_goal = match request {
+        AgentDispatchRequest::Goal(operation_id, intent) => {
+            Some(reserve_goal_supervisor_run(supervisor, operation_id, intent)?.supervisor_run_id)
+        }
+        _ => None,
+    };
+    let admission_result =
         agent
             .lock()
             .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
@@ -8515,17 +8709,40 @@ fn admit_agent_dispatch_request(
                 | AgentDispatchRequest::Restart(_, _, _, _) => {
                     unreachable!("handled before readiness")
                 }
-            })?;
-    let supervisor_run_id = match request {
-        AgentDispatchRequest::Goal(operation_id, intent) => Some(
-            start_goal_supervisor_run(supervisor, operation_id, intent, &admission.runtime)?
-                .supervisor_run_id,
-        ),
-        _ => None,
+            });
+    let admission = match admission_result {
+        Ok(admission) => admission,
+        Err(error) => {
+            if let AgentDispatchRequest::Goal(operation_id, _) = request
+                && error.code != ErrorCode::OwnershipUnknown
+                && let Ok(runtime) = supervisor.lock()
+            {
+                let _ = runtime.fail_reserved_goal(
+                    operation_id,
+                    "Agent admission failed before Goal promotion".into(),
+                    chrono::Utc::now(),
+                );
+            }
+            return Err(error);
+        }
     };
+    if let AgentDispatchRequest::Goal(operation_id, _) = request
+        && let Err(error) = bind_goal_supervisor_run(supervisor, operation_id, &admission.runtime)
+    {
+        // The Goal reservation and Agent admission are both durable. Returning
+        // their accepted identities is safer than turning a post-spawn storage
+        // error into a client retry that launches another Agent. Startup and
+        // Agent-observer reconciliation retry the exact operation fence.
+        ErrorLog::record(&format!("Goal promotion deferred: {}", error.message));
+        if let Err(reconcile) = reconcile_pending_supervisor_promotions(supervisor, agent) {
+            ErrorLog::record(&format!(
+                "Goal promotion reconciliation deferred: {reconcile}"
+            ));
+        }
+    }
     Ok(AgentDispatchAdmission {
         admission,
-        supervisor_run_id,
+        supervisor_run_id: reserved_goal,
     })
 }
 
@@ -8538,11 +8755,10 @@ fn goal_supervisor_caller(workspace: WorkspaceId) -> String {
     format!("goal-composer:{workspace}")
 }
 
-fn start_goal_supervisor_run(
+fn reserve_goal_supervisor_run(
     supervisor: &SharedSupervisorRuntime,
     operation_id: &str,
     intent: &usagi_core::usecase::client::AgentGoalIntent,
-    worker: &usagi_core::domain::id::AgentRuntimeRef,
 ) -> Result<
     usagi_core::domain::supervisor::SupervisorRunQuery,
     usagi_core::infrastructure::ipc::ProtocolError,
@@ -8555,16 +8771,192 @@ fn start_goal_supervisor_run(
         .map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
         })?
-        .start_for_workspace_root_dispatch(
+        .reserve_goal_for_workspace(
             &goal_supervisor_caller(intent.workspace),
             intent.workspace,
             operation_id,
             intent.goal.clone(),
             Some("standard".into()),
-            worker,
             Utc::now(),
         )
         .map_err(supervisor_error)
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=goal_supervisor_promotion_maps_a_poisoned_owner_to_unavailable
+fn bind_goal_supervisor_run(
+    supervisor: &SharedSupervisorRuntime,
+    operation_id: &str,
+    worker: &usagi_core::domain::id::AgentRuntimeRef,
+) -> Result<
+    usagi_core::domain::supervisor::SupervisorRunQuery,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    supervisor
+        .lock()
+        .map_err(|_| {
+            usagi_core::infrastructure::ipc::ProtocolError::new(
+                usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
+                "supervisor runtime is unavailable",
+            )
+        })?
+        .bind_reserved_workspace_root_dispatch(operation_id, worker, chrono::Utc::now())
+        .map_err(supervisor_error)
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=delegated_dispatch_is_reserved_before_spawn_and_reconciled_by_exact_operation
+fn bind_delegated_supervisor_dispatch(
+    supervisor: &SharedSupervisorRuntime,
+    operation_id: &str,
+    worker: &usagi_core::domain::id::AgentRuntimeRef,
+) -> anyhow::Result<()> {
+    let bound = supervisor
+        .lock()
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+        .bind_reserved_delegated_dispatch(operation_id, worker, chrono::Utc::now())?;
+    if bound.is_none() {
+        anyhow::bail!("delegated supervisor reservation does not exist");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn start_goal_supervisor_run(
+    supervisor: &SharedSupervisorRuntime,
+    operation_id: &str,
+    intent: &usagi_core::usecase::client::AgentGoalIntent,
+    worker: &usagi_core::domain::id::AgentRuntimeRef,
+) -> Result<
+    usagi_core::domain::supervisor::SupervisorRunQuery,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    reserve_goal_supervisor_run(supervisor, operation_id, intent)?;
+    bind_goal_supervisor_run(supervisor, operation_id, worker)
+}
+
+/// Replays only durable, exact Goal promotions. Missing Agent outcomes remain
+/// pending; definite Agent failures close the reservation; successful outcomes
+/// bind the persisted runtime fence without spawning anything.
+#[allow(clippy::too_many_lines)] // Root and delegated reservations share one best-effort reconciliation pass.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+fn reconcile_pending_supervisor_promotions(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+) -> anyhow::Result<usize> {
+    let pending = supervisor
+        .lock()
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+        .pending_goal_promotions()?;
+    let mut reconciled = 0;
+    let mut first_failure = None;
+    for item in pending {
+        let outcome = agent
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?
+            .operation_outcome(&item.operation_id);
+        match outcome {
+            Some(Ok(admission)) => {
+                let result = (|| {
+                    supervisor
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+                        .bind_reserved_workspace_root_dispatch(
+                            &item.operation_id,
+                            &admission.runtime,
+                            chrono::Utc::now(),
+                        )?;
+                    Ok::<_, anyhow::Error>(())
+                })();
+                if let Err(error) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "Goal promotion {} remains pending: {error}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(error))
+                if error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown =>
+            {
+                let result = (|| {
+                    supervisor
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+                        .fail_reserved_goal(
+                            &item.operation_id,
+                            "Agent admission failed before Goal promotion".into(),
+                            chrono::Utc::now(),
+                        )?;
+                    Ok::<_, anyhow::Error>(())
+                })();
+                if let Err(failure) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "Goal failure {} remains pending: {failure}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(_)) | None => {}
+        }
+    }
+    let pending = supervisor
+        .lock()
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+        .pending_delegated_promotions()?;
+    for item in pending {
+        let outcome = agent
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?
+            .operation_outcome(&item.operation_id);
+        match outcome {
+            Some(Ok(admission)) => {
+                let result = bind_delegated_supervisor_dispatch(
+                    supervisor,
+                    &item.operation_id,
+                    &admission.runtime,
+                );
+                if let Err(error) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "delegated promotion {} remains pending: {error}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(error))
+                if error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown =>
+            {
+                let result = (|| {
+                    supervisor
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+                        .fail_reserved_delegated_dispatch(&item.operation_id, chrono::Utc::now())?;
+                    Ok::<_, anyhow::Error>(())
+                })();
+                if let Err(failure) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "delegated failure {} remains pending: {failure}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(_)) | None => {}
+        }
+    }
+    first_failure.map_or(Ok(reconciled), Err)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e

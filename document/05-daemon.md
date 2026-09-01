@@ -1320,10 +1320,12 @@ ownership を証明できない incomplete record も新しい child を spawn �
 別である。`AgentGoal` は workspace root だけを対象にし、非空かつ 16 KiB 以下の Goal を固定 operating contract と結合して
 `LaunchRequest.initial_prompt` に保存する。semantic key は workspace、profile、root scope に Goal の長さと本文を加えるため、
 同じ operation / Goal の retry は同じ admission を replay し、別 Goal は spawn 前に `idempotency_conflict` になる。
-readiness と semantic conflict の検証後、daemon はAgentをdurable admissionし、そのdispatchを同じoperation IDでworkspace所有
-`SupervisorRun` のroot taskへ束縛する。Agent admission が失敗した場合はRunを作らない。Run永続化または束縛の途中で応答できない場合も、
-再送は既存Agent admissionをreplayして同じRunとroot provenanceへ収束する。成功応答は `supervisor_run_id` を含み、Agentのterminal
-dispatchをSupervisorが観測するとroot taskとRunもterminalへ遷移する。
+readiness と semantic conflict の検証後、daemon は workspace 所有 `SupervisorRun` と review-ready PR artifact contract を持つ
+root task を Agent spawn より先に予約する。続いて同じ operation ID で Agent を durable admission し、その exact runtime fence を
+root provenance へ束縛する。確定的な pre-spawn failure は予約済み Run を `Failed` へ収束させる。spawn の成否が不明な場合、または
+Agent admission 後の束縛に失敗した場合は新しい Agent を起動させる error response を返さず、予約済み `supervisor_run_id` と admission を
+返す。daemon startup と Agent observer は Agent operation の durable outcome だけを使い、成功なら同じ provenance を束縛し、確定失敗なら
+Run を終端化する。成功応答は `supervisor_run_id` を含み、再送は既存 Agent admission と同じ Run へ収束する。
 同 scope に既存の queued prompt がある場合はどちらを実行するか推測せず拒否する。通常 launch は従来どおり queued prompt
 だけを consume し、Goal mode の有効化・無効化で classic Agent admission の意味は変わらない。
 
@@ -1701,7 +1703,9 @@ read-only response はすべて 512 KiB 以下とし、1 run の安全な projec
 
 failure は policy の attempt 上限内だけ `Retrying` へ遷移し、generation と `retry_at` を保存する。scheduler は deadline 後にだけ `RetryReady` event を保存するため、restart や duplicate completion は retry を早めない。run/task の cancel event は未完了 node を `Cancelled` にし、finishedまたはquiescentなrunへの late completion は reducer が拒否する。
 
-artifact contract がcore domainで定義するno-verification sentinel以外の worker completionは `Succeeded` ではなく `Verifying` へ遷移する。Goalのreview-ready PR契約も同じdomain vocabularyに置く。独立 verifier が保存した digest を伴う `VerificationResult` が passed の場合だけ `Succeeded` となる。failed verification は escalation record を保存するため、worker の summary や PR URL 単独では success gate を通らない。
+artifact contract が core domain で定義する no-verification sentinel 以外の worker completion は `Succeeded` ではなく `Verifying` へ遷移する。Goal の review-ready PR 契約も同じ domain vocabulary に置く。worker report の PR URL は候補にすぎず、daemon の独立 verifier が canonical GitHub PR identity に対して固定 argv の `gh pr view` を実行する。provider が返した state が open、draft が false、checks が passing または未設定の場合だけ、redaction-safe な SHA-256 evidence digest を伴う `VerificationResult` を passed として保存する。provider unavailable、invalid response、closed/draft PR、pending/failing checks は safe summary を持つ escalation になり、worker の summary や PR URL 単独では success gate を通らない。Resume 後は保存済み候補を再検証できるが、Escalated 中に自動で gate を解除しない。completion inbox の commit 後に daemon が停止しても、起動時の専用 recovery worker が `Running` run の contracted task、exact provenance generation、terminal dispatch outcome を照合して未完了の検証だけを再実行する。この remote IO は supervisor mutex と daemon 起動経路の外で行い、通常の client 接続を待たせない。
+
+supervised root Agent が `session_dispatch` または `delegate_brief` で child Agent を起動する場合、daemon は child operation から導出する安定した task ID、parent dispatch provenance、instruction を Agent spawn より先に同じ `SupervisorRun` の DAG へ保存する。成功後は child の exact runtime fence を束縛し、確定的な pre-spawn failure は予約 task を cancel する。spawn outcome が不明、または post-spawn binding が失敗した場合は予約を残し、startup / Agent observer reconciliation が Agent operation の durable outcome から束縛または終端化する。これにより Work Run の task/agent 集計は root だけでなく、実際に委譲された worker も同じ aggregate から導出する。
 
 ## metrics observer
 

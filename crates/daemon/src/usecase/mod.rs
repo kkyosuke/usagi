@@ -21,6 +21,7 @@ pub mod control;
 pub mod custody;
 pub mod generation;
 pub mod generic_terminal;
+pub mod goal_artifact;
 pub mod metrics;
 pub mod orchestration;
 pub mod pr_inventory;
