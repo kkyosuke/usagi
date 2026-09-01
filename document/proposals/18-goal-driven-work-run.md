@@ -6,7 +6,7 @@
 進む」goal-driven UI の target design である。Config、Goal Composer、goal-bound Director admission からなる v1 は実装済みで、
 現在仕様は [TUI](../03-tui.md#goal-driven-workflow) と [daemon](../05-daemon.md#agent-admission-transaction) を正本とする。
 durable SupervisorRun の compact な Active work banner、Director 内 task progress、Goal submit から workspace 所有 Run への
-idempotent な昇格を現在の画面と daemon が提供する。本書の複数 run 一覧、選択可能な独立 Run Closeup、Run-scoped team defaults、
+idempotent な昇格、root Agent dispatchとのdurableな相関とterminal進捗を現在の画面とdaemonが提供する。本書の複数 run 一覧、選択可能な独立 Run Closeup、Run-scoped team defaults、
 独立PR/CI verificationは後続提案である。
 
 現在の usagi は session、Agent、terminal、Director、Garden、durable decision、supervisor aggregate を個別に持つ。

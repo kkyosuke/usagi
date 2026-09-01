@@ -8489,12 +8489,6 @@ fn admit_agent_dispatch_request(
             }
         })?;
     run_agent_readiness(agent, preflight.as_ref())?;
-    let supervisor_run = match request {
-        AgentDispatchRequest::Goal(operation_id, intent) => {
-            Some(start_goal_supervisor_run(supervisor, operation_id, intent)?)
-        }
-        _ => None,
-    };
     let admission =
         agent
             .lock()
@@ -8521,19 +8515,18 @@ fn admit_agent_dispatch_request(
                 | AgentDispatchRequest::Restart(_, _, _, _) => {
                     unreachable!("handled before readiness")
                 }
-            });
-    match admission {
-        Ok(admission) => Ok(AgentDispatchAdmission {
-            admission,
-            supervisor_run_id: supervisor_run.map(|run| run.supervisor_run_id),
-        }),
-        Err(error) => {
-            if let (Some(run), AgentDispatchRequest::Goal(_, intent)) = (supervisor_run, request) {
-                cancel_failed_goal_supervisor_run(supervisor, intent, run.supervisor_run_id);
-            }
-            Err(error)
-        }
-    }
+            })?;
+    let supervisor_run_id = match request {
+        AgentDispatchRequest::Goal(operation_id, intent) => Some(
+            start_goal_supervisor_run(supervisor, operation_id, intent, &admission.runtime)?
+                .supervisor_run_id,
+        ),
+        _ => None,
+    };
+    Ok(AgentDispatchAdmission {
+        admission,
+        supervisor_run_id,
+    })
 }
 
 struct AgentDispatchAdmission {
@@ -8549,6 +8542,7 @@ fn start_goal_supervisor_run(
     supervisor: &SharedSupervisorRuntime,
     operation_id: &str,
     intent: &usagi_core::usecase::client::AgentGoalIntent,
+    worker: &usagi_core::domain::id::AgentRuntimeRef,
 ) -> Result<
     usagi_core::domain::supervisor::SupervisorRunQuery,
     usagi_core::infrastructure::ipc::ProtocolError,
@@ -8561,31 +8555,16 @@ fn start_goal_supervisor_run(
         .map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
         })?
-        .start_for_workspace(
+        .start_for_workspace_root_dispatch(
             &goal_supervisor_caller(intent.workspace),
             intent.workspace,
             operation_id,
             intent.goal.clone(),
-            Vec::new(),
             Some("standard".into()),
+            worker,
             Utc::now(),
         )
         .map_err(supervisor_error)
-}
-
-fn cancel_failed_goal_supervisor_run(
-    supervisor: &SharedSupervisorRuntime,
-    intent: &usagi_core::usecase::client::AgentGoalIntent,
-    supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId,
-) {
-    if let Ok(runtime) = supervisor.lock() {
-        let _ = runtime.cancel(
-            &goal_supervisor_caller(intent.workspace),
-            supervisor_run_id,
-            "goal Director launch was not admitted".into(),
-            chrono::Utc::now(),
-        );
-    }
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
@@ -13798,8 +13777,8 @@ mod tests {
 
     use usagi_core::domain::{
         id::{
-            ClientId, ConnectionId, DaemonGeneration, RequestId, SessionId, TerminalId,
-            WorkspaceId, WorktreeId,
+            AgentRuntimeId, AgentRuntimeRef, ClientId, ConnectionId, DaemonGeneration, RequestId,
+            SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
         },
         terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId},
     };
@@ -22080,6 +22059,7 @@ instructions = "{instructions}"
         generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
         hello: &usagi_core::infrastructure::ipc::ClientHello,
         authenticated: Option<&usagi_core::domain::agent::CallerRef>,
+        workspace: WorkspaceId,
         body: serde_json::Value,
     ) -> (
         usagi_core::infrastructure::ipc::ResponseOutcome,
@@ -22136,12 +22116,7 @@ instructions = "{instructions}"
                             "supervisor caller provenance is unknown",
                         ))
                     },
-                    |caller| {
-                        Ok((
-                            supervisor_caller_descriptor(&client, caller),
-                            WorkspaceId::new(),
-                        ))
-                    },
+                    |caller| Ok((supervisor_caller_descriptor(&client, caller), workspace)),
                 );
                 dispatch_supervisor_tool(runtime, caller, request_id, &body, server)
             },
@@ -22190,6 +22165,7 @@ instructions = "{instructions}"
             session_id: Some(SessionId::new()),
             agent_id: AgentId::new(),
         };
+        let workspace = WorkspaceId::new();
         let hello = fence_client_hello(Vec::new());
         let first_generation = ipc_generation();
         let start = supervisor_request(
@@ -22205,10 +22181,17 @@ instructions = "{instructions}"
             &first_generation,
             &hello,
             Some(&caller),
+            workspace,
             start.clone(),
         );
-        let (retry_outcome, retry_body) =
-            serve_supervisor_request(&runtime, &first_generation, &hello, Some(&caller), start);
+        let (retry_outcome, retry_body) = serve_supervisor_request(
+            &runtime,
+            &first_generation,
+            &hello,
+            Some(&caller),
+            workspace,
+            start,
+        );
         assert_eq!(retry_outcome, ResponseOutcome::Ok);
         let run_id = retry_body["supervisor_run_id"].as_str().unwrap();
 
@@ -22231,6 +22214,7 @@ instructions = "{instructions}"
                 &rollover,
                 &hello,
                 Some(&caller),
+                workspace,
                 supervisor_request(action, "observe", payload),
             );
             assert_eq!(outcome, ResponseOutcome::Ok);
@@ -22247,6 +22231,7 @@ instructions = "{instructions}"
             &rollover,
             &hello,
             Some(&caller),
+            workspace,
             supervisor_request(
                 SupervisorToolAction::ResolveEscalation,
                 "resolve",
@@ -22308,6 +22293,7 @@ instructions = "{instructions}"
                     &rollover,
                     candidate_hello,
                     authenticated,
+                    workspace,
                     supervisor_request(action, operation, payload),
                 );
                 assert!(matches!(outcome, ResponseOutcome::Error(_)));
@@ -22318,6 +22304,7 @@ instructions = "{instructions}"
                 &rollover,
                 candidate_hello,
                 authenticated,
+                workspace,
                 supervisor_request(
                     SupervisorToolAction::List,
                     "foreign-list",
@@ -22334,6 +22321,7 @@ instructions = "{instructions}"
             &rollover,
             &hello,
             None,
+            workspace,
             supervisor_request(
                 SupervisorToolAction::Cancel,
                 "missing-capability",
@@ -22350,6 +22338,7 @@ instructions = "{instructions}"
             &ipc_generation(),
             &hello,
             None,
+            workspace,
             supervisor_request(
                 SupervisorToolAction::Get,
                 "restart",
@@ -22365,6 +22354,7 @@ instructions = "{instructions}"
             &rollover,
             &hello,
             Some(&caller),
+            workspace,
             supervisor_request(
                 SupervisorToolAction::Cancel,
                 "cancel",
@@ -22462,12 +22452,15 @@ instructions = "{instructions}"
     }
 
     #[test]
-    fn goal_supervisor_promotion_is_idempotent_and_compensates_failed_launch() {
-        use usagi_core::domain::supervisor::SupervisorRunState;
+    fn goal_supervisor_promotion_maps_a_poisoned_owner_to_unavailable() {
+        use usagi_core::domain::{
+            agent::{DispatchRun, RunStatus},
+            id::AgentId,
+        };
+        use usagi_core::infrastructure::store::dispatch::DispatchStore;
         use usagi_core::usecase::client::AgentGoalIntent;
 
         let temporary = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(Mutex::new(SupervisorRuntime::new(temporary.path())));
         let workspace = WorkspaceId::new();
         let intent = AgentGoalIntent {
             workspace,
@@ -22475,31 +22468,37 @@ instructions = "{instructions}"
             goal: "prepare the requested change for review".into(),
         };
         let operation = usagi_core::domain::id::OperationId::new().to_string();
-        let first = start_goal_supervisor_run(&runtime, &operation, &intent).unwrap();
-        let replay = start_goal_supervisor_run(&runtime, &operation, &intent).unwrap();
-        assert_eq!(replay.supervisor_run_id, first.supervisor_run_id);
-        assert_eq!(
-            runtime
-                .lock()
-                .unwrap()
-                .list_workspace(workspace)
-                .unwrap()
-                .len(),
-            1
-        );
-
-        cancel_failed_goal_supervisor_run(&runtime, &intent, first.supervisor_run_id);
-        let cancelled = runtime
-            .lock()
-            .unwrap()
-            .list_workspace(workspace)
-            .unwrap()
-            .pop()
+        let worker = AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            },
+            None,
+        )
+        .unwrap();
+        let healthy = Arc::new(Mutex::new(SupervisorRuntime::new(temporary.path())));
+        DispatchStore::new(temporary.path())
+            .upsert_run(DispatchRun {
+                run_id: usagi_core::domain::id::OperationId::parse(&operation).unwrap(),
+                agent_id: AgentId::new(),
+                prompt: String::new(),
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
             .unwrap();
-        assert_eq!(cancelled.state, SupervisorRunState::Cancelled);
+        let started = start_goal_supervisor_run(&healthy, &operation, &intent, &worker).unwrap();
         assert_eq!(
-            cancelled.terminal_reason.as_deref(),
-            Some("goal Director launch was not admitted")
+            started.tasks[0].state,
+            usagi_core::domain::supervisor::TaskState::Dispatched
+        );
+        assert_eq!(
+            goal_supervisor_caller(workspace),
+            format!("goal-composer:{workspace}")
         );
 
         let poisoned = Arc::new(Mutex::new(SupervisorRuntime::new(
@@ -22512,7 +22511,7 @@ instructions = "{instructions}"
         })
         .join()
         .unwrap_err();
-        let error = start_goal_supervisor_run(&poisoned, &operation, &intent).unwrap_err();
+        let error = start_goal_supervisor_run(&poisoned, &operation, &intent, &worker).unwrap_err();
         assert_eq!(
             error.code,
             usagi_core::infrastructure::ipc::ErrorCode::Unavailable
