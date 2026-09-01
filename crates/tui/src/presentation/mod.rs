@@ -57,6 +57,7 @@ use crate::presentation::views::root_terminal_drawer;
 use crate::presentation::views::scratchpad_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
+use crate::presentation::views::work_run::WorkRunProjection;
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
     Workspace as WorkspaceView, garden_click_at, garden_fits, garden_scroll_action,
@@ -4775,7 +4776,7 @@ fn director_drawer_projection(
         interrupted_detail,
         feedback,
         new: director_new_projection(runtime),
-        work_runs: Vec::new(),
+        work_runs: WorkRunProjection::default(),
     }
 }
 
@@ -6042,11 +6043,8 @@ impl HomeFrameMaterial {
         self
     }
 
-    fn with_work_runs(
-        mut self,
-        runs: &[usagi_core::domain::supervisor::SupervisorRunQuery],
-    ) -> Self {
-        self.projection = self.projection.with_work_runs(runs.to_vec());
+    fn with_work_runs(mut self, runs: WorkRunProjection) -> Self {
+        self.projection = self.projection.with_work_runs(runs);
         self
     }
 
@@ -7281,7 +7279,7 @@ fn drive_workspace_controller(
     let mut garden_observation = GardenObservation::new();
     let mut garden_observations = 0_u64;
     let mut work_run_observation = WorkRunObservation::new();
-    let mut work_runs = Vec::new();
+    let mut work_runs = WorkRunProjection::default();
     let mut work_run_revision = 0_u64;
     // Filesystem hint for the inline create form. It is off the frame budget:
     // no scan happens while the form is closed (#554).
@@ -7443,10 +7441,12 @@ fn drive_workspace_controller(
         }
         for completion in work_run_completions.try_iter().take(FRAME_EVENT_BUDGET) {
             let observed = completion.snapshot.is_ok();
-            if let Ok(snapshot) = completion.snapshot
-                && snapshot.runs != work_runs
-            {
-                work_runs = snapshot.runs;
+            let next = match completion.snapshot {
+                Ok(snapshot) => WorkRunProjection::fresh(snapshot.runs),
+                Err(_) => work_runs.clone().unavailable(),
+            };
+            if next != work_runs {
+                work_runs = next;
                 work_run_revision = work_run_revision.wrapping_add(1);
             }
             work_run_port = Some(completion.port);
@@ -7702,7 +7702,7 @@ fn drive_workspace_controller(
                 now,
             )
             .with_agent_inventory(ui.agent_inventory())
-            .with_work_runs(&work_runs)
+            .with_work_runs(work_runs.clone())
             .with_workspace_deck_garden(deck)
             .with_garden_animation(animation, garden_reduced_motion);
             let mut next_frame_key = next_source_key.clone();
