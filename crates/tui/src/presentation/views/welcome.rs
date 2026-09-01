@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 
-use usagi_core::domain::recent::Recent;
+use usagi_core::domain::recent::{Recent, UniteOverview};
 use usagi_core::domain::workspace::Workspace;
 
 use crate::presentation::layouts::mascot_screen;
@@ -161,6 +161,38 @@ impl Welcome {
         overview.workspace = workspace.clone();
         self.recent
             .sort_by_key(|recent| std::cmp::Reverse(recent.updated_at()));
+    }
+
+    /// Remove unregistered workspace paths from the in-memory Recent
+    /// projection. Unite entries retain their surviving members and disappear
+    /// only when no registered member remains.
+    pub(crate) fn remove_paths(&mut self, paths: &[std::path::PathBuf]) {
+        self.recent = self
+            .recent
+            .drain(..)
+            .filter_map(|recent| match recent {
+                Recent::Workspace(overview) => (!paths.contains(&overview.workspace.path))
+                    .then_some(Recent::Workspace(overview)),
+                Recent::Unite(unite) => {
+                    let updated_at = unite.updated_at();
+                    let members = unite
+                        .members()
+                        .iter()
+                        .filter(|member| !paths.contains(&member.workspace.path))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if members.is_empty() {
+                        None
+                    } else if let Some(updated_at) = updated_at {
+                        Some(Recent::Unite(UniteOverview::with_updated_at(
+                            members, updated_at,
+                        )))
+                    } else {
+                        Some(Recent::Unite(UniteOverview::new(members)))
+                    }
+                }
+            })
+            .collect();
     }
 
     /// 選択中の項目の添字。

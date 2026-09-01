@@ -4051,6 +4051,16 @@ fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Determine whether a registered workspace directory is absent without
+/// turning an unreadable path into cleanup authority.
+fn workspace_directory_missing(path: &Path) -> std::io::Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(!metadata.is_dir()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 /// Classify what currently exists at `path` for New-project pre-validation.
 /// Metadata is resolved through symlinks; anything unreadable (including a
 /// missing path or a broken link) is treated as [`WorkspaceProbe::Missing`],
@@ -4233,12 +4243,27 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         crate::runtime::daemon::declare_opened_workspace(path).map(|_| ())
     }
 
-    fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
-        let missing = workspaces
+    fn missing_paths(&mut self, paths: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
+        paths
             .iter()
-            .filter(|workspace| !workspace.path.is_dir())
-            .map(|workspace| workspace.path.clone())
-            .collect::<Vec<_>>();
+            .filter_map(|path| match workspace_directory_missing(path) {
+                Ok(true) => Some(Ok(path.clone())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
+    fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
+        // Re-check at effect time. A directory may have been restored while the
+        // confirmation modal was open; unreadable paths do not authorize a
+        // registry mutation.
+        let missing = self.missing_paths(
+            &workspaces
+                .iter()
+                .map(|workspace| workspace.path.clone())
+                .collect::<Vec<_>>(),
+        )?;
         Ok(workspace_usecase::remove(&self.storage, &missing)
             .map_err(io_error)?
             .into_iter()
@@ -5303,7 +5328,7 @@ mod tests {
         reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
         session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
         validate_workspace_directory, version_detail, version_result_from_observation,
-        workspace_open_error,
+        workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -8412,6 +8437,12 @@ mod tests {
             validate_workspace_directory(&missing).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
+        assert!(workspace_directory_missing(&missing).unwrap());
+        assert!(!workspace_directory_missing(temporary.path()).unwrap());
+
+        let replacement_file = temporary.path().join("replacement");
+        std::fs::write(&replacement_file, "not a directory").unwrap();
+        assert!(workspace_directory_missing(&replacement_file).unwrap());
     }
 
     #[test]
