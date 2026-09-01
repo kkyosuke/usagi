@@ -1,15 +1,15 @@
 {
   "version": 1,
-  "total": 510,
+  "total": 516,
   "owners": {
     "core": 9,
-    "daemon": 339,
-    "root-cli": 39,
-    "tui": 123
+    "daemon": 343,
+    "root-cli": 40,
+    "tui": 124
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
-    "crates/cli/src/mcp/serve.rs": 4,
+    "crates/cli/src/mcp/serve.rs": 5,
     "crates/cli/src/mcp/tools/issue.rs": 1,
     "crates/core/src/infrastructure/bounded_process.rs": 5,
     "crates/core/src/infrastructure/env_resolver.rs": 3,
@@ -54,14 +54,14 @@
     "src/runtime/cli.rs": 10,
     "src/runtime/clean.rs": 18,
     "src/runtime/clipboard.rs": 1,
-    "src/runtime/daemon.rs": 256,
+    "src/runtime/daemon.rs": 260,
     "src/runtime/daemon/tenant_control.rs": 5,
     "src/runtime/inventory_pump.rs": 1,
     "src/runtime/launchd.rs": 1,
     "src/runtime/platform_child_reaper.rs": 3,
     "src/runtime/systemd.rs": 1,
     "src/runtime/terminal_pump.rs": 1,
-    "src/runtime/tui.rs": 72,
+    "src/runtime/tui.rs": 73,
     "src/tui_input.rs": 4
   }
 }

@@ -254,7 +254,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
 | Base branch | workspace で新しい session を作るときの既定 branch |
-| Workflow | `classic`（既定）の会話 picker、または `goal-driven` の Goal Composer。後者は Director の New で目的を一度入力し、Draft PR の review-ready または明示判断まで進める |
+| Workflow | `classic`（既定）の会話 picker、または `goal-driven` の Goal Composer。後者は Director の New で目的を一度入力し、open・non-draft・checks passing の review-ready PR または明示判断まで進める |
 | Team | Enterで構造図付きカードを開き、`none` / 階層型 / フラット / パイプラインから session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
@@ -292,6 +292,8 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 `usagi clean` は dry-run で候補だけを表示する。`--apply` は欠損 path の workspace 登録、欠損 workspace の
 daemon data、lifecycle に存在しない `usagi/*` branch と `.usagi/sessions/*` worktree を削除する。dirty worktree と
 未マージ branch は `--apply --force` を明示した場合だけ削除し、daemon が使用中の workspace はスキップする。
+Open、Recent、Unite で元ディレクトリが消えた workspace を選ぶと、その場で登録解除の確認を表示する。
+`Remove` が削除するのは workspace registry entry だけで、daemon data は `usagi clean --apply` の対象として残す。
 
 加えて、消滅した daemon generation が握ったままの capacity claim も回収する。claim は Agent と terminal の
 固定サイズ pool を占有するため、取りこぼしが積み上がると pool が枯渇して**どの session でも Agent を起動できなくなる**。

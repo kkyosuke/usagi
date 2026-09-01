@@ -59,7 +59,7 @@ fi
 audit_root="$tmp/audit-repo"
 mkdir -p "$audit_root/.github/workflows"
 cp "$repo_root/.github/required-contexts.json" "$audit_root/.github/required-contexts.json"
-for workflow in test.yml enforce-pr-base.yml coverage.yml markdown-link-check.yml; do
+for workflow in test.yml coverage.yml markdown-link-check.yml; do
   cp "$repo_root/.github/workflows/$workflow" "$audit_root/.github/workflows/$workflow"
 done
 REQUIRED_CONTEXTS_REPO_ROOT="$audit_root" "$subject" audit-workflows
@@ -95,7 +95,7 @@ JSON
 
 $subject prepare-ruleset "$tmp/snapshot.json" "$tmp/update.json" "$tmp/rollback.json"
 jq -e '.rules[] | select(.type == "required_status_checks")
-  | .parameters.required_status_checks | length == 5' "$tmp/update.json" >/dev/null
+  | .parameters.required_status_checks | length == 4' "$tmp/update.json" >/dev/null
 jq -e '.rules[] | select(.type == "pull_request")
   | .parameters.required_approving_review_count == 0' "$tmp/update.json" >/dev/null
 jq -e '.bypass_actors == []' "$tmp/update.json" >/dev/null

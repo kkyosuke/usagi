@@ -627,9 +627,11 @@ conversation だけで、managed Closeup の tab count・identity・selection �
 
 実効 Workspace 設定の Workflow が `goal-driven` の場合、New は CLI だけの picker ではなく Goal Composer を開く。
 Composer は必須の `Goal` と install 済み provider の選択を同じ drawer に表示し、通常文字、Backspace、bracketed paste を
-Goal が所有する。`↑` / `↓` は provider だけを循環し、`Esc` は draft を破棄して conversation へ戻る。空または空白だけの
-Goal と Goal 欄を描けない高さは launch を発行しない。TUI は 16 KiB を超える入力部分を受け付けず、上限までの完全な
-UTF-8 境界だけを保持する。daemon も 16 KiB 超の request と非空条件を admission 前に再検証する。
+Goal が所有する。paste 内の改行・tabを含む区切り whitespace は単一 field の可視 space へ正規化し、その他の terminal control と bidi control は
+保存しない。`↑` / `↓` は provider だけを循環し、`Esc` は draft を破棄して conversation へ戻る。空または空白だけの
+Goal、または選択中 provider を描けない高さは launch を発行せず、footer に `Terminal too short to choose provider` を出す。
+TUI は 16 KiB を超える入力部分を受け付けず、上限までの完全な UTF-8 境界だけを保持する。daemon も 16 KiB 超の request と
+非空条件を admission 前に再検証する。
 
 `Enter` は fresh operation、workspace root、explicit profile、Goal を持つ専用の `agent_goal` request を 1 件発行する。
 この request は classic `agent` request と別の wire variant であり、classic の semantic key や初期 prompt を変更しない。
@@ -645,12 +647,22 @@ daemon は利用者の Goal を次の固定 operating contract と結合し、`L
 - 通常の不確実性や回復可能な failure では質問せず、blocking choice だけを durable user-decision tool へ送る。
 - 停止時は安全な理由と回復 action を root conversation に出し、PR は自動 merge しない。
 
-この v1 で Work Run の前面は既存 Director drawer である。drawer の selector は `Work Run`、footer は停止理由の参照先を
-`output or Decision` と表示する。進行中の worker は Organization / Session / Garden、明示判断は既存 decision notice/modal、
-PR は既存 PR inventory/modal、launch failure と Agent 停止理由は root pane の safe feedback と terminal output で確認する。
-SupervisorRun を正本にした Active work 一覧、task DAG、独立 PR/CI verifier、typed Stop reason
-projection は [goal-driven Work Run 提案](proposals/18-goal-driven-work-run.md) の後続段階であり、v1 がそれらの完了を
-装うことはない。
+Work Run の前面は既存 Director drawer である。daemon が workspace に属する durable `SupervisorRun` を保持すると、
+Home の notice band は最優先 run の状態、成功 task 数、実行中 task 数と concurrency 上限を `Active work` として表示する。
+Director drawer は同じ redaction-safe snapshot から progress bar、最大5件の task state、停止理由を描き、2秒 cadence の
+専用 background lane で更新する。実行中 Agent 数は supervisor admission と同じ `Dispatched | Running` task の数を正本とし、
+Home と Director は共通 projection から同じ並び順・集計を読む。観測失敗時は既存 snapshot を維持して `Stale` と明示し、
+初回から取得不能なら `Work Run progress unavailable` と authoritative `Failed` を描き分けて5秒 backoffする。frame thread から
+IPCは行わない。
+workspace 所有情報を持たない旧 run は別 workspace へ推測せず表示しない。
+
+この表示は workspace に属する `SupervisorRun` の観測面である。goal-driven `AgentGoal` launch は同じ operation ID で
+idempotent な run start へ接続され、応答再送でも同じ root Agent と Run へ収束する。Run の root task は実際のAgent dispatchへ
+束縛され、Agentの終了に伴ってtaskとRunの進捗もterminalへ収束する。Agent admission が失敗した場合はRunを作らない。
+進行中の worker は Organization / Session / Garden、明示判断は既存 decision notice/modal、
+PR は既存 PR inventory/modal、launch failure と Agent 停止理由は root pane の safe feedback と terminal output でも確認する。
+複数 run を選択する完全な Active work list、typed Stop reason action は
+[goal-driven Work Run 提案](proposals/18-goal-driven-work-run.md) の後続段階である。
 
 成功時は root `AgentTabIntent` の order への追加と新 conversation の selection を 1 回の CAS mutation で commit
 してから pending slot を live にする。write / CAS / future-schema failure、profile rejection、daemon 不通、
@@ -1316,10 +1328,18 @@ footer 行は body-composition kit の `footer` helper を通す。
 |---|---|---|
 | open の Unregister workspace | Yes/No ボタン（既定） | `Enter/y: yes   Esc/n: no   ←→/Tab: choose` |
 | open の registry cleanup | compact（ボタンなし） | `y: remove   n/Esc: cancel` |
+| 欠損 workspace の選択 | `Remove` / `Cancel` ボタン | `Enter/y: remove   Esc/n: cancel   ←→/Tab: choose` |
 
 ボタン付き variant の Yes/No 選択状態は `ConfirmationModal` が持ち、compact variant は選択状態を
 持たない（state 引数を読まない）。open の cleanup は list 本文に手組みしていた `y/n` prompt を廃し、
 unregister と同じ overlay 経路で合成する。
+
+Open、Recent、Unite は選択 path を開く前に同じ read-only preflight を通す。`NotFound` または
+directory ではない path があれば
+対象 path（複数なら件数）を `Workspace not found` confirmation に表示し、通常の open はまだ開始しない。
+`Remove` は effect 直前に欠損を再検証して workspace registry entry だけを削除する。ディレクトリが
+復活していれば登録を保ち、permission error など `NotFound` 以外の観測失敗は削除 authority にしない。
+daemon lifecycle data の削除はこの確認に含めず、`clean --apply` の責務に保つ。
 
 Home の [exit prompt](#workspace-の離脱と終了) は 2 択ではないため `render_choice_over` を使うが、
 ボタンの幅と focus 表示は `confirmation_buttons` と同じ `choice_buttons` を通るので、2 択と 3 択の
@@ -1590,7 +1610,7 @@ response が失われた・timeout した場合は、その pane を安全な失
 受け取り、以降は redraw ごとに `Resume { after_offset }` で offset 以降の出力だけを取得する。attach では
 checkpoint から screen を復元し（履歴の control byte を再生しない）、以降の suffix を**その復元済み parser**へ
 feed する。screen は最小の VT screen（印字・
-`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・Reverse Index（`ESC M`）・SGR の色と属性・alternate screen buffer）で、
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・文字削除/消去（DCH / ECH）・scroll region を含む画面スクロール・Reverse Index（`ESC M`）・SGR の色と属性・alternate screen buffer）で、
 その screen 行を右ペインへ clip して表示する。PTY output の適用は parser state だけを更新し、retained scrollback 全体の
 描画 cache は作らない。各 frame は現在の viewport に必要な行 window だけを ANSI 付き表示へ投影し、URL 検出もその
 window に接する折返し logical line までに限定する。このため通常の output・idle redraw・scroll 操作は 10,000 行の

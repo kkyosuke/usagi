@@ -67,6 +67,7 @@ struct ServerCapabilities<'a> {
     tools: McpToolFamilies,
     caller_credential: Option<&'a str>,
     store_root: &'a Path,
+    memory_root: &'a Path,
 }
 
 /// stdin の JSON-RPC を行ごとに処理し、応答を stdout へ書く。EOF で正常終了する。
@@ -127,6 +128,7 @@ pub fn serve_with_client(
             tools: families,
             caller_credential: None,
             store_root: &store_root,
+            memory_root: &store_root,
         },
     )
 }
@@ -190,6 +192,7 @@ fn serve_with_client_and_caller_scoped(
             tools: families,
             caller_credential: Some(caller_credential),
             store_root,
+            memory_root: store_root,
         },
     )
 }
@@ -211,18 +214,57 @@ pub fn serve_with_client_and_caller_at(
     caller_credential: &str,
     store_root: &Path,
 ) -> io::Result<()> {
-    let workspace_root = resolve_workspace_root(
-        store_root.to_path_buf(),
-        std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
-    );
-    serve_with_client_and_caller_scoped(
+    serve_with_client_and_caller_at_roots(
         input,
         out,
         version,
         client,
         caller_credential,
-        &workspace_root,
         store_root,
+        store_root,
+    )
+}
+
+/// Serves one claimed MCP child with a repository store root for issues and a
+/// daemon-owned, git-untracked root for cross-session memory.
+///
+/// # Errors
+///
+/// Returns an I/O error when settings cannot be read or the stdio server fails.
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=mcp_e2e
+pub fn serve_with_client_and_caller_at_roots(
+    input: impl BufRead,
+    out: &mut dyn Write,
+    version: &str,
+    client: &mut dyn DaemonClient,
+    caller_credential: &str,
+    store_root: &Path,
+    memory_root: &Path,
+) -> io::Result<()> {
+    let workspace_root = resolve_workspace_root(
+        store_root.to_path_buf(),
+        std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
+    );
+    let global = Storage::open_default()
+        .and_then(|storage| storage.load_settings())
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let local = WorkspaceSettingsStore::new(&workspace_root)
+        .load()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let families = McpToolFamilies::from_settings(&global.with_local(&local));
+    let snapshot = runtime_model_snapshot(&workspace_root, &PathExecutableLocator);
+    serve_with_client_and_capabilities(
+        input,
+        out,
+        version,
+        client,
+        ServerCapabilities {
+            runtime_models: &snapshot,
+            tools: families,
+            caller_credential: Some(caller_credential),
+            store_root,
+            memory_root,
+        },
     )
 }
 
@@ -277,6 +319,7 @@ pub fn serve_with_client_and_features(
             tools: families,
             caller_credential: None,
             store_root: &store_root,
+            memory_root: &store_root,
         },
     )
 }
@@ -356,6 +399,7 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
             tools: McpToolFamilies::all(),
             caller_credential: None,
             store_root: Path::new("."),
+            memory_root: Path::new("."),
         },
         &mut state,
     )
@@ -486,6 +530,7 @@ fn respond(
             capabilities.tools,
             capabilities.caller_credential,
             capabilities.store_root,
+            capabilities.memory_root,
         ),
         "resources/list" => protocol::success(id, resources::list_result()),
         "resources/read" => resources_read(id, params),
@@ -524,6 +569,7 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Result<Value, &'s
 fn tools_list_result(snapshot: &RuntimeModelSnapshot, families: McpToolFamilies) -> Value {
     let tools: Vec<Value> = tools::registry_with_families(families)
         .iter()
+        .filter(|tool| tool.name() != "session_delegate_brief" || snapshot.can_create_agent())
         .map(|tool| {
             // 各 tool の input_schema は妥当な JSON（tools のテストで検証済み）。
             let mut schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
@@ -545,6 +591,7 @@ fn tools_list_result(snapshot: &RuntimeModelSnapshot, families: McpToolFamilies)
 
 /// `tools/call` を処理する。実装済み tool を store / daemon 経路へ送り、未実装 tool と
 /// daemon の protocol error は JSON-RPC エラーとして返す。
+#[allow(clippy::too_many_arguments)] // The boundary keeps the two store authorities explicit.
 fn tools_call(
     id: Value,
     params: Option<&Value>,
@@ -553,6 +600,7 @@ fn tools_call(
     families: McpToolFamilies,
     caller_credential: Option<&str>,
     store_root: &Path,
+    memory_root: &Path,
 ) -> Value {
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing tool name");
@@ -579,6 +627,13 @@ fn tools_call(
             &format!("unknown tool: {name}"),
         );
     };
+    if name == "session_delegate_brief" && !snapshot.can_create_agent() {
+        return protocol::error(
+            id,
+            error_code::METHOD_NOT_FOUND,
+            "session_delegate_brief is unavailable because no configured runtime is executable",
+        );
+    }
     let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
     if let Some(agent_schema) = agent_selector_schema(snapshot, name) {
         schema["properties"]["agent"] = agent_schema;
@@ -604,13 +659,18 @@ fn tools_call(
     {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
+    let routed_store_root = if descriptor.name().starts_with("memory_") {
+        memory_root
+    } else {
+        store_root
+    };
     execute_tool(
         id,
         descriptor,
         arguments,
         client,
         caller_credential,
-        store_root,
+        routed_store_root,
     )
 }
 
@@ -873,7 +933,7 @@ mod tests {
         daemon_error_data, execute_tool, handle_line, handle_line_with_client,
         normalize_caller_credential, read_bounded_line, resolve_workspace_root,
         runtime_model_snapshot, serve, serve_with_client, serve_with_client_and_features,
-        serve_with_client_and_snapshot, session_tool_response,
+        serve_with_client_and_snapshot, session_tool_response, tools_call, tools_list_result,
     };
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
@@ -1009,6 +1069,7 @@ mod tests {
                     tools: McpToolFamilies::all(),
                     caller_credential: None,
                     store_root: Path::new("."),
+                    memory_root: Path::new("."),
                 },
                 &mut state,
             )
@@ -1123,7 +1184,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 48);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1169,13 +1230,88 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 38);
+        assert_eq!(names.len(), 37);
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
         for response in &responses[2..] {
             assert_eq!(response["error"]["code"], -32601);
         }
+        assert!(client.requests.is_empty());
+    }
+
+    #[test]
+    fn delegation_is_hidden_when_no_new_worker_selector_is_executable() {
+        let snapshot =
+            RuntimeModelSnapshot::capture(&WorkspaceAgentConfig::empty(), &FakeLocator(&[]));
+        let listed = tools_list_result(&snapshot, McpToolFamilies::all());
+        assert!(
+            listed["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| { tool["name"] != "session_delegate_brief" })
+        );
+
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({"unexpected": true}))),
+            requests: Vec::new(),
+        };
+        let params = serde_json::json!({
+            "name": "session_delegate_brief",
+            "arguments": {"name":"worker", "brief":"work", "agent":{"runtime":"claude", "model":"default"}}
+        });
+        let response = tools_call(
+            serde_json::json!(1),
+            Some(&params),
+            &mut client,
+            &snapshot,
+            McpToolFamilies::all(),
+            Some("credential"),
+            Path::new("."),
+            Path::new("."),
+        );
+        assert_eq!(response["error"]["code"], -32601);
+        assert!(client.requests.is_empty());
+    }
+
+    #[test]
+    fn memory_tools_use_the_shared_memory_root_instead_of_the_issue_root() {
+        let issue_root = tempdir().unwrap();
+        let memory_root = tempdir().unwrap();
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+            requests: Vec::new(),
+        };
+        let params = serde_json::json!({
+            "name": "memory_save",
+            "arguments": {"name":"dispatch-lessons", "title":"Dispatch lessons", "body":"poll durable state"}
+        });
+
+        let response = tools_call(
+            serde_json::json!(1),
+            Some(&params),
+            &mut client,
+            &RuntimeModelSnapshot::default(),
+            McpToolFamilies::all(),
+            Some("credential"),
+            issue_root.path(),
+            memory_root.path(),
+        );
+
+        assert!(response.get("result").is_some(), "{response}");
+        assert!(
+            memory_root
+                .path()
+                .join(".usagi/memory/dispatch-lessons.md")
+                .exists()
+        );
+        assert!(
+            !issue_root
+                .path()
+                .join(".usagi/memory/dispatch-lessons.md")
+                .exists()
+        );
         assert!(client.requests.is_empty());
     }
 
@@ -2040,7 +2176,7 @@ mod tests {
     #[test]
     fn dispatch_schema_and_parser_use_the_captured_snapshot() {
         let snapshot = RuntimeModelSnapshot::capture(
-            &WorkspaceAgentConfig::default(),
+            &WorkspaceAgentConfig::empty(),
             &FakeLocator(&["claude"]),
         );
         // An empty config never publishes a runtime even when its executable exists.

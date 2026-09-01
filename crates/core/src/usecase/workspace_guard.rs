@@ -60,6 +60,7 @@ const NON_MUTATING_TOOLS: &[&str] = &[
     "ToolSearch",
     "TodoWrite",
     "AskUserQuestion",
+    "Monitor",
 ];
 
 /// `tool_input` の key がファイルを名指しすると判断する末尾の語。key は完全一致ではなく
@@ -233,10 +234,23 @@ pub fn root_command_is_read_only(command: &str) -> bool {
     if command.trim().is_empty()
         || command
             .chars()
-            .any(|c| matches!(c, '\n' | '\r' | ';' | '&' | '|' | '>' | '<' | '`' | '$'))
+            .any(|c| matches!(c, '\n' | '\r' | ';' | '&' | '>' | '<' | '`' | '$'))
     {
         return false;
     }
+    // A read-only producer may be narrowed by another read-only command. Keep
+    // the supported composition deliberately small: no `||`, redirection,
+    // substitutions, or multiline shell syntax.
+    if command.contains('|') {
+        return !command.contains("||")
+            && command
+                .split('|')
+                .all(|segment| root_simple_command_is_read_only(segment.trim()));
+    }
+    root_simple_command_is_read_only(command)
+}
+
+fn root_simple_command_is_read_only(command: &str) -> bool {
     // クォート不整合などで字句分割に失敗したら空トークン列に倒し、先頭語が取れない
     // （分割失敗を含む）場合は read-only と判定しない。
     let tokens = shell_words::split(command).unwrap_or_default();
@@ -252,21 +266,16 @@ pub fn root_command_is_read_only(command: &str) -> bool {
         let Some(subcommand) = git_subcommand_from_tokens(git_tokens) else {
             return false;
         };
-        let has_safe_global_options = git_tokens
-            .iter()
-            .take_while(|token| token.as_str() != subcommand)
-            .any(|token| token == "--no-pager")
-            && git_tokens
-                .iter()
-                .take_while(|token| token.as_str() != subcommand)
-                .any(|token| token == "--no-optional-locks");
         let unsafe_option = git_tokens.iter().any(|token| {
             token == "-c"
                 || token.starts_with("-c=")
                 || token == "--config-env"
                 || token.starts_with("--config-env=")
-                || token == "-C"
-                || token.starts_with("-C=")
+                || (token == "-C"
+                    && git_tokens
+                        .windows(2)
+                        .any(|pair| pair[0] == "-C" && pair[1] != "."))
+                || (token.starts_with("-C=") && token != "-C=.")
                 || token == "--git-dir"
                 || token.starts_with("--git-dir=")
                 || token == "--work-tree"
@@ -291,19 +300,57 @@ pub fn root_command_is_read_only(command: &str) -> bool {
                 || token.starts_with("--textconv=")
                 || token == "--show-signature"
         });
+        let log_requests_diff = subcommand == "log"
+            && git_tokens.iter().any(|token| {
+                matches!(
+                    token.as_str(),
+                    "-p" | "--patch"
+                        | "--stat"
+                        | "--numstat"
+                        | "--shortstat"
+                        | "--raw"
+                        | "--name-only"
+                        | "--name-status"
+                )
+            });
         let diff_helpers_disabled = !DIFF_CAPABLE_GIT_SUBCOMMANDS.contains(&subcommand)
+            || (subcommand == "log" && !log_requests_diff)
             || (git_tokens.iter().any(|token| token == "--no-ext-diff")
                 && git_tokens.iter().any(|token| token == "--no-textconv"));
         return READ_ONLY_GIT_SUBCOMMANDS.contains(&subcommand)
-            && has_safe_global_options
             && !unsafe_option
             && diff_helpers_disabled;
     }
-    program == basename
-        && matches!(
-            basename,
-            "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "test" | "true" | "false"
-        )
+    if program != basename {
+        return false;
+    }
+    if basename == "gh" {
+        return matches!(tokens.get(1).map(String::as_str), Some("pr"))
+            && matches!(tokens.get(2).map(String::as_str), Some("view" | "list"))
+            && !tokens.iter().any(|token| token == "--web");
+    }
+    if basename == "sleep" {
+        if tokens.len() != 2 {
+            return false;
+        }
+        let (number, multiplier) = tokens[1].strip_suffix('s').map_or_else(
+            || {
+                tokens[1]
+                    .strip_suffix('m')
+                    .map_or((tokens[1].as_str(), 1_u64), |number| (number, 60))
+            },
+            |number| (number, 1),
+        );
+        return number
+            .parse::<u64>()
+            .ok()
+            .and_then(|number| number.checked_mul(multiplier))
+            .is_some_and(|seconds| seconds <= 300);
+    }
+    matches!(
+        basename,
+        "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "test" | "true" | "false"
+    )
 }
 
 fn git_subcommand_from_tokens(tokens: &[String]) -> Option<&str> {
@@ -411,7 +458,7 @@ mod tests {
     #[test]
     fn known_non_mutating_tools_pass_even_when_they_name_a_file() {
         // `Read` / `Grep` は path を取るが読むだけなので、worktree の外でも通す。
-        for tool in ["Read", "Glob", "Grep", "ToolSearch", "Agent"] {
+        for tool in ["Read", "Glob", "Grep", "ToolSearch", "Agent", "Monitor"] {
             assert_eq!(
                 classify_tool(tool, ["file_path", "path"]),
                 ToolGuard::Unrestricted,
@@ -673,7 +720,6 @@ mod tests {
             "git -c diff.external=touch diff --ext-diff",
             "git --config-env=diff.external=PWN git diff --ext-diff",
             "git --no-pager --no-optional-locks diff HEAD",
-            "git --no-pager --no-optional-locks log --oneline",
             "git --no-pager --no-optional-locks ls-remote --upload-pack=touch origin",
             "git --no-pager --no-optional-locks -p status",
             "git --no-pager --no-optional-locks show --no-ext-diff --no-textconv --show-signature",
@@ -686,9 +732,29 @@ mod tests {
             "git --no-pager --no-optional-locks status",
             "git --no-pager --no-optional-locks log --no-ext-diff --no-textconv --oneline",
             "git --no-pager --no-optional-locks diff --no-ext-diff --no-textconv",
+            "git log --oneline main",
+            "git log --stat --no-ext-diff --no-textconv main",
+            "git -C . status --short --branch",
+            "git log main | head -20",
+            "gh pr view --comments",
+            "gh pr list --limit 10",
+            "sleep 1",
+            "sleep 1s",
             "ls -la",
         ] {
             assert!(root_command_is_read_only(command), "denied {command}");
+        }
+        for command in [
+            "git -C .. status",
+            "git status | sh",
+            "gh pr checkout 1",
+            "gh pr view 1 --web",
+            "git log --stat main",
+            "sleep 1 2",
+            "sleep forever",
+            "sleep 6m",
+        ] {
+            assert!(!root_command_is_read_only(command), "allowed {command}");
         }
     }
 

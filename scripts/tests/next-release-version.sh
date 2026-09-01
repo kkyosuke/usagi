@@ -34,11 +34,20 @@ grep -F 'type: choice' "$WORKFLOW" >/dev/null
 grep -F 'RELEASE_BUMP: ${{ inputs.bump }}' "$WORKFLOW" >/dev/null
 grep -F 'scripts/ci/next-release-version.sh "$CURRENT_VERSION" "$RELEASE_BUMP"' "$WORKFLOW" >/dev/null
 grep -F 'steps.version.outputs.version' "$WORKFLOW" >/dev/null
+grep -F 'RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}' "$WORKFLOW" >/dev/null
+grep -F 'token: ${{ secrets.RELEASE_PR_TOKEN }}' "$WORKFLOW" >/dev/null
+grep -F 'id: create-pr' "$WORKFLOW" >/dev/null
+grep -F "if: steps.create-pr.outputs.pull-request-number != ''" "$WORKFLOW" >/dev/null
+grep -F 'gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash --auto' "$WORKFLOW" >/dev/null
 for option in major minor patch; do
   grep -F -- "- $option" "$WORKFLOW" >/dev/null
 done
 if grep -F '${{ inputs.version }}' "$WORKFLOW" >/dev/null; then
   echo "release workflow still consumes a free-form version input" >&2
+  exit 1
+fi
+if grep -F 'token: ${{ secrets.GITHUB_TOKEN }}' "$WORKFLOW" >/dev/null; then
+  echo "release workflow still creates pull requests with GITHUB_TOKEN" >&2
   exit 1
 fi
 

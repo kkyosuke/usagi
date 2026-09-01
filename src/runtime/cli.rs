@@ -164,7 +164,7 @@ mod action_io {
                     };
                 match client {
                     Ok(mut client) => {
-                        let (credential, store_root) = match client
+                        let (credential, store_root, memory_root) = match client
                             .request(usagi_core::usecase::client::DaemonRequest::McpChildClaim)
                         {
                             Ok(DaemonReply::Ok(body)) => (
@@ -176,19 +176,35 @@ mod action_io {
                                     .and_then(serde_json::Value::as_str)
                                     .filter(|value| !value.is_empty())
                                     .map(std::path::PathBuf::from),
+                                body.get("memory_root")
+                                    .and_then(serde_json::Value::as_str)
+                                    .filter(|value| !value.is_empty())
+                                    .map(std::path::PathBuf::from),
                             ),
-                            _ => (None, None),
+                            _ => (None, None, None),
                         };
                         if let Some(credential) = credential {
                             if let Some(store_root) = store_root {
-                                usagi_cli::mcp::serve_with_client_and_caller_at(
-                                    stdin.lock(),
-                                    out,
-                                    info.version,
-                                    &mut *client,
-                                    &credential,
-                                    &store_root,
-                                )
+                                if let Some(memory_root) = memory_root {
+                                    usagi_cli::mcp::serve_with_client_and_caller_at_roots(
+                                        stdin.lock(),
+                                        out,
+                                        info.version,
+                                        &mut *client,
+                                        &credential,
+                                        &store_root,
+                                        &memory_root,
+                                    )
+                                } else {
+                                    usagi_cli::mcp::serve_with_client_and_caller_at(
+                                        stdin.lock(),
+                                        out,
+                                        info.version,
+                                        &mut *client,
+                                        &credential,
+                                        &store_root,
+                                    )
+                                }
                             } else {
                                 // A compatible older daemon returns only the
                                 // credential. Preserve that inter-version path

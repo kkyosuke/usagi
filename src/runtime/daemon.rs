@@ -761,21 +761,16 @@ impl CodexProvisioner for RootCodexProvisioner {
         } else {
             None
         };
-        let mut sandbox_roots = if mode == SandboxMode::Root {
-            root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
-                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?
-        } else {
-            let mut roots = claude_writable_roots(mode, &working_directory);
-            roots.extend(
-                session_git
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|policy| policy.writable_roots.iter().cloned()),
-            );
-            roots
-        };
-        sandbox_roots.sort();
-        sandbox_roots.dedup();
+        let sandbox_roots = codex_writable_roots(
+            mode,
+            &working_directory,
+            session_git.as_ref(),
+            self.sandbox_home.as_deref(),
+            self.program,
+            &self.data_home,
+            context.scope.workspace_id,
+        )
+        .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
             program: self.program,
@@ -822,6 +817,33 @@ impl CodexProvisioner for RootCodexProvisioner {
         })
     }
 }
+
+fn codex_writable_roots(
+    mode: SandboxMode,
+    working_directory: &Path,
+    session_git: Option<&SessionGitPolicy>,
+    sandbox_home: Option<&Path>,
+    program: &str,
+    data_home: &paths::DataHome,
+    workspace: WorkspaceId,
+) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
+    let mut roots = if mode == SandboxMode::Root {
+        root_agent_writable_roots(sandbox_home, program)?
+    } else {
+        let mut roots = claude_writable_roots(mode, working_directory);
+        roots.extend(
+            session_git
+                .into_iter()
+                .flat_map(|policy| policy.writable_roots.iter().cloned()),
+        );
+        roots
+    };
+    roots.push(root_memory_store_root(data_home, workspace)?);
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
 /// The Claude provisioner's product program: what the readiness probe proves,
 /// what the launcher execs, and whose `$HOME` state root the sandbox grants.
 /// The Codex provisioner carries the same value per profile (`RootCodexProvisioner::program`).
@@ -858,6 +880,34 @@ fn root_agent_writable_roots(
         .canonicalize()
         .map(|state| vec![state])
         .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)
+}
+
+/// A root coordinator's reusable memory lives outside every Git checkout and
+/// outside daemon control state. The MCP adapter adds `.usagi/memory` beneath
+/// this synthetic store root, preserving the existing `MemoryStore` contract.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_root_memory_survives_without_dirtying_the_workspace
+fn root_memory_store_root(
+    data_home: &paths::DataHome,
+    workspace: WorkspaceId,
+) -> Result<PathBuf, ClaudeSandboxPolicyError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let requested = data_home
+        .selected()
+        .join("agent-memory")
+        .join(workspace.to_string());
+    std::fs::create_dir_all(requested.join(".usagi/memory"))
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    std::fs::set_permissions(&requested, std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    // The launcher re-validates exact canonical paths. In particular, macOS
+    // exposes `/tmp` through `/private/tmp`; returning the lexical spelling
+    // would make an otherwise valid Agent exit before its provider starts.
+    let root = requested
+        .canonicalize()
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    validate_owned_directory(&root)?;
+    Ok(root)
 }
 
 /// Codex's arg0 janitor cannot open the `.lock` inside a directory left with no
@@ -985,6 +1035,10 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             None
         };
         let mut launch_roots = claude_writable_roots(mode, &working_directory);
+        launch_roots.push(
+            root_memory_store_root(&self.data_home, context.scope.workspace_id)
+                .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?,
+        );
         launch_roots.extend(
             session_git
                 .as_ref()
@@ -3062,120 +3116,6 @@ const CLIENT_CONNECTION_FDS: u64 = 3;
 /// write: expiry no longer takes the store lock or fsyncs unless something
 /// actually changed.
 const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
-/// Maximum time a synchronous decision waiter may take to observe a connection
-/// cancellation when no decision state transition occurs.
-const DECISION_CANCELLATION_POLL: Duration = Duration::from_millis(250);
-
-struct DecisionWaiter {
-    token: u64,
-    notify: SyncSender<()>,
-}
-
-/// Process-local notification for durable decision state transitions.
-///
-/// The JSON document remains authoritative. This registry only prevents every
-/// synchronous MCP waiter from reading that complete document forty times per
-/// second while its decision is still pending.
-#[derive(Default)]
-struct DecisionWaiters {
-    next_token: AtomicU64,
-    waiting: Mutex<BTreeMap<usagi_core::domain::id::UserDecisionId, Vec<DecisionWaiter>>>,
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
-impl DecisionWaiters {
-    fn subscribe(
-        self: &Arc<Self>,
-        decision_id: usagi_core::domain::id::UserDecisionId,
-    ) -> DecisionWaitSubscription {
-        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        let (notify, changes) = mpsc::sync_channel(1);
-        self.waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(decision_id)
-            .or_default()
-            .push(DecisionWaiter { token, notify });
-        DecisionWaitSubscription {
-            registry: Arc::clone(self),
-            decision_id,
-            token,
-            changes,
-        }
-    }
-
-    fn notify(&self, decision_id: usagi_core::domain::id::UserDecisionId) {
-        let waiters = self
-            .waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&decision_id)
-            .unwrap_or_default();
-        for waiter in waiters {
-            let _ = waiter.notify.try_send(());
-        }
-    }
-
-    fn unsubscribe(&self, decision_id: usagi_core::domain::id::UserDecisionId, token: u64) {
-        let mut waiting = self
-            .waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let remove_entry = if let Some(waiters) = waiting.get_mut(&decision_id) {
-            waiters.retain(|waiter| waiter.token != token);
-            waiters.is_empty()
-        } else {
-            false
-        };
-        if remove_entry {
-            waiting.remove(&decision_id);
-        }
-    }
-
-    #[cfg(test)]
-    fn waiting_count(&self, decision_id: usagi_core::domain::id::UserDecisionId) -> usize {
-        self.waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&decision_id)
-            .map_or(0, Vec::len)
-    }
-}
-
-struct DecisionWaitSubscription {
-    registry: Arc<DecisionWaiters>,
-    decision_id: usagi_core::domain::id::UserDecisionId,
-    token: u64,
-    changes: Receiver<()>,
-}
-
-impl Drop for DecisionWaitSubscription {
-    fn drop(&mut self) {
-        self.registry.unsubscribe(self.decision_id, self.token);
-    }
-}
-
-trait DecisionWaitCancellation {
-    fn is_cancelled(&self) -> bool;
-}
-
-#[derive(Clone, Copy)]
-struct DecisionWaitContext<'a> {
-    waiters: &'a Arc<DecisionWaiters>,
-    cancellation: &'a dyn DecisionWaitCancellation,
-}
-
-struct DecisionConnectionCancellation {
-    connection: AcceptedStream,
-    gate: AdmissionGate,
-}
-
-impl DecisionWaitCancellation for DecisionConnectionCancellation {
-    fn is_cancelled(&self) -> bool {
-        !self.gate.is_open(LeaseClass::ActiveControl) || self.connection.peer_disconnected()
-    }
-}
-
 struct ProductionRefreshClock {
     started: Instant,
 }
@@ -3570,6 +3510,11 @@ fn spawn_ipc_server(
     )?;
     reconcile_removed_session_agents(&data_dir.join("daemon"), &agent)?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
+    if let Err(error) = reconcile_pending_supervisor_promotions(&supervisor, &agent) {
+        ErrorLog::record(&format!(
+            "supervisor promotion reconciliation deferred: {error}"
+        ));
+    }
     if let Ok(runtime) = supervisor.lock()
         && let Err(error) = runtime.tick_all(
             chrono::Utc::now(),
@@ -3580,6 +3525,7 @@ fn spawn_ipc_server(
             "supervisor startup reconciliation deferred: {error}"
         ));
     }
+    background_workers.push(start_goal_artifact_recovery(Arc::clone(&supervisor))?);
     background_workers.push(start_agent_observer(
         Arc::downgrade(&agent),
         agent_observations,
@@ -3599,12 +3545,8 @@ fn spawn_ipc_server(
         Arc::clone(&shutdown),
     )?);
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
-    let decision_waiters = Arc::new(DecisionWaiters::default());
-    consume_user_decision_events(&decisions)
-        .map_err(|error| std::io::Error::other(error.message))?;
     background_workers.push(start_decision_maintenance(
         Arc::clone(&decisions),
-        Arc::clone(&decision_waiters),
         Arc::clone(&shutdown),
     )?);
     background_workers.push(start_pr_refresh_worker(
@@ -3690,7 +3632,6 @@ fn spawn_ipc_server(
         pr_inventory,
         projection,
         decisions,
-        decision_waiters,
         Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
             agent_concurrency,
             shutdown.background_worker_health(),
@@ -4567,10 +4508,9 @@ fn node_identity(metadata: &std::fs::Metadata) -> NodeIdentity {
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn start_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
-    waiters: Arc<DecisionWaiters>,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    spawn_decision_maintenance(decisions, waiters, shutdown, DECISION_MAINTENANCE_TICK)
+    spawn_decision_maintenance(decisions, shutdown, DECISION_MAINTENANCE_TICK)
 }
 
 /// The loop, with the tick injected so a test can drive it without waiting out
@@ -4578,7 +4518,6 @@ fn start_decision_maintenance(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn spawn_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
-    waiters: Arc<DecisionWaiters>,
     shutdown: Arc<ShutdownRequest>,
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
@@ -4588,12 +4527,7 @@ fn spawn_decision_maintenance(
             let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::DecisionMaintenance);
             while !shutdown.is_requested() {
-                if let Ok(expired) = decisions.expire_due(chrono::Utc::now()) {
-                    for decision_id in expired {
-                        waiters.notify(decision_id);
-                    }
-                }
-                let _ = consume_user_decision_events(&decisions);
+                let _ = decisions.expire_due(chrono::Utc::now());
                 if shutdown.wait_for_tick(tick) {
                     break;
                 }
@@ -4800,6 +4734,14 @@ fn start_agent_observer(
                         // A candidate the output never terminated is only
                         // creditable once nothing more can arrive for it.
                         projection.submit_closed(reference.terminal_id, reference.session_id);
+                        if let Some(agent) = agent.upgrade()
+                            && let Err(error) =
+                                reconcile_pending_supervisor_promotions(&supervisor, &agent)
+                        {
+                            ErrorLog::record(&format!(
+                                "supervisor promotion reconciliation deferred: {error}"
+                            ));
+                        }
                         if let (Some(agent), Ok(runtime)) = (agent.upgrade(), supervisor.lock())
                             && let Err(error) = runtime.tick_all(
                                 chrono::Utc::now(),
@@ -5037,7 +4979,6 @@ fn start_ipc_accept_loop(
     pr_inventory: SharedPrInventory,
     projection: Arc<PrProjectionQueue>,
     decisions: Arc<UserDecisionStore>,
-    decision_waiters: Arc<DecisionWaiters>,
     metrics: SharedMetricsBroker,
     process_metrics: SharedProcessResourceSampler,
     pipeline_metrics: Arc<TerminalPipelineMetrics>,
@@ -5143,7 +5084,6 @@ fn start_ipc_accept_loop(
                         let agent_launch = Arc::clone(&agent);
                         let pr_inventory = Arc::clone(&pr_inventory);
                         let decisions = Arc::clone(&decisions);
-                        let decision_waiters = Arc::clone(&decision_waiters);
                         let metrics = Arc::clone(&metrics);
                         let process_metrics = Arc::clone(&process_metrics);
                         let pipeline_metrics = Arc::clone(&pipeline_metrics);
@@ -5166,10 +5106,6 @@ fn start_ipc_accept_loop(
                         };
                         let worker_completion = Some(unblock.clone());
                         let retirement = unblock.retirement();
-                        let decision_cancellation = DecisionConnectionCancellation {
-                            connection: unblock.clone(),
-                            gate: connection_fence.gate.clone(),
-                        };
                         let spawned = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -5295,22 +5231,23 @@ fn start_ipc_accept_loop(
                                             );
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
-                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, peer_process, request_id, &body, hello),
+                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, peer_process, request_id, &body, hello),
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
-                                        Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
+                                        Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
+                                        Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, wait: DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation } }, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, supervisor: &supervisor }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
                                             let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                         },
-                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
+                                        Some("supervisor_snapshot") => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
+                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                         }
                                     },
@@ -5496,7 +5433,7 @@ struct DispatchToolContext<'a> {
     bound: &'a ConnectionWorkspace,
     pr_inventory: &'a SharedPrInventory,
     decisions: &'a UserDecisionStore,
-    wait: DecisionWaitContext<'a>,
+    supervisor: &'a SharedSupervisorRuntime,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
@@ -5529,6 +5466,7 @@ fn dispatch_dispatch_tool(
             context.agent,
             context.bound,
             context.pr_inventory,
+            context.supervisor,
             request_id,
             body,
             hello,
@@ -5538,7 +5476,6 @@ fn dispatch_dispatch_tool(
             context.agent,
             context.bound,
             context.decisions,
-            context.wait,
             request_id,
             body,
             hello,
@@ -5552,6 +5489,7 @@ fn dispatch_agent_tool(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     pr_inventory: &SharedPrInventory,
+    supervisor: &SharedSupervisorRuntime,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -5667,6 +5605,7 @@ fn dispatch_agent_tool(
                 "agent caller does not belong to this workspace",
             ));
         }
+        let parent_dispatch_run = authenticated.run_id;
         let caller = authenticated.caller;
         let store = runtime.dispatch_store();
         let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {
@@ -5787,6 +5726,7 @@ fn dispatch_agent_tool(
                         )
                     })?;
                 let scope = bound.scope_resolver();
+                let task_instruction = input.prompt.clone();
                 let dispatch_intent = DispatchIntent {
                     workspace,
                     session_name: session_name.clone(),
@@ -5794,13 +5734,73 @@ fn dispatch_agent_tool(
                     agent: selected,
                     prompt: input.prompt,
                 };
+                let supervised = supervisor
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "supervisor runtime is unavailable",
+                        )
+                    })?
+                    .reserve_delegated_dispatch(
+                        parent_dispatch_run,
+                        &operation_id,
+                        task_instruction.clone(),
+                        chrono::Utc::now(),
+                    )
+                    .map_err(supervisor_error)?
+                    .is_some();
                 let admission = dispatch_agent_after_preflight(
                     agent,
                     &operation_id,
                     &dispatch_intent,
                     session_id,
                     &scope,
-                )?;
+                );
+                let admission = match admission {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        if supervised && error.code != ErrorCode::OwnershipUnknown {
+                            let failed = supervisor
+                                .lock()
+                                .map_err(|_| {
+                                    ProtocolError::new(
+                                        ErrorCode::Unavailable,
+                                        "supervisor runtime is unavailable",
+                                    )
+                                })?
+                                .fail_reserved_delegated_dispatch(
+                                    &operation_id,
+                                    chrono::Utc::now(),
+                                );
+                            if let Err(failure) = failed {
+                                ErrorLog::record(&format!(
+                                    "delegated Supervisor failure reconciliation deferred: {failure}"
+                                ));
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
+                if supervised
+                    && let Err(error) = bind_delegated_supervisor_dispatch(
+                        supervisor,
+                        &admission.operation_id,
+                        &admission.runtime,
+                    )
+                {
+                    // The Agent admission is already durable. Returning an
+                    // error here would invite a retry to launch duplicate work;
+                    // startup/observer reconciliation binds the exact operation.
+                    ErrorLog::record(&format!("delegated Supervisor promotion deferred: {error}"));
+                    if let Err(reconcile) =
+                        reconcile_pending_supervisor_promotions(supervisor, agent)
+                    {
+                        ErrorLog::record(&format!(
+                            "delegated Supervisor promotion reconciliation deferred: {reconcile}"
+                        ));
+                    }
+                }
                 runtime = agent.lock().map_err(|_| {
                     ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
                 })?;
@@ -5942,6 +5942,10 @@ fn dispatch_agent_tool(
                     .and_then(|result| result.pr.as_deref());
                 project_reported_pr(pr_inventory, delivery.worker.session_id, reported_pr)
                     .inspect_err(|_| ErrorLog::record("reported PR projection failed"))?;
+                verify_completed_goal_artifact(
+                    supervisor,
+                    delivery.committed.as_ref().map(|message| message.run_id),
+                )?;
                 Ok((
                     ResponseOutcome::Ok,
                     serde_json::json!({"delivered_to": delivery.delivered_to}),
@@ -6027,6 +6031,78 @@ fn project_reported_pr(
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=only_an_open_non_draft_pr_with_passing_checks_satisfies_the_contract
+fn verify_completed_goal_artifact(
+    supervisor: &SharedSupervisorRuntime,
+    dispatch_run_id: Option<usagi_core::domain::id::OperationId>,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    use usagi_daemon::usecase::{
+        goal_artifact::GoalArtifactVerifier, supervisor_runtime::ArtifactVerifier,
+    };
+
+    let Some(dispatch_run_id) = dispatch_run_id else {
+        return Ok(());
+    };
+    let request = supervisor
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
+        .prepare_artifact_verification(dispatch_run_id, chrono::Utc::now())
+        .map_err(supervisor_error)?;
+    let Some(request) = request else {
+        return Ok(());
+    };
+    // The provider process runs outside the supervisor mutex. A slow or broken
+    // remote can delay only this report request, never task/run observation.
+    let verification =
+        GoalArtifactVerifier::new(GhProcess).verify(&request.contract, request.result.as_ref());
+    supervisor
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
+        .record_artifact_verification(&request, verification, chrono::Utc::now())
+        .map_err(supervisor_error)?;
+    Ok(())
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
+fn start_goal_artifact_recovery(
+    supervisor: SharedSupervisorRuntime,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("usagi-goal-artifact-recovery".to_owned())
+        .spawn(move || {
+            if let Err(error) = reconcile_pending_goal_artifacts(&supervisor) {
+                ErrorLog::record(&format!(
+                    "Goal artifact verification reconciliation deferred: {error}"
+                ));
+            }
+        })
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=artifact_preparation_rejects_nonterminal_wrong_contract_and_corrupt_membership
+fn reconcile_pending_goal_artifacts(supervisor: &SharedSupervisorRuntime) -> anyhow::Result<usize> {
+    let pending = supervisor
+        .lock()
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+        .pending_artifact_verifications()?;
+    let mut reconciled = 0;
+    let mut first_failure = None;
+    for item in pending {
+        if let Err(error) = verify_completed_goal_artifact(supervisor, Some(item.dispatch_run_id)) {
+            first_failure.get_or_insert_with(|| {
+                anyhow::anyhow!(
+                    "artifact verification {} remains pending: {}",
+                    item.dispatch_run_id,
+                    error.message
+                )
+            });
+        } else {
+            reconciled += 1;
+        }
+    }
+    first_failure.map_or(Ok(reconciled), Err)
+}
+
 fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 
@@ -6045,7 +6121,7 @@ fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::i
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn dispatch_supervisor_tool(
     runtime: &SharedSupervisorRuntime,
-    caller: Result<String, usagi_core::infrastructure::ipc::ProtocolError>,
+    caller: Result<(String, WorkspaceId), usagi_core::infrastructure::ipc::ProtocolError>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -6117,7 +6193,7 @@ fn dispatch_supervisor_tool(
             ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
         })
         .and_then(|runtime| {
-            let caller = caller?;
+            let (caller, workspace) = caller?;
             match action {
                 SupervisorToolAction::Start => {
                     let input: StartPayload = serde_json::from_value(payload).map_err(|_| {
@@ -6127,8 +6203,9 @@ fn dispatch_supervisor_tool(
                         )
                     })?;
                     let started = runtime
-                        .start(
+                        .start_for_workspace(
                             &caller,
+                            workspace,
                             &operation_id,
                             input.root_task,
                             input.initial_task_dag,
@@ -6311,13 +6388,98 @@ fn dispatch_supervisor_tool(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=supervisor_snapshot_is_exactly_workspace_scoped
+fn dispatch_supervisor_snapshot(
+    runtime: &SharedSupervisorRuntime,
+    bound: &ConnectionWorkspace,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot;
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::DaemonRequest;
+
+    let result = (|| {
+        let Ok(DaemonRequest::SupervisorSnapshot {
+            workspace: requested,
+        }) = serde_json::from_value::<DaemonRequest>(body.clone())
+        else {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid supervisor snapshot request",
+            ));
+        };
+        let workspace = bound
+            .sessions()
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .snapshot()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+            })?
+            .get("workspace_id")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+            })?;
+        if requested != workspace {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "supervisor snapshot belongs to another workspace",
+            ));
+        }
+        let mut runs = runtime
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+            })?
+            .list_workspace(workspace)
+            .map_err(supervisor_error)?;
+        // The TUI draws current state only. Event provenance has its own
+        // capability-scoped MCP surface and is omitted here to keep the
+        // periodic projection small even for long-lived runs.
+        for run in &mut runs {
+            run.provenance.clear();
+        }
+        let mut snapshot = SupervisorWorkspaceSnapshot {
+            workspace_id: workspace,
+            runs,
+        };
+        loop {
+            let value = serde_json::to_value(&snapshot).map_err(|_| {
+                ProtocolError::new(ErrorCode::Internal, "supervisor snapshot encoding failed")
+            })?;
+            match bounded_supervisor_query(value) {
+                Ok(value) => return Ok(value),
+                Err(_) if !snapshot.runs.is_empty() => {
+                    snapshot.runs.pop();
+                }
+                Err(error) => return Err(supervisor_error(error)),
+            }
+        }
+    })();
+    match result {
+        Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn authenticated_supervisor_caller(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     client: &usagi_core::domain::id::ClientId,
     body: &serde_json::Value,
-) -> Result<String, usagi_core::infrastructure::ipc::ProtocolError> {
+) -> Result<(String, WorkspaceId), usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 
     let credential = serde_json::from_value::<DaemonRequest>(body.clone())
@@ -6363,7 +6525,10 @@ fn authenticated_supervisor_caller(
             "supervisor caller does not belong to this workspace",
         ));
     }
-    Ok(supervisor_caller_descriptor(client, &authenticated.caller))
+    Ok((
+        supervisor_caller_descriptor(client, &authenticated.caller),
+        workspace,
+    ))
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
@@ -6464,7 +6629,6 @@ fn dispatch_pr_snapshot(
 #[derive(Debug)]
 enum UserDecisionDispatchError {
     Decision(usagi_core::domain::user_decision::UserDecisionError),
-    Cancelled,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
@@ -6480,7 +6644,6 @@ fn dispatch_user_decision(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     store: &UserDecisionStore,
-    wait: DecisionWaitContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -6642,10 +6805,6 @@ fn dispatch_user_decision(
         ))
     });
     let response = owner.and_then(|(workspace, owner)| {
-        // Resolved events are retained only for atomicity with legacy durable
-        // records. Their acknowledgement must not inject a continuation while
-        // this MCP call is waiting for its own synchronous response.
-        let _ = consume_user_decision_events(store);
         let request_owner = owner.clone();
         let decision_for = |id| -> Result<UserDecision, UserDecisionError> {
             let decision = store
@@ -6688,18 +6847,22 @@ fn dispatch_user_decision(
                             resolved_at: None,
                         })
                         .map_err(|_| UserDecisionError::Terminal)??;
-                    wait_for_user_decision(
-                        store,
-                        wait.waiters,
-                        wait.cancellation,
-                        workspace,
-                        &decision,
-                    )
+                    Ok(serde_json::json!(decision))
                 }
                 DispatchToolAction::UserDecisionGet => {
                     let input = serde_json::from_value::<DecisionIdPayload>(payload)
                         .map_err(|_| UserDecisionError::Terminal)?;
-                    Ok(serde_json::json!(decision_for(input.decision_id)?))
+                    let decision = decision_for(input.decision_id)?;
+                    if decision.status != UserDecisionStatus::Pending {
+                        // Resolution creates a durable outbox entry atomically.
+                        // Polling the terminal decision is the acknowledgement;
+                        // no synchronous connection is kept open while a human
+                        // considers the answer.
+                        store
+                            .ack_event(input.decision_id)
+                            .map_err(|_| UserDecisionError::Terminal)?;
+                    }
+                    Ok(serde_json::json!(decision))
                 }
                 DispatchToolAction::UserDecisionList => {
                     let decisions = store
@@ -6722,7 +6885,6 @@ fn dispatch_user_decision(
                     let decision = store
                         .resolve(workspace, input.decision_id, input.answer, now)
                         .map_err(|_| UserDecisionError::Terminal)??;
-                    wait.waiters.notify(input.decision_id);
                     Ok(serde_json::json!(decision))
                 }
                 DispatchToolAction::UserDecisionCancel | DispatchToolAction::UserDecisionExpire => {
@@ -6737,7 +6899,6 @@ fn dispatch_user_decision(
                     let decision = store
                         .terminal(workspace, input.decision_id, status, now)
                         .map_err(|_| UserDecisionError::Terminal)??;
-                    wait.waiters.notify(input.decision_id);
                     Ok(serde_json::json!(decision))
                 }
                 _ => unreachable!(),
@@ -6783,13 +6944,9 @@ fn dispatch_user_decision(
                     "the user decision store is full of pending or undelivered records; \
                      complete some before retrying",
                 ),
-                UserDecisionDispatchError::Cancelled => {
-                    (ErrorCode::Cancelled, "decision wait was cancelled")
-                }
             };
             ProtocolError::new(code, message)
         })?;
-        let _ = consume_user_decision_events(store);
         Ok(value)
     });
     match response {
@@ -6801,94 +6958,6 @@ fn dispatch_user_decision(
             serde_json::json!(null),
         ),
     }
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
-fn wait_for_user_decision(
-    decisions: &UserDecisionStore,
-    waiters: &Arc<DecisionWaiters>,
-    cancellation: &dyn DecisionWaitCancellation,
-    workspace: usagi_core::domain::id::WorkspaceId,
-    requested: &usagi_core::domain::user_decision::UserDecision,
-) -> Result<serde_json::Value, UserDecisionDispatchError> {
-    use usagi_core::domain::user_decision::UserDecisionStatus;
-
-    // Subscribe before the first authoritative read. A terminal transition that
-    // races this setup either appears in that read or leaves a queued wakeup, so
-    // no state edge can be missed.
-    let subscription = waiters.subscribe(requested.decision_id);
-    let mut refresh = true;
-    loop {
-        if cancellation.is_cancelled() {
-            return Err(UserDecisionDispatchError::Cancelled);
-        }
-        if !refresh {
-            match subscription
-                .changes
-                .recv_timeout(DECISION_CANCELLATION_POLL)
-            {
-                Ok(()) => refresh = true,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(UserDecisionDispatchError::Cancelled);
-                }
-            }
-            continue;
-        }
-        let decision = decisions
-            .get(workspace, requested.decision_id)
-            .map_err(|_| usagi_core::domain::user_decision::UserDecisionError::Terminal)?
-            .ok_or(usagi_core::domain::user_decision::UserDecisionError::Terminal)?;
-        match decision.status {
-            UserDecisionStatus::Pending => refresh = false,
-            UserDecisionStatus::Resolved => {
-                let answer = decision
-                    .answer
-                    .ok_or(usagi_core::domain::user_decision::UserDecisionError::Terminal)?;
-                return Ok(serde_json::json!({
-                    "decision_id": decision.decision_id,
-                    "status": "resolved",
-                    "answer": answer,
-                }));
-            }
-            UserDecisionStatus::Cancelled => {
-                return Err(usagi_core::domain::user_decision::UserDecisionError::Terminal.into());
-            }
-            UserDecisionStatus::Expired => {
-                return Err(usagi_core::domain::user_decision::UserDecisionError::Expired.into());
-            }
-        }
-    }
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
-fn consume_user_decision_events(
-    decisions: &UserDecisionStore,
-) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
-    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
-
-    // A resolved event and its answer are atomically persisted together. The
-    // caller now receives that answer from its still-open MCP request, so the
-    // outbox has no asynchronous PTY continuation to deliver.
-    for event in decisions
-        .events()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable"))?
-    {
-        let Some(decision) = decisions.get_for_event(&event).map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
-        })?
-        else {
-            return Err(ProtocolError::new(
-                ErrorCode::Unavailable,
-                "decision delivery record is inconsistent",
-            ));
-        };
-        let _ = decision;
-        decisions.ack_event(event.decision_id).map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
-        })?;
-    }
-    Ok(())
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
@@ -7153,12 +7222,17 @@ fn dispatch_metrics(
     }
 }
 
+struct SessionDispatchContext<'a> {
+    bound: &'a ConnectionWorkspace,
+    teardown: &'a TeardownSignal,
+    agent: &'a SharedAgentRuntime,
+    pr_inventory: &'a SharedPrInventory,
+    supervisor: &'a SharedSupervisorRuntime,
+}
+
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 fn dispatch_session(
-    bound: &ConnectionWorkspace,
-    teardown: &TeardownSignal,
-    agent: &SharedAgentRuntime,
-    pr_inventory: &SharedPrInventory,
+    context: &SessionDispatchContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -7177,15 +7251,7 @@ fn dispatch_session(
     let Some((action, operation_id, payload)) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
-    let result = dispatch_session_action(
-        bound,
-        teardown,
-        agent,
-        pr_inventory,
-        action,
-        &operation_id,
-        &payload,
-    );
+    let result = dispatch_session_action(context, action, &operation_id, &payload);
     session_response_envelope(action, result, request_id, hello)
 }
 
@@ -7205,6 +7271,7 @@ fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
 fn dispatch_mcp_child_claim(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
+    data_dir: &Path,
     peer_process: (u32, u32, u32),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
@@ -7253,16 +7320,27 @@ fn dispatch_mcp_child_claim(
         } else {
             bound.tenant.root().to_path_buf()
         };
-        Ok((credential, store_root))
+        let memory_root = data_dir
+            .join("agent-memory")
+            .join(bound.tenant.workspace_id().to_string())
+            .canonicalize()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "agent memory store is unavailable")
+            })?;
+        validate_owned_directory(&memory_root).map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "agent memory store is unavailable")
+        })?;
+        Ok((credential, store_root, memory_root))
     })();
     match result {
-        Ok((credential, store_root)) => envelope(
+        Ok((credential, store_root, memory_root)) => envelope(
             hello,
             request_id,
             ResponseOutcome::Ok,
             serde_json::json!({
                 "credential": credential,
                 "store_root": paths::wire_workspace_root(&store_root),
+                "memory_root": paths::wire_workspace_root(&memory_root),
             }),
         ),
         Err(error) => envelope(
@@ -7605,10 +7683,7 @@ fn clean_orphan_session_resources(
 #[allow(clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn dispatch_session_action(
-    bound: &ConnectionWorkspace,
-    teardown: &TeardownSignal,
-    agent: &SharedAgentRuntime,
-    pr_inventory: &SharedPrInventory,
+    context: &SessionDispatchContext<'_>,
     action: usagi_core::usecase::client::SessionAction,
     operation_id: &str,
     payload: &serde_json::Value,
@@ -7617,6 +7692,11 @@ fn dispatch_session_action(
     use usagi_core::usecase::client::SessionAction;
     use usagi_core::usecase::{issue, note};
     use usagi_daemon::usecase::agent_ipc::PromptMode;
+
+    let bound = context.bound;
+    let teardown = context.teardown;
+    let agent = context.agent;
+    let pr_inventory = context.pr_inventory;
 
     let reply = |body: serde_json::Value| {
         let revision = bound
@@ -7920,13 +8000,7 @@ fn dispatch_session_action(
             };
             reply(serde_json::json!({"session_id": scope.session_id, "scratchpad": body}))
         }
-        SessionAction::DelegateBrief => reply(delegate_brief(
-            bound,
-            teardown,
-            agent,
-            operation_id,
-            payload,
-        )?),
+        SessionAction::DelegateBrief => reply(delegate_brief(context, operation_id, payload)?),
         SessionAction::DelegateIssue => {
             let authenticated = payload
                 .get("_caller_credential")
@@ -8085,10 +8159,7 @@ fn dispatch_session_action(
                 .sleep_session(id)
                 .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
             let mut snapshot = dispatch_session_action(
-                bound,
-                teardown,
-                agent,
-                pr_inventory,
+                context,
                 SessionAction::List,
                 operation_id,
                 &serde_json::json!({}),
@@ -8312,15 +8383,20 @@ fn required_payload_string<'a>(
 /// a restart. A dispatch whose spawn outcome is *unknown* is deliberately not
 /// rolled back: the worktree may already hold a running worker, so the caller
 /// gets the session and run identity to reconcile instead.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
+#[allow(clippy::too_many_lines)] // Atomic create, reservation, spawn, compensation, and recovery stay visible as one transaction.
 fn delegate_brief(
-    bound: &ConnectionWorkspace,
-    teardown: &TeardownSignal,
-    agent: &SharedAgentRuntime,
+    context: &SessionDispatchContext<'_>,
     operation_id: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
     use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
+
+    let bound = context.bound;
+    let teardown = context.teardown;
+    let agent = context.agent;
+    let supervisor = context.supervisor;
 
     let brief = required_payload_string(payload, "brief")?;
     let suffix = operation_id
@@ -8338,7 +8414,7 @@ fn delegate_brief(
     let (runtime, model) = new_agent_selector(payload.get("agent"))?;
 
     let credential = required_payload_string(payload, "_caller_credential")?;
-    let (workspace, caller, repository_root) = {
+    let (workspace, parent_dispatch_run, caller, repository_root) = {
         let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
         let authenticated = runtime
             .mcp_dispatch_context(credential)
@@ -8359,6 +8435,7 @@ fn delegate_brief(
         }
         (
             workspace,
+            authenticated.run_id,
             authenticated.caller,
             sessions.repository_root().to_path_buf(),
         )
@@ -8399,13 +8476,34 @@ fn delegate_brief(
         session_name: name.clone(),
         caller,
         agent: DispatchAgentIntent::New { runtime, model },
-        prompt,
+        prompt: prompt.clone(),
     };
+    let supervised = supervisor
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .reserve_delegated_dispatch(
+            parent_dispatch_run,
+            operation_id,
+            prompt.clone(),
+            chrono::Utc::now(),
+        )
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .is_some();
     let admission =
         dispatch_agent_after_preflight(agent, operation_id, &dispatch_intent, id, &scope);
     let admission = match admission {
         Ok(admission) => admission,
         Err(error) => {
+            if supervised
+                && error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
+                && let Ok(runtime) = supervisor.lock()
+                && let Err(failure) =
+                    runtime.fail_reserved_delegated_dispatch(operation_id, chrono::Utc::now())
+            {
+                ErrorLog::record(&format!(
+                    "delegated Supervisor failure reconciliation deferred: {failure}"
+                ));
+            }
             return Err(compensate_delegation(
                 bound.sessions(),
                 teardown,
@@ -8416,6 +8514,22 @@ fn delegate_brief(
             ));
         }
     };
+    if supervised
+        && let Err(error) = bind_delegated_supervisor_dispatch(
+            supervisor,
+            &admission.operation_id,
+            &admission.runtime,
+        )
+    {
+        // The child Agent is already durable; exact-operation reconciliation
+        // finishes the promotion without asking the caller to retry the spawn.
+        ErrorLog::record(&format!("delegated Supervisor promotion deferred: {error}"));
+        if let Err(reconcile) = reconcile_pending_supervisor_promotions(supervisor, agent) {
+            ErrorLog::record(&format!(
+                "delegated Supervisor promotion reconciliation deferred: {reconcile}"
+            ));
+        }
+    }
     Ok(serde_json::json!({
         "name": name,
         "session_id": id,
@@ -8534,12 +8648,10 @@ enum AgentDispatchRequest {
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn admit_agent_dispatch_request(
     agent: &SharedAgentRuntime,
+    supervisor: &SharedSupervisorRuntime,
     scope: &dyn SessionScopeResolver,
     request: &AgentDispatchRequest,
-) -> Result<
-    usagi_daemon::usecase::agent_ipc::AgentAdmission,
-    usagi_core::infrastructure::ipc::ProtocolError,
-> {
+) -> Result<AgentDispatchAdmission, usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     let preflight = agent
         .lock()
@@ -8565,34 +8677,286 @@ fn admit_agent_dispatch_request(
             }
         })?;
     run_agent_readiness(agent, preflight.as_ref())?;
-    agent
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
-        .and_then(|mut owner| match request {
-            AgentDispatchRequest::Launch(operation_id, intent) => {
-                owner.launch_after_readiness(operation_id, intent, scope, preflight.as_ref())
-            }
-            AgentDispatchRequest::Goal(operation_id, intent) => {
-                owner.launch_goal_after_readiness(operation_id, intent, scope, preflight.as_ref())
-            }
-            AgentDispatchRequest::Resume(operation_id, target) => {
-                owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
-            }
-            AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
-                .resume_with_current_integration_after_readiness(
+    let reserved_goal = match request {
+        AgentDispatchRequest::Goal(operation_id, intent) => {
+            Some(reserve_goal_supervisor_run(supervisor, operation_id, intent)?.supervisor_run_id)
+        }
+        _ => None,
+    };
+    let admission_result =
+        agent
+            .lock()
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
+            .and_then(|mut owner| match request {
+                AgentDispatchRequest::Launch(operation_id, intent) => {
+                    owner.launch_after_readiness(operation_id, intent, scope, preflight.as_ref())
+                }
+                AgentDispatchRequest::Goal(operation_id, intent) => owner
+                    .launch_goal_after_readiness(operation_id, intent, scope, preflight.as_ref()),
+                AgentDispatchRequest::Resume(operation_id, target) => owner
+                    .resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref()),
+                AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
+                    .resume_with_current_integration_after_readiness(
+                        operation_id,
+                        target,
+                        *revision,
+                        scope,
+                        preflight.as_ref(),
+                    ),
+                AgentDispatchRequest::Inventory(_)
+                | AgentDispatchRequest::WorkspaceObservation(_)
+                | AgentDispatchRequest::Diagnose(_, _)
+                | AgentDispatchRequest::Restart(_, _, _, _) => {
+                    unreachable!("handled before readiness")
+                }
+            });
+    let admission = match admission_result {
+        Ok(admission) => admission,
+        Err(error) => {
+            if let AgentDispatchRequest::Goal(operation_id, _) = request
+                && error.code != ErrorCode::OwnershipUnknown
+                && let Ok(runtime) = supervisor.lock()
+            {
+                let _ = runtime.fail_reserved_goal(
                     operation_id,
-                    target,
-                    *revision,
-                    scope,
-                    preflight.as_ref(),
-                ),
-            AgentDispatchRequest::Inventory(_)
-            | AgentDispatchRequest::WorkspaceObservation(_)
-            | AgentDispatchRequest::Diagnose(_, _)
-            | AgentDispatchRequest::Restart(_, _, _, _) => {
-                unreachable!("handled before readiness")
+                    "Agent admission failed before Goal promotion".into(),
+                    chrono::Utc::now(),
+                );
             }
-        })
+            return Err(error);
+        }
+    };
+    if let AgentDispatchRequest::Goal(operation_id, _) = request
+        && let Err(error) = bind_goal_supervisor_run(supervisor, operation_id, &admission.runtime)
+    {
+        // The Goal reservation and Agent admission are both durable. Returning
+        // their accepted identities is safer than turning a post-spawn storage
+        // error into a client retry that launches another Agent. Startup and
+        // Agent-observer reconciliation retry the exact operation fence.
+        ErrorLog::record(&format!("Goal promotion deferred: {}", error.message));
+        if let Err(reconcile) = reconcile_pending_supervisor_promotions(supervisor, agent) {
+            ErrorLog::record(&format!(
+                "Goal promotion reconciliation deferred: {reconcile}"
+            ));
+        }
+    }
+    Ok(AgentDispatchAdmission {
+        admission,
+        supervisor_run_id: reserved_goal,
+    })
+}
+
+struct AgentDispatchAdmission {
+    admission: usagi_daemon::usecase::agent_ipc::AgentAdmission,
+    supervisor_run_id: Option<usagi_core::domain::supervisor::SupervisorRunId>,
+}
+
+fn goal_supervisor_caller(workspace: WorkspaceId) -> String {
+    format!("goal-composer:{workspace}")
+}
+
+fn reserve_goal_supervisor_run(
+    supervisor: &SharedSupervisorRuntime,
+    operation_id: &str,
+    intent: &usagi_core::usecase::client::AgentGoalIntent,
+) -> Result<
+    usagi_core::domain::supervisor::SupervisorRunQuery,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    use chrono::Utc;
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    supervisor
+        .lock()
+        .map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+        })?
+        .reserve_goal_for_workspace(
+            &goal_supervisor_caller(intent.workspace),
+            intent.workspace,
+            operation_id,
+            intent.goal.clone(),
+            Some("standard".into()),
+            Utc::now(),
+        )
+        .map_err(supervisor_error)
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=goal_supervisor_promotion_maps_a_poisoned_owner_to_unavailable
+fn bind_goal_supervisor_run(
+    supervisor: &SharedSupervisorRuntime,
+    operation_id: &str,
+    worker: &usagi_core::domain::id::AgentRuntimeRef,
+) -> Result<
+    usagi_core::domain::supervisor::SupervisorRunQuery,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    supervisor
+        .lock()
+        .map_err(|_| {
+            usagi_core::infrastructure::ipc::ProtocolError::new(
+                usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
+                "supervisor runtime is unavailable",
+            )
+        })?
+        .bind_reserved_workspace_root_dispatch(operation_id, worker, chrono::Utc::now())
+        .map_err(supervisor_error)
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=delegated_dispatch_is_reserved_before_spawn_and_reconciled_by_exact_operation
+fn bind_delegated_supervisor_dispatch(
+    supervisor: &SharedSupervisorRuntime,
+    operation_id: &str,
+    worker: &usagi_core::domain::id::AgentRuntimeRef,
+) -> anyhow::Result<()> {
+    let bound = supervisor
+        .lock()
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+        .bind_reserved_delegated_dispatch(operation_id, worker, chrono::Utc::now())?;
+    if bound.is_none() {
+        anyhow::bail!("delegated supervisor reservation does not exist");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn start_goal_supervisor_run(
+    supervisor: &SharedSupervisorRuntime,
+    operation_id: &str,
+    intent: &usagi_core::usecase::client::AgentGoalIntent,
+    worker: &usagi_core::domain::id::AgentRuntimeRef,
+) -> Result<
+    usagi_core::domain::supervisor::SupervisorRunQuery,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    reserve_goal_supervisor_run(supervisor, operation_id, intent)?;
+    bind_goal_supervisor_run(supervisor, operation_id, worker)
+}
+
+/// Replays only durable, exact Goal promotions. Missing Agent outcomes remain
+/// pending; definite Agent failures close the reservation; successful outcomes
+/// bind the persisted runtime fence without spawning anything.
+#[allow(clippy::too_many_lines)] // Root and delegated reservations share one best-effort reconciliation pass.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+fn reconcile_pending_supervisor_promotions(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+) -> anyhow::Result<usize> {
+    let pending = supervisor
+        .lock()
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+        .pending_goal_promotions()?;
+    let mut reconciled = 0;
+    let mut first_failure = None;
+    for item in pending {
+        let outcome = agent
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?
+            .operation_outcome(&item.operation_id);
+        match outcome {
+            Some(Ok(admission)) => {
+                let result = (|| {
+                    supervisor
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+                        .bind_reserved_workspace_root_dispatch(
+                            &item.operation_id,
+                            &admission.runtime,
+                            chrono::Utc::now(),
+                        )?;
+                    Ok::<_, anyhow::Error>(())
+                })();
+                if let Err(error) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "Goal promotion {} remains pending: {error}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(error))
+                if error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown =>
+            {
+                let result = (|| {
+                    supervisor
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+                        .fail_reserved_goal(
+                            &item.operation_id,
+                            "Agent admission failed before Goal promotion".into(),
+                            chrono::Utc::now(),
+                        )?;
+                    Ok::<_, anyhow::Error>(())
+                })();
+                if let Err(failure) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "Goal failure {} remains pending: {failure}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(_)) | None => {}
+        }
+    }
+    let pending = supervisor
+        .lock()
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+        .pending_delegated_promotions()?;
+    for item in pending {
+        let outcome = agent
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?
+            .operation_outcome(&item.operation_id);
+        match outcome {
+            Some(Ok(admission)) => {
+                let result = bind_delegated_supervisor_dispatch(
+                    supervisor,
+                    &item.operation_id,
+                    &admission.runtime,
+                );
+                if let Err(error) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "delegated promotion {} remains pending: {error}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(error))
+                if error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown =>
+            {
+                let result = (|| {
+                    supervisor
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+                        .fail_reserved_delegated_dispatch(&item.operation_id, chrono::Utc::now())?;
+                    Ok::<_, anyhow::Error>(())
+                })();
+                if let Err(failure) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "delegated failure {} remains pending: {failure}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(_)) | None => {}
+        }
+    }
+    first_failure.map_or(Ok(reconciled), Err)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
@@ -8663,6 +9027,7 @@ fn dispatch_agent_maintenance(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn dispatch_agent(
     agent: &SharedAgentRuntime,
+    supervisor: &SharedSupervisorRuntime,
     bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
@@ -8731,9 +9096,11 @@ fn dispatch_agent(
     }
     // The first owner visit captures immutable facts, the provider command runs
     // after its guard is dropped, and the second visit repeats every fence.
-    let result = admit_agent_dispatch_request(agent, &scope, &request);
+    let result = admit_agent_dispatch_request(agent, supervisor, &scope, &request);
     match result {
-        Ok(admission) => {
+        Ok(result) => {
+            let supervisor_run_id = result.supervisor_run_id;
+            let admission = result.admission;
             // `Ok` is the durable final — direct or replayed after a reconnect —
             // and `ResponseOutcome::Ok` carries no envelope operation identity, so
             // the body is what makes the final correlatable to the producer's
@@ -8750,19 +9117,18 @@ fn dispatch_agent(
                     operation_revision: admission.revision,
                 }
             };
-            envelope(
-                hello,
-                request_id,
-                outcome,
-                serde_json::json!({
-                    "operation_id": admission.operation_id,
-                    "semantic_digest": admission.semantic_digest,
-                    "terminal": admission.terminal,
-                    "continuation": admission.continuation,
-                    "resume_relation": admission.resume_relation,
-                    "completed": admission.completed,
-                }),
-            )
+            let mut body = serde_json::json!({
+                "operation_id": admission.operation_id,
+                "semantic_digest": admission.semantic_digest,
+                "terminal": admission.terminal,
+                "continuation": admission.continuation,
+                "resume_relation": admission.resume_relation,
+                "completed": admission.completed,
+            });
+            if let Some(supervisor_run_id) = supervisor_run_id {
+                body["supervisor_run_id"] = serde_json::json!(supervisor_run_id);
+            }
+            envelope(hello, request_id, outcome, body)
         }
         Err(error) => envelope(
             hello,
@@ -10601,6 +10967,7 @@ impl AcceptedStream {
     /// Observes a peer close without consuming bytes that may belong to a later
     /// request. The retained duplicate is already owned for retirement, so this
     /// adds no descriptor to a waiting decision.
+    #[cfg(test)]
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
     fn peer_disconnected(&self) -> bool {
         if self.retired.load(Ordering::Acquire) {
@@ -10663,13 +11030,6 @@ impl AcceptedStream {
             }
             return error.kind() != std::io::ErrorKind::WouldBlock;
         }
-    }
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
-impl DecisionWaitCancellation for AcceptedStream {
-    fn is_cancelled(&self) -> bool {
-        self.peer_disconnected()
     }
 }
 
@@ -13809,8 +14169,8 @@ mod tests {
 
     use usagi_core::domain::{
         id::{
-            ClientId, ConnectionId, DaemonGeneration, RequestId, SessionId, TerminalId,
-            WorkspaceId, WorktreeId,
+            AgentRuntimeId, AgentRuntimeRef, ClientId, ConnectionId, DaemonGeneration, RequestId,
+            SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
         },
         terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId},
     };
@@ -17783,109 +18143,6 @@ mod tests {
         assert!(!data_dir.exists());
     }
 
-    fn pending_decision(
-        store: &UserDecisionStore,
-    ) -> usagi_core::domain::user_decision::UserDecision {
-        use usagi_core::domain::{
-            agent::CallerRef,
-            id::{AgentId, OperationId, UserDecisionId},
-            user_decision::{
-                UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionStatus,
-            },
-        };
-
-        store
-            .create(UserDecision {
-                decision_id: UserDecisionId::new(),
-                owner: UserDecisionOwner {
-                    workspace_id: WorkspaceId::new(),
-                    session_id: Some(SessionId::new()),
-                    caller: CallerRef {
-                        session_id: Some(SessionId::new()),
-                        agent_id: AgentId::new(),
-                    },
-                    run_id: OperationId::new(),
-                },
-                title: "Choose".into(),
-                prompt: "Continue?".into(),
-                options: vec![UserDecisionOption {
-                    id: "yes".into(),
-                    label: "Yes".into(),
-                    description: None,
-                }],
-                allow_freeform: false,
-                expires_at: None,
-                idempotency_key: Some("decision-wait-test".into()),
-                status: UserDecisionStatus::Pending,
-                answer: None,
-                created_at: chrono::Utc::now(),
-                resolved_at: None,
-            })
-            .unwrap()
-            .unwrap()
-    }
-
-    fn wait_until_decision_waiter_is_registered(
-        waiters: &DecisionWaiters,
-        decision_id: usagi_core::domain::id::UserDecisionId,
-    ) {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while waiters.waiting_count(decision_id) == 0 {
-            assert!(
-                Instant::now() < deadline,
-                "decision waiter did not register"
-            );
-            std::thread::yield_now();
-        }
-    }
-
-    #[test]
-    fn decision_transition_notifies_the_synchronous_waiter() {
-        use usagi_core::domain::user_decision::UserDecisionAnswer;
-
-        struct NeverCancelled;
-        impl DecisionWaitCancellation for NeverCancelled {
-            fn is_cancelled(&self) -> bool {
-                false
-            }
-        }
-
-        let home = tempfile::tempdir_in("/tmp").unwrap();
-        let store = Arc::new(UserDecisionStore::new(home.path()));
-        let decision = pending_decision(&store);
-        let waiters = Arc::new(DecisionWaiters::default());
-        let waiting_store = Arc::clone(&store);
-        let waiting_registry = Arc::clone(&waiters);
-        let requested = decision.clone();
-        let handle = std::thread::spawn(move || {
-            wait_for_user_decision(
-                &waiting_store,
-                &waiting_registry,
-                &NeverCancelled,
-                requested.owner.workspace_id,
-                &requested,
-            )
-        });
-        wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
-
-        store
-            .resolve(
-                decision.owner.workspace_id,
-                decision.decision_id,
-                UserDecisionAnswer::Option {
-                    option_id: "yes".into(),
-                },
-                chrono::Utc::now(),
-            )
-            .unwrap()
-            .unwrap();
-        waiters.notify(decision.decision_id);
-
-        let response = handle.join().unwrap().unwrap();
-        assert_eq!(response["status"], "resolved");
-        assert_eq!(waiters.waiting_count(decision.decision_id), 0);
-    }
-
     #[test]
     fn accepted_stream_observes_peer_close_behind_buffered_data() {
         let (server, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -17909,91 +18166,6 @@ mod tests {
     }
 
     #[test]
-    fn disconnected_client_releases_a_pending_decision_waiter_without_mutating_it() {
-        let home = tempfile::tempdir_in("/tmp").unwrap();
-        let store = Arc::new(UserDecisionStore::new(home.path()));
-        let decision = pending_decision(&store);
-        let waiters = Arc::new(DecisionWaiters::default());
-        let (server, peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let cancellation = AcceptedStream::new(server);
-        let waiting_store = Arc::clone(&store);
-        let waiting_registry = Arc::clone(&waiters);
-        let requested = decision.clone();
-        let handle = std::thread::spawn(move || {
-            wait_for_user_decision(
-                &waiting_store,
-                &waiting_registry,
-                &cancellation,
-                requested.owner.workspace_id,
-                &requested,
-            )
-        });
-        wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
-
-        drop(peer);
-        assert!(matches!(
-            handle.join().unwrap(),
-            Err(UserDecisionDispatchError::Cancelled)
-        ));
-        let retained = store
-            .get(decision.owner.workspace_id, decision.decision_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            retained.status,
-            usagi_core::domain::user_decision::UserDecisionStatus::Pending
-        );
-        assert_eq!(waiters.waiting_count(decision.decision_id), 0);
-    }
-
-    #[test]
-    fn rollover_control_barrier_cancels_a_pending_decision_before_waiting_for_its_lease() {
-        let home = tempfile::tempdir_in("/tmp").unwrap();
-        let store = Arc::new(UserDecisionStore::new(home.path()));
-        let decision = pending_decision(&store);
-        let waiters = Arc::new(DecisionWaiters::default());
-        let (server, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
-        let lease = gate.acquire(LeaseClass::ActiveControl).unwrap();
-        let cancellation = DecisionConnectionCancellation {
-            connection: AcceptedStream::new(server),
-            gate: gate.clone(),
-        };
-        let waiting_store = Arc::clone(&store);
-        let waiting_registry = Arc::clone(&waiters);
-        let requested = decision.clone();
-        let handle = std::thread::spawn(move || {
-            let _lease = lease;
-            assert!(matches!(
-                wait_for_user_decision(
-                    &waiting_store,
-                    &waiting_registry,
-                    &cancellation,
-                    requested.owner.workspace_id,
-                    &requested,
-                ),
-                Err(UserDecisionDispatchError::Cancelled)
-            ));
-        });
-        wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
-
-        let started = Instant::now();
-        gate.close(LeaseClass::ActiveControl);
-        gate.await_drain(LeaseClass::ActiveControl).unwrap();
-        handle.join().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(waiters.waiting_count(decision.decision_id), 0);
-        let retained = store
-            .get(decision.owner.workspace_id, decision.decision_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            retained.status,
-            usagi_core::domain::user_decision::UserDecisionStatus::Pending
-        );
-    }
-
-    #[test]
     fn decision_maintenance_never_writes_when_nothing_is_due_and_honors_shutdown() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let daemon = home.path().join("daemon");
@@ -18003,13 +18175,8 @@ mod tests {
         let shutdown = Arc::new(ShutdownRequest::new());
         let stopper = Arc::clone(&shutdown);
 
-        let handle = spawn_decision_maintenance(
-            decisions,
-            Arc::new(DecisionWaiters::default()),
-            shutdown,
-            Duration::from_millis(1),
-        )
-        .unwrap();
+        let handle =
+            spawn_decision_maintenance(decisions, shutdown, Duration::from_millis(1)).unwrap();
         // Let several ticks run, then stop: the worker must observe the request
         // rather than needing its tick to be short.
         std::thread::sleep(Duration::from_millis(30));
@@ -18039,7 +18206,6 @@ mod tests {
         shutdown.request();
         spawn_decision_maintenance(
             Arc::new(UserDecisionStore::new(daemon)),
-            Arc::new(DecisionWaiters::default()),
             shutdown,
             Duration::from_secs(30),
         )
@@ -19266,6 +19432,33 @@ instructions = "{instructions}"
 
         let roots = root_agent_writable_roots(None, "/bin/sh").unwrap();
         assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn agent_memory_root_is_shared_by_workspace_and_outside_the_checkout() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
+        let workspace = WorkspaceId::new();
+
+        let root = root_memory_store_root(&data_home, workspace).unwrap();
+
+        assert_eq!(
+            root,
+            fixture
+                .path()
+                .join("agent-memory")
+                .join(workspace.to_string())
+                .canonicalize()
+                .unwrap()
+        );
+        assert!(root.join(".usagi/memory").is_dir());
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[test]
@@ -22258,6 +22451,7 @@ instructions = "{instructions}"
         generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
         hello: &usagi_core::infrastructure::ipc::ClientHello,
         authenticated: Option<&usagi_core::domain::agent::CallerRef>,
+        workspace: WorkspaceId,
         body: serde_json::Value,
     ) -> (
         usagi_core::infrastructure::ipc::ResponseOutcome,
@@ -22314,7 +22508,7 @@ instructions = "{instructions}"
                             "supervisor caller provenance is unknown",
                         ))
                     },
-                    |caller| Ok(supervisor_caller_descriptor(&client, caller)),
+                    |caller| Ok((supervisor_caller_descriptor(&client, caller), workspace)),
                 );
                 dispatch_supervisor_tool(runtime, caller, request_id, &body, server)
             },
@@ -22351,14 +22545,7 @@ instructions = "{instructions}"
     #[test]
     #[allow(clippy::too_many_lines)] // One matrix keeps every authority transition on one durable run.
     fn supervisor_authority_survives_reconnect_and_rollover_but_not_forgery_or_restart() {
-        use chrono::Utc;
-        use usagi_core::domain::{
-            agent::CallerRef,
-            id::{AgentId, OperationId},
-            supervisor::{
-                EscalationDecision, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
-            },
-        };
+        use usagi_core::domain::{agent::CallerRef, id::AgentId, supervisor::EscalationDecision};
         use usagi_core::infrastructure::{
             ipc::{ErrorCode, ResponseOutcome},
             store::supervisor::SupervisorStore,
@@ -22370,6 +22557,7 @@ instructions = "{instructions}"
             session_id: Some(SessionId::new()),
             agent_id: AgentId::new(),
         };
+        let workspace = WorkspaceId::new();
         let hello = fence_client_hello(Vec::new());
         let first_generation = ipc_generation();
         let start = supervisor_request(
@@ -22385,10 +22573,17 @@ instructions = "{instructions}"
             &first_generation,
             &hello,
             Some(&caller),
+            workspace,
             start.clone(),
         );
-        let (retry_outcome, retry_body) =
-            serve_supervisor_request(&runtime, &first_generation, &hello, Some(&caller), start);
+        let (retry_outcome, retry_body) = serve_supervisor_request(
+            &runtime,
+            &first_generation,
+            &hello,
+            Some(&caller),
+            workspace,
+            start,
+        );
         assert_eq!(retry_outcome, ResponseOutcome::Ok);
         let run_id = retry_body["supervisor_run_id"].as_str().unwrap();
 
@@ -22411,37 +22606,16 @@ instructions = "{instructions}"
                 &rollover,
                 &hello,
                 Some(&caller),
+                workspace,
                 supervisor_request(action, "observe", payload),
             );
             assert_eq!(outcome, ResponseOutcome::Ok);
         }
 
-        // Put the aggregate in a real durable escalation so the authorized
-        // resolve path is exercised through the dispatcher too.
+        // Start's initial tick detects that no worker reservation was produced,
+        // so its durable escalation also exercises the authorized resolve path.
         let store = SupervisorStore::new(temp.path());
         let id = serde_json::from_value(retry_body["supervisor_run_id"].clone()).unwrap();
-        let run = store.load(id).unwrap().unwrap();
-        store
-            .apply(
-                id,
-                run.state_revision,
-                &SupervisorEvent {
-                    sequence: run.state_revision + 1,
-                    event_id: OperationId::new(),
-                    causation_id: None,
-                    correlation_id: None,
-                    observed_at: Utc::now(),
-                    payload_digest: "test-escalation".into(),
-                    source: SupervisorEventSource::Admission,
-                    kind: SupervisorEventKind::Escalate {
-                        task_id: None,
-                        reason: "operator decision required".into(),
-                        safe_evidence: "fixture".into(),
-                        choices: vec!["resume".into()],
-                    },
-                },
-            )
-            .unwrap();
         let escalated = store.load(id).unwrap().unwrap();
         let actual_escalation = escalated.escalation.unwrap().escalation_id;
         let (resolved, _) = serve_supervisor_request(
@@ -22449,6 +22623,7 @@ instructions = "{instructions}"
             &rollover,
             &hello,
             Some(&caller),
+            workspace,
             supervisor_request(
                 SupervisorToolAction::ResolveEscalation,
                 "resolve",
@@ -22510,6 +22685,7 @@ instructions = "{instructions}"
                     &rollover,
                     candidate_hello,
                     authenticated,
+                    workspace,
                     supervisor_request(action, operation, payload),
                 );
                 assert!(matches!(outcome, ResponseOutcome::Error(_)));
@@ -22520,6 +22696,7 @@ instructions = "{instructions}"
                 &rollover,
                 candidate_hello,
                 authenticated,
+                workspace,
                 supervisor_request(
                     SupervisorToolAction::List,
                     "foreign-list",
@@ -22536,6 +22713,7 @@ instructions = "{instructions}"
             &rollover,
             &hello,
             None,
+            workspace,
             supervisor_request(
                 SupervisorToolAction::Cancel,
                 "missing-capability",
@@ -22552,6 +22730,7 @@ instructions = "{instructions}"
             &ipc_generation(),
             &hello,
             None,
+            workspace,
             supervisor_request(
                 SupervisorToolAction::Get,
                 "restart",
@@ -22567,6 +22746,7 @@ instructions = "{instructions}"
             &rollover,
             &hello,
             Some(&caller),
+            workspace,
             supervisor_request(
                 SupervisorToolAction::Cancel,
                 "cancel",
@@ -22574,6 +22754,160 @@ instructions = "{instructions}"
             ),
         );
         assert_eq!(cancelled, ResponseOutcome::Ok);
+    }
+
+    #[test]
+    fn supervisor_snapshot_is_exactly_workspace_scoped() {
+        use chrono::Utc;
+        use usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot;
+        use usagi_core::infrastructure::ipc::{EnvelopeKind, ErrorCode, ResponseOutcome};
+        use usagi_daemon::usecase::session_runtime::SessionRuntime;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        let sessions = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                repository.clone(),
+                &temporary.path().join("session-daemon"),
+                DaemonGeneration::new(),
+                AlwaysSuccessfulGit,
+                PermissiveSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        let workspace: WorkspaceId = serde_json::from_value(
+            sessions.lock().unwrap().snapshot().unwrap()["workspace_id"].clone(),
+        )
+        .unwrap();
+        let bound = bound_to(
+            &temporary.path().join("tenants"),
+            &repository,
+            sessions,
+            workspace,
+        );
+        let runtime = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("supervisor"),
+        )));
+        let visible = runtime
+            .lock()
+            .unwrap()
+            .start_for_workspace(
+                "caller",
+                workspace,
+                "start",
+                "root".into(),
+                Vec::new(),
+                None,
+                Utc::now(),
+            )
+            .unwrap();
+        let request_id = usagi_core::infrastructure::ipc::RequestId("snapshot".into());
+        let request =
+            serde_json::to_value(DaemonRequest::SupervisorSnapshot { workspace }).unwrap();
+        let reply = dispatch_supervisor_snapshot(
+            &runtime,
+            &bound,
+            request_id.clone(),
+            &request,
+            &session_test_hello(),
+        );
+        let EnvelopeKind::Response { outcome, body, .. } = reply.kind else {
+            panic!("supervisor snapshot returned a non-response envelope");
+        };
+        assert_eq!(outcome, ResponseOutcome::Ok);
+        let snapshot: SupervisorWorkspaceSnapshot = serde_json::from_value(body).unwrap();
+        assert_eq!(snapshot.workspace_id, workspace);
+        assert_eq!(snapshot.runs.len(), 1);
+        assert_eq!(
+            snapshot.runs[0].supervisor_run_id,
+            visible.supervisor_run_id
+        );
+        assert!(snapshot.runs[0].provenance.is_empty());
+
+        let foreign = serde_json::to_value(DaemonRequest::SupervisorSnapshot {
+            workspace: WorkspaceId::new(),
+        })
+        .unwrap();
+        let rejected = dispatch_supervisor_snapshot(
+            &runtime,
+            &bound,
+            request_id,
+            &foreign,
+            &session_test_hello(),
+        );
+        let EnvelopeKind::Response { outcome, .. } = rejected.kind else {
+            panic!("supervisor snapshot returned a non-response envelope");
+        };
+        assert!(
+            matches!(outcome, ResponseOutcome::Error(error) if error.code == ErrorCode::OwnershipUnknown)
+        );
+    }
+
+    #[test]
+    fn goal_supervisor_promotion_maps_a_poisoned_owner_to_unavailable() {
+        use usagi_core::domain::{
+            agent::{DispatchRun, RunStatus},
+            id::AgentId,
+        };
+        use usagi_core::infrastructure::store::dispatch::DispatchStore;
+        use usagi_core::usecase::client::AgentGoalIntent;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceId::new();
+        let intent = AgentGoalIntent {
+            workspace,
+            profile: None,
+            goal: "prepare the requested change for review".into(),
+        };
+        let operation = usagi_core::domain::id::OperationId::new().to_string();
+        let worker = AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            },
+            None,
+        )
+        .unwrap();
+        let healthy = Arc::new(Mutex::new(SupervisorRuntime::new(temporary.path())));
+        DispatchStore::new(temporary.path())
+            .upsert_run(DispatchRun {
+                run_id: usagi_core::domain::id::OperationId::parse(&operation).unwrap(),
+                agent_id: AgentId::new(),
+                prompt: String::new(),
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let started = start_goal_supervisor_run(&healthy, &operation, &intent, &worker).unwrap();
+        assert_eq!(
+            started.tasks[0].state,
+            usagi_core::domain::supervisor::TaskState::Dispatched
+        );
+        assert_eq!(
+            goal_supervisor_caller(workspace),
+            format!("goal-composer:{workspace}")
+        );
+
+        let poisoned = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("poisoned"),
+        )));
+        let poison_owner = Arc::clone(&poisoned);
+        std::thread::spawn(move || {
+            let _guard = poison_owner.lock().unwrap();
+            panic!("poison supervisor runtime for the unavailable-path fixture");
+        })
+        .join()
+        .unwrap_err();
+        let error = start_goal_supervisor_run(&poisoned, &operation, &intent, &worker).unwrap_err();
+        assert_eq!(
+            error.code,
+            usagi_core::infrastructure::ipc::ErrorCode::Unavailable
+        );
     }
 
     #[test]

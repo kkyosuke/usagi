@@ -66,6 +66,9 @@ Unite では Space で複数の workspace を選び、Enter で registry 順に�
 ディレクトリを指す registry entry の削除を確認し、`y` でだけ削除する。Welcome 右側の Recent は
 最終利用日時が新しい順に最大 3 件を表示し、`1`〜`3` で一覧を経由せず同じ Workspace 画面を開く。
 どちらの導線も開いた workspace の最終利用日時を更新する。
+Open、Recent、Unite のいずれでも、選択した workspace のディレクトリが存在しない場合は開く前に
+`Workspace not found` モーダルを表示する。`Remove` は欠損を再確認して registry entry だけを削除し、
+確認中にディレクトリが復活した場合や permission error で欠損と断定できない場合は削除しない。
 
 Welcome の **New** を選ぶと新規 workspace 作成フォーム（New 画面）へ進む。`↑↓` でフィールドを移り、
 モード選択では `←→` で Clone / Existing を切り替え、テキスト欄では文字入力・Backspace・`←→` の

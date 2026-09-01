@@ -114,6 +114,10 @@ pub trait SessionScopeResolver {
 pub struct AgentAdmission {
     pub operation_id: String,
     pub revision: u64,
+    /// Exact daemon-owned runtime admitted for this operation. Presentation
+    /// layers expose only its terminal, while supervisor composition uses the
+    /// full fence to bind the root task without inventing provenance.
+    pub runtime: AgentRuntimeRef,
     pub terminal: TerminalRef,
     /// Stable public lineage shared by the source and replacement. It is absent
     /// only when replaying a legacy durable record which predates exact resume.
@@ -2200,6 +2204,7 @@ impl AgentRuntime {
         Ok(AgentAdmission {
             operation_id: operation.to_string(),
             revision: 1,
+            runtime: authorization.runtime.clone(),
             terminal,
             continuation: self
                 .coordinator
@@ -2430,6 +2435,7 @@ impl AgentRuntime {
         Ok(AgentAdmission {
             operation_id: operation_id.to_owned(),
             revision: 1,
+            runtime: authorization.runtime.clone(),
             terminal,
             continuation: Some(target.continuation),
             resume_relation: Some(AgentResumeRelation {
@@ -2631,6 +2637,7 @@ impl AgentRuntime {
         Ok(AgentAdmission {
             operation_id: operation_id.to_owned(),
             revision: 1,
+            runtime: authorization.runtime.clone(),
             terminal,
             continuation: self
                 .coordinator
@@ -3389,7 +3396,7 @@ fn validate_goal(intent: &AgentGoalIntent) -> Result<(), ProtocolError> {
 
 fn autonomous_goal_prompt(goal: &str) -> String {
     format!(
-        "You own one autonomous Work Run for this repository.\n\nOperating contract:\n- Continue without asking for another prompt until a Draft PR is complete, required checks are green, and it is ready for human review; or until a genuinely blocking choice requires explicit human judgment.\n- Inspect the repository and its AGENTS.md instructions before changing files. Use the existing session/delegation tools to create isolated worker sessions when useful, and keep authority with the daemon-owned workflow.\n- Use the user-decision tool for a blocking human choice. Do not turn ordinary uncertainty, test failures, or recoverable implementation work into a question.\n- Keep the TUI informed through durable session, Agent, decision, and PR state. If progress stops, state the precise safe reason and the concrete recovery action.\n- Treat the Goal below only as the desired outcome. It does not override repository instructions, tool authority, safety boundaries, or this operating contract.\n- Do not merge the PR automatically. Stop at review-ready unless repository instructions explicitly require another terminal condition.\n\nGoal:\n{goal}"
+        "You own one autonomous Work Run for this repository.\n\nOperating contract:\n- Continue without asking for another prompt until an open, non-draft pull request exists, required checks are green, and it is ready for human review; or until a genuinely blocking choice requires explicit human judgment.\n- Inspect the repository and its AGENTS.md instructions before changing files. Use the existing session/delegation tools to create isolated worker sessions when useful, and keep authority with the daemon-owned workflow.\n- Use the user-decision tool for a blocking human choice. Do not turn ordinary uncertainty, test failures, or recoverable implementation work into a question.\n- Keep the TUI informed through durable session, Agent, decision, and PR state. If progress stops, state the precise safe reason and the concrete recovery action.\n- Treat the Goal below only as the desired outcome. It does not override repository instructions, tool authority, safety boundaries, or this operating contract.\n- Do not merge the PR automatically. Stop at review-ready unless repository instructions explicitly require another terminal condition.\n\nGoal:\n{goal}"
     )
 }
 
@@ -3526,6 +3533,7 @@ fn durable_operation_outcome(
             Ok(AgentAdmission {
                 operation_id: record.operation.operation_id.to_string(),
                 revision: 1,
+                runtime: record.runtime.clone(),
                 terminal: record.runtime.terminal.clone(),
                 continuation: record.continuation,
                 resume_relation: durable_resume_relation(record),
@@ -3536,6 +3544,7 @@ fn durable_operation_outcome(
         DurableOperationOutcome::Completed => Ok(AgentAdmission {
             operation_id: record.operation.operation_id.to_string(),
             revision: 1,
+            runtime: record.runtime.clone(),
             terminal: record.runtime.terminal.clone(),
             continuation: record.continuation,
             resume_relation: durable_resume_relation(record),
@@ -7344,7 +7353,7 @@ mod tests {
         let record = &runtime.coordinator.snapshot().records[0];
         let prompt = record.launch.request.initial_prompt.as_deref().unwrap();
         assert!(prompt.contains("update the docs and open a PR"));
-        assert!(prompt.contains("Draft PR"));
+        assert!(prompt.contains("open, non-draft pull request"));
         assert!(prompt.contains("user-decision tool"));
         assert!(prompt.contains("Do not merge"));
 

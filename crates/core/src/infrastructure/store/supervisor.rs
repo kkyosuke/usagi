@@ -73,6 +73,8 @@ struct JournalIndex {
 struct RunListIndexEntry {
     supervisor_run_id: SupervisorRunId,
     root_caller_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<crate::domain::id::WorkspaceId>,
     created_at: DateTime<Utc>,
     state: SupervisorRunState,
     state_revision: u64,
@@ -83,6 +85,7 @@ impl From<&SupervisorRun> for RunListIndexEntry {
         Self {
             supervisor_run_id: run.supervisor_run_id,
             root_caller_ref: run.root_caller_ref.clone(),
+            workspace_id: run.workspace_id,
             created_at: run.created_at,
             state: run.state,
             state_revision: run.state_revision,
@@ -90,9 +93,20 @@ impl From<&SupervisorRun> for RunListIndexEntry {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct RunListIndex {
+    #[serde(default)]
+    schema: u32,
     entries: Vec<RunListIndexEntry>,
+}
+
+impl Default for RunListIndex {
+    fn default() -> Self {
+        Self {
+            schema: 1,
+            entries: Vec::new(),
+        }
+    }
 }
 
 /// Bounded `supervisor_list` result. The cursor is an opaque position in the
@@ -174,8 +188,8 @@ impl SupervisorStore {
 
     /// Delete the finished runs past [`RUN_RETENTION`], oldest first.
     ///
-    /// Only terminal runs are eligible: a run still planning, running, verifying
-    /// or waiting on a person is live state, whatever its age. Each removal takes
+    /// Only finished runs are eligible: a run still planning, running, verifying,
+    /// escalated, or otherwise waiting on a person is live state, whatever its age. Each removal takes
     /// the snapshot, journal and checkpoint together, and the snapshot goes last
     /// so an interrupted prune leaves a run that [`Self::runs`] can still read
     /// and that the next prune will finish.
@@ -196,7 +210,7 @@ impl SupervisorStore {
         let mut finished: Vec<(DateTime<Utc>, SupervisorRunId)> = self
             .runs()?
             .into_iter()
-            .filter(|run| run.state.terminal())
+            .filter(|run| run.state.is_finished())
             .map(|run| {
                 (
                     run.terminal_at.unwrap_or(run.updated_at),
@@ -406,6 +420,56 @@ impl SupervisorStore {
         self.runs_page_with_budget(caller, state, cursor, limit, RUN_LIST_RESPONSE_MAX_BYTES)
     }
 
+    /// Lists a bounded priority-ordered workspace projection while hydrating
+    /// only the selected snapshots. The derived index carries workspace,
+    /// state, and creation time; legacy entries rebuild once under schema 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested limit is zero or durable index and
+    /// snapshot state cannot be read consistently.
+    pub fn workspace_runs(
+        &self,
+        workspace: crate::domain::id::WorkspaceId,
+        limit: usize,
+    ) -> Result<Vec<SupervisorRunQuery>> {
+        if limit == 0 {
+            bail!("supervisor workspace list limit must be positive");
+        }
+        let index = self.run_list_index()?;
+        let mut entries = index
+            .entries
+            .iter()
+            .filter(|entry| entry.workspace_id == Some(workspace))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| {
+            let priority = match entry.state {
+                SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated => 0,
+                SupervisorRunState::Failed => 1,
+                SupervisorRunState::Running | SupervisorRunState::Verifying => 2,
+                SupervisorRunState::Planning => 3,
+                SupervisorRunState::Succeeded | SupervisorRunState::Cancelled => 4,
+            };
+            (
+                priority,
+                std::cmp::Reverse(entry.created_at),
+                std::cmp::Reverse(entry.supervisor_run_id),
+            )
+        });
+        let mut runs = Vec::new();
+        for entry in entries.into_iter().take(limit) {
+            let run = self
+                .load(entry.supervisor_run_id)?
+                .context("supervisor indexed snapshot disappeared")?;
+            if RunListIndexEntry::from(&run) != *entry {
+                self.run_list_index_trusted.set(false);
+                return self.workspace_runs(workspace, limit);
+            }
+            runs.push(run.query());
+        }
+        Ok(runs)
+    }
+
     fn runs_page_with_budget(
         &self,
         caller: &str,
@@ -482,6 +546,9 @@ impl SupervisorStore {
     }
 
     fn run_list_index_is_valid(&self, index: &RunListIndex) -> Result<bool> {
+        if index.schema != 1 {
+            return Ok(false);
+        }
         if index.entries.len() != self.snapshot_count()? {
             return Ok(false);
         }
@@ -544,6 +611,7 @@ impl SupervisorStore {
             }
             let index = RunListIndex {
                 entries: vec![RunListIndexEntry::from(run)],
+                ..RunListIndex::default()
             };
             if json_file::write_atomic(&self.dir, &self.run_list_index_path(), &index).is_ok() {
                 self.run_list_index_trusted.set(true);
@@ -890,7 +958,7 @@ impl SupervisorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::id::OperationId;
+    use crate::domain::id::{OperationId, WorkspaceId};
     use crate::domain::supervisor::{
         SupervisorEventKind, SupervisorEventSource, SupervisorRunState,
     };
@@ -1422,13 +1490,16 @@ mod tests {
 
         // The oldest run of all, still waiting on a person. Age is not what
         // makes a run eligible; being finished is.
-        let live = SupervisorRun::new(
+        let mut live = SupervisorRun::new(
             "caller".into(),
             "task".into(),
             "input".into(),
             "policy".into(),
             now(),
         );
+        live.state = SupervisorRunState::Escalated;
+        live.terminal_at = Some(live.created_at);
+        live.terminal_reason = Some("waiting for a human decision".into());
         let live_id = live.supervisor_run_id;
         store.initialize(&live).unwrap();
 
@@ -1448,7 +1519,7 @@ mod tests {
         }
 
         let kept = store.runs().unwrap();
-        let kept_finished = kept.iter().filter(|run| run.state.terminal()).count();
+        let kept_finished = kept.iter().filter(|run| run.state.is_finished()).count();
         assert!(
             kept_finished <= RUN_RETENTION,
             "supervisor history grew past its bound: {kept_finished}"
@@ -1681,6 +1752,103 @@ mod tests {
                 .to_string()
                 .contains("capacity is exhausted")
         );
+    }
+
+    #[test]
+    fn workspace_run_index_hydrates_only_the_bounded_matching_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let foreign = WorkspaceId::new();
+        let mut expected = Vec::new();
+        for index in 0..24 {
+            let mut run = SupervisorRun::new(
+                "caller".into(),
+                format!("task-{index}"),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(index),
+            );
+            run.workspace_id = Some(if index % 2 == 0 { workspace } else { foreign });
+            run.state = SupervisorRunState::Running;
+            if index % 2 == 0 {
+                expected.push(run.supervisor_run_id);
+            }
+            store.initialize(&run).unwrap();
+        }
+        store.run_snapshots_read.set(0);
+        let page = store.workspace_runs(workspace, 3).unwrap();
+        assert_eq!(page.len(), 3);
+        assert_eq!(store.run_snapshots_read.get(), 3);
+        assert_eq!(
+            page.iter()
+                .map(|run| run.supervisor_run_id)
+                .collect::<Vec<_>>(),
+            expected.into_iter().rev().take(3).collect::<Vec<_>>()
+        );
+
+        let mut legacy_index = store.run_list_index().unwrap();
+        legacy_index.schema = 0;
+        json_file::write_atomic(&store.dir, &store.run_list_index_path(), &legacy_index).unwrap();
+        store.run_list_index_trusted.set(true);
+        assert_eq!(store.workspace_runs(workspace, 1).unwrap().len(), 1);
+        assert_eq!(store.run_list_index().unwrap().schema, 1);
+    }
+
+    #[test]
+    fn workspace_runs_prioritize_every_state_and_rebuild_stale_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let states = [
+            SupervisorRunState::Planning,
+            SupervisorRunState::Running,
+            SupervisorRunState::WaitingForDecision,
+            SupervisorRunState::Verifying,
+            SupervisorRunState::Succeeded,
+            SupervisorRunState::Failed,
+            SupervisorRunState::Cancelled,
+            SupervisorRunState::Escalated,
+        ];
+        let mut ids = Vec::new();
+        for (index, state) in states.into_iter().enumerate() {
+            let mut run = SupervisorRun::new(
+                "caller".into(),
+                format!("task-{index}"),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(i64::try_from(index).unwrap()),
+            );
+            run.workspace_id = Some(workspace);
+            run.state = state;
+            ids.push(run.supervisor_run_id);
+            store.initialize(&run).unwrap();
+        }
+        assert!(store.workspace_runs(workspace, 0).is_err());
+        let priority = |state| match state {
+            SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated => 0,
+            SupervisorRunState::Failed => 1,
+            SupervisorRunState::Running | SupervisorRunState::Verifying => 2,
+            SupervisorRunState::Planning => 3,
+            SupervisorRunState::Succeeded | SupervisorRunState::Cancelled => 4,
+        };
+        let listed = store.workspace_runs(workspace, states.len()).unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|run| priority(run.state))
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1, 2, 2, 3, 4, 4]
+        );
+
+        let stale_id = ids[0];
+        let mut changed = store.load(stale_id).unwrap().unwrap();
+        changed.state = SupervisorRunState::Failed;
+        json_file::write_atomic(&store.dir, &store.snapshot_path(stale_id), &changed).unwrap();
+        let rebuilt = store.workspace_runs(workspace, states.len()).unwrap();
+        assert!(rebuilt.iter().any(|run| {
+            run.supervisor_run_id == stale_id && run.state == SupervisorRunState::Failed
+        }));
     }
 
     #[test]

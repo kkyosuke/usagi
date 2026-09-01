@@ -210,10 +210,15 @@ presentation 主体の実クレートになる。
 
 ## Markdown 永続化の commit contract
 
-issue / memory store の永続化契約は本節を正本とする。source of truth は
+issue / memory store の永続化契約は本節を正本とする。source of truth は各 store root 配下の
 `.usagi/issues/*.md` と `.usagi/memory/*.md` であり、`index.json` と memory の
 `MEMORY.md` は source から破棄・再生成できる derived file である。derived file のための
 durable source migration は行わない。
+
+CLI の既定 store root は cwd だが、daemon provisioned MCP は issue と memory を分離する。issue は
+authenticated session の trusted worktree、memory は data home の `agent-memory/<workspace-id>` を root にする。
+後者は Git 追跡外かつ同じ workspace の root/session Agent 間で共有されるため、コーディネータの運用知見を
+session をまたいで再利用できる。
 
 `index.json` の schema version は `2` で、sorted source file name（key identity）と source
 Markdown の全 byte を長さ区切りで SHA-256 に入力した `source_fingerprint` を保持する。list は

@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 use usagi_core::domain::agent::{AgentProfileId, AgentWorkspaceObservation};
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::session_lifecycle::AgentPhase;
+use usagi_core::domain::supervisor::{
+    SupervisorRunId, SupervisorRunQuery, SupervisorRunState, SupervisorWorkspaceSnapshot, TaskState,
+};
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
@@ -299,6 +302,32 @@ fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
         None,
         "publish its socket",
     )
+}
+
+fn wait_for_supervisor_run_state(
+    client: &mut IpcClient<std::os::unix::net::UnixStream>,
+    workspace: WorkspaceId,
+    expected: SupervisorRunState,
+) -> SupervisorRunQuery {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let DaemonReply::Ok(body) = client
+            .request(DaemonRequest::SupervisorSnapshot { workspace })
+            .unwrap()
+        else {
+            panic!("supervisor snapshot must remain available")
+        };
+        let mut snapshot: SupervisorWorkspaceSnapshot = serde_json::from_value(body).unwrap();
+        let run = snapshot.runs.pop().expect("one supervisor run");
+        if run.state == expected {
+            return run;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "SupervisorRun did not reach {expected:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The readiness wait behind [`client`], with the bound and the liveness
@@ -1052,8 +1081,14 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
         )
     );
     let terminal: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
+    let supervisor_run_id: SupervisorRunId =
+        serde_json::from_value(body["supervisor_run_id"].clone()).unwrap();
     assert_eq!(terminal.workspace_id, workspace);
     assert_eq!(terminal.session_id, None);
+    let active = wait_for_supervisor_run_state(&mut client, workspace, SupervisorRunState::Running);
+    assert_eq!(active.supervisor_run_id, supervisor_run_id);
+    assert_eq!(active.tasks.len(), 1);
+    assert_eq!(active.tasks[0].state, TaskState::Dispatched);
 
     let subscription = attach(&mut client, &terminal);
     client
@@ -1073,7 +1108,14 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match client.request(request()).unwrap() {
-            DaemonReply::Ok(body) if body["completed"] == true => break,
+            DaemonReply::Ok(body) if body["completed"] == true => {
+                assert_eq!(
+                    serde_json::from_value::<SupervisorRunId>(body["supervisor_run_id"].clone())
+                        .unwrap(),
+                    supervisor_run_id
+                );
+                break;
+            }
             DaemonReply::Accepted { .. } => {}
             reply @ DaemonReply::Ok(_) => panic!("unexpected goal replay: {reply:?}"),
         }
@@ -1081,6 +1123,14 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(fs::read_to_string(&count).unwrap().lines().count(), 1);
+
+    let completed =
+        wait_for_supervisor_run_state(&mut client, workspace, SupervisorRunState::Failed);
+    assert_eq!(completed.tasks[0].state, TaskState::Failed);
+    assert_eq!(
+        completed.terminal_reason.as_deref(),
+        Some("one or more supervisor tasks failed")
+    );
 
     let mut changed = intent;
     changed.goal = "a different goal".to_owned();
@@ -1094,6 +1144,15 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
         panic!("changed goal must be a typed protocol refusal")
     };
     assert_eq!(error.code, ErrorCode::IdempotencyConflict);
+    let DaemonReply::Ok(body) = client
+        .request(DaemonRequest::SupervisorSnapshot { workspace })
+        .unwrap()
+    else {
+        panic!("goal promotion snapshot must remain available")
+    };
+    let snapshot: SupervisorWorkspaceSnapshot = serde_json::from_value(body).unwrap();
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].supervisor_run_id, supervisor_run_id);
 }
 
 #[test]
@@ -1123,6 +1182,36 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
         };
         safe_readiness_error(client.request(request()).unwrap_err());
         safe_readiness_error(client.request(request()).unwrap_err());
+        let goal_operation = OperationId::new().to_string();
+        let goal = AgentGoalIntent {
+            workspace,
+            profile: Some(AgentProfileId::new("codex").unwrap()),
+            goal: "do not create a run when readiness fails".into(),
+        };
+        safe_readiness_error(
+            client
+                .request(DaemonRequest::AgentGoal {
+                    operation_id: goal_operation.clone(),
+                    intent: goal.clone(),
+                })
+                .unwrap_err(),
+        );
+        safe_readiness_error(
+            client
+                .request(DaemonRequest::AgentGoal {
+                    operation_id: goal_operation,
+                    intent: goal,
+                })
+                .unwrap_err(),
+        );
+        let DaemonReply::Ok(body) = client
+            .request(DaemonRequest::SupervisorSnapshot { workspace })
+            .unwrap()
+        else {
+            panic!("empty supervisor snapshot must be available")
+        };
+        let snapshot: SupervisorWorkspaceSnapshot = serde_json::from_value(body).unwrap();
+        assert!(snapshot.runs.is_empty());
         assert!(!count.exists(), "readiness failure must not spawn the PTY");
     }
 }

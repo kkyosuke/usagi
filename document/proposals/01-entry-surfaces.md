@@ -97,8 +97,8 @@ crates/
 
 - `usagi-cli` は `usagi-core` にのみ依存する。daemon との連携は `usagi-core` の IPC プロトコル型を
   介した実行時通信だけで行う（TUI と同じ規律）。
-- `usagi mcp` はエージェントが spawn する**別プロセス**である。カレントディレクトリ（session worktree か
-  workspace root か）が issue / memory の書き込み先を決めるため、stdio プロセスとして cwd の文脈を運ぶ。
+- `usagi mcp` はエージェントが spawn する**別プロセス**である。daemon provisioned child は credential claim で
+  issue 用の trusted worktree と memory 用の workspace 共有 root を受け取る。手動起動時だけ cwd を互換 root に使う。
 
 ## tool / コマンドの 2 分類と経路
 
@@ -106,7 +106,7 @@ CLI コマンドと MCP tool は、実行を伴うかどうかで経路が 2 つ
 
 | 分類 | 対象 | 経路 | 理由 |
 |---|---|---|---|
-| store 系 | issue / memory の CRUD・検索 | cwd の `.usagi/{issues,memory}/` を core usecase で直接読み書き | git 追跡ファイルの編集であり実行を伴わない。session worktree 内ならブランチに乗って PR で `main` へ流れる。daemon 不要 |
+| store 系 | issue / memory の CRUD・検索 | core usecase で Markdown store を直接読み書き。daemon provisioned MCP では issue は trusted worktree、memory は data home の workspace 共有 root | issue は session branch に乗せ、memory は Git 追跡外で root/session 間に共有する。手動 CLI/MCP は cwd を root にできる |
 | session 系 | `session_create` / `session_prompt` / `session_status` / `session_remove` / `session_delegate_*` と対応 CLI | daemon への IPC リクエスト。daemon が worktree 生成・`state.json` 記録・prompt 配送・破棄を実行する | 実行（PTY・autostart）と session 状態の権威が daemon にあるため。書き手を一本化して競合を排す |
 | dispatch 系 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | daemon への IPC リクエスト。daemon が agent registry・run binding・durable inbox を操作する | worker は宛先を指定せず、保存済み binding を使うため取り違えない |
 
@@ -172,7 +172,7 @@ TUI から起動した agent（daemon 所有 PTY 内で動作）が MCP tool で
 | 代替案 | 不採用の理由 |
 |---|---|
 | CLI / MCP を合成ルート（ルート bin）に置く | ルートは実 IO 注入のみで `#[coverage(off)]` 対象。tool アダプタ・引数解析はテスト対象のロジックであり crates 側に置く |
-| MCP を `usagi-daemon` に置く（daemon が MCP を serve する） | MCP はエージェントごとに spawn される stdio の**クライアント側**プロセスで、cwd（session worktree）の文脈を運ぶ。常駐サーバに置くと issue / memory の書き込み先解決が cwd から切り離される |
+| MCP を `usagi-daemon` に置く（daemon が MCP を serve する） | MCP はエージェントごとに spawn される stdio の**クライアント側**プロセスで、credential と trusted store roots を claim する。常駐サーバに置くと provider ごとの stdio lifecycle と caller scope が失われる |
 | MCP を `usagi-core` に置く | core は両面が共有するライブラリで presentation を含めない。入口を core に入れると依存の終点が入口を持つ逆転になる |
 | `crates/mcp` を `crates/cli` と別クレートに分ける | どちらも core にしか依存しない薄いアダプタで、互いの逆流リスクがなく、コンパイラで強制すべき境界がない。クレートを増やす利益が boilerplate に見合わない（肥大したら分割を再検討） |
 | CLI / MCP が `state.json` を直接書き、daemon が watcher で拾う | 多書き手のロック・watcher競合が残る。書き手をdaemonに一本化する方が単純で、pushによる即時反映も得られる |
