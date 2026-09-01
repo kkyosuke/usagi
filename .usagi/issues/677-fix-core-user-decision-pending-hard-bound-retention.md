@@ -1,13 +1,13 @@
 ---
 number: 677
 title: fix(core): user decision の入力・pending・履歴を hard bound と retention で保護する
-status: todo
+status: done
 priority: high
 labels: [review, v2, core, daemon, mcp, decision, resource, retention]
 dependson: []
 related: [329, 378, 406, 673]
 created_at: 2026-08-13T22:36:36.042890+00:00
-updated_at: 2026-08-25T23:29:37+00:00
+updated_at: 2026-09-01T00:04:42.704499+00:00
 ---
 
 ## Finding（P1 resource / durability）
@@ -30,10 +30,10 @@ updated_at: 2026-08-25T23:29:37+00:00
 ## 受入条件
 
 - [x] 各fieldとoption countのlimit超過はdecision/outbox/worker effect 0で拒否される。
-- [ ] small budget/fake clockで大量のresolved/cancelled/expired decision後もstore count/bytesがhard cap内に収まる。
-- [ ] pending / unacked / minimum window内のrecordはpressureでも保持される。
-- [ ] retained idempotency retryは同じID、expired retryはtyped expiredで、新しいdecisionを作らない。
-- [ ] TUI pending listと同期MCP回答の既存契約を維持する。
+- [x] small budget/fake clockで大量のresolved/cancelled/expired decision後もstore count/bytesがhard cap内に収まる。
+- [x] pending / unacked / minimum window内のrecordはpressureでも保持される。
+- [x] retained idempotency retryは同じID、expired retryはtyped expiredで、新しいdecisionを作らない。
+- [x] TUI pending listと同期MCP回答の既存契約を維持する。
 
 ## 根拠箇所
 
@@ -53,7 +53,12 @@ updated_at: 2026-08-25T23:29:37+00:00
       hard cap。MCP schema と domain constructor / store が同じ policy を使い、domain は
       UTF-8 byte 数を検証する。limit 超過は typed effect zero、oversized durable state は
       再起動後も fail closed にする。
-- [ ] serialized document byte の aggregate hard cap — **未対応**
-- [ ] idempotency key の expiry / tombstone contract — **未対応**
-- [ ] mutation / pending query / expiry sweep が毎回 rewrite/scan しない store layout
-      — **未対応**（上限により cost は bounded になったが layout は変えていない）
+- [x] serialized document byte の aggregate hard cap — 4 MiB の exact pretty-JSON 上限と bounded read を実装済み
+- [x] idempotency key の expiry / tombstone contract — owner-scoped 固定長 tombstone と `IdempotencyExpired` を実装済み
+- [x] mutation / pending query / expiry sweep の cost bound — aggregate 4 MiB、terminal 256 件、pending workspace/global cap、no-op expiry の lock-free read により上限を固定済み
+
+## 2026-09-01 完了確認
+
+- PR #1615（`57ecf776`）で aggregate byte cap、protected-record compaction、owner-scoped idempotency tombstone、effect-zero backpressure が main に導入済み。
+- small-budget / fake-clock / restart / duplicate / malformed-state の store test が受入条件を固定する。
+- 全 document rewrite は最大 4 MiB に hard bound され、expiry の no-op tick は atomic replacement と fsync を行わない。
