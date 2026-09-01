@@ -103,6 +103,8 @@ pub struct LaunchAgentRequest {
     pub operation_id: OperationId,
     /// Optional Agent profile; `None` uses the daemon default.
     pub profile: Option<AgentProfileId>,
+    /// Present only for the opt-in goal-driven Director launch.
+    pub goal: Option<String>,
 }
 
 /// Explicit provider-native resume request derived from
@@ -447,6 +449,19 @@ impl DaemonBackend {
                 session,
                 operation_id,
                 profile,
+                goal: None,
+            }),
+            Effect::LaunchGoal {
+                workspace,
+                operation_id,
+                profile,
+                goal,
+            } => self.agent.launch_agent(LaunchAgentRequest {
+                workspace,
+                session: None,
+                operation_id,
+                profile,
+                goal: Some(goal),
             }),
             Effect::ResumeAgent {
                 workspace,
@@ -667,6 +682,20 @@ mod tests {
         fn select_tab(&mut self, direction: TabDirection) {
             self.tabs.push(direction);
         }
+    }
+
+    struct SharedLaunches(std::sync::Arc<std::sync::Mutex<Vec<LaunchAgentRequest>>>);
+
+    impl AgentPort for SharedLaunches {
+        fn launch_agent(&mut self, request: LaunchAgentRequest) {
+            self.0.lock().unwrap().push(request);
+        }
+
+        fn open_terminal(&mut self, _: OpenTerminalRequest) {}
+
+        fn open_external_terminal(&mut self, _: Target) {}
+
+        fn select_tab(&mut self, _: TabDirection) {}
     }
 
     struct DefaultResumeAgent;
@@ -968,13 +997,29 @@ mod tests {
 
     #[test]
     fn launch_agent_open_terminal_and_select_tab_reach_the_agent_port() {
-        let mut backend = backend();
+        let launches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = DaemonBackend::new(
+            Box::new(FakeSessions::default()),
+            Box::new(SharedLaunches(std::sync::Arc::clone(&launches))),
+            Box::new(FakeStore::default()),
+            Box::new(FakeWorkspaceCommands::default()),
+        );
+        let goal_workspace = WorkspaceId::new();
         assert_eq!(
             backend.dispatch(Effect::LaunchAgent {
                 workspace: WorkspaceId::new(),
                 session: Some(SessionId::new()),
                 operation_id: OperationId::new(),
                 profile: None,
+            }),
+            Flow::Continue
+        );
+        assert_eq!(
+            backend.dispatch(Effect::LaunchGoal {
+                workspace: goal_workspace,
+                operation_id: OperationId::new(),
+                profile: None,
+                goal: "prepare a PR".to_owned(),
             }),
             Flow::Continue
         );
@@ -1010,6 +1055,15 @@ mod tests {
         // Agent effects are synchronous against the pane state; they reflux no
         // completion in this stage.
         assert!(backend.drain_events().is_empty());
+        assert!(matches!(
+            launches.lock().unwrap().as_slice(),
+            [LaunchAgentRequest { goal: None, .. }, LaunchAgentRequest {
+                workspace,
+                session: None,
+                goal: Some(goal),
+                ..
+            }] if *workspace == goal_workspace && goal == "prepare a PR"
+        ));
     }
 
     #[test]
@@ -1288,6 +1342,7 @@ mod tests {
             session: Some(session),
             operation_id,
             profile: None,
+            goal: None,
         };
         assert_eq!(launch.clone(), launch);
         assert!(format!("{launch:?}").contains("LaunchAgentRequest"));

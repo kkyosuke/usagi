@@ -1318,6 +1318,13 @@ pre-spawn の terminal 登録までに失敗した launch は、dispatch admissi
 `Failed` / ownership unknown へ reconcile される。admission metadata を持たない legacy run、または runtime
 ownership を証明できない incomplete record も新しい child を spawn せず、unknown/failed として扱う。
 
+通常の `Agent` launch と opt-in の `AgentGoal` launch はこの同じ transaction を使うが、request と semantic key は
+別である。`AgentGoal` は workspace root だけを対象にし、非空かつ 16 KiB 以下の Goal を固定 operating contract と結合して
+`LaunchRequest.initial_prompt` に保存する。semantic key は workspace、profile、root scope に Goal の長さと本文を加えるため、
+同じ operation / Goal の retry は同じ admission を replay し、別 Goal は spawn 前に `idempotency_conflict` になる。
+同 scope に既存の queued prompt がある場合はどちらを実行するか推測せず拒否する。通常 launch は従来どおり queued prompt
+だけを consume し、Goal mode の有効化・無効化で classic Agent admission の意味は変わらない。
+
 credential の durable form は `daemon_minted_ephemeral` という provenance だけである。opaque secret 自体は
 dispatch registry、runtime snapshot、IPC、terminal journal、log のいずれにも保存しない。daemon restart では
 in-memory caller registry が空になるため、旧 credential は必ず失効する。

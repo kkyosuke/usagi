@@ -89,6 +89,12 @@ pub enum DaemonRequest {
         operation_id: String,
         intent: AgentLaunchIntent,
     },
+    /// Opt-in workspace-root launch carrying one goal. Keeping this separate
+    /// means old clients and classic launch semantics are unchanged.
+    AgentGoal {
+        operation_id: String,
+        intent: AgentGoalIntent,
+    },
     /// Private Codex `SessionStart` hook delivery. The opaque credential binds
     /// the provider-owned ID to one live daemon runtime; callers cannot name a
     /// runtime, session, path, or provider themselves.
@@ -456,6 +462,17 @@ pub struct AgentLaunchIntent {
     pub profile: Option<AgentProfileId>,
 }
 
+/// One bounded objective admitted as a workspace-root Director launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentGoalIntent {
+    pub workspace: WorkspaceId,
+    pub profile: Option<AgentProfileId>,
+    pub goal: String,
+}
+
+/// Maximum UTF-8 size of one goal accepted by the daemon.
+pub const MAX_AGENT_GOAL_BYTES: usize = 16 * 1024;
+
 /// The canonical semantic intent of one Agent launch.
 ///
 /// This string, not the producer-issued `OperationId`, is what makes a launch
@@ -477,6 +494,24 @@ pub fn agent_launch_semantic_key(intent: &AgentLaunchIntent) -> String {
             .profile
             .as_ref()
             .map_or_else(|| "<default>".to_owned(), ToString::to_string),
+    )
+}
+
+/// Canonical idempotency meaning of one goal-driven launch. The goal is part of
+/// the durable launch request, so reusing an operation for different text must
+/// conflict even when workspace and provider are identical.
+#[must_use]
+pub fn agent_goal_semantic_key(intent: &AgentGoalIntent) -> String {
+    let launch = AgentLaunchIntent {
+        workspace: intent.workspace,
+        session: None,
+        profile: intent.profile.clone(),
+    };
+    format!(
+        "{}\ngoal:{}:{}",
+        agent_launch_semantic_key(&launch),
+        intent.goal.len(),
+        intent.goal
     )
 }
 
@@ -1709,6 +1744,7 @@ impl RetryEligibility {
             }
             DaemonRequest::Rollover { .. }
             | DaemonRequest::Agent { .. }
+            | DaemonRequest::AgentGoal { .. }
             | DaemonRequest::ResumeAgent { .. }
             | DaemonRequest::ResumeAgentWithCurrentIntegration { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
@@ -3140,6 +3176,14 @@ mod deadline_and_retry_tests {
                     profile: None,
                 },
             },
+            DaemonRequest::AgentGoal {
+                operation_id: "op".into(),
+                intent: AgentGoalIntent {
+                    workspace: WorkspaceId::new(),
+                    profile: None,
+                    goal: "prepare a PR".to_owned(),
+                },
+            },
         ];
         for request in &durable {
             assert_eq!(
@@ -3805,6 +3849,37 @@ mod deadline_and_retry_tests {
             },
         ] {
             assert_ne!(key, agent_launch_semantic_key(&other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_agent_goal_semantic_key_covers_the_exact_goal_and_root_launch() {
+        let intent = AgentGoalIntent {
+            workspace: WorkspaceId::new(),
+            profile: None,
+            goal: "目的を実装する".to_owned(),
+        };
+        let key = agent_goal_semantic_key(&intent);
+        assert_eq!(key, agent_goal_semantic_key(&intent));
+        assert!(key.contains("workspace-root"));
+        assert!(key.contains(&format!("goal:{}", intent.goal.len())));
+        assert!(key.ends_with(&intent.goal));
+
+        for other in [
+            AgentGoalIntent {
+                goal: "別の目的".to_owned(),
+                ..intent.clone()
+            },
+            AgentGoalIntent {
+                workspace: WorkspaceId::new(),
+                ..intent.clone()
+            },
+            AgentGoalIntent {
+                profile: Some(AgentProfileId::new("codex").unwrap()),
+                ..intent.clone()
+            },
+        ] {
+            assert_ne!(key, agent_goal_semantic_key(&other));
         }
     }
 

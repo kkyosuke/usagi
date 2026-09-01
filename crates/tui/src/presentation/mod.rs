@@ -145,6 +145,23 @@ pub trait AgentCommandPort: Send {
         profile: Option<AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String>;
 
+    /// Launch a workspace-root Director with one goal supplied to the daemon as
+    /// its initial prompt. Ports that have not implemented the opt-in workflow
+    /// fail closed and leave classic launch available.
+    ///
+    /// # Errors
+    ///
+    /// Returns a presentation-safe daemon launch failure.
+    fn launch_goal(
+        &mut self,
+        _operation: OperationId,
+        _workspace: WorkspaceId,
+        _profile: Option<AgentProfileId>,
+        _goal: &str,
+    ) -> Result<AgentPaneAdmission, String> {
+        Err("goal-driven Agent launch is unavailable".to_owned())
+    }
+
     /// Explicitly resumes retained provider-native metadata in a new daemon
     /// runtime. Implementations must not attach to the old PTY.
     ///
@@ -379,6 +396,21 @@ pub trait PaneLaunchCommandPort: Send + Sync {
         profile: Option<AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String>;
 
+    /// Launch a workspace-root Director with one bounded goal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a presentation-safe daemon launch failure.
+    fn launch_goal(
+        &self,
+        _operation: OperationId,
+        _workspace: WorkspaceId,
+        _profile: Option<AgentProfileId>,
+        _goal: &str,
+    ) -> Result<AgentPaneAdmission, String> {
+        Err("goal-driven Agent launch is unavailable".to_owned())
+    }
+
     /// # Errors
     ///
     /// Returns safe feedback when the daemon rejects the resume or does not
@@ -449,6 +481,17 @@ impl PaneLaunchCommandPort for SerializedPaneLaunchPort {
         profile: Option<AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String> {
         self.client().launch(operation, workspace, session, profile)
+    }
+
+    fn launch_goal(
+        &self,
+        operation: OperationId,
+        workspace: WorkspaceId,
+        profile: Option<AgentProfileId>,
+        goal: &str,
+    ) -> Result<AgentPaneAdmission, String> {
+        self.client()
+            .launch_goal(operation, workspace, profile, goal)
     }
 
     fn resume(
@@ -1586,6 +1629,7 @@ struct WorkspaceEntryPolicy {
     available_models: AvailableAgentModels,
     default_model: usagi_core::domain::settings::DefaultModel,
     default_branch: Option<String>,
+    work_mode: usagi_core::domain::settings::WorkMode,
 }
 
 impl Default for WorkspaceEntryPolicy {
@@ -1594,6 +1638,7 @@ impl Default for WorkspaceEntryPolicy {
             available_models: AvailableAgentModels::all(),
             default_model: usagi_core::domain::settings::DefaultModel::default(),
             default_branch: None,
+            work_mode: usagi_core::domain::settings::WorkMode::default(),
         }
     }
 }
@@ -2311,6 +2356,8 @@ enum PaneLaunch {
         /// Absent for a workspace-root Agent.
         session: Option<SessionId>,
         profile: Option<AgentProfileId>,
+        /// Present only for the opt-in workspace-root Work Run.
+        goal: Option<String>,
         resume: bool,
     },
     Terminal {
@@ -3825,6 +3872,7 @@ fn run_pane_launch(
             workspace,
             session,
             profile,
+            goal,
             resume,
         } => {
             let result = if resume {
@@ -3832,6 +3880,12 @@ fn run_pane_launch(
                     || Err("workspace-root Agent resume is unavailable".to_owned()),
                     |session| port.resume(workspace, session, operation),
                 )
+            } else if let Some(goal) = goal {
+                if session.is_some() {
+                    Err("goal-driven Agent launch requires workspace-root scope".to_owned())
+                } else {
+                    port.launch_goal(operation, workspace, profile, &goal)
+                }
             } else {
                 // The pending pane's own operation is what the daemon admits and
                 // finalizes, so no second identity can complete this pane (#522).
@@ -4612,37 +4666,50 @@ fn director_drawer_projection(
         None
     };
     DirectorDrawerProjection {
+        goal_driven: runtime.state().work_mode()
+            == usagi_core::domain::settings::WorkMode::GoalDriven,
         conversations,
         organization: director_organization(ui),
         terminal_view,
         interrupted_detail,
         feedback,
-        new: if runtime.state().director_launching().is_some() {
-            DirectorNewProjection::Launching
-        } else {
-            match runtime.state().director_new() {
-                DirectorNew::Idle => DirectorNewProjection::Ready,
-                DirectorNew::Empty => DirectorNewProjection::Empty,
-                DirectorNew::Choosing(selected) => {
-                    let candidates = runtime
-                        .state()
-                        .available_models()
-                        .iter()
-                        .map(|model| model.selector().to_owned())
-                        .collect::<Vec<_>>();
-                    let selected = runtime
-                        .state()
-                        .available_models()
-                        .iter()
-                        .position(|model| model == selected)
-                        .unwrap_or(0);
-                    DirectorNewProjection::Choosing {
-                        candidates,
-                        selected,
-                    }
+        new: director_new_projection(runtime),
+    }
+}
+
+fn director_new_projection(runtime: &WorkspaceRuntime) -> DirectorNewProjection {
+    if runtime.state().director_launching().is_some() {
+        return DirectorNewProjection::Launching;
+    }
+    match runtime.state().director_new() {
+        DirectorNew::Idle => DirectorNewProjection::Ready,
+        DirectorNew::Empty => DirectorNewProjection::Empty,
+        DirectorNew::Choosing(selected) => {
+            let candidates = runtime
+                .state()
+                .available_models()
+                .iter()
+                .map(|model| model.selector().to_owned())
+                .collect::<Vec<_>>();
+            let selected = runtime
+                .state()
+                .available_models()
+                .iter()
+                .position(|model| model == selected)
+                .unwrap_or(0);
+            if runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven {
+                DirectorNewProjection::GoalComposer {
+                    candidates,
+                    selected,
+                    goal: runtime.state().director_goal().to_owned(),
+                }
+            } else {
+                DirectorNewProjection::Choosing {
+                    candidates,
+                    selected,
                 }
             }
-        },
+        }
     }
 }
 
@@ -6190,12 +6257,21 @@ fn drain_controller_host_actions(
                     .session
                     .map_or(Target::Root(request.workspace), Target::Session);
                 pending_targets.insert(request.operation_id, target);
-                runtime.on_effect(&Effect::LaunchAgent {
-                    workspace: request.workspace,
-                    session: request.session,
-                    operation_id: request.operation_id,
-                    profile: request.profile.clone(),
-                });
+                if let Some(goal) = &request.goal {
+                    runtime.on_effect(&Effect::LaunchGoal {
+                        workspace: request.workspace,
+                        operation_id: request.operation_id,
+                        profile: request.profile.clone(),
+                        goal: goal.clone(),
+                    });
+                } else {
+                    runtime.on_effect(&Effect::LaunchAgent {
+                        workspace: request.workspace,
+                        session: request.session,
+                        operation_id: request.operation_id,
+                        profile: request.profile.clone(),
+                    });
+                }
                 enqueue_pane_launch(
                     ui,
                     PaneLaunch::Agent {
@@ -6203,6 +6279,7 @@ fn drain_controller_host_actions(
                         workspace: request.workspace,
                         session: request.session,
                         profile: request.profile,
+                        goal: request.goal,
                         resume: false,
                     },
                 );
@@ -6223,6 +6300,7 @@ fn drain_controller_host_actions(
                         workspace: request.workspace,
                         session: Some(request.session),
                         profile: None,
+                        goal: None,
                         resume: true,
                     },
                 );
@@ -6977,6 +7055,7 @@ fn drive_workspace_controller(
         available_models,
         default_model,
         default_branch,
+        work_mode,
     } = entry_policy;
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
@@ -7046,6 +7125,7 @@ fn drive_workspace_controller(
             ));
         });
     runtime.set_agent_models(available_models, default_model);
+    runtime.set_work_mode(work_mode);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
     }
@@ -8030,6 +8110,7 @@ fn drive_workspace_controller(
                 // A newly saved Agent default applies to the next `agent`
                 // command without reopening the workspace.
                 runtime.set_agent_models(context.available_models, effective.default_model);
+                runtime.set_work_mode(effective.work_mode);
                 let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
                     session_branch_catalog(&root_cwd, effective.default_branch.as_deref()),
                 )));
@@ -8217,6 +8298,7 @@ pub fn run_workspace_controller_with_backend_and_settings(
         WorkspaceEntryPolicy {
             default_model: settings.default_model,
             default_branch: settings.default_branch.clone(),
+            work_mode: settings.work_mode,
             ..WorkspaceEntryPolicy::default()
         },
         None,
@@ -8253,6 +8335,7 @@ pub fn run_workspace_controller_with_backend_and_config(
             available_models,
             default_model: effective.default_model,
             default_branch: effective.default_branch.clone(),
+            work_mode: effective.work_mode,
         },
         Some(WorkspaceConfigContext {
             settings,
@@ -8590,6 +8673,7 @@ fn open_snapshot_via_controller(
             available_models,
             default_model: effective.default_model,
             default_branch: effective.default_branch.clone(),
+            work_mode: effective.work_mode,
         },
         Some(WorkspaceConfigContext {
             settings,
@@ -9366,13 +9450,14 @@ mod tests {
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
         FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort,
-        Geometry, GitDiff, IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort,
-        MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep,
-        PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
-        SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory,
-        SessionCommandResult, SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort,
-        SessionWorktreeHint, SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk,
-        TerminalError, TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
+        Geometry, GitDiff, IdleWatch, LaunchAgentRequest, MAX_BACKGROUND_EXITS_PER_FRAME,
+        MetricsPort, MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics,
+        NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort,
+        PrModalClickRoute, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
+        SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
+        SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
+        SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
+        TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
         TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
@@ -11429,6 +11514,7 @@ mod tests {
                 workspace,
                 session,
                 profile: None,
+                goal: None,
                 resume: true,
             });
             super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
@@ -11452,6 +11538,7 @@ mod tests {
             workspace,
             session: Some(session),
             profile: None,
+            goal: None,
             resume: false,
         });
         let mut pending = std::collections::HashMap::from([(operation, target)]);
@@ -11601,6 +11688,7 @@ mod tests {
             workspace,
             session: Some(session),
             profile: None,
+            goal: None,
             resume: false,
         });
         ui.pane_launches.push(super::PaneLaunch::Terminal {
@@ -11878,6 +11966,7 @@ mod tests {
             workspace,
             session: Some(session),
             profile: None,
+            goal: None,
             resume: false,
         }
     }
@@ -12082,6 +12171,19 @@ mod tests {
             })
         }
 
+        fn launch_goal(
+            &self,
+            operation: OperationId,
+            workspace: WorkspaceId,
+            _profile: Option<AgentProfileId>,
+            _goal: &str,
+        ) -> Result<AgentPaneAdmission, String> {
+            Ok(AgentPaneAdmission {
+                terminal: self.record("goal", operation, workspace, None),
+                continuation: None,
+            })
+        }
+
         fn resume(
             &self,
             _workspace: WorkspaceId,
@@ -12147,6 +12249,7 @@ mod tests {
         let mut pending = std::collections::HashMap::new();
 
         let root_agent = OperationId::new();
+        let root_goal = OperationId::new();
         let session_agent = OperationId::new();
         let session_terminal = OperationId::new();
         let planned = [
@@ -12159,6 +12262,20 @@ mod tests {
                     workspace,
                     session: None,
                     profile: None,
+                    goal: None,
+                    resume: false,
+                },
+            ),
+            (
+                Target::Root(workspace),
+                root_goal,
+                "goal",
+                super::PaneLaunch::Agent {
+                    operation: root_goal,
+                    workspace,
+                    session: None,
+                    profile: None,
+                    goal: Some("prepare the PR".to_owned()),
                     resume: false,
                 },
             ),
@@ -12210,8 +12327,77 @@ mod tests {
                 "the pane promoted the terminal its own operation was answered with"
             );
         }
-        assert_eq!(requests.lock().unwrap().len(), 3);
+        assert_eq!(requests.lock().unwrap().len(), 4);
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn goal_pane_launch_rejects_a_managed_session_before_calling_the_port() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let outcome = super::run_pane_launch(
+            &IdentityRecordingLaunchPort(Arc::clone(&requests)),
+            super::PaneLaunch::Agent {
+                operation,
+                workspace,
+                session: Some(session),
+                profile: None,
+                goal: Some("invalid scope".to_owned()),
+                resume: false,
+            },
+            terminal_geometry(20, 80),
+        );
+
+        assert!(matches!(
+            outcome,
+            super::PaneLaunchOutcome::Agent {
+                operation: actual,
+                result: Err(ref reason),
+            } if actual == operation && reason.contains("workspace-root scope")
+        ));
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn goal_host_action_creates_one_root_pending_pane_and_preserves_the_goal() {
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut pending = std::collections::HashMap::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(ControllerHostAction::LaunchAgent(LaunchAgentRequest {
+                workspace,
+                session: None,
+                operation_id: operation,
+                profile: None,
+                goal: Some("prepare a PR".to_owned()),
+            }))
+            .unwrap();
+
+        drain_host_actions(&receiver, &mut ui, &mut runtime, &mut pending);
+
+        assert_eq!(pending.get(&operation), Some(&Target::Root(workspace)));
+        assert!(matches!(
+            runtime
+                .panes()
+                .pane(Target::Root(workspace))
+                .and_then(|pane| pane.tabs().last()),
+            Some(PaneTab::Pending(pending)) if pending.operation == operation
+        ));
+        assert!(matches!(
+            ui.pane_launches.as_slice(),
+            [super::PaneLaunch::Agent {
+                operation: actual,
+                session: None,
+                goal: Some(goal),
+                ..
+            }] if *actual == operation && goal == "prepare a PR"
+        ));
     }
 
     /// #522: while a pending operation lives in this process, its completion — even
@@ -12836,12 +13022,22 @@ mod tests {
                 .launch(OperationId::new(), workspace_id, None, None)
                 .is_err()
         );
+        assert!(
+            UnavailableAgentCommandPort
+                .launch_goal(OperationId::new(), workspace_id, None, "goal")
+                .is_err()
+        );
         // An embedder without a launch client refuses every pane launch inline
         // instead of leaving a pending tab forever.
         let history = interrupted_history(workspace_id, Some(session_id), true);
         assert!(
             UnavailablePaneLaunchPort
                 .launch(OperationId::new(), workspace_id, None, None)
+                .is_err()
+        );
+        assert!(
+            UnavailablePaneLaunchPort
+                .launch_goal(OperationId::new(), workspace_id, None, "goal")
                 .is_err()
         );
         assert!(
@@ -12971,6 +13167,30 @@ mod tests {
                 continuation: None,
             })
         }
+
+        fn launch_goal(
+            &mut self,
+            _operation: OperationId,
+            _workspace: WorkspaceId,
+            _profile: Option<AgentProfileId>,
+            _goal: &str,
+        ) -> Result<AgentPaneAdmission, String> {
+            Ok(AgentPaneAdmission {
+                terminal: self.0.clone(),
+                continuation: None,
+            })
+        }
+    }
+
+    #[test]
+    fn serialized_launch_port_forwards_goal_admission() {
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let port = launch_port(Box::new(SuccessfulAgentPort(terminal.clone())));
+        let admitted = port
+            .launch_goal(OperationId::new(), workspace, None, "prepare a PR")
+            .unwrap();
+        assert!(admitted.terminal.fences(&terminal));
     }
 
     /// screen graph の workspace 遷移が実 port を通すことを検証する fake port。
@@ -18153,6 +18373,22 @@ mod tests {
             }
         );
 
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        let _ = runtime.handle_key(Key::Char('g'));
+        let _ = runtime.handle_key(Key::Paste("o".to_owned()));
+        let _ = runtime.handle_key(Key::Backspace);
+        let goal_projection = super::director_drawer_projection(&ui, &runtime, None);
+        assert!(goal_projection.goal_driven);
+        assert!(matches!(
+            goal_projection.new,
+            super::DirectorNewProjection::GoalComposer {
+                selected: 1,
+                ref goal,
+                ..
+            } if goal == "g"
+        ));
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
+
         let _ = runtime.handle_key(Key::Escape);
         runtime.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
@@ -18505,6 +18741,7 @@ mod tests {
             workspace,
             session: Some(session),
             profile: None,
+            goal: None,
             resume: false,
         });
         let mut pending_targets = std::collections::HashMap::from([(operation, target)]);
@@ -25028,7 +25265,7 @@ mod tests {
 
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
-        for _ in 0..4 {
+        for _ in 0..5 {
             step_config(&mut config, Key::Down, &mut settings);
         }
         assert_eq!(config.field(), ConfigField::TeamTemplate);
@@ -25143,6 +25380,7 @@ mod tests {
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         // Enter on the dirty Save row begins the save flow (loading).
         assert!(matches!(
             step_config(&mut config, Key::Enter, &mut settings),
@@ -25207,6 +25445,7 @@ mod tests {
         keys.extend("config".chars().map(Key::Char));
         keys.extend([
             Key::Enter,
+            Key::Down,
             Key::Down,
             Key::Down,
             Key::Down,
@@ -25363,7 +25602,7 @@ mod tests {
         };
         let mut config = Config::load(&mut settings);
         let _ = step_config(&mut config, Key::Right, &mut settings);
-        for _ in 0..8 {
+        for _ in 0..9 {
             let _ = step_config(&mut config, Key::Down, &mut settings);
         }
         assert!(matches!(
@@ -25531,9 +25770,11 @@ mod tests {
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Environment → Agent model → Team → Issue → Memory → PR → Save).
-    const CONFIG_SAVE_KEYS: [Key; 10] = [
+    // Save (Theme → Modal mode → Environment → Agent model → Workflow → Team →
+    // Issue → Memory → PR → Save).
+    const CONFIG_SAVE_KEYS: [Key; 11] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
@@ -25546,9 +25787,10 @@ mod tests {
     ];
 
     // Workspace Config starts on Agent and contains Agent → env → Base branch →
-    // Team → Issue → Memory → Save.
-    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 8] = [
+    // Workflow → Team → Issue → Memory → Save.
+    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 9] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,

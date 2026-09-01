@@ -242,6 +242,7 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: crate::domain::settings::TeamTemplate::Hierarchical,
+            work_mode: crate::domain::settings::WorkMode::GoalDriven,
             env: [(
                 "GH_TOKEN".to_owned(),
                 "op://Private/GitHub/token".to_owned(),

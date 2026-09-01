@@ -1,6 +1,6 @@
 use super::{
     AgentReadinessCommand, AvailableModels, DefaultModel, EnvBindings, LocalSettings,
-    ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
+    ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme, WorkMode,
 };
 
 fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
@@ -76,6 +76,7 @@ fn settings_round_trip_through_json() {
         issue_enabled: false,
         memory_enabled: false,
         team_template: TeamTemplate::Pipeline,
+        work_mode: WorkMode::GoalDriven,
         env: bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
     };
     let json = serde_json::to_string(&settings).unwrap();
@@ -344,6 +345,41 @@ fn team_templates_round_trip_and_cycle_in_both_directions() {
 }
 
 #[test]
+fn work_mode_is_opt_in_and_unknown_tokens_stay_classic() {
+    assert_eq!(WorkMode::default(), WorkMode::Classic);
+    assert_eq!(WorkMode::Classic.cycle(), WorkMode::GoalDriven);
+    assert_eq!(WorkMode::GoalDriven.cycle(), WorkMode::Classic);
+    assert_eq!(
+        serde_json::from_str::<WorkMode>("\"goal_driven\"").unwrap(),
+        WorkMode::GoalDriven
+    );
+    assert_eq!(
+        serde_json::from_str::<WorkMode>("\"future-mode\"").unwrap(),
+        WorkMode::Classic
+    );
+    let missing: Settings = serde_json::from_str("{}").unwrap();
+    assert_eq!(missing.work_mode, WorkMode::Classic);
+    let unknown_local: LocalSettings =
+        serde_json::from_str(r#"{"work_mode":"future-mode"}"#).unwrap();
+    assert_eq!(unknown_local.work_mode, Some(WorkMode::Classic));
+    let goal_default = Settings {
+        work_mode: WorkMode::GoalDriven,
+        ..Settings::default()
+    };
+    assert_eq!(
+        goal_default
+            .clone()
+            .with_local(&LocalSettings::default())
+            .work_mode,
+        WorkMode::GoalDriven
+    );
+    assert_eq!(
+        goal_default.with_local(&unknown_local).work_mode,
+        WorkMode::Classic
+    );
+}
+
+#[test]
 fn local_settings_overlay_only_workspace_owned_fields() {
     let global = Settings {
         theme: Theme::Dark,
@@ -354,6 +390,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         issue_enabled: true,
         memory_enabled: false,
         team_template: TeamTemplate::Hierarchical,
+        work_mode: WorkMode::Classic,
         env: EnvBindings::new(),
     };
     let local = LocalSettings {
@@ -375,6 +412,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
             issue_enabled: false,
             memory_enabled: false,
             team_template: TeamTemplate::Flat,
+            work_mode: WorkMode::Classic,
             env: EnvBindings::new(),
         }
     );
@@ -496,6 +534,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         issue_enabled: false,
         memory_enabled: true,
         team_template: TeamTemplate::Pipeline,
+        work_mode: WorkMode::GoalDriven,
         env: EnvBindings::new(),
     };
     let local = LocalSettings::from(&settings);
@@ -510,6 +549,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
             issue_enabled: false,
             memory_enabled: true,
             team_template: TeamTemplate::Pipeline,
+            work_mode: WorkMode::GoalDriven,
             env: EnvBindings::new(),
         }
     );

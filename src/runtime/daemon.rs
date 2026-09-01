@@ -5299,7 +5299,7 @@ fn start_ipc_accept_loop(
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
+                                        Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
@@ -8514,6 +8514,7 @@ fn reconcile_orphan_delegations(
 
 enum AgentDispatchRequest {
     Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
+    Goal(String, usagi_core::usecase::client::AgentGoalIntent),
     Inventory(WorkspaceId),
     WorkspaceObservation(WorkspaceId),
     Diagnose(
@@ -8547,6 +8548,9 @@ fn admit_agent_dispatch_request(
             AgentDispatchRequest::Launch(operation_id, intent) => {
                 owner.prepare_launch_readiness(operation_id, intent)
             }
+            AgentDispatchRequest::Goal(operation_id, intent) => {
+                owner.prepare_goal_launch_readiness(operation_id, intent)
+            }
             AgentDispatchRequest::Resume(operation_id, target) => {
                 owner.prepare_resume_readiness(operation_id, target)
             }
@@ -8567,6 +8571,9 @@ fn admit_agent_dispatch_request(
         .and_then(|mut owner| match request {
             AgentDispatchRequest::Launch(operation_id, intent) => {
                 owner.launch_after_readiness(operation_id, intent, scope, preflight.as_ref())
+            }
+            AgentDispatchRequest::Goal(operation_id, intent) => {
+                owner.launch_goal_after_readiness(operation_id, intent, scope, preflight.as_ref())
             }
             AgentDispatchRequest::Resume(operation_id, target) => {
                 owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
@@ -8647,6 +8654,7 @@ fn dispatch_agent_maintenance(
                 }),
         ),
         AgentDispatchRequest::Launch(..)
+        | AgentDispatchRequest::Goal(..)
         | AgentDispatchRequest::Resume(..)
         | AgentDispatchRequest::RepairResume(..) => None,
     }
@@ -8669,6 +8677,10 @@ fn dispatch_agent(
                 operation_id,
                 intent,
             } => Some(AgentDispatchRequest::Launch(operation_id, intent)),
+            DaemonRequest::AgentGoal {
+                operation_id,
+                intent,
+            } => Some(AgentDispatchRequest::Goal(operation_id, intent)),
             DaemonRequest::AgentInventory { workspace } => {
                 Some(AgentDispatchRequest::Inventory(workspace))
             }

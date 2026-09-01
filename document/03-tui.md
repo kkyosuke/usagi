@@ -76,8 +76,8 @@ worker 内の `git clone` 自体は強制終了しないため、処理が完了
 既存 directory は削除せず、clone が途中まで作った destination も自動削除しない。`Ctrl+C` / `Ctrl+Q` は TUI を終了する。
 
 Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・PR auto-open・Environment、`Workspace init` 見出しに
-新規 workspace の初期値となる Agent・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
-実行した場合は、Home 上の overlay modal に Agent・Base branch・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
+新規 workspace の初期値となる Agent・Workflow・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
+実行した場合は、Home 上の overlay modal に Agent・Base branch・Workflow・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
 `↑↓` で行を、`←→` で値を切り替える。Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
 `←→` で階層型・フラット・パイプライン型のカードを切り替え、`↑↓` でカード行と独立した `Use no template` actionの間を移動する。`Enter` は選択をdraftへ適用し、
 `Esc` は変更せずConfigへ戻る。80列未満では同じ選択肢を縦リストへ縮退する。未保存の値には `●` が付く。
@@ -215,24 +215,28 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
-| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・PR auto-open・Environment はすべての workspace に適用する。Agent・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
-| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field と未知 token は安全な互換動作として Global を継承する |
+| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・PR auto-open・Environment はすべての workspace に適用する。Agent・Workflow・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
+| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Workflow・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field は Global を継承する。Workflow の未知 token は自律実行を暗黙に有効化せず `classic` へ縮退する |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
-merge して atomic write する。Global Config は Theme・Modal mode・PR auto-open・Agent・Team・Issue・Memory を所有し、Environment 行の
+merge して atomic write する。Global Config は Theme・Modal mode・PR auto-open・Agent・Workflow・Team・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
-Workspace Config は Agent・Base branch・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
+Workspace Config は Agent・Base branch・Workflow・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
-Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
+Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Workflow は `work_mode`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
+Workflow の `classic` は既定値で、従来どおり New が CLI picker を開き、選択した root Agent conversation を空の
+initial prompt で起動する。`goal-driven` は明示的な opt-in で、New を [Goal Composer](#goal-driven-workflow) に替える。
+Global / Workspace の field 欠落と Global の未知値は `classic`、Workspace の明示的な未知値も `classic` へ縮退するため、
+upgrade や typo だけで自律実行へ移らない。
 Base branch の `current checkout` は `default_branch` を空にし、session 作成時点の checkout branch を使う。保存した ref が現在の branch inventory にあれば session 作成 picker の初期値にし、削除済みなどで見つからなければ current checkout へ安全に戻す。
 `default_model` は選択可能な agent CLI の closed vocabulary（`claude` / `codex` / `sakana.ai`）であり、Config 画面の
 Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`sakana.ai` は Codex 互換 CLI で、
 実行するのは `codex-fugu`（daemon profile は `sakana-ai`）である。
 Issue と Memory の Global 初期値はどちらも `true` である。Workspace ファイルに残る旧 Theme / Modal mode field は読み飛ばし、
 全体設定を上書きしない。Global ファイルに残る旧 `local_llm` field も読み飛ばし、次の保存時に除去する。
-Workspace の Agent・Team・Issue・Memory は個別値を持つ。Team の選択肢と catalog 合成は [session role](10-session-roles.md#catalog)を正本とする。
+Workspace の Agent・Workflow・Team・Issue・Memory は個別値を持つ。Team の選択肢と catalog 合成は [session role](10-session-roles.md#catalog)を正本とする。
 MCP server は起動時に解決した Issue / Memory の実効値を tool 公開・実行へ適用する。
 無効時の tool 範囲と server lifetime の契約は [MCP サーバ](07-mcp.md#tool-面)を正本とする。
 
@@ -616,6 +620,35 @@ root New の pending / completion は terminal の `workspace_id` と `session_i
 `Target::Root` に照合してから root registry entry だけへ admit する。scope が一致しない completion は拒否し、
 現在 active / selected な managed-session entry へ fallback しない。New を繰り返しても増えるのは drawer の
 conversation だけで、managed Closeup の tab count・identity・selection は変わらない。
+
+### goal-driven workflow
+
+実効 Workspace 設定の Workflow が `goal-driven` の場合、New は CLI だけの picker ではなく Goal Composer を開く。
+Composer は必須の `Goal` と install 済み provider の選択を同じ drawer に表示し、通常文字、Backspace、bracketed paste を
+Goal が所有する。`↑` / `↓` は provider だけを循環し、`Esc` は draft を破棄して conversation へ戻る。空または空白だけの
+Goal と Goal 欄を描けない高さは launch を発行しない。TUI は 16 KiB を超える入力部分を受け付けず、上限までの完全な
+UTF-8 境界だけを保持する。daemon も 16 KiB 超の request と非空条件を admission 前に再検証する。
+
+`Enter` は fresh operation、workspace root、explicit profile、Goal を持つ専用の `agent_goal` request を 1 件発行する。
+この request は classic `agent` request と別の wire variant であり、classic の semantic key や初期 prompt を変更しない。
+goal-driven の semantic key は Goal 全文を長さ付きで含むため、同じ operation の replay は同じ root Agent へ収束し、
+別 Goal への operation ID 再利用は idempotency conflict になる。response の operation、semantic digest、workspace、
+`session_id: None` は classic launch と同じ exact correlation を通り、一つでも不一致なら pending pane を成功へ昇格しない。
+
+daemon は利用者の Goal を次の固定 operating contract と結合し、`LaunchRequest.initial_prompt` として Agent admission transaction
+へ載せる。
+
+- Draft PR、required check 成功、human review ready、または本当に必要な user decision まで再 prompt なしで継続する。
+- repository の `AGENTS.md` に従い、既存 session / delegation tool で必要な worktree と worker を作る。
+- 通常の不確実性や回復可能な failure では質問せず、blocking choice だけを durable user-decision tool へ送る。
+- 停止時は安全な理由と回復 action を root conversation に出し、PR は自動 merge しない。
+
+この v1 で Work Run の前面は既存 Director drawer である。drawer の selector は `Work Run`、footer は停止理由の参照先を
+`output or Decision` と表示する。進行中の worker は Organization / Session / Garden、明示判断は既存 decision notice/modal、
+PR は既存 PR inventory/modal、launch failure と Agent 停止理由は root pane の safe feedback と terminal output で確認する。
+SupervisorRun を正本にした Active work 一覧、task DAG、独立 PR/CI verifier、typed Stop reason
+projection は [goal-driven Work Run 提案](proposals/18-goal-driven-work-run.md) の後続段階であり、v1 がそれらの完了を
+装うことはない。
 
 成功時は root `AgentTabIntent` の order への追加と新 conversation の selection を 1 回の CAS mutation で commit
 してから pending slot を live にする。write / CAS / future-schema failure、profile rejection、daemon 不通、

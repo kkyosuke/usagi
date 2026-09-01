@@ -4198,6 +4198,7 @@ mod tests {
     fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
         let workspace = WorkspaceId::new();
         let material = DirectorDrawerProjection {
+            goal_driven: false,
             conversations: vec![DirectorConversation {
                 label: "root conversation".to_owned(),
                 selected: true,
