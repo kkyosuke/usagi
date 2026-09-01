@@ -9282,12 +9282,11 @@ pub fn run_screen_graph_with_backend_and_notice(
                 Key::Char('y' | 'Y') | Key::Enter
                     if explicit_remove || prompt.confirmation.is_confirm_selected() =>
                 {
-                    let Some(prompt) = missing_workspace_prompt.take() else {
-                        continue;
-                    };
+                    let paths = prompt.paths.clone();
+                    missing_workspace_prompt = None;
                     let candidates = registry
                         .iter()
-                        .filter(|workspace| prompt.paths.contains(&workspace.path))
+                        .filter(|workspace| paths.contains(&workspace.path))
                         .cloned()
                         .collect::<Vec<_>>();
                     let removed = loader.cleanup_missing(&candidates)?;
@@ -9302,10 +9301,13 @@ pub fn run_screen_graph_with_backend_and_notice(
                     } else {
                         format!("{} workspace registrations removed.", removed.len())
                     };
-                    match screen {
-                        Screen::Welcome => welcome.set_notice(Some(notice)),
-                        Screen::Open => open.set_notice(Some(notice)),
-                        Screen::New | Screen::Config => {}
+                    if screen == Screen::Welcome {
+                        welcome.set_notice(Some(notice));
+                    } else {
+                        // Missing-workspace prompts are only created by Welcome
+                        // and Open actions, so every non-Welcome prompt belongs
+                        // to the Open screen.
+                        open.set_notice(Some(notice));
                     }
                 }
                 Key::Char('n' | 'N') | Key::Escape | Key::Enter => {
@@ -27117,6 +27119,67 @@ mod tests {
     }
 
     #[test]
+    fn missing_workspace_prompt_keyboard_controls_are_complete() {
+        let alpha = ws("alpha");
+        let mut cancel_term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Right,
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut cancel_loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+        run(
+            &mut cancel_term,
+            vec![alpha.clone()],
+            Vec::new(),
+            now(),
+            &mut cancel_loader,
+        )
+        .unwrap();
+        assert_eq!(cancel_loader.cleanup_calls, 0);
+
+        let mut enter_term =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Enter, Key::Quit]);
+        let mut enter_loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            cleanup_removed: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+        run(
+            &mut enter_term,
+            vec![alpha.clone()],
+            Vec::new(),
+            now(),
+            &mut enter_loader,
+        )
+        .unwrap();
+        assert_eq!(enter_loader.cleanup_calls, 1);
+
+        let mut quit_term =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('x'), Key::Quit]);
+        let mut quit_loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(
+                &mut quit_term,
+                vec![alpha],
+                Vec::new(),
+                now(),
+                &mut quit_loader,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(quit_loader.cleanup_calls, 0);
+    }
+
+    #[test]
     fn missing_recent_can_cancel_without_mutating_the_registry() {
         let alpha = ws("alpha");
         let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('n'), Key::Quit]);
@@ -27181,8 +27244,8 @@ mod tests {
             Key::Quit,
         ]);
         let mut loader = FakeLoader {
-            missing: vec![beta.path.clone()],
-            cleanup_removed: vec![beta.path.clone()],
+            missing: vec![alpha.path.clone(), beta.path.clone()],
+            cleanup_removed: vec![alpha.path.clone(), beta.path.clone()],
             ..FakeLoader::default()
         };
 
@@ -27196,8 +27259,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(loader.opened, Vec::<PathBuf>::new());
-        assert_eq!(loader.missing_calls[0], vec![alpha.path, beta.path.clone()]);
-        assert_eq!(loader.cleanup_candidates, vec![vec![beta.path]]);
+        assert_eq!(
+            loader.missing_calls[0],
+            vec![alpha.path.clone(), beta.path.clone()]
+        );
+        assert_eq!(loader.cleanup_candidates, vec![vec![alpha.path, beta.path]]);
+        assert!(term.frames.iter().any(|frame| {
+            frame
+                .join("\n")
+                .contains("2 workspace registrations removed")
+        }));
+    }
+
+    #[test]
+    fn unreadable_recent_reports_the_error_without_a_removal_prompt() {
+        let alpha = ws("alpha");
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Quit]);
+        let mut loader = FakeLoader {
+            missing_error: Some(io::ErrorKind::PermissionDenied),
+            ..FakeLoader::default()
+        };
+
+        run(
+            &mut term,
+            vec![alpha],
+            vec![recent("alpha")],
+            now(),
+            &mut loader,
+        )
+        .unwrap();
+
+        assert_eq!(loader.cleanup_calls, 0);
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("workspace path could not be checked"))
+        );
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame.contains("Workspace not found"))
+        );
     }
 
     #[test]

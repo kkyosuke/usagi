@@ -651,13 +651,13 @@ mod tests {
 
         welcome.remove_paths(&["/tmp/solo".into(), "/tmp/beta".into(), "/tmp/gone".into()]);
 
-        assert_eq!(welcome.recent().len(), 1);
-        let Recent::Unite(unite) = &welcome.recent()[0] else {
-            panic!("surviving recent should remain a unite");
-        };
-        assert_eq!(unite.members().len(), 1);
-        assert_eq!(unite.members()[0].workspace.name, "alpha");
-        assert_eq!(unite.updated_at(), Some(now() - Duration::minutes(2)));
+        assert!(matches!(
+            welcome.recent(),
+            [Recent::Unite(unite)]
+                if unite.members().len() == 1
+                    && unite.members()[0].workspace.name == "alpha"
+                    && unite.updated_at() == Some(now() - Duration::minutes(2))
+        ));
     }
 
     #[test]
