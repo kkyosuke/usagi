@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 use usagi_core::domain::agent::{AgentProfileId, AgentWorkspaceObservation};
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::session_lifecycle::AgentPhase;
+use usagi_core::domain::supervisor::{
+    SupervisorRunId, SupervisorRunState, SupervisorWorkspaceSnapshot, TaskState,
+};
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
@@ -1052,8 +1055,22 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
         )
     );
     let terminal: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
+    let supervisor_run_id: SupervisorRunId =
+        serde_json::from_value(body["supervisor_run_id"].clone()).unwrap();
     assert_eq!(terminal.workspace_id, workspace);
     assert_eq!(terminal.session_id, None);
+    let DaemonReply::Ok(body) = client
+        .request(DaemonRequest::SupervisorSnapshot { workspace })
+        .unwrap()
+    else {
+        panic!("goal promotion snapshot must be available")
+    };
+    let snapshot: SupervisorWorkspaceSnapshot = serde_json::from_value(body).unwrap();
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].supervisor_run_id, supervisor_run_id);
+    assert_eq!(snapshot.runs[0].state, SupervisorRunState::Running);
+    assert_eq!(snapshot.runs[0].tasks.len(), 1);
+    assert_eq!(snapshot.runs[0].tasks[0].state, TaskState::Ready);
 
     let subscription = attach(&mut client, &terminal);
     client
@@ -1073,7 +1090,14 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match client.request(request()).unwrap() {
-            DaemonReply::Ok(body) if body["completed"] == true => break,
+            DaemonReply::Ok(body) if body["completed"] == true => {
+                assert_eq!(
+                    serde_json::from_value::<SupervisorRunId>(body["supervisor_run_id"].clone())
+                        .unwrap(),
+                    supervisor_run_id
+                );
+                break;
+            }
             DaemonReply::Accepted { .. } => {}
             reply @ DaemonReply::Ok(_) => panic!("unexpected goal replay: {reply:?}"),
         }
@@ -1094,6 +1118,15 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
         panic!("changed goal must be a typed protocol refusal")
     };
     assert_eq!(error.code, ErrorCode::IdempotencyConflict);
+    let DaemonReply::Ok(body) = client
+        .request(DaemonRequest::SupervisorSnapshot { workspace })
+        .unwrap()
+    else {
+        panic!("goal promotion snapshot must remain available")
+    };
+    let snapshot: SupervisorWorkspaceSnapshot = serde_json::from_value(body).unwrap();
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].supervisor_run_id, supervisor_run_id);
 }
 
 #[test]

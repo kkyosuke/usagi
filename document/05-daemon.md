@@ -1320,6 +1320,9 @@ ownership を証明できない incomplete record も新しい child を spawn �
 別である。`AgentGoal` は workspace root だけを対象にし、非空かつ 16 KiB 以下の Goal を固定 operating contract と結合して
 `LaunchRequest.initial_prompt` に保存する。semantic key は workspace、profile、root scope に Goal の長さと本文を加えるため、
 同じ operation / Goal の retry は同じ admission を replay し、別 Goal は spawn 前に `idempotency_conflict` になる。
+readiness と semantic conflict の検証後、daemon は同じ operation ID を使って workspace 所有の `SupervisorRun` を先に永続化する。
+その後の Agent admission が失敗した場合は Run を `Cancelled` へ補償する。成功応答は `supervisor_run_id` を含み、応答喪失後の
+再送は Agent と Run の両方で同じ実体を返す。
 同 scope に既存の queued prompt がある場合はどちらを実行するか推測せず拒否する。通常 launch は従来どおり queued prompt
 だけを consume し、Goal mode の有効化・無効化で classic Agent admission の意味は変わらない。
 
@@ -1650,6 +1653,11 @@ check が共用する。同じ client の再接続と process 内 generation rol
 foreign scope、credential の欠落・偽造・失効は effect-zero の `ownership_unknown` となる。credential registry は
 process-local であるため daemon restart は明示的な失効境界であり、durable run と scheduler は継続する一方、control は
 新しい credential が同じ caller scope と client incarnation の組を証明するまで fail-closed になる。
+
+新規 run は上記caller ownershipとは別に、admission時にdaemonが検証した `WorkspaceId` をsnapshotへ保存する。
+local TUIの `supervisor_snapshot` はこの値がconnection workspaceと一致するrunだけを返す。workspace fieldを持たない
+旧snapshotは推測で補完せず非表示にする。TUI projectionは最大16件、512 KiB以下に制限し、観測がscheduler tickや
+control authorityを発生させることはない。
 
 tick は dispatch run ID と supervisor provenance を照合して terminal fact を reducer event として保存する。
 child terminal 後に parent が `Running` なら `AwaitingDecision` に遷移し、parent provenance と child run、
