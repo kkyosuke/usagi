@@ -8034,14 +8034,12 @@ mod tests {
     }
 
     #[test]
-    fn terminal_adapter_swallows_leader_global_follow_up_then_reads_next_key_fresh() {
+    fn terminal_adapter_routes_assigned_control_follow_ups_and_resets_the_leader() {
         for follow_up in [
             live_key(KeyCode::Char('c'), control()),
             LiveInput::Raw(vec![3]),
             live_key(KeyCode::Char('q'), control()),
             LiveInput::Raw(vec![17]),
-            live_key(KeyCode::Char('d'), control()),
-            LiveInput::Raw(vec![4]),
         ] {
             let mut classifier = usagi_tui::usecase::terminal_input::LiveInputClassifier::default();
             assert_eq!(
@@ -8063,6 +8061,27 @@ mod tests {
                     &live_key(KeyCode::Char('z'), Modifiers::default()),
                 ),
                 Some(Key::Char('z'))
+            );
+        }
+
+        for follow_up in [
+            live_key(KeyCode::Char('d'), control()),
+            LiveInput::Raw(vec![4]),
+        ] {
+            let mut classifier = usagi_tui::usecase::terminal_input::LiveInputClassifier::default();
+            assert_eq!(
+                classify_terminal_input(
+                    &mut classifier,
+                    Duration::ZERO,
+                    &live_key(KeyCode::Char('o'), control()),
+                ),
+                None
+            );
+            assert_eq!(
+                classify_terminal_input(&mut classifier, Duration::from_millis(1), &follow_up),
+                Some(Key::Live(
+                    usagi_tui::usecase::terminal_input::LiveTerminalAction::ScrollDown
+                ))
             );
         }
     }
@@ -8115,7 +8134,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_adapter_distinguishes_plain_n_new_from_ctrl_n_next_tab() {
+    fn terminal_adapter_normalizes_optional_control_on_letter_follow_ups() {
         let classify_follow_up = |follow_up| {
             let mut classifier = usagi_tui::usecase::terminal_input::LiveInputClassifier::default();
             assert_eq!(
@@ -8136,6 +8155,18 @@ mod tests {
         );
         assert_eq!(
             classify_follow_up(live_key(KeyCode::Char('n'), control())),
+            Some(Key::Live(
+                usagi_tui::usecase::terminal_input::LiveTerminalAction::DirectorNew
+            ))
+        );
+        assert_eq!(
+            classify_follow_up(live_key(KeyCode::Char('f'), Modifiers::default())),
+            Some(Key::Live(
+                usagi_tui::usecase::terminal_input::LiveTerminalAction::NextTab
+            ))
+        );
+        assert_eq!(
+            classify_follow_up(live_key(KeyCode::Char('f'), control())),
             Some(Key::Live(
                 usagi_tui::usecase::terminal_input::LiveTerminalAction::NextTab
             ))
