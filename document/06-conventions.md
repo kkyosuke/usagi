@@ -111,7 +111,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
   （`create-release-pr.yml` のリリース PR）は生成時に `Internal-Issue: none` を書き込む。本文を差し込めない
   Dependabot だけは author 名（`dependabot[bot]`）で `none` とみなす。この免除は「マーカーを省ける」だけで、
   issue を `done` へ動かす差分が混ざれば同じように CI が失敗する。
-- ベースブランチは `main`。[CI](#cigithub-actions) が強制する。
+- ベースブランチは `main`。
 - **PR は Draft で開き、[CI](#cigithub-actions) の必須チェック（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になってから Ready for review にする**。ローカル push では重い full gate を走らせないため（[Git Hooks](#git-hookslefthook)）、最終的な full gate の green は CI で確認する。CI が落ちたら Draft のまま修正して push し直す。
 
 ## ドキュメント規約
@@ -397,7 +397,6 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | `.github/workflows/release-build-check.yml` | ルート `Cargo.toml` / `Cargo.lock`、またはリリース経路の workflow / `rust-toolchain.toml` を変更する PR | リリースと同じ 3 プラットフォーム・同じ `--features production` で `cargo build --release` し、リリースビルドが成功することをマージ前に検証する。host target では installer の version 出力契約も検証する。workflow 自身も trigger に含めるのは、リリース経路を変更する PR では version が動かず、version だけを trigger にすると経路の変更が無検証でマージされるためである |
 | `.github/workflows/coverage.yml` | `main` への push / PR | Rust gate 対象差分では `coverage(off)` registry lint、カバレッジ計測・未達レポート（PR ではコメント + Job Summary、push では Job Summary）・100% 未満で失敗し、全差分で `coverage` aggregate を報告 |
 | `.github/workflows/markdown-link-check.yml` | `main` への push / PR | Markdown 対象差分ではリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証し、全差分で `markdown-link-check` aggregate を報告 |
-| `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
 | `.github/workflows/security-audit.yml` | 毎週 / 手動 | `Cargo.lock` を RustSec advisory database と照合する。PR / `main` push では `test.yml` の policy check として同じ audit を実行し、required `test` aggregate が結果を伝播する |
 
 - Rust 依存は Dependabot が毎週更新 PR を作り、GitHub Actions の参照も同じ周期で更新する。RustSec advisory を一時的に
@@ -408,7 +407,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 - `test.yml` は `scripts/ci/root-readme.sh` でルート `README.md` の最低限の contract（`# usagi` 見出し・`document/` の正本へのリンク・truncation 検出のための本文行数）を検証する。リンクチェックはリンクが 0 本になった README を通してしまい、実際にルート README が 1 行へ破壊されたまま `main` に残った事故があるため、この checker が独立した gate として必要である。checker 自体は `scripts/tests/root-readme.sh` の fixture test で検証する。
 - Rust の test / coverage workflow は PR または branch ごとに最新の実行だけを継続し、古い commit の実行をキャンセルする。
 - required status check、review count、bypass actor の正本は `.github/required-contexts.json` である。ruleset `17627257` は `test`、
-  `enforce-base-main`、`full-test`、`coverage`、`markdown-link-check` を GitHub Actions（integration ID
+  `full-test`、`coverage`、`markdown-link-check` を GitHub Actions（integration ID
   `15368`）の required context として持つ。各 workflow は path filter をイベントに置かず、軽量な差分判定後に対象の重い job だけを
   実行する。aggregate job は `if: always()` で判定 job と実行 job の結果を検査するため、Rust、Markdown-only、既知の静的 asset の
   どの PR でも同じ context 名を報告し、判定失敗や対象 job 失敗を success へ変換しない。未知 path は fail-safe で Rust gate 対象とする。
