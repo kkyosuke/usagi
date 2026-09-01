@@ -220,6 +220,11 @@ Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックは、P
 上部の All / Open / Closed / Merged を `←→`、PR を `↑↓` で選ぶ。枠外のクリックで閉じ、PR を選んで
 Enter を押すと既定のブラウザで開く。
 
+PR がすべて merged になり Agent が作業中でない session は、Overview の
+`session cleanup` で安全な cleanup queue にまとめられる。Space（`a` で全件）で選び、Enter を押すと daemon の
+完了 snapshot を1件ずつ確認しながら順番に削除する。dirty worktree や削除不能な branch は daemon が拒否し、queue は
+そこで停止する。
+
 ## AI エージェントとの連携
 
 daemon から起動した Agent には usagi の stdio MCP server が組み込まれる。Agent は作業中の session から、

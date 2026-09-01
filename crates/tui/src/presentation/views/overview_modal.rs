@@ -332,7 +332,7 @@ impl OverviewModal {
     fn subcommands(&self) -> &'static [&'static str] {
         match self.selected_command().map(|command| command.name) {
             Some("clean") => &["--apply", "--apply --force"],
-            Some("session") => &["list", "overview", "remove"],
+            Some("session") => &["cleanup", "list", "overview", "remove"],
             _ => &[],
         }
     }
@@ -549,16 +549,19 @@ mod tests {
 
         modal.select_prev(); // session
         modal.expand_selected();
+        assert_eq!(modal.submission(), "session cleanup");
+        modal.select_next();
         assert_eq!(modal.submission(), "session list");
         modal.select_next();
         assert_eq!(modal.submission(), "session overview");
         modal.select_next();
         assert_eq!(modal.submission(), "session remove");
         modal.select_next();
-        assert_eq!(modal.submission(), "session list");
+        assert_eq!(modal.submission(), "session cleanup");
         modal.select_prev();
         assert_eq!(modal.submission(), "session remove");
         let expanded = joined(&modal);
+        assert!(expanded.contains("cleanup"));
         assert!(expanded.contains("list"));
         assert!(expanded.contains("overview"));
         assert!(expanded.contains("remove"));
@@ -588,7 +591,7 @@ mod tests {
     #[test]
     fn tab_completes_a_session_subcommand_without_replacing_the_command() {
         let mut modal = OverviewModal::new();
-        for character in "session c".chars() {
+        for character in "session cr".chars() {
             modal.insert_char(character);
         }
         modal.complete_selected();

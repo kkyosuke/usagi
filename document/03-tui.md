@@ -879,7 +879,8 @@ verbose な detail は漏らさない）。その safe message は dialog 幅に
 これは入力段階の inline validation（未受付の名前を行の下に error 表示する挙動）とは別で、dialog は受付後の
 daemon 失敗だけを扱う。
 
-session create / remove / refresh の admission は workspace ごとに容量 1 とし、queue は持たない。先行 command の
+session create / remove / refresh の backend admission は workspace ごとに容量 1 とし、内部 queue は持たない。cleanup queue も
+daemon command を並列投入せず、直前の remove が消えた authoritative snapshot を受け取ってから次の1件だけを送る。先行 command の
 worker が daemon port を所有している間に届いた 2 件目は backend action を開始せず、create なら要求 token に対応する
 失敗 `OperationResult`、remove / refresh なら安全な Busy notice を即座に 1 件返す。したがって 2 件目の skeleton や
 pending overlay は残らず、実行順序・queue cancel policy は発生しない。worker panic は安全な失敗 completion に変換して
@@ -896,8 +897,8 @@ skeleton は session 行ではなく作成中の 2 行として、選択でき�
 ## Overview と modal
 
 Overview palette の Tab は選択中のトップレベル command を補完する。`session` の第 1 引数は
-登録済み subcommand の一意な prefix を補完するため、`session c` は `session create` になる。未知または
-曖昧な prefix は入力を変えない。
+登録済み subcommand の一意な prefix を補完する。`cleanup` の追加により `session c` は曖昧なので入力を変えず、
+`session cl` は `session cleanup`、`session cr` は `session create` になる。未知または曖昧な prefix は入力を変えない。
 
 Config の `Modal mode` は Overview と Closeup の command surface に共通して適用される。`Action` は
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
@@ -907,6 +908,7 @@ command の subcommand picker を開き、`←` は閉じる。`Prompt` は入�
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
 `clean` は daemon lifecycle に紐付かない managed worktree / `usagi/*` branch と、dispatch run が既に failed なのに pre-spawn の `reserved` runtime だけが残った Agent reservation を dry-run で数える。daemon restart がその予約を `reconcile_required(identity_unknown)` へ変換した場合も同じ候補として数える。`clean --apply` は merged branch と clean worktree だけを削除し、dirty worktree、unmerged branch、失敗済み Agent reservation は `clean --apply --force` の二重の明示がある場合だけ回収する。Agent reservation は matching `OperationId` の dispatch run が failed、runtime が `reserved` または `reconcile_required(identity_unknown)`、process identity が未設定、という全条件を daemon が再確認し、running runtime や process identity を持つ曖昧な runtime を候補にしない。処理は workspace fence を保持する daemon 内で inventory と lifecycle を再照合して実行し、途中で session が active になった Git resource には作用しない。active daemon は保持中の全 workspace へ同じ non-force cleanup を 5 分ごとに適用するため、merged branch と clean worktree は手動実行なしでも回収される。dirty / unmerged resource と失敗済み Agent reservation は自動回収せず、引き続き明示的な `clean --apply --force` を必要とする。
+`session cleanup` は session として登録中の worktree を対象にする別の操作である。resident PR lane の snapshot に dismissed でない PR が1件以上あり、そのすべてが Merged、Agent phase が absent または done、daemon lifecycle が remove 可能な session だけを queue に並べる。Space で個別選択、`a` で全件選択、Enter で開始し、Esc は queue を閉じる。各 remove は force を付けず、daemon の削除結果から対象 `SessionId` が消えた snapshot を受け取った場合だけ、選択済みの次の identity を再検証して送る。PR が open / closed へ変わった row、Agent が再開した row、削除不能になった row は dispatch 前に候補から外す。dirty worktree、未マージ branch、稼働中 terminal など daemon が拒否した場合は安全な notice を queue に残して自動継続を止める。
 Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
 
@@ -1251,6 +1253,10 @@ window title 引数）を argv として実行する。URL を shell command に
 [live terminal の URL クリック](#live-terminal-の出力表示と入力)でも再利用する。
 PR が Merged へ遷移した session は短時間の celebration state を持ち、その間 Garden が表示中なら当該 plot のうさぎが
 `PR merged!` と一度だけ喜ぶ。reduced motion では点滅を止める。
+同じ daemon-authoritative PR projection は `session cleanup` の候補判定にも使う。queue は表示名や row index を削除 target にせず、
+選択時から完了まで stable `SessionId` を保持する。複数選択を一度に backend へ投入せず、各成功 snapshot 後に次を送るため、
+workspace 単位で容量1の session-command admission と競合しない。失敗 notice または delete failure lifecycle を受けた場合は
+in-flight を解除して停止し、残りを暗黙に続行しない。
 Closeup の `close [-f|--force]` は、選択中 session の削除を Overview と同じ daemon session-command port へ
 直接依頼し、`-f` と `--force` は同値である。force の意味は `X` と同じで、dirty な worktree と未マージの
 session ブランチの両方を破棄する。target、未知 flag、重複 flag は安全に拒否する。

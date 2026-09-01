@@ -66,6 +66,8 @@ pub enum SessionCommand {
     },
     List,
     Overview,
+    /// Open the merge-confirmed session cleanup queue.
+    Cleanup,
     Resume {
         name: String,
     },
@@ -160,8 +162,8 @@ const DEFINITIONS: &[CommandDefinition] = &[
     CommandDefinition {
         info: CommandInfo {
             name: "session",
-            description: "Create, list, resume, select, sleep, or remove sessions",
-            usage: "session [create|list|overview|remove|resume|sleep] <name>",
+            description: "Create, list, resume, select, sleep, clean up, or remove sessions",
+            usage: "session [cleanup|create|list|overview|remove|resume|sleep] <name>",
             long_description: "Manage the sessions that belong to this workspace.",
         },
         factory: |arguments| Command::Session { arguments },
@@ -194,7 +196,9 @@ pub fn parse_clean(arguments: &str) -> Result<CleanCommand, &'static str> {
 
 /// `session` が受け付ける workspace-level subcommand。実行の解釈は session
 /// handler が所有し、ここは palette の補完候補だけを一元化する。
-const SESSION_SUBCOMMANDS: &[&str] = &["create", "list", "overview", "remove", "resume", "sleep"];
+const SESSION_SUBCOMMANDS: &[&str] = &[
+    "cleanup", "create", "list", "overview", "remove", "resume", "sleep",
+];
 
 /// Overview 固有コマンドの metadata を名前順に返す。
 #[must_use]
@@ -286,6 +290,7 @@ pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
         }),
         "list" if rest.is_empty() => Ok(SessionCommand::List),
         "overview" if rest.is_empty() => Ok(SessionCommand::Overview),
+        "cleanup" if rest.is_empty() => Ok(SessionCommand::Cleanup),
         "resume" if !rest.is_empty() && !rest.contains(char::is_whitespace) => {
             Ok(SessionCommand::Resume {
                 name: rest.to_owned(),
@@ -575,7 +580,9 @@ mod tests {
 
     #[test]
     fn completes_a_unique_session_subcommand_prefix() {
-        assert_eq!(completion("session c"), Some("session create".to_owned()));
+        assert_eq!(completion("session c"), None);
+        assert_eq!(completion("session cl"), Some("session cleanup".to_owned()));
+        assert_eq!(completion("session cr"), Some("session create".to_owned()));
         assert_eq!(completion("session o"), Some("session overview".to_owned()));
         assert_eq!(completion("session z"), None);
         assert_eq!(completion("session create "), None);
@@ -595,6 +602,7 @@ mod tests {
         );
         assert_eq!(parse_session("list"), Ok(SessionCommand::List));
         assert_eq!(parse_session("overview"), Ok(SessionCommand::Overview));
+        assert_eq!(parse_session("cleanup"), Ok(SessionCommand::Cleanup));
         assert_eq!(
             parse_session("resume feature-x"),
             Ok(SessionCommand::Resume {
