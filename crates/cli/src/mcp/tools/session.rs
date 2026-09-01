@@ -52,7 +52,7 @@ impl Tool for UserDecisionRequest {
         "user_decision_request"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run に人間の判断を durable に要求し、回答を同期的に返す"
+        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。回答は user_decision_get で取得する"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -99,7 +99,7 @@ impl Tool for UserDecisionGet {
         "user_decision_get"
     }
     fn description(&self) -> &'static str {
-        "recovery/debug のため現在の agent が所有する decision を取得する。回答 polling の主経路には使わない"
+        "現在の agent が所有する decision を取得する。pending の間は同じ decision_id を polling し、terminal 応答を受け取る"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"decision_id":{"type":"string"}},"required":["decision_id"],"additionalProperties":false}"#

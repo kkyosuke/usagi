@@ -87,9 +87,18 @@ struct RuntimeConfig {
 }
 
 /// Runtime/model configuration read from a workspace's `.usagi/config.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceAgentConfig {
     runtimes: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for WorkspaceAgentConfig {
+    fn default() -> Self {
+        // A freshly initialized workspace must be able to delegate without an
+        // undocumented config edit. `default` is the provider-owned selector:
+        // the CLI, rather than usagi, chooses the concrete Claude model.
+        Self::from_runtime_allowlists([("claude", vec!["default".to_owned()])])
+    }
 }
 
 impl WorkspaceAgentConfig {
@@ -112,14 +121,17 @@ impl WorkspaceAgentConfig {
                 .collect(),
         }
     }
-    /// Read configuration. Missing or malformed input is an empty allowlist.
+    /// Read configuration. A missing file uses the product default; malformed
+    /// or explicitly empty configuration remains fail-closed.
     #[must_use]
     pub fn read(workspace: &Path) -> Self {
-        let Ok(text) = fs::read_to_string(workspace.join(CONFIG_PATH)) else {
-            return Self::default();
+        let text = match fs::read_to_string(workspace.join(CONFIG_PATH)) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(_) => return Self::empty(),
         };
         let Ok(parsed) = toml::from_str::<WorkspaceConfig>(&text) else {
-            return Self::default();
+            return Self::empty();
         };
         let runtimes = parsed
             .agents
@@ -130,6 +142,14 @@ impl WorkspaceAgentConfig {
             })
             .collect();
         Self { runtimes }
+    }
+
+    /// Builds an explicit deny-all policy.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            runtimes: BTreeMap::new(),
+        }
     }
 
     /// Models allowed for this closed-vocabulary runtime.
@@ -197,10 +217,16 @@ mod tests {
 
         assert!(
             WorkspaceAgentConfig::read(workspace.path().join("missing").as_path())
+                .allows("claude", "default")
+        );
+        std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [toml").unwrap();
+        assert!(
+            WorkspaceAgentConfig::read(workspace.path())
                 .models("claude")
                 .is_empty()
         );
-        std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [toml").unwrap();
+        std::fs::remove_file(workspace.path().join(".usagi/config.toml")).unwrap();
+        std::fs::create_dir(workspace.path().join(".usagi/config.toml")).unwrap();
         assert!(
             WorkspaceAgentConfig::read(workspace.path())
                 .models("claude")

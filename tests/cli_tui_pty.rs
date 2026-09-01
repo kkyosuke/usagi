@@ -1881,16 +1881,18 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
         "root-hello",
         "claude-input:root-hello",
     );
-    // Director の左端まで確保された背景 terminal に burst を流す。root conversation と
-    // managed pane はそれぞれ独立した drawer / left-band geometry を維持する。
+    // 通常の Home sidebar の右に残る背景 terminal へ burst を流す。100 桁では
+    // Director 左側の managed pane は 3 桁だけ見えるため、完了 marker の先頭を
+    // drawer が開いている間に観測して output poll の継続を固定する。
     wait_for_screen_since(&captured, baseline, "♛ Director");
     fs::write(&burst_trigger, "go\n").unwrap();
     wait_for_file_lines(&burst_done, 1);
-    wait_for_screen_since(&captured, baseline, "dim-live-done");
+    wait_for_screen_since(&captured, baseline, "dim");
 
     // drawer を閉じると、live のまま更新されていた managed Agent が入力 owner へ戻る。
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, baseline, "[closeup]");
+    wait_for_screen_since(&captured, baseline, "dim-live-done");
     send_line_until_delivered(
         &mut master,
         &captured,
