@@ -1381,6 +1381,33 @@ mod tests {
     }
 
     #[test]
+    fn a_dispatch_escalation_persistence_failure_is_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let started = scheduler
+            .start(
+                "caller",
+                "operation",
+                "root work".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        scheduler.fail_apply_at(2);
+
+        let error = scheduler
+            .tick(started.supervisor_run_id, now(), &mut Waker::default())
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+    }
+
+    #[test]
     fn tick_reconciles_only_retries_whose_durable_deadline_is_due() {
         let temp = tempfile::tempdir().unwrap();
         let scheduler = SupervisorRuntime::new(temp.path());

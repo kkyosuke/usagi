@@ -225,6 +225,13 @@ mod tests {
                 .models("claude")
                 .is_empty()
         );
+        std::fs::remove_file(workspace.path().join(".usagi/config.toml")).unwrap();
+        std::fs::create_dir(workspace.path().join(".usagi/config.toml")).unwrap();
+        assert!(
+            WorkspaceAgentConfig::read(workspace.path())
+                .models("claude")
+                .is_empty()
+        );
         assert!(config.models("unknown").is_empty());
     }
 

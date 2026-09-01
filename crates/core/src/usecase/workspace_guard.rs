@@ -733,11 +733,13 @@ mod tests {
             "git --no-pager --no-optional-locks log --no-ext-diff --no-textconv --oneline",
             "git --no-pager --no-optional-locks diff --no-ext-diff --no-textconv",
             "git log --oneline main",
+            "git log --stat --no-ext-diff --no-textconv main",
             "git -C . status --short --branch",
             "git log main | head -20",
             "gh pr view --comments",
             "gh pr list --limit 10",
             "sleep 1",
+            "sleep 1s",
             "ls -la",
         ] {
             assert!(root_command_is_read_only(command), "denied {command}");
@@ -747,6 +749,8 @@ mod tests {
             "git status | sh",
             "gh pr checkout 1",
             "gh pr view 1 --web",
+            "git log --stat main",
+            "sleep 1 2",
             "sleep forever",
             "sleep 6m",
         ] {
