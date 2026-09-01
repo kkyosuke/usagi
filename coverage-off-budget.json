@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 511,
+  "total": 512,
   "owners": {
     "core": 9,
-    "daemon": 339,
+    "daemon": 340,
     "root-cli": 39,
     "tui": 124
   },
@@ -54,7 +54,7 @@
     "src/runtime/cli.rs": 10,
     "src/runtime/clean.rs": 18,
     "src/runtime/clipboard.rs": 1,
-    "src/runtime/daemon.rs": 256,
+    "src/runtime/daemon.rs": 257,
     "src/runtime/daemon/tenant_control.rs": 5,
     "src/runtime/inventory_pump.rs": 1,
     "src/runtime/launchd.rs": 1,

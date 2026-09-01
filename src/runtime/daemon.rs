@@ -6398,6 +6398,7 @@ fn dispatch_supervisor_snapshot(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn authenticated_supervisor_caller(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,

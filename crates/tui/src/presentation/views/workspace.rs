@@ -3215,7 +3215,7 @@ mod tests {
         home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
         pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
         right_pane_tab_at, role_identity, short_id, sidebar_agent_line, sidebar_metadata,
-        sidecar_labels, terminal_point_at, with_footer_gap,
+        sidecar_labels, terminal_point_at, with_footer_gap, work_run_state_label,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -3239,7 +3239,7 @@ mod tests {
     use std::path::Path;
 
     use chrono::{DateTime, Utc};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
     use std::sync::Arc;
     use usagi_core::domain::agent::{
@@ -3255,7 +3255,8 @@ mod tests {
     use usagi_core::domain::role::RoleId;
     use usagi_core::domain::session_lifecycle::{AgentPhase, FailureStage, SessionLifecycle};
     use usagi_core::domain::supervisor::{
-        ExecutionPolicy, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
+        ExecutionPolicy, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskId,
+        TaskQuery, TaskState,
     };
 
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -3268,7 +3269,7 @@ mod tests {
     #[test]
     fn home_banner_surfaces_the_highest_priority_work_run() {
         let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let run = SupervisorRunQuery {
+        let mut run = SupervisorRunQuery {
             supervisor_run_id: SupervisorRunId::new(),
             state_revision: 1,
             state: SupervisorRunState::Running,
@@ -3279,13 +3280,76 @@ mod tests {
             tasks: Vec::new(),
             provenance: Vec::new(),
         };
+        run.tasks = [
+            TaskState::Succeeded,
+            TaskState::Dispatched,
+            TaskState::Running,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, state)| TaskQuery {
+            task_id: TaskId::new(format!("task-{index}")).unwrap(),
+            parent_task_id: None,
+            dependencies: BTreeSet::new(),
+            instruction_digest: format!("digest-{index}"),
+            required_artifact_contract: "none".into(),
+            attempt: 1,
+            generation: 1,
+            assigned_dispatch_run: None,
+            state,
+        })
+        .collect();
         let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
-            .with_work_runs(vec![run]);
+            .with_work_runs(vec![run.clone()]);
         let banner = widgets::strip_ansi(&home_notice_banner(100, &home));
         assert!(banner.contains("Active work"));
         assert!(banner.contains("Working"));
-        assert!(banner.contains("0/0 tasks"));
+        assert!(banner.contains("1/3 tasks"));
+        assert!(banner.contains("2/4 agents"));
         assert!(banner.contains("Director for details"));
+
+        let states = [
+            SupervisorRunState::Planning,
+            SupervisorRunState::Running,
+            SupervisorRunState::Verifying,
+            SupervisorRunState::WaitingForDecision,
+            SupervisorRunState::Escalated,
+            SupervisorRunState::Succeeded,
+            SupervisorRunState::Failed,
+            SupervisorRunState::Cancelled,
+        ];
+        assert_eq!(
+            states.map(work_run_state_label),
+            [
+                "Planning",
+                "Working",
+                "Working",
+                "Waiting for you",
+                "Waiting for you",
+                "Completed",
+                "Failed",
+                "Cancelled",
+            ]
+        );
+        let sorted = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
+            .with_work_runs(
+                states
+                    .into_iter()
+                    .map(|state| SupervisorRunQuery {
+                        supervisor_run_id: SupervisorRunId::new(),
+                        state,
+                        ..run.clone()
+                    })
+                    .collect(),
+            );
+        assert!(matches!(
+            sorted.work_runs[0].state,
+            SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated
+        ));
+        assert!(matches!(
+            sorted.work_runs.last().unwrap().state,
+            SupervisorRunState::Succeeded | SupervisorRunState::Cancelled
+        ));
     }
 
     #[test]

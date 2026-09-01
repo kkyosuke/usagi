@@ -20138,6 +20138,37 @@ mod tests {
         assert!(lane.begin_if_due(next + super::WORK_RUN_OBSERVATION_BACKOFF));
     }
 
+    #[test]
+    fn work_run_observation_drops_a_mismatched_workspace() {
+        struct MismatchedWorkRuns;
+
+        impl super::WorkRunPort for MismatchedWorkRuns {
+            fn snapshot(
+                &mut self,
+                _: WorkspaceId,
+            ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>
+            {
+                Ok(
+                    usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot {
+                        workspace_id: WorkspaceId::new(),
+                        runs: Vec::new(),
+                    },
+                )
+            }
+        }
+
+        let requested = WorkspaceId::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        super::spawn_work_run_observation_job(Box::new(MismatchedWorkRuns), requested, sender);
+        let completion = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the Work Run observation returns its port");
+        assert_eq!(
+            completion.snapshot.unwrap_err(),
+            "daemon returned another workspace's Work Runs"
+        );
+    }
+
     /// One round asks each *other* open project for its own inventory. An
     /// answer that names a different workspace is dropped rather than drawn in
     /// the plot that was asked about, and the port comes back either way.

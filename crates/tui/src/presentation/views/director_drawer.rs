@@ -641,8 +641,12 @@ fn selector_row(width: usize, projection: &DirectorDrawerProjection) -> String {
 mod tests {
     use super::*;
     use crate::presentation::widgets::{display_width, strip_ansi};
+    use chrono::Utc;
     use std::collections::BTreeSet;
-    use usagi_core::domain::supervisor::{ExecutionPolicy, SupervisorRunId, TaskId, TaskQuery};
+    use usagi_core::domain::id::OperationId;
+    use usagi_core::domain::supervisor::{
+        EscalationRecord, ExecutionPolicy, SupervisorRunId, TaskId, TaskQuery,
+    };
 
     fn work_run() -> SupervisorRunQuery {
         SupervisorRunQuery {
@@ -892,6 +896,97 @@ mod tests {
             assert!(body.contains("● task-1  working"));
             assert!(body.contains("Stop reason: —"));
         }
+    }
+
+    #[test]
+    fn work_run_projection_covers_every_priority_state_and_task_badge() {
+        let run_states = [
+            SupervisorRunState::Planning,
+            SupervisorRunState::Running,
+            SupervisorRunState::WaitingForDecision,
+            SupervisorRunState::Verifying,
+            SupervisorRunState::Succeeded,
+            SupervisorRunState::Failed,
+            SupervisorRunState::Cancelled,
+            SupervisorRunState::Escalated,
+        ];
+        let expected_priorities = [3, 2, 0, 2, 4, 1, 4, 0];
+        assert_eq!(run_states.map(work_run_priority), expected_priorities,);
+        let projection = DirectorDrawerProjection::default().with_work_runs(
+            run_states
+                .into_iter()
+                .map(|state| {
+                    let mut run = work_run();
+                    run.state = state;
+                    run
+                })
+                .collect(),
+        );
+        assert_eq!(
+            projection
+                .work_runs
+                .iter()
+                .map(|run| work_run_priority(run.state))
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1, 2, 2, 3, 4, 4]
+        );
+        assert_eq!(
+            run_states.map(run_state_label),
+            [
+                "Planning",
+                "Working",
+                "Waiting for you",
+                "Verifying",
+                "Completed",
+                "Failed",
+                "Cancelled",
+                "Needs attention",
+            ]
+        );
+
+        let task_states = [
+            TaskState::Pending,
+            TaskState::Ready,
+            TaskState::Dispatched,
+            TaskState::Running,
+            TaskState::AwaitingDecision,
+            TaskState::Retrying,
+            TaskState::Verifying,
+            TaskState::Succeeded,
+            TaskState::Failed,
+            TaskState::Cancelled,
+            TaskState::Blocked,
+        ];
+        for state in task_states {
+            let mut run = work_run();
+            run.tasks.truncate(1);
+            run.tasks[0].state = state;
+            assert!(
+                work_run_rows(60, &run)
+                    .iter()
+                    .any(|row| { strip_ansi(row).contains(task_state_label(state)) })
+            );
+        }
+
+        let mut verbose = work_run();
+        let template = verbose.tasks[0].clone();
+        verbose.tasks = (0..7)
+            .map(|index| TaskQuery {
+                task_id: TaskId::new(format!("many-{index}")).unwrap(),
+                ..template.clone()
+            })
+            .collect();
+        verbose.escalation = Some(EscalationRecord {
+            escalation_id: OperationId::new(),
+            reason: "choose a recovery".into(),
+            blocking_task_id: None,
+            safe_evidence: "bounded".into(),
+            choices: vec!["resume".into()],
+            created_at: Utc::now(),
+        });
+        let rows = work_run_rows(60, &verbose).join("\n");
+        assert!(rows.contains("… 2 more tasks"));
+        assert!(rows.contains("Stop reason: choose a recovery"));
     }
 
     #[test]

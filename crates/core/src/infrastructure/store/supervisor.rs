@@ -1793,6 +1793,62 @@ mod tests {
     }
 
     #[test]
+    fn workspace_runs_prioritize_every_state_and_rebuild_stale_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let states = [
+            SupervisorRunState::Planning,
+            SupervisorRunState::Running,
+            SupervisorRunState::WaitingForDecision,
+            SupervisorRunState::Verifying,
+            SupervisorRunState::Succeeded,
+            SupervisorRunState::Failed,
+            SupervisorRunState::Cancelled,
+            SupervisorRunState::Escalated,
+        ];
+        let mut ids = Vec::new();
+        for (index, state) in states.into_iter().enumerate() {
+            let mut run = SupervisorRun::new(
+                "caller".into(),
+                format!("task-{index}"),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(i64::try_from(index).unwrap()),
+            );
+            run.workspace_id = Some(workspace);
+            run.state = state;
+            ids.push(run.supervisor_run_id);
+            store.initialize(&run).unwrap();
+        }
+        assert!(store.workspace_runs(workspace, 0).is_err());
+        let priority = |state| match state {
+            SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated => 0,
+            SupervisorRunState::Failed => 1,
+            SupervisorRunState::Running | SupervisorRunState::Verifying => 2,
+            SupervisorRunState::Planning => 3,
+            SupervisorRunState::Succeeded | SupervisorRunState::Cancelled => 4,
+        };
+        let listed = store.workspace_runs(workspace, states.len()).unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|run| priority(run.state))
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1, 2, 2, 3, 4, 4]
+        );
+
+        let stale_id = ids[0];
+        let mut changed = store.load(stale_id).unwrap().unwrap();
+        changed.state = SupervisorRunState::Failed;
+        json_file::write_atomic(&store.dir, &store.snapshot_path(stale_id), &changed).unwrap();
+        let rebuilt = store.workspace_runs(workspace, states.len()).unwrap();
+        assert!(rebuilt.iter().any(|run| {
+            run.supervisor_run_id == stale_id && run.state == SupervisorRunState::Failed
+        }));
+    }
+
+    #[test]
     fn run_list_rebuilds_once_and_falls_back_from_stale_or_unreadable_state() {
         let (tmp, store, caller_runs) = indexed_run_fixture();
         let reopened = SupervisorStore::new(tmp.path());
