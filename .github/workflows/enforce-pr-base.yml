@@ -10,10 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ensure PR targets main
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          echo "PR base branch: ${{ github.base_ref }}"
-          if [ "${{ github.base_ref }}" != "main" ]; then
-            echo "::error::PR のベースブランチは 'main' でなければなりません（現在: '${{ github.base_ref }}'）。"
+          echo "PR base branch: ${BASE_REF}"
+          if [ "${BASE_REF}" != "main" ]; then
+            echo "::error::PR のベースブランチは 'main' でなければなりません（現在: '${BASE_REF}'）。"
             exit 1
           fi
           echo "PR は main に向いています。OK。"

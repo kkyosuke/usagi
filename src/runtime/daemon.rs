@@ -21,7 +21,9 @@ use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::domain::agent::prompt::{PromptScope, launch_system_prompt};
-use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
+use usagi_core::domain::agent::{
+    AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName, aggregate_agent_status,
+};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{ConnectionId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
@@ -404,7 +406,7 @@ fn open_runtime_state(
     generation: usagi_core::domain::id::DaemonGeneration,
     children: &Arc<SpawnedChildren>,
 ) -> std::io::Result<ShardedRuntimeState> {
-    ShardedRuntimeState::new(
+    let state = ShardedRuntimeState::new(
         generation,
         GenerationRole::Active,
         ResourceAllocator::new(
@@ -414,7 +416,35 @@ fn open_runtime_state(
         Box::new(ShardArchiveFiles::new(data_dir)?),
         Box::new(ObservedChildren(Arc::clone(children))),
         Box::new(SystemLogicalClock),
-    )
+    )?;
+    Ok(match registered_generations(data_dir, generation) {
+        // A registry this process cannot read proves nothing retired, so the
+        // reclaim stays closed rather than guessing against a live generation.
+        Some(registered) => state.with_registered_generations(registered),
+        None => state,
+    })
+}
+
+/// The generations `generations.json` still lists, plus this one.
+///
+/// This process is registering itself as it starts, so its own entry may not be
+/// durable yet; including it keeps the reclaim from ever considering the
+/// hydrating generation's own claims. An absent registry is a daemon that has
+/// never rolled over, which is a readable answer, not an unknown one.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=restart_hydrates_file_snapshot_before_dispatch_admission_and_preserves_ledger
+fn registered_generations(
+    data_dir: &Path,
+    generation: usagi_core::domain::id::DaemonGeneration,
+) -> Option<std::collections::BTreeSet<usagi_core::domain::id::DaemonGeneration>> {
+    let document = read_registry_document(data_dir).ok()?;
+    let mut registered = std::collections::BTreeSet::from([generation]);
+    registered.extend(
+        document
+            .into_iter()
+            .flat_map(|document| document.generations)
+            .map(|entry| entry.generation),
+    );
+    Some(registered)
 }
 
 /// Reads this generation's shard and every retained one, migrating the legacy
@@ -436,6 +466,12 @@ fn hydrate_runtime_state(
             migration.marker.adopted,
             migration.marker.generations.len(),
             migration.marker.unknown
+        ));
+    }
+    if hydrated.reclaimed != 0 {
+        ErrorLog::record(&format!(
+            "daemon startup reclaimed {} leaked {what} capacity claim(s) no retained generation accounted for",
+            hydrated.reclaimed
         ));
     }
     if hydrated.interrupted != 0 {
@@ -1694,10 +1730,10 @@ fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let mut arguments = codex_product_mcp_arguments(command);
     arguments.extend(["-c".into(), r"features.hooks = true".into()]);
     for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
-        // Codex exposes PermissionRequest for the same user-attention boundary
-        // that Claude exposes as Notification. Each provider therefore reports
-        // `waiting` without pretending it supports the other's native event.
-        if event == "Notification" {
+        // Interactive Codex runs with approval_policy=never inside usagi's
+        // outer sandbox, so PermissionRequest cannot fire. Notification is a
+        // Claude-only hook event. Do not advertise either as a Codex signal.
+        if matches!(event, "Notification" | "PermissionRequest") {
             continue;
         }
         let phase_command = format!("{} agent-phase {}", shell_quote(command), phase.as_token());
@@ -2417,12 +2453,23 @@ impl DecisionWaker for AgentDecisionWaker<'_> {
             .dispatch_store()
             .workspace_for_agent(binding.worker.agent_id)?
             .ok_or_else(|| anyhow::anyhow!("parent workspace is unavailable"))?;
+        if runtime
+            .prompt(
+                workspace,
+                binding.worker.session_id,
+                &prompt,
+                PromptMode::Live,
+            )
+            .is_ok()
+        {
+            return Ok(());
+        }
         runtime
             .prompt(
                 workspace,
                 binding.worker.session_id,
                 &prompt,
-                PromptMode::Auto,
+                PromptMode::Queue,
             )
             .map_err(|error| anyhow::anyhow!(error.message))?;
         Ok(())
@@ -2981,6 +3028,11 @@ const CUSTODY_TICK: Duration = Duration::from_secs(1);
 /// the pending set again anyway. An admission wakes it immediately, so this only
 /// bounds the retry of a teardown whose durable finalization failed.
 const SESSION_TEARDOWN_TICK: Duration = Duration::from_secs(1);
+
+/// How often the active daemon removes safe Git resources that are no longer
+/// linked from a workspace lifecycle document. The manual command remains the
+/// only path for protected candidates.
+const ORPHAN_CLEANUP_TICK: Duration = Duration::from_mins(5);
 
 /// How long the accept loop waits after an accept error that may have left the
 /// connection queued. This is the error path only: an idle daemon parks on
@@ -3563,9 +3615,15 @@ fn spawn_ipc_server(
     let (teardown, teardown_worker) = start_session_teardown_worker(
         Arc::clone(&workspaces),
         Arc::clone(&agent),
+        Arc::clone(&terminal),
         Arc::clone(&shutdown),
     )?;
     background_workers.push(teardown_worker);
+    background_workers.push(start_orphan_cleanup_worker(
+        &workspaces,
+        fence.gate.clone(),
+        Arc::clone(&shutdown),
+    )?);
     // Workspaces adopted for a client that has gone away are given back, so a
     // daemon that served many of them over a day does not still own them all.
     background_workers.push(start_tenant_retire_worker(
@@ -3918,6 +3976,7 @@ where
 fn start_session_teardown_worker(
     workspaces: Workspaces,
     agent: SharedAgentRuntime,
+    terminal: SharedTerminalRuntime,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<(Arc<TeardownSignal>, std::thread::JoinHandle<()>)> {
     let signal = Arc::new(TeardownSignal::new());
@@ -3925,6 +3984,7 @@ fn start_session_teardown_worker(
         WorkspacesTeardown { workspaces },
         AgentAndWorktreeTeardown {
             agent,
+            terminal,
             worktree: WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo),
         },
         Arc::clone(&signal),
@@ -3970,10 +4030,17 @@ impl TeardownJournal for WorkspacesTeardown {
     }
 }
 
-/// Orders session destruction so no Agent process or durable Agent inventory
-/// can outlive the worktree scope it belongs to.
+/// Orders session destruction so no Agent process, generic terminal, or durable
+/// inventory row can outlive the worktree scope it belongs to.
+///
+/// Both runtime kinds are closed before the worktree is touched, because both
+/// hold a PTY child whose cwd is inside that worktree and a claim in the shared
+/// capacity pool. A terminal left running keeps the checkout busy so
+/// `git worktree remove` fails, and keeps its pool slot for the life of the
+/// daemon.
 struct AgentAndWorktreeTeardown<E> {
     agent: SharedAgentRuntime,
+    terminal: SharedTerminalRuntime,
     worktree: E,
 }
 
@@ -3983,6 +4050,11 @@ impl<E: TeardownEffect> TeardownEffect for AgentAndWorktreeTeardown<E> {
         self.agent
             .lock()
             .map_err(|_| "agent owner is unavailable".to_owned())?
+            .close_session(teardown.session_id)
+            .map_err(|error| error.message)?;
+        self.terminal
+            .lock()
+            .map_err(|_| "terminal owner is unavailable".to_owned())?
             .close_session(teardown.session_id)
             .map_err(|error| error.message)?;
         self.worktree.tear_down(teardown)
@@ -4039,6 +4111,93 @@ where
                 // re-derives the pending set while a teardown whose
                 // finalization failed still needs retrying.
                 should_drain = signal.wait(tick) || retry_finalization;
+            }
+            worker_health.finish_planned();
+        })
+}
+
+/// Periodically applies only the non-force half of `clean` to every workspace
+/// whose fence this active generation still holds.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=automatic_orphan_cleanup_ticks_until_shutdown
+fn start_orphan_cleanup_worker(
+    workspaces: &Workspaces,
+    gate: AdmissionGate,
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    spawn_orphan_cleanup_worker(
+        AutomaticOrphanCleanup {
+            workspaces: Arc::clone(workspaces),
+            gate,
+        },
+        shutdown,
+        ORPHAN_CLEANUP_TICK,
+    )
+}
+
+trait OrphanCleanupPass: Send {
+    fn run(&mut self);
+}
+
+impl<C> OrphanCleanupPass for C
+where
+    C: FnMut() + Send,
+{
+    fn run(&mut self) {
+        self();
+    }
+}
+
+struct AutomaticOrphanCleanup {
+    workspaces: Workspaces,
+    gate: AdmissionGate,
+}
+
+impl OrphanCleanupPass for AutomaticOrphanCleanup {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions
+    fn run(&mut self) {
+        for tenant in self.workspaces.all() {
+            let Some(_lease) = active_cleanup_lease(&self.gate) else {
+                break;
+            };
+            let root = tenant.root().to_path_buf();
+            let bound = ConnectionWorkspace {
+                tenant,
+                workspaces: Arc::clone(&self.workspaces),
+            };
+            if let Err(error) = clean_orphan_session_resources(&bound, None, true, false) {
+                ErrorLog::record(&format!(
+                    "automatic orphan cleanup deferred for {}: {}",
+                    root.display(),
+                    error.safe_message()
+                ));
+            }
+        }
+    }
+}
+
+/// Acquires the same active-control barrier as mutating IPC requests. A rollover
+/// closes admission and waits for a pass already in flight; a draining
+/// predecessor cannot start another pass.
+fn active_cleanup_lease(gate: &AdmissionGate) -> Option<AdmissionLease> {
+    gate.acquire(LeaseClass::ActiveControl).ok()
+}
+
+/// The maintenance loop with its effect and cadence injected for deterministic
+/// tests. Waiting before the first pass keeps daemon startup free of Git scans.
+fn spawn_orphan_cleanup_worker<C>(
+    mut clean: C,
+    shutdown: Arc<ShutdownRequest>,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    C: OrphanCleanupPass + 'static,
+{
+    std::thread::Builder::new()
+        .name("usagi-orphan-cleanup".to_string())
+        .spawn(move || {
+            let worker_health = shutdown.monitor_background_worker(BackgroundWorker::OrphanCleanup);
+            while !shutdown.wait_for_tick(tick) {
+                clean.run();
             }
             worker_health.finish_planned();
         })
@@ -5140,7 +5299,7 @@ fn start_ipc_accept_loop(
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent" | "agent_inventory" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
+                                        Some("agent" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
@@ -7146,6 +7305,7 @@ fn session_response_envelope(
                 SessionAction::Create => Some("session.created"),
                 SessionAction::Remove => Some("session.removed"),
                 SessionAction::Clean
+                | SessionAction::Sleep
                 | SessionAction::List
                 | SessionAction::Status
                 | SessionAction::Overview
@@ -7261,6 +7421,7 @@ fn best_effort_merged_pr_head(
 #[allow(clippy::too_many_lines)]
 fn clean_orphan_session_resources(
     bound: &ConnectionWorkspace,
+    agent: Option<&SharedAgentRuntime>,
     apply: bool,
     force: bool,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
@@ -7325,7 +7486,17 @@ fn clean_orphan_session_resources(
             )
         })
         .collect::<Vec<_>>();
-    let described = git_candidates
+    let failed_reservations = agent.map_or_else(
+        || Ok(Vec::new()),
+        |agent| {
+            agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .failed_reservation_ids()
+                .map_err(|_| SessionRuntimeError::Storage)
+        },
+    )?;
+    let mut described = git_candidates
         .iter()
         .map(|candidate| match candidate {
             CleanCandidate::Worktree {
@@ -7350,17 +7521,42 @@ fn clean_orphan_session_resources(
             _ => unreachable!(),
         })
         .collect::<Vec<_>>();
+    described.extend(failed_reservations.iter().map(|runtime| {
+        serde_json::json!({
+            "kind": "agent_reservation",
+            "name": runtime.as_str(),
+            "protected": true,
+        })
+    }));
     if !apply {
         return Ok(serde_json::json!({
             "mode": "dry_run",
             "candidates": described,
             "removed": 0,
-            "protected": git_candidates.iter().filter(|item| item.requires_force()).count(),
+            "protected": git_candidates.iter().filter(|item| item.requires_force()).count()
+                + failed_reservations.len(),
         }));
     }
 
     let mut removed = 0usize;
     let mut protected = 0usize;
+    if !failed_reservations.is_empty() {
+        if force {
+            removed += agent
+                .ok_or(SessionRuntimeError::InvalidRequest)?
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .clean_failed_reservations()
+                .map_err(|error| {
+                    SessionRuntimeError::DurableFailure(format!(
+                        "could not clean failed Agent reservations: {}",
+                        error.message
+                    ))
+                })?;
+        } else {
+            protected += failed_reservations.len();
+        }
+    }
     for candidate in &git_candidates {
         if candidate.requires_force() && !force {
             protected += 1;
@@ -7498,11 +7694,12 @@ fn dispatch_session_action(
                         let (resumable, reason) = runtime.session_resume_status(id);
                         item["agent_resumable"] = serde_json::json!(resumable);
                         item["agent_resume_reason"] = serde_json::json!(reason);
-                        let member = agents
-                            .iter()
-                            .filter(|agent| agent.session_id == Some(id))
-                            .max_by_key(|agent| agent.current_run.is_some());
-                        item["agent_status"] = serde_json::json!(member.map(|agent| agent.status));
+                        item["agent_status"] = serde_json::json!(aggregate_agent_status(
+                            agents
+                                .iter()
+                                .filter(|agent| agent.session_id == Some(id))
+                                .map(|agent| agent.status),
+                        ));
                         // Parentage is immutable lifecycle metadata captured when
                         // the session is created. A later dispatch into an existing
                         // session must never reorganize it.
@@ -7580,9 +7777,8 @@ fn dispatch_session_action(
             let mode = match payload
                 .get("mode")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("auto")
+                .unwrap_or("live")
             {
-                "auto" => PromptMode::Auto,
                 "queue" => PromptMode::Queue,
                 "live" => PromptMode::Live,
                 _ => return Err(SessionRuntimeError::InvalidRequest),
@@ -7880,6 +8076,28 @@ fn dispatch_session_action(
                 merged_head_oid,
             )
         }
+        SessionAction::Sleep => {
+            let name = string("name")?;
+            let id = named_session(name)?;
+            let slept = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .sleep_session(id)
+                .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            let mut snapshot = dispatch_session_action(
+                bound,
+                teardown,
+                agent,
+                pr_inventory,
+                SessionAction::List,
+                operation_id,
+                &serde_json::json!({}),
+            )?;
+            snapshot.body["slept"] = serde_json::json!(slept);
+            snapshot.body["slept_session"] = serde_json::json!(name);
+            snapshot.body["session_retained"] = serde_json::json!(true);
+            Ok(snapshot)
+        }
         SessionAction::Clean => {
             let flag = |name| match payload.get(name) {
                 None => Ok(false),
@@ -7891,7 +8109,12 @@ fn dispatch_session_action(
             if force && !apply {
                 return Err(SessionRuntimeError::InvalidRequest);
             }
-            reply(clean_orphan_session_resources(bound, apply, force)?)
+            reply(clean_orphan_session_resources(
+                bound,
+                Some(agent),
+                apply,
+                force,
+            )?)
         }
         SessionAction::Setup => bound
             .sessions()
@@ -8292,6 +8515,7 @@ fn reconcile_orphan_delegations(
 enum AgentDispatchRequest {
     Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
     Inventory(WorkspaceId),
+    WorkspaceObservation(WorkspaceId),
     Diagnose(
         WorkspaceId,
         Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
@@ -8330,6 +8554,7 @@ fn admit_agent_dispatch_request(
                 owner.prepare_current_integration_resume_readiness(operation_id, target, *revision)
             }
             AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::WorkspaceObservation(_)
             | AgentDispatchRequest::Diagnose(_, _)
             | AgentDispatchRequest::Restart(_, _, _, _) => {
                 unreachable!("handled before readiness")
@@ -8355,6 +8580,7 @@ fn admit_agent_dispatch_request(
                     preflight.as_ref(),
                 ),
             AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::WorkspaceObservation(_)
             | AgentDispatchRequest::Diagnose(_, _)
             | AgentDispatchRequest::Restart(_, _, _, _) => {
                 unreachable!("handled before readiness")
@@ -8379,6 +8605,18 @@ fn dispatch_agent_maintenance(
                 .map(|agent| {
                     serde_json::to_value(agent.inventory(*workspace))
                         .expect("safe Agent inventory is serializable")
+                }),
+        ),
+        AgentDispatchRequest::WorkspaceObservation(workspace) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|agent| agent.workspace_observation(*workspace))
+                .map(|observation| {
+                    serde_json::to_value(observation)
+                        .expect("safe Agent workspace observation is serializable")
                 }),
         ),
         AgentDispatchRequest::Diagnose(workspace, expected) => Some(
@@ -8433,6 +8671,9 @@ fn dispatch_agent(
             } => Some(AgentDispatchRequest::Launch(operation_id, intent)),
             DaemonRequest::AgentInventory { workspace } => {
                 Some(AgentDispatchRequest::Inventory(workspace))
+            }
+            DaemonRequest::AgentWorkspaceObservation { workspace } => {
+                Some(AgentDispatchRequest::WorkspaceObservation(workspace))
             }
             DaemonRequest::DiagnoseAgents {
                 workspace,
@@ -11094,6 +11335,7 @@ impl ShutdownSignal for SignalShutdown {
 
 struct ServeLauncher {
     exe: PathBuf,
+    launched: RefCell<Option<std::process::Child>>,
 }
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl ServeLauncher {
@@ -11120,7 +11362,32 @@ impl DaemonLauncher for ServeLauncher {
             .stderr(std::process::Stdio::null());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        command.spawn()?;
+        let child = command.spawn()?;
+        self.launched.replace(Some(child));
+        Ok(())
+    }
+
+    fn launched_exit(&self) -> std::io::Result<Option<String>> {
+        let mut launched = self.launched.borrow_mut();
+        let Some(child) = launched.as_mut() else {
+            return Ok(None);
+        };
+        let Some(status) = child.try_wait()? else {
+            return Ok(None);
+        };
+        launched.take();
+        Ok(Some(status.to_string()))
+    }
+
+    fn abort_launch(&self) -> std::io::Result<()> {
+        let Some(mut child) = self.launched.borrow_mut().take() else {
+            return Ok(());
+        };
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        child.kill()?;
+        child.wait()?;
         Ok(())
     }
 
@@ -12190,6 +12457,7 @@ fn run_inner(
     });
     let launcher = ServeLauncher {
         exe: std::env::current_exe()?,
+        launched: RefCell::new(None),
     };
     let rollover = IpcRolloverRequester {
         data_dir: &data_dir,
@@ -12884,7 +13152,7 @@ fn policy_client_for(
             policy.timeout_ms,
         )
     })?;
-    let data_dir = paths::data_dir().map_err(client_unavailable)?;
+    let data_dir = client_result(paths::data_dir())?;
     let build = current_build();
     // Reconnects target the already-running daemon; the initial bootstrap above
     // owns cold-start and rollover, so a plain connect that fails simply exhausts
@@ -12907,6 +13175,10 @@ fn client_unavailable(error: anyhow::Error) -> ClientError {
     let message = error.to_string();
     drop(error);
     ClientError::Unavailable(message)
+}
+
+fn client_result<T>(result: anyhow::Result<T>) -> Result<T, ClientError> {
+    result.map_err(client_unavailable)
 }
 
 /// Connect a resilient per-request client to the already-running generation
@@ -15806,9 +16078,11 @@ mod tests {
 
     #[test]
     fn unavailable_client_errors_preserve_the_safe_reason() {
+        let expected = PathBuf::from("available");
+        assert_eq!(client_result(Ok(expected.clone())), Ok(expected));
         assert!(matches!(
-            client_unavailable(anyhow::anyhow!("data directory unavailable")),
-            ClientError::Unavailable(message) if message == "data directory unavailable"
+            client_result::<PathBuf>(Err(anyhow::anyhow!("data directory unavailable"))),
+            Err(ClientError::Unavailable(message)) if message == "data directory unavailable"
         ));
     }
 
@@ -17256,6 +17530,56 @@ mod tests {
         assert_eq!(pending_calls.load(Ordering::Acquire), 2);
     }
 
+    #[test]
+    fn automatic_orphan_cleanup_ticks_until_shutdown() {
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let stop = Arc::clone(&shutdown);
+        let worker = spawn_orphan_cleanup_worker(
+            move || {
+                if observed.fetch_add(1, Ordering::AcqRel) + 1 == 2 {
+                    stop.request();
+                }
+            },
+            Arc::clone(&shutdown),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        worker.join().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+
+        let already_stopped = Arc::new(ShutdownRequest::new());
+        already_stopped.request();
+        let untouched = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&untouched);
+        spawn_orphan_cleanup_worker(
+            move || {
+                observed.fetch_add(1, Ordering::AcqRel);
+            },
+            already_stopped,
+            Duration::from_millis(1),
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(untouched.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn automatic_orphan_cleanup_is_fenced_by_the_active_control_lease() {
+        let gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
+        let lease = active_cleanup_lease(&gate).expect("active generation admits cleanup");
+        assert_eq!(gate.outstanding(LeaseClass::ActiveControl), 1);
+        drop(lease);
+        assert_eq!(gate.outstanding(LeaseClass::ActiveControl), 0);
+
+        gate.close(LeaseClass::ActiveControl);
+        gate.await_drain(LeaseClass::ActiveControl).unwrap();
+        assert!(active_cleanup_lease(&gate).is_none());
+    }
+
     /// Prepares `<data>/daemon` with an acquired instance lock and a registered
     /// owner record, exactly as `serve` leaves it before publishing, and returns
     /// the production custody probe built from that state.
@@ -18255,13 +18579,13 @@ mod tests {
                 "features.hooks = true",
             ]
         );
-        assert_eq!(codex.len(), 24);
+        assert_eq!(codex.len(), 22);
         for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
-            if event == "Notification" {
+            if matches!(event, "Notification" | "PermissionRequest") {
                 assert!(
                     !codex
                         .iter()
-                        .any(|argument| argument.starts_with("hooks.Notification"))
+                        .any(|argument| argument.starts_with(&format!("hooks.{event}")))
                 );
                 continue;
             }
@@ -18295,6 +18619,74 @@ mod tests {
                 "mcp__usagi",
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rendered_codex_hook_toml_parses_and_executes_every_wired_command() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let bin = fixture.path().join("hook bin");
+        std::fs::create_dir(&bin).unwrap();
+        let command = bin.join("usagi'fixture");
+        let log = fixture.path().join("hook.log");
+        std::fs::write(
+            &command,
+            "#!/bin/sh\npayload=$(cat)\nprintf '%s|%s\\n' \"$*\" \"$payload\" >> \"$USAGI_HOOK_TEST_LOG\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let arguments = codex_integration_arguments(&command).unwrap();
+        let (pairs, remainder) = arguments.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        let assignments = pairs
+            .iter()
+            .filter_map(|pair| pair[1].strip_prefix("hooks.").map(str::to_owned))
+            .collect::<Vec<_>>();
+        assert_eq!(assignments.len(), 6);
+
+        for assignment in assignments {
+            let (event_and_key, groups) = assignment.split_once(" = ").unwrap();
+            let event = event_and_key.trim();
+            let document = toml::from_str::<toml::Value>(&format!("value = {groups}"))
+                .unwrap_or_else(|error| panic!("invalid generated {event} TOML: {error}"));
+            let groups = document["value"]
+                .as_array()
+                .expect("hook groups are an array");
+            for group in groups {
+                let hooks = group["hooks"].as_array().expect("group hooks are an array");
+                for hook in hooks {
+                    let rendered = hook["command"].as_str().expect("command hook");
+                    let mut child = Command::new("/bin/sh")
+                        .args(["-c", rendered])
+                        .env("USAGI_HOOK_TEST_LOG", &log)
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    write!(
+                        child.stdin.take().unwrap(),
+                        "{{\"hook_event_name\":\"{event}\",\"source\":\"startup\",\"session_id\":\"fixture-session\"}}"
+                    )
+                    .unwrap();
+                    assert!(child.wait().unwrap().success(), "{event}: {rendered}");
+                }
+            }
+        }
+
+        let calls = std::fs::read_to_string(log).unwrap();
+        for expected in [
+            "codex-session-capture|",
+            "agent-phase ready|",
+            "agent-phase running|",
+            "agent-phase waiting|",
+            "agent-phase ended|",
+            "agent-phase exited|",
+        ] {
+            assert!(calls.contains(expected), "missing {expected}: {calls}");
+        }
+        assert_eq!(calls.lines().count(), 7, "{calls}");
     }
 
     #[test]

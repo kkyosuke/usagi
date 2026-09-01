@@ -46,8 +46,11 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 
 workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
 選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。`+ Open` は左右の余白を
-含めてクリックでき、Session Garden では開いている全 project の session をまとめて見渡せる。workspace root の
-shell は header の `[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。
+含めてクリックでき、登録済み workspace の複数選択に加えて `Tab` から既存ディレクトリを直接追加できる。overlay を
+開いている間は別の usagi が追加した workspace も自動で一覧へ反映される。Session Garden では開いている全 project の
+session を巣穴として、Agent のうさぎが池・餌場・木陰を行き来する共有の庭を見渡せる。右の `Notifications` は
+`Agent completed.` や入力待ちなど、現在の viewport の状態を短い文で表示する。workspace root の shell は header の
+`[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。
 
 ```text
  1 usagi   2 api   3 web   + Open
@@ -159,7 +162,8 @@ usagi open /path/to/project
 ```
 
 引数を省略するとカレントディレクトリを開く。次回からは `usagi` の Welcome にある Open / Recent
-から選べる。新しいリポジトリを clone したい場合は Welcome の New を使う。
+から選べる。Home の `+ Open` では `Tab` を押して既存ディレクトリのパスを入力しても登録・open できる。
+新しいリポジトリを clone したい場合は Welcome の New を使う。
 
 ### 2. session を作る
 
@@ -178,8 +182,9 @@ usagi session create remote-fix --base refs/remotes/origin/main
 ```
 
 session は対象リポジトリの `.usagi/sessions/<name>/` に独立した worktree として作られる。
-Home の作成欄では `local:main` / `remote:origin/main` のように出所を区別した base branch を
-`↑↓` で選ぶ。CLI の `--base` は同じ対象を fully-qualified ref で指定する。
+Home の作成欄では `local:main` / `remote:origin/(default)` / `remote:origin/main` のように
+出所を区別した base branch を `↑↓` で選ぶ。`(default)` はその remote の既定 branch を表す。
+CLI の `--base` は同じ対象を fully-qualified ref で指定する。
 role は作業種別ごとの追加指示を選ぶ stable ID で、権限や sandbox を変更するものではない。
 詳細は [session role](document/10-session-roles.md)を参照する。
 
@@ -201,6 +206,9 @@ terminal new     # 外部ターミナルを開き、modal を閉じて Closeup �
 
 daemon 再起動などで Agent が中断した場合は、自動的に別の会話へ接続せず、保持された provider conversation を
 `session resume <name>` で明示的に再開する。
+終了済みの会話を保持したまま Agent process と PTY だけを止める場合は `session sleep <name>` を使う。
+同時起動枠は 16 で、枠が埋まった状態から新しく起動すると、exact resume 可能な終了済み Agent のうち最古の 1 件が
+自動的に sleep へ移る。session、worktree、provider conversation は削除されず、同じ `session resume <name>` で再開できる。
 
 ### 4. 状態と PR を確認する
 
@@ -260,7 +268,7 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、daemon だけが古い場合は seamless restart する |
 | `usagi doctor --fix --restart-agents` | 古い integration の Agent を一覧化・停止し、provider session ID を使って現在の設定で再開する。Running の Agent は拒否する |
 | `usagi doctor --fix --restart-agents --force` | Running（tool / prompt 実行中）の Agent も明示的に中断して再開する |
-| `usagi clean [--dry-run\|--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch を検出・削除する |
+| `usagi clean [--dry-run\|--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch と、消滅した generation が握ったままの capacity claim を検出・削除する |
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
@@ -271,6 +279,12 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 `usagi clean` は dry-run で候補だけを表示する。`--apply` は欠損 path の workspace 登録、欠損 workspace の
 daemon data、lifecycle に存在しない `usagi/*` branch と `.usagi/sessions/*` worktree を削除する。dirty worktree と
 未マージ branch は `--apply --force` を明示した場合だけ削除し、daemon が使用中の workspace はスキップする。
+
+加えて、消滅した daemon generation が握ったままの capacity claim も回収する。claim は Agent と terminal の
+固定サイズ pool を占有するため、取りこぼしが積み上がると pool が枯渇して**どの session でも Agent を起動できなくなる**。
+回収対象は「どの owner shard も資源を説明せず、かつ generation registry が owner を載せていない」claim だけで、
+どちらか一方しか満たさない claim は通常の durable state として残す（正本は
+[owner-generation runtime shard と global resource allocator](document/05-daemon.md#owner-generation-runtime-shard-と-global-resource-allocator)）。
 
 `restart` は live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、
 安全な handoff の前提が欠ける場合だけ拒否する。`stop` は live Agent や terminal があると拒否する。

@@ -253,7 +253,7 @@ fn click_director_button(master: &mut File) {
 
 /// Click `[ New ]` in the 100-column drawer selector row below the top padding.
 fn click_director_new(master: &mut File) {
-    send(master, b"\x1b[<0;96;4M\x1b[<0;96;4m");
+    send(master, b"\x1b[<0;96;5M\x1b[<0;96;5m");
 }
 
 fn toggle_director_with_key(master: &mut File) {
@@ -2295,16 +2295,22 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
         !root_codex_argv.contains("--dangerously-bypass-approvals-and-sandbox"),
         "{root_codex_argv}"
     );
+    assert!(
+        !root_codex_argv.contains("--dangerously-bypass-hook-trust"),
+        "{root_codex_argv}"
+    );
     for hook in [
         "hooks.SessionStart",
         "hooks.UserPromptSubmit",
         "hooks.PreToolUse",
         "hooks.PostToolUse",
-        "hooks.PermissionRequest",
         "hooks.Stop",
         "hooks.SessionEnd",
     ] {
         assert!(root_codex_argv.contains(hook), "{hook}: {root_codex_argv}");
+    }
+    for hook in ["hooks.PermissionRequest", "hooks.Notification"] {
+        assert!(!root_codex_argv.contains(hook), "{hook}: {root_codex_argv}");
     }
     assert!(
         root_codex_argv.contains("agent-phase waiting"),
@@ -3253,10 +3259,13 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     assert!(narrow.contains("♛ Director"), "{narrow}");
     assert!(!narrow.contains("Leave this workspace?"), "{narrow}");
 
-    send(&mut master, b"\x1b");
-    wait_for_screen_since(&captured, baseline, "No conversations yet");
-    send(&mut master, b"\x1b");
-    wait_for_screen_absent_since(&captured, baseline, "No conversations yet");
+    // The workspace header remains above the full-width drawer, and its
+    // Director button closes even while the empty picker owns all other input.
+    // The PTY is 70 columns wide now; column 61 is inside the right-aligned
+    // 14-cell button on the row below the project bar (SGR mouse coordinates
+    // are one-based).
+    send(&mut master, b"\x1b[<0;61;2M\x1b[<0;61;2m");
+    wait_for_screen_absent_since(&captured, baseline, "No Agent CLI installed");
     send(&mut master, b"\x11");
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");

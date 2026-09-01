@@ -125,7 +125,7 @@ Home の最上段には project tab bar を常時 1 行表示する。deck が 1
 
 | 入力 | 動作 |
 |---|---|
-| `Ctrl-O` → `+` / `+ Open` click | Add workspace overlay。登録済み workspace を filter し、`Space` で複数選択、`Enter` で末尾へ追加する。表示中の open workspace は `Ctrl-D` で閉じる |
+| `Ctrl-O` → `+` / `+ Open` click | Add workspace overlay。登録済み workspace を filter し、`Space` で複数選択、`Enter` で末尾へ追加する。`Tab` で Directory 入力へ切り替えると、未登録の既存ディレクトリを同じ open 経路で canonicalize・登録・追加する。表示中の open workspace は `Ctrl-D` で閉じる |
 | `Ctrl-O` → `1` … `9` / tab click | 1〜9 番目またはクリックした project tab を active にする |
 | `Ctrl-O` → `0` | 全件 switcher。`↑↓` / 数字 / `Enter` で切替し、10 件目以降にも到達できる |
 | switcher の `x` | 選択 project tab を deck から detach する。workspace 登録、session、daemon terminal は削除・終了しない |
@@ -134,13 +134,21 @@ Home の最上段には project tab bar を常時 1 行表示する。deck が 1
 live PTY と management surface の両方で解決できる 1 秒の `Ctrl-O` leader を使う。leader がない plain digit / `+` は従来どおり live PTY へ
 1 回だけ渡す。project shortcut は Switch、Closeup、Director、project overlay より先に process shell が消費する。
 
+Add workspace overlay を表示している間は、global `workspaces.json` を frame thread の外で 250ms 間隔に再取得する。別の
+usagi が `usagi open`、Welcome の New、または別の `+ Open` から登録した workspace は、現在の filter・選択・Directory
+入力を維持したまま候補へ反映する。overlay が閉じている間はこの再取得を行わず、Home の frame budget にファイル IO を置かない。
+
 Add は現在の Home composition を背面に保ち、既存 tab を checked で示す。checked row の `Ctrl-D` は switcher の `x` と同じ
 project close を実行し、未追加 row では何もしない。filter 入力の plain `x` は従来どおり文字として扱う。選択した全 workspace の snapshot と settings を
 現在の composition を保ったまま背景 worker で準備し、`Opening workspace N / total…` の spinner を表示する。
 `Esc` は画面上の待機を取り消し、完了済みの late result を破棄して元の workspace authority を再申告する。
 1 件でも失敗すれば membership を変更せず notice を出す。成功時だけ追加した先頭を active にし、
 旧 composition を drop してから新しい composition を作る。通常切替も同じ prepare → commit 境界を使うため、失敗時は current workspace と
-その接続を保つ。未保存の create / notes / environment / roles editor がある間は切替・active close を拒否する。
+その接続を保つ。既に開いている tab への通常切替は、project tab bar を全画面 loading で置き換えない。target tab と、その tab が
+deck に保持する session 一覧を通信なしで即時に描く。snapshot を短い猶予内に準備できれば spinner は出さず、時間がかかった場合だけ
+右 content pane に表示する。待機中の `Esc` 以外の入力は次の workspace frame へ順序を保って繰り越す。cancel / open error 後に current
+workspace の authority を再申告する間も同じ部分描画を使う。準備完了後は fresh snapshot で session 一覧と content を置き換える。
+未保存の create / notes / environment / roles editor がある間は切替・active close を拒否する。
 
 TUI が resident に持つ `ControllerBackendComposition` は active workspace の 1 件だけである。切替 return が旧 workspace の port、pump、worker、
 subscription をすべて drop してから次の factory を呼ぶ。drop は daemon-owned Agent / terminal / operation を停止せず detach だけを行い、
@@ -557,7 +565,7 @@ provider 固有 ID、prompt、inbox 本文は表示しない。
 
 root scope（`session_id: None`）の Agent へ指示を出し、session を作らせる面を**指示モード**（英語 / identifier は
 `director`）と呼ぶ。この節が指示モードの名称と仕様の正本である。managed session の実作業を見る面
-（[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home の高さ一杯を使って右端へ重なる drawer として現れる。
+（[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home header の下から右端へ重なる drawer として現れる。
 
 Home header の右端には Unicode の chess queen を使う `[ ♛ Director ]` button を表示し、drawer title も
 `♛ Director` とする。glyph は直接描画し、狭幅でも
@@ -574,7 +582,7 @@ clip する場合も、この対比は変わらない。
 button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
 指示モードの open/closed state を toggle する。drawer の通常幅は端末幅の 60% とし、
 56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
-同時に保てない幅では全幅へ縮退し、完全に隠れる managed terminal は detach する。背景 Home は ANSI span ごと dim にする。
+同時に保てない幅では全幅へ縮退し、完全に隠れる managed terminal は detach する。背景 Home は header を残して ANSI span ごと dim にする。
 drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
 managed-session Closeup の right pane viewport とは別の pure geometry とする。背景に見えている managed Agent は
 その right pane viewport の attachment と出力 poll を維持し、dim 表示中も live output を描く。
@@ -818,7 +826,7 @@ skeleton には Accent（青）を使わないため、静的行から入力欄�
 request を非同期に開始し、完了まで行の直前に 2 行の skeleton を表示する。skeleton の activity glyph と session 名は Success（緑）で同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。IME に依存しない `Ctrl-A` も
-同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前、read-only base branch picker、read-only role picker を受け取り、profile / model は指定せず daemon の workspace default policy に委ねる。base picker は local branch と remote-tracking branch を `local:<name>` / `remote:<remote>/<name>` と表示し、Config の Base branch が現在の inventory にあればそれを、なければ現在 checkout 中の local branch を初期選択する。remote の symbolic alias（`origin/HEAD` など）は候補に含めない。`↑↓` で base、Tab で role を切り替え、daemon へは選択した fully-qualified ref と role ID だけを送る。branch inventory または role catalog を読めない場合は対応する picker を空に縮退させ、base が空なら従来どおり `HEAD` を使う。入力中は英数字・`-`・`_` 以外、64 文字超過、または daemon snapshot で表示中の session と、read-only に検出した `.usagi/sessions/` の既存 worktree と同じ名前を caret 行の下に error として表示し、空の名前は Enter 時に error を表示する。未マージ branch の安全な削除に失敗した session も `failed` 行として snapshot に残るため、その branch が所有する名前には入力中から `session name already exists` を表示する。error は caret 行と同じ 1 行に詰めて末尾を切り捨てるのではなく、sidebar 幅（`unicode-width` 準拠の表示桁数）に合わせて caret 行の**下へ折り返して**表示するため、CJK を含む長い安全文でも切れずに読める。折り返した行数は `+ new session` 行の高さ計上（viewport の scroll 起点と footer）と一致させ、error が伸びてもレイアウトがずれない。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
+同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前、read-only base branch picker、read-only role picker を受け取り、profile / model は指定せず daemon の workspace default policy に委ねる。base picker は local branch と remote-tracking branch を `local:<name>` / `remote:<remote>/<name>` と表示し、remote の symbolic `HEAD` は `remote:<remote>/(default)` と表示する。Config の Base branch が現在の inventory にあればそれを、なければ現在 checkout 中の local branch を初期選択する。remote の `HEAD` 以外の symbolic alias は候補に含めない。`↑↓` で base、Tab で role を切り替え、daemon へは選択した fully-qualified ref と role ID だけを送る。branch inventory または role catalog を読めない場合は対応する picker を空に縮退させ、base が空なら従来どおり `HEAD` を使う。入力中は英数字・`-`・`_` 以外、64 文字超過、または daemon snapshot で表示中の session と、read-only に検出した `.usagi/sessions/` の既存 worktree と同じ名前を caret 行の下に error として表示し、空の名前は Enter 時に error を表示する。未マージ branch の安全な削除に失敗した session も `failed` 行として snapshot に残るため、その branch が所有する名前には入力中から `session name already exists` を表示する。error は caret 行と同じ 1 行に詰めて末尾を切り捨てるのではなく、sidebar 幅（`unicode-width` 準拠の表示桁数）に合わせて caret 行の**下へ折り返して**表示するため、CJK を含む長い安全文でも切れずに読める。折り返した行数は `+ new session` 行の高さ計上（viewport の scroll 起点と footer）と一致させ、error が伸びてもレイアウトがずれない。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
 作成 request の受付後、完了まで入力がなければ、作成された session を選択して Closeup へ移る。完了前に入力があればこの自動遷移を取り消し、
 作成完了後もその時点の操作 surface を保つ。
 完了 snapshot は sidebar row と daemon-issued session ID を同時に置換するため、`a` のような短い名前も
@@ -864,11 +872,11 @@ command の subcommand picker を開き、`←` は閉じる。`Prompt` は入�
 `garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
-`clean` は daemon lifecycle に紐付かない managed worktree / `usagi/*` branch を dry-run で数え、`clean --apply` は merged branch と clean worktree だけを削除する。dirty worktree と unmerged branch は `clean --apply --force` の二重の明示がある場合だけ削除する。処理は workspace fence を保持する daemon 内で inventory と lifecycle を再照合して実行し、途中で session が active になった resource には作用しない。
+`clean` は daemon lifecycle に紐付かない managed worktree / `usagi/*` branch と、dispatch run が既に failed なのに pre-spawn の `reserved` runtime だけが残った Agent reservation を dry-run で数える。daemon restart がその予約を `reconcile_required(identity_unknown)` へ変換した場合も同じ候補として数える。`clean --apply` は merged branch と clean worktree だけを削除し、dirty worktree、unmerged branch、失敗済み Agent reservation は `clean --apply --force` の二重の明示がある場合だけ回収する。Agent reservation は matching `OperationId` の dispatch run が failed、runtime が `reserved` または `reconcile_required(identity_unknown)`、process identity が未設定、という全条件を daemon が再確認し、running runtime や process identity を持つ曖昧な runtime を候補にしない。処理は workspace fence を保持する daemon 内で inventory と lifecycle を再照合して実行し、途中で session が active になった Git resource には作用しない。active daemon は保持中の全 workspace へ同じ non-force cleanup を 5 分ごとに適用するため、merged branch と clean worktree は手動実行なしでも回収される。dirty / unmerged resource と失敗済み Agent reservation は自動回収せず、引き続き明示的な `clean --apply --force` を必要とする。
 Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
 
-`session create <name>`、`session list`、`session overview`、`session resume <name>`、`session remove <name> [--force]` は
+`session create <name>`、`session list`、`session overview`、`session resume <name>`、`session sleep <name>`、`session remove <name> [--force]` は
 Overview の実行 port を通じて daemon IPC request になる。この実行 port は起動経路に依存せず、
 Welcome→Open・Welcome の Recent・direct な Workspace entry のいずれで開いた workspace でも同じ
 daemon-authoritative な port を通る。screen graph は workspace 起動ごとに port を新しく生成し、
@@ -887,11 +895,17 @@ launch admission や ownership の判断には使わない。metrics 未取得�
 
 live Agent の枠は対象 tab で `Ctrl-D` により Agent を終了して解放する。status modal 自体は読み取り専用で、Esc で閉じる。
 
+`session sleep <name>` は、対象 session の idle Agent process と PTY を止めて concurrency slot を解放する。
+実行できるのは daemon が `ready` または `ended` と観測し、exact provider resume metadata を保持する Agent だけである。
+running / waiting の Agent や再開情報を持たない Agent が 1 件でもあれば、process を止めず request 全体を拒否する。
+sleep は session、worktree、provider conversation を削除せず、phase を `sleeping` として表示する。
+
 `session resume <name>` はその session の provider conversation を明示的に再開する。TUI は新しい
 `OperationId` で pending Agent tab を作り、daemon が返す新しい完全な `TerminalRef` だけを同じ pending tab へ
 昇格する。この pending pane を伴う経路は controller の `ResumeAgent` effect だけが所有し、他の session command
 port は resume を受理しない。provider-native ID は受け取らず表示もしない。live Agent、resume metadata の欠落、
 scope/revision 不一致は安全な error として収束し、provider の last session や旧 PTY を推測しない。
+`sleeping` は明示的に中断された resumable history と同じ再開導線へ入り、resume 成功時は新しい PTY と runtime identity を得る。
 sidebar は daemon snapshot の `available` session に加えて、名前を占有し続ける `failed` session も
 失敗 stage に応じた状態付きで表示する。`failed` 行は使用不可（`can_use=false`）なので新しい pane の launch を提示せず、
 削除可能（`can_remove=true`）なので `x` / `X` の remove をそのまま受け付ける。ただし、その session に daemon 所有の
@@ -960,8 +974,8 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 
 ## session garden
 
-session を庭の区画、その session に属する Agent runtime を区画内のうさぎとして眺める screen saver である。
-Home の一時的な全幅レイヤーで、開いている project tab 全件の session を tab 順に並べる。active project は daemon 権威の
+session を庭の巣穴、その session に属する Agent runtime を庭を歩くうさぎとして眺める screen saver である。
+Home の一時的な全幅レイヤーで、開いている project tab 全件の session を tab 順に横長の仮想世界へ置く。active project は daemon 権威の
 lifecycle・最新の coherent Agent inventory・controller が runtime ごとに保持する Agent phase を写す。inactive project は
 session / lifecycle を最後に準備または active だった daemon snapshot の cache として保持し、Agent membership だけは
 [cross-project 観測](#inactive-project-の-agent-観測)で daemon から読み直してうさぎを描く。inactive controller は
@@ -969,24 +983,52 @@ resident にせず、観測できていない membership を推測もしない�
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
-区画は端末の縦方向へ収まる数を1列として tab 順に上から下、次に右へ並べる。横方向に収まらない場合は固定容量で
-切り捨てず、footer の `← Scroll` / `Scroll →` button または `←` / `→` key で viewport を1 plot列ずつ動かす。
-footer は表示中のsession範囲と全件数を示し、最後のprojectを含む全sessionへGarden内から到達できる。scroll button は
-左右1cellのpaddingを含む描画範囲全体をclick targetにし、左右端の無効な方向を押してもGardenを閉じない。
+Garden 本体は左、`Notifications` panel は右に分ける。panel は端末幅の 3 分の 1 を基準に 24〜36 桁を使い、
+左の Garden は残りの幅を使う。左領域が 80 桁 × 18 行以上（通常の panel 幅では端末全体が 120 桁 × 18 行以上）なら、
+横方向に広い仮想世界を描く。session 順に 96 cell の地域を割り当て、立札と巣穴を home にし、その周囲へ池・餌場・
+木陰と小道を置く。viewport より広い分は footer の `← Pan` / `Pan →` button または `←` / `→` key で 16 cell ずつ
+camera を動かす。footer は現在見えている world cell 範囲と全幅を示し、最後の project を含む全 session の home へ
+Garden 内から到達できる。pan button は左右 1 cell の padding を含む描画範囲全体を click target にし、左右端の
+無効な方向を押しても Garden を閉じない。
+
+左領域がこの寸法に満たないが Garden 全体の最小寸法を満たす端末では、固定 plot を compact fallback として描く。
+左領域の縦方向へ収まる数を 1 列として tab 順に上から下、次に右へ並べ、`← Scroll` / `Scroll →` で 1 plot 列ずつ
+動かす。先頭 plot は左端へ固定し、狭い端末でも一覧性と click target を失わない。
 
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
 自動で開く。
 
+### notification panel
+
+右 panel は event 履歴を別に保持せず、現在の viewport に見えている session と同じ safe projection を短い説明文へ写す。
+各項目は session label と説明の 2 行で、縦幅に収まらない項目は `+N more in this view` に畳む。Garden を横スクロールすると
+panel も同じ viewport へ切り替わるため、見えていないうさぎの古い通知が残ることはない。
+
+| 現在状態 | 1 Agent の説明例 |
+|---|---|
+| `Waiting` | `Agent needs your input.` |
+| `Running` | `Agent is working.` |
+| dispatch `Idle`、または phase `Ended` / `Exited` | `Agent completed.` |
+| `Interrupted` | `Agent was interrupted.` |
+| session lifecycle `Failed` | `Session failed.` |
+| PR merge celebration | `PR merged.` |
+
+複数 Agent が属する session は、注目度の高い現在状態と該当数を `1/3 agents need input.` のように示す。
+通知は lifecycle、dispatch status、Agent phase の順に強い事実を採用し、raw error、prompt、terminal output、provider-native ID は
+panel へ渡さない。inactive project をまだ観測していない場合は `Status is unavailable.` とし、状態を推測しない。
+
 ### 区画とうさぎ
 
-1 区画は 1 session、1 うさぎは 1 Agent runtime である。project が複数なら nameplate の先頭へ `project /` を置き、その後を
-`role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
-phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
+1 巣穴は 1 session、1 うさぎは 1 Agent runtime である。巣穴は session の home であって囲いではなく、うさぎは同じ地域の
+池・餌場・木陰まで左右・上下に移動して戻る。project が複数なら立札の先頭へ `project /` を置き、その後を
+`role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は立札・巣穴とその近くの pose、Agent
+phase は各うさぎの pose と巣穴の状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の巣穴を
 描く。inactive project も観測できた `Available` の session は同じ規則で描き、観測していない間（daemon が答える前・
 daemon が居ない・観測できる project 数の上限を超えた分）は `no agents` と断定せず `project inactive` と表示する。
 遷移中または失敗した cached lifecycle は `cached · creating` / `cached · deleting` / `cached · failed` と表示する。
 cached lifecycle は live の進行状況ではないため、Agent を観測できていてもうさぎを描かず、animation させない。
-runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
+spacious world は session ごとに注目順の最大 6 羽を描き、それより後ろの runtime も巣穴の状態内訳には残す。compact
+fallback は固定幅のため最大 3 羽を並べる。
 
 **どの runtime が居るかは最新の coherent Agent inventory が決める**。Closeup の tab strip と同じ observation を
 membership の権威にするので、庭のうさぎは常に「開ける tab を持つ Agent」と一致する。inventory が
@@ -1000,35 +1042,49 @@ phase をそのまま保つ runtime-local phase を優先し、まだ観測し�
 （`reserved → ready`、`live → running`、`interrupted → interrupted`）で描く。inventory を 1 度も観測していない
 （起動直後・`daemon` surface を開いた直後の再取得中）間は、controller が持つ runtime-local phase がそのまま
 うさぎになる。workspace root の runtime と、Home に存在しない session の runtime は区画へ加えない。
-active project では `session list` の dispatch status も status 行へ重ねる。`starting` / `idle` / `exited` /
-`failed` は inventory の粗い `live → running` より強く、`starting` / `idle` / `stopped` / `failed` と表示する。
-dispatch が `running` の間だけは runtime-local の `waiting` / `interrupted` を保ち、より粗い running 表示で潰さない。
+dispatch status も区画へ重ねる。active project は `session list`、inactive project は観測した
+`AgentWorkspaceObservation.session_statuses` を使い、どちらも全 Agent を
+`running > starting > failed > idle > exited` の共通順位で
+決定的に集約する。record の挿入順や「current run がある最初の1件」で結果を変えない。`starting` / `idle` /
+`exited` / `failed` は inventory の粗い `live → running` より強く、区画全体を calm / stopped / failed の静止 pose に
+する。この pose は個別 runtime を表さないため、うさぎ単位の animation と hitbox を置かない。通常動作は絵を見れば
+分かるため `starting` / `idle` / `stopped` の action caption は重ねず、見逃せない `failed` だけを文字でも表示する。
+dispatch が `running` の間だけは runtime-local の `waiting` / `interrupted` pose と各うさぎの hitbox を保ち、より粗い
+running pose で潰さない。
 
-複数 runtime は注目順（`waiting → running → ready → interrupted → idle → done`）に並べ、同 phase の
+複数 runtime は注目順（`waiting → running → ready → interrupted → sleep → idle → done`）に並べ、同 phase の
 tie-break を stable `AgentRuntimeId` 順にする。この順序と状態内訳の語彙は
 [Session sidebar rows](#session-sidebar-rows) の agent 行と共有する（同じ session の Agent が
-2 つの surface で違う数・違う順に見えることが無いよう、投影も 1 つに束ねる）。4 羽目以降は末尾から畳むが、
-畳まれた runtime も状態内訳の記号列には現れるため、描けなかった Agent が何をしているかは失われない。
+2 つの surface で違う数・違う順に見えることが無いよう、投影も 1 つに束ねる）。描画上限以降は末尾から畳む。
+compact fallback は畳んだ runtime も phase glyph に残し、spacious world は右の notification panel で全 Agent の件数を示す。
+うさぎの上や巣穴には pose と重複する `walking` / `4 wait · 1 run` のような action caption を表示しない。
 controller が runtime の `Ended` / `Exited` を観測した runtime（tab は残っており、inventory も保持している）は
 瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さないため描かない。
-区画の幅と区画の hitbox は羽数で変えない（うさぎ 1 羽ぶんの hitbox はその内側に別に置く）。session の選択状態は Garden に装飾せず、
-すべて同じ dim の nameplate で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
+巣穴の幅と hitbox は羽数で変えず、うさぎ 1 羽ぶんの hitbox は実際の移動先へ別に置く。session の選択状態は Garden に装飾せず、
+すべて同じ dim の立札で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
-`Running` は hop・bound・sniff・dig・look の長さが異なる 5 種類の基本動作を持つ。各 runtime の stable
-`AgentRuntimeId` から動作順と開始位置を疑似ランダムに決め、5 動作を終えるたびに順序を組み直すため、同じ phase の
-うさぎもそれぞれ異なる順序で動く。うさぎ本体の色も ID から 5 色の palette の 1 色を選ぶ。状態ラベルの色は
-`Running` / `Waiting` などの意味色を保つ。同じ ID・tick なら同じ色・pose になり、refresh で見た目が飛ぶことはない。
+spacious world の `Running` / `Ready` / `Absent` は 100 tick の生活 cycle を持つ。`Sleeping` は木陰で静止する。
+生活 cycle は巣穴から池へ歩く → 水を飲む →
+餌場へ歩く → carrot を食べる → 木陰へ歩く → 眠る → 巣穴へ戻る、の順で移動し、帰路では左向き、往路では右向きの
+sprite を使う。各 runtime の stable `AgentRuntimeId` から cycle の開始位置をずらすため、同じ phase のうさぎも一斉に
+同じ場所へ移動しない。compact fallback の `Running` は従来どおり hop・bound・sniff・dig・look の 5 動作を使う。
+うさぎ本体の色は ID から 5 色の palette の 1 色を選ぶ。
+同じ ID・tick・size・camera offset なら同じ位置・色・pose になり、refresh で見た目が飛ぶことはない。
 `Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
-土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は既存 frame tick を共有し、
-同じ pose を描く tick は canonical tick へ畳んで frame material の不要な再描画を抑える。
+土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は相対時刻ラベルの分単位の壁時計から
+分離し、shell の monotonic な 16 ms logical clock を 8 tick ずつ保持する約 8 fps の Garden clock で進める。同じ pose を
+描く tick は canonical tick へ畳み、frame key にはこの canonical tick を載せる。Garden の背面に隠れた mascot clock は
+key に入れないため、通常 Home は Garden のために毎秒再構築されない。
 composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
-全 pose を静止姿勢に固定し、lifecycle と Agent phase の状態ラベルだけを更新する。
+うさぎ・空・草の全 pose を静止姿勢に固定する。
 
-Garden の背景は workspace 名から決定的に配置した `.` / `*` の空、session 名を挟んだ立札、庭の全幅へ続く草地と
-薄い土の 2 層で構成する。装飾は ASCII を基本とし、同じ workspace・session 順・端末幅では refresh ごとに移動しない。
-状態ラベルに加え、`Ready` は足元の草、`Done` は `z`、`Failed` は枯れ草を小さく添える。これらは雰囲気の補助であり、
-状態の意味は引き続き文字ラベルと顔で伝える。footer は左にうさぎの click 操作、右に任意キーで起こす操作を分けて表示する。
+spacious world の背景は workspace 名と world 座標から決定的に配置した `.` / `*` / `v`、session の立札と巣穴、
+`~` の池、`Y` の餌場、`&` の木、小道で構成する。compact fallback は左の庭領域へ続く草地と薄い土の 2 層を使う。
+星は同じ cell で明滅し、草は同じ根元で小さく向きを変えるため、Agent の稼働状態を偽らず背景だけに ambient motion を足す。
+うさぎの各行は pose 全体で耳と顔の中心軸を揃え、左向き・右向き・各 lifecycle を切り替えても耳だけ横へずれない。
+compact fallback は `Ready` に足元の草、`Done` に `z`、`Failed` に枯れ草を小さく添える。通常動作は action caption を
+反復せず pose・顔・phase glyph で伝える。footer は左にうさぎの click 操作、右に任意キーで起こす操作を分けて表示する。
 
 ### inactive project の Agent 観測
 
@@ -1037,15 +1093,17 @@ Garden は開いている project 全件を描くが、workspace controller が 
 
 | 性質 | 内容 |
 |---|---|
-| 何を読むか | project ごとの `AgentInventory`。request が名指しした `WorkspaceId` を daemon が自分の Agent record から filter して答えるので、その project の tenant へ接続し直す必要も IPC の追加も無い |
+| 何を読むか | project ごとの `AgentWorkspaceObservation`。`AgentInventory` の runtime detail と、session ごとの daemon-authoritative な dispatch status を同じ応答で読む。request が名指しした `WorkspaceId` を daemon が自分の record から filter して答えるので、その project の tenant へ接続し直さない |
 | いつ読むか | Garden が前面にある間だけ。1 round ずつ直列で、成功後は 1 秒、daemon が 1 件も答えなかった round のあとは 5 秒あけて次の round に入る。Garden を閉じると次に開いた瞬間へ再武装する |
 | 何をしないか | daemon の cold start、session の変更、terminal の attach。observation 専用の port を使い、active project の lane とは接続を共有しない |
 | 上限 | 1 round で観測する project は 16 件まで。超えた分は `project inactive` のまま残る |
 
 観測が届いた区画は active project と同じ規則（[区画とうさぎ](#区画とうさぎ)）でうさぎを描く。届く前・daemon が
-居ない・上限を超えた区画は `project inactive` を保ち、うさぎを推測しない。phase は inventory の粗い state
-（`reserved → ready`、`live → running`、`interrupted → interrupted`）で、runtime-local phase を持つのは
-controller が resident な active project だけである。
+居ない・上限を超えた区画は `project inactive` を保ち、うさぎを推測しない。runtime phase は inventory の粗い state
+（`reserved → ready`、`live → running`、`interrupted → interrupted`）だが、session の `starting` / `idle` / `exited` /
+`failed` は同じ observation の dispatch status を優先し、粗い `live` を running と数えない。複数 Agent の status は
+active project と同じ共通順位で集約済みである。runtime-local phase を持つのは controller が resident な
+active project だけである。
 
 **session と lifecycle は cache のままである**。inactive project の session 一覧・lifecycle・failure summary は、
 その tab が最後に active だったときの daemon snapshot で、そこで新しく生まれた session は tab を開くまで区画にならない。
@@ -1079,20 +1137,22 @@ notice に表示するため、見えない overlay が入力だけを所有す�
 
 | 入力 | 挙動 |
 |---|---|
-| `←` / `→` | Garden を1 plot列ずつ横スクロールする。左右端では現在位置に留まり、Gardenを閉じない |
-| footer の `← Scroll` / `Scroll →` を click | buttonの左右paddingを含む範囲で1 plot列ずつ横スクロールする。無効な方向は現在位置に留まる |
+| `←` / `→` | spacious world は camera を16 cell、compact fallback は1 plot列ずつ横へ動かす。左右端では現在位置に留まり、Gardenを閉じない |
+| footer の `← Pan` / `Pan →` または `← Scroll` / `Scroll →` を click | buttonの左右paddingを含む範囲で同じ単位だけ横へ動かす。無効な方向は現在位置に留まる |
 | 上記以外の key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
-| active project のうさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
-| inactive project の区画・うさぎを click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く。押した相手が[観測されたうさぎ](#inactive-project-の-agent-観測)でも Agent tab の選択までは運ばない（その project の controller はまだ存在しない） |
-| 区画のうさぎ以外（nameplate・状態行・余白）を click | 同じ project / session の Closeup へ入るところまでで、tab の選択は動かさない |
-| 区画の外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
+| active project のうさぎを single click | 移動中の hitbox に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
+| inactive project の巣穴・うさぎを click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く。押した相手が[観測されたうさぎ](#inactive-project-の-agent-観測)でも Agent tab の選択までは運ばない（その project の controller はまだ存在しない） |
+| うさぎ以外の巣穴（立札・状態行・入口）を click | 同じ project / session の Closeup へ入るところまでで、tab の選択は動かさない |
+| 巣穴・うさぎの外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
 
-click は frame を描いたのと同じ layout 関数が返す rectangle に当てて解決する。rectangle は区画に stable
-`WorkspaceId` / `SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛し、うさぎは区画の内側にあるので先に判定する。
-controller は画面座標から session 順や羽の順を再計算しないため、CJK label・端末 resize・表示上限で click target が
-ずれない。session の pose（`creating` / `deleting` / `failed`）と PR merge の celebration は session そのものの姿で
-agent 1 体に対応しないため、`AgentRuntimeId` を束縛せず session の訪問だけになる。
+click は frame を描いたのと同じ layout 関数が返す rectangle に当てて解決する。rectangle は巣穴に stable
+`WorkspaceId` / `SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛する。うさぎの rectangle は現在の world 座標を
+camera へ射影して毎 frame 作り、他のうさぎや巣穴より手前へ描いた順を click 優先順にも使う。
+controller は画面座標から session 順や羽の順を再計算しないため、CJK label・terminal resize・表示上限で click target が
+ずれない。session の lifecycle pose（`creating` / `deleting` / `failed`）は agent 1 体に対応しないため、
+`AgentRuntimeId` を束縛せず session の訪問だけになる。PR merge 時は spacious world の既存うさぎが runtime identity を
+保ったまま祝う。compact fallback の session-wide celebration は従来どおり session の訪問だけになる。
 
 tab の選択も stable identity だけで引く。押されたうさぎの runtime が持つ terminal incarnation（live tab）、
 または会話 lineage（中断 tab）と一致する tab を選び、一致する tab が無ければ（押した瞬間に終了した、pane を
@@ -1470,7 +1530,7 @@ response が失われた・timeout した場合は、その pane を安全な失
 受け取り、以降は redraw ごとに `Resume { after_offset }` で offset 以降の出力だけを取得する。attach では
 checkpoint から screen を復元し（履歴の control byte を再生しない）、以降の suffix を**その復元済み parser**へ
 feed する。screen は最小の VT screen（印字・
-`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・SGR の色と属性・alternate screen buffer）で、
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・Reverse Index（`ESC M`）・SGR の色と属性・alternate screen buffer）で、
 その screen 行を右ペインへ clip して表示する。PTY output の適用は parser state だけを更新し、retained scrollback 全体の
 描画 cache は作らない。各 frame は現在の viewport に必要な行 window だけを ANSI 付き表示へ投影し、URL 検出もその
 window に接する折返し logical line までに限定する。このため通常の output・idle redraw・scroll 操作は 10,000 行の
@@ -1481,9 +1541,12 @@ live の input cursor は現在セルを反転して表示する。output offset
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
 checkpoint は `output_offset` 時点の完全な screen state（可視 grid・scrollback とその oldest-row origin・cursor・saved cursor・
-scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態・application cursor / bracketed paste / mouse protocol）を含むため、retention の先頭が
+scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態・DEC synchronized output（mode 2026）の bounded な未 commit bytes・application cursor / bracketed paste / mouse protocol）を含むため、retention の先頭が
 UTF-8 / CSI / OSC / SGR / alternate の途中でも reconnect 前後で可視セル・cursor・style が一致し、
 `cells_with_scrollback` を使う selection / copy history も untrimmed な参照と一致する。
+DEC synchronized output の開始から終了までは committed screen を描画し続け、終了 sequence が PTY chunk を跨いでも
+更新後の frame を atomic に公開する。未完了 bytes は 128 KiB で上限を設け、終端を失った stream は上限到達時に通常描画へ
+fail open して daemon/TUI の保持量を bounded に保つ。
 
 `Resume`（poll）は**描画スレッドでは行わない**。専用接続を持つ背景スレッド（foreground poll pump）が、attach 済みの
 terminal を fetch して per-terminal の read-ahead バッファへ積み、描画スレッドは redraw ごとにそのバッファを**非ブロッキングに
@@ -1857,8 +1920,9 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
 - **タイミング**: 初回 frame を paint した後、UI event loop と別の daemon connection で
   [`terminal inventory`](04-ipc.md#generic-terminal-request) / `agent_inventory` / `terminal inventory` の順に取得する。
   前後の terminal snapshot が同一で、live Agent が両 inventory で一対一に対応する全量 observation だけを適用する。
-  foreground poll または background inventory が Agent terminal の終了を検知した場合は、この dedicated restore lane を
-  即座に wake し、session lifecycle の次回変更を待たずに sidebar・Garden・tab strip の membership を再観測する。
+  Agent launch / resume が成功した場合、または foreground poll / background inventory が Agent terminal の終了を検知した
+  場合は、この dedicated restore lane を即座に wake し、session lifecycle の次回変更を待たずに sidebar・Garden・tab strip
+  の membership を再観測する。
   transport・partial・不整合は controller 所有の capped exponential backoff で再試行し、初回 frame・キー入力・animation を
   待たせない。失敗時は last valid intent を空 snapshot で上書きせず、generic tab だけを部分適用せず、local spawn もしない。
   成功後も dedicated restore port を保持する。restore socket の passive EOF を検知し、current endpoint が再び接続可能になった

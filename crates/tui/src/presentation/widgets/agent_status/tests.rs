@@ -49,11 +49,12 @@ fn attention_rank_puts_waiting_first_and_finished_work_last() {
         AgentPhase::Running,
         AgentPhase::Ready,
         AgentPhase::Interrupted,
+        AgentPhase::Sleeping,
         AgentPhase::Absent,
         AgentPhase::Ended,
     ]
     .map(attention_rank);
-    assert_eq!(ranks, [0, 1, 2, 3, 4, 5]);
+    assert_eq!(ranks, [0, 1, 2, 3, 4, 5, 6]);
     // Ended と Exited はどちらも「終わった」1 つの class に畳む。
     assert_eq!(
         attention_rank(AgentPhase::Exited),
@@ -129,9 +130,10 @@ fn summary_lists_the_quiet_phases_too() {
     let agents = [
         runtime(1, AgentPhase::Ready),
         runtime(2, AgentPhase::Interrupted),
-        runtime(3, AgentPhase::Absent),
+        runtime(3, AgentPhase::Sleeping),
+        runtime(4, AgentPhase::Absent),
     ];
-    assert_eq!(summary(&agents), "1 ready · 1 int · 1 idle");
+    assert_eq!(summary(&agents), "1 ready · 1 int · 1 sleep · 1 idle");
 }
 
 #[test]

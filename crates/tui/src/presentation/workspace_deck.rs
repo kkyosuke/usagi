@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use usagi_core::domain::agent::AgentInventory;
+use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
 use usagi_core::domain::workspace::Workspace;
@@ -41,24 +41,22 @@ pub struct WorkspaceSlot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CachedGardenSession {
-    id: SessionId,
-    label: String,
-    lifecycle: SessionLifecycle,
-    failure_summary: Option<String>,
+    projected: ProjectedSession,
     /// Agent runtimes the observation lane last saw in this session. They are
     /// membership only: the lane observes the daemon inventory, never this
     /// project's controller, so the phases stay the coarse inventory states.
     agents: Vec<GardenAgent>,
+    /// Daemon-owned dispatch status observed in the same response as runtime
+    /// membership. `None` means this session has no dispatch Agent.
+    agent_status: Option<AgentStatus>,
 }
 
 impl CachedGardenSession {
     fn from_projected(session: &ProjectedSession) -> Self {
         Self {
-            id: session.id,
-            label: session.label.clone(),
-            lifecycle: session.lifecycle,
-            failure_summary: session.failure_summary.clone(),
+            projected: session.clone(),
             agents: Vec::new(),
+            agent_status: None,
         }
     }
 
@@ -70,20 +68,20 @@ impl CachedGardenSession {
     /// tab went inactive, so it keeps the still read-only plot rather than
     /// being animated as if it were live.
     fn garden_session(&self, observed: bool) -> GardenSession {
-        let observed = observed && self.lifecycle == SessionLifecycle::Available;
+        let observed = observed && self.projected.lifecycle == SessionLifecycle::Available;
         GardenSession {
-            id: self.id,
-            label: self.label.clone(),
-            lifecycle: self.lifecycle,
+            id: self.projected.id,
+            label: self.projected.label.clone(),
+            lifecycle: self.projected.lifecycle,
             selected: false,
-            failure_summary: self.failure_summary.clone(),
+            failure_summary: self.projected.failure_summary.clone(),
             agents_observed: observed,
             agents: if observed {
                 self.agents.clone()
             } else {
                 Vec::new()
             },
-            agent_status: None,
+            agent_status: observed.then_some(self.agent_status).flatten(),
             pr_merged: false,
         }
     }
@@ -100,15 +98,20 @@ impl WorkspaceSlot {
             .zip(&snapshot.session_ids)
             .map(|(record, id)| {
                 let projection = snapshot.session_lifecycles.get(id);
+                let mut projected = ProjectedSession::from_record(*id, record);
+                if let Some(projection) = projection {
+                    projected.lifecycle = projection.lifecycle;
+                    projected
+                        .failure_stage
+                        .clone_from(&projection.failure_stage);
+                    projected
+                        .failure_summary
+                        .clone_from(&projection.failure_summary);
+                }
                 CachedGardenSession {
-                    id: *id,
-                    label: record.display_label().to_owned(),
-                    lifecycle: projection.map_or(SessionLifecycle::Available, |projection| {
-                        projection.lifecycle
-                    }),
-                    failure_summary: projection
-                        .and_then(|projection| projection.failure_summary.clone()),
+                    projected,
                     agents: Vec::new(),
+                    agent_status: None,
                 }
             })
             .collect();
@@ -135,6 +138,15 @@ impl WorkspaceSlot {
     pub fn label(&self) -> &str {
         &self.label
     }
+
+    /// Cached session rows available without reopening this workspace.
+    #[must_use]
+    pub fn projected_sessions(&self) -> Vec<ProjectedSession> {
+        self.sessions
+            .iter()
+            .map(|session| session.projected.clone())
+            .collect()
+    }
 }
 
 /// Which process-level modal is in front of Home.
@@ -142,6 +154,12 @@ impl WorkspaceSlot {
 enum DeckOverlay {
     Add(AddWorkspace),
     Switcher(ProjectSwitcher),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddWorkspaceMode {
+    Registered,
+    Directory,
 }
 
 /// Result of reducing one key while a deck overlay is open.
@@ -245,6 +263,21 @@ impl WorkspaceDeck {
         self.slots.iter().any(|slot| slot.path == path)
     }
 
+    /// Read the already-open slot for a transition frame without daemon IO.
+    #[must_use]
+    pub fn slot_for_path(&self, path: &Path) -> Option<&WorkspaceSlot> {
+        self.slots.iter().find(|slot| slot.path == path)
+    }
+
+    /// Select an existing slot in a presentation-only deck clone.
+    pub fn preview_path(&mut self, path: &Path) {
+        if let Some(slot) = self.slots.iter().find(|slot| slot.path == path) {
+            self.active = slot.workspace_id;
+            self.overlay = None;
+            self.notice = None;
+        }
+    }
+
     /// Append prepared tabs in request order, ignoring duplicate paths.
     pub fn append_snapshots(&mut self, snapshots: &[WorkspaceSnapshot]) {
         for snapshot in snapshots {
@@ -277,6 +310,21 @@ impl WorkspaceDeck {
         let open = self.slots.iter().map(|slot| slot.path.clone()).collect();
         self.overlay = Some(DeckOverlay::Add(AddWorkspace::new(registry, open)));
         self.notice = None;
+    }
+
+    /// Replace the candidates of an already-open add overlay with a fresh
+    /// global registry snapshot. Filter text, directory input, and selections
+    /// survive so another usagi process can update the list without disrupting
+    /// the current interaction.
+    pub fn refresh_add(&mut self, registry: &[Workspace]) {
+        if let Some(DeckOverlay::Add(add)) = self.overlay.as_mut() {
+            add.refresh(registry);
+        }
+    }
+
+    #[must_use]
+    pub fn add_overlay_open(&self) -> bool {
+        matches!(self.overlay, Some(DeckOverlay::Add(_)))
     }
 
     /// Open the all-tab switcher with the active row selected.
@@ -402,7 +450,8 @@ impl WorkspaceDeck {
     ///
     /// Returns whether the projection changed, so the shell can redraw a Garden
     /// whose other material (session list, animation tick) stood still.
-    pub fn apply_garden_inventory(&mut self, inventory: &AgentInventory) -> bool {
+    pub fn apply_garden_inventory(&mut self, observation: &AgentWorkspaceObservation) -> bool {
+        let inventory = &observation.inventory;
         if inventory.workspace_id == self.active {
             return false;
         }
@@ -429,9 +478,17 @@ impl WorkspaceDeck {
         let mut changed = !slot.agents_observed;
         slot.agents_observed = true;
         for session in &mut slot.sessions {
-            let agents = observed.remove(&session.id).unwrap_or_default();
+            let agents = observed.remove(&session.projected.id).unwrap_or_default();
             if session.agents != agents {
                 session.agents = agents;
+                changed = true;
+            }
+            let agent_status = observation
+                .session_statuses
+                .get(&session.projected.id)
+                .copied();
+            if session.agent_status != agent_status {
+                session.agent_status = agent_status;
                 changed = true;
             }
         }
@@ -512,6 +569,8 @@ struct AddWorkspace {
     selected: HashSet<PathBuf>,
     cursor: usize,
     filter: String,
+    directory: String,
+    mode: AddWorkspaceMode,
 }
 
 impl AddWorkspace {
@@ -522,7 +581,28 @@ impl AddWorkspace {
             selected: HashSet::new(),
             cursor: 0,
             filter: String::new(),
+            directory: String::new(),
+            mode: AddWorkspaceMode::Registered,
         }
+    }
+
+    fn refresh(&mut self, registry: &[Workspace]) {
+        let cursor_path = self
+            .visible()
+            .get(self.cursor)
+            .map(|workspace| workspace.path.clone());
+        self.candidates = registry.to_vec();
+        let candidates = self
+            .candidates
+            .iter()
+            .map(|workspace| workspace.path.clone())
+            .collect::<HashSet<_>>();
+        self.selected
+            .retain(|path| candidates.contains(path) && !self.opened.contains(path));
+        let visible = self.visible();
+        self.cursor = cursor_path
+            .and_then(|path| visible.iter().position(|workspace| workspace.path == path))
+            .unwrap_or_else(|| self.cursor.min(visible.len().saturating_sub(1)));
     }
 
     fn visible(&self) -> Vec<&Workspace> {
@@ -536,6 +616,16 @@ impl AddWorkspace {
     }
 
     fn handle(&mut self, key: &Key) -> OverlayIntent {
+        if matches!(key, Key::Tab) {
+            self.mode = match self.mode {
+                AddWorkspaceMode::Registered => AddWorkspaceMode::Directory,
+                AddWorkspaceMode::Directory => AddWorkspaceMode::Registered,
+            };
+            return OverlayIntent::Stay;
+        }
+        if self.mode == AddWorkspaceMode::Directory {
+            return self.handle_directory(key);
+        }
         match key {
             Key::Up => self.cursor = self.cursor.saturating_sub(1),
             Key::Down => {
@@ -581,6 +671,25 @@ impl AddWorkspace {
                     .map(|workspace| workspace.path.clone())
                     .collect::<Vec<_>>();
                 return OverlayIntent::Add(paths);
+            }
+            Key::Escape => return OverlayIntent::Cancel,
+            _ => {}
+        }
+        OverlayIntent::Stay
+    }
+
+    fn handle_directory(&mut self, key: &Key) -> OverlayIntent {
+        match key {
+            Key::Backspace => {
+                self.directory.pop();
+            }
+            Key::Char(character) => self.directory.push(*character),
+            Key::Paste(text) => self.directory.push_str(text),
+            Key::Enter => {
+                let directory = self.directory.trim();
+                if !directory.is_empty() {
+                    return OverlayIntent::Add(vec![PathBuf::from(directory)]);
+                }
             }
             Key::Escape => return OverlayIntent::Cancel,
             _ => {}
@@ -794,6 +903,21 @@ fn render_add(
     base: &[String],
 ) -> Vec<String> {
     let inner = modal::modal_inner_width(width, 60);
+    if add.mode == AddWorkspaceMode::Directory {
+        let mut body = vec![
+            Style::new().dim().paint("  Directory"),
+            modal::filter_line(&add.directory, add.directory.len(), None),
+            String::new(),
+            Style::new()
+                .dim()
+                .paint("  Enter an existing directory to register and open it."),
+        ];
+        if let Some(notice) = deck.notice() {
+            body.push(modal::error_line(notice, inner));
+        }
+        body.push(modal::footer("Enter add / Tab registered / Esc cancel"));
+        return modal::render_body_over(height, width, base, "Add workspace", inner, 13, body);
+    }
     let visible = add.visible();
     let rows = visible
         .iter()
@@ -829,7 +953,7 @@ fn render_add(
         body.push(modal::error_line(notice, inner));
     }
     body.push(modal::footer(
-        "type filter / Space select / Ctrl-D close / Enter add / Esc",
+        "type filter / Space select / Tab directory / Ctrl-D close / Enter add / Esc",
     ));
     modal::render_body_over(height, width, base, "Add workspace", inner, 13, body)
 }
@@ -1034,9 +1158,69 @@ mod tests {
             OverlayIntent::Stay
         );
         assert_eq!(deck.handle_overlay_key(&Key::Up), OverlayIntent::Stay);
+        assert_eq!(deck.handle_overlay_key(&Key::Other), OverlayIntent::Stay);
         assert_eq!(deck.handle_overlay_key(&Key::Tab), OverlayIntent::Stay);
         assert_eq!(deck.handle_overlay_key(&Key::Escape), OverlayIntent::Cancel);
         assert_eq!(deck.paths(), vec![PathBuf::from("/alpha")]);
+    }
+
+    #[test]
+    fn add_overlay_accepts_an_existing_directory_path() {
+        let alpha = snapshot("alpha", "/alpha");
+        let mut deck = WorkspaceDeck::new(&alpha);
+        deck.open_add(std::slice::from_ref(&alpha.workspace));
+
+        assert_eq!(deck.handle_overlay_key(&Key::Tab), OverlayIntent::Stay);
+        assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Char('x')),
+            OverlayIntent::Stay
+        );
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Backspace),
+            OverlayIntent::Stay
+        );
+        assert_eq!(deck.handle_overlay_key(&Key::Down), OverlayIntent::Stay);
+        assert_eq!(deck.handle_overlay_key(&Key::Tab), OverlayIntent::Stay);
+        assert_eq!(deck.handle_overlay_key(&Key::Tab), OverlayIntent::Stay);
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Paste(" /projects/new workspace ".to_owned())),
+            OverlayIntent::Stay
+        );
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Enter),
+            OverlayIntent::Add(vec![PathBuf::from("/projects/new workspace")])
+        );
+    }
+
+    #[test]
+    fn add_overlay_refreshes_candidates_without_losing_the_current_interaction() {
+        let alpha = snapshot("alpha", "/alpha");
+        let beta = Workspace::new("beta", "/beta");
+        let gamma = Workspace::new("gamma", "/gamma");
+        let mut deck = WorkspaceDeck::new(&alpha);
+        deck.open_add(&[alpha.workspace.clone(), beta.clone()]);
+        assert!(deck.add_overlay_open());
+        let _ = deck.handle_overlay_key(&Key::Down);
+        let _ = deck.handle_overlay_key(&Key::Char(' '));
+
+        deck.refresh_add(&[alpha.workspace.clone(), beta, gamma]);
+        let _ = deck.handle_overlay_key(&Key::Down);
+        let _ = deck.handle_overlay_key(&Key::Char(' '));
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Enter),
+            OverlayIntent::Add(vec![PathBuf::from("/beta"), PathBuf::from("/gamma")])
+        );
+
+        deck.refresh_add(std::slice::from_ref(&alpha.workspace));
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Enter),
+            OverlayIntent::Add(Vec::new())
+        );
+
+        deck.close_overlay();
+        deck.refresh_add(&[]);
+        assert!(!deck.add_overlay_open());
     }
 
     #[test]
@@ -1278,22 +1462,39 @@ mod tests {
             usagi_core::domain::id::AgentRuntimeRef,
             usagi_core::domain::agent::AgentRuntimeInventoryState,
         )>,
-    ) -> AgentInventory {
-        AgentInventory {
-            workspace_id: workspace,
-            runtimes: runtimes
-                .into_iter()
-                .map(
-                    |(runtime, state)| usagi_core::domain::agent::AgentRuntimeInventoryItem {
-                        runtime,
-                        continuation: usagi_core::domain::id::AgentContinuationRef::new(),
-                        state,
-                        resumed_from: None,
-                    },
-                )
-                .collect(),
-            resumable: Vec::new(),
+    ) -> AgentWorkspaceObservation {
+        AgentWorkspaceObservation {
+            inventory: usagi_core::domain::agent::AgentInventory {
+                workspace_id: workspace,
+                runtimes: runtimes
+                    .into_iter()
+                    .map(
+                        |(runtime, state)| usagi_core::domain::agent::AgentRuntimeInventoryItem {
+                            runtime,
+                            continuation: usagi_core::domain::id::AgentContinuationRef::new(),
+                            state,
+                            resumed_from: None,
+                        },
+                    )
+                    .collect(),
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::new(),
         }
+    }
+
+    fn inventory_with_status(
+        workspace: WorkspaceId,
+        runtimes: Vec<(
+            usagi_core::domain::id::AgentRuntimeRef,
+            usagi_core::domain::agent::AgentRuntimeInventoryState,
+        )>,
+        session: SessionId,
+        status: AgentStatus,
+    ) -> AgentWorkspaceObservation {
+        let mut observation = inventory(workspace, runtimes);
+        observation.session_statuses.insert(session, status);
+        observation
     }
 
     /// The Garden draws every open project, so an inactive project's plots take
@@ -1317,7 +1518,7 @@ mod tests {
         let closed = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
         let root = runtime_ref(beta.workspace_id, None);
         let foreign = runtime_ref(beta.workspace_id, Some(SessionId::new()));
-        assert!(deck.apply_garden_inventory(&inventory(
+        assert!(deck.apply_garden_inventory(&inventory_with_status(
             beta.workspace_id,
             vec![
                 (live.clone(), AgentRuntimeInventoryState::Live),
@@ -1325,10 +1526,13 @@ mod tests {
                 (root, AgentRuntimeInventoryState::Live),
                 (foreign, AgentRuntimeInventoryState::Live),
             ],
+            beta.session_ids[0],
+            AgentStatus::Idle,
         )));
 
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(plot.agents_observed);
+        assert_eq!(plot.agent_status, Some(AgentStatus::Idle));
         // Only the runtime that owns a tab in a known session becomes a rabbit.
         assert_eq!(
             plot.agents
@@ -1337,17 +1541,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(live.agent_runtime_id, AgentPhase::Running)]
         );
-
         // Re-observing the same inventory changes no draw material.
-        assert!(!deck.apply_garden_inventory(&inventory(
+        assert!(!deck.apply_garden_inventory(&inventory_with_status(
             beta.workspace_id,
             vec![(live.clone(), AgentRuntimeInventoryState::Live)],
+            beta.session_ids[0],
+            AgentStatus::Idle,
         )));
         // The Agent leaving is membership too: the rabbit goes with it.
         assert!(deck.apply_garden_inventory(&inventory(beta.workspace_id, Vec::new())));
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(plot.agents_observed);
         assert!(plot.agents.is_empty());
+        assert_eq!(plot.agent_status, None);
     }
 
     /// The active project's own controller owns its plots, and a cached
@@ -1368,7 +1574,7 @@ mod tests {
         // A workspace no tab holds is not a plot of this deck either.
         assert!(!deck.apply_garden_inventory(&inventory(WorkspaceId::new(), Vec::new())));
 
-        deck.slots[1].sessions[0].lifecycle = SessionLifecycle::Creating;
+        deck.slots[1].sessions[0].projected.lifecycle = SessionLifecycle::Creating;
         let creating = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
         assert!(deck.apply_garden_inventory(&inventory(
             beta.workspace_id,
@@ -1432,6 +1638,15 @@ mod tests {
         deck.open_add(std::slice::from_ref(&alpha.workspace));
         let add = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
         assert!(add.iter().any(|line| line.contains("Ctrl-D close")));
+        let _ = deck.handle_overlay_key(&Key::Tab);
+        deck.set_notice("directory does not exist");
+        let directory = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
+        assert!(directory.iter().any(|line| line.contains("Directory")));
+        assert!(
+            directory
+                .iter()
+                .any(|line| line.contains("directory does not exist"))
+        );
         deck.close_overlay();
         assert!(!deck.overlay_open());
         assert_eq!(render_overlay(&deck, 20, 80, &frame), frame);

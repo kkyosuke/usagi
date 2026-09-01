@@ -24,7 +24,10 @@ impl AgentPhaseAggregation {
             AgentPhase::Ready => Self::Ready,
             AgentPhase::Running => Self::Running,
             AgentPhase::Waiting => Self::Waiting,
-            AgentPhase::Ended | AgentPhase::Exited | AgentPhase::Interrupted => Self::Done,
+            AgentPhase::Sleeping
+            | AgentPhase::Ended
+            | AgentPhase::Exited
+            | AgentPhase::Interrupted => Self::Done,
         }
     }
 
@@ -59,6 +62,7 @@ mod tests {
             (AgentPhase::Ready, AgentPhaseAggregation::Ready, 1),
             (AgentPhase::Running, AgentPhaseAggregation::Running, 2),
             (AgentPhase::Waiting, AgentPhaseAggregation::Waiting, 3),
+            (AgentPhase::Sleeping, AgentPhaseAggregation::Done, 4),
             (AgentPhase::Ended, AgentPhaseAggregation::Done, 4),
             (AgentPhase::Exited, AgentPhaseAggregation::Done, 4),
             (AgentPhase::Interrupted, AgentPhaseAggregation::Done, 4),

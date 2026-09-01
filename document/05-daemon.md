@@ -187,8 +187,10 @@ recovery、runtime state の hydrate、serve する workspace の adopt を経�
 
 窓を短く取ると、**健全な daemon が起動している最中に「起動しなかった」と報告する**という最悪の
 結果になる。operator は失敗を告げられ、当然の次手であるもう一度の `start` は「すでに稼働中」で
-拒否され、実際には daemon が上がっている。窓は「遅いが健全」な場合に合わせて取り、本当に失敗した
-daemon は自分の error log に記録した理由で報告される。
+拒否され、実際には daemon が上がっている。窓は「遅いが健全」な場合に合わせて取る。それでも期限を
+超えた場合は、起動元が自分の spawn した child を停止・reap してから失敗を返すため、失敗報告後に
+同じ child が遅れて authority を登録しない。child が登録前に終了した場合は30秒を待たず終了状態を
+報告し、daemon 自身が error log に理由を残した場合は期限切れの診断へ載せる。
 
 > 期限切れの報告は error log の最後の entry を根拠にするため、待っている間に無関係な entry が
 > 書かれると、そちらを原因として表示することがある。表示される理由が状況と噛み合わないときは
@@ -1092,6 +1094,7 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
 | branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。daemon-owned PR inventory に merged PR の exact `headRefOid` があり、撤去後に完全修飾した `refs/heads/usagi/<name>` の HEAD と一致する場合だけ squash merge 済みと証明して `git branch -D` を使う（同名 tag は証明に使わない）。PR inventory を読めない場合は証明なしとして安全な `-d` に退避する。PR 後の commit や OID 不明・不一致は Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。client が worktree force と `DeletePlan.force_delete_branch` を対で送った remove だけは `git branch -D` で削除する。TUI では Switch の `X`、Closeup の `close -f`、削除失敗行を Enter で選んで破棄確認へ Yes と答えた recovery がこれを送る。`x` は送らないため安全な `-d` のままである。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
 | Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
+| generic terminal | Agent と同じ順序で、対象 `SessionId` の generic terminal も worktree 撤去より前に terminate/reap して record を除去する。session の shell terminal も worktree 内に cwd を持つ child と capacity claim を握るため、残すと `git worktree remove` が使用中で失敗し、claim は daemon の生存中ずっと pool を占有する。reap に失敗した場合は record を残して retry する。`SessionId` を持たない workspace-root terminal は対象外である |
 
 daemon 起動時は canonical な `.usagi/sessions/` 直下も走査し、lifecycle state に所有者がいない物理 entry を
 `Failed` / `Integrity` の recovery row として採用する。採用は attach authority を与えず、actual local branch、dirty、
@@ -1099,7 +1102,12 @@ workspace root の現在の `HEAD` に未統合な commit 件数だけを safe f
 投影しない）。actual branch が `usagi/` namespace の local branchで、worktree が clean、未統合 commit が 0 件の場合だけ
 通常の remove を受理し、actual branch と規約上の `usagi/<session-name>` branch を Git の安全な `-d` で回収する。
 dirty、未統合、detached、`usagi/` 外 branch、診断不能、linked worktree でない entry は remove のたびに再診断して拒否し、
-`force` でも保護を解除しない。利用者は変更を commit/stash し、branch を PR で基点へ統合してから再実行する。
+通常の `force` では保護を解除しない。利用者は変更を commit/stash し、branch を PR で基点へ統合してから再実行する。
+内容を破棄すると確認できた integrity orphan だけは、CLI の
+`usagi session remove <name> --force --purge-orphan`、MCP `session_remove` の
+`force: true, purge_orphan: true`、または TUI の破棄確認付き force removal で exact session target を回収できる。
+`purge_orphan` は integrity failure 以外へ指定できず、`force` との対が必須である。effect 直前の canonical
+path confinement は通常 remove と同じく再検証し、session container 外や保護 root を削除対象にしない。
 
 daemon 起動時にも session lifecycle の全 `SessionId` と Agent inventory を照合する。session record が既に無い
 Agent は旧 teardown が残した orphan として、terminal state の保存による capacity claim 解放を先行させてから durable
@@ -1135,6 +1143,12 @@ bounded journal の先頭位置に依存しない完全な screen state を返�
 process-local の aggregate cell budget で bound し、超過分は古い scrollback から trim して trim 行数を
 counter に計上する。checkpoint payload が frame budget を超える場合も payload 側の古い scrollback を
 落として収め、可視 grid だけでも収まらないときは部分的な screen を返さず fail closed とする。
+
+daemon-owned PTY では registry の VT screen が terminal endpoint でもある。child が `CSI 6n` で現在の
+cursor position を問い合わせた場合は、query を受理した時点の authoritative cursor から `CSI row;col R`
+を PTY へ返す。この terminal protocol reply は user input ではないため input ledger へ記録しない。
+Agent と generic terminal は同じ経路を使い、inline TUI が起動前の警告行を含む cursor origin を正しく
+取得できるようにする。
 
 terminal input は `(ClientId, TerminalRef, input sequence, RequestId)` で dedupe し、同じ input batch を
 別 connection から重複 write しない。input は queue capacity を予約してから enqueue し、ACK は全 byte が
@@ -1297,6 +1311,8 @@ validate
 | commit | runtime process identity と `Running` run/agent を保存する | commit 完了後だけ admission success を返す |
 | compensate | post-spawn の runtime/dispatch 保存失敗を safe failure または reconcile-required として保存する | exact terminal owner が process を terminate して reap する。terminate/reap を証明できなければ orphan-running として fail closed する |
 
+pre-spawn の terminal 登録までに失敗した launch は、dispatch admission を failed にする前に runtime reservation も `spawn_failed` へ終端化する。旧バージョンが残した不整合は通常の inventory では live / ready とみなさず、`clean --apply --force` だけが matching dispatch run の failed、runtime の `reserved` または daemon restart 後の `reconcile_required(identity_unknown)`、process identity 未設定を再検証して `spawn_failed` へ収束させる。`identity_unknown` の回収は明示された `--force` を process 不在の acknowledgement として扱う。いずれかが一致しない runtime は clean の候補にせず、process の不存在を暗黙に推測しない。
+
 同じ operation の retry は保存済み semantic key と outcome を replay し、異なる intent は
 `idempotency_conflict` になる。`Preparing` / `Starting` は成功 outcome ではなく、daemon restart 時に
 `Failed` / ownership unknown へ reconcile される。admission metadata を持たない legacy run、または runtime
@@ -1324,13 +1340,18 @@ resume では active owner が foreign shard を書き換えないため、repla
 
 Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、kernel 由来の hook PID・parent PID・process group と exact live runtime の照合で structured capture 境界へ渡す。provider と同じ process group の hook に加えて、provider の direct child で inherited / self-led process group の hook を受理する。hook は MCP caller credential を継承せず、dispatch scope も取得しない。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
 
-この Codex 経路の互換条件は、lifecycle hooks、`SessionStart` command event、その共通 input field `session_id`、および daemon が指定する hook trust bypass を CLI が提供することである。managed policy による hooks 無効化、非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。hook input の `transcript_path` は deserialize 対象にせず、provider state / transcript / state database / 設定 / 履歴 file の場所や形式を推測・走査・parse する capture 経路も持たない。native ID/name は先頭 `-` の option-like 値を拒否し、`--last` / `--continue` の暗黙選択へ CLI parse が切り替わる余地を持たない。
+この Codex 経路の互換条件は、lifecycle hooks、`SessionStart` command event、その共通 input field `session_id`、および通常の hook trust review を CLI が提供することである。daemon は `--dangerously-bypass-hook-trust` を渡さず、初回または定義変更時は Codex が提示する hook を利用者が明示的に review する。managed policy による hooks 無効化、未 trust、非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。hook input の `transcript_path` は deserialize 対象にせず、provider state / transcript / state database / 設定 / 履歴 file の場所や形式を推測・走査・parse する capture 経路も持たない。native ID/name は先頭 `-` の option-like 値を拒否し、`--last` / `--continue` の暗黙選択へ CLI parse が切り替わる余地を持たない。
 
 workspace 単位の `AgentInventory` は root と managed session、同一 scope の複数 history を別 item として
 deterministic に返す。resumable projection は availability と非機密な reason に加えて、client が interrupted
 history を provider 単位で表示できる closed vocabulary（`ProviderKind` と safe な `ProviderResumePhase`）だけを返す。
 これらは code-defined enum であり、provider-native ID / argv / cwd / transcript は返さない。metadata を保存していない
 record では両 field を省略し、名前・path・profile ID から provider を推測しない。
+cross-project view 用の `AgentWorkspaceObservation` はこの inventory に、同じ workspace の dispatch store から読んだ
+managed session ごとの `AgentStatus` を添える。同じ session に複数 Agent がある場合は
+`running > starting > failed > idle > exited` の共通順位で決定的に集約し、`session list` と同じ値にする。root Agent は
+session status map へ載せない。これにより PTY record の粗い `Live` と dispatch の terminal state
+（`Idle` / `Exited` / `Failed`）を混同しない。
 `AgentResumeTarget` は continuation、source、workspace、optional session、worktree、source runtime incarnation、
 adapter revision だけを持つ。旧 schema record は continuation / source を合成せず、target 無しの unavailable item
 として起動可能なまま読む。
@@ -1453,8 +1474,8 @@ scope、profile revision、current executable、config、concurrency を再検�
 daemon は managed session ごとに一つの Agent phase を lifecycle projection（`session_list` / `session_status` /
 overview の `agent_phase`）へ載せる。この phase の authority は **daemon が観測した runtime state** であり、
 エージェントが自分の lifecycle hook で報告した phase はその refinement にすぎない。本節がこの優先順位の正本である。
-projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / `ended` / `exited` /
-`interrupted` で、core の `AgentPhase` が token と parse の正本である。`none` と `interrupted` は daemon
+projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / `sleeping` / `ended` / `exited` /
+`interrupted` で、core の `AgentPhase` が token と parse の正本である。`none`、`sleeping`、`interrupted` は daemon
 観測専用であり、agent lifecycle hook からは報告できない。
 
 観測 state 由来の phase は次のとおり。
@@ -1464,13 +1485,15 @@ projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / 
 | `Running` | `running` | 4 |
 | `Reserved` | `ready` | 3 |
 | `ReconcileRequired(identity_unknown)` | `interrupted` | 3 |
+| `Sleeping` | `sleeping` | 3 |
 | `SpawnFailed` / その他の `ReconcileRequired` | `exited` | 2 |
 | `Exited` / `Reclaimed` | `ended` | 1 |
 
 報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、kernel 由来の hook
 process identity で報告元 runtime に束縛される。Claude の command hook は exec form なので provider の direct child として
-照合でき、Codex の command hook を含む inherited process group も受理する。両 provider は同じphase写像を使い、
-Claude の `Notification` と Codex の `PermissionRequest` はどちらも `waiting` を報告する。反映は次の規則に従う。
+照合でき、Codex の command hook を含む inherited process group も受理する。両 provider は同じphase写像を使う。
+Claude の `PermissionRequest` / `Notification` と Codex の `PostToolUse` は `waiting` を報告する。Codex は
+`approval_policy = "never"` で起動するため `PermissionRequest` を配線しない。反映は次の規則に従う。
 
 | 報告 phase | projection | 集約重み | durable `ProviderResumePhase` |
 |---|---|---|---|
@@ -1706,8 +1729,11 @@ wire 表現は [4. daemon IPC](04-ipc.md#agent-concurrency-projection) が正本
 | supervisor `max_concurrency` | supervisor run の `ExecutionPolicy` が持つ dispatch の同時実行数 | 対象外 |
 
 **使用中（`in_use`）の定義は admission が数えるものと同一**である。すなわち reserved（spawn 前の予約）、
-running、reconcile 待ちの Agent runtime record を数え、exited / reclaimed / spawn 失敗の record は数えない。
-したがって `in_use == limit` の snapshot は「次の Agent launch は concurrency で拒否される」と同義である。
+running、reconcile 待ちの Agent runtime record を数え、sleeping / exited / reclaimed / spawn 失敗の record は数えない。
+上限は 16 である。`in_use == limit` で新しい launch を受けた場合、daemon は `ended` と報告済みで exact resume
+metadata を持つ live runtime のうち、operation identity が最古の 1 件を sleep へ移してから admission を再試行する。
+running / waiting / ready は自動選択せず、安全な候補がなければ従来どおり concurrency exhausted で拒否する。
+sleep は process と PTY ownership だけを解放し、session、worktree、provider conversation、resume source を削除しない。
 
 publish は権威側から行う。Agent runtime は record を変更する durable mutation の choke point で、自分の
 使用中 slot 数と上限を lock-free な gauge へ書き、broker はそれを読むだけである。この方向にする理由は
@@ -2107,6 +2133,39 @@ E3  old shard CAS    consumed 以下の outbox を破棄          owner が自�
 
 duplicate、reorder、late delivery、consumer restart は同じ outcome に収束し、capacity 解放は 1 度だけである。
 別 owner の resource を名指した event、claim の無い resource の event は refuse され、他の resource を変更しない。
+
+### 説明されない claim の回収
+
+capacity の解放は証拠に基づく。通常の経路は definite failure か、owner generation が publish した exit を active
+consumer が apply することであり（[exit event の handoff](#exit-event-の-handoff)）、どちらも **claim に対応する
+shard entry があること**を前提にしている。したがって、retired generation の shard entry が失われた claim は
+どちらの経路からも到達できず、pool の slot を永久に占有する。pool は固定サイズなので、これが積み上がると
+最終的に **どの session でも Agent を起動できなくなる**。
+
+active generation は hydrate 時にこの取りこぼしを回収する。対象は次の 3 条件を **すべて** 満たす claim だけである。
+
+| 条件 | 意味 |
+|---|---|
+| どの retained shard もその resource を説明しない | owner の真実に record が無く、exit を publish する主体が存在しない |
+| `generations.json` が claim の owner を載せていない | その generation はもう行動できない。稼働中の generation を除外する |
+| outcome が `ambiguous` でない | child が存在し得る final は capacity を保持し続ける |
+
+**「説明されない」だけでは leak の証明にならない**。claim は L1 で shard entry より先に durable になるため
+（[launch の書き込み順序](#launch-の書き込み順序)）、稼働中の owner にも「shard entry の無い claim」が
+commit 1 回分の幅で存在する。とくに rollover 中の draining predecessor は、後継の active generation が hydrate
+している間ずっと稼働している。この 2 つを分けるのが registry であり、registry が載せていない generation だけが
+「もう publish できない」ことの証明になる。
+
+registry を読めなかった場合、この回収は **何も解放しない**（fail closed）。unknown な registry に対する回収は、
+稼働中 generation の in-flight claim を奪うことと区別できないためである。自 generation の claim も対象外で、
+outbox を経由して exactly-once に解放する契約を維持する。回収件数は startup log に残す。
+
+`usagi clean` も同じ条件で、同じ取りこぼしを daemon の外から回収できる
+（[1. プロジェクト概要](01-overview.md#現在の実装状態)）。
+
+active daemon は 5 分ごとに保持中 workspace の orphan Git resource を再棚卸しし、merged branch と clean
+worktree だけを自動回収する。draining generation はこの effect を実行しない。dirty worktree、未マージ branch、
+failed Agent reservation など force を要する候補は自動回収せず、`usagi clean --apply --force` の明示を必要とする。
 
 ### child identity
 

@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use usagi_core::domain::{
-    id::{ClientId, CompletionFence, ConnectionId, OperationId, TerminalRef},
+    id::{ClientId, CompletionFence, ConnectionId, OperationId, SessionId, TerminalRef},
     terminal_launch::{
         DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalInventoryEntry,
         TerminalKind, TerminalLaunchRequest, TerminalLaunchValidationError,
@@ -467,9 +467,20 @@ impl GenericTerminalCoordinator {
         terminal: &TerminalRef,
         bytes: Vec<u8>,
     ) -> Result<Output, GenericTerminalError> {
+        self.output_with_replies(terminal, bytes)
+            .map(|(output, _)| output)
+    }
+
+    /// Applies PTY output and returns protocol replies for the daemon-owned
+    /// endpoint without treating those replies as client input.
+    pub fn output_with_replies(
+        &mut self,
+        terminal: &TerminalRef,
+        bytes: Vec<u8>,
+    ) -> Result<(Output, Vec<u8>), GenericTerminalError> {
         self.running(terminal)?;
         self.terminals
-            .append_output(terminal, bytes)
+            .append_output_with_replies(terminal, bytes)
             .map_err(GenericTerminalError::Terminal)
     }
     pub fn resize(
@@ -681,10 +692,44 @@ impl GenericTerminalCoordinator {
         store: &mut dyn TerminalStore,
         spawner: &mut dyn GenericPtySpawner,
     ) -> Result<usize, GenericTerminalError> {
+        self.close_matching(
+            |record| record.terminal.workspace_id == workspace,
+            store,
+            spawner,
+        )
+    }
+
+    /// Terminates and forgets every generic terminal owned by one managed
+    /// session.
+    ///
+    /// Session teardown calls this beside the Agent close, because a session's
+    /// shell terminals hold the same two things an Agent runtime does: a PTY
+    /// child rooted in the worktree about to be removed, and a capacity claim in
+    /// the shared pool. Leaving them behind keeps the worktree busy and leaks the
+    /// slot for as long as the daemon lives.
+    pub fn close_session(
+        &mut self,
+        session: SessionId,
+        store: &mut dyn TerminalStore,
+        spawner: &mut dyn GenericPtySpawner,
+    ) -> Result<usize, GenericTerminalError> {
+        self.close_matching(
+            |record| record.terminal.session_id == Some(session),
+            store,
+            spawner,
+        )
+    }
+
+    fn close_matching(
+        &mut self,
+        selected: impl Fn(&DurableTerminalRecord) -> bool,
+        store: &mut dyn TerminalStore,
+        spawner: &mut dyn GenericPtySpawner,
+    ) -> Result<usize, GenericTerminalError> {
         let targets = self
             .records
             .values()
-            .filter(|record| record.terminal.workspace_id == workspace)
+            .filter(|record| selected(record))
             .cloned()
             .collect::<Vec<_>>();
         let mut terminate_failed = false;
@@ -1062,6 +1107,117 @@ mod tests {
         assert_eq!(spawner.0, vec![first]);
         assert_eq!(coordinator.snapshot().records.len(), 1);
         assert_eq!(coordinator.snapshot().records[0].terminal, second);
+    }
+
+    #[test]
+    fn session_close_terminates_and_forgets_only_that_sessions_terminals() {
+        // Two terminals of the session being removed — one running, one already
+        // exited — and one belonging to a sibling session of the same workspace.
+        let first_request = request();
+        let mut exited_request = request();
+        exited_request.scope.workspace_id = first_request.scope.workspace_id;
+        exited_request.scope.session_id = first_request.scope.session_id;
+        let mut sibling_request = request();
+        sibling_request.scope.workspace_id = first_request.scope.workspace_id;
+        let (first, first_fence) = refs(&first_request);
+        let (exited, exited_fence) = refs(&exited_request);
+        let (sibling, sibling_fence) = refs(&sibling_request);
+        let mut coordinator = GenericTerminalCoordinator::new(3, 64, 1);
+        let mut store = Store::default();
+        let mut spawner = RetiringSpawner::default();
+        for (request, terminal, fence) in [
+            (&first_request, first.clone(), first_fence),
+            (&exited_request, exited.clone(), exited_fence),
+            (&sibling_request, sibling.clone(), sibling_fence),
+        ] {
+            coordinator
+                .launch(
+                    request,
+                    terminal,
+                    fence,
+                    Geometry { cols: 80, rows: 24 },
+                    &mut Resolver,
+                    &mut store,
+                    &mut spawner,
+                )
+                .unwrap();
+        }
+        coordinator.exit(&exited, 0, &mut store).unwrap();
+
+        let session = first_request.scope.session_id.unwrap();
+        assert_eq!(
+            coordinator
+                .close_session(session, &mut store, &mut spawner)
+                .unwrap(),
+            2
+        );
+        // Only the running one needed reaping, and the sibling session keeps its
+        // terminal and its pool slot.
+        assert_eq!(spawner.0, vec![first]);
+        assert_eq!(coordinator.snapshot().records.len(), 1);
+        assert_eq!(coordinator.snapshot().records[0].terminal, sibling);
+    }
+
+    #[test]
+    fn session_close_keeps_a_live_terminal_when_termination_fails() {
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+
+        // A reap that fails leaves the record for the durable teardown worker to
+        // retry rather than forgetting a terminal whose child may still be alive.
+        assert_eq!(
+            coordinator.close_session(
+                request.scope.session_id.unwrap(),
+                &mut store,
+                &mut Spawner(Ok(process())),
+            ),
+            Err(GenericTerminalError::ReconcileRequired(
+                TerminalReconcileState::OrphanRunning
+            ))
+        );
+        assert_eq!(coordinator.snapshot().records[0].terminal, terminal);
+    }
+
+    #[test]
+    fn session_close_leaves_workspace_root_terminals_alone() {
+        let mut request = request();
+        request.scope.session_id = None;
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        let mut spawner = RetiringSpawner::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut spawner,
+            )
+            .unwrap();
+
+        assert_eq!(
+            coordinator
+                .close_session(SessionId::new(), &mut store, &mut spawner)
+                .unwrap(),
+            0
+        );
+        assert_eq!(coordinator.snapshot().records[0].terminal, terminal);
     }
 
     #[test]

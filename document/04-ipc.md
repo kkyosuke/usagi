@@ -457,7 +457,9 @@ snapshot を読み直す。slow subscriber は bounded queue で coalesce/drop �
 
 ## managed session request
 
-`session` kind の `create`、`remove`、`list`、`overview` は daemon が所有する durable lifecycle に届く。create / remove は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。provider conversation の再開は name-based session action ではなく、[exact target の `ResumeAgent`](#provider-conversation-resume-request) request だけが受け付ける。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。remove の hook は受理を意味し、worktree 撤去の完了ではない（下表）。`OperationId` の再送は action と canonical intent が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。create intent は canonical session target と role、remove intent は canonical session target、request origin（client request / compensating teardown）、effective `force` を含む。
+`session` kind の `create`、`remove`、`sleep`、`list`、`overview` は daemon が所有する durable lifecycle / Agent runtime に届く。create / remove は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。`sleep` は canonical session name を stable `SessionId` へ解決し、その session の eligible Agent を停止した後の snapshot と `slept` 件数を返す。provider conversation の再開は name-based session action ではなく、[exact target の `ResumeAgent`](#provider-conversation-resume-request) request だけが受け付ける。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。remove の hook は受理を意味し、worktree 撤去の完了ではない（下表）。`OperationId` の再送は action と canonical intent が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。create intent は canonical session target と role、remove intent は canonical session target、request origin（client request / compensating teardown）、effective `force` を含む。
+
+`sleep` は削除操作ではない。対象 session の live Agent がすべて `ready` / `ended` かつ exact resume metadata を持つことを停止前に検証し、busy または再開不能な Agent があれば effect なしで拒否する。成功時は Agent process と PTY ownership だけを解放し、session lifecycle、worktree、provider resume metadata を保持する。snapshot の `agent_phase` は `sleeping`、inventory state は `sleeping` となり、後続の exact `ResumeAgent` は保持した source から新しい runtime を起動する。
 
 create の durable outcome と wire response / hook の対応は次の表を正本とする。同じ semantic operation の再送は daemon restart の前後を問わず同じ行を replay し、filesystem / Git effect を再実行しない。
 
@@ -573,8 +575,11 @@ provision にだけ存在する daemon-minted credential の 2 つだけであ�
 path / provider を指定できず、daemon は credential から exact live runtime を逆引きする。成功 response は
 body を持たない。
 
-phase は wire に載る前に hook 側で検証する。usagi が配線した lifecycle event（`SessionStart` /
-`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd`）と phase の対応が hook input の
+phase は wire に載る前に hook 側で検証する。共通 validator の lifecycle vocabulary は `SessionStart` /
+`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd` である。
+Claude はこのうち `PreToolUse` を含む対応 event を、Codex は `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
+`PostToolUse` / `Stop` / `SessionEnd` だけを配線する。Codex は `approval_policy = "never"` で起動するため
+`PermissionRequest` は発火せず、`Notification` も Codex event ではない。event と phase の対応が hook input の
 `hook_event_name` と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
 
@@ -601,6 +606,13 @@ item は durable operation timestamp と stable runtime ID で決定的に並ぶ
 Agent history / exit history / dismissal の allocator・retention・GC は
 [#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務であり、この request は
 削除 authority を返さない。
+
+`agent_workspace_observation` は process-level の read-only view が別 workspace を観測する request で、名指しした
+`WorkspaceId` の `AgentInventory` と `session_statuses` を同じ応答で返す。status map は managed session の
+`SessionId` だけを key とし、値は dispatch store の closed `AgentStatus` である。同じ session に複数 Agent がある場合は
+`running > starting > failed > idle > exited` の共通順位で決定的に集約し、`session list` と同じ値になる。root Agent、
+provider-native identity、prompt、path は map に含めない。この request は mutation を持たないため、fresh connection で
+安全に retry できる。
 
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで
@@ -727,7 +739,7 @@ daemon は generation 1 の `max_revision` を 2 として広告し、`ServerHel
 従来どおり raw tail を返すため、両 revision が同じ daemon で同時に成立する。revision 2 の `screen` は schema version・
 geometry・active buffer・primary（常に存在）と alternate（active のときだけ）の grid / scrollback /
 oldest-row origin /
-cursor / saved cursor / scroll region、interned style table、decoder の途中状態、application cursor mode、bracketed paste mode、mouse protocol の有効状態と coordinate encoding を持つため、reattach 後の最初の paste / ホイールから full-screen program へ同じ入力列を送れる。client は
+cursor / saved cursor / scroll region、interned style table、decoder の途中状態（128 KiB 上限の DEC synchronized output 未 commit bytes を含む）、application cursor mode、bracketed paste mode、mouse protocol の有効状態と coordinate encoding を持つため、reattach 後の最初の paste / ホイールから full-screen program へ同じ入力列を送れる。client は
 checkpoint から screen を復元し、`output_offset` からの raw suffix を同じ parser へ feed する。
 raw tail を blank parser へ流すことに起因する UTF-8 / CSI / OSC の切断は revision 2 では起こらない。
 

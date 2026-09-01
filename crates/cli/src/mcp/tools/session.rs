@@ -386,10 +386,10 @@ impl Tool for SessionPrompt {
         "session_prompt"
     }
     fn description(&self) -> &'static str {
-        "既存セッションの agent に指示（プロンプト）を送るときに使う。name と prompt が必須。mode で配送先を選ぶ（auto=daemon が live/queue を判定、queue=起動時キュー、live=実行中端末へ直接）。"
+        "実行中の既存 session agent に追加指示を送る。name と prompt は必須。live（既定）は live agent が無ければ失敗し、agent を起動したい場合は session_dispatch を使う。queue は次回起動まで待たせることを意図した場合だけ使う。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"mode":{"type":"string","enum":["auto","queue","live"]},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name","prompt"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"mode":{"type":"string","enum":["queue","live"]},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name","prompt"]}"#
     }
 }
 
@@ -431,10 +431,10 @@ impl Tool for SessionRemove {
         "session_remove"
     }
     fn description(&self) -> &'static str {
-        "不要になったセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。応答は受理で、worktree の撤去は daemon が続ける。完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
+        "不要になったセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。integrity orphan の診断不能な残骸や未マージ commit も破棄するときだけ force と purge_orphan を両方指定する。応答は受理で、worktree の撤去は daemon が続ける。完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"force":{"type":"boolean"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"force":{"type":"boolean"},"purge_orphan":{"type":"boolean"}},"required":["name"]}"#
     }
 }
 

@@ -89,6 +89,9 @@ pub enum TerminalRuntimeState {
     /// The previous owner and child are proved gone. History remains available
     /// for Agent resume, but this state holds no runtime capacity.
     Interrupted,
+    /// The Agent was intentionally stopped to free concurrency while retaining
+    /// an exact provider resume source.
+    Sleeping,
     Exited,
     Reclaimed,
     ReconcileRequired(TerminalReconcileState),
@@ -933,12 +936,34 @@ impl TerminalRegistry {
         reference: &TerminalRef,
         data: Vec<u8>,
     ) -> Result<Output, RegistryError> {
+        self.append_output_with_replies(reference, data)
+            .map(|(output, _)| output)
+    }
+
+    /// Applies PTY output and also returns terminal-protocol replies for the
+    /// daemon-owned PTY endpoint. Replies are not user input and therefore do
+    /// not enter the client input ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::StaleTarget`] when the terminal is not owned by
+    /// this registry.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal retained-byte accounting invariant is
+    /// broken.
+    pub fn append_output_with_replies(
+        &mut self,
+        reference: &TerminalRef,
+        data: Vec<u8>,
+    ) -> Result<(Output, Vec<u8>), RegistryError> {
         let limit = self.journal_limit;
         let budgets = self.screen_budgets();
         let entry = self.entry_mut(reference)?;
         // The screen is the authority: it sees every accepted byte, including
         // the bytes the bounded journal is about to drop.
-        entry.screen.advance(&data);
+        let replies = entry.screen.advance_with_replies(&data);
         enforce_screen_budget(entry, budgets);
         let start_offset = entry.next_offset;
         entry.next_offset += data.len() as u64;
@@ -993,7 +1018,7 @@ impl TerminalRegistry {
                 );
             }
         }
-        Ok(output)
+        Ok((output, replies))
     }
 
     /// # Errors

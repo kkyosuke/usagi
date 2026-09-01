@@ -715,6 +715,7 @@ impl RuntimeCoordinator {
                 RuntimeState::Exited
                     | RuntimeState::Reclaimed
                     | RuntimeState::Interrupted
+                    | RuntimeState::Sleeping
                     | RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
             ) {
                 return Err(RuntimeError::ProviderResumeMismatch);
@@ -920,6 +921,18 @@ impl RuntimeCoordinator {
         data: Vec<u8>,
         journal: &mut dyn OutputJournal,
     ) -> Result<Output, RuntimeError> {
+        self.append_output_with_replies(runtime, data, journal)
+            .map(|(output, _)| output)
+    }
+
+    /// Journals PTY output and returns terminal-protocol replies for the
+    /// daemon-owned PTY endpoint without recording them as client input.
+    pub fn append_output_with_replies(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        data: Vec<u8>,
+        journal: &mut dyn OutputJournal,
+    ) -> Result<(Output, Vec<u8>), RuntimeError> {
         self.running(runtime)?;
         // Offsets only: journaling an accepted chunk must not capture a screen,
         // or every PTY chunk would pay for a full checkpoint.
@@ -941,7 +954,7 @@ impl RuntimeCoordinator {
         // registry takes the same allocation rather than a second copy of it.
         let Output { data, .. } = output;
         self.terminals
-            .append_output(&runtime.terminal, data)
+            .append_output_with_replies(&runtime.terminal, data)
             .map_err(RuntimeError::Terminal)
     }
 
@@ -1194,6 +1207,53 @@ impl RuntimeCoordinator {
         Ok(interrupted)
     }
 
+    /// Intentionally stops exact selected Agents while retaining their records
+    /// as provider-resumable sleep sources. The worktree and managed session
+    /// are outside this runtime transition and remain untouched.
+    pub fn sleep_agents(
+        &mut self,
+        runtime_ids: &BTreeSet<String>,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
+    ) -> Result<usize, RuntimeError> {
+        let targets = self
+            .records
+            .iter()
+            .filter(|(key, _)| runtime_ids.contains(*key))
+            .map(|(key, record)| (key.clone(), record.clone()))
+            .collect::<Vec<_>>();
+
+        let mut slept = 0;
+        for (key, record) in targets {
+            if record.state != RuntimeState::Running {
+                continue;
+            }
+            if spawner.terminate_reap(&record.runtime.terminal).is_err() {
+                self.records
+                    .get_mut(&key)
+                    .expect("selected runtime exists")
+                    .state = RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning);
+                self.persist(store)?;
+                return Err(RuntimeError::ReconcileRequired(
+                    ReconcileState::OrphanRunning,
+                ));
+            }
+            self.generation
+                .resolve_orphan(&record.runtime.terminal, ProcessObservation::Unknown, true)
+                .map_err(RuntimeError::Generation)?;
+            let retained = self.records.get_mut(&key).expect("selected runtime exists");
+            retained.state = RuntimeState::Sleeping;
+            retained.process = None;
+            if let Some(provider) = &mut retained.provider_resume {
+                provider.last_known_status = ProviderResumeStatus::Interrupted;
+                provider.last_known_phase = Some(ProviderResumePhase::Interrupted);
+            }
+            slept += 1;
+        }
+        self.persist(store)?;
+        Ok(slept)
+    }
+
     /// The aggregate retention authority this owner shares with the generic
     /// terminal owner.
     #[must_use]
@@ -1242,6 +1302,61 @@ impl RuntimeCoordinator {
             });
         }
         self.persist(store)
+    }
+
+    /// Converts a launch reservation which is known not to have spawned a
+    /// process into its terminal failure state. This is used both by the
+    /// immediate launch error path and by explicit cleanup of an older leaked
+    /// admission whose dispatch run is already terminal.
+    pub fn fail_reserved_launch(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        store: &mut dyn RuntimeStore,
+    ) -> Result<bool, RuntimeError> {
+        let record = self.record(runtime)?;
+        if record.state != RuntimeState::Reserved || record.process.is_some() {
+            return Ok(false);
+        }
+        self.generation
+            .resolve_orphan(&runtime.terminal, ProcessObservation::Gone, false)
+            .map_err(RuntimeError::Generation)?;
+        let record = self.record_mut(runtime)?;
+        record.state = RuntimeState::SpawnFailed;
+        record.outcome = DurableOperationOutcome::SpawnUnavailable;
+        record.process = None;
+        self.persist(store)?;
+        Ok(true)
+    }
+
+    /// Force-clean counterpart for a failed admission restored after daemon
+    /// restart. The caller has already matched a terminal dispatch run and the
+    /// explicit clean command acknowledges the identity-unknown reservation.
+    pub fn clean_failed_launch(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        store: &mut dyn RuntimeStore,
+    ) -> Result<bool, RuntimeError> {
+        let record = self.record(runtime)?;
+        if record.process.is_some() {
+            return Ok(false);
+        }
+        let observation = match record.state {
+            RuntimeState::Reserved => ProcessObservation::Gone,
+            RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown) => {
+                ProcessObservation::Unknown
+            }
+            _ => return Ok(false),
+        };
+        let acknowledged = matches!(observation, ProcessObservation::Unknown);
+        self.generation
+            .resolve_orphan(&runtime.terminal, observation, acknowledged)
+            .map_err(RuntimeError::Generation)?;
+        let record = self.record_mut(runtime)?;
+        record.state = RuntimeState::SpawnFailed;
+        record.outcome = DurableOperationOutcome::SpawnUnavailable;
+        record.process = None;
+        self.persist(store)?;
+        Ok(true)
     }
 
     pub fn terminal_snapshot(&self, runtime: &AgentRuntimeRef) -> Result<Snapshot, RuntimeError> {
@@ -1647,9 +1762,10 @@ impl RuntimeCoordinator {
                 .generation
                 .require_terminal(&runtime.terminal)
                 .map_err(RuntimeError::Generation),
-            RuntimeState::Interrupted | RuntimeState::Exited | RuntimeState::Reclaimed => {
-                Err(RuntimeError::Terminal(RegistryError::Exited))
-            }
+            RuntimeState::Interrupted
+            | RuntimeState::Sleeping
+            | RuntimeState::Exited
+            | RuntimeState::Reclaimed => Err(RuntimeError::Terminal(RegistryError::Exited)),
             _ => Err(RuntimeError::ReconcileRequired(
                 ReconcileState::IdentityUnknown,
             )),
@@ -1683,7 +1799,7 @@ fn terminal_ownership_state(state: RuntimeState) -> TerminalState {
             | ReconcileState::PersistAfterExit
             | ReconcileState::IdentityUnknown,
         ) => TerminalState::IdentityUnknown,
-        RuntimeState::Exited => TerminalState::Terminated,
+        RuntimeState::Sleeping | RuntimeState::Exited => TerminalState::Terminated,
         RuntimeState::SpawnFailed | RuntimeState::Reclaimed => TerminalState::Lost,
     }
 }
@@ -2761,6 +2877,84 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_pre_spawn_reservation_becomes_terminal_and_releases_capacity() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        let runtime_id = runtime.agent_runtime_id.as_str();
+        let record = coordinator.records.get_mut(&runtime_id).unwrap();
+        record.state = RuntimeState::Reserved;
+        record.process = None;
+
+        assert!(
+            coordinator
+                .fail_reserved_launch(&runtime, &mut store)
+                .unwrap()
+        );
+        let record = coordinator.record_for(&runtime).unwrap();
+        assert_eq!(record.state, RuntimeState::SpawnFailed);
+        assert_eq!(record.outcome, DurableOperationOutcome::SpawnUnavailable);
+        assert_eq!(coordinator.occupied_slots(), 0);
+        assert!(
+            !coordinator
+                .fail_reserved_launch(&runtime, &mut store)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn force_clean_repairs_only_a_processless_failed_launch() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        let runtime_id = runtime.agent_runtime_id.as_str();
+        coordinator.records.get_mut(&runtime_id).unwrap().state = RuntimeState::Reserved;
+
+        assert!(
+            !coordinator
+                .clean_failed_launch(&runtime, &mut store)
+                .unwrap()
+        );
+        coordinator.records.get_mut(&runtime_id).unwrap().process = None;
+        assert!(
+            coordinator
+                .clean_failed_launch(&runtime, &mut store)
+                .unwrap()
+        );
+        assert_eq!(
+            coordinator.record_for(&runtime).unwrap().state,
+            RuntimeState::SpawnFailed
+        );
+        assert!(
+            !coordinator
+                .clean_failed_launch(&runtime, &mut store)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn closing_a_reconciled_session_persists_termination_before_forgetting_it() {
         let request = request();
         let session = request.scope.session_id.unwrap();
@@ -2875,6 +3069,101 @@ mod tests {
                 &[runtime.agent_runtime_id.as_str().clone()]
                     .into_iter()
                     .collect(),
+                &mut store,
+                &mut spawner,
+            ),
+            Err(RuntimeError::ReconcileRequired(
+                ReconcileState::OrphanRunning
+            ))
+        );
+        assert_eq!(
+            coordinator.snapshot().records[0].state,
+            RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning)
+        );
+    }
+
+    #[test]
+    fn sleeping_an_agent_releases_its_slot_and_retains_resume_metadata() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        let reference = ProviderResumeRef {
+            provider: ProviderKind::Claude,
+            native_session_id: ProviderSessionId::new("sleep-source").unwrap(),
+            adapter_revision: 7,
+            scope: request.scope.clone(),
+            provenance: ProviderCaptureProvenance::DaemonIssued,
+            last_known_status: ProviderResumeStatus::Active,
+            last_known_phase: Some(ProviderResumePhase::Running),
+        };
+        coordinator
+            .record_provider_resume(&runtime, reference, &mut store)
+            .unwrap();
+
+        assert_eq!(coordinator.occupied_slots(), 1);
+        assert_eq!(
+            coordinator.sleep_agents(
+                &[runtime.agent_runtime_id.as_str()].into_iter().collect(),
+                &mut store,
+                &mut spawner,
+            ),
+            Ok(1)
+        );
+
+        let slept = &coordinator.snapshot().records[0];
+        assert!(spawner.terminated);
+        assert_eq!(slept.state, RuntimeState::Sleeping);
+        assert_eq!(slept.process, None);
+        assert_eq!(coordinator.occupied_slots(), 0);
+        assert_eq!(
+            slept.provider_resume.as_ref().unwrap().last_known_status,
+            ProviderResumeStatus::Interrupted
+        );
+        assert_eq!(
+            store.0.last().unwrap().records[0].state,
+            RuntimeState::Sleeping
+        );
+        assert_eq!(
+            coordinator.sleep_agents(
+                &[runtime.agent_runtime_id.as_str()].into_iter().collect(),
+                &mut store,
+                &mut spawner,
+            ),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn sleeping_an_agent_fails_closed_when_the_process_cannot_be_reaped() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+
+        assert_eq!(
+            coordinator.sleep_agents(
+                &[runtime.agent_runtime_id.as_str()].into_iter().collect(),
                 &mut store,
                 &mut spawner,
             ),

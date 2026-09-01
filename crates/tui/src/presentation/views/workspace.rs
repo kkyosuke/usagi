@@ -305,6 +305,9 @@ pub struct HomeProjection {
     /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
     /// replaces the phase line while a read-only history tab is selected.
     pane_detail: Option<String>,
+    /// Workspace transition progress replaces only the right-pane content.
+    /// The project bar and cached session sidebar remain stable around it.
+    content_loading: Option<ContentLoading>,
     /// Whether an explicit or forced Closeup action modal covers the right pane
     /// this frame. Empty Closeup remains a plain pane until Enter opens it.
     closeup_action_visible: bool,
@@ -338,6 +341,10 @@ pub struct HomeProjection {
     garden_scroll: usize,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
+    /// Canonical Garden animation tick supplied by the composition root's
+    /// monotonic logical clock. `None` keeps pure renderer fixtures compatible
+    /// with an explicitly injected wall clock; production always supplies it.
+    garden_tick: Option<u64>,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
     daemon_runtimes: Option<Vec<daemon_modal::AgentRuntimeRow>>,
     /// Persisted Closeup action-modal input, when its overlay is open.
@@ -359,6 +366,12 @@ pub struct HomeProjection {
     director_drawer: Option<DirectorDrawerProjection>,
     /// Frontmost bottom-anchored workspace-root generic terminal drawer.
     root_terminal_drawer: Option<RootTerminalDrawerProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContentLoading {
+    Pending,
+    Visible { label: String, frame: usize },
 }
 
 /// Left-sidebar draft for the inline new-session input.
@@ -549,6 +562,7 @@ impl HomeProjection {
             pane_tabs: Vec::new(),
             pane_error: None,
             pane_detail: None,
+            content_loading: None,
             // Only an explicit/forced `Overlay::Closeup` shows the action modal.
             closeup_action_visible: matches!(
                 state.route(),
@@ -569,6 +583,7 @@ impl HomeProjection {
             garden_workspaces,
             garden_scroll: state.garden_scroll(),
             garden_motion: GardenMotion::Full,
+            garden_tick: None,
             daemon_runtimes: None,
             closeup_modal: None,
             create_draft,
@@ -598,6 +613,31 @@ impl HomeProjection {
         self
     }
 
+    /// Attach and canonicalize the Garden's monotonic animation clock after all
+    /// active/deck Agent projections are present. Identical visible poses fold
+    /// onto one value, so material equality can suppress their redraws.
+    #[must_use]
+    pub(crate) fn with_garden_tick(
+        mut self,
+        raw_height: usize,
+        raw_width: usize,
+        tick: u64,
+    ) -> Self {
+        let Some(sessions) = self.garden_sessions.as_deref() else {
+            return self;
+        };
+        let (height, width) = widgets::normalize_size(raw_height, raw_width);
+        self.garden_tick = widgets::garden::canonical_tick_scrolled(
+            height,
+            width,
+            sessions,
+            self.garden_scroll,
+            tick,
+            self.garden_motion.is_reduced(),
+        );
+        self
+    }
+
     /// Replace the active-only Garden with the process deck's ordered plots.
     /// This is inert while Garden is closed, so ordinary Home material does not
     /// retain inactive project rows.
@@ -623,28 +663,9 @@ impl HomeProjection {
         self.garden_sessions.as_deref()
     }
 
-    pub(crate) fn canonical_garden_now(
-        &self,
-        raw_height: usize,
-        raw_width: usize,
-        now: DateTime<Utc>,
-    ) -> DateTime<Utc> {
-        let Some(sessions) = self.garden_sessions.as_deref() else {
-            return now;
-        };
-        let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        let Some(tick) = widgets::garden::canonical_tick_scrolled(
-            height,
-            width,
-            sessions,
-            self.garden_scroll,
-            garden_tick(now),
-            self.garden_motion.is_reduced(),
-        ) else {
-            return now;
-        };
-        DateTime::from_timestamp(i64::try_from(tick).expect("Garden phases fit i64"), 0)
-            .expect("a Garden-cycle Unix timestamp is valid")
+    /// Canonical tick that materially identifies the visible Garden pose.
+    pub(crate) const fn garden_animation_tick(&self) -> Option<u64> {
+        self.garden_tick
     }
 
     /// Attach the name of a create request the daemon is still fulfilling, so the
@@ -653,6 +674,25 @@ impl HomeProjection {
     #[must_use]
     pub fn with_create_pending(mut self, name: Option<String>) -> Self {
         self.create_pending = name;
+        self
+    }
+
+    /// Replace the right pane with workspace-open progress while retaining the
+    /// locally cached session list.
+    #[must_use]
+    pub fn with_content_loading(mut self, label: impl Into<String>, frame: usize) -> Self {
+        self.content_loading = Some(ContentLoading::Visible {
+            label: label.into(),
+            frame,
+        });
+        self
+    }
+
+    /// Keep the right pane neutral during the short grace period before a
+    /// workspace-open spinner is warranted.
+    #[must_use]
+    pub fn with_content_pending(mut self) -> Self {
+        self.content_loading = Some(ContentLoading::Pending);
         self
     }
 
@@ -905,6 +945,13 @@ impl HomeProjection {
     /// the create skeleton only become visible through those steps.
     #[must_use]
     pub fn collapse_animation_clock(mut self) -> Self {
+        // Garden replaces the whole Home surface. Its own canonical tick is the
+        // only animation material on screen, so a sidebar mascot tick must not
+        // invalidate the hidden frame underneath it.
+        if self.garden_sessions.is_some() {
+            self.mascot_tick = 0;
+            return self;
+        }
         let drives_a_per_tick_animation = self.create_pending.is_some()
             || self.sessions.iter().any(|session| session.removing)
             || self.pane_tabs.iter().any(|tab| tab.pending);
@@ -1897,7 +1944,8 @@ pub(crate) const fn present_agent_phase(state: AgentRuntimeInventoryState) -> Op
         AgentRuntimeInventoryState::Reserved => Some(AgentPhase::Ready),
         AgentRuntimeInventoryState::Live => Some(AgentPhase::Running),
         AgentRuntimeInventoryState::Interrupted => Some(AgentPhase::Interrupted),
-        AgentRuntimeInventoryState::Exited
+        AgentRuntimeInventoryState::Sleeping
+        | AgentRuntimeInventoryState::Exited
         | AgentRuntimeInventoryState::Reclaimed
         | AgentRuntimeInventoryState::Unavailable => None,
     }
@@ -1938,7 +1986,7 @@ fn garden_frame(
         &home.garden_scope,
         sessions,
         home.garden_scroll,
-        garden_tick(now),
+        home.garden_tick.unwrap_or_else(|| garden_tick(now)),
         home.garden_motion.is_reduced(),
     )
 }
@@ -2870,6 +2918,13 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     let footer = Style::new()
         .dim()
         .paint(&widgets::clip_to_width(&footer_hint, width));
+    if let Some(loading) = &home.content_loading {
+        let progress = match loading {
+            ContentLoading::Pending => None,
+            ContentLoading::Visible { label, frame } => Some((label.as_str(), *frame)),
+        };
+        return workspace_content_loading(height, width, header, footer, progress);
+    }
     if home.pane_tabs.is_empty() {
         let feedback = home
             .pane_error
@@ -2943,6 +2998,33 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         height,
         footer,
     )
+}
+
+fn workspace_content_loading(
+    height: usize,
+    width: usize,
+    header: String,
+    footer: String,
+    progress: Option<(&str, usize)>,
+) -> Vec<String> {
+    let block = progress.map_or_else(Vec::new, |(label, frame)| {
+        widgets::loading::hopping_rabbit(frame, frame / 3, label)
+    });
+    let top = height.saturating_sub(2 + block.len()) / 2;
+    let mut rows = vec![header];
+    rows.resize(1 + top, String::new());
+    rows.extend(block.into_iter().map(|row| {
+        let row = widgets::clip_to_width(&row, width);
+        format!(
+            "{}{}",
+            " ".repeat(widgets::centered_padding(
+                width,
+                widgets::display_width(&row)
+            )),
+            row
+        )
+    }));
+    with_footer_gap(rows, height, footer)
 }
 
 /// The selected interrupted tab's body line. It states what an explicit Resume
@@ -4505,6 +4587,10 @@ mod tests {
                         refname: "refs/heads/main".into(),
                     },
                     BranchChoice {
+                        label: "remote:origin/(default)".into(),
+                        refname: "refs/remotes/origin/HEAD".into(),
+                    },
+                    BranchChoice {
                         label: "remote:origin/main".into(),
                         refname: "refs/remotes/origin/main".into(),
                     },
@@ -4521,6 +4607,14 @@ mod tests {
         ));
         assert!(local.contains("base: local:main"));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let remote_default = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
+        assert!(remote_default.contains("base: remote:origin/(default)"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let remote = joined_home(&HomeProjection::from_state(
             &state,
             "work",
@@ -4528,6 +4622,14 @@ mod tests {
             &[],
         ));
         assert!(remote.contains("base: remote:origin/main"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let remote_default = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
+        assert!(remote_default.contains("base: remote:origin/(default)"));
     }
 
     #[test]
@@ -4838,7 +4940,9 @@ mod tests {
                 .any(|agent| agent.phase == AgentPhase::Running)
         );
 
-        let frame = render_home_at(24, 100, &home, now());
+        // A wide viewport keeps every virtual-world home in this aggregate phase fixture.
+        // Ordinary terminals pan through the same material one region at a time.
+        let frame = render_home_at(24, 540, &home, now());
         let text = frame
             .iter()
             .map(|line| strip(line))
@@ -4848,9 +4952,10 @@ mod tests {
         // Garden が Home を置き換えている（sidebar ではなく庭の footer が出る）。
         assert!(text.contains("Garden · click a usagi"));
         assert!(text.contains("any key · wake"));
-        assert!(text.contains("running"));
-        assert!(text.contains("waiting"));
-        assert!(text.contains("1 run · 1 done"));
+        assert!(text.contains("Notifications"));
+        assert!(!text.contains("running"));
+        assert!(!text.contains("waiting"));
+        assert!(!text.contains("1 run · 1 done"));
         assert!(!text.contains("> s0"));
         assert!(text.contains("failed · worktree missing"));
         assert!(text.contains("s0"));
@@ -4936,8 +5041,9 @@ mod tests {
             phase: AgentPhase::Running,
         }));
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        // 注意順（waiting が先）で数え上げ、Garden と sidebar が同じ言葉を使う。
-        assert!(text.contains("1 wait · 1 run"), "{text}");
+        // 注意順（waiting が先）の glyph だけを示し、pose と同じ action caption は重ねない。
+        assert!(text.contains("◆ ●"), "{text}");
+        assert!(!text.contains("1 wait · 1 run"), "{text}");
         assert!(!text.contains("no agents"));
     }
 
@@ -5023,7 +5129,9 @@ mod tests {
         let garden = home.garden_sessions.as_ref().expect("garden projection");
         assert_eq!(garden[0].agents, home.session_agents[&session]);
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        assert!(text.contains("1 run"), "{text}");
+        assert!(text.contains("1 plots · 1 usagi"), "{text}");
+        assert!(text.contains("o.o"), "{text}");
+        assert!(!text.contains("1 run"), "{text}");
         assert!(!text.contains("done"), "{text}");
     }
 
@@ -5126,8 +5234,8 @@ mod tests {
         let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
 
         let frame = garden_frame(24, 100, &home, now()).expect("the garden owns this frame");
-        // Agent の居ない庭なので、rectangle は区画ぶんだけである。
-        assert_eq!(frame.hitboxes.len(), 3);
+        // Agent の居ない compact 庭なので、rectangle は区画ぶんだけである。
+        assert_eq!(frame.hitboxes.len(), ids.len());
         assert!(frame.hitboxes.iter().all(|hitbox| hitbox.agent.is_none()));
         for hitbox in &frame.hitboxes {
             let column = u16::try_from(hitbox.column + hitbox.width / 2).expect("fits a u16");
@@ -5163,12 +5271,8 @@ mod tests {
         assert_eq!(garden_scroll_action(12, 100, &home, now(), true), None);
     }
 
-    #[test]
-    fn garden_horizontal_scroll_reaches_later_projects_with_keyboard_and_footer_buttons() {
-        let active_workspace = WorkspaceId::new();
-        let mut state = AppState::home(active_workspace, Vec::new());
-        let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
-        let rows = (0..5)
+    fn garden_project_rows() -> Vec<(WorkspaceId, widgets::garden::GardenSession)> {
+        (0..5)
             .map(|index| {
                 let workspace = WorkspaceId::new();
                 let session = SessionId::new();
@@ -5187,7 +5291,15 @@ mod tests {
                     },
                 )
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    #[test]
+    fn garden_horizontal_scroll_reaches_later_projects_with_keyboard_and_footer_buttons() {
+        let active_workspace = WorkspaceId::new();
+        let mut state = AppState::home(active_workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let rows = garden_project_rows();
         let (later_workspace, later_session) = (rows[4].0, rows[4].1.id);
         let project = |state: &AppState| {
             HomeProjection::from_state(state, "active", Path::new("/work"), &[])
@@ -5196,8 +5308,8 @@ mod tests {
         let first = project(&state);
         let first_frame = garden_frame(23, 80, &first, now()).expect("first viewport fits");
         assert_eq!(first_frame.scroll, 0);
-        assert_eq!(first_frame.max_scroll, 1);
-        assert_eq!(first_frame.hitboxes.len(), 4);
+        assert_eq!(first_frame.max_scroll, 2);
+        assert_eq!(first_frame.hitboxes.len(), 2);
         assert_eq!(
             garden_scroll_action(23, 80, &first, now(), true),
             Some(GardenClick::Scroll(1))
@@ -5206,22 +5318,21 @@ mod tests {
         let second = project(&state);
         let second_frame = garden_frame(23, 80, &second, now()).expect("shifted viewport fits");
         assert_eq!(second_frame.scroll, 1);
-        assert_eq!(second_frame.hitboxes.len(), 3);
-        assert!(
-            second_frame
-                .hitboxes
-                .iter()
-                .any(|hitbox| hitbox.session_id == later_session)
-        );
+        assert_eq!(second_frame.hitboxes.len(), 2);
         assert_eq!(
             garden_scroll_action(23, 80, &second, now(), false),
             Some(GardenClick::Scroll(0))
         );
         assert_eq!(
             garden_scroll_action(23, 80, &second, now(), true),
-            Some(GardenClick::Scroll(1))
+            Some(GardenClick::Scroll(2))
         );
-        let plot = *second_frame
+        let _ = update(&mut state, AppEvent::GardenClick(GardenClick::Scroll(2)));
+        let last = project(&state);
+        let last_frame = garden_frame(23, 80, &last, now()).expect("last viewport fits");
+        assert_eq!(last_frame.scroll, 2);
+        assert_eq!(last_frame.hitboxes.len(), 1);
+        let plot = *last_frame
             .hitboxes
             .iter()
             .find(|hitbox| hitbox.session_id == later_session)
@@ -5230,7 +5341,7 @@ mod tests {
             garden_click_at(
                 23,
                 80,
-                &second,
+                &last,
                 now(),
                 u16::try_from(plot.column).expect("fits u16"),
                 u16::try_from(plot.row).expect("fits u16"),
@@ -5242,18 +5353,18 @@ mod tests {
             })
         );
 
-        let previous = second_frame.scroll_hitboxes[0];
-        let next = second_frame.scroll_hitboxes[1];
+        let previous = last_frame.scroll_hitboxes[0];
+        let next = last_frame.scroll_hitboxes[1];
         assert_eq!(
             garden_click_at(
                 23,
                 80,
-                &second,
+                &last,
                 now(),
                 u16::try_from(previous.column).expect("fits u16"),
                 u16::try_from(previous.row).expect("fits u16"),
             ),
-            Some(GardenClick::Scroll(0))
+            Some(GardenClick::Scroll(1))
         );
         // The disabled boundary button remains a consumed no-op rather than
         // dismissing the Garden through the generic background click.
@@ -5261,12 +5372,12 @@ mod tests {
             garden_click_at(
                 23,
                 80,
-                &second,
+                &last,
                 now(),
                 u16::try_from(next.column).expect("fits u16"),
                 u16::try_from(next.row).expect("fits u16"),
             ),
-            Some(GardenClick::Scroll(1))
+            Some(GardenClick::Scroll(2))
         );
     }
 
@@ -5307,22 +5418,28 @@ mod tests {
             .filter(|hitbox| hitbox.agent.is_some())
             .collect::<Vec<_>>();
         assert_eq!(rabbits.len(), 2);
-        // うさぎは区画の内側にあり、区画より先に並ぶ（click は先に当たったものを採る）。
-        let plot = frame
+        // うさぎは巣穴より先に並ぶ。複数の動く sprite が重なった cell では、
+        // 実際に後から描かれた（hitbox 上は先頭の）うさぎを click 対象にする。
+        let home_hitbox = frame
             .hitboxes
             .iter()
             .position(|hitbox| hitbox.agent.is_none())
-            .expect("the plot itself is a target");
-        assert_eq!(plot, 2);
+            .expect("the home itself is a target");
+        assert_eq!(home_hitbox, 2);
         for rabbit in rabbits {
             let column = u16::try_from(rabbit.column + rabbit.width / 2).expect("fits a u16");
             let row = u16::try_from(rabbit.row + rabbit.height / 2).expect("fits a u16");
+            let topmost_agent = frame
+                .hitboxes
+                .iter()
+                .find(|hitbox| hitbox.contains(usize::from(column), usize::from(row)))
+                .and_then(|hitbox| hitbox.agent);
             assert_eq!(
                 garden_click_at(24, 100, &home, now(), column, row),
                 Some(GardenClick::Visit {
                     workspace,
                     session,
-                    agent: rabbit.agent,
+                    agent: topmost_agent,
                 }),
             );
             assert!(
@@ -5331,8 +5448,8 @@ mod tests {
                     .any(|runtime| Some(runtime.agent_runtime_id) == rabbit.agent)
             );
         }
-        // nameplate 行は区画そのものなので、agent を名指さない。
-        let nameplate = frame.hitboxes[plot];
+        // nameplate 行は巣穴そのものなので、agent を名指さない。
+        let nameplate = frame.hitboxes[home_hitbox];
         assert_eq!(
             garden_click_at(
                 24,
@@ -5351,11 +5468,11 @@ mod tests {
     }
 
     #[test]
-    fn the_garden_tick_advances_with_the_frame_clock() {
+    fn the_renderer_fixture_fallback_tick_advances_with_wall_seconds() {
         let base = now();
         assert_eq!(garden_tick(base), garden_tick(base));
-        // 1 秒で pose が 1 つ進み、Garden animation cycle で一周する。frame material の壁時計は秒へ
-        // 切り捨てられるので、これが観測できる最小の刻みである。
+        // Pure renderer fixtures can still inject a wall clock when no
+        // composition-owned logical tick is attached.
         assert_ne!(
             garden_tick(base),
             garden_tick(base + chrono::Duration::seconds(1))
@@ -5399,15 +5516,8 @@ mod tests {
             Path::new("/work"),
             &[projected_session(session, "running", "/work")],
         );
-        let epoch = DateTime::from_timestamp(0, 0).expect("Unix epoch");
         let canonical = (0..widgets::garden::ANIMATION_CYCLE_TICKS)
-            .map(|tick| {
-                home.canonical_garden_now(
-                    24,
-                    100,
-                    epoch + chrono::Duration::seconds(i64::try_from(tick).expect("tick fits i64")),
-                )
-            })
+            .map(|tick| home.clone().with_garden_tick(24, 100, tick).garden_tick)
             .collect::<Vec<_>>();
         assert!(
             canonical.windows(2).any(|ticks| ticks[0] != ticks[1]),
@@ -5420,15 +5530,14 @@ mod tests {
 
         let reduced = home.with_garden_reduced_motion(true);
         assert_eq!(
-            reduced.canonical_garden_now(24, 100, epoch),
-            reduced.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(5))
+            reduced.clone().with_garden_tick(24, 100, 0).garden_tick,
+            reduced.clone().with_garden_tick(24, 100, 5).garden_tick
         );
 
-        let ordinary_home_now = epoch + chrono::Duration::days(20_000);
         assert_eq!(
-            reduced.canonical_garden_now(13, 63, ordinary_home_now),
-            ordinary_home_now,
-            "a Garden that does not fit must preserve the ordinary Home clock"
+            reduced.with_garden_tick(13, 63, 5).garden_tick,
+            None,
+            "a Garden that does not fit must not attach an animation clock"
         );
     }
 

@@ -5,8 +5,9 @@
 //! deliberately small VT interpreter: it covers what a login shell prompt and
 //! everyday commands such as `ls` emit — printable text, `CR` / `LF` / `BS` /
 //! `HT`, line wrap and scroll, cursor moves, line/display erase and SGR styling
-//! — and silently ignores window-title (OSC) sequences.  It is pure and holds no
-//! IO, so it is exercised entirely by unit tests.
+//! — and silently ignores window-title (OSC) sequences. It also produces the
+//! terminal replies required by cursor-position queries while remaining pure
+//! and holding no IO, so it is exercised entirely by unit tests.
 //!
 //! Alternate screen buffers used by full-screen terminal applications are
 //! supported. Scrollback is retained locally with a bounded history for the
@@ -30,8 +31,14 @@ pub use checkpoint::{
     ActiveBuffer, BufferCheckpoint, CELLS_PER_TERMINAL_MAX, CHECKPOINT_BYTES_MAX, COLS_MAX,
     CellRun, CheckpointError, DecoderCheckpoint, DecoderPhase, Geometry, MouseProtocolEncoding,
     MouseProtocolMode, PARAMS_MAX, ROWS_MAX, RowCheckpoint, SCHEMA_VERSION, SCROLLBACK_MAX,
-    STYLE_BYTES_MAX, STYLES_MAX, ScreenCheckpoint, UTF8_NEEDED_MAX, UTF8_PENDING_MAX,
+    STYLE_BYTES_MAX, STYLES_MAX, SYNCHRONIZED_OUTPUT_MAX, ScreenCheckpoint, UTF8_NEEDED_MAX,
+    UTF8_PENDING_MAX,
 };
+
+/// Exact control emitted by Codex/crossterm to finish DEC synchronized output.
+/// Bytes between the matching `DECSET 2026` and this sequence are committed as
+/// one parser update, so callers cannot observe a half-drawn frame.
+const SYNCHRONIZED_OUTPUT_END: &[u8] = b"\x1b[?2026l";
 
 /// Escape-sequence parser position. Only these six states are reachable; any
 /// byte that does not belong to the active state returns the parser to
@@ -159,6 +166,14 @@ pub struct VtScreen {
     mouse_protocol_mode: checkpoint::MouseProtocolMode,
     /// Coordinate encoding selected by DECSET 1005/1006.
     mouse_encoding: checkpoint::MouseProtocolEncoding,
+    /// Bytes hidden by DEC synchronized output until `DECRST 2026` commits the
+    /// complete frame. `Some(empty)` distinguishes an active transaction from
+    /// the normal inactive state.
+    synchronized_output: Option<Vec<u8>>,
+    /// True only while a completed or over-limit synchronized update is replayed
+    /// through the parser. It prevents a nested 2026 marker in that captured
+    /// byte sequence from opening another transaction.
+    replaying_synchronized_output: bool,
     /// The primary screen while a full-screen program (for example Codex)
     /// renders into the active alternate buffer.
     primary_screen: Option<Box<ScreenBuffer>>,
@@ -339,6 +354,8 @@ impl VtScreen {
             bracketed_paste: false,
             mouse_protocol_mode: checkpoint::MouseProtocolMode::None,
             mouse_encoding: checkpoint::MouseProtocolEncoding::Default,
+            synchronized_output: None,
+            replaying_synchronized_output: false,
             primary_screen: None,
         }
     }
@@ -346,9 +363,19 @@ impl VtScreen {
     /// Applies a chunk of raw PTY output.  Chunks may split a multibyte
     /// character; the trailing bytes are buffered until the next call.
     pub fn advance(&mut self, bytes: &[u8]) {
+        drop(self.advance_with_replies(bytes));
+    }
+
+    /// Applies raw PTY output and returns terminal-protocol bytes that the PTY
+    /// owner must write back to the child. Queries may span chunks because they
+    /// share this screen's incremental decoder state.
+    #[must_use]
+    pub fn advance_with_replies(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut replies = Vec::new();
         for &byte in bytes {
-            self.feed(byte);
+            self.feed(byte, &mut replies);
         }
+        replies
     }
 
     /// Clears the primary screen and its retained history for an explicit
@@ -373,6 +400,8 @@ impl VtScreen {
         self.params.clear();
         self.utf8_pending.clear();
         self.utf8_needed = 0;
+        self.synchronized_output = None;
+        self.replaying_synchronized_output = false;
         self.saved_cursor = None;
         self.scroll_top = 0;
         self.scroll_bottom = self.rows - 1;
@@ -589,15 +618,46 @@ impl VtScreen {
         (self.cursor_row, self.cursor_col)
     }
 
-    fn feed(&mut self, byte: u8) {
+    fn feed(&mut self, byte: u8, replies: &mut Vec<u8>) {
+        if self.synchronized_output.is_some() && !self.replaying_synchronized_output {
+            let (complete, over_limit) = {
+                let pending = self.synchronized_output.get_or_insert_default();
+                pending.push(byte);
+                (
+                    pending.ends_with(SYNCHRONIZED_OUTPUT_END),
+                    pending.len() > SYNCHRONIZED_OUTPUT_MAX,
+                )
+            };
+            if complete || over_limit {
+                self.commit_synchronized_output(replies);
+            }
+            return;
+        }
+        self.feed_parsed(byte, replies);
+    }
+
+    fn feed_parsed(&mut self, byte: u8, replies: &mut Vec<u8>) {
         match self.phase {
             Phase::Ground => self.ground(byte),
             Phase::Escape => self.escape(byte),
-            Phase::Csi => self.csi(byte),
+            Phase::Csi => self.csi(byte, replies),
             Phase::CsiOverflow => self.csi_overflow(byte),
             Phase::Osc => self.osc(byte),
             Phase::Charset => self.phase = Phase::Ground,
         }
+    }
+
+    /// Applies one hidden frame without yielding an intermediate parser state.
+    /// An update missing its closing marker takes this same path after the byte
+    /// bound is reached, preferring a visible partial frame over unbounded
+    /// retention.
+    fn commit_synchronized_output(&mut self, replies: &mut Vec<u8>) {
+        let pending = self.synchronized_output.take().unwrap_or_default();
+        self.replaying_synchronized_output = true;
+        for byte in pending {
+            self.feed_parsed(byte, replies);
+        }
+        self.replaying_synchronized_output = false;
     }
 
     fn ground(&mut self, byte: u8) {
@@ -660,12 +720,16 @@ impl VtScreen {
                 self.restore_cursor();
                 self.phase = Phase::Ground;
             }
+            b'M' => {
+                self.reverse_index();
+                self.phase = Phase::Ground;
+            }
             // Single-byte escapes (e.g. `ESC =`, `ESC c`) are ignored.
             _ => self.phase = Phase::Ground,
         }
     }
 
-    fn csi(&mut self, byte: u8) {
+    fn csi(&mut self, byte: u8, replies: &mut Vec<u8>) {
         match byte {
             0x20..=0x3f if self.params.len() < PARAMS_MAX => self.params.push(byte as char),
             0x20..=0x3f => {
@@ -673,7 +737,7 @@ impl VtScreen {
                 self.phase = Phase::CsiOverflow;
             }
             0x40..=0x7e => {
-                self.dispatch_csi(byte as char);
+                self.dispatch_csi(byte as char, replies);
                 self.phase = Phase::Ground;
             }
             _ => self.phase = Phase::Ground,
@@ -697,7 +761,7 @@ impl VtScreen {
         }
     }
 
-    fn dispatch_csi(&mut self, final_byte: char) {
+    fn dispatch_csi(&mut self, final_byte: char, replies: &mut Vec<u8>) {
         match final_byte {
             'A' => self.cursor_row = self.cursor_row.saturating_sub(self.param(0, 1)),
             'B' => self.cursor_row = (self.cursor_row + self.param(0, 1)).min(self.rows - 1),
@@ -719,6 +783,16 @@ impl VtScreen {
             'u' => self.restore_cursor(),
             'h' => self.set_private_modes(),
             'l' => self.reset_private_modes(),
+            // DSR cursor position report. Coordinates on the wire are
+            // one-based and cannot expose this parser's pending-wrap column.
+            'n' if self.params == "6" => replies.extend_from_slice(
+                format!(
+                    "\u{1b}[{};{}R",
+                    self.cursor_row.min(self.rows - 1) + 1,
+                    self.cursor_col.min(self.cols - 1) + 1
+                )
+                .as_bytes(),
+            ),
             // Unhandled finals leave the grid unchanged.
             _ => {}
         }
@@ -864,6 +938,18 @@ impl VtScreen {
         }
     }
 
+    /// Applies Reverse Index (`ESC M`): move up one row, or insert a blank row
+    /// at the top margin when the cursor is already there. Codex uses this with
+    /// DECSTBM to insert transcript history without moving its composer/status
+    /// rows outside the active region.
+    fn reverse_index(&mut self) {
+        if self.cursor_row == self.scroll_top {
+            self.scroll_down(1);
+        } else {
+            self.cursor_row = self.cursor_row.saturating_sub(1);
+        }
+    }
+
     fn tab(&mut self) {
         let next = ((self.cursor_col / 8) + 1) * 8;
         self.cursor_col = next.min(self.cols - 1);
@@ -901,6 +987,9 @@ impl VtScreen {
                 1005 => self.mouse_encoding = checkpoint::MouseProtocolEncoding::Utf8,
                 1006 => self.mouse_encoding = checkpoint::MouseProtocolEncoding::Sgr,
                 2004 => self.bracketed_paste = true,
+                2026 if !self.replaying_synchronized_output => {
+                    self.synchronized_output = Some(Vec::new());
+                }
                 47 | 1047 | 1049 => self.enter_alternate_screen(),
                 _ => {}
             }
@@ -931,6 +1020,9 @@ impl VtScreen {
                 }
                 2004 => self.bracketed_paste = false,
                 47 | 1047 | 1049 => self.leave_alternate_screen(),
+                // A matching 2026 reset is buffered and commits before it is
+                // parsed. An unmatched reset, like every unknown mode, has no
+                // state to change.
                 _ => {}
             }
         }
@@ -1151,6 +1243,7 @@ impl VtScreen {
                 params: self.params.clone(),
                 utf8_pending: self.utf8_pending.clone(),
                 utf8_needed: self.utf8_needed as u8,
+                synchronized_output: self.synchronized_output.clone(),
             },
             application_cursor: self.application_cursor,
             bracketed_paste: self.bracketed_paste,
@@ -1214,6 +1307,9 @@ impl VtScreen {
         screen.params.clone_from(&cp.decoder.params);
         screen.utf8_pending.clone_from(&cp.decoder.utf8_pending);
         screen.utf8_needed = cp.decoder.utf8_needed as usize;
+        screen
+            .synchronized_output
+            .clone_from(&cp.decoder.synchronized_output);
         screen.application_cursor = cp.application_cursor;
         screen.bracketed_paste = cp.bracketed_paste;
         screen.mouse_protocol_mode = cp.mouse_protocol_mode;
@@ -1789,6 +1885,55 @@ mod tests {
     }
 
     #[test]
+    fn reverse_index_inserts_only_at_the_scroll_region_top() {
+        let mut screen = VtScreen::new(5, 12);
+        screen.advance(b"\x1b[1;1HA\x1b[2;1HB\x1b[3;1HC\x1b[4;1HD\x1b[5;1HE\x1b[2;4r\x1b[2;1H");
+
+        screen.advance(b"\x1bM");
+        assert_eq!(rows(&screen), vec!["A", "", "B", "C", "E"]);
+        assert_eq!(screen.cursor(), (1, 0));
+
+        let unchanged = rows(&screen);
+        screen.advance(b"\x1b[4;1H\x1bM");
+        assert_eq!(rows(&screen), unchanged);
+        assert_eq!(screen.cursor(), (2, 0));
+    }
+
+    #[test]
+    fn codex_synchronized_history_insert_never_exposes_a_mixed_frame() {
+        let mut screen = VtScreen::new(5, 32);
+        screen.advance(
+            "\x1b[1;1Hold reply\x1b[2;1HWorked for 6m\x1b[3;1H>\x1b[4;1H付与します\x1b[5;1Hgpt-5.6-sol medium"
+                .as_bytes(),
+        );
+        let committed = rows(&screen);
+
+        // Codex wraps a ratatui draw in DECSET/DECRST 2026. Its history
+        // insertion reserves the lower rows and uses RI at the top margin.
+        screen.advance(b"\x1b[?2026h\x1b[1;2r\x1b[1;1H\x1bMnew reply");
+        assert_eq!(rows(&screen), committed);
+        screen.advance(b"\x1b[r\x1b[4;1H\x1b[2K");
+        assert_eq!(rows(&screen), committed);
+        screen.advance("修正します".as_bytes());
+        assert_eq!(rows(&screen), committed);
+
+        // The terminator may itself be split at an arbitrary PTY chunk edge.
+        screen.advance(b"\x1b[?2026");
+        assert_eq!(rows(&screen), committed);
+        screen.advance(b"l");
+        assert_eq!(
+            rows(&screen),
+            vec![
+                "new reply",
+                "old reply",
+                ">",
+                "修正します",
+                "gpt-5.6-sol medium"
+            ]
+        );
+    }
+
+    #[test]
     fn invalid_scroll_region_resets_to_the_full_screen() {
         let mut screen = VtScreen::new(3, 8);
         screen.advance(b"\x1b[2;3r\x1b[3;2r");
@@ -1902,6 +2047,28 @@ mod tests {
     }
 
     #[test]
+    fn cursor_position_query_replies_from_the_authoritative_screen_across_chunks() {
+        let mut screen = VtScreen::new(4, 20);
+        screen.advance(b"warning\r\n> ");
+
+        assert!(screen.advance_with_replies(b"\x1b[6").is_empty());
+        assert_eq!(screen.advance_with_replies(b"n"), b"\x1b[2;3R");
+        assert_eq!(rows(&screen), vec!["warning", ">", "", ""]);
+        assert!(screen.advance_with_replies(b"\x1b[?6n\x1b[5n").is_empty());
+
+        let mut synchronized = VtScreen::new(4, 20);
+        assert!(
+            synchronized
+                .advance_with_replies(b"\x1b[?2026h\x1b[3;4H\x1b[6n")
+                .is_empty()
+        );
+        assert_eq!(
+            synchronized.advance_with_replies(b"\x1b[?2026l"),
+            b"\x1b[3;4R"
+        );
+    }
+
+    #[test]
     fn cursor_position_sequence_places_text_absolutely() {
         // CUP is 1-based; `ESC[2;3H` targets row 2 column 3 (zero-based 1,2).
         let mut screen = VtScreen::new(3, 6);
@@ -1993,6 +2160,12 @@ mod tests {
         screen.advance(b"X");
         assert_eq!(rows(&screen)[0], "X");
 
+        screen.advance(b"\x1b[?2026hqueued");
+        assert!(screen.synchronized_output.is_some());
+        assert!(screen.clear_primary_for_user());
+        assert!(screen.synchronized_output.is_none());
+        assert_eq!(rows(&screen), vec!["", ""]);
+
         screen.advance(b"prompt\x1b[?1049hfull");
         assert!(!screen.clear_primary_for_user());
         assert_eq!(rows(&screen)[0], "full");
@@ -2020,6 +2193,31 @@ mod tests {
         // `ESC[?25l` (hide cursor) and a stray CSI abort leave text intact.
         assert_eq!(screen_after(1, 6, b"\x1b[?25lAB"), vec!["AB"]);
         assert_eq!(screen_after(1, 6, b"\x1b[1\x00AB"), vec!["AB"]);
+    }
+
+    #[test]
+    fn synchronized_output_round_trips_mid_frame_and_is_bounded() {
+        let mut screen = VtScreen::new(2, 16);
+        screen.advance(b"committed\x1b[?2026h\x1b[Hpending");
+        assert_eq!(rows(&screen), vec!["committed", ""]);
+        assert_eq!(
+            screen.checkpoint().decoder.synchronized_output.as_deref(),
+            Some(b"\x1b[Hpending".as_slice())
+        );
+
+        let mut restored =
+            VtScreen::from_checkpoint(&screen.checkpoint()).expect("mid-frame checkpoint");
+        screen.advance(b"\x1b[?2026l");
+        restored.advance(b"\x1b[?2026l");
+        assert_eq!(restored, screen);
+        assert_eq!(rows(&restored), vec!["pendinged", ""]);
+
+        // A missing terminator cannot retain an unbounded PTY stream. The byte
+        // that crosses the limit flushes the captured update as ordinary output.
+        let mut over_limit = VtScreen::new(1, 1);
+        over_limit.synchronized_output = Some(vec![0; SYNCHRONIZED_OUTPUT_MAX]);
+        over_limit.advance(&[0]);
+        assert!(over_limit.synchronized_output.is_none());
     }
 
     #[test]
@@ -2280,6 +2478,7 @@ mod tests {
             built(2, 8, &[b"mid-csi-overflow\x1b[11111111111111111111111111111111111111111111111111111111111111111"]),
             built(2, 8, &[b"mid-osc\x1b]0;partial title"]),
             built(2, 8, &[b"mid-charset\x1b("]),
+            built(2, 16, &[b"base\x1b[?2026h\x1b[Hpending"]),
             built(1, 8, &[&star[..1]]),
         ]
     }
@@ -2317,6 +2516,10 @@ mod tests {
         legacy_object.remove("bracketed_paste");
         legacy_object.remove("mouse_protocol_mode");
         legacy_object.remove("mouse_encoding");
+        legacy["decoder"]
+            .as_object_mut()
+            .expect("decoder object")
+            .remove("synchronized_output");
         let legacy: ScreenCheckpoint =
             serde_json::from_value(legacy).expect("legacy checkpoint decodes");
         assert_eq!(legacy.primary.scrollback_origin, 0);
@@ -2324,6 +2527,7 @@ mod tests {
         assert!(!legacy.bracketed_paste);
         assert_eq!(legacy.mouse_protocol_mode, MouseProtocolMode::None);
         assert_eq!(legacy.mouse_encoding, MouseProtocolEncoding::Default);
+        assert!(legacy.decoder.synchronized_output.is_none());
     }
 
     /// One block exercising UTF-8, CJK width, combining marks, CSI moves/erase,
@@ -2434,6 +2638,7 @@ mod tests {
                 params: String::new(),
                 utf8_pending: Vec::new(),
                 utf8_needed: 0,
+                synchronized_output: None,
             },
             application_cursor: false,
             bracketed_paste: false,
@@ -2527,6 +2732,13 @@ mod tests {
         assert_eq!(
             reject(&cp),
             CheckpointError::Utf8NeededOutOfRange(UTF8_NEEDED_MAX + 1)
+        );
+
+        let mut cp = valid_checkpoint();
+        cp.decoder.synchronized_output = Some(vec![0; SYNCHRONIZED_OUTPUT_MAX + 1]);
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::SynchronizedOutputTooLong(SYNCHRONIZED_OUTPUT_MAX + 1)
         );
 
         // Alternate advertised as active but not carried.
@@ -2735,6 +2947,7 @@ mod tests {
             CheckpointError::ParamsTooLong(9),
             CheckpointError::Utf8PendingTooLong(9),
             CheckpointError::Utf8NeededOutOfRange(9),
+            CheckpointError::SynchronizedOutputTooLong(9),
             CheckpointError::ActiveBufferMismatch,
             CheckpointError::TooLarge { size: 9, limit: 1 },
             CheckpointError::Malformed("bad".to_owned()),

@@ -34,6 +34,9 @@ pub enum AgentPhase {
     Ready,
     Running,
     Waiting,
+    /// The provider conversation is retained, but its Agent process and PTY
+    /// were intentionally released.
+    Sleeping,
     Ended,
     Exited,
     /// Daemon restart reconciliation could not prove the runtime identity.
@@ -59,11 +62,12 @@ pub const AGENT_PHASE_HOOK_EVENTS: [(&str, AgentPhase); 8] = [
 
 impl AgentPhase {
     /// Every token which may appear in an Agent phase projection.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Absent,
         Self::Ready,
         Self::Running,
         Self::Waiting,
+        Self::Sleeping,
         Self::Ended,
         Self::Exited,
         Self::Interrupted,
@@ -78,6 +82,7 @@ impl AgentPhase {
             Self::Ready => "ready",
             Self::Running => "running",
             Self::Waiting => "waiting",
+            Self::Sleeping => "sleeping",
             Self::Ended => "ended",
             Self::Exited => "exited",
             Self::Interrupted => "interrupted",
@@ -99,7 +104,7 @@ impl AgentPhase {
     /// claims an Agent process may make about itself.
     #[must_use]
     pub const fn is_reportable(self) -> bool {
-        !matches!(self, Self::Absent | Self::Interrupted)
+        !matches!(self, Self::Absent | Self::Sleeping | Self::Interrupted)
     }
 
     /// Returns the phase usagi wires one documented hook event to, if any.

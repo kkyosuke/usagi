@@ -212,6 +212,20 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
             .map_err(map_error)
     }
 
+    /// Closes every generic terminal belonging to one session being removed.
+    pub fn close_session(
+        &mut self,
+        session: usagi_core::domain::id::SessionId,
+    ) -> Result<usize, ProtocolError>
+    where
+        S: TerminalStore,
+        P: GenericPtySpawner,
+    {
+        self.coordinator
+            .close_session(session, &mut self.store, &mut self.pty)
+            .map_err(map_error)
+    }
+
     pub fn collect_retention_garbage(&mut self) -> usize
     where
         S: TerminalStore,
@@ -234,15 +248,21 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
             .map(|record| record.terminal.terminal_id.as_str())
             .collect()
     }
-    pub fn output(
-        &mut self,
-        terminal: &TerminalRef,
-        bytes: Vec<u8>,
-    ) -> Result<Value, ProtocolError> {
-        self.coordinator
-            .output(terminal, bytes)
-            .map(|output| json!({"event":"output", "output": output}))
-            .map_err(map_error)
+    pub fn output(&mut self, terminal: &TerminalRef, bytes: Vec<u8>) -> Result<Value, ProtocolError>
+    where
+        P: PtyWriter,
+    {
+        let (output, replies) = self
+            .coordinator
+            .output_with_replies(terminal, bytes)
+            .map_err(map_error)?;
+        if !replies.is_empty() {
+            self.pty.select_terminal(terminal);
+            // The output is already authoritative. A failed reply must not
+            // turn the committed observer event into an apparent output loss.
+            let _ = self.pty.write_all(&replies);
+        }
+        Ok(json!({"event":"output", "output": output}))
     }
     pub fn exit(&mut self, terminal: &TerminalRef, status: i32) -> Result<(), ProtocolError>
     where
@@ -610,6 +630,8 @@ mod tests {
         resized: Vec<Geometry>,
         released: Vec<TerminalRef>,
         resize_failure: bool,
+        /// Makes the exact-identity reap fail, as a live child that will not die.
+        reap_failure: bool,
         resize_started: Option<std::sync::mpsc::SyncSender<()>>,
         resize_continue: Option<std::sync::mpsc::Receiver<()>>,
     }
@@ -628,6 +650,17 @@ mod tests {
                 start_identity: "fake".into(),
                 process_group: 7,
             })
+        }
+
+        fn terminate_reap(
+            &mut self,
+            terminal: &TerminalRef,
+        ) -> Result<(), super::super::generic_terminal::GenericTerminateReapError> {
+            if self.reap_failure {
+                return Err(super::super::generic_terminal::GenericTerminateReapError);
+            }
+            self.released.push(terminal.clone());
+            Ok(())
         }
     }
     impl PtyWriter for Pty {
@@ -706,6 +739,32 @@ mod tests {
             )
             .unwrap()
     }
+    #[test]
+    fn close_session_reaps_the_removed_sessions_terminals() {
+        let (mut runtime, terminal) = launched_runtime();
+        let session = terminal
+            .session_id
+            .expect("the fixture launches in a session");
+
+        assert_eq!(runtime.close_session(session).unwrap(), 1);
+        assert!(runtime.pty.released.contains(&terminal));
+        assert_eq!(runtime.retained_resources().len(), 0);
+    }
+
+    #[test]
+    fn close_session_reports_a_reap_it_could_not_finish() {
+        let (mut runtime, terminal) = launched_runtime();
+        let session = terminal
+            .session_id
+            .expect("the fixture launches in a session");
+        runtime.pty.reap_failure = true;
+
+        // The teardown worker retries against this, so the refusal must be typed
+        // rather than a silently forgotten terminal.
+        assert!(runtime.close_session(session).is_err());
+        assert_eq!(runtime.retained_resources().len(), 1);
+    }
+
     fn launched_runtime() -> (
         GenericTerminalRuntime<Resolver, Store, Pty, Scope>,
         TerminalRef,
@@ -749,6 +808,17 @@ mod tests {
         )
         .unwrap();
         (runtime, terminal)
+    }
+
+    #[test]
+    fn generic_output_answers_cursor_position_queries_through_the_owned_pty() {
+        let (mut runtime, terminal) = launched_runtime();
+
+        runtime
+            .output(&terminal, b"warning\r\n> \x1b[6n".to_vec())
+            .unwrap();
+
+        assert_eq!(runtime.pty.writes, b"\x1b[2;3R");
     }
 
     /// A runtime whose scope resolver admits exactly `scope`.

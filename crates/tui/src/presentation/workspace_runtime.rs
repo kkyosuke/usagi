@@ -1232,7 +1232,8 @@ impl WorkspaceRuntime {
 
     fn close_empty_root_terminal_drawer(&mut self) {
         if self.state.root_terminal_drawer_open() && !self.has_root_terminal_tabs() {
-            let _ = self.apply_event(AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+            let effects = self.apply_event(AppEvent::RootTerminalDrawerEmptied);
+            debug_assert!(effects.is_empty(), "closing an empty drawer is state-only");
         }
     }
 
@@ -1974,7 +1975,7 @@ mod tests {
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
         AppEvent, AppKey, BackendEvent, Effect, HomeMode, Overlay, Route, Selection, TabDirection,
-        Target,
+        Target, WorkspaceDrawerFocus,
     };
     use crate::usecase::application::pane::{
         InterruptedPane, LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection,
@@ -3529,11 +3530,23 @@ mod tests {
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
         assert!(runtime.state().root_terminal_drawer_open());
         assert!(runtime.state().director_drawer_open());
-        assert_eq!(runtime.focused_terminal(), Some(root_terminal));
+        assert_eq!(runtime.focused_terminal(), Some(root_terminal.clone()));
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert!(runtime.state().director_drawer_open());
         assert!(runtime.state().root_terminal_drawer_open());
+        assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
+
+        // A background Shell may exit while Director owns focus. Empty-drawer
+        // cleanup is an explicit close: it must neither steal focus nor replay
+        // the user toggle and request a replacement terminal.
+        let _ = runtime.exit_pane(Target::Root(workspace), root_terminal);
+        assert!(runtime.state().director_drawer_open());
+        assert!(!runtime.state().root_terminal_drawer_open());
+        assert_eq!(
+            runtime.state().workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
         assert_eq!(runtime.focused_terminal(), Some(root_agent));
     }
 

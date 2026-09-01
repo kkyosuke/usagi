@@ -109,6 +109,10 @@ pub enum DaemonRequest {
     /// Read the safe Agent runtime and interrupted-source inventory for one
     /// workspace. Root and managed-session records share this response.
     AgentInventory { workspace: WorkspaceId },
+    /// Read the same runtime inventory together with daemon-authoritative
+    /// per-session dispatch status. Process-level cross-project views use this
+    /// instead of treating a coarse live PTY as proof that dispatch is running.
+    AgentWorkspaceObservation { workspace: WorkspaceId },
     /// Diagnose launch-time hook/MCP integration revisions against the invoking
     /// binary without exposing rendered configuration or provider identity.
     DiagnoseAgents {
@@ -536,6 +540,9 @@ pub struct DispatchIntent {
 pub enum SessionAction {
     Create,
     Remove,
+    /// Stop quiescent Agents in the session while retaining exact provider
+    /// resume metadata and the worktree.
+    Sleep,
     /// Inspect or remove Git resources absent from daemon lifecycle state.
     Clean,
     List,
@@ -1653,6 +1660,7 @@ impl RetryEligibility {
             | DaemonRequest::PrBatch { .. }
             | DaemonRequest::Metrics { .. }
             | DaemonRequest::AgentInventory { .. }
+            | DaemonRequest::AgentWorkspaceObservation { .. }
             | DaemonRequest::DiagnoseAgents { .. }
             | DaemonRequest::Tenant {
                 action: TenantAction::Inventory,
@@ -3063,6 +3071,9 @@ mod deadline_and_retry_tests {
                 action: MetricsAction::Snapshot,
             },
             DaemonRequest::AgentInventory {
+                workspace: WorkspaceId::new(),
+            },
+            DaemonRequest::AgentWorkspaceObservation {
                 workspace: WorkspaceId::new(),
             },
             DaemonRequest::Session {

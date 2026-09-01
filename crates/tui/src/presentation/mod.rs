@@ -27,7 +27,7 @@ use chrono::{DateTime, Timelike, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{
     AgentInventory, AgentProfileId, AgentResumeRelation, AgentResumeTarget,
-    AgentRuntimeInventoryState, ProviderResumeProjection,
+    AgentRuntimeInventoryState, AgentWorkspaceObservation, ProviderResumeProjection,
 };
 use usagi_core::domain::id::{
     AgentContinuationRef, OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId,
@@ -84,7 +84,8 @@ use crate::usecase::application::daemon_backend::{
     DecisionPort as BackendDecisionPort, Flow as BackendFlow, LaunchAgentRequest,
     OpenTerminalRequest, OverlayPort as BackendOverlayPort, RemoveSessionRequest,
     ReopenAgentRequest, ResumeAgentRequest, SessionCommandPort as BackendSessionCommandPort,
-    TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
+    SleepSessionRequest, TargetStorePort as BackendTargetStorePort,
+    WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
 use crate::usecase::application::pane::{PaneKind, PaneTab, TabSelection};
@@ -1072,6 +1073,7 @@ pub enum ControllerHostAction {
     Create(CreateSessionRequest, Completions),
     Refresh(WorkspaceId, Completions),
     Remove(RemoveSessionRequest, Completions),
+    Sleep(SleepSessionRequest, Completions),
     LaunchAgent(LaunchAgentRequest),
     ResumeAgent(ResumeAgentRequest),
     ReopenAgent(ReopenAgentRequest),
@@ -1124,6 +1126,17 @@ impl BackendSessionCommandPort for ControllerHost {
         if let Err(mpsc::SendError(ControllerHostAction::Remove(_, completions))) = self
             .0
             .send(ControllerHostAction::Remove(request, completions))
+        {
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                "session command host is unavailable",
+            ))));
+        }
+    }
+
+    fn sleep(&mut self, request: SleepSessionRequest, completions: Completions) {
+        if let Err(mpsc::SendError(ControllerHostAction::Sleep(_, completions))) = self
+            .0
+            .send(ControllerHostAction::Sleep(request, completions))
         {
             completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
                 "session command host is unavailable",
@@ -1206,19 +1219,19 @@ pub struct ControllerBackendComposition {
 /// never cold-starts a daemon, so a project whose daemon is gone simply keeps
 /// its read-only plot.
 pub trait GardenInventoryPort: Send {
-    /// The daemon's safe Agent inventory for one open project.
+    /// The daemon's safe runtime and dispatch observation for one open project.
     ///
     /// # Errors
     ///
     /// Returns safe feedback when the daemon is unavailable or refuses the
     /// workspace. The Garden keeps the plot it has.
-    fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentInventory, String>;
+    fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String>;
 }
 
 struct UnavailableGardenInventoryPort;
 
 impl GardenInventoryPort for UnavailableGardenInventoryPort {
-    fn inventory(&mut self, _: WorkspaceId) -> Result<AgentInventory, String> {
+    fn inventory(&mut self, _: WorkspaceId) -> Result<AgentWorkspaceObservation, String> {
         Err("Agent inventory is unavailable".to_owned())
     }
 }
@@ -1436,10 +1449,40 @@ fn save_config_responsive(
     let Some((scope, draft)) = form.save_request() else {
         return Ok(false);
     };
-    let result = run_workspace_loading(term, "Saving settings…", false, || {
-        settings.save(scope, &draft)
-    });
+    let result = if let Some(base) = base {
+        run_config_save_loading(term, form, base, || settings.save(scope, &draft))
+    } else {
+        run_workspace_loading(term, "Saving settings…", false, || {
+            settings.save(scope, &draft)
+        })
+    };
     Ok(form.finish_save(draft, result))
+}
+
+/// Persist a workspace Config draft without replacing its Home-owned modal.
+///
+/// The generic workspace loading surface clears the complete frame. Using it
+/// here made Config disappear during the write, then reappear for `done` before
+/// closing. Keep painting the pending Config form over the same Home snapshot
+/// so one modal remains visible throughout the save lifecycle.
+fn run_config_save_loading<T: Send>(
+    term: &mut dyn Terminal,
+    form: &mut Config,
+    base: &[String],
+    operation: impl FnOnce() -> io::Result<T> + Send,
+) -> io::Result<T> {
+    run_workspace_loading_with(
+        term,
+        "Saving settings…",
+        false,
+        false,
+        operation,
+        |height, width, _frame, _status, _show_progress| {
+            let lines = config::render_over(height, width, base, form);
+            form.advance_save_animation();
+            lines
+        },
+    )
 }
 
 fn save_environment_responsive(
@@ -1877,10 +1920,10 @@ struct WorkspaceUi {
     /// observation. It never projects from an inventory cached before a later
     /// pane admission.
     agent_observation_requested: bool,
-    /// An Agent terminal exit changes daemon inventory. Unlike a display-only
-    /// observation request, this must schedule one follow-up when an older
-    /// restore snapshot is already in flight.
-    agent_exit_observation_requested: bool,
+    /// A successful Agent launch/resume or terminal exit changes daemon
+    /// inventory. Unlike a display-only observation request, this must schedule
+    /// one follow-up when an older restore snapshot is already in flight.
+    agent_inventory_change_observation_requested: bool,
 }
 
 struct AgentTabIntentContext {
@@ -1934,7 +1977,7 @@ struct GardenObservationCompletion {
     port: Box<dyn GardenInventoryPort>,
     /// Inventories the daemon answered, each already checked to be the
     /// workspace it was asked for.
-    inventories: Vec<AgentInventory>,
+    inventories: Vec<AgentWorkspaceObservation>,
 }
 
 /// Admission for the Garden's cross-project observation lane.
@@ -2002,7 +2045,7 @@ fn spawn_garden_observation_job(
         let mut inventories = Vec::new();
         for workspace in workspaces.into_iter().take(MAX_OBSERVED_PROJECTS) {
             if let Ok(inventory) = port.inventory(workspace)
-                && inventory.workspace_id == workspace
+                && inventory.inventory.workspace_id == workspace
             {
                 inventories.push(inventory);
             }
@@ -2026,6 +2069,7 @@ const MAX_BACKGROUND_EXITS_PER_FRAME: usize = 8;
 const DETACHED_TERMINAL_LIMIT: usize = 8;
 /// The process-level project tab bar permanently owns the first terminal row.
 const PROJECT_BAR_ROWS: usize = 1;
+const WORKSPACE_SWITCH_LOADING_GRACE: std::time::Duration = std::time::Duration::from_millis(80);
 
 const RESTORE_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
 const RESTORE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(4);
@@ -2186,6 +2230,10 @@ enum SessionBackendCompletion {
     },
     Remove {
         session: SessionId,
+        before: Vec<SessionId>,
+        completions: Completions,
+    },
+    Sleep {
         before: Vec<SessionId>,
         completions: Completions,
     },
@@ -2368,7 +2416,7 @@ impl WorkspaceUi {
             terminal_size: (0, 0),
             agent_tab_intent: None,
             agent_observation_requested: false,
-            agent_exit_observation_requested: false,
+            agent_inventory_change_observation_requested: false,
         }
     }
 
@@ -2786,12 +2834,12 @@ impl WorkspaceUi {
         std::mem::take(&mut self.agent_observation_requested)
     }
 
-    fn request_agent_exit_observation(&mut self) {
-        self.agent_exit_observation_requested = true;
+    fn request_agent_inventory_change_observation(&mut self) {
+        self.agent_inventory_change_observation_requested = true;
     }
 
-    fn take_agent_exit_observation_request(&mut self) -> bool {
-        std::mem::take(&mut self.agent_exit_observation_requested)
+    fn take_agent_inventory_change_observation_request(&mut self) -> bool {
+        std::mem::take(&mut self.agent_inventory_change_observation_requested)
     }
 
     fn agent_inventory(&self) -> Option<&AgentInventory> {
@@ -3555,7 +3603,7 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
             {
                 ui.removing_session = None;
             }
-            SessionBackendCompletion::Remove { .. } => {}
+            SessionBackendCompletion::Remove { .. } | SessionBackendCompletion::Sleep { .. } => {}
         }
         if let Ok(result) = completion.result {
             adopt_session_snapshot(ui, result);
@@ -3663,6 +3711,10 @@ fn emit_session_command_result(
                 before,
                 completions,
                 ..
+            }
+            | SessionBackendCompletion::Sleep {
+                before,
+                completions,
             },
         ) => {
             completions.emit(AppEvent::Backend(BackendEvent::Sessions(
@@ -3682,7 +3734,11 @@ fn emit_session_command_result(
                 notice: Some(Notice::new(safe_session_error(message))),
             }));
         }
-        (Err(message), SessionBackendCompletion::Remove { completions, .. }) => {
+        (
+            Err(message),
+            SessionBackendCompletion::Remove { completions, .. }
+            | SessionBackendCompletion::Sleep { completions, .. },
+        ) => {
             completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
                 safe_session_error(message),
             ))));
@@ -4713,7 +4769,7 @@ fn close_exited_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
         // the last coherent Agent inventory. Wake the dedicated restore lane so
         // a terminated Agent is removed there without waiting for an unrelated
         // session lifecycle change to trigger another observation.
-        ui.request_agent_exit_observation();
+        ui.request_agent_inventory_change_observation();
     }
 }
 
@@ -5474,6 +5530,40 @@ fn is_director_new_click(
         && director_drawer::new_button_at(height, width, column, row, false)
 }
 
+/// Whether this press lands on the persistent Director button in the Home
+/// header that produced the current frame.
+///
+/// This is resolved before drawer-local input ownership. In particular, the
+/// CLI picker deliberately consumes every other user input, but must not make
+/// the visible close button inert.
+fn is_director_header_click(key: &Key, width: usize, home: &HomeProjection) -> bool {
+    let (column, row) = match key {
+        Key::Click { column, row }
+        | Key::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            column,
+            row,
+        }) => (*column, *row),
+        _ => return false,
+    };
+    home_header_action_at(width, home, column, row) == Some(HomeHeaderAction::Director)
+}
+
+/// Close an open Director drawer from its persistent header button before its
+/// exclusive picker consumes the press. Existing modals keep precedence, and a
+/// closed drawer continues through the ordinary Home header route.
+fn close_director_from_header(
+    runtime: &mut WorkspaceRuntime,
+    key: &Key,
+    width: usize,
+    home: &HomeProjection,
+) -> Option<Vec<Effect>> {
+    (runtime.state().overlay().is_none()
+        && runtime.state().director_drawer_open()
+        && is_director_header_click(key, width, home))
+    .then(|| runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer)))
+}
+
 fn is_director_new_pointer(
     key: &Key,
     runtime: &WorkspaceRuntime,
@@ -5730,19 +5820,15 @@ struct HomeFrameMaterial {
     force_remove_confirmation: Option<(String, bool)>,
     environment_editor: Option<crate::usecase::application::controller::EnvironmentEditor>,
     role_editor: Option<crate::usecase::application::controller::RoleEditor>,
-    /// Whole-second wall clock behind the sidebar's relative session times.
-    ///
-    /// Truncating to the second is what makes time material without making
-    /// every frame material: the coarsest thing the renderer derives from it
-    /// changes at minute granularity, so a one-second resolution can never be
-    /// late, and an idle Home redraws at most once per second because of it.
+    /// Minute-resolution wall clock behind relative session labels. Garden
+    /// animation has a separate monotonic logical clock and never reads this.
     now: DateTime<Utc>,
 }
 
 /// Cheap dependency vector for the owned Home projection. Equality is the
 /// admission gate to projection construction; each revision is advanced by its
 /// authoritative controller/daemon source, never by this cache.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FrameMaterialKey {
     height: usize,
     width: usize,
@@ -5785,11 +5871,11 @@ impl HomeFrameMaterial {
         self
     }
 
-    fn with_garden_reduced_motion(mut self, reduced_motion: bool) -> Self {
+    fn with_garden_animation(mut self, tick: u64, reduced_motion: bool) -> Self {
         self.projection = self.projection.with_garden_reduced_motion(reduced_motion);
-        self.now = self
+        self.projection = self
             .projection
-            .canonical_garden_now(self.height, self.width, self.now);
+            .with_garden_tick(self.height, self.width, tick);
         self
     }
 
@@ -5838,7 +5924,10 @@ fn home_frame_material(
         create_pending,
         now,
     )
-    .with_garden_reduced_motion(false)
+    .with_garden_animation(
+        widgets::garden::runtime_tick(runtime.state().mascot_tick()),
+        false,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5899,8 +5988,14 @@ fn home_frame_material_shared(
         role_editor: runtime.state().role_editor().cloned(),
         // Garden canonicalization happens only after every composition-owned
         // source (notably Agent inventory and reduced motion) is attached.
-        now: now.with_nanosecond(0).unwrap_or(now),
+        now: relative_time_clock(now),
     }
+}
+
+fn relative_time_clock(now: DateTime<Utc>) -> DateTime<Utc> {
+    now.with_second(0)
+        .and_then(|now| now.with_nanosecond(0))
+        .unwrap_or(now)
 }
 
 /// Compose the controller Home frame: [`render_home_at`] plus the shell
@@ -6073,6 +6168,23 @@ fn drain_controller_host_actions(
                     ))));
                 }
             }
+            ControllerHostAction::Sleep(request, completions) => {
+                if let Some(name) = session_name_for(ui, request.session) {
+                    let before = ui.workspace.session_ids().to_vec();
+                    begin_session_command(
+                        ui,
+                        SessionCommand::Sleep { name },
+                        SessionBackendCompletion::Sleep {
+                            before,
+                            completions,
+                        },
+                    );
+                } else {
+                    completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                        "selected session is no longer available",
+                    ))));
+                }
+            }
             ControllerHostAction::LaunchAgent(request) => {
                 let target = request
                     .session
@@ -6233,6 +6345,12 @@ fn drain_pane_completions_into_runtime(
         }
         match completion.outcome {
             PaneLaunchOutcome::Agent { operation, result } => {
+                if result.is_ok() {
+                    // The daemon has admitted a new live runtime. Sidebar and
+                    // Garden membership comes from the coherent inventory, so
+                    // a cached pre-launch snapshot must not filter it back out.
+                    ui.request_agent_inventory_change_observation();
+                }
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
                 };
@@ -6297,6 +6415,9 @@ fn drain_pane_completions_into_runtime(
                 continuation,
                 result,
             } => {
+                if result.is_ok() {
+                    ui.request_agent_inventory_change_observation();
+                }
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
                 };
@@ -6476,30 +6597,56 @@ fn run_workspace_loading<T: Send>(
     cancellable: bool,
     operation: impl FnOnce() -> io::Result<T> + Send,
 ) -> io::Result<T> {
+    run_workspace_loading_with(
+        term,
+        label,
+        cancellable,
+        false,
+        operation,
+        |height, width, frame, status, _| {
+            widgets::loading::loading_screen(width, height, frame, frame / 3, status)
+        },
+    )
+}
+
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=blocking_operations_keep_painting_and_workspace_open_can_be_cancelled
+fn run_workspace_loading_with<T: Send>(
+    term: &mut dyn Terminal,
+    label: &str,
+    cancellable: bool,
+    defer_progress: bool,
+    operation: impl FnOnce() -> io::Result<T> + Send,
+    mut render: impl FnMut(usize, usize, usize, &str, bool) -> Vec<String>,
+) -> io::Result<T> {
     std::thread::scope(|scope| {
         let worker = scope.spawn(operation);
         let mut frame = 0_usize;
         let mut cancelled = false;
+        let started = std::time::Instant::now();
         loop {
             let (height, width) = term.size()?;
             let status = if cancelled { "Cancelling…" } else { label };
-            term.draw(&widgets::loading::loading_screen(
-                width,
-                height,
-                frame,
-                frame / 3,
-                status,
-            ))?;
+            let show_progress =
+                workspace_loading_visible(defer_progress, cancelled, started.elapsed());
+            term.draw(&render(height, width, frame, status, show_progress))?;
             // Even an immediately completed operation gets one visible frame.
             // Without this fence, fast settings writes skipped feedback
             // entirely and made the Enter key appear to do nothing.
             if worker.is_finished() {
                 break;
             }
-            let tick = std::time::Duration::from_millis(80);
+            let tick = if defer_progress && !show_progress {
+                std::time::Duration::from_millis(16)
+            } else {
+                std::time::Duration::from_millis(80)
+            };
             if cancellable && !cancelled {
-                if matches!(term.wait_for_key(tick)?, Some(Key::Escape)) {
-                    cancelled = true;
+                if let Some(key) = term.wait_for_key(tick)? {
+                    if matches!(key, Key::Escape) {
+                        cancelled = true;
+                    } else {
+                        term.defer_key(key);
+                    }
                 }
             } else {
                 // Saving and the post-cancel wait cannot accept input, but they
@@ -6521,6 +6668,47 @@ fn run_workspace_loading<T: Send>(
             result
         }
     })
+}
+
+fn workspace_loading_visible(
+    defer_progress: bool,
+    cancelled: bool,
+    elapsed: std::time::Duration,
+) -> bool {
+    cancelled || !defer_progress || elapsed >= WORKSPACE_SWITCH_LOADING_GRACE
+}
+
+fn cached_workspace_switch_frame(
+    deck: &WorkspaceDeck,
+    path: &Path,
+    height: usize,
+    width: usize,
+    frame: usize,
+    status: &str,
+    show_progress: bool,
+) -> Option<Vec<String>> {
+    let slot = deck.slot_for_path(path)?;
+    let sessions = slot.projected_sessions();
+    let state = AppState::home(
+        slot.workspace_id(),
+        sessions.iter().map(|session| session.id).collect(),
+    );
+    let projection = HomeProjection::from_state(&state, slot.label(), slot.path(), &sessions);
+    let projection = if show_progress {
+        projection.with_content_loading(status, frame)
+    } else {
+        projection.with_content_pending()
+    };
+    let home_height = height.saturating_sub(PROJECT_BAR_ROWS);
+    let home = render_home(home_height, width, &projection);
+    let mut preview_deck = deck.clone();
+    preview_deck.preview_path(path);
+    Some(compose_workspace_shell_frame(
+        &preview_deck,
+        home_height,
+        width,
+        &home,
+    ))
 }
 
 /// Open and refresh a workspace while an interactive production adapter keeps
@@ -6558,6 +6746,29 @@ fn activate_workspace_responsive(
     }
 }
 
+fn activate_cached_workspace_responsive(
+    term: &mut dyn Terminal,
+    loader: &mut dyn WorkspaceLoader,
+    deck: &WorkspaceDeck,
+    path: &Path,
+    label: &str,
+) -> io::Result<()> {
+    if !loader.background_operations() || !deck.contains_path(path) {
+        return activate_workspace_responsive(term, loader, path, label);
+    }
+    run_workspace_loading_with(
+        term,
+        label,
+        false,
+        true,
+        || loader.activate_prepared(path),
+        |height, width, frame, status, show_progress| {
+            cached_workspace_switch_frame(deck, path, height, width, frame, status, show_progress)
+                .expect("the cached workspace path was checked before activation")
+        },
+    )
+}
+
 fn prepare_deck_workspace(
     term: &mut dyn Terminal,
     loader: &mut Option<&mut dyn WorkspaceLoader>,
@@ -6569,16 +6780,44 @@ fn prepare_deck_workspace(
         deck.set_notice("Open the workspace list to add or switch projects.");
         return None;
     };
-    match open_workspace_responsive(term, &mut **loader, path, label) {
+    let result = if (**loader).background_operations() && deck.contains_path(path) {
+        run_workspace_loading_with(
+            term,
+            label,
+            true,
+            true,
+            || {
+                let snapshot = (**loader).open(path)?;
+                Ok(refresh_empty_workspace_snapshot(&mut **loader, snapshot))
+            },
+            |height, width, frame, status, show_progress| {
+                cached_workspace_switch_frame(
+                    deck,
+                    path,
+                    height,
+                    width,
+                    frame,
+                    status,
+                    show_progress,
+                )
+                .expect("the cached workspace path was checked before opening")
+            },
+        )
+    } else {
+        open_workspace_responsive(term, &mut **loader, path, label)
+    };
+    match result {
         Ok(snapshot) => Some(snapshot),
         Err(error) => {
             // A cancelled worker may already have completed its declaration.
             // Reassert the still-visible project before its resident pumps run
             // again, so cancellation never silently switches tenant authority.
-            let _ = activate_workspace_responsive(
+            let current = deck.active_path().to_path_buf();
+            let _ = activate_cached_workspace_responsive(
                 term,
                 &mut **loader,
-                deck.active_path(),
+                deck,
+                &current,
                 "Restoring current workspace…",
             );
             deck.set_notice(error.to_string());
@@ -6598,6 +6837,13 @@ fn refresh_empty_workspace_snapshot(
     snapshot
 }
 
+fn restore_prepared_workspace(loader: &mut Option<&mut dyn WorkspaceLoader>, current: &Path) {
+    let Some(loader) = loader.as_mut() else {
+        return;
+    };
+    let _ = (**loader).activate_prepared(current);
+}
+
 fn prepare_activation_settings(
     workspace_config: &mut Option<WorkspaceConfigContext<'_>>,
     loader: &mut Option<&mut dyn WorkspaceLoader>,
@@ -6610,9 +6856,7 @@ fn prepare_activation_settings(
     };
     if let Err(error) = context.settings.select_workspace(target) {
         let _ = context.settings.select_workspace(current);
-        if let Some(loader) = loader.as_mut() {
-            let _ = (**loader).activate_prepared(current);
-        }
+        restore_prepared_workspace(loader, current);
         deck.set_notice(error.to_string());
         return false;
     }
@@ -6632,9 +6876,7 @@ fn prepare_batch_settings(
     for snapshot in prepared {
         if let Err(error) = context.settings.select_workspace(&snapshot.workspace.path) {
             let _ = context.settings.select_workspace(current);
-            if let Some(loader) = loader.as_mut() {
-                let _ = (**loader).activate_prepared(current);
-            }
+            restore_prepared_workspace(loader, current);
             deck.set_notice(error.to_string());
             return false;
         }
@@ -6704,6 +6946,11 @@ fn switch_arrow_target(deck: &WorkspaceDeck, state: &AppState, key: &Key) -> Opt
 /// Maximum number of completions one Home frame may apply from each queue.
 const FRAME_EVENT_BUDGET: usize = 128;
 
+/// Registry reads are useful only while `+ Open` is visible. A short bounded
+/// cadence feels live across processes without turning the Home frame loop into
+/// a filesystem poller.
+const REGISTRY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -6725,6 +6972,7 @@ fn drive_workspace_controller(
     entry_policy: WorkspaceEntryPolicy,
     mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
+    let mut registry = registry.to_vec();
     let WorkspaceEntryPolicy {
         available_models,
         default_model,
@@ -6834,6 +7082,8 @@ fn drive_workspace_controller(
     // and a capped backoff across worker jobs; a frame tick never resets it.
     let restore_clock = std::time::Instant::now();
     let mut restore_retry = RestoreRetryState::new();
+    let mut registry_refresh_pending = false;
+    let mut registry_refresh_due = std::time::Duration::ZERO;
     let mut garden_observation = GardenObservation::new();
     let mut garden_observations = 0_u64;
     // Filesystem hint for the inline create form. It is off the frame budget:
@@ -6863,10 +7113,59 @@ fn drive_workspace_controller(
     let mut root_terminal_view: Option<Arc<TerminalViewProjection>> = None;
     let mut root_terminal_generation = 0_u64;
     let mut director_material_key = None;
+    // The source key remembers the raw Garden cadence so a held pose is
+    // canonicalized once. The material key stores only the canonical visible
+    // tick and therefore names the frame actually sent to the terminal.
+    let mut frame_source_key: Option<FrameMaterialKey> = None;
     let mut frame_material_key: Option<FrameMaterialKey> = None;
     let mut allowed_sessions_revision = u64::MAX;
     let mut current_sessions = BTreeSet::new();
     loop {
+        let registry_now = restore_clock.elapsed();
+        if deck.add_overlay_open()
+            && !registry_refresh_pending
+            && registry_now >= registry_refresh_due
+            && let Some(loader) = loader.as_mut()
+        {
+            match (**loader).dispatch_registry_refresh() {
+                Ok(true) => registry_refresh_pending = true,
+                Ok(false) => {
+                    registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+                }
+                Err(error) => {
+                    deck.set_notice(error.to_string());
+                    registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+                    drawn_material = None;
+                    frame_source_key = None;
+                    frame_material_key = None;
+                }
+            }
+        }
+        if let Some(completion) = loader
+            .as_mut()
+            .and_then(|loader| (**loader).take_registry_refresh())
+        {
+            registry_refresh_pending = false;
+            registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+            match completion {
+                Ok(latest) => {
+                    registry = latest;
+                    if deck.add_overlay_open() {
+                        deck.refresh_add(&registry);
+                        drawn_material = None;
+                        frame_source_key = None;
+                        frame_material_key = None;
+                    }
+                }
+                Err(error) if deck.add_overlay_open() => {
+                    deck.set_notice(error.to_string());
+                    drawn_material = None;
+                    frame_source_key = None;
+                    frame_material_key = None;
+                }
+                Err(_) => {}
+            }
+        }
         if let Ok(catalog) = branch_catalog_receiver.try_recv() {
             let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
                 catalog,
@@ -6889,7 +7188,7 @@ fn drive_workspace_controller(
         if ui.take_agent_observation_request() {
             restore_retry.request_observation(restore_clock.elapsed());
         }
-        if ui.take_agent_exit_observation_request() {
+        if ui.take_agent_inventory_change_observation_request() {
             restore_retry.request_changed_observation(restore_clock.elapsed());
         }
         drain_session_completions(&mut ui);
@@ -7131,13 +7430,8 @@ fn drive_workspace_controller(
         for update in metrics_backend.drain_events() {
             metrics_projection.apply(update);
         }
-        let now = Utc::now();
-        // Relative session labels change at minute granularity. Keying the full
-        // Home frame by seconds caused needless full-material rebuilds.
-        let now = now
-            .with_second(0)
-            .and_then(|now| now.with_nanosecond(0))
-            .unwrap_or(now);
+        let now = relative_time_clock(Utc::now());
+        let garden_open = runtime.state().overlay() == Some(Overlay::Garden);
         let drives_tick_animation = ui.creating_session.is_some()
             || sessions.iter().any(|session| session.removing)
             || runtime
@@ -7147,12 +7441,14 @@ fn drive_workspace_controller(
                 .any(|tab| matches!(tab, PaneTab::Pending(_)));
         let animation = if garden_reduced_motion {
             0
+        } else if garden_open {
+            widgets::garden::runtime_tick(runtime.state().mascot_tick())
         } else if drives_tick_animation {
             runtime.state().mascot_tick()
         } else {
             widgets::mascot::canonical_tick(runtime.state().mascot_tick())
         };
-        let next_frame_key = FrameMaterialKey {
+        let next_source_key = FrameMaterialKey {
             height,
             width,
             controller: runtime.material_key(),
@@ -7173,10 +7469,7 @@ fn drive_workspace_controller(
             garden_observations,
             now,
         };
-        if frame_material_key.as_ref() != Some(&next_frame_key) {
-            let controller_may_be_noop = frame_material_key
-                .as_ref()
-                .is_some_and(|previous| previous.differs_only_by_controller(&next_frame_key));
+        if frame_source_key.as_ref() != Some(&next_source_key) {
             let material = home_frame_material_shared(
                 height,
                 width,
@@ -7199,21 +7492,34 @@ fn drive_workspace_controller(
             )
             .with_agent_inventory(ui.agent_inventory())
             .with_workspace_deck_garden(deck)
-            .with_garden_reduced_motion(garden_reduced_motion);
+            .with_garden_animation(animation, garden_reduced_motion);
+            let mut next_frame_key = next_source_key.clone();
+            if garden_open {
+                next_frame_key.animation = material
+                    .projection
+                    .garden_animation_tick()
+                    .unwrap_or(animation);
+            }
+            let frame_changed = frame_material_key.as_ref() != Some(&next_frame_key);
+            let controller_may_be_noop = frame_material_key
+                .as_ref()
+                .is_some_and(|previous| previous.differs_only_by_controller(&next_frame_key));
             // Skip only the drawing. A skipped tick has already run every drain
             // above and still runs restore admission, pane launches, and input
             // below, so nothing that makes progress depends on the redraw.
-            if !controller_may_be_noop || drawn_material.as_ref() != Some(&material) {
+            if frame_changed
+                && (!controller_may_be_noop || drawn_material.as_ref() != Some(&material))
+            {
                 let home = render_home_material(&material);
                 let frame = compose_workspace_shell_frame(deck, height, width, &home);
                 term.draw(&frame)?;
                 drawn_material = Some(material);
             }
+            frame_source_key = Some(next_source_key);
             frame_material_key = Some(next_frame_key);
         }
         // The other open projects' Agents, observed only while the Garden is the
         // frame. The active project keeps its own controller's richer phases.
-        let garden_open = runtime.state().overlay() == Some(Overlay::Garden);
         if garden_inventory.is_some()
             && garden_observation.begin_if_due(garden_open, restore_clock.elapsed())
         {
@@ -7273,14 +7579,17 @@ fn drive_workspace_controller(
         let opens_add = matches!(key, Key::Live(LiveTerminalAction::OpenWorkspace))
             || matches!(bar_target, Some(ProjectBarTarget::Add));
         if opens_add {
-            deck.open_add(registry);
+            deck.open_add(&registry);
+            registry_refresh_due = std::time::Duration::ZERO;
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
         if matches!(key, Key::Live(LiveTerminalAction::OpenWorkspaceSwitcher)) {
             deck.open_switcher();
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
@@ -7295,6 +7604,7 @@ fn drive_workspace_controller(
                 deck.open_switcher();
                 deck.set_notice("Save or cancel the current draft before switching.");
                 drawn_material = None;
+                frame_source_key = None;
                 frame_material_key = None;
                 continue;
             }
@@ -7311,6 +7621,7 @@ fn drive_workspace_controller(
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
@@ -7377,6 +7688,7 @@ fn drive_workspace_controller(
                                 {
                                     deck.set_notice(error.to_string());
                                     drawn_material = None;
+                                    frame_source_key = None;
                                     frame_material_key = None;
                                     continue;
                                 }
@@ -7388,6 +7700,7 @@ fn drive_workspace_controller(
                                     &prepared,
                                 ) {
                                     drawn_material = None;
+                                    frame_source_key = None;
                                     frame_material_key = None;
                                     continue;
                                 }
@@ -7402,6 +7715,7 @@ fn drive_workspace_controller(
                                     &first.workspace.path,
                                 ) {
                                     drawn_material = None;
+                                    frame_source_key = None;
                                     frame_material_key = None;
                                     continue;
                                 }
@@ -7452,6 +7766,7 @@ fn drive_workspace_controller(
                 }
             }
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
@@ -7518,6 +7833,7 @@ fn drive_workspace_controller(
                 deck.set_notice("That project is no longer open.");
                 garden_pointer_gesture = false;
                 drawn_material = None;
+                frame_source_key = None;
                 frame_material_key = None;
                 continue;
             };
@@ -7541,12 +7857,23 @@ fn drive_workspace_controller(
             }
             garden_pointer_gesture = false;
             drawn_material = None;
+            frame_source_key = None;
             frame_material_key = None;
             continue;
         }
+        // The Home header stays above the overlaid Director drawer. Resolve its
+        // persistent toggle before the drawer picker gets a chance to consume
+        // the click, otherwise an open picker makes the visible close button
+        // inert.
+        let director_header_effects = drawn_material.as_ref().and_then(|material| {
+            close_director_from_header(&mut runtime, &key, material.width, &material.projection)
+        });
         let input_route = match garden_route {
             Some(GardenInputRoute::Local(effects)) => WorkspaceInputRoute::Garden(effects),
             Some(GardenInputRoute::Project(_)) => unreachable!("project visit returned above"),
+            None if director_header_effects.is_some() => {
+                WorkspaceInputRoute::Drawer(director_header_effects.expect("matched above"))
+            }
             None => route_workspace_input_before_reducer(
                 &mut ui,
                 &mut runtime,
@@ -7694,6 +8021,7 @@ fn drive_workspace_controller(
                 // The modal drew over the frame the gate remembers, so the next
                 // tick must redraw even if no material changed underneath it.
                 drawn_material = None;
+                frame_source_key = None;
                 frame_material_key = None;
                 let effective =
                     usagi_core::usecase::settings::read_for_workspace_entry(context.settings);
@@ -7754,9 +8082,9 @@ fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> Sess
 }
 
 /// Reads local and remote-tracking branch identities for the create picker.
-/// Symbolic remote aliases such as `origin/HEAD` are omitted so every row names
-/// one stable ref. A failure shrinks the picker to the daemon's legacy `HEAD`
-/// default instead of making the workspace unusable.
+/// A remote's symbolic `HEAD` is exposed as its `(default)` choice; other
+/// symbolic aliases are omitted. A failure shrinks the picker to the daemon's
+/// legacy `HEAD` default instead of making the workspace unusable.
 fn session_branch_catalog(
     workspace_root: &Path,
     configured_default: Option<&str>,
@@ -7809,23 +8137,32 @@ fn parse_session_branch_choices(output: &str) -> Vec<BranchChoice> {
         .lines()
         .filter_map(|line| {
             let (refname, symref) = line.split_once(' ').unwrap_or((line, ""));
-            if !symref.is_empty() {
-                return None;
-            }
-            let label = refname
-                .strip_prefix("refs/heads/")
-                .map(|name| format!("local:{name}"))
-                .or_else(|| {
-                    refname
-                        .strip_prefix("refs/remotes/")
-                        .map(|name| format!("remote:{name}"))
-                })?;
+            let label = if symref.is_empty() {
+                refname
+                    .strip_prefix("refs/heads/")
+                    .map(|name| format!("local:{name}"))
+                    .or_else(|| {
+                        refname
+                            .strip_prefix("refs/remotes/")
+                            .map(|name| format!("remote:{name}"))
+                    })
+            } else {
+                remote_default_branch_label(refname, symref)
+            }?;
             Some(BranchChoice {
                 label,
                 refname: refname.to_owned(),
             })
         })
         .collect()
+}
+
+fn remote_default_branch_label(refname: &str, symref: &str) -> Option<String> {
+    let name = refname.strip_prefix("refs/remotes/")?;
+    let remote = name.strip_suffix("/HEAD")?;
+    let target_prefix = format!("refs/remotes/{remote}/");
+    (!remote.is_empty() && symref.starts_with(&target_prefix) && symref != refname)
+        .then(|| format!("remote:{remote}/(default)"))
 }
 
 /// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
@@ -9040,24 +9377,25 @@ mod tests {
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
         UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
-        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceConfigContext,
-        WorkspaceConfigStep, WorkspaceCreateCompletion, WorkspaceCreateEffect,
-        WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute, WorkspaceLoader,
-        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        UnavailableSessionCommandPortFactory, WORKSPACE_SWITCH_LOADING_GRACE, WelcomeStep,
+        WorkspaceConfigContext, WorkspaceConfigStep, WorkspaceCreateCompletion,
+        WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute,
+        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
         activate_workspace_responsive, adjust_project_bar_pointer, app_event_from_key,
-        close_exited_panes, compose_workspace_shell_frame, controller_terminal_view,
-        copy_terminal_selection, director_organization, dismiss_pr_modal_on_project_bar_click,
-        drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
-        garden_click_at, garden_fits, garden_shell_owned_wake, handle_terminal_pointer,
-        home_frame_material, intercept_live_terminal_control, is_user_activity,
+        cached_workspace_switch_frame, close_director_from_header, close_exited_panes,
+        compose_workspace_shell_frame, controller_terminal_view, copy_terminal_selection,
+        director_organization, dismiss_pr_modal_on_project_bar_click, drain_session_completions,
+        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at, garden_fits,
+        garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
+        intercept_live_terminal_control, is_director_header_click, is_user_activity,
         key_to_terminal_bytes, key_to_terminal_bytes_for_mode, new_project_notice,
         open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
         prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
         prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
         remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
-        reset_projection_build_counts, restore_open_panes, retarget_drawer_chords,
-        route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
-        run as run_from_start, run_screen_graph_with_backend,
+        reset_projection_build_counts, restore_open_panes, restore_prepared_workspace,
+        retarget_drawer_chords, route_garden_input, route_pr_modal_click,
+        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
         run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
@@ -9067,7 +9405,7 @@ mod tests {
         save_config_responsive, save_environment_responsive, select_right_pane_tab,
         select_root_terminal_tab, sidebar_pointer_event, step_config, step_new, step_open,
         step_workspace_config, terminal_geometry, visit_garden_agent, welcome_action,
-        workspace_has_unsaved_surface, write_banner,
+        workspace_has_unsaved_surface, workspace_loading_visible, write_banner,
     };
     use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
     use crate::presentation::live_terminal::LiveTerminalControls;
@@ -9075,6 +9413,7 @@ mod tests {
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::open::Open;
     use crate::presentation::views::welcome::MenuAction;
+    use crate::presentation::views::workspace::HomeProjection;
     use crate::presentation::widgets::strip_ansi;
     use crate::presentation::workspace_runtime::PaneRestoreTarget;
     use crate::usecase::application::agent_tab_intent::{
@@ -9110,6 +9449,7 @@ mod tests {
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::{
         AgentInventory, AgentProfileId, AgentRuntimeInventoryItem, AgentRuntimeInventoryState,
+        AgentWorkspaceObservation,
     };
     use usagi_core::domain::id::{
         AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId,
@@ -9788,7 +10128,7 @@ mod tests {
         let build = |deck: &WorkspaceDeck| {
             home_frame_material(
                 24,
-                100,
+                220,
                 &runtime,
                 "alpha",
                 &alpha.workspace.path,
@@ -9820,25 +10160,31 @@ mod tests {
         // The daemon answers for whichever workspace the request names, so the
         // other project's Agents reach its plot without a resident controller.
         let runtime_id = AgentRuntimeId::new();
-        assert!(deck.apply_garden_inventory(&AgentInventory {
-            workspace_id: beta.workspace_id,
-            runtimes: vec![AgentRuntimeInventoryItem {
-                runtime: AgentRuntimeRef {
-                    agent_runtime_id: runtime_id,
-                    terminal: TerminalRef {
-                        daemon_generation: DaemonGeneration::new(),
-                        terminal_id: TerminalId::new(),
-                        workspace_id: beta.workspace_id,
+        assert!(deck.apply_garden_inventory(&AgentWorkspaceObservation {
+            inventory: AgentInventory {
+                workspace_id: beta.workspace_id,
+                runtimes: vec![AgentRuntimeInventoryItem {
+                    runtime: AgentRuntimeRef {
+                        agent_runtime_id: runtime_id,
+                        terminal: TerminalRef {
+                            daemon_generation: DaemonGeneration::new(),
+                            terminal_id: TerminalId::new(),
+                            workspace_id: beta.workspace_id,
+                            session_id: Some(beta.session_ids[0]),
+                            worktree_id: WorktreeId::new(),
+                        },
                         session_id: Some(beta.session_ids[0]),
-                        worktree_id: WorktreeId::new(),
                     },
-                    session_id: Some(beta.session_ids[0]),
-                },
-                continuation: AgentContinuationRef::new(),
-                state: AgentRuntimeInventoryState::Live,
-                resumed_from: None,
-            }],
-            resumable: Vec::new(),
+                    continuation: AgentContinuationRef::new(),
+                    state: AgentRuntimeInventoryState::Live,
+                    resumed_from: None,
+                }],
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::from([(
+                beta.session_ids[0],
+                usagi_core::domain::agent::AgentStatus::Idle,
+            )]),
         }));
         let material = build(&deck);
         let plots = material
@@ -9855,7 +10201,10 @@ mod tests {
         );
         let observed = render_home_material(&material);
         assert!(!observed.iter().any(|row| row.contains("project inactive")));
-        assert!(observed.iter().any(|row| row.contains("1 run")));
+        assert!(observed.iter().any(|row| row.contains("2 plots · 1 usagi")));
+        assert!(observed.iter().any(|row| row.contains("-.-")));
+        assert!(observed.iter().any(|row| row.contains("Agent completed")));
+        assert!(!observed.iter().any(|row| row.contains("1 run")));
     }
 
     #[test]
@@ -10405,6 +10754,7 @@ mod tests {
                 force: true,
                 force_delete_branch: false,
             },
+            Effect::SleepSession { workspace, session },
             Effect::LaunchAgent {
                 workspace,
                 session: Some(session),
@@ -10432,7 +10782,7 @@ mod tests {
         ] {
             backend.dispatch(effect);
         }
-        assert_eq!(actions.try_iter().count(), 9);
+        assert_eq!(actions.try_iter().count(), 10);
 
         for effect in [
             Effect::LoadNotes { target },
@@ -10626,6 +10976,10 @@ mod tests {
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         std::thread::sleep(std::time::Duration::from_millis(10));
         super::drain_session_completions(&mut ui);
+        backend.dispatch(Effect::SleepSession { workspace, session });
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        super::drain_session_completions(&mut ui);
         backend.dispatch(Effect::RemoveSession {
             workspace,
             session,
@@ -10635,13 +10989,18 @@ mod tests {
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         std::thread::sleep(std::time::Duration::from_millis(10));
         super::drain_session_completions(&mut ui);
+        backend.dispatch(Effect::SleepSession {
+            workspace,
+            session: SessionId::new(),
+        });
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         backend.dispatch(Effect::OpenTerminal {
             target,
             operation_id: OperationId::new(),
             arguments: "new".into(),
         });
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
-        // Only the user-initiated `Remove` reaches the command port. The
+        // Only the user-initiated `Sleep` and `Remove` reach the command port. The
         // refresh went to the resident lane, so it neither spawned a worker nor
         // opened a connection of its own (#551).
         assert_eq!(
@@ -10649,7 +11008,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .len(),
-            1
+            2
         );
     }
 
@@ -11098,6 +11457,10 @@ mod tests {
             Geometry { cols: 20, rows: 5 },
         );
         assert!(pending.is_empty());
+        assert!(
+            ui.take_agent_inventory_change_observation_request(),
+            "a successful Agent launch must replace the pre-launch inventory"
+        );
         ui.resize_terminals(Geometry { cols: 30, rows: 6 });
         let projected_records = ui.workspace.sessions().to_vec();
         super::apply_session_projection(
@@ -11156,6 +11519,10 @@ mod tests {
             &mut pending,
             Geometry { cols: 20, rows: 5 },
         );
+        assert!(
+            ui.take_agent_inventory_change_observation_request(),
+            "a daemon admission still changes inventory after its pending tab closes"
+        );
 
         let failed_agent = OperationId::new();
         runtime.on_effect(&Effect::LaunchAgent {
@@ -11181,6 +11548,10 @@ mod tests {
             Geometry { cols: 20, rows: 5 },
         );
         assert!(pending.is_empty());
+        assert!(
+            !ui.take_agent_inventory_change_observation_request(),
+            "a rejected Agent launch does not change daemon inventory"
+        );
 
         ui.pane_completion_sender
             .send(super::PaneLaunchCompletion {
@@ -12945,10 +13316,10 @@ mod tests {
     }
 
     #[test]
-    fn branch_choices_distinguish_local_remote_and_skip_symbolic_aliases() {
+    fn branch_choices_include_remote_defaults_and_skip_other_symbolic_aliases() {
         assert_eq!(
             super::parse_session_branch_choices(
-                "refs/heads/main \nrefs/heads/feature \nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/main \nnot-a-ref\n"
+                "refs/heads/main \nrefs/heads/feature \nrefs/heads/current refs/heads/main\nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/alias refs/remotes/origin/main\nrefs/remotes/origin/main \nrefs/remotes/upstream/HEAD refs/remotes/other/main\nnot-a-ref\n"
             ),
             vec![
                 crate::usecase::application::controller::BranchChoice {
@@ -12958,6 +13329,10 @@ mod tests {
                 crate::usecase::application::controller::BranchChoice {
                     label: "local:feature".into(),
                     refname: "refs/heads/feature".into(),
+                },
+                crate::usecase::application::controller::BranchChoice {
+                    label: "remote:origin/(default)".into(),
+                    refname: "refs/remotes/origin/HEAD".into(),
                 },
                 crate::usecase::application::controller::BranchChoice {
                     label: "remote:origin/main".into(),
@@ -14059,17 +14434,17 @@ mod tests {
         }
     }
 
-    /// Park until the wall clock has just crossed into a new second.
-    ///
-    /// The frame material carries the wall clock truncated to seconds, so a
-    /// second boundary redraws whatever the workspace is doing. A run that
-    /// starts here and finishes inside the same second sees no clock-driven
-    /// redraw, which is what makes the skipped tick it observes reproducible
-    /// rather than a matter of which phase of the second the run began in
-    /// (#567).
-    fn wait_for_a_fresh_wall_clock_second() {
-        let nanos = u64::from(Utc::now().nanosecond().min(999_999_999));
-        std::thread::sleep(std::time::Duration::from_nanos(1_000_000_000 - nanos));
+    /// Keep the short retry test away from the minute boundary that materially
+    /// updates relative-time labels. Most runs return immediately; a run in the
+    /// last ten seconds of a minute parks until the next one begins.
+    fn wait_for_a_stable_relative_time_minute() {
+        let now = Utc::now();
+        if now.second() < 50 {
+            return;
+        }
+        let remaining = std::time::Duration::from_secs(60 - u64::from(now.second()))
+            .saturating_sub(std::time::Duration::from_nanos(u64::from(now.nanosecond())));
+        std::thread::sleep(remaining);
     }
 
     /// #554 acceptance. The skip covers the drawing and nothing else: the
@@ -14079,7 +14454,7 @@ mod tests {
     /// happened to be material (#567).
     #[test]
     fn a_skipped_tick_still_admits_the_restore_retry() {
-        wait_for_a_fresh_wall_clock_second();
+        wait_for_a_stable_relative_time_minute();
         let log = Arc::new(RestoreAdmissionLog::default());
         let mut term = RetryDrivingTerminal {
             log: Arc::clone(&log),
@@ -14150,7 +14525,7 @@ mod tests {
         let sessions = vec![ProjectedSession::from_record(session, &record)];
         let root = PathBuf::from("/tmp/demo");
         let no_diffs = BTreeMap::new();
-        let clock = now();
+        let clock = super::relative_time_clock(now()) + Duration::seconds(10);
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
 
         let material = |runtime: &WorkspaceRuntime| {
@@ -14213,9 +14588,9 @@ mod tests {
         );
         assert_ne!(resized, base, "a resize did not redraw");
 
-        // The wall clock behind the sidebar's relative session times. It is
-        // material at whole-second resolution: sub-second jitter must not force
-        // a redraw, but a new second must.
+        // The wall clock behind relative session times is independent from the
+        // monotonic animation clock. Neither sub-second nor one-second changes
+        // rebuild an ordinary Home; the next minute does.
         let sub_second = home_frame_material(
             20,
             80,
@@ -14245,7 +14620,22 @@ mod tests {
             None,
             clock + Duration::seconds(1),
         );
-        assert_ne!(next_second, base, "the relative session times froze");
+        assert_eq!(next_second, base, "a wall-clock second forced a redraw");
+        let next_minute = home_frame_material(
+            20,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            health(),
+            &no_diffs,
+            None,
+            None,
+            clock + Duration::minutes(1),
+        );
+        assert_ne!(next_minute, base, "the relative session times froze");
 
         // Daemon metrics for the mascot sidecar.
         let metrics = home_frame_material(
@@ -14382,6 +14772,90 @@ mod tests {
             material(&quitting),
             confirming,
             "moving the quit confirmation's focus did not redraw"
+        );
+    }
+
+    #[test]
+    fn garden_motion_uses_the_logical_clock_inside_one_relative_time_minute() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let record = SessionRecord {
+            name: "alpha".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("/tmp/demo/alpha"),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let sessions = vec![ProjectedSession::from_record(session, &record)];
+        let root = PathBuf::from("/tmp/demo");
+        let no_diffs = BTreeMap::new();
+        let clock = super::relative_time_clock(now()) + Duration::seconds(10);
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let runtime_id = AgentRuntimeId::parse("00000000-0000-4000-8000-000000000001")
+            .expect("fixture runtime id");
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: WorktreeId::new(),
+        };
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::RuntimePhase {
+            runtime: AgentRuntimeRef {
+                agent_runtime_id: runtime_id,
+                terminal,
+                session_id: Some(session),
+            },
+            phase: usagi_core::domain::session_lifecycle::AgentPhase::Running,
+        }));
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let material = |runtime: &WorkspaceRuntime, wall_clock| {
+            home_frame_material(
+                24,
+                100,
+                runtime,
+                "demo",
+                &root,
+                &sessions,
+                None,
+                health(),
+                &no_diffs,
+                None,
+                None,
+                wall_clock,
+            )
+        };
+
+        let first = material(&runtime, clock);
+        assert!(first.projection.garden_sessions().is_some());
+        for _ in 0..7 {
+            let _ = runtime.apply_event(AppEvent::Tick);
+        }
+        assert_eq!(
+            material(&runtime, clock + Duration::milliseconds(900)),
+            first,
+            "the Garden rebuilt at the 16 ms input-pump cadence"
+        );
+
+        let _ = runtime.apply_event(AppEvent::Tick);
+        let advanced = material(&runtime, clock + Duration::seconds(1));
+        assert_eq!(
+            first.now, advanced.now,
+            "relative-time clock left its minute"
+        );
+        assert_ne!(
+            first.projection.garden_animation_tick(),
+            advanced.projection.garden_animation_tick(),
+            "the canonical Garden pose did not advance"
+        );
+        assert_ne!(
+            render_home_material(&first),
+            render_home_material(&advanced),
+            "the running pose froze inside one wall-clock minute"
         );
     }
 
@@ -15050,12 +15524,40 @@ mod tests {
             AppEvent::Backend(BackendEvent::Notice(notice)) if notice.message == "daemon unavailable"
         ));
         assert!(receiver.try_recv().is_err());
+
+        let (completions, receiver) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        let completion = super::SessionBackendCompletion::Sleep {
+            before: vec![existing],
+            completions,
+        };
+        super::emit_session_command_result(
+            &Ok(SessionCommandResult::message("slept")),
+            &completion,
+        );
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Sessions(sessions)) if sessions == [existing]
+        ));
+
+        let (completions, receiver) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        let completion = super::SessionBackendCompletion::Sleep {
+            before: vec![existing],
+            completions,
+        };
+        super::emit_session_command_result(&Err("sleep refused".to_owned()), &completion);
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(notice)) if notice.message == "sleep refused"
+        ));
     }
 
     #[derive(Clone, Copy)]
     enum ConcurrentSessionRequest {
         Create(u64),
         Remove,
+        Sleep,
     }
 
     struct BlockingSessionPort {
@@ -15130,6 +15632,13 @@ mod tests {
                     session,
                     force: false,
                     force_delete_branch: false,
+                },
+                completions,
+            ),
+            ConcurrentSessionRequest::Sleep => host.sleep(
+                crate::usecase::application::daemon_backend::SleepSessionRequest {
+                    workspace,
+                    session,
                 },
                 completions,
             ),
@@ -15348,6 +15857,7 @@ mod tests {
         for request in [
             ConcurrentSessionRequest::Create(1),
             ConcurrentSessionRequest::Remove,
+            ConcurrentSessionRequest::Sleep,
         ] {
             let completion = enqueue_session_request(&mut host, request, workspace, session);
             assert!(matches!(
@@ -15755,7 +16265,7 @@ mod tests {
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
         assert!(
-            ui.take_agent_exit_observation_request(),
+            ui.take_agent_inventory_change_observation_request(),
             "an Agent exit must refresh sidebar and Garden membership immediately"
         );
     }
@@ -15908,7 +16418,7 @@ mod tests {
         );
         assert!(runtime.state().has_live_pane());
         assert!(
-            ui.take_agent_exit_observation_request(),
+            ui.take_agent_inventory_change_observation_request(),
             "a background Agent exit must wake the coherent inventory lane"
         );
         // The closed tab stops being watched on the next frame.
@@ -17308,6 +17818,54 @@ mod tests {
         assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
         assert!(term.copied.is_empty());
         assert!(browser.opened.is_empty());
+    }
+
+    #[test]
+    fn director_header_button_closes_the_drawer_while_the_picker_owns_input() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude, DefaultModel::OpenAi]),
+            DefaultModel::Claude,
+        );
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
+                .is_empty()
+        );
+        assert!(runtime.state().director_drawer_open());
+        assert!(matches!(
+            runtime.state().director_new(),
+            DirectorNew::Choosing(_)
+        ));
+
+        let home = HomeProjection::from_state(runtime.state(), "demo", Path::new("/work"), &[]);
+        let click = Key::Click { column: 99, row: 0 };
+        assert!(is_director_header_click(
+            &Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 99,
+                row: 0,
+            }),
+            100,
+            &home,
+        ));
+
+        // The picker is intentionally exclusive, so the frame loop must resolve
+        // the persistent header through this dedicated route first.
+        assert_eq!(
+            close_director_from_header(&mut runtime, &click, 100, &home),
+            Some(Vec::new())
+        );
+        assert!(!runtime.state().director_drawer_open());
+
+        // Once closed, the same visible button belongs to the ordinary Home
+        // route instead of this close-only priority seam.
+        let closed = HomeProjection::from_state(runtime.state(), "demo", Path::new("/work"), &[]);
+        assert_eq!(
+            close_director_from_header(&mut runtime, &click, 100, &closed),
+            None
+        );
     }
 
     #[test]
@@ -19179,12 +19737,15 @@ mod tests {
     #[test]
     fn a_garden_round_observes_every_other_project_and_drops_a_mismatched_answer() {
         struct FakeGardenInventory {
-            answers: BTreeMap<WorkspaceId, Result<AgentInventory, String>>,
+            answers: BTreeMap<WorkspaceId, Result<AgentWorkspaceObservation, String>>,
             asked: Arc<Mutex<Vec<WorkspaceId>>>,
         }
 
         impl super::GardenInventoryPort for FakeGardenInventory {
-            fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentInventory, String> {
+            fn inventory(
+                &mut self,
+                workspace: WorkspaceId,
+            ) -> Result<AgentWorkspaceObservation, String> {
                 self.asked.lock().unwrap().push(workspace);
                 self.answers
                     .remove(&workspace)
@@ -19203,10 +19764,13 @@ mod tests {
         let observed = WorkspaceId::new();
         let mismatched = WorkspaceId::new();
         let unavailable = WorkspaceId::new();
-        let empty_inventory = |workspace| AgentInventory {
-            workspace_id: workspace,
-            runtimes: Vec::new(),
-            resumable: Vec::new(),
+        let empty_inventory = |workspace| AgentWorkspaceObservation {
+            inventory: AgentInventory {
+                workspace_id: workspace,
+                runtimes: Vec::new(),
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::new(),
         };
         let asked = Arc::new(Mutex::new(Vec::new()));
         let port = FakeGardenInventory {
@@ -19234,7 +19798,7 @@ mod tests {
             completion
                 .inventories
                 .iter()
-                .map(|inventory| inventory.workspace_id)
+                .map(|inventory| inventory.inventory.workspace_id)
                 .collect::<Vec<_>>(),
             vec![observed]
         );
@@ -23697,6 +24261,11 @@ mod tests {
         Background,
     }
 
+    enum FakeRegistryRefresh {
+        Queued(Vec<Workspace>),
+        Pending(Vec<Workspace>),
+    }
+
     #[derive(Default)]
     struct FakeLoader {
         operation_mode: FakeOperationMode,
@@ -23733,6 +24302,8 @@ mod tests {
         completion_noise: bool,
         opened_at: Option<DateTime<Utc>>,
         open_delay: std::time::Duration,
+        registry_refresh: Option<FakeRegistryRefresh>,
+        registry_refresh_dispatches: usize,
     }
 
     impl WorkspaceLoader for FakeLoader {
@@ -23784,6 +24355,30 @@ mod tests {
         fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
             self.activate_error
                 .map_or(Ok(()), |error| Err(io::Error::other(error)))
+        }
+
+        fn dispatch_registry_refresh(&mut self) -> io::Result<bool> {
+            match self.registry_refresh.take() {
+                Some(FakeRegistryRefresh::Queued(registry)) => {
+                    self.registry_refresh = Some(FakeRegistryRefresh::Pending(registry));
+                    self.registry_refresh_dispatches += 1;
+                    Ok(true)
+                }
+                state => {
+                    self.registry_refresh = state;
+                    Ok(false)
+                }
+            }
+        }
+
+        fn take_registry_refresh(&mut self) -> Option<io::Result<Vec<Workspace>>> {
+            match self.registry_refresh.take() {
+                Some(FakeRegistryRefresh::Pending(registry)) => Some(Ok(registry)),
+                queued => {
+                    self.registry_refresh = queued;
+                    None
+                }
+            }
         }
 
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
@@ -23907,6 +24502,10 @@ mod tests {
             Ok(self.wait_keys.pop_front())
         }
 
+        fn defer_key(&mut self, key: Key) {
+            self.keys.push_back(key);
+        }
+
         fn read_key(&mut self) -> io::Result<Key> {
             self.keys
                 .pop_front()
@@ -23942,6 +24541,25 @@ mod tests {
     }
 
     #[test]
+    fn interruptible_loading_defers_non_escape_input_for_the_next_screen() {
+        let mut term = ResponsiveLoadingTerminal {
+            wait_keys: VecDeque::from([Key::CtrlQ]),
+            ..ResponsiveLoadingTerminal::default()
+        };
+        let draw_count = Arc::clone(&term.draw_count);
+
+        run_workspace_loading(&mut term, "Opening workspace…", true, || {
+            while draw_count.load(std::sync::atomic::Ordering::Acquire) < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok(())
+        })
+        .expect("a non-cancelling key does not interrupt the operation");
+
+        assert_eq!(term.read_key().unwrap(), Key::CtrlQ);
+    }
+
+    #[test]
     fn non_cancellable_loading_throttles_frames_without_consuming_input() {
         let mut term = ResponsiveLoadingTerminal {
             wait_keys: VecDeque::from([Key::Enter]),
@@ -23971,6 +24589,135 @@ mod tests {
                 .all(|duration| *duration == std::time::Duration::from_millis(80))
         );
         assert_eq!(term.wait_keys, VecDeque::from([Key::Enter]));
+    }
+
+    #[test]
+    fn workspace_switch_keeps_the_project_bar_and_cached_sessions_while_content_loads() {
+        let alpha = snapshot("alpha");
+        let beta = snapshot("beta");
+        let deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
+
+        let pending = cached_workspace_switch_frame(
+            &deck,
+            &beta.workspace.path,
+            24,
+            80,
+            0,
+            "Opening workspace…",
+            false,
+        )
+        .expect("an already-open project has a local transition projection")
+        .join("\n");
+        let frame = cached_workspace_switch_frame(
+            &deck,
+            &beta.workspace.path,
+            24,
+            80,
+            2,
+            "Opening workspace…",
+            true,
+        )
+        .expect("an already-open project has a local transition projection")
+        .join("\n");
+
+        assert!(frame.contains("1 alpha"));
+        assert!(frame.contains("2 beta"));
+        assert!(frame.contains("beta-session"));
+        assert!(!frame.contains("alpha-session"));
+        assert!(frame.contains("Opening workspace…"));
+        assert!(pending.contains("beta-session"));
+        assert!(!pending.contains("Opening workspace…"));
+    }
+
+    #[test]
+    fn workspace_switch_progress_appears_only_after_the_grace_or_cancellation() {
+        assert!(!workspace_loading_visible(
+            true,
+            false,
+            WORKSPACE_SWITCH_LOADING_GRACE
+                .checked_sub(std::time::Duration::from_millis(1))
+                .expect("the loading grace exceeds one millisecond"),
+        ));
+        assert!(workspace_loading_visible(
+            true,
+            false,
+            WORKSPACE_SWITCH_LOADING_GRACE,
+        ));
+        assert!(workspace_loading_visible(
+            true,
+            true,
+            std::time::Duration::ZERO,
+        ));
+        assert!(workspace_loading_visible(
+            false,
+            false,
+            std::time::Duration::ZERO,
+        ));
+    }
+
+    #[test]
+    fn prepared_existing_tab_uses_the_cached_switch_surface() {
+        let alpha = snapshot("alpha");
+        let beta = snapshot("beta");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
+        let mut term = ResponsiveLoadingTerminal::default();
+        let mut loader = FakeLoader {
+            operation_mode: FakeOperationMode::Background,
+            open_delay: std::time::Duration::from_millis(8),
+            ..FakeLoader::default()
+        };
+        let mut loader_port: Option<&mut dyn WorkspaceLoader> = Some(&mut loader);
+
+        let prepared = prepare_deck_workspace(
+            &mut term,
+            &mut loader_port,
+            &mut deck,
+            &beta.workspace.path,
+            "Opening workspace…",
+        );
+
+        assert!(prepared.is_some());
+        assert!(!term.frames.is_empty());
+        assert!(
+            term.frames
+                .iter()
+                .all(|frame| frame.join("\n").contains("beta-session"))
+        );
+    }
+
+    #[test]
+    fn cancelled_switch_never_replaces_the_deck_with_a_full_screen_loader() {
+        let alpha = snapshot("alpha");
+        let beta = snapshot("beta");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
+        let mut term = ResponsiveLoadingTerminal {
+            wait_keys: VecDeque::from([Key::Escape]),
+            ..ResponsiveLoadingTerminal::default()
+        };
+        let mut loader = FakeLoader {
+            operation_mode: FakeOperationMode::Background,
+            open_delay: std::time::Duration::from_millis(8),
+            ..FakeLoader::default()
+        };
+        let mut loader_port: Option<&mut dyn WorkspaceLoader> = Some(&mut loader);
+
+        assert!(
+            prepare_deck_workspace(
+                &mut term,
+                &mut loader_port,
+                &mut deck,
+                &beta.workspace.path,
+                "Opening workspace…",
+            )
+            .is_none()
+        );
+
+        assert!(term.frames.iter().all(|frame| {
+            let frame = frame.join("\n");
+            frame.contains("1 alpha")
+                && frame.contains("2 beta")
+                && (frame.contains("alpha-session") || frame.contains("beta-session"))
+        }));
     }
 
     #[test]
@@ -24854,6 +25601,42 @@ mod tests {
                 .iter()
                 .any(|frame| frame.join("\n").contains("Save failed"))
         );
+    }
+
+    #[test]
+    fn background_workspace_config_save_keeps_one_modal_visible_until_done() {
+        let base = vec!["home".to_owned(); 24];
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut term = ResponsiveLoadingTerminal {
+            keys: VecDeque::from(WORKSPACE_CONFIG_SAVE_KEYS),
+            ..ResponsiveLoadingTerminal::default()
+        };
+
+        run_workspace_config(
+            &mut term,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
+
+        assert_eq!(settings.saves, 1);
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(frames.iter().all(|frame| frame.contains("Config")));
+        assert!(
+            frames
+                .iter()
+                .all(|frame| !frame.contains("Saving settings…"))
+        );
+        assert!(frames.iter().any(|frame| frame.contains("[ done ]")));
     }
 
     #[test]
@@ -26294,7 +27077,7 @@ mod tests {
                 false,
                 Some(WorkspaceDrawerFocus::Director),
             ),
-            Geometry { cols: 56, rows: 17 }
+            Geometry { cols: 56, rows: 16 }
         );
         assert_eq!(
             foreground_terminal_geometry(
@@ -27330,7 +28113,10 @@ mod tests {
     }
 
     impl super::GardenInventoryPort for CountedPort {
-        fn inventory(&mut self, _workspace: WorkspaceId) -> Result<AgentInventory, String> {
+        fn inventory(
+            &mut self,
+            _workspace: WorkspaceId,
+        ) -> Result<AgentWorkspaceObservation, String> {
             Err("Agent inventory is unavailable".to_owned())
         }
     }
@@ -27794,6 +28580,87 @@ mod tests {
     }
 
     #[test]
+    fn project_add_accepts_and_opens_an_unregistered_directory_path() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Tab,
+            Key::Paste("/tmp/external".to_owned()),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        term.size = Some((24, 80));
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![ws("alpha")],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/external")]
+        );
+        assert!(term.frames.iter().any(|frame| {
+            let frame = frame.join("\n");
+            frame.contains("Directory") && frame.contains("Tab registered")
+        }));
+    }
+
+    #[test]
+    fn project_add_applies_a_registry_refresh_while_the_overlay_is_open() {
+        let alpha = ws("alpha");
+        let beta = ws("beta");
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader {
+            registry_refresh: Some(FakeRegistryRefresh::Queued(vec![alpha.clone(), beta])),
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![alpha],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(loader.registry_refresh_dispatches, 1);
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")]
+        );
+    }
+
+    #[test]
     fn add_workspace_overlay_can_close_its_checked_active_project() {
         let mut term = FakeTerminal::with_keys(&[
             Key::Char('o'),
@@ -28147,6 +29014,7 @@ mod tests {
         let mut term = FakeTerminal::default();
 
         let mut no_loader: Option<&mut dyn WorkspaceLoader> = None;
+        restore_prepared_workspace(&mut no_loader, Path::new("/tmp/alpha"));
         assert!(
             prepare_deck_workspace(
                 &mut term,

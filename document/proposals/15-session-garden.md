@@ -64,9 +64,10 @@ agent を複数持てる（controller の runtime 一覧を session で絞り込
 最上位でよい）。しかし Garden の目的は実行状態を一覧表より速く把握することなので、ここでは逆効果になる。
 したがって Garden は集約後の値ではなく、**session に属する agent ごとの phase** を描画素材にする。
 
-見た目のために daemon schema、永続 session record、IPC event は増やさない。agent membership は既存の coherent
-Agent inventory と controller の runtime 一覧を stable identity で結合し、agent ごとの詳細な phase は controller が
-既に持っていればそちらを優先する。これにより TUI 起動前から存在する agent も Garden から欠落しない。
+見た目のために永続 session record や IPC event は増やさない。agent membership は coherent Agent inventory と
+controller の runtime 一覧を stable identity で結合し、agent ごとの詳細な phase は controller が既に持っていれば
+そちらを優先する。inactive project は `AgentWorkspaceObservation` で runtime detail と session-level dispatch status を
+同時に読み、availability を推測しない。これにより TUI 起動前から存在する agent も Garden から欠落しない。
 
 ### 状態の対応
 
@@ -175,7 +176,8 @@ stable session への既存 Closeup 遷移だけに一本化する。session が
 
 ## presentation 境界
 
-純粋 renderer と hitbox layout は `crates/tui/src/presentation/widgets/garden.rs` に置く。idle clock は
+compact renderer と共通 projection は `crates/tui/src/presentation/widgets/garden.rs`、spacious world の純粋 renderer・
+生活 cycle・動的 hitbox layout は `crates/tui/src/presentation/widgets/garden_world.rs` に置く。idle clock は
 interactive frame loop が monotonic time と user input を観測し、経過時間を注入済みの event として controller へ
 渡す。controller 自身は `Instant::now()` を呼ばない（sidebar の double-click 判定が既に取っている形と同じで、
 shell が `Instant` を `Duration` へ落として渡す）。overlay lifetime と stable target の検証は
@@ -194,26 +196,28 @@ daemon lifecycle / Agent phase
 ```
 
 `GardenSession` は表示に必要な `id`、safe label、lifecycle、**その session に属する agent ごとの phase**、
-safe failure summary だけを持つ。agent の phase は stable な runtime identity と対で持ち、並び順の tie-break と
-うさぎ 1 羽ぶんの hitbox に使う。
+optional な dispatch status、safe failure summary だけを持つ。agent の phase は stable な runtime identity と対で持ち、
+並び順の tie-break と、dispatch が `running` の間のうさぎ 1 羽ぶんの hitbox に使う。非 running の dispatch status は
+区画全体の静止 pose であり、個別 agent の identity へ誤って束縛しない。
 filesystem path、provider-native ID、terminal output、raw error は renderer に渡さない。
 
 ## UI sample
 
-純粋 renderer と固定データを使う sample は、次の 4 場面を標準出力へ描く。
+純粋 renderer と固定データを使う sample は、次の場面を標準出力へ描く。
 
 | 場面 | 確認できること |
 |---|---|
-| 100×24 · 全 lifecycle | 状態別 pose・状態ラベル・3 列 2 行の plot |
-| 100×24 · reduced motion | 全 pose が静止姿勢に固定される |
-| 100×24 · session 0 件 | 空の庭と `No sessions in the garden` |
-| 64×14 terminal の Garden 本体 13 行（左右端） | 2 列 1 行への縮退と1列ずつの横スクロール |
+| 120×24 · spacious world 左右端 | notification panel と、巣穴・池・餌場・木陰、左右へ移動するうさぎ、16 cell 単位の camera pan |
+| 120×24 · spacious world reduced motion | 全 pose と位置が静止姿勢に固定される |
+| 120×24 · session 0 件 | 空の庭と `No sessions in the garden` |
+| 120×24 · 2 open projects | project をまたぐ home と観測済み Agent |
+| 64×14 terminal の Garden 本体 13 行（左右端） | compact plot への縮退と1列ずつの横スクロール |
 
 ```bash
 cargo run -p usagi-tui --example garden_sample
 ```
 
-sample は idle timer、click dispatch には接続しない。状態別 pose、複数 plot、端末幅、色と文言を
+sample は idle timer、click dispatch には接続しない。生活 cycle、複数 home、compact fallback、端末幅、色と文言を
 production 配線より先に確認するための presentation-only surface である。
 
 実際の workspace で見るには、Overview の `garden` command で手動で開くか、5 分間操作せずに待つ（仕様は
@@ -238,12 +242,13 @@ session / lifecycle の cache だけを持ち、Agent membership は「観測し
 | 案 | 内容 | 採否 |
 |---|---|---|
 | inactive controller を resident にする | project ごとに workspace controller と lane 一式を常駐させる | **不採用**。tab の数だけ terminal 購読・pane 復元・PR 観測が増え、Garden という screen saver のために process の常時コストを倍以上にする |
-| workspace を名指しした read-only 観測 | Garden が前面の間だけ `AgentInventory { workspace }` を project ごとに読む | **採用** |
+| workspace を名指しした read-only 観測 | Garden が前面の間だけ `AgentWorkspaceObservation { workspace }` を project ごとに読む | **採用** |
 
-採用案が成立するのは、`AgentInventory` が **connection の bound tenant ではなく request が名指しした
+採用案が成立するのは、`AgentWorkspaceObservation` が **connection の bound tenant ではなく request が名指しした
 `WorkspaceId`** を daemon 全体の Agent record から filter して答えるからである。daemon は開いている project を
-tenant として保持するので、既存の client から他 project の membership をそのまま読める。IPC protocol も
-daemon 側の record も増やさない。
+tenant として保持するので、既存の client から他 project の membership をそのまま読める。
+`AgentWorkspaceObservation` は runtime inventory と dispatch 由来の session status を一つの read-only response に束ね、
+daemon 側の durable record は増やさない。
 
 観測を Garden の表示中に限るのは、他の面が他 project の Agent を描かないからである。閉じた Garden の裏で
 読み続ける daemon traffic は誰も見ない。cold start もしない: 観測 lane が daemon を起こせるようにすると、
@@ -274,8 +279,13 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 
 10. inactive project の Agent membership を Garden 表示中だけ daemon から観測し、cached lifecycle が
     `Available` の区画へうさぎを描く。
+11. うさぎの plot を左領域へ寄せ、右の notification panel に同じ safe projection から導出した現在状態を表示する。
+12. 左の Garden 領域が 80×18 以上では session の固定 plot を home の巣穴へ変え、stable identity と tick で再現できる生活 cycle、
+    池・餌場・木陰、16 cell 単位の camera pan、移動位置に追随する hitbox を追加する。小さい端末は compact plot を保つ。
+13. active / inactive project の dispatch status を同じ deterministic な順位で集約し、非 running status は
+    animation と個別 Agent hitbox を持たない session-level の静止 pose にする。
 
-1〜10 はすべて実装済みで、うさぎは agent 単位である。
+1〜13 はすべて実装済みで、うさぎは agent 単位、非 running の dispatch pose は session 単位である。
 
 受け入れ条件は次のとおりである。
 
@@ -288,6 +298,8 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 - 表示上限を超えた agent は `+N` に畳まれる。表示枠は `Waiting` が先に使い、`Waiting` 自体が上限を超える
   場合は隠れた `Waiting` の羽数が明示される。
 - agent の並びは phase と stable な runtime identity だけで決まり、同じ素材の frame では入れ替わらない。
+- spacious world のうさぎは左右へ歩き、cycle 内で池の飲水・餌場の食事・木陰の睡眠をすべて行う。各時点の
+  click rectangle は描いた sprite の viewport 座標と一致し、camera を最後まで動かすと全 session の巣穴へ到達できる。
 - animation の pose が変わらない tick では frame material も変わらない。
 - 5 分未満では Garden を開かず、5 分到達時に eligible な Home だけで開く。
 - backend event と terminal output は idle deadline を延長せず、user input と resize は延長する。
@@ -295,6 +307,9 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 - Garden から daemon command を直接発行しない。observation lane は read-only で、daemon を起動しない。
 - 開いているどの project の session も、その project の Agent を観測できていればうさぎになり、観測できて
   いなければ推測されない。
+- notification panel は表示中の plot と同じ viewport を説明し、完了、入力待ち、実行中、失敗を安全な文で区別する。
+- runtime record の順序を入れ替えても dispatch status の集約は変わらず、非 running status の区画は tick が進んでも
+  静止し、個別 Agent hitbox を持たない。
 - selected session が snapshot 更新で消えた場合は、既存 reconciliation と同じ surviving session へ着地する。
 
 ## 採用しない案
@@ -303,5 +318,7 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 - **常に右ペインを Garden にする**: Switch の cursor preview と live pane の視認性を失う。無操作時だけ全幅表示する。
 - **Garden 上で通常キーをそのまま実行する**: 見えていない terminal や modal に意図しない入力が入るため、最初の
   入力は wake-up として消費する。
-- **物理 simulation で自由に歩かせる**: frame の決定性、hit test、テスト、低負荷 redraw と相性が悪い。
+- **非決定的な連続物理 simulation で歩かせる**: frame の決定性、hit test、テスト、低負荷 redraw と相性が悪い。
+  実装した spacious world は stable runtime identity と注入 tick から位置を求める固定 cycle とし、自由な移動表現を
+  入れながら同じ material の再現性を保つ。
 - **状態を色だけで表す**: 端末テーマと色覚差に依存するため、太字・顔・text label を必ず併用する。

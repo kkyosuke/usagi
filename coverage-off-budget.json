@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "total": 502,
+  "total": 509,
   "owners": {
     "core": 9,
-    "daemon": 336,
-    "root-cli": 36,
-    "tui": 121
+    "daemon": 339,
+    "root-cli": 39,
+    "tui": 122
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
@@ -25,7 +25,7 @@
     "crates/tui/src/infrastructure/daemon.rs": 1,
     "crates/tui/src/presentation/frame.rs": 1,
     "crates/tui/src/presentation/live_terminal.rs": 1,
-    "crates/tui/src/presentation/mod.rs": 12,
+    "crates/tui/src/presentation/mod.rs": 13,
     "crates/tui/src/presentation/views/create_session_error_modal.rs": 1,
     "crates/tui/src/presentation/views/decision_modal.rs": 1,
     "crates/tui/src/presentation/views/open.rs": 1,
@@ -51,9 +51,9 @@
     "src/runtime/agent_tab_intent.rs": 1,
     "src/runtime/bootstrap.rs": 3,
     "src/runtime/cli.rs": 10,
-    "src/runtime/clean.rs": 15,
+    "src/runtime/clean.rs": 18,
     "src/runtime/clipboard.rs": 1,
-    "src/runtime/daemon.rs": 253,
+    "src/runtime/daemon.rs": 256,
     "src/runtime/daemon/tenant_control.rs": 5,
     "src/runtime/inventory_pump.rs": 1,
     "src/runtime/launchd.rs": 1,

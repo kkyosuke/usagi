@@ -184,6 +184,20 @@ pub trait WorkspaceLoader: Send {
         Ok(())
     }
 
+    /// Start a non-blocking read of the global workspace registry.
+    ///
+    /// Home uses this only while its `+ Open` overlay is visible so workspace
+    /// additions from another usagi process become selectable without putting
+    /// file IO on the frame thread. `Ok(true)` means a refresh was admitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the refresh worker cannot be started.
+    fn dispatch_registry_refresh(&mut self) -> io::Result<bool>;
+
+    /// Take a completed global workspace-registry read without waiting.
+    fn take_registry_refresh(&mut self) -> Option<io::Result<Vec<Workspace>>>;
+
     /// Remove entries that no longer point at directories and return the paths
     /// removed from the core-owned workspace registry. The caller has already
     /// obtained explicit user confirmation before invoking this operation.
@@ -456,6 +470,12 @@ pub trait Terminal {
         Ok(None)
     }
 
+    /// Return an input observed by an interruptible wait to the terminal's
+    /// normal input queue. Adapters that can observe input in
+    /// [`Self::wait_for_key`] override this so a key which does not interrupt
+    /// the current animation is delivered by the next [`Self::read_key`].
+    fn defer_key(&mut self, _key: Key) {}
+
     /// 次のキー入力を 1 つ読む（入力があるまでブロックする）。
     ///
     /// # Errors
@@ -543,6 +563,8 @@ mod tests {
         let mut term = DefaultClipboardTerminal;
 
         assert_eq!(term.wait_for_key(Duration::from_millis(1)).unwrap(), None);
+        term.defer_key(Key::Enter);
+        assert_eq!(term.read_key().unwrap(), Key::Quit);
     }
 
     impl ScreenRunner for RecordingRunner {

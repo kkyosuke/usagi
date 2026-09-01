@@ -24,8 +24,9 @@ use super::runtime::{
 #[cfg(test)]
 mod fixture;
 
-/// Revision 3 adds lifecycle phase hooks to the structured Codex integration.
-pub const PROFILE_REVISION: u32 = 3;
+/// Revision 4 requires explicit Codex hook trust and removes the unreachable
+/// `PermissionRequest` hook from the structured integration.
+pub const PROFILE_REVISION: u32 = 4;
 
 /// The non-secret outcome that the renderer may use to build a durable plan.
 pub struct CodexProvision {
@@ -272,7 +273,6 @@ fn render_plan(
     };
     let mut argv = match (request.mode, root) {
         (LaunchMode::Interactive, _) => vec![
-            "--dangerously-bypass-hook-trust".into(),
             "--sandbox".into(),
             codex_sandbox.into(),
             "--ask-for-approval".into(),

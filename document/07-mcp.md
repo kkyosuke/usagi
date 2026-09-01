@@ -154,7 +154,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_create` | daemon IPC を通じて session lifecycle store と worktree を操作する |
 | `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
-| `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、handshake で fence した workspace と optional session が一致する次回 Agent launch 用 durable queue または live Agent PTY へ配送する |
+| `session_prompt` | `live`（既定）は handshake で fence した workspace と optional session が一致する live Agent PTY へ配送し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ durable queue へ配送する。停止中の Agent を起動する入口は `session_dispatch` とする |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
 | `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する。失敗時は作成した session を巻き戻す（[delegation の atomicity](#delegation-の-atomicity)） |
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
@@ -208,6 +208,10 @@ payload を成功応答としてエコーしない。
 | `session_list` にその session が `failed` で残る | teardown が失敗した。`failure.summary` に原因が入る。名前は保持されるため、その record を `session_remove` すれば同名 session を再作成できる |
 
 daemon を停止・crash させても teardown は失われない。次の daemon 起動時に `deleting` の record から再開される。
+daemon 起動時に `failed/integrity` として採用された orphan は通常の `force` でも診断不能な entry や未統合成果を
+保護する。内容を破棄すると別経路で確認した exact session に限り、`force: true` と
+`purge_orphan: true` を対で送ると回収できる。daemon は integrity row 以外への `purge_orphan` と単独指定を拒否し、
+filesystem effect の直前にも target confinement を再検証する。
 
 dispatch 系は credential から caller と current run を復元する。`session_dispatch` は session を作成または再利用し、
 その session worktree で worker PTY を起動して run/agent/binding を durable に保存する。worker の

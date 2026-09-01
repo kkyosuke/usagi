@@ -1061,8 +1061,8 @@ pub struct AppState {
     /// behind an invisible overlay. The renderer injects this layout fact; the
     /// reducer uses it to admit both automatic and manual opening consistently.
     garden_available: bool,
-    /// Zero-based leftmost Garden plot column selected through renderer-owned scroll controls.
-    /// Presentation clamps it to the current column range before drawing, and
+    /// Renderer-owned zero-based horizontal Garden position selected through scroll controls.
+    /// Presentation clamps it to the current range before drawing, and
     /// sends the exact resulting target back instead of asking the reducer to
     /// derive terminal-dependent capacity.
     garden_scroll: usize,
@@ -1433,7 +1433,7 @@ impl AppState {
     pub const fn size(&self) -> Option<(u16, u16)> {
         self.size
     }
-    /// Zero-based leftmost plot column requested for the open Garden.
+    /// Renderer-owned zero-based horizontal position requested for the open Garden.
     #[must_use]
     pub const fn garden_scroll(&self) -> usize {
         self.garden_scroll
@@ -1986,6 +1986,11 @@ pub enum AppEvent {
     /// launch. A mismatched operation is ignored, preserving the in-flight
     /// fence against stale or replayed completions.
     DirectorLaunchFinished(OperationId),
+    /// The runtime observed that the workspace-root Shell drawer owns no tabs.
+    /// This is an explicit close rather than the user-facing toggle: both
+    /// workspace drawers may be open while Director owns focus, and replaying a
+    /// toggle in that state would open/focus Shell and request a new terminal.
+    RootTerminalDrawerEmptied,
     /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
     /// reducer resolves the row with the same viewport geometry the frame draws
     /// and either moves the cursor or, for two presses on the same stable
@@ -2029,7 +2034,7 @@ pub enum AppEvent {
 pub enum GardenClick {
     /// A horizontal scroll control or arrow key. The renderer has already clamped
     /// the target against the frame currently on screen, so this keeps the Garden
-    /// open and replaces the requested leftmost plot column exactly.
+    /// open and replaces the requested horizontal position exactly.
     Scroll(usize),
     /// A session's plot. Its stable project/session pair becomes the process
     /// shell's visit target; this reducer activates it only when `workspace`
@@ -2261,6 +2266,11 @@ pub enum Effect {
         workspace: WorkspaceId,
         session: SessionId,
         operation_id: OperationId,
+    },
+    /// Stop quiescent resumable Agents without removing their session.
+    SleepSession {
+        workspace: WorkspaceId,
+        session: SessionId,
     },
     /// Clear one local continuation-scoped dismissal. This effect never asks
     /// the daemon to spawn or provider-resume a runtime.
@@ -3268,6 +3278,15 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
+        AppEvent::RootTerminalDrawerEmptied => {
+            state.root_terminal_drawer_open = false;
+            if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Terminal) {
+                state.workspace_drawer_focus = state
+                    .director_drawer_open
+                    .then_some(WorkspaceDrawerFocus::Director);
+            }
+            Vec::new()
+        }
         AppEvent::OperationResult(result) => {
             let pending = state
                 .pending
@@ -3639,11 +3658,12 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
 /// `widgets::normalize_size`; the assertion there keeps the two agreeing.
 pub(crate) const NORMALIZED_TERMINAL_ROWS: usize = 24;
 /// Rows the director drawer spends on chrome around the New picker's candidate
-/// rows: the panel's top and bottom borders, two vertical padding rows, the
-/// conversation selector, its separator, and the footer hint.
+/// rows: the Home header above the drawer, the panel's top and bottom borders,
+/// two vertical padding rows, the conversation selector, its separator, and the
+/// footer hint.
 /// Mirrors `views::director_drawer`'s `PICKER_CHROME_ROWS`; the assertion there
 /// keeps the launch gate and the render agreeing on the geometry.
-pub(crate) const DIRECTOR_PICKER_CHROME_ROWS: usize = 7;
+pub(crate) const DIRECTOR_PICKER_CHROME_ROWS: usize = 8;
 
 /// Candidate rows the New picker can draw at `height` terminal rows.
 ///
@@ -4955,6 +4975,23 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
                 operation_id: OperationId::new(),
             }]
         }
+        overview::SessionCommand::Sleep { name } => {
+            state.overlay = None;
+            let Some(index) = state
+                .session_names
+                .iter()
+                .position(|candidate| candidate == &name)
+            else {
+                state.notice = Some(Notice::new("session was not found"));
+                return Vec::new();
+            };
+            let session = state.sessions[index];
+            state.notice = Some(Notice::new("Putting idle Agent to sleep"));
+            vec![Effect::SleepSession {
+                workspace: state.workspace,
+                session,
+            }]
+        }
         overview::SessionCommand::SelectRemove { .. } => {
             state.notice = Some(Notice::new(
                 "session selection is available in the live TUI",
@@ -5825,6 +5862,10 @@ mod tests {
                         refname: "refs/heads/main".into(),
                     },
                     BranchChoice {
+                        label: "remote:origin/(default)".into(),
+                        refname: "refs/remotes/origin/HEAD".into(),
+                    },
+                    BranchChoice {
                         label: "remote:origin/main".into(),
                         refname: "refs/remotes/origin/main".into(),
                     },
@@ -5845,7 +5886,7 @@ mod tests {
                 .as_str(),
             "coder"
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
         state.create_session.as_mut().unwrap().move_role(true);
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
@@ -5856,7 +5897,7 @@ mod tests {
         assert!(
             matches!(effects.as_slice(), [Effect::CreateSession { intent, .. }]
             if intent.role_id.as_ref() == Some(&reviewer)
-                && intent.base_ref.as_deref() == Some("refs/remotes/origin/main")
+                && intent.base_ref.as_deref() == Some("refs/remotes/origin/HEAD")
                 && intent.profile.is_none() && intent.model.is_none())
         );
 
@@ -6661,6 +6702,36 @@ mod tests {
     }
 
     #[test]
+    fn empty_root_terminal_drawer_closes_without_replaying_the_user_toggle() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        let effects = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        assert!(matches!(effects.as_slice(), [Effect::OpenTerminal { .. }]));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+        assert!(update(&mut state, AppEvent::RootTerminalDrawerEmptied).is_empty());
+        assert!(!state.root_terminal_drawer_open());
+        assert_eq!(state.workspace_drawer_focus(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert!(update(&mut state, AppEvent::RootTerminalDrawerEmptied).is_empty());
+        assert!(!state.root_terminal_drawer_open());
+        assert!(state.director_drawer_open());
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+    }
+
+    #[test]
     fn director_frontmost_transition_table_keeps_modal_and_background_ownership_unique() {
         struct Case {
             name: &'static str,
@@ -6838,11 +6909,11 @@ mod tests {
 
     #[test]
     fn director_picker_enter_is_inert_while_the_terminal_hides_every_candidate() {
-        // The full-height drawer draws its first candidate row at 8 terminal
-        // rows; 7 rows reach the footer without one, so nothing highlighted is
-        // on screen.
-        assert_eq!(director_picker_capacity(8), 1);
-        assert_eq!(director_picker_capacity(7), 0);
+        // The drawer below the persistent Home header draws its first candidate
+        // row at 9 terminal rows; 8 rows reach the footer without one, so no
+        // highlight is on screen.
+        assert_eq!(director_picker_capacity(9), 1);
+        assert_eq!(director_picker_capacity(8), 0);
         // An unmeasured terminal falls back to the renderer's normalized size
         // rather than locking the picker out before the first resize.
         assert_eq!(
@@ -6851,7 +6922,7 @@ mod tests {
         );
 
         let workspace = WorkspaceId::new();
-        for (height, launches) in [(7_u16, 0_usize), (8, 1)] {
+        for (height, launches) in [(8_u16, 0_usize), (9, 1)] {
             let mut state = AppState::home(workspace, Vec::new());
             state.set_agent_models(
                 AvailableModels::new([DefaultModel::Claude]),
@@ -8327,6 +8398,28 @@ mod tests {
                 ..
             }] if *actual_workspace == workspace && *actual_session == session
         ));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("session sleep feature-x".into())),
+            ),
+            vec![Effect::SleepSession { workspace, session }]
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("session sleep missing".into())),
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("session was not found")
+        );
 
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         assert!(
