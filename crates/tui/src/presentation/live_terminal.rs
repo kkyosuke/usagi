@@ -303,11 +303,11 @@ impl LiveTerminalControls {
         let Some(state) = self.view_state_mut(terminal) else {
             return;
         };
+        let Some(buffer) = state.selection_buffer else {
+            return;
+        };
         let mut changed = false;
         for motion in motions {
-            let Some(buffer) = state.selection_buffer else {
-                continue;
-            };
             if !buffer.matches(motion.buffer()) {
                 continue;
             }
@@ -903,6 +903,17 @@ mod tests {
         let mut controls = LiveTerminalControls::default();
         let terminal = terminal();
         controls.sync_focus(Some(&terminal));
+        let idle_revision = controls.revision();
+        controls.apply_retained_row_motions(
+            &terminal,
+            &[RetainedRowMotion::Up {
+                buffer: ActiveBuffer::Alternate,
+                top: 1,
+                bottom: 2,
+                count: 1,
+            }],
+        );
+        assert_eq!(controls.revision(), idle_revision);
         let _ = controls.visible_range(TerminalBuffer::Alternate, 0, 4, 4);
         controls.begin_selection(TerminalSelection::begin(
             vec![
