@@ -7276,7 +7276,9 @@ mod tests {
 
     #[test]
     fn goal_launch_is_root_scoped_idempotent_and_carries_the_work_contract() {
-        let mut runtime = runtime();
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
         let workspace = WorkspaceId::new();
         let operation = OperationId::new().to_string();
         let mut intent = AgentGoalIntent {
@@ -7356,7 +7358,7 @@ mod tests {
             ErrorCode::IdempotencyConflict
         );
 
-        let mut queued = self::runtime();
+        let mut queued = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
         queued
             .prompt(workspace, None, "already queued", PromptMode::Queue)
             .unwrap();
