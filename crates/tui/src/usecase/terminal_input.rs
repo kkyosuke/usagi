@@ -993,6 +993,36 @@ mod tests {
     }
 
     #[test]
+    fn raw_control_bytes_after_leader_match_their_letter_actions() {
+        for (byte, action) in [
+            (1, LiveTerminalAction::OpenCloseupModal),
+            (2, LiveTerminalAction::ScrollBottom),
+            (4, LiveTerminalAction::ScrollDown),
+            (6, LiveTerminalAction::NextTab),
+            (7, LiveTerminalAction::Director),
+            (14, LiveTerminalAction::DirectorNew),
+            (15, LiveTerminalAction::Switch),
+            (16, LiveTerminalAction::PreviousTab),
+            (18, LiveTerminalAction::ResumeTab),
+            (20, LiveTerminalAction::RootTerminal),
+            (21, LiveTerminalAction::ScrollUp),
+            (22, LiveTerminalAction::OpenPullRequests),
+            (24, LiveTerminalAction::CloseTab),
+            (26, LiveTerminalAction::RootTerminalFullHeight),
+        ] {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), LiveInput::Raw(vec![byte])),
+                LiveInputOutput::Action(action)
+            );
+        }
+    }
+
+    #[test]
     fn project_deck_prefix_reserves_plus_switcher_and_digits() {
         for plain in ['+', '0', '1', '2'] {
             let mut classifier = LiveInputClassifier::default();

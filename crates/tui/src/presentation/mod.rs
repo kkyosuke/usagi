@@ -21317,6 +21317,14 @@ mod tests {
             "the attached dimmed terminal must not also enter inventory polling"
         );
         assert_eq!(calls.detaches, 0);
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminalFullHeight));
+        assert_eq!(
+            super::visible_managed_background_terminal(&runtime, 24, 100),
+            None,
+            "a full-height terminal drawer must occlude the managed background"
+        );
     }
 
     fn assert_director_background_visibility(runtime: &WorkspaceRuntime, managed: &TerminalRef) {
