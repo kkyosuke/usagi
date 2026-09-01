@@ -669,6 +669,29 @@ impl SupervisorRuntime {
                 self.reserve_parent_wake(&mut run, &parent_id, child_run, kind, now)?;
             }
         }
+        // A ready task without a dispatch reservation is not progress. The
+        // previous scheduler left such runs in `running` forever when selector
+        // resolution or dispatch admission produced no worker. Persist a typed
+        // escalation so callers can distinguish an actionable stop from a live
+        // scheduler and inspect the exact blocking task.
+        if run.state == SupervisorRunState::Running
+            && let Some((task_id, _)) = run.tasks.iter().find(|(_, task)| {
+                task.state == TaskState::Ready && task.assigned_dispatch_run.is_none()
+            })
+        {
+            let _ = self.apply(
+                &run,
+                now,
+                SupervisorEventSource::DispatchFailure,
+                SupervisorEventKind::Escalate {
+                    task_id: Some(task_id.clone()),
+                    reason: "no worker dispatch reservation was produced for a ready task".into(),
+                    safe_evidence:
+                        "runtime/model selection or dispatch admission did not assign a run".into(),
+                    choices: vec!["resume".into(), "cancel".into()],
+                },
+            )?;
+        }
         self.deliver_reserved(waker)
     }
 
@@ -1319,6 +1342,41 @@ mod tests {
         scheduler
             .tick(initial.supervisor_run_id, now(), &mut waker)
             .unwrap();
+        assert!(waker.wakes.is_empty());
+    }
+
+    #[test]
+    fn a_ready_task_without_a_dispatch_reservation_escalates_instead_of_stalling() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let started = scheduler
+            .start(
+                "caller",
+                "operation",
+                "root work".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        let mut waker = Waker::default();
+
+        scheduler
+            .tick(started.supervisor_run_id, now(), &mut waker)
+            .unwrap();
+
+        let stopped = scheduler
+            .get("caller", started.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.state, SupervisorRunState::Escalated);
+        let escalation = stopped.escalation.unwrap();
+        assert_eq!(escalation.blocking_task_id.unwrap().0, "root");
+        assert_eq!(
+            escalation.reason,
+            "no worker dispatch reservation was produced for a ready task"
+        );
+        assert!(escalation.safe_evidence.contains("runtime/model selection"));
         assert!(waker.wakes.is_empty());
     }
 
