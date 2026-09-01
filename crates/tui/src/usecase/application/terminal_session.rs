@@ -31,7 +31,9 @@ use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 use usagi_core::domain::id::{OperationId, TerminalRef};
-use usagi_core::usecase::vt_screen::{CheckpointError, ScreenCheckpoint};
+use usagi_core::usecase::vt_screen::{
+    ActiveBuffer, CheckpointError, RetainedRowMotion, ScreenCheckpoint,
+};
 
 use super::pane_runtime::Geometry;
 use super::terminal_screen::{TerminalBuffer, TerminalInputModes, TerminalScreen};
@@ -474,6 +476,9 @@ pub struct TerminalSession {
     /// width indefinitely.
     synchronized_geometry: Option<Geometry>,
     screen: TerminalScreen,
+    /// Visual row-coordinate changes not yet consumed by the shell-owned
+    /// selection controls.
+    retained_row_motions: Vec<RetainedRowMotion>,
     subscription: Option<TerminalSubscription>,
     cursor: u64,
     input_seq: u64,
@@ -535,6 +540,7 @@ impl TerminalSession {
             requested_geometry: geometry,
             synchronized_geometry: None,
             screen,
+            retained_row_motions: Vec::new(),
             subscription: None,
             cursor: 0,
             input_seq: 0,
@@ -668,10 +674,8 @@ impl TerminalSession {
     /// selection highlight, including selected blank grid padding.
     #[must_use]
     pub fn display_row_count_selection(&self, selection: &TerminalSelection) -> usize {
-        self.screen.rows_with_scrollback_selection_count(
-            (selection.anchor().row, selection.anchor().column),
-            (selection.focus().row, selection.focus().column),
-        )
+        self.screen
+            .rows_with_scrollback_tracked_selection_count(selection)
     }
 
     /// Render only the retained rows needed by the current viewport.
@@ -699,12 +703,8 @@ impl TerminalSession {
         end: usize,
         selection: &TerminalSelection,
     ) -> Vec<String> {
-        self.screen.rows_with_scrollback_window_selection(
-            start,
-            end,
-            (selection.anchor().row, selection.anchor().column),
-            (selection.focus().row, selection.focus().column),
-        )
+        self.screen
+            .rows_with_scrollback_window_tracked_selection(start, end, selection)
     }
 
     /// Complete visible screen cells for selection/copy. Unlike [`Self::rows`]
@@ -724,6 +724,11 @@ impl TerminalSession {
             self.screen.soft_wraps_with_scrollback(),
             anchor,
         )
+    }
+
+    /// Drain visual row-coordinate changes accumulated while applying output.
+    pub fn take_retained_row_motions(&mut self) -> Vec<RetainedRowMotion> {
+        std::mem::take(&mut self.retained_row_motions)
     }
 
     /// Attaches (or reattaches) with this pane's viewport and rebuilds the
@@ -1118,7 +1123,8 @@ impl TerminalSession {
                 self.connect_at(port, now);
                 return;
             }
-            self.screen.advance(&chunk.data);
+            self.retained_row_motions
+                .extend(self.screen.advance(&chunk.data));
             self.cursor = chunk.end_offset;
         }
     }
@@ -1157,6 +1163,14 @@ impl TerminalSession {
             }
         };
         self.screen = screen;
+        self.retained_row_motions.extend([
+            RetainedRowMotion::Reset {
+                buffer: ActiveBuffer::Primary,
+            },
+            RetainedRowMotion::Reset {
+                buffer: ActiveBuffer::Alternate,
+            },
+        ]);
         self.history = history;
         Ok(())
     }

@@ -36,6 +36,45 @@ pub use checkpoint::{
     UTF8_PENDING_MAX,
 };
 
+/// A retained-row coordinate change produced by one VT scroll operation.
+///
+/// The range is expressed in the active buffer's retained coordinates before
+/// the operation. Consumers such as the TUI selection layer use it to keep a
+/// visual annotation attached to the same row while a full-screen Agent moves
+/// that row through a DECSTBM scroll region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedRowMotion {
+    /// A checkpoint or other screen replacement invalidated local retained
+    /// coordinates for this buffer.
+    Reset { buffer: ActiveBuffer },
+    /// Rows at `top..top + count` leave the region; the survivors through
+    /// `bottom` move toward smaller retained indices.
+    Up {
+        buffer: ActiveBuffer,
+        top: usize,
+        bottom: usize,
+        count: usize,
+    },
+    /// Rows at `bottom + 1 - count..=bottom` leave the region; the survivors
+    /// from `top` move toward larger retained indices.
+    Down {
+        buffer: ActiveBuffer,
+        top: usize,
+        bottom: usize,
+        count: usize,
+    },
+}
+
+impl RetainedRowMotion {
+    /// Buffer whose retained coordinate space the motion belongs to.
+    #[must_use]
+    pub const fn buffer(self) -> ActiveBuffer {
+        match self {
+            Self::Reset { buffer } | Self::Up { buffer, .. } | Self::Down { buffer, .. } => buffer,
+        }
+    }
+}
+
 /// Exact control emitted by Codex/crossterm to finish DEC synchronized output.
 /// Bytes between the matching `DECSET 2026` and this sequence are committed as
 /// one parser update, so callers cannot observe a half-drawn frame.
@@ -178,6 +217,10 @@ pub struct VtScreen {
     /// The primary screen while a full-screen program (for example Codex)
     /// renders into the active alternate buffer.
     primary_screen: Option<Box<ScreenBuffer>>,
+    /// Row-coordinate changes collected during the current `advance` call.
+    /// Every public advance path drains this before returning, so parser state
+    /// and checkpoints never retain an unbounded event log.
+    retained_row_motions: Vec<RetainedRowMotion>,
 }
 
 /// Semantic SGR attributes used to replace the unbounded raw escape append
@@ -358,13 +401,14 @@ impl VtScreen {
             synchronized_output: None,
             replaying_synchronized_output: false,
             primary_screen: None,
+            retained_row_motions: Vec::new(),
         }
     }
 
     /// Applies a chunk of raw PTY output.  Chunks may split a multibyte
     /// character; the trailing bytes are buffered until the next call.
     pub fn advance(&mut self, bytes: &[u8]) {
-        drop(self.advance_with_replies(bytes));
+        drop(self.advance_with_replies_and_row_motions(bytes));
     }
 
     /// Applies raw PTY output and returns terminal-protocol bytes that the PTY
@@ -372,11 +416,26 @@ impl VtScreen {
     /// share this screen's incremental decoder state.
     #[must_use]
     pub fn advance_with_replies(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.advance_with_replies_and_row_motions(bytes).0
+    }
+
+    /// Applies output and returns both terminal-protocol replies and the exact
+    /// retained-row moves performed by VT scroll commands.
+    ///
+    /// The daemon uses [`Self::advance_with_replies`] because it owns no local
+    /// selection. The TUI consumes this richer result to move an existing
+    /// highlight with the Agent's alternate-screen transcript.
+    #[must_use]
+    pub fn advance_with_replies_and_row_motions(
+        &mut self,
+        bytes: &[u8],
+    ) -> (Vec<u8>, Vec<RetainedRowMotion>) {
+        self.retained_row_motions.clear();
         let mut replies = Vec::new();
         for &byte in bytes {
             self.feed(byte, &mut replies);
         }
-        replies
+        (replies, std::mem::take(&mut self.retained_row_motions))
     }
 
     /// Clears the primary screen and its retained history for an explicit
@@ -943,6 +1002,10 @@ impl VtScreen {
 
     fn scroll_region_up(&mut self, count: usize) {
         for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
+            let buffer = self.active_buffer();
+            let retained_offset = self.scrollback.len();
+            let retained_top = retained_offset.saturating_add(self.scroll_top);
+            let retained_bottom = retained_offset.saturating_add(self.scroll_bottom);
             let row = self.grid.remove(self.scroll_top);
             // A region anchored at row zero is transcript history; a lower
             // region is a transient full-screen UI.
@@ -951,6 +1014,26 @@ impl VtScreen {
                 && append_scrollback(&mut self.scrollback, row, SCROLLBACK_MAX)
             {
                 self.scrollback_origin = self.scrollback_origin.saturating_add(1);
+                // The history ring was already full. Its oldest retained row
+                // disappeared and every surviving retained coordinate moved up
+                // by one, even though the grid row leaving at the bottom of the
+                // combined history remains represented in scrollback.
+                self.retained_row_motions.push(RetainedRowMotion::Up {
+                    buffer,
+                    top: 0,
+                    bottom: retained_offset.saturating_add(self.rows).saturating_sub(1),
+                    count: 1,
+                });
+            } else if self.primary_screen.is_some() || self.scroll_top > 0 {
+                // Alternate-screen and lower DECSTBM regions do not retain the
+                // row that leaves their top. The surviving rows move within the
+                // current frame and visual annotations must move with them.
+                self.retained_row_motions.push(RetainedRowMotion::Up {
+                    buffer,
+                    top: retained_top,
+                    bottom: retained_bottom,
+                    count: 1,
+                });
             }
             self.grid
                 .insert(self.scroll_bottom, vec![Cell::blank(); self.cols]);
@@ -968,6 +1051,13 @@ impl VtScreen {
     /// scrolling never invents local history.
     fn scroll_down(&mut self, count: usize) {
         for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
+            let retained_offset = self.scrollback.len();
+            self.retained_row_motions.push(RetainedRowMotion::Down {
+                buffer: self.active_buffer(),
+                top: retained_offset.saturating_add(self.scroll_top),
+                bottom: retained_offset.saturating_add(self.scroll_bottom),
+                count: 1,
+            });
             self.grid.remove(self.scroll_bottom);
             self.grid
                 .insert(self.scroll_top, vec![Cell::blank(); self.cols]);
@@ -1913,10 +2003,28 @@ mod tests {
         let mut screen = VtScreen::new(4, 16);
         screen.advance(b"\x1b[?1049hheader\x1b[4;1Hcomposer\x1b[2;3r\x1b[2;1Hone\r\ntwo");
 
-        screen.advance(b"\x1b[1S");
+        let (_, motions) = screen.advance_with_replies_and_row_motions(b"\x1b[1S");
+        assert_eq!(
+            motions,
+            vec![RetainedRowMotion::Up {
+                buffer: ActiveBuffer::Alternate,
+                top: 1,
+                bottom: 2,
+                count: 1,
+            }]
+        );
         assert_eq!(rows(&screen), vec!["header", "two", "", "composer"]);
 
-        screen.advance(b"\x1b[1T");
+        let (_, motions) = screen.advance_with_replies_and_row_motions(b"\x1b[1T");
+        assert_eq!(
+            motions,
+            vec![RetainedRowMotion::Down {
+                buffer: ActiveBuffer::Alternate,
+                top: 1,
+                bottom: 2,
+                count: 1,
+            }]
+        );
         assert_eq!(rows(&screen), vec!["header", "", "two", "composer"]);
     }
 

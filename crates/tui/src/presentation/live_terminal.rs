@@ -19,6 +19,7 @@
 use std::collections::VecDeque;
 
 use usagi_core::domain::id::TerminalRef;
+use usagi_core::usecase::vt_screen::RetainedRowMotion;
 
 use crate::presentation::views::workspace::TerminalViewProjection;
 use crate::usecase::application::pr::BrowserOpener;
@@ -49,6 +50,10 @@ struct TerminalViewState {
     /// mouse is released so the highlighted range stays on screen (and copyable)
     /// until a new drag replaces it or the terminal is closed/evicted.
     selection: Option<TerminalSelection>,
+    /// Buffer coordinate space shared by `pointer_press` and `selection`.
+    /// Primary and alternate rows can reuse the same numeric indices, so a
+    /// highlight must never be projected or moved across that boundary.
+    selection_buffer: Option<TerminalBuffer>,
     /// Whether a mouse drag is currently extending [`Self::selection`]. This
     /// distinguishes "extend the live drag" from "start a fresh selection",
     /// which `has_selection` alone cannot once a finished selection lingers.
@@ -185,6 +190,7 @@ impl LiveTerminalControls {
         self.active.projected_extent = None;
         self.active.pointer_press = None;
         self.active.selection = None;
+        self.active.selection_buffer = None;
         self.active.dragging = false;
         self.active.feedback = None;
     }
@@ -192,9 +198,11 @@ impl LiveTerminalControls {
     /// Begin a drag selection, replacing any earlier (including finished) one,
     /// and surface that a selection has started.
     pub fn begin_selection(&mut self, selection: TerminalSelection) {
+        let buffer = self.current_buffer();
         self.revision = self.revision.saturating_add(1);
         self.active.pointer_press = None;
         self.active.selection = Some(selection);
+        self.active.selection_buffer = Some(buffer);
         self.active.dragging = true;
         self.active.feedback = Some("terminal selection started".to_owned());
     }
@@ -204,9 +212,11 @@ impl LiveTerminalControls {
     /// snapshotted viewport and anchor into `selection`; a release before that
     /// remains a plain click.
     pub fn press_pointer(&mut self, selection: TerminalSelection) {
+        let buffer = self.current_buffer();
         self.revision = self.revision.saturating_add(1);
         self.active.pointer_press = Some(selection);
         self.active.selection = None;
+        self.active.selection_buffer = Some(buffer);
         self.active.dragging = false;
     }
 
@@ -238,6 +248,7 @@ impl LiveTerminalControls {
                 .map_or(PointerRelease::None, PointerRelease::Copy);
         }
         if self.active.pointer_press.take().is_some() {
+            self.active.selection_buffer = None;
             return PointerRelease::Click;
         }
         PointerRelease::None
@@ -246,7 +257,7 @@ impl LiveTerminalControls {
     /// Extend the in-progress selection to `focus`; a no-op without a selection.
     pub fn extend_selection(&mut self, focus: TerminalPoint) {
         if let Some(selection) = &mut self.active.selection {
-            selection.extend(focus);
+            selection.extend_visual(focus);
             self.revision = self.revision.saturating_add(1);
         }
     }
@@ -273,6 +284,45 @@ impl LiveTerminalControls {
         self.active.selection.as_ref()
     }
 
+    /// Current selection only when it belongs to `buffer`'s retained
+    /// coordinate space.
+    #[must_use]
+    pub fn selection_for(&self, buffer: TerminalBuffer) -> Option<&TerminalSelection> {
+        (self.active.selection_buffer == Some(buffer))
+            .then_some(self.active.selection.as_ref())
+            .flatten()
+    }
+
+    /// Apply parser-observed row movement to the matching terminal's pending or
+    /// retained highlight. Copy text remains snapshotted inside the selection.
+    pub fn apply_retained_row_motions(
+        &mut self,
+        terminal: &TerminalRef,
+        motions: &[RetainedRowMotion],
+    ) {
+        let Some(state) = self.view_state_mut(terminal) else {
+            return;
+        };
+        let mut changed = false;
+        for motion in motions {
+            let Some(buffer) = state.selection_buffer else {
+                continue;
+            };
+            if !buffer.matches(motion.buffer()) {
+                continue;
+            }
+            if let Some(selection) = &mut state.pointer_press {
+                changed |= selection.apply_retained_row_motion(*motion);
+            }
+            if let Some(selection) = &mut state.selection {
+                changed |= selection.apply_retained_row_motion(*motion);
+            }
+        }
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+    }
+
     /// End an in-progress drag and return the finished selection's text to copy,
     /// keeping the selection highlighted on screen. Returns `None` when no drag
     /// was active (so a stray release never re-copies or clears the clipboard) or
@@ -287,6 +337,7 @@ impl LiveTerminalControls {
         let text = self.active.selection.as_ref()?.text();
         if text.is_empty() {
             self.active.selection = None;
+            self.active.selection_buffer = None;
             self.active.feedback = Some("no terminal text is selected".to_owned());
             None
         } else {
@@ -300,6 +351,7 @@ impl LiveTerminalControls {
         self.revision = self.revision.saturating_add(1);
         self.active.pointer_press = None;
         self.active.selection = None;
+        self.active.selection_buffer = None;
         self.active.dragging = false;
         self.active.feedback = Some("terminal selection cleared".to_owned());
     }
@@ -462,6 +514,26 @@ impl LiveTerminalControls {
     pub fn scroll(&self) -> usize {
         self.active.scroll
     }
+
+    fn current_buffer(&self) -> TerminalBuffer {
+        self.active
+            .projected_extent
+            .map_or(TerminalBuffer::Primary, |extent| extent.0)
+    }
+
+    fn view_state_mut(&mut self, terminal: &TerminalRef) -> Option<&mut TerminalViewState> {
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|focused| focused.fences(terminal))
+        {
+            return Some(&mut self.active);
+        }
+        self.retained
+            .iter_mut()
+            .find(|(retained, _)| retained.fences(terminal))
+            .map(|(_, state)| state)
+    }
 }
 
 /// Result of completing one terminal pointer gesture.
@@ -485,6 +557,7 @@ mod tests {
     use usagi_core::domain::id::{
         DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
+    use usagi_core::usecase::vt_screen::{ActiveBuffer, RetainedRowMotion};
 
     fn terminal() -> TerminalRef {
         TerminalRef {
@@ -823,6 +896,75 @@ mod tests {
         // A stray release without a live drag must not re-copy the retained text.
         assert!(controls.finish_drag().is_none());
         assert!(controls.has_selection());
+    }
+
+    #[test]
+    fn agent_row_motions_follow_the_matching_terminal_and_buffer_selection() {
+        let mut controls = LiveTerminalControls::default();
+        let terminal = terminal();
+        controls.sync_focus(Some(&terminal));
+        let _ = controls.visible_range(TerminalBuffer::Alternate, 0, 4, 4);
+        controls.begin_selection(TerminalSelection::begin(
+            vec![
+                "header".into(),
+                "one".into(),
+                "two".into(),
+                "composer".into(),
+            ],
+            TerminalPoint { row: 2, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 2, column: 2 });
+        let before = controls.revision();
+
+        controls.apply_retained_row_motions(
+            &terminal,
+            &[
+                RetainedRowMotion::Up {
+                    buffer: ActiveBuffer::Primary,
+                    top: 1,
+                    bottom: 2,
+                    count: 1,
+                },
+                RetainedRowMotion::Up {
+                    buffer: ActiveBuffer::Alternate,
+                    top: 1,
+                    bottom: 2,
+                    count: 1,
+                },
+            ],
+        );
+
+        let selection = controls
+            .selection_for(TerminalBuffer::Alternate)
+            .expect("alternate selection remains visible");
+        assert_eq!(selection.visual_columns_at(1), Some((0, 2)));
+        assert_eq!(selection.text(), "two");
+        assert!(controls.revision() > before);
+        assert!(controls.selection_for(TerminalBuffer::Primary).is_none());
+
+        let mut other = terminal.clone();
+        other.terminal_id = TerminalId::new();
+        controls.sync_focus(Some(&other));
+        controls.apply_retained_row_motions(
+            &terminal,
+            &[RetainedRowMotion::Down {
+                buffer: ActiveBuffer::Alternate,
+                top: 1,
+                bottom: 2,
+                count: 1,
+            }],
+        );
+        let mut unknown = terminal.clone();
+        unknown.terminal_id = TerminalId::new();
+        controls.apply_retained_row_motions(&unknown, &[]);
+        controls.sync_focus(Some(&terminal));
+
+        assert_eq!(
+            controls
+                .selection_for(TerminalBuffer::Alternate)
+                .and_then(|selection| selection.visual_columns_at(2)),
+            Some((0, 2))
+        );
     }
 
     #[test]

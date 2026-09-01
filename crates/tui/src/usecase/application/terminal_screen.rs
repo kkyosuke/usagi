@@ -15,11 +15,12 @@
 use std::collections::HashSet;
 
 use usagi_core::usecase::vt_screen::{
-    ActiveBuffer, Cell, CheckpointError, MouseProtocolEncoding, ScreenCheckpoint, VtScreen,
+    ActiveBuffer, Cell, CheckpointError, MouseProtocolEncoding, RetainedRowMotion,
+    ScreenCheckpoint, VtScreen,
 };
 
 use super::terminal_link::scan_links;
-use super::terminal_selection::TerminalPoint;
+use super::terminal_selection::{TerminalPoint, TerminalSelection};
 
 // Kept in sync with `presentation::frame::TERMINAL_CURSOR_MARKER`.  This
 // use-case module deliberately does not depend on presentation, while the
@@ -33,6 +34,16 @@ const TERMINAL_CURSOR_MARKER: char = '\u{e0001}';
 pub enum TerminalBuffer {
     Primary,
     Alternate,
+}
+
+impl TerminalBuffer {
+    #[must_use]
+    pub const fn matches(self, buffer: ActiveBuffer) -> bool {
+        matches!(
+            (self, buffer),
+            (Self::Primary, ActiveBuffer::Primary) | (Self::Alternate, ActiveBuffer::Alternate)
+        )
+    }
 }
 
 /// How the focused program expects a paste payload to be encoded.
@@ -105,8 +116,8 @@ impl TerminalScreen {
     }
 
     /// Feeds a chunk of raw PTY output into the shared parser.
-    pub fn advance(&mut self, bytes: &[u8]) {
-        self.screen.advance(bytes);
+    pub fn advance(&mut self, bytes: &[u8]) -> Vec<RetainedRowMotion> {
+        self.screen.advance_with_replies_and_row_motions(bytes).1
     }
 
     /// Drops primary-screen history and starts a fresh viewport at the top.
@@ -194,6 +205,22 @@ impl TerminalScreen {
             .min(self.retained_row_count())
     }
 
+    /// Number of rows needed for live content and the surviving visual rows of
+    /// a tracked selection.
+    #[must_use]
+    pub fn rows_with_scrollback_tracked_selection_count(
+        &self,
+        selection: &TerminalSelection,
+    ) -> usize {
+        self.rows_with_scrollback_count(true)
+            .max(
+                selection
+                    .visual_tail()
+                    .map_or(0, |row| row.saturating_add(1)),
+            )
+            .min(self.retained_row_count())
+    }
+
     /// Renders only the requested retained-row window.
     ///
     /// Link detection expands the request to the logical lines which touch the
@@ -270,16 +297,43 @@ impl TerminalScreen {
         focus: (usize, usize),
     ) -> Vec<String> {
         let count = self.rows_with_scrollback_selection_count(anchor, focus);
-        let start = start.min(count);
-        let end = end.min(count);
-        if start >= end {
-            return Vec::new();
-        }
         let (first, last) = if anchor <= focus {
             (anchor, focus)
         } else {
             (focus, anchor)
         };
+        self.rows_with_scrollback_window_selection_by(start, end, count, |row| {
+            selection_for(row, first, last)
+        })
+    }
+
+    /// Renders a retained-row window while following the selected source rows
+    /// through VT scroll-region movement.
+    #[must_use]
+    pub fn rows_with_scrollback_window_tracked_selection(
+        &self,
+        start: usize,
+        end: usize,
+        selection: &TerminalSelection,
+    ) -> Vec<String> {
+        let count = self.rows_with_scrollback_tracked_selection_count(selection);
+        self.rows_with_scrollback_window_selection_by(start, end, count, |row| {
+            selection.visual_columns_at(row)
+        })
+    }
+
+    fn rows_with_scrollback_window_selection_by(
+        &self,
+        start: usize,
+        end: usize,
+        count: usize,
+        selection_at: impl Fn(usize) -> Option<(usize, usize)>,
+    ) -> Vec<String> {
+        let start = start.min(count);
+        let end = end.min(count);
+        if start >= end {
+            return Vec::new();
+        }
         let (scan_start, scan_end) = self.logical_scan_range(start, end, count);
         let plain = (scan_start..scan_end)
             .map(|row| unstyled_row(self.retained_row(row)))
@@ -302,7 +356,7 @@ impl TerminalScreen {
                     self.retained_row(row),
                     cursor,
                     cursor_style,
-                    selection_for(row, first, last),
+                    selection_at(row),
                     Some((row, &links)),
                 )
             })
@@ -781,6 +835,29 @@ mod tests {
         assert_eq!(rows.len(), 3);
         // The scrolled-off history row renders with the selection highlight.
         assert_eq!(rows[0], "\u{1b}[7mab  \u{1b}[0m");
+    }
+
+    #[test]
+    fn agent_scroll_region_moves_the_tracked_highlight_with_its_row() {
+        let mut screen = TerminalScreen::new(4, 16);
+        screen.advance(b"\x1b[?1049hheader\x1b[4;1Hcomposer\x1b[2;3r\x1b[2;1Hone\r\ntwo");
+        let mut selection = TerminalSelection::begin(
+            screen.cells_with_scrollback(),
+            TerminalPoint { row: 2, column: 0 },
+        );
+        selection.extend(TerminalPoint { row: 2, column: 2 });
+
+        for motion in screen.advance(b"\x1b[1S") {
+            selection.apply_retained_row_motion(motion);
+        }
+        let rows = screen.rows_with_scrollback_window_tracked_selection(0, usize::MAX, &selection);
+
+        assert_eq!(selection.text(), "two");
+        assert!(
+            rows[1].contains("\x1b[7mtwo"),
+            "highlight did not follow the moved Agent row: {rows:?}"
+        );
+        assert!(!rows[2].contains("\x1b[7mtwo"));
     }
 
     #[test]
