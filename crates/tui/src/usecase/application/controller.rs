@@ -5,7 +5,7 @@
 //! [`BackendPort`] で effect を backend 固有の command に変換し、テストでは
 //! [`FakeBackend`] の command log と event queue を使う。
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
@@ -70,6 +70,8 @@ pub enum Overlay {
     CreateSession,
     /// Workspace-scoped pending user decisions and their answer editor.
     Decisions,
+    /// Merge-confirmed sessions awaiting explicit, sequential cleanup.
+    CleanupQueue,
     /// active target scope の Pull Request 一覧。素材は port から還流する。
     Prs,
     /// active target の Markdown preview。素材は port から還流する。
@@ -581,6 +583,57 @@ pub struct PrOverlay {
     filter: PrFilter,
 }
 
+/// Stable identities in the merge-confirmed cleanup queue.
+///
+/// Names and PR metadata remain live projections outside this state. Selection
+/// can therefore survive redraws without a refreshed row rebinding to another
+/// session, and every removal is revalidated immediately before dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupQueueState {
+    candidates: Vec<SessionId>,
+    selected: BTreeSet<SessionId>,
+    cursor: usize,
+    in_flight: Option<SessionId>,
+    feedback: Option<Notice>,
+}
+
+impl CleanupQueueState {
+    fn new(candidates: Vec<SessionId>) -> Self {
+        Self {
+            candidates,
+            selected: BTreeSet::new(),
+            cursor: 0,
+            in_flight: None,
+            feedback: None,
+        }
+    }
+
+    #[must_use]
+    pub fn candidates(&self) -> &[SessionId] {
+        &self.candidates
+    }
+
+    #[must_use]
+    pub fn selected(&self) -> &BTreeSet<SessionId> {
+        &self.selected
+    }
+
+    #[must_use]
+    pub const fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    #[must_use]
+    pub const fn in_flight(&self) -> Option<SessionId> {
+        self.in_flight
+    }
+
+    #[must_use]
+    pub fn feedback(&self) -> Option<&Notice> {
+        self.feedback.as_ref()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PrFilter {
     #[default]
@@ -1027,6 +1080,7 @@ pub struct AppState {
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
     decision_overlay: Option<DecisionOverlayState>,
     pr_overlay: Option<PrOverlay>,
+    cleanup_queue: Option<CleanupQueueState>,
     preview_overlay: Option<PreviewOverlay>,
     create_session: Option<CreateSessionForm>,
     create_session_error: Option<Notice>,
@@ -1194,6 +1248,7 @@ impl AppState {
             unread_decisions: std::collections::BTreeSet::new(),
             decision_overlay: None,
             pr_overlay: None,
+            cleanup_queue: None,
             preview_overlay: None,
             create_session: None,
             create_session_error: None,
@@ -1323,6 +1378,11 @@ impl AppState {
     pub fn pr_overlay(&self) -> Option<&PrOverlay> {
         self.pr_overlay.as_ref()
     }
+    /// Open merge-confirmed cleanup queue, including its stable selection.
+    #[must_use]
+    pub fn cleanup_queue(&self) -> Option<&CleanupQueueState> {
+        self.cleanup_queue.as_ref()
+    }
     /// Open Markdown preview overlay state, including its scroll and any safe error.
     #[must_use]
     pub fn preview_overlay(&self) -> Option<&PreviewOverlay> {
@@ -1405,6 +1465,25 @@ impl AppState {
         self.session_lifecycles
             .get(&session)
             .is_none_or(|lifecycle| lifecycle.capabilities().can_remove)
+    }
+    /// A cleanup candidate has a fully observed, merge-only visible PR set and
+    /// no Agent which may still be producing work. The daemon remains the final
+    /// authority for dirty worktrees, terminals, and Git teardown.
+    fn session_can_cleanup(&self, session: SessionId) -> bool {
+        let Some(prs) = self.session_prs(session) else {
+            return false;
+        };
+        let mut visible = prs.iter().filter(|pr| pr.state != PrState::Dismissed);
+        let Some(first) = visible.next() else {
+            return false;
+        };
+        first.state == PrState::Merged
+            && visible.all(|pr| pr.state == PrState::Merged)
+            && self.session_can_remove(session)
+            && matches!(
+                self.phase_for(Target::Session(session)),
+                TargetPhase::Absent | TargetPhase::Done
+            )
     }
     /// 最後の safe notice。
     #[must_use]
@@ -3241,9 +3320,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             state.reconcile_sessions(&previous_sessions);
             reconcile_force_remove_confirmation(state);
-            vec![Effect::SyncPullRequestTargets {
+            let mut effects = vec![Effect::SyncPullRequestTargets {
                 sessions: state.sessions.clone(),
-            }]
+            }];
+            effects.extend(continue_cleanup_after_snapshot(state));
+            effects
         }
         AppEvent::Backend(BackendEvent::SessionNames(names)) => {
             state.session_names = names;
@@ -3257,6 +3338,27 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             let sessions = state.sessions.clone();
             state.reconcile_sessions(&sessions);
             reconcile_force_remove_confirmation(state);
+            let failed = state
+                .cleanup_queue
+                .as_ref()
+                .and_then(CleanupQueueState::in_flight)
+                .filter(|session| {
+                    state
+                        .session_lifecycles
+                        .get(session)
+                        .is_some_and(|projection| {
+                            projection.lifecycle == SessionLifecycle::Failed
+                                && projection.failure_stage == Some(FailureStage::Delete)
+                        })
+                });
+            if let Some(failed) = failed
+                && let Some(queue) = state.cleanup_queue.as_mut()
+            {
+                queue.in_flight = None;
+                queue.selected.remove(&failed);
+                queue.feedback = Some(Notice::new("cleanup paused after removal failed"));
+            }
+            reconcile_cleanup_queue(state);
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::SessionRoles(roles)) => {
@@ -3272,6 +3374,12 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
+            if let Some(queue) = state.cleanup_queue.as_mut()
+                && let Some(failed) = queue.in_flight.take()
+            {
+                queue.selected.remove(&failed);
+                queue.feedback = Some(notice.clone());
+            }
             state.notice = Some(notice);
             Vec::new()
         }
@@ -3296,6 +3404,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             } else {
                 state.runtimes.push(RuntimePhase { runtime, phase });
             }
+            reconcile_cleanup_queue(state);
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Feedback(feedback)) => {
@@ -3585,6 +3694,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             {
                 state.notice = Some(Notice::new(format!("PR detected: {}", pr.url)));
             }
+            reconcile_cleanup_queue(state);
         }
         BackendEvent::PullRequestsError { target, error } => {
             let matching_request = state
@@ -3948,6 +4058,130 @@ fn dismiss_closeup_action_modal(state: &mut AppState) {
     state.overlay = None;
 }
 
+fn cleanup_candidates(state: &AppState) -> Vec<SessionId> {
+    let in_flight = state
+        .cleanup_queue
+        .as_ref()
+        .and_then(CleanupQueueState::in_flight);
+    state
+        .sessions
+        .iter()
+        .copied()
+        .filter(|session| Some(*session) == in_flight || state.session_can_cleanup(*session))
+        .collect()
+}
+
+/// Rebuild only queue membership. Checked identities survive while eligible;
+/// newly merged sessions join in workspace order, and stale rows disappear.
+fn reconcile_cleanup_queue(state: &mut AppState) {
+    let candidates = cleanup_candidates(state);
+    let Some(queue) = state.cleanup_queue.as_mut() else {
+        return;
+    };
+    queue.candidates = candidates;
+    queue
+        .selected
+        .retain(|session| queue.candidates.contains(session));
+    queue.cursor = queue.cursor.min(queue.candidates.len().saturating_sub(1));
+}
+
+fn begin_next_cleanup(state: &mut AppState, continuing: bool) -> Vec<Effect> {
+    if let Some(queue) = state.cleanup_queue.as_mut()
+        && queue.in_flight.is_some()
+    {
+        queue.feedback = Some(Notice::new("waiting for the current removal"));
+        return Vec::new();
+    }
+    reconcile_cleanup_queue(state);
+    let next =
+        state.cleanup_queue.as_ref().and_then(|queue| {
+            queue.candidates.iter().copied().find(|session| {
+                queue.selected.contains(session) && state.session_can_cleanup(*session)
+            })
+        });
+    let Some(session) = next else {
+        if let Some(queue) = state.cleanup_queue.as_mut() {
+            queue.feedback = Some(Notice::new(if continuing {
+                "cleanup complete"
+            } else if queue.candidates.is_empty() {
+                "no merge-confirmed sessions are ready"
+            } else {
+                "select sessions with Space"
+            }));
+        }
+        return Vec::new();
+    };
+    if let Some(queue) = state.cleanup_queue.as_mut() {
+        queue.in_flight = Some(session);
+        queue.feedback = None;
+    }
+    vec![Effect::RemoveSession {
+        workspace: state.workspace,
+        session,
+        force: false,
+        force_delete_branch: false,
+    }]
+}
+
+fn update_cleanup_queue(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    let Some(queue) = state.cleanup_queue.as_mut() else {
+        state.overlay = None;
+        return Vec::new();
+    };
+    match key {
+        AppKey::Escape => {
+            state.overlay = None;
+            state.cleanup_queue = None;
+        }
+        AppKey::Up if !queue.candidates.is_empty() => {
+            queue.cursor = queue
+                .cursor
+                .checked_sub(1)
+                .unwrap_or(queue.candidates.len() - 1);
+        }
+        AppKey::Down if !queue.candidates.is_empty() => {
+            queue.cursor = (queue.cursor + 1) % queue.candidates.len();
+        }
+        AppKey::Char(' ') if queue.in_flight.is_none() => {
+            if let Some(session) = queue.candidates.get(queue.cursor).copied() {
+                if !queue.selected.insert(session) {
+                    queue.selected.remove(&session);
+                }
+                queue.feedback = None;
+            }
+        }
+        AppKey::Char('a' | 'A') if queue.in_flight.is_none() => {
+            if queue.selected.len() == queue.candidates.len() {
+                queue.selected.clear();
+            } else {
+                queue.selected = queue.candidates.iter().copied().collect();
+            }
+            queue.feedback = None;
+        }
+        AppKey::Enter => return begin_next_cleanup(state, false),
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn continue_cleanup_after_snapshot(state: &mut AppState) -> Vec<Effect> {
+    let completed = state
+        .cleanup_queue
+        .as_ref()
+        .and_then(CleanupQueueState::in_flight)
+        .filter(|session| !state.sessions.contains(session));
+    let Some(completed) = completed else {
+        reconcile_cleanup_queue(state);
+        return Vec::new();
+    };
+    if let Some(queue) = state.cleanup_queue.as_mut() {
+        queue.in_flight = None;
+        queue.selected.remove(&completed);
+        queue.feedback = None;
+    }
+    begin_next_cleanup(state, true)
+}
+
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
     if let Some(effects) = update_overlay_control_chord(state, overlay, &key) {
         return effects;
@@ -3972,6 +4206,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
     }
     match overlay {
         Overlay::Decisions => update_decisions_overlay(state, key),
+        Overlay::CleanupQueue => update_cleanup_queue(state, &key),
         Overlay::QuitConfirmation => match key {
             // Each answer has its own letter so leaving and quitting are never
             // the same keystroke: `w` returns to Welcome, `q`/`y` end the
@@ -5043,6 +5278,15 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
             state.notice = Some(Notice::new("Refreshing sessions"));
             vec![Effect::RefreshSessions {
                 workspace: state.workspace,
+            }]
+        }
+        overview::SessionCommand::Cleanup => {
+            let candidates = cleanup_candidates(state);
+            state.overlay = Some(Overlay::CleanupQueue);
+            state.cleanup_queue = Some(CleanupQueueState::new(candidates));
+            state.notice = None;
+            vec![Effect::SyncPullRequestTargets {
+                sessions: state.sessions.clone(),
             }]
         }
         overview::SessionCommand::Resume { name } => {
@@ -7176,6 +7420,7 @@ mod tests {
             Overlay::Roles,
             Overlay::CreateSession,
             Overlay::Decisions,
+            Overlay::CleanupQueue,
             Overlay::Prs,
             Overlay::Preview,
             Overlay::CreateSessionError,
@@ -7210,6 +7455,9 @@ mod tests {
                         selected: 0,
                         editor: None,
                     });
+                }
+                Overlay::CleanupQueue => {
+                    state.cleanup_queue = Some(CleanupQueueState::new(Vec::new()));
                 }
                 Overlay::Overview
                 | Overlay::Daemon
@@ -10228,6 +10476,224 @@ mod tests {
         let mut pr = PrLink::new(number, format!("https://github.com/o/r/pull/{number}"));
         pr.auto_open = true;
         pr
+    }
+
+    fn merged_pr_link(number: u32) -> PrLink {
+        let mut pr = pr_link(number);
+        pr.state = PrState::Merged;
+        pr
+    }
+
+    fn observe_prs(state: &mut AppState, session: SessionId, revision: u64, prs: Vec<PrLink>) {
+        let _ = update(
+            state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target: Target::Session(session),
+                revision,
+                prs,
+            }),
+        );
+    }
+
+    #[test]
+    fn cleanup_queue_admits_only_idle_sessions_whose_visible_prs_are_all_merged() {
+        let (workspace, mixed, ready) = ids();
+        let mut state = AppState::home(workspace, vec![mixed, ready]);
+        observe_prs(&mut state, mixed, 1, vec![merged_pr_link(1), pr_link(2)]);
+        observe_prs(&mut state, ready, 1, vec![merged_pr_link(3)]);
+        state.overlay = Some(Overlay::Overview);
+
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("session cleanup".to_owned()))
+            ),
+            vec![Effect::SyncPullRequestTargets {
+                sessions: vec![mixed, ready]
+            }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::CleanupQueue));
+        assert_eq!(state.cleanup_queue().unwrap().candidates(), &[ready]);
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: runtime(workspace, ready),
+                phase: AgentPhase::Running,
+            }),
+        );
+        assert!(state.cleanup_queue().unwrap().candidates().is_empty());
+    }
+
+    #[test]
+    fn cleanup_queue_serializes_selected_removals_by_stable_identity() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        observe_prs(&mut state, first, 1, vec![merged_pr_link(1)]);
+        observe_prs(&mut state, second, 1, vec![merged_pr_link(2)]);
+        state.overlay = Some(Overlay::Overview);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session cleanup".to_owned())),
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('a')));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session: first,
+                force: false,
+                force_delete_branch: false,
+            }]
+        );
+        assert_eq!(state.cleanup_queue().unwrap().in_flight(), Some(first));
+
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Sessions(vec![second]))
+            ),
+            vec![
+                Effect::SyncPullRequestTargets {
+                    sessions: vec![second]
+                },
+                Effect::RemoveSession {
+                    workspace,
+                    session: second,
+                    force: false,
+                    force_delete_branch: false,
+                },
+            ]
+        );
+        assert_eq!(state.cleanup_queue().unwrap().in_flight(), Some(second));
+
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Sessions(Vec::new()))
+            ),
+            vec![Effect::SyncPullRequestTargets {
+                sessions: Vec::new()
+            }]
+        );
+        let queue = state.cleanup_queue().unwrap();
+        assert!(queue.candidates().is_empty());
+        assert_eq!(queue.in_flight(), None);
+        assert_eq!(queue.feedback().unwrap().message, "cleanup complete");
+    }
+
+    #[test]
+    fn cleanup_queue_revalidates_pr_state_and_pauses_on_a_remove_error() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        observe_prs(&mut state, session, 1, vec![merged_pr_link(1)]);
+        state.overlay = Some(Overlay::Overview);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session cleanup".to_owned())),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+
+        observe_prs(&mut state, session, 2, vec![pr_link(1)]);
+        assert!(state.cleanup_queue().unwrap().candidates().is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+
+        observe_prs(&mut state, session, 3, vec![merged_pr_link(1)]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [Effect::RemoveSession { session: target, .. }] if *target == session
+        ));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Notice(Notice::new("worktree is dirty"))),
+        );
+        let queue = state.cleanup_queue().unwrap();
+        assert_eq!(queue.in_flight(), None);
+        assert!(queue.selected().is_empty());
+        assert_eq!(queue.feedback().unwrap().message, "worktree is dirty");
+    }
+
+    #[test]
+    fn cleanup_queue_navigation_waiting_and_failed_delete_paths_are_explicit() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        observe_prs(&mut state, first, 1, vec![merged_pr_link(1)]);
+        observe_prs(&mut state, second, 1, vec![merged_pr_link(2)]);
+        state.overlay = Some(Overlay::Overview);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session cleanup".to_owned())),
+        );
+
+        assert_eq!(state.cleanup_queue().unwrap().cursor(), 0);
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            state.cleanup_queue().unwrap().feedback().unwrap().message,
+            "select sessions with Space"
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        assert_eq!(state.cleanup_queue().unwrap().cursor(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.cleanup_queue().unwrap().cursor(), 0);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        assert_eq!(
+            state.cleanup_queue().unwrap().selected(),
+            &BTreeSet::from([first])
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        assert!(state.cleanup_queue().unwrap().selected().is_empty());
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('a')));
+        assert_eq!(state.cleanup_queue().unwrap().selected().len(), 2);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('A')));
+        assert!(state.cleanup_queue().unwrap().selected().is_empty());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('a')));
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [Effect::RemoveSession { session, .. }] if *session == first
+        ));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            state.cleanup_queue().unwrap().feedback().unwrap().message,
+            "waiting for the current removal"
+        );
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                first,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Delete),
+                    failure_summary: Some("safe detail".to_owned()),
+                },
+            )]))),
+        );
+        let queue = state.cleanup_queue().unwrap();
+        assert_eq!(queue.in_flight(), None);
+        assert!(!queue.selected().contains(&first));
+        assert_eq!(
+            queue.feedback().unwrap().message,
+            "cleanup paused after removal failed"
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.cleanup_queue(), None);
+
+        state.overlay = Some(Overlay::CleanupQueue);
+        assert!(update_cleanup_queue(&mut state, &AppKey::Down).is_empty());
+        assert_eq!(state.overlay(), None);
+        assert!(begin_next_cleanup(&mut state, false).is_empty());
+
+        state.overlay = Some(Overlay::CleanupQueue);
+        state.cleanup_queue = Some(CleanupQueueState::new(Vec::new()));
+        assert!(update_cleanup_queue(&mut state, &AppKey::Char(' ')).is_empty());
+        assert!(state.cleanup_queue().unwrap().selected().is_empty());
     }
 
     fn safe_error(message: &str) -> SafeError {

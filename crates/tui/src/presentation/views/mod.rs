@@ -4,6 +4,7 @@
 //! [`super::widgets`] に委ね、view は「どの状態をどこに出すか」だけを担う。
 //! 色は [`super::theme`] の意味的な役割で載せる。
 
+pub mod cleanup_modal;
 pub mod closeup_modal;
 pub mod config;
 pub mod create_session_error_modal;

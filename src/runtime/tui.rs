@@ -3398,6 +3398,9 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             SessionCommand::SelectRemove { .. } => {
                 return Err("session selection must be handled by the TUI".to_owned());
             }
+            SessionCommand::Cleanup => {
+                return Err("session cleanup must be handled by the TUI".to_owned());
+            }
             SessionCommand::Remove {
                 name,
                 force,

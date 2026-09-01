@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use usagi_core::domain::agent::{
     AgentInventory, AgentRuntimeInventoryState, ProviderResumeProjection, ProviderResumeReason,
 };
-use usagi_core::domain::pullrequest::PrLink;
+use usagi_core::domain::pullrequest::{PrLink, PrState};
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
@@ -32,6 +32,7 @@ use usagi_core::usecase::session_state::SessionStateCounts;
 use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
+use crate::presentation::views::cleanup_modal::{self, CleanupEntry, CleanupModal};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
 use crate::presentation::views::daemon_modal;
 use crate::presentation::views::decision_modal;
@@ -318,6 +319,8 @@ pub struct HomeProjection {
     pr_overlay: Option<PrOverlay>,
     /// Open Markdown preview overlay projection, drawn above the frame.
     preview_overlay: Option<PreviewOverlay>,
+    /// Merge-confirmed cleanup queue projected with current session labels.
+    cleanup_queue: Option<CleanupModal>,
     /// Persisted Overview command-palette input, when its overlay is open. The
     /// runtime owns this so the caret and filter survive across frames.
     overview_modal: Option<OverviewModal>,
@@ -398,6 +401,34 @@ impl From<&CreateSessionForm> for CreateDraft {
 
 fn clone_notice_message(notice: &Notice) -> String {
     notice.message.clone()
+}
+
+fn project_cleanup_queue(state: &AppState, sessions: &[ProjectedSession]) -> Option<CleanupModal> {
+    let queue = state.cleanup_queue()?;
+    let entries = queue
+        .candidates()
+        .iter()
+        .filter_map(|session| {
+            let projected = sessions.iter().find(|entry| entry.id == *session)?;
+            let merged_prs = state
+                .session_prs(*session)
+                .unwrap_or_default()
+                .iter()
+                .filter(|pr| pr.state == PrState::Merged)
+                .count();
+            Some(CleanupEntry {
+                label: projected.label.clone(),
+                merged_prs,
+                selected: queue.selected().contains(session),
+                removing: queue.in_flight() == Some(*session),
+            })
+        })
+        .collect();
+    Some(CleanupModal {
+        entries,
+        cursor: queue.cursor(),
+        feedback: queue.feedback().map(clone_notice_message),
+    })
 }
 
 fn project_garden_sessions(
@@ -521,6 +552,7 @@ impl HomeProjection {
         sessions: Arc<[ProjectedSession]>,
     ) -> Self {
         let create_draft = state.create_session_form().map(CreateDraft::from);
+        let cleanup_queue = project_cleanup_queue(state, &sessions);
         let create_role = state
             .create_session_form()
             .and_then(CreateSessionForm::selected_role)
@@ -589,6 +621,7 @@ impl HomeProjection {
             unread_decision_ids: state.unread_decision_ids().clone(),
             pr_overlay: state.pr_overlay().cloned(),
             preview_overlay: state.preview_overlay().cloned(),
+            cleanup_queue,
             overview_modal: None,
             daemon_overlay: state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Daemon),
@@ -2196,6 +2229,8 @@ fn render_home_modals(
 ) -> Vec<String> {
     if let Some(modal) = &home.overview_modal {
         overview_modal::render_over(height, width, &frame, modal)
+    } else if let Some(modal) = &home.cleanup_queue {
+        cleanup_modal::render_over(height, width, &frame, modal)
     } else if home.daemon_overlay {
         daemon_modal::render_over(
             height,
@@ -3220,6 +3255,56 @@ mod tests {
             &terminal
         ));
     }
+
+    #[test]
+    fn cleanup_queue_projection_joins_stable_sessions_and_renders_modal() {
+        let workspace = WorkspaceId::new();
+        let ready = SessionId::new();
+        let omitted = SessionId::new();
+        let mut state = AppState::home(workspace, vec![ready, omitted]);
+        for (session, number) in [(ready, 1), (omitted, 2)] {
+            let mut pr = PrLink::new(number, format!("https://github.com/o/r/pull/{number}"));
+            pr.state = PrState::Merged;
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                    target: Target::Session(session),
+                    revision: 1,
+                    prs: vec![pr],
+                }),
+            );
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session cleanup".to_owned())),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        let record = session("ready", None, SessionOrigin::Human);
+        let sessions: Arc<[ProjectedSession]> =
+            Arc::from([ProjectedSession::from_record(ready, &record)]);
+        let home = HomeProjection::from_ordered_state(&state, "work", sessions);
+        let queue = home.cleanup_queue.as_ref().unwrap();
+        assert_eq!(queue.cursor, 0);
+        assert_eq!(queue.entries.len(), 1);
+        assert_eq!(queue.entries[0].label, "ready");
+        assert_eq!(queue.entries[0].merged_prs, 1);
+        assert!(queue.entries[0].selected);
+        assert!(queue.entries[0].removing);
+        assert_eq!(
+            queue.feedback.as_deref(),
+            Some("waiting for the current removal")
+        );
+
+        let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
+        assert!(text.contains("Merged session cleanup"));
+        assert!(text.contains("ready"));
+        assert!(text.contains("waiting for the current removal"));
+    }
+
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
