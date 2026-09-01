@@ -25,12 +25,12 @@ user_decision_request {
   allow_freeform?: boolean,
   expires_at?: string,
   idempotency_key?: string
-} -> { decision_id: string, status: "resolved", answer: { kind: "option", option_id: string } | { kind: "freeform", text: string } }
+} -> { decision_id: string, status: "pending", ... }
 ```
 
-option `id` は stable で一意な machine key とする。request は durable な Pending record を作成して MCP 応答を保留し、
-人間入力の resolve 後に回答を同期的に返す。通常フローでは `user_decision_get` を呼ばない。get は再接続、障害復旧、
-デバッグで durable record を調べるためだけに使う。
+option `id` は stable で一意な machine key とする。request は durable な Pending record を作成して即時に返す。
+caller は `user_decision_get` / `user_decision_list` で terminal state と回答を観測する。人間の応答時間を MCP
+connection deadline に束縛しないため、再接続や daemon rollover をまたいでも同じ durable record から継続できる。
 
 ## 所有者と状態
 
@@ -53,13 +53,12 @@ request 成功時は owner task/run を waiting state にし、解決前の新�
 ## 配送と再開の境界
 
 resolve は `Resolved` の durable 記録と `UserDecisionResolved` outbox event append を一度だけ commit する。
-request を処理中の daemon handler は durable record を待機して回答を返す。outbox は以前の非同期配送との互換のため
-確認済みにするだけで、agent PTY への continuation prompt は送らない。cancel/expire は delivery event を作らない。
+caller の terminal get を ACK とし、agent PTY への continuation prompt は送らない。cancel/expire は delivery event を作らない。
 
 ```text
-agent request -> daemon: Pending + wait for resolve
+agent request <- daemon: Pending（immediate）
 TUI resolve  -> daemon: Resolved + durable delivery event
-daemon       -> original MCP call: { decision_id, status: "resolved", answer }
+agent get    <- daemon: { decision_id, status: "resolved", answer } + ACK
 ```
 
 ## TUI
@@ -73,8 +72,9 @@ editor を表示する。dismiss は modal だけを閉じ、一覧から再表�
 
 `user_decision_get` が成功を返すのに回答 modal が出なかった不具合の triage と接続順を記録する。
 #378 と #379 で durable store、TUI 本番 port、pending modal を接続し、#383 で daemon-managed Codex の
-MCP child に runtime-fenced caller provenance を導入した。#406 で TUI の回答経路と、resolve 後の回答を
-元の同期 MCP request へ返す last-mile を接続した。現在の契約は [MCP サーバ](../07-mcp.md) と
+MCP child に runtime-fenced caller provenance を導入した。#406 では同期 MCP request へ回答を返す形で
+last-mile を接続したが、人間の応答が connection deadline を超える問題を受け、現在は request を即時受理し
+get/list で回答を観測する非同期契約へ移行した。現在の契約は [MCP サーバ](../07-mcp.md) と
 [TUI](../03-tui.md) が正本である。
 
 ### 層ごとの gap
@@ -85,7 +85,7 @@ MCP child に runtime-fenced caller provenance を導入した。#406 で TUI �
 | daemon / 合成ルート dispatch | credential と live runtime fence から owner を一括解決する | 実装済み（#383） |
 | daemon → TUI 配送 | decision snapshot / resolve の daemon-backed port と reducer projection を使う | 実装済み（#379） |
 | TUI 本番 port・自動表示 | decision command port と pending 到着時の modal open を実行する | 実装済み（#379） |
-| 解決回答 → caller | request handler が durable decision を待機し、resolve 後の回答を同じ MCP 応答で返す | 実装済み |
+| 解決回答 → caller | request は pending を即時返却し、caller が get/list で durable terminal state を観測する | 実装済み |
 
 ### 接続順
 

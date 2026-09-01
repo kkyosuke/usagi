@@ -4,8 +4,9 @@
 //! that byte stream into a fixed `rows × cols` character grid.  It is a
 //! deliberately small VT interpreter: it covers what a login shell prompt and
 //! everyday commands such as `ls` emit — printable text, `CR` / `LF` / `BS` /
-//! `HT`, line wrap and scroll, cursor moves, line/display erase and SGR styling
-//! — and silently ignores window-title (OSC) sequences. It also produces the
+//! `HT`, line wrap and scroll, cursor moves, line/display/character erase,
+//! character deletion and SGR styling — and silently ignores window-title
+//! (OSC) sequences. It also produces the
 //! terminal replies required by cursor-position queries while remaining pure
 //! and holding no IO, so it is exercised entirely by unit tests.
 //!
@@ -775,6 +776,12 @@ impl VtScreen {
             }
             'K' => self.erase_line(),
             'J' => self.erase_display(),
+            // Readline-backed CLIs (including psql) commonly repaint a
+            // backspace as `BS` followed by DCH. Moving the cursor without
+            // applying DCH leaves the deleted character in the semantic grid
+            // even though the child already removed it from its input buffer.
+            'P' => self.delete_characters(),
+            'X' => self.erase_characters(),
             'r' => self.set_scroll_region(),
             'S' => self.scroll_up(self.param(0, 1)),
             'T' => self.scroll_down(self.param(0, 1)),
@@ -832,6 +839,35 @@ impl VtScreen {
                 }
             }
         }
+    }
+
+    /// Applies DCH: delete cells at the cursor, shift the remainder of the row
+    /// left, and fill the vacated right edge with blank cells.
+    fn delete_characters(&mut self) {
+        let start = self.cursor_col.min(self.cols - 1);
+        let count = self.param(0, 1).max(1).min(self.cols - start);
+        let end = start + count;
+        let row = &mut self.grid[self.cursor_row];
+
+        // A column-addressed edit may intersect either half of a wide glyph.
+        // Clear both boundary glyphs before shifting so the result cannot
+        // retain an orphan leader or continuation cell.
+        if row[start].continuation {
+            clear_glyph_at(row, start);
+        }
+        if end < row.len() && row[end].continuation {
+            clear_glyph_at(row, end);
+        }
+        row.drain(start..end);
+        row.extend(std::iter::repeat_with(Cell::blank).take(count));
+    }
+
+    /// Applies ECH: replace cells at the cursor with blanks without moving the
+    /// cursor or the remainder of the row.
+    fn erase_characters(&mut self) {
+        let start = self.cursor_col.min(self.cols - 1);
+        let count = self.param(0, 1).max(1).min(self.cols - start);
+        clear_glyph_range(&mut self.grid[self.cursor_row], start, start + count);
     }
 
     fn blank_row(&mut self, row: usize) {
@@ -2142,6 +2178,44 @@ mod tests {
         let mut screen = VtScreen::new(3, 4);
         screen.advance(b"aa\r\nbb\r\ncc\x1b[2;1H\x1b[1J");
         assert_eq!(rows(&screen), vec!["", " b", "cc"]);
+    }
+
+    #[test]
+    fn readline_delete_character_repaints_the_semantic_row() {
+        // readline uses this compact sequence for a backspace when the
+        // terminal advertises DCH: BS moves over the final character and CSI P
+        // removes it. psql's input buffer was correct, but ignoring CSI P left
+        // the old character visible in the TUI checkpoint.
+        let mut screen = VtScreen::new(1, 12);
+        screen.advance(b"demo=> abc\x08\x1b[P");
+        assert_eq!(rows(&screen), vec!["demo=> ab"]);
+        assert_eq!(screen.cursor(), (0, 9));
+
+        screen.advance(b"cde\x1b[3D\x1b[2P");
+        assert_eq!(rows(&screen), vec!["demo=> abe"]);
+        assert_eq!(screen.cursor(), (0, 9));
+    }
+
+    #[test]
+    fn erase_characters_blanks_without_shifting_and_character_edits_keep_wide_glyphs_valid() {
+        let mut screen = VtScreen::new(1, 8);
+        screen.advance(b"abcdef\x1b[4D\x1b[2X");
+        assert_eq!(screen.cells(), vec!["ab  ef  "]);
+        assert_eq!(screen.cursor(), (0, 2));
+
+        let mut wide = VtScreen::new(1, 8);
+        wide.advance("A界BC\x1b[4D\x1b[P".as_bytes());
+        assert_eq!(rows(&wide), vec!["A BC"]);
+        assert!(wide.grid()[0].iter().all(|cell| !cell.continuation()));
+
+        let mut continuation = VtScreen::new(1, 8);
+        continuation.advance("A界BC\x1b[3D\x1b[P".as_bytes());
+        assert_eq!(rows(&continuation), vec!["A BC"]);
+        assert!(
+            continuation.grid()[0]
+                .iter()
+                .all(|cell| !cell.continuation())
+        );
     }
 
     #[test]

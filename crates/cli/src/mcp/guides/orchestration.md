@@ -54,8 +54,10 @@ committed issue は `session_delegate_issue`、事前 issue の無い依頼は `
 `session_delegate_issue` は daemon が worktree を作成した後、同じ session identity の queue へ初回 prompt を
 保存する。`session_delegate_brief` は caller credential を検証してから worktree を作成し、worker を直ちに
 dispatch する。brief の `agent` は
-`{"id":"<agent_id>"}` または allowlist にある `{"runtime":"codex","model":"gpt-5"}` のどちらか一方だけを
-指定する。credential・selector・session 作成のいずれかが失敗した場合は queue へフォールバックしない。
+allowlist にある `{"runtime":"codex","model":"gpt-5"}` のような新規 worker selector を指定する。
+作成前の session に既存 worker は所属できないため `id` による再利用は受け付けない。実行可能な selector が
+1 つも無い場合、この tool 自体が `tools/list` に現れない。credential・selector・session 作成のいずれかが
+失敗した場合は queue へフォールバックしない。
 
 ```json
 {"jsonrpc":"2.0","id":4,"method":"tools/call",
@@ -129,6 +131,19 @@ caller は `agent_inbox {"unread_only":true,"limit":100}` で自分宛ての報�
 pageの`cursor`に使い、messageを処理し終えた後だけ`agent_inbox_ack {"cursor":<next_cursor>}`へ渡す。queryだけでは
 既読にならないため、応答を失った場合は同じcursorで安全に再読できる。`since`にはRFC 3339 timestampを指定できる。
 workerが報告せず終了した場合もdaemonが`no_report`を配送する。
+
+## 人間の判断を待つ
+
+`user_decision_request` は durable な pending decision を作成して直ちに返す。人間の回答まで同じ MCP call を
+開いたままにはしない。caller は返された `decision_id` を `user_decision_get` で polling し、`resolved`、
+`cancelled`、`expired` のいずれかになったら処理を続ける。同じ idempotency key の request は同じ decision に
+収束するため、接続をまたぐ retry に使える。
+
+## 運用知見を残す
+
+`memory_save` で残した判断・制約・再発防止策は、daemon data home の workspace 専用 store に保存される。
+Git 追跡対象ではなく、同じ workspace の root と session worker から検索できる。作業固有の進捗は session の
+scratchpad、次の run にも再利用する知見は memory、実装 backlog は issue と使い分ける。
 
 ## session を作成する
 

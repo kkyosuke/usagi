@@ -761,21 +761,16 @@ impl CodexProvisioner for RootCodexProvisioner {
         } else {
             None
         };
-        let mut sandbox_roots = if mode == SandboxMode::Root {
-            root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
-                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?
-        } else {
-            let mut roots = claude_writable_roots(mode, &working_directory);
-            roots.extend(
-                session_git
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|policy| policy.writable_roots.iter().cloned()),
-            );
-            roots
-        };
-        sandbox_roots.sort();
-        sandbox_roots.dedup();
+        let sandbox_roots = codex_writable_roots(
+            mode,
+            &working_directory,
+            session_git.as_ref(),
+            self.sandbox_home.as_deref(),
+            self.program,
+            &self.data_home,
+            context.scope.workspace_id,
+        )
+        .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
             program: self.program,
@@ -822,6 +817,33 @@ impl CodexProvisioner for RootCodexProvisioner {
         })
     }
 }
+
+fn codex_writable_roots(
+    mode: SandboxMode,
+    working_directory: &Path,
+    session_git: Option<&SessionGitPolicy>,
+    sandbox_home: Option<&Path>,
+    program: &str,
+    data_home: &paths::DataHome,
+    workspace: WorkspaceId,
+) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
+    let mut roots = if mode == SandboxMode::Root {
+        root_agent_writable_roots(sandbox_home, program)?
+    } else {
+        let mut roots = claude_writable_roots(mode, working_directory);
+        roots.extend(
+            session_git
+                .into_iter()
+                .flat_map(|policy| policy.writable_roots.iter().cloned()),
+        );
+        roots
+    };
+    roots.push(root_memory_store_root(data_home, workspace)?);
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
 /// The Claude provisioner's product program: what the readiness probe proves,
 /// what the launcher execs, and whose `$HOME` state root the sandbox grants.
 /// The Codex provisioner carries the same value per profile (`RootCodexProvisioner::program`).
@@ -858,6 +880,34 @@ fn root_agent_writable_roots(
         .canonicalize()
         .map(|state| vec![state])
         .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)
+}
+
+/// A root coordinator's reusable memory lives outside every Git checkout and
+/// outside daemon control state. The MCP adapter adds `.usagi/memory` beneath
+/// this synthetic store root, preserving the existing `MemoryStore` contract.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_root_memory_survives_without_dirtying_the_workspace
+fn root_memory_store_root(
+    data_home: &paths::DataHome,
+    workspace: WorkspaceId,
+) -> Result<PathBuf, ClaudeSandboxPolicyError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let requested = data_home
+        .selected()
+        .join("agent-memory")
+        .join(workspace.to_string());
+    std::fs::create_dir_all(requested.join(".usagi/memory"))
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    std::fs::set_permissions(&requested, std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    // The launcher re-validates exact canonical paths. In particular, macOS
+    // exposes `/tmp` through `/private/tmp`; returning the lexical spelling
+    // would make an otherwise valid Agent exit before its provider starts.
+    let root = requested
+        .canonicalize()
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    validate_owned_directory(&root)?;
+    Ok(root)
 }
 
 /// Codex's arg0 janitor cannot open the `.lock` inside a directory left with no
@@ -985,6 +1035,10 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             None
         };
         let mut launch_roots = claude_writable_roots(mode, &working_directory);
+        launch_roots.push(
+            root_memory_store_root(&self.data_home, context.scope.workspace_id)
+                .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?,
+        );
         launch_roots.extend(
             session_git
                 .as_ref()
@@ -3062,120 +3116,6 @@ const CLIENT_CONNECTION_FDS: u64 = 3;
 /// write: expiry no longer takes the store lock or fsyncs unless something
 /// actually changed.
 const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
-/// Maximum time a synchronous decision waiter may take to observe a connection
-/// cancellation when no decision state transition occurs.
-const DECISION_CANCELLATION_POLL: Duration = Duration::from_millis(250);
-
-struct DecisionWaiter {
-    token: u64,
-    notify: SyncSender<()>,
-}
-
-/// Process-local notification for durable decision state transitions.
-///
-/// The JSON document remains authoritative. This registry only prevents every
-/// synchronous MCP waiter from reading that complete document forty times per
-/// second while its decision is still pending.
-#[derive(Default)]
-struct DecisionWaiters {
-    next_token: AtomicU64,
-    waiting: Mutex<BTreeMap<usagi_core::domain::id::UserDecisionId, Vec<DecisionWaiter>>>,
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
-impl DecisionWaiters {
-    fn subscribe(
-        self: &Arc<Self>,
-        decision_id: usagi_core::domain::id::UserDecisionId,
-    ) -> DecisionWaitSubscription {
-        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        let (notify, changes) = mpsc::sync_channel(1);
-        self.waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(decision_id)
-            .or_default()
-            .push(DecisionWaiter { token, notify });
-        DecisionWaitSubscription {
-            registry: Arc::clone(self),
-            decision_id,
-            token,
-            changes,
-        }
-    }
-
-    fn notify(&self, decision_id: usagi_core::domain::id::UserDecisionId) {
-        let waiters = self
-            .waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&decision_id)
-            .unwrap_or_default();
-        for waiter in waiters {
-            let _ = waiter.notify.try_send(());
-        }
-    }
-
-    fn unsubscribe(&self, decision_id: usagi_core::domain::id::UserDecisionId, token: u64) {
-        let mut waiting = self
-            .waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let remove_entry = if let Some(waiters) = waiting.get_mut(&decision_id) {
-            waiters.retain(|waiter| waiter.token != token);
-            waiters.is_empty()
-        } else {
-            false
-        };
-        if remove_entry {
-            waiting.remove(&decision_id);
-        }
-    }
-
-    #[cfg(test)]
-    fn waiting_count(&self, decision_id: usagi_core::domain::id::UserDecisionId) -> usize {
-        self.waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&decision_id)
-            .map_or(0, Vec::len)
-    }
-}
-
-struct DecisionWaitSubscription {
-    registry: Arc<DecisionWaiters>,
-    decision_id: usagi_core::domain::id::UserDecisionId,
-    token: u64,
-    changes: Receiver<()>,
-}
-
-impl Drop for DecisionWaitSubscription {
-    fn drop(&mut self) {
-        self.registry.unsubscribe(self.decision_id, self.token);
-    }
-}
-
-trait DecisionWaitCancellation {
-    fn is_cancelled(&self) -> bool;
-}
-
-#[derive(Clone, Copy)]
-struct DecisionWaitContext<'a> {
-    waiters: &'a Arc<DecisionWaiters>,
-    cancellation: &'a dyn DecisionWaitCancellation,
-}
-
-struct DecisionConnectionCancellation {
-    connection: AcceptedStream,
-    gate: AdmissionGate,
-}
-
-impl DecisionWaitCancellation for DecisionConnectionCancellation {
-    fn is_cancelled(&self) -> bool {
-        !self.gate.is_open(LeaseClass::ActiveControl) || self.connection.peer_disconnected()
-    }
-}
-
 struct ProductionRefreshClock {
     started: Instant,
 }
@@ -3599,12 +3539,8 @@ fn spawn_ipc_server(
         Arc::clone(&shutdown),
     )?);
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
-    let decision_waiters = Arc::new(DecisionWaiters::default());
-    consume_user_decision_events(&decisions)
-        .map_err(|error| std::io::Error::other(error.message))?;
     background_workers.push(start_decision_maintenance(
         Arc::clone(&decisions),
-        Arc::clone(&decision_waiters),
         Arc::clone(&shutdown),
     )?);
     background_workers.push(start_pr_refresh_worker(
@@ -3690,7 +3626,6 @@ fn spawn_ipc_server(
         pr_inventory,
         projection,
         decisions,
-        decision_waiters,
         Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
             agent_concurrency,
             shutdown.background_worker_health(),
@@ -4567,10 +4502,9 @@ fn node_identity(metadata: &std::fs::Metadata) -> NodeIdentity {
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn start_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
-    waiters: Arc<DecisionWaiters>,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    spawn_decision_maintenance(decisions, waiters, shutdown, DECISION_MAINTENANCE_TICK)
+    spawn_decision_maintenance(decisions, shutdown, DECISION_MAINTENANCE_TICK)
 }
 
 /// The loop, with the tick injected so a test can drive it without waiting out
@@ -4578,7 +4512,6 @@ fn start_decision_maintenance(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn spawn_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
-    waiters: Arc<DecisionWaiters>,
     shutdown: Arc<ShutdownRequest>,
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
@@ -4588,12 +4521,7 @@ fn spawn_decision_maintenance(
             let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::DecisionMaintenance);
             while !shutdown.is_requested() {
-                if let Ok(expired) = decisions.expire_due(chrono::Utc::now()) {
-                    for decision_id in expired {
-                        waiters.notify(decision_id);
-                    }
-                }
-                let _ = consume_user_decision_events(&decisions);
+                let _ = decisions.expire_due(chrono::Utc::now());
                 if shutdown.wait_for_tick(tick) {
                     break;
                 }
@@ -5037,7 +4965,6 @@ fn start_ipc_accept_loop(
     pr_inventory: SharedPrInventory,
     projection: Arc<PrProjectionQueue>,
     decisions: Arc<UserDecisionStore>,
-    decision_waiters: Arc<DecisionWaiters>,
     metrics: SharedMetricsBroker,
     process_metrics: SharedProcessResourceSampler,
     pipeline_metrics: Arc<TerminalPipelineMetrics>,
@@ -5143,7 +5070,6 @@ fn start_ipc_accept_loop(
                         let agent_launch = Arc::clone(&agent);
                         let pr_inventory = Arc::clone(&pr_inventory);
                         let decisions = Arc::clone(&decisions);
-                        let decision_waiters = Arc::clone(&decision_waiters);
                         let metrics = Arc::clone(&metrics);
                         let process_metrics = Arc::clone(&process_metrics);
                         let pipeline_metrics = Arc::clone(&pipeline_metrics);
@@ -5166,10 +5092,6 @@ fn start_ipc_accept_loop(
                         };
                         let worker_completion = Some(unblock.clone());
                         let retirement = unblock.retirement();
-                        let decision_cancellation = DecisionConnectionCancellation {
-                            connection: unblock.clone(),
-                            gate: connection_fence.gate.clone(),
-                        };
                         let spawned = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -5295,7 +5217,7 @@ fn start_ipc_accept_loop(
                                             );
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
-                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, peer_process, request_id, &body, hello),
+                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, peer_process, request_id, &body, hello),
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
@@ -5305,13 +5227,13 @@ fn start_ipc_accept_loop(
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, wait: DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation } }, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
                                             let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                         },
                                         Some("supervisor_snapshot") => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
-                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
+                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                         }
                                     },
@@ -5497,7 +5419,6 @@ struct DispatchToolContext<'a> {
     bound: &'a ConnectionWorkspace,
     pr_inventory: &'a SharedPrInventory,
     decisions: &'a UserDecisionStore,
-    wait: DecisionWaitContext<'a>,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
@@ -5539,7 +5460,6 @@ fn dispatch_dispatch_tool(
             context.agent,
             context.bound,
             context.decisions,
-            context.wait,
             request_id,
             body,
             hello,
@@ -6554,7 +6474,6 @@ fn dispatch_pr_snapshot(
 #[derive(Debug)]
 enum UserDecisionDispatchError {
     Decision(usagi_core::domain::user_decision::UserDecisionError),
-    Cancelled,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
@@ -6570,7 +6489,6 @@ fn dispatch_user_decision(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     store: &UserDecisionStore,
-    wait: DecisionWaitContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -6732,10 +6650,6 @@ fn dispatch_user_decision(
         ))
     });
     let response = owner.and_then(|(workspace, owner)| {
-        // Resolved events are retained only for atomicity with legacy durable
-        // records. Their acknowledgement must not inject a continuation while
-        // this MCP call is waiting for its own synchronous response.
-        let _ = consume_user_decision_events(store);
         let request_owner = owner.clone();
         let decision_for = |id| -> Result<UserDecision, UserDecisionError> {
             let decision = store
@@ -6778,18 +6692,22 @@ fn dispatch_user_decision(
                             resolved_at: None,
                         })
                         .map_err(|_| UserDecisionError::Terminal)??;
-                    wait_for_user_decision(
-                        store,
-                        wait.waiters,
-                        wait.cancellation,
-                        workspace,
-                        &decision,
-                    )
+                    Ok(serde_json::json!(decision))
                 }
                 DispatchToolAction::UserDecisionGet => {
                     let input = serde_json::from_value::<DecisionIdPayload>(payload)
                         .map_err(|_| UserDecisionError::Terminal)?;
-                    Ok(serde_json::json!(decision_for(input.decision_id)?))
+                    let decision = decision_for(input.decision_id)?;
+                    if decision.status != UserDecisionStatus::Pending {
+                        // Resolution creates a durable outbox entry atomically.
+                        // Polling the terminal decision is the acknowledgement;
+                        // no synchronous connection is kept open while a human
+                        // considers the answer.
+                        store
+                            .ack_event(input.decision_id)
+                            .map_err(|_| UserDecisionError::Terminal)?;
+                    }
+                    Ok(serde_json::json!(decision))
                 }
                 DispatchToolAction::UserDecisionList => {
                     let decisions = store
@@ -6812,7 +6730,6 @@ fn dispatch_user_decision(
                     let decision = store
                         .resolve(workspace, input.decision_id, input.answer, now)
                         .map_err(|_| UserDecisionError::Terminal)??;
-                    wait.waiters.notify(input.decision_id);
                     Ok(serde_json::json!(decision))
                 }
                 DispatchToolAction::UserDecisionCancel | DispatchToolAction::UserDecisionExpire => {
@@ -6827,7 +6744,6 @@ fn dispatch_user_decision(
                     let decision = store
                         .terminal(workspace, input.decision_id, status, now)
                         .map_err(|_| UserDecisionError::Terminal)??;
-                    wait.waiters.notify(input.decision_id);
                     Ok(serde_json::json!(decision))
                 }
                 _ => unreachable!(),
@@ -6873,13 +6789,9 @@ fn dispatch_user_decision(
                     "the user decision store is full of pending or undelivered records; \
                      complete some before retrying",
                 ),
-                UserDecisionDispatchError::Cancelled => {
-                    (ErrorCode::Cancelled, "decision wait was cancelled")
-                }
             };
             ProtocolError::new(code, message)
         })?;
-        let _ = consume_user_decision_events(store);
         Ok(value)
     });
     match response {
@@ -6891,94 +6803,6 @@ fn dispatch_user_decision(
             serde_json::json!(null),
         ),
     }
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
-fn wait_for_user_decision(
-    decisions: &UserDecisionStore,
-    waiters: &Arc<DecisionWaiters>,
-    cancellation: &dyn DecisionWaitCancellation,
-    workspace: usagi_core::domain::id::WorkspaceId,
-    requested: &usagi_core::domain::user_decision::UserDecision,
-) -> Result<serde_json::Value, UserDecisionDispatchError> {
-    use usagi_core::domain::user_decision::UserDecisionStatus;
-
-    // Subscribe before the first authoritative read. A terminal transition that
-    // races this setup either appears in that read or leaves a queued wakeup, so
-    // no state edge can be missed.
-    let subscription = waiters.subscribe(requested.decision_id);
-    let mut refresh = true;
-    loop {
-        if cancellation.is_cancelled() {
-            return Err(UserDecisionDispatchError::Cancelled);
-        }
-        if !refresh {
-            match subscription
-                .changes
-                .recv_timeout(DECISION_CANCELLATION_POLL)
-            {
-                Ok(()) => refresh = true,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(UserDecisionDispatchError::Cancelled);
-                }
-            }
-            continue;
-        }
-        let decision = decisions
-            .get(workspace, requested.decision_id)
-            .map_err(|_| usagi_core::domain::user_decision::UserDecisionError::Terminal)?
-            .ok_or(usagi_core::domain::user_decision::UserDecisionError::Terminal)?;
-        match decision.status {
-            UserDecisionStatus::Pending => refresh = false,
-            UserDecisionStatus::Resolved => {
-                let answer = decision
-                    .answer
-                    .ok_or(usagi_core::domain::user_decision::UserDecisionError::Terminal)?;
-                return Ok(serde_json::json!({
-                    "decision_id": decision.decision_id,
-                    "status": "resolved",
-                    "answer": answer,
-                }));
-            }
-            UserDecisionStatus::Cancelled => {
-                return Err(usagi_core::domain::user_decision::UserDecisionError::Terminal.into());
-            }
-            UserDecisionStatus::Expired => {
-                return Err(usagi_core::domain::user_decision::UserDecisionError::Expired.into());
-            }
-        }
-    }
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
-fn consume_user_decision_events(
-    decisions: &UserDecisionStore,
-) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
-    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
-
-    // A resolved event and its answer are atomically persisted together. The
-    // caller now receives that answer from its still-open MCP request, so the
-    // outbox has no asynchronous PTY continuation to deliver.
-    for event in decisions
-        .events()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable"))?
-    {
-        let Some(decision) = decisions.get_for_event(&event).map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
-        })?
-        else {
-            return Err(ProtocolError::new(
-                ErrorCode::Unavailable,
-                "decision delivery record is inconsistent",
-            ));
-        };
-        let _ = decision;
-        decisions.ack_event(event.decision_id).map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
-        })?;
-    }
-    Ok(())
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
@@ -7295,6 +7119,7 @@ fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
 fn dispatch_mcp_child_claim(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
+    data_dir: &Path,
     peer_process: (u32, u32, u32),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
@@ -7343,16 +7168,27 @@ fn dispatch_mcp_child_claim(
         } else {
             bound.tenant.root().to_path_buf()
         };
-        Ok((credential, store_root))
+        let memory_root = data_dir
+            .join("agent-memory")
+            .join(bound.tenant.workspace_id().to_string())
+            .canonicalize()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "agent memory store is unavailable")
+            })?;
+        validate_owned_directory(&memory_root).map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "agent memory store is unavailable")
+        })?;
+        Ok((credential, store_root, memory_root))
     })();
     match result {
-        Ok((credential, store_root)) => envelope(
+        Ok((credential, store_root, memory_root)) => envelope(
             hello,
             request_id,
             ResponseOutcome::Ok,
             serde_json::json!({
                 "credential": credential,
                 "store_root": paths::wire_workspace_root(&store_root),
+                "memory_root": paths::wire_workspace_root(&memory_root),
             }),
         ),
         Err(error) => envelope(
@@ -10691,6 +10527,7 @@ impl AcceptedStream {
     /// Observes a peer close without consuming bytes that may belong to a later
     /// request. The retained duplicate is already owned for retirement, so this
     /// adds no descriptor to a waiting decision.
+    #[cfg(test)]
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
     fn peer_disconnected(&self) -> bool {
         if self.retired.load(Ordering::Acquire) {
@@ -10753,13 +10590,6 @@ impl AcceptedStream {
             }
             return error.kind() != std::io::ErrorKind::WouldBlock;
         }
-    }
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
-impl DecisionWaitCancellation for AcceptedStream {
-    fn is_cancelled(&self) -> bool {
-        self.peer_disconnected()
     }
 }
 
@@ -17873,109 +17703,6 @@ mod tests {
         assert!(!data_dir.exists());
     }
 
-    fn pending_decision(
-        store: &UserDecisionStore,
-    ) -> usagi_core::domain::user_decision::UserDecision {
-        use usagi_core::domain::{
-            agent::CallerRef,
-            id::{AgentId, OperationId, UserDecisionId},
-            user_decision::{
-                UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionStatus,
-            },
-        };
-
-        store
-            .create(UserDecision {
-                decision_id: UserDecisionId::new(),
-                owner: UserDecisionOwner {
-                    workspace_id: WorkspaceId::new(),
-                    session_id: Some(SessionId::new()),
-                    caller: CallerRef {
-                        session_id: Some(SessionId::new()),
-                        agent_id: AgentId::new(),
-                    },
-                    run_id: OperationId::new(),
-                },
-                title: "Choose".into(),
-                prompt: "Continue?".into(),
-                options: vec![UserDecisionOption {
-                    id: "yes".into(),
-                    label: "Yes".into(),
-                    description: None,
-                }],
-                allow_freeform: false,
-                expires_at: None,
-                idempotency_key: Some("decision-wait-test".into()),
-                status: UserDecisionStatus::Pending,
-                answer: None,
-                created_at: chrono::Utc::now(),
-                resolved_at: None,
-            })
-            .unwrap()
-            .unwrap()
-    }
-
-    fn wait_until_decision_waiter_is_registered(
-        waiters: &DecisionWaiters,
-        decision_id: usagi_core::domain::id::UserDecisionId,
-    ) {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while waiters.waiting_count(decision_id) == 0 {
-            assert!(
-                Instant::now() < deadline,
-                "decision waiter did not register"
-            );
-            std::thread::yield_now();
-        }
-    }
-
-    #[test]
-    fn decision_transition_notifies_the_synchronous_waiter() {
-        use usagi_core::domain::user_decision::UserDecisionAnswer;
-
-        struct NeverCancelled;
-        impl DecisionWaitCancellation for NeverCancelled {
-            fn is_cancelled(&self) -> bool {
-                false
-            }
-        }
-
-        let home = tempfile::tempdir_in("/tmp").unwrap();
-        let store = Arc::new(UserDecisionStore::new(home.path()));
-        let decision = pending_decision(&store);
-        let waiters = Arc::new(DecisionWaiters::default());
-        let waiting_store = Arc::clone(&store);
-        let waiting_registry = Arc::clone(&waiters);
-        let requested = decision.clone();
-        let handle = std::thread::spawn(move || {
-            wait_for_user_decision(
-                &waiting_store,
-                &waiting_registry,
-                &NeverCancelled,
-                requested.owner.workspace_id,
-                &requested,
-            )
-        });
-        wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
-
-        store
-            .resolve(
-                decision.owner.workspace_id,
-                decision.decision_id,
-                UserDecisionAnswer::Option {
-                    option_id: "yes".into(),
-                },
-                chrono::Utc::now(),
-            )
-            .unwrap()
-            .unwrap();
-        waiters.notify(decision.decision_id);
-
-        let response = handle.join().unwrap().unwrap();
-        assert_eq!(response["status"], "resolved");
-        assert_eq!(waiters.waiting_count(decision.decision_id), 0);
-    }
-
     #[test]
     fn accepted_stream_observes_peer_close_behind_buffered_data() {
         let (server, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -17999,91 +17726,6 @@ mod tests {
     }
 
     #[test]
-    fn disconnected_client_releases_a_pending_decision_waiter_without_mutating_it() {
-        let home = tempfile::tempdir_in("/tmp").unwrap();
-        let store = Arc::new(UserDecisionStore::new(home.path()));
-        let decision = pending_decision(&store);
-        let waiters = Arc::new(DecisionWaiters::default());
-        let (server, peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let cancellation = AcceptedStream::new(server);
-        let waiting_store = Arc::clone(&store);
-        let waiting_registry = Arc::clone(&waiters);
-        let requested = decision.clone();
-        let handle = std::thread::spawn(move || {
-            wait_for_user_decision(
-                &waiting_store,
-                &waiting_registry,
-                &cancellation,
-                requested.owner.workspace_id,
-                &requested,
-            )
-        });
-        wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
-
-        drop(peer);
-        assert!(matches!(
-            handle.join().unwrap(),
-            Err(UserDecisionDispatchError::Cancelled)
-        ));
-        let retained = store
-            .get(decision.owner.workspace_id, decision.decision_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            retained.status,
-            usagi_core::domain::user_decision::UserDecisionStatus::Pending
-        );
-        assert_eq!(waiters.waiting_count(decision.decision_id), 0);
-    }
-
-    #[test]
-    fn rollover_control_barrier_cancels_a_pending_decision_before_waiting_for_its_lease() {
-        let home = tempfile::tempdir_in("/tmp").unwrap();
-        let store = Arc::new(UserDecisionStore::new(home.path()));
-        let decision = pending_decision(&store);
-        let waiters = Arc::new(DecisionWaiters::default());
-        let (server, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
-        let lease = gate.acquire(LeaseClass::ActiveControl).unwrap();
-        let cancellation = DecisionConnectionCancellation {
-            connection: AcceptedStream::new(server),
-            gate: gate.clone(),
-        };
-        let waiting_store = Arc::clone(&store);
-        let waiting_registry = Arc::clone(&waiters);
-        let requested = decision.clone();
-        let handle = std::thread::spawn(move || {
-            let _lease = lease;
-            assert!(matches!(
-                wait_for_user_decision(
-                    &waiting_store,
-                    &waiting_registry,
-                    &cancellation,
-                    requested.owner.workspace_id,
-                    &requested,
-                ),
-                Err(UserDecisionDispatchError::Cancelled)
-            ));
-        });
-        wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
-
-        let started = Instant::now();
-        gate.close(LeaseClass::ActiveControl);
-        gate.await_drain(LeaseClass::ActiveControl).unwrap();
-        handle.join().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(waiters.waiting_count(decision.decision_id), 0);
-        let retained = store
-            .get(decision.owner.workspace_id, decision.decision_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            retained.status,
-            usagi_core::domain::user_decision::UserDecisionStatus::Pending
-        );
-    }
-
-    #[test]
     fn decision_maintenance_never_writes_when_nothing_is_due_and_honors_shutdown() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let daemon = home.path().join("daemon");
@@ -18093,13 +17735,8 @@ mod tests {
         let shutdown = Arc::new(ShutdownRequest::new());
         let stopper = Arc::clone(&shutdown);
 
-        let handle = spawn_decision_maintenance(
-            decisions,
-            Arc::new(DecisionWaiters::default()),
-            shutdown,
-            Duration::from_millis(1),
-        )
-        .unwrap();
+        let handle =
+            spawn_decision_maintenance(decisions, shutdown, Duration::from_millis(1)).unwrap();
         // Let several ticks run, then stop: the worker must observe the request
         // rather than needing its tick to be short.
         std::thread::sleep(Duration::from_millis(30));
@@ -18129,7 +17766,6 @@ mod tests {
         shutdown.request();
         spawn_decision_maintenance(
             Arc::new(UserDecisionStore::new(daemon)),
-            Arc::new(DecisionWaiters::default()),
             shutdown,
             Duration::from_secs(30),
         )
@@ -19356,6 +18992,33 @@ instructions = "{instructions}"
 
         let roots = root_agent_writable_roots(None, "/bin/sh").unwrap();
         assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn agent_memory_root_is_shared_by_workspace_and_outside_the_checkout() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
+        let workspace = WorkspaceId::new();
+
+        let root = root_memory_store_root(&data_home, workspace).unwrap();
+
+        assert_eq!(
+            root,
+            fixture
+                .path()
+                .join("agent-memory")
+                .join(workspace.to_string())
+                .canonicalize()
+                .unwrap()
+        );
+        assert!(root.join(".usagi/memory").is_dir());
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[test]
@@ -22446,14 +22109,7 @@ instructions = "{instructions}"
     #[test]
     #[allow(clippy::too_many_lines)] // One matrix keeps every authority transition on one durable run.
     fn supervisor_authority_survives_reconnect_and_rollover_but_not_forgery_or_restart() {
-        use chrono::Utc;
-        use usagi_core::domain::{
-            agent::CallerRef,
-            id::{AgentId, OperationId},
-            supervisor::{
-                EscalationDecision, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
-            },
-        };
+        use usagi_core::domain::{agent::CallerRef, id::AgentId, supervisor::EscalationDecision};
         use usagi_core::infrastructure::{
             ipc::{ErrorCode, ResponseOutcome},
             store::supervisor::SupervisorStore,
@@ -22511,32 +22167,10 @@ instructions = "{instructions}"
             assert_eq!(outcome, ResponseOutcome::Ok);
         }
 
-        // Put the aggregate in a real durable escalation so the authorized
-        // resolve path is exercised through the dispatcher too.
+        // Start's initial tick detects that no worker reservation was produced,
+        // so its durable escalation also exercises the authorized resolve path.
         let store = SupervisorStore::new(temp.path());
         let id = serde_json::from_value(retry_body["supervisor_run_id"].clone()).unwrap();
-        let run = store.load(id).unwrap().unwrap();
-        store
-            .apply(
-                id,
-                run.state_revision,
-                &SupervisorEvent {
-                    sequence: run.state_revision + 1,
-                    event_id: OperationId::new(),
-                    causation_id: None,
-                    correlation_id: None,
-                    observed_at: Utc::now(),
-                    payload_digest: "test-escalation".into(),
-                    source: SupervisorEventSource::Admission,
-                    kind: SupervisorEventKind::Escalate {
-                        task_id: None,
-                        reason: "operator decision required".into(),
-                        safe_evidence: "fixture".into(),
-                        choices: vec!["resume".into()],
-                    },
-                },
-            )
-            .unwrap();
         let escalated = store.load(id).unwrap().unwrap();
         let actual_escalation = escalated.escalation.unwrap().escalation_id;
         let (resolved, _) = serve_supervisor_request(

@@ -17,7 +17,8 @@ pub mod tools;
 
 pub use serve::{
     serve, serve_with_client, serve_with_client_and_caller, serve_with_client_and_caller_at,
-    serve_with_client_and_features, serve_with_client_and_snapshot,
+    serve_with_client_and_caller_at_roots, serve_with_client_and_features,
+    serve_with_client_and_snapshot,
 };
 use tool::ToolError;
 

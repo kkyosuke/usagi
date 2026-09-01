@@ -615,7 +615,11 @@ fn production_supervisor_tools_observe_one_durable_aggregate() {
     let started: serde_json::Value =
         serde_json::from_str(started["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     let run_id = started["supervisor_run_id"].as_str().unwrap();
-    assert_eq!(started["state"], "running");
+    assert_eq!(started["state"], "escalated");
+    assert_eq!(
+        started["escalation"]["reason"],
+        "no worker dispatch reservation was produced for a ready task"
+    );
     assert_eq!(started["tasks"].as_array().unwrap().len(), 2);
     assert!(!started.to_string().contains("inspect without exposing"));
 
@@ -637,8 +641,9 @@ fn production_supervisor_tools_observe_one_durable_aggregate() {
     );
     let events: serde_json::Value =
         serde_json::from_str(events["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(events["events"].as_array().unwrap().len(), 3);
-    assert_eq!(events["next_sequence"], 4);
+    assert_eq!(events["events"].as_array().unwrap().len(), 4);
+    assert_eq!(events["next_sequence"], 5);
+    assert_eq!(events["events"][3]["source"], "dispatch_failure");
 
     let durable_dir = mcp.data_dir().join("daemon/supervisor-runs");
     assert!(fs::read_dir(durable_dir).unwrap().count() >= 2);
@@ -1480,7 +1485,8 @@ fi
   printf '%s\n' '{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"decision-agent","version":"1"}}}}}}'
   printf '%s\n' '{{"jsonrpc":"2.0","method":"notifications/initialized"}}'
   printf '%s\n' '{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"user_decision_request","arguments":{{"title":"Deploy?","prompt":"Choose","options":[{{"id":"yes","label":"Yes"}}]}}}}}}'
-}} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_RUNTIME_MODE="$USAGI_RUNTIME_MODE" USAGI_WORKSPACE_ROOT="$USAGI_WORKSPACE_ROOT" "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
+  printf '%s\n' '{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"user_decision_list","arguments":{{}}}}}}'
+}} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_RUNTIME_MODE="$USAGI_RUNTIME_MODE" USAGI_WORKSPACE_ROOT="$USAGI_WORKSPACE_ROOT" "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG" 2>&1
 "#,
         ),
     );
@@ -1513,12 +1519,23 @@ fi
     assert!(matches!(reply, DaemonReply::Accepted { .. }));
 
     let decision_path = mcp.data_dir().join("daemon/user-decisions.json");
-    wait_until(|| {
-        fs::read(&decision_path)
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if fs::read(&decision_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .is_some_and(|state| !state["decisions"][0].is_null())
-    });
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "decision was not created; fixture output:\n{}\ndispatch state:\n{}",
+            fs::read_to_string(mcp.fixture_log()).unwrap_or_default(),
+            fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
     let state: serde_json::Value =
         serde_json::from_slice(&fs::read(&decision_path).unwrap()).unwrap();
     let decision: UserDecision = serde_json::from_value(state["decisions"][0].clone()).unwrap();
@@ -1563,12 +1580,22 @@ fi
         .unwrap();
     assert!(matches!(cancelled, DaemonReply::Ok(ref body) if body["status"] == "cancelled"));
 
-    wait_until(|| {
-        fs::read_to_string(mcp.fixture_log()).is_ok_and(|output| {
-            output.contains("\\\"status\\\":\\\"resolved\\\"")
-                && output.contains("\\\"option_id\\\":\\\"yes\\\"")
-        })
-    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let output = fs::read_to_string(mcp.fixture_log()).unwrap_or_default();
+        if output.contains("\"id\":2")
+            && output.contains("\"id\":3")
+            && output.contains("\\\"status\\\":\\\"pending\\\"")
+            && !output.contains("OwnershipUnknown")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "decision fixture did not complete both calls:\n{output}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
     let durable: serde_json::Value =
         serde_json::from_slice(&fs::read(decision_path).unwrap()).unwrap();
     assert!(durable["events"].as_array().unwrap().is_empty());
