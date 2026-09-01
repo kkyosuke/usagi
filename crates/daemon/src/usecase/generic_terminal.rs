@@ -348,9 +348,14 @@ impl GenericTerminalCoordinator {
             },
         );
         self.persist(store)?;
-        self.terminals
-            .register(terminal.clone(), geometry)
-            .expect("a newly reserved terminal cannot already be registered");
+        if let Err(error) = self.terminals.register(terminal.clone(), geometry) {
+            // No PTY effect occurred, so this reservation has a definite final
+            // state rather than becoming an ambiguous live owner.
+            self.records.get_mut(&key).expect("reserved record").state =
+                TerminalRuntimeState::SpawnFailed;
+            self.persist(store)?;
+            return Err(GenericTerminalError::Terminal(error));
+        }
         match spawner.spawn(&resolved, &terminal, geometry) {
             Ok(process) => {
                 let record = self.records.get_mut(&key).expect("reserved record");
@@ -1825,6 +1830,44 @@ mod tests {
         assert_eq!(metrics.retained_finals, 1);
         assert_eq!(metrics.retained_bytes, 12);
         assert!(retention.lookup(&terminal).retained().is_some());
+    }
+
+    #[test]
+    fn a_screen_budget_refusal_is_persisted_without_spawning_a_pty() {
+        let (retention, _clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator =
+            GenericTerminalCoordinator::with_retention(1, 64, 1, retention.clone());
+        coordinator.terminals =
+            TerminalRegistry::new(64, 1).with_screen_cell_budgets(1, usize::MAX);
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let spawns = std::cell::Cell::new(0);
+        let mut store = Store::default();
+
+        assert_eq!(
+            coordinator.launch(
+                &request,
+                terminal,
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut CountingSpawner(&spawns),
+            ),
+            Err(GenericTerminalError::Terminal(
+                RegistryError::ScreenBudgetExceeded
+            ))
+        );
+        assert_eq!(spawns.get(), 0);
+        assert_eq!(retention.metrics().reserved_finals, 0);
+        assert_eq!(
+            coordinator.snapshot().records[0].state,
+            TerminalRuntimeState::SpawnFailed
+        );
+        assert_eq!(
+            store.0.last().unwrap().records[0].state,
+            TerminalRuntimeState::SpawnFailed
+        );
     }
 
     /// Counts spawns so a rejected launch can prove no PTY was started.
