@@ -1,13 +1,13 @@
 ---
 number: 703
 title: fix(test): 結合テストが起動した bootstrap-broker が reap されず常駐し続ける
-status: todo
+status: done
 priority: medium
 labels: [fix, test, daemon]
 dependson: []
 related: []
 created_at: 2026-08-19T11:20:34.240449+00:00
-updated_at: 2026-08-19T11:20:34.240449+00:00
+updated_at: 2026-09-01T00:10:49.292249+00:00
 ---
 
 ## 症状
@@ -47,3 +47,10 @@ exact reap を要求している当の問題と同じ形）。
 （broker socket の owner か、broker 自身が置く pid 記録）をどこに持たせるかを先に決める必要がある。
 
 関連: #702（この残留を見つけた調査）
+
+## 完了確認（2026-09-01）
+
+- PR #1610（`66bc2d00`）で broker が digest-scoped identity record（PID + process-start identity）を publish する。
+- fixture teardown は private socket の STOP、exact SIGTERM、exact SIGKILL の順で broker を回収する。
+- stale record、PID reuse、自プロセスは signal 対象から除外する。
+- `fixture_reap_terminates_the_exact_bootstrap_broker_after_a_daemon_crash` が daemon crash 後の exact reap と record / socket cleanup を固定する。
