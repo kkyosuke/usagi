@@ -1588,7 +1588,7 @@ response が失われた・timeout した場合は、その pane を安全な失
 受け取り、以降は redraw ごとに `Resume { after_offset }` で offset 以降の出力だけを取得する。attach では
 checkpoint から screen を復元し（履歴の control byte を再生しない）、以降の suffix を**その復元済み parser**へ
 feed する。screen は最小の VT screen（印字・
-`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・Reverse Index（`ESC M`）・SGR の色と属性・alternate screen buffer）で、
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・文字削除/消去（DCH / ECH）・scroll region を含む画面スクロール・Reverse Index（`ESC M`）・SGR の色と属性・alternate screen buffer）で、
 その screen 行を右ペインへ clip して表示する。PTY output の適用は parser state だけを更新し、retained scrollback 全体の
 描画 cache は作らない。各 frame は現在の viewport に必要な行 window だけを ANSI 付き表示へ投影し、URL 検出もその
 window に接する折返し logical line までに限定する。このため通常の output・idle redraw・scroll 操作は 10,000 行の
