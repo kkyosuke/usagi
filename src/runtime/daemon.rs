@@ -5221,7 +5221,7 @@ fn start_ipc_accept_loop(
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
+                                        Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
@@ -8460,12 +8460,10 @@ enum AgentDispatchRequest {
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn admit_agent_dispatch_request(
     agent: &SharedAgentRuntime,
+    supervisor: &SharedSupervisorRuntime,
     scope: &dyn SessionScopeResolver,
     request: &AgentDispatchRequest,
-) -> Result<
-    usagi_daemon::usecase::agent_ipc::AgentAdmission,
-    usagi_core::infrastructure::ipc::ProtocolError,
-> {
+) -> Result<AgentDispatchAdmission, usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     let preflight = agent
         .lock()
@@ -8491,34 +8489,103 @@ fn admit_agent_dispatch_request(
             }
         })?;
     run_agent_readiness(agent, preflight.as_ref())?;
-    agent
+    let supervisor_run = match request {
+        AgentDispatchRequest::Goal(operation_id, intent) => {
+            Some(start_goal_supervisor_run(supervisor, operation_id, intent)?)
+        }
+        _ => None,
+    };
+    let admission =
+        agent
+            .lock()
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
+            .and_then(|mut owner| match request {
+                AgentDispatchRequest::Launch(operation_id, intent) => {
+                    owner.launch_after_readiness(operation_id, intent, scope, preflight.as_ref())
+                }
+                AgentDispatchRequest::Goal(operation_id, intent) => owner
+                    .launch_goal_after_readiness(operation_id, intent, scope, preflight.as_ref()),
+                AgentDispatchRequest::Resume(operation_id, target) => owner
+                    .resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref()),
+                AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
+                    .resume_with_current_integration_after_readiness(
+                        operation_id,
+                        target,
+                        *revision,
+                        scope,
+                        preflight.as_ref(),
+                    ),
+                AgentDispatchRequest::Inventory(_)
+                | AgentDispatchRequest::WorkspaceObservation(_)
+                | AgentDispatchRequest::Diagnose(_, _)
+                | AgentDispatchRequest::Restart(_, _, _, _) => {
+                    unreachable!("handled before readiness")
+                }
+            });
+    match admission {
+        Ok(admission) => Ok(AgentDispatchAdmission {
+            admission,
+            supervisor_run_id: supervisor_run.map(|run| run.supervisor_run_id),
+        }),
+        Err(error) => {
+            if let (Some(run), AgentDispatchRequest::Goal(_, intent)) = (supervisor_run, request) {
+                cancel_failed_goal_supervisor_run(supervisor, intent, run.supervisor_run_id);
+            }
+            Err(error)
+        }
+    }
+}
+
+struct AgentDispatchAdmission {
+    admission: usagi_daemon::usecase::agent_ipc::AgentAdmission,
+    supervisor_run_id: Option<usagi_core::domain::supervisor::SupervisorRunId>,
+}
+
+fn goal_supervisor_caller(workspace: WorkspaceId) -> String {
+    format!("goal-composer:{workspace}")
+}
+
+fn start_goal_supervisor_run(
+    supervisor: &SharedSupervisorRuntime,
+    operation_id: &str,
+    intent: &usagi_core::usecase::client::AgentGoalIntent,
+) -> Result<
+    usagi_core::domain::supervisor::SupervisorRunQuery,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    use chrono::Utc;
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    supervisor
         .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
-        .and_then(|mut owner| match request {
-            AgentDispatchRequest::Launch(operation_id, intent) => {
-                owner.launch_after_readiness(operation_id, intent, scope, preflight.as_ref())
-            }
-            AgentDispatchRequest::Goal(operation_id, intent) => {
-                owner.launch_goal_after_readiness(operation_id, intent, scope, preflight.as_ref())
-            }
-            AgentDispatchRequest::Resume(operation_id, target) => {
-                owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
-            }
-            AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
-                .resume_with_current_integration_after_readiness(
-                    operation_id,
-                    target,
-                    *revision,
-                    scope,
-                    preflight.as_ref(),
-                ),
-            AgentDispatchRequest::Inventory(_)
-            | AgentDispatchRequest::WorkspaceObservation(_)
-            | AgentDispatchRequest::Diagnose(_, _)
-            | AgentDispatchRequest::Restart(_, _, _, _) => {
-                unreachable!("handled before readiness")
-            }
-        })
+        .map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+        })?
+        .start_for_workspace(
+            &goal_supervisor_caller(intent.workspace),
+            intent.workspace,
+            operation_id,
+            intent.goal.clone(),
+            Vec::new(),
+            Some("standard".into()),
+            Utc::now(),
+        )
+        .map_err(supervisor_error)
+}
+
+fn cancel_failed_goal_supervisor_run(
+    supervisor: &SharedSupervisorRuntime,
+    intent: &usagi_core::usecase::client::AgentGoalIntent,
+    supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId,
+) {
+    if let Ok(runtime) = supervisor.lock() {
+        let _ = runtime.cancel(
+            &goal_supervisor_caller(intent.workspace),
+            supervisor_run_id,
+            "goal Director launch was not admitted".into(),
+            chrono::Utc::now(),
+        );
+    }
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
@@ -8589,6 +8656,7 @@ fn dispatch_agent_maintenance(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn dispatch_agent(
     agent: &SharedAgentRuntime,
+    supervisor: &SharedSupervisorRuntime,
     bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
@@ -8657,9 +8725,11 @@ fn dispatch_agent(
     }
     // The first owner visit captures immutable facts, the provider command runs
     // after its guard is dropped, and the second visit repeats every fence.
-    let result = admit_agent_dispatch_request(agent, &scope, &request);
+    let result = admit_agent_dispatch_request(agent, supervisor, &scope, &request);
     match result {
-        Ok(admission) => {
+        Ok(result) => {
+            let supervisor_run_id = result.supervisor_run_id;
+            let admission = result.admission;
             // `Ok` is the durable final — direct or replayed after a reconnect —
             // and `ResponseOutcome::Ok` carries no envelope operation identity, so
             // the body is what makes the final correlatable to the producer's
@@ -8676,19 +8746,18 @@ fn dispatch_agent(
                     operation_revision: admission.revision,
                 }
             };
-            envelope(
-                hello,
-                request_id,
-                outcome,
-                serde_json::json!({
-                    "operation_id": admission.operation_id,
-                    "semantic_digest": admission.semantic_digest,
-                    "terminal": admission.terminal,
-                    "continuation": admission.continuation,
-                    "resume_relation": admission.resume_relation,
-                    "completed": admission.completed,
-                }),
-            )
+            let mut body = serde_json::json!({
+                "operation_id": admission.operation_id,
+                "semantic_digest": admission.semantic_digest,
+                "terminal": admission.terminal,
+                "continuation": admission.continuation,
+                "resume_relation": admission.resume_relation,
+                "completed": admission.completed,
+            });
+            if let Some(supervisor_run_id) = supervisor_run_id {
+                body["supervisor_run_id"] = serde_json::json!(supervisor_run_id);
+            }
+            envelope(hello, request_id, outcome, body)
         }
         Err(error) => envelope(
             hello,
@@ -22389,6 +22458,64 @@ instructions = "{instructions}"
         };
         assert!(
             matches!(outcome, ResponseOutcome::Error(error) if error.code == ErrorCode::OwnershipUnknown)
+        );
+    }
+
+    #[test]
+    fn goal_supervisor_promotion_is_idempotent_and_compensates_failed_launch() {
+        use usagi_core::domain::supervisor::SupervisorRunState;
+        use usagi_core::usecase::client::AgentGoalIntent;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(SupervisorRuntime::new(temporary.path())));
+        let workspace = WorkspaceId::new();
+        let intent = AgentGoalIntent {
+            workspace,
+            profile: None,
+            goal: "prepare the requested change for review".into(),
+        };
+        let operation = usagi_core::domain::id::OperationId::new().to_string();
+        let first = start_goal_supervisor_run(&runtime, &operation, &intent).unwrap();
+        let replay = start_goal_supervisor_run(&runtime, &operation, &intent).unwrap();
+        assert_eq!(replay.supervisor_run_id, first.supervisor_run_id);
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .list_workspace(workspace)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        cancel_failed_goal_supervisor_run(&runtime, &intent, first.supervisor_run_id);
+        let cancelled = runtime
+            .lock()
+            .unwrap()
+            .list_workspace(workspace)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(cancelled.state, SupervisorRunState::Cancelled);
+        assert_eq!(
+            cancelled.terminal_reason.as_deref(),
+            Some("goal Director launch was not admitted")
+        );
+
+        let poisoned = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("poisoned"),
+        )));
+        let poison_owner = Arc::clone(&poisoned);
+        std::thread::spawn(move || {
+            let _guard = poison_owner.lock().unwrap();
+            panic!("poison supervisor runtime for the unavailable-path fixture");
+        })
+        .join()
+        .unwrap_err();
+        let error = start_goal_supervisor_run(&poisoned, &operation, &intent).unwrap_err();
+        assert_eq!(
+            error.code,
+            usagi_core::infrastructure::ipc::ErrorCode::Unavailable
         );
     }
 
