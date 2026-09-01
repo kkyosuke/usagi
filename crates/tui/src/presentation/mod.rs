@@ -5586,7 +5586,7 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
         Key::Live(LiveTerminalAction::NextTab) => {
             crate::usecase::application::controller::TabDirection::Next
         }
-        Key::Live(LiveTerminalAction::PreviousTab | LiveTerminalAction::OpenPullRequests) => {
+        Key::Live(LiveTerminalAction::PreviousTab) => {
             crate::usecase::application::controller::TabDirection::Previous
         }
         _ => return false,
@@ -5619,7 +5619,7 @@ fn select_root_terminal_tab(key: &Key, runtime: &mut WorkspaceRuntime) -> bool {
         Key::Live(LiveTerminalAction::NextTab) => {
             crate::usecase::application::controller::TabDirection::Next
         }
-        Key::Live(LiveTerminalAction::PreviousTab | LiveTerminalAction::OpenPullRequests) => {
+        Key::Live(LiveTerminalAction::PreviousTab) => {
             crate::usecase::application::controller::TabDirection::Previous
         }
         _ => return false,
@@ -5780,6 +5780,7 @@ fn intercept_live_terminal_control(
         if let Some(index) = root_terminal_drawer::tab_at_for_mode(
             height,
             width,
+            root_terminal_available_width(height, width, runtime.state().director_drawer_open()),
             &projection.tabs,
             runtime.state().root_terminal_full_height(),
             *column,
@@ -18623,6 +18624,11 @@ mod tests {
             &mut ui,
             &mut runtime,
         ));
+        assert!(!super::select_director_tab(
+            &Key::Live(LiveTerminalAction::OpenPullRequests),
+            &mut ui,
+            &mut runtime,
+        ));
         assert!(super::select_director_tab(
             &Key::Live(LiveTerminalAction::NextTab),
             &mut ui,
@@ -23477,6 +23483,10 @@ mod tests {
             &mut runtime,
         ));
         assert_eq!(runtime.focused_terminal(), Some(first));
+        assert!(!select_root_terminal_tab(
+            &Key::Live(LiveTerminalAction::OpenPullRequests),
+            &mut runtime,
+        ));
 
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();

@@ -214,23 +214,27 @@ pub fn tab_at(
     column: u16,
     row: u16,
 ) -> Option<usize> {
-    tab_at_for_mode(raw_height, raw_width, tabs, false, column, row)
+    tab_at_for_mode(raw_height, raw_width, usize::MAX, tabs, false, column, row)
 }
 
 #[must_use]
 pub fn tab_at_for_mode(
     raw_height: usize,
     raw_width: usize,
+    available_width: usize,
     tabs: &[RootTerminalTabProjection],
     full_height: bool,
     column: u16,
     row: u16,
 ) -> Option<usize> {
-    let drawer = geometry_for_mode(raw_height, raw_width, usize::MAX, full_height);
+    let drawer = geometry_for_mode(raw_height, raw_width, available_width, full_height);
     if usize::from(row) != drawer.top.saturating_add(2) {
         return None;
     }
     let mut column = usize::from(column).checked_sub(2)?;
+    if column >= drawer.width.saturating_sub(4) {
+        return None;
+    }
     for (index, tab) in tabs.iter().enumerate() {
         let width = widgets::display_width(&format!(
             " {}{} ",
@@ -447,6 +451,11 @@ mod tests {
         assert_eq!(tab_at(30, 100, &tabs, 15, tab_row), Some(1));
         assert_eq!(tab_at(30, 100, &tabs, 29, tab_row), None);
         assert_eq!(tab_at(30, 100, &tabs, 2, body_row), None);
+        assert_eq!(
+            tab_at_for_mode(30, 100, 14, &tabs, false, 15, tab_row),
+            None,
+            "a clipped tab must not keep a hit box outside the drawer"
+        );
     }
 
     #[test]
