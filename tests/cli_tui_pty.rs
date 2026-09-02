@@ -1039,7 +1039,7 @@ fn kill_process(pid: u64) {
     assert_eq!(result, 0, "failed to kill the background terminal process");
 }
 
-/// `Ctrl-O Ctrl-N` の実キー入力で tab を巡回し、`label` の tab が選択されるまで待つ。
+/// `Ctrl-O Ctrl-F` の実キー入力で tab を巡回し、`label` の tab が選択されるまで待つ。
 ///
 /// selection は描画された marker から読むので、durable な復元順に依存しない。
 fn select_tab_by_label(
@@ -1058,15 +1058,15 @@ fn select_tab_by_label(
             Instant::now() < deadline,
             "tab {label} was never selected; screen={screen:?}"
         );
-        send(master, b"\x0f\x0e");
+        send(master, b"\x0f\x06");
         thread::sleep(Duration::from_millis(150));
     }
 }
 
 /// Director mode drawer の conversation selector を実キーで巡回する。
 ///
-/// Drawer では New が `Ctrl-O Ctrl-N` を所有するため、巡回は plain follow-up の
-/// `Ctrl-O n` で行う（`document/03-tui.md` の prefix 表）。
+/// Drawer でも New は `Ctrl-O n` / `Ctrl-O Ctrl-N`、巡回は
+/// `Ctrl-O f` / `Ctrl-O Ctrl-F` で行う（`document/03-tui.md` の prefix 表）。
 ///
 /// Drawer は Closeup の tab strip ではなく、選択中 conversation だけを
 /// `Conversation  [label]` として描くため、marker ではなく selector の closed
@@ -1088,7 +1088,7 @@ fn select_drawer_conversation_by_label(
             Instant::now() < deadline,
             "drawer conversation {label} was never selected; screen={screen:?}"
         );
-        send(master, b"\x0fn");
+        send(master, b"\x0ff");
         thread::sleep(Duration::from_millis(150));
     }
 }
@@ -2439,8 +2439,8 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     // make the picker the exclusive foreground owner. Ordinary bytes, bracketed
     // paste, and pane-control chords cannot reach or mutate the root Agent behind
     // it. Escape cancels only the picker; the next ordinary input reaches the PTY.
-    // Director mode gives New the `Ctrl-O Ctrl-N` chord and conversation cycling
-    // the plain `Ctrl-O n` follow-up, so both appear in their drawer meaning here.
+    // Director mode gives New both `Ctrl-O n` and `Ctrl-O Ctrl-N`; conversation
+    // cycling uses `Ctrl-O f` / `Ctrl-O Ctrl-F`.
     send(&mut master, b"\x0f\x0e");
     wait_for_screen_since(&captured, reopened_baseline, "↑↓: select");
     send(&mut master, b"picker-leak");
@@ -2468,7 +2468,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     assert!(ordered.dismissed.is_empty());
     // Leave Codex selected in the second slot. A fresh UI must therefore
     // restore durable selection rather than falling back to the first slot.
-    send(&mut master, b"\x0fn");
+    send(&mut master, b"\x0ff");
     wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-one");
     let _ = wait_for_agent_intent(home.path(), |intent| {
         intent.targets.iter().any(|target| {

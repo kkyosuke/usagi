@@ -484,7 +484,7 @@ Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup 
 表示する。この状態では `a` が Agent、`t` が Terminal を直接起動し、`Enter` が action modal を開く。tab が 1 つ以上ある Closeup は `LiveInputClassifier` がすべての入力を先に分類する。pending な `Ctrl-O`
 prefix（leader）が次の入力を所有し、leader が無い場合は `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` を control chord として解決する。
 それ以外の非 prefix 入力は、修飾キーを含めて live terminal への passthrough として扱う。leader の follow-up は下表のアクションに
-解決し、それ以外は消費する。tab 切替（`Ctrl-O` / `Ctrl-A` / `Ctrl-N` / `Ctrl-P`）は reducer が所有するが、scroll・tab close・copy は
+解決し、それ以外は消費する。tab 切替（`Ctrl-O f` / `Ctrl-O p`。2 打目は `Ctrl` 付きでも同じ）は reducer が所有するが、scroll・tab close・copy は
 reducer に持ち込まず shell と `TerminalSession` が所有する（scroll offset・選択・feedback は shell 側の状態）。
 
 controller reducer path も同じ投影を使う。**tab を 1 枚も持たない** target の Closeup への遷移は overlay を
@@ -500,15 +500,16 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `+` | OpenWorkspace | Add workspace overlay を開く |
 | `Ctrl-O` `1` … `9` | ActivateWorkspace | 対応する project tab へ切り替える |
 | `Ctrl-O` `0` | OpenWorkspaceSwitcher | 全 project / session の fuzzy finder を開く |
-| `Ctrl-O` `Ctrl-O` | Switch | Closeup から Switch へ戻る |
-| `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
-| `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ（[指示モード](#指示モードdirector-mode)が開いている間は New） |
+| `Ctrl-O` `o` | Switch | Closeup から Switch へ戻る |
+| `Ctrl-O` `a` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
+| `Ctrl-O` `f` | NextTab | 次の tab を選ぶ |
 | `Ctrl-O` `p` | PreviousTab | 前の tab を選ぶ |
-| `Ctrl-O` `Ctrl-P` | OpenPullRequests | focused session の Pull Request modal を開く |
+| `Ctrl-O` `v` | OpenPullRequests | focused session の Pull Request modal を開く |
 | `Ctrl-O` `,` | OpenGarden | 前面 modal が無い workspace の session garden を開く |
-| `Ctrl-O` `Ctrl-G` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
-| `Ctrl-O` `Ctrl-T` / `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する。IME 中も届く `Ctrl-T` を標準操作とする |
-| `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する（[指示モード](#指示モードdirector-mode)が開いている間は NextTab） |
+| `Ctrl-O` `g` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
+| `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する |
+| `Ctrl-O` `z` | WorkspaceTerminalFullHeight | workspace terminal の高さを通常 drawer / 画面いっぱいで切り替える |
+| `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する。workspace terminal では新しい terminal tab を開く |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
@@ -518,12 +519,11 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 | `Ctrl-O` `b` / `End` | ScrollBottom | 右ペインを live bottom へ 1 手で戻し、新しい出力への追従を再開する |
 
-follow-up の plain `,` / `n` / `p` / `t` / `Ctrl-G` / `Ctrl-T` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
-classifier は plain `n` を New、`Ctrl-N` を NextTab として修飾状態で区別する。この 2 つの意味だけは
-**指示モードの drawer が開いている間に入れ替わる**（`Ctrl-O Ctrl-N` が New、`Ctrl-O n` が conversation の
-NextTab）。入れ替えは frame loop が key を 1 度だけ retarget するので、PTY 転送・pane control・reducer は
-同じ 1 つの key を見る。classifier 自体は drawer の状態を持たない。
-`Ctrl-O` 後の plain `g` は drawer action ではなく PTY へ 1 回だけ送る。leader は 1 秒で失効し、その他の未知の
+follow-up の letter は `a` / `b` / `d` / `f` / `g` / `n` / `o` / `p` / `r` / `t` / `u` / `v` / `x` / `z` である。
+leader 後は 2 打目の `Ctrl` の有無を同一視し、semantic key と raw control byte のどちらでも同じ action に正規化する。
+たとえば `Ctrl-O n` と `Ctrl-O Ctrl-N` はどちらも New、`Ctrl-O f` と `Ctrl-O Ctrl-F` はどちらも NextTab になる。
+`Ctrl-O` leader がない単体 letter は PTY へ送る。`,` / `[` / `]` / `↑` / `↓` / `End` も leader が生きている間だけ予約する。
+leader は 1 秒で失効し、その他の未知の
 follow-up、key release、raw byte を含む次の入力を 1 件だけ握って捨て、その時点で必ず reset する。
 auto-repeat は press と同じ follow-up として 1 件だけ解決する。ちょうど 1 秒の timeout 境界では leader は失効済みであり、単一 raw
 control byte と semantic control event は同じ global shortcut に解決する。
@@ -537,8 +537,8 @@ root scope（`session_id: None`）の generic Terminal は、managed session の
 Home header の `[ ⌂ Shell ]` button、`Ctrl-O Ctrl-T`、または互換操作の `Ctrl-O t` で toggle し、閉じた状態から開く操作は root scope の
 `OpenTerminal` を発行する。daemon に live Terminal があれば同じ runtime を再利用し、無ければ新規に起動する。
 
-drawer は root generic Terminal ごとに `Terminal 1`、`Terminal 2` …のタブを表示する。drawer 内の `Ctrl-O n` は
-`OpenTerminal(new)` で新しいタブを追加し、`Ctrl-O Ctrl-N` / `Ctrl-O p` は root Agent を混ぜず terminal タブだけを
+drawer は root generic Terminal ごとに `Terminal 1`、`Terminal 2` …のタブを表示する。drawer 内の `Ctrl-O n`（または `Ctrl-O Ctrl-N`）は
+`OpenTerminal(new)` で新しいタブを追加し、`Ctrl-O f` / `Ctrl-O p` は root Agent を混ぜず terminal タブだけを
 次 / 前へ循環する。tab の click も表示中の terminal-only index を stable tab identity へ解決して選択する。
 `Ctrl-O x` は選択中の shell を終了してタブを閉じ、最後の terminal タブが無くなれば drawer も閉じる。
 shell 自身が終了した場合も同じように最後のタブで drawer を閉じる。
@@ -549,6 +549,8 @@ generic shell の `Ctrl-L` は primary screen の retained scrollback、選択�
 
 drawer の通常高は Home の 55% とし、10 rows 以上 32 rows 以下へ clamp する。背景に必要な高さを残せない短い端末では
 header の直下から下端までを使う。terminal viewport は border、title、footer を除いた drawer 専用 geometry で計算し、
+`Ctrl-O z`（または `Ctrl-O Ctrl-Z`）は同じ border、title、tab、footer を保ったまま高さだけを画面いっぱいへ切り替える。
+再入力で通常高へ戻り、選択 tab、scrollback、入力 sequence、terminal process は変更しない。
 背景 Home は header を除いて dim にする。`[ ⌂ Shell ]` と `[ ♛ Director ]` は同じ header layout で描画・hit-test し、
 2 つの drawer は同時に開ける。Director も開いている場合、workspace terminal drawer は Director の左側の band だけを使い、
 選択 session の Agent pane をその上に残す。Director が全幅へ縮退する狭幅では root shell が下側へ重なり、Director の上側を残す。
@@ -597,8 +599,8 @@ conversation selector に表示する。generic Terminal は専用の [workspace
 Diff と Terminal pending/action は Director の restore projection と pane admission で拒否する。live Agent の continuation が intent context 未作成、未 observe、CAS 後の投影遅延で
 まだ得られない場合も terminal fence を identity として selector に残し、provider metadata を含まない `Agent` を
 fallback label にする。terminal view がある frame は conversation inventory の有無にかかわらず PTY 出力を描き、
-terminal view も conversation も無い場合だけ empty state を描く。drawer が閉じている間の `Ctrl-O n`、開いている
-間の `Ctrl-O Ctrl-N`、または `[ New ]` の mouse-down hit で drawer を開いて
+terminal view も conversation も無い場合だけ empty state を描く。drawer の開閉状態にかかわらず `Ctrl-O n`
+（または `Ctrl-O Ctrl-N`）、または `[ New ]` の mouse-down hit で drawer を開いて
 合成ルートから注入された install 済み CLI だけを `claude`、`codex`、`sakana.ai` の順で picker に表示する。
 設定済み default が候補ならそこを、なければ先頭候補を highlight するが、自動確定はしない。`↑↓` は循環選択し、
 `Enter` は選択した CLI の explicit profile を確定する。`Esc` は conversation order / selection と drawer open
@@ -695,7 +697,7 @@ new exact `TerminalRef` がすべて一致した成功だけを同 slot の live
 
 drawer open 中は drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
 それらへ key / click / pointer を伝播しない。root Agent tab の terminal input と `Ctrl-O` tab controls、および
-New picker の `↑↓` / `Enter` / `Esc`、`Ctrl-O Ctrl-N` の New、`Ctrl-O Ctrl-G` の close だけを受理する。picker が閉じている
+New picker の `↑↓` / `Enter` / `Esc`、`Ctrl-O n` の New、`Ctrl-O g` の close だけを受理する。picker が閉じている
 間の通常文字・`Enter`・`Esc` は root Agent terminal へ送る。`[ New ]` の mouse-down は
 drawer が先に消費して picker を開き、同じ pointer gesture を背景 Closeup の click / focus / attach 選択へ
 fallthrough させない。picker Choosing 中の `[ New ]` 再クリックは inert とし、mouse-up も背景へ渡さないため、
@@ -725,8 +727,8 @@ Agent PTY へ送る。
 | drawer conversation | `Ctrl-O Ctrl-G` / header button | drawer を閉じ、元の route / managed pane selection / focus を復元する |
 | drawer conversation（live Agent あり） | `Esc` | selected root Agent PTY へ `0x1b`。drawer は開いたまま |
 | drawer conversation（live Agent なし） | `Esc` | drawer を閉じ、元の route / managed pane selection / focus を復元する |
-| drawer conversation | `Ctrl-O Ctrl-N` / `[ New ]` click | drawer picker。背景への pointer / key effect は発行しない |
-| drawer conversation | `Ctrl-O n` / `Ctrl-O Ctrl-P` | conversation の次 / 前を選ぶ |
+| drawer conversation | `Ctrl-O n` / `[ New ]` click | drawer picker。背景への pointer / key effect は発行しない |
+| drawer conversation | `Ctrl-O f` / `Ctrl-O p` | conversation の次 / 前を選ぶ |
 | drawer conversation | 通常文字 / `Enter` | selected root Agent PTY。New picker は開かない |
 | drawer picker | `↑` / `↓` | picker 内の CLI 選択だけを循環する |
 | drawer picker | `Esc` | picker だけを閉じ、drawer conversation に戻る |
@@ -1233,7 +1235,7 @@ current project を保ったまま project switcher に安全な理由を表示�
 
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない PR の件数を
 sidebar の右端に Nerd Font の PR アイコンとともに固定列で投影する。Switch の `p`、Closeup の
-`Ctrl-O Ctrl-P`、または PR アイコン＋件数のクリックは、対象 `SessionId` について resident PR lane を wake する。
+`Ctrl-O v`、または PR アイコン＋件数のクリックは、対象 `SessionId` について resident PR lane を wake する。
 dismissed でない PR がある場合だけ同じ PR modal を表示し、snapshot が空なら modal は閉じたままにする。modal の枠タイトルは `Pull Request` の 1 か所だけに置く。repository は連続する PR 群の見出しとして 1 回表示し、その下の各行へ状態・番号・title・CI / review を
 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。modal の枠外をクリックすると閉じ、枠内と枠外のクリックはいずれも背後の project bar・header・pane・sidebar へ伝播しない。sidebar projection は新しい revision だけで進み、
 開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
@@ -1529,7 +1531,7 @@ session 作成と同じ interaction gate であり、受付時の interaction co
 （読んでいる画面から focus を奪わない）。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
-pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O p` は tab を巡回し、`Ctrl-O [` / `Ctrl-O ]` は
+pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O f` / `Ctrl-O p` は tab を巡回し、`Ctrl-O [` / `Ctrl-O ]` は
 選択 tab を前後へ並べ替える。`Ctrl-O x` / `Ctrl-O Ctrl-X` は generic Terminal / document tab と、daemon へ未送信の
 client-owned pending launch を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を
 閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は foreground command を
@@ -1841,7 +1843,7 @@ pointer の release は PTY へ入力として転送しない。
 
 live terminal に focus がある間、leader が無い `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` を除くすべての非 prefix キー入力（文字・修飾キー・paste・
 raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。端末では bracketed paste（DECSET 2004）を有効にし、複数行の貼り付けを 1 つの paste イベントとして受け取る。PTY 側の program が DECSET 2004 を要求している間だけ bracketed paste マーカー（`ESC[200~` … `ESC[201~`）で包んで転送し、agent が埋め込まれた改行ごとに 1 行ずつ実行せず 1 ブロックとして挿入できるようにする（貼り付け内に含まれる終了マーカーは注入対策として除去する）。要求していない間は元の text をそのまま転送し、マーカーを文字として混入させない。tab 巡回、PR modal、Closeup/Switch の遷移は
-`Ctrl-O` prefix（`Ctrl-O Ctrl-N` / `Ctrl-O p` / `Ctrl-O Ctrl-P` / `Ctrl-O Ctrl-O`）だけが所有する。前面 modal や forced action modal がある間は
+`Ctrl-O` prefix（`Ctrl-O f` / `Ctrl-O p` / `Ctrl-O v` / `Ctrl-O o`）だけが所有する。前面 modal や forced action modal がある間は
 その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。
 daemon の input ACK は `Written` だけを通常成功とする。`Failed` は 0 byte 適用を表示し、`Ambiguous` は
 `applied_prefix` byte 適用後の effect が不確定であることを表示する。`Cached` は内側の outcome へ正規化する。
@@ -2174,8 +2176,8 @@ selection は projection だけが所有する。
 
 cold restart 直後のように **interrupted tab しか無い target** でも、root drawer は conversation surface、
 managed-session Closeup は action launcher ではなく tab strip へ着地する（[Closeup pane](#closeup-pane) の入力所有者は
-live PTY の有無ではなく tab の有無で決まる）。history tab は managed-session Closeup では `Ctrl-O Ctrl-N` /
-`Ctrl-O Ctrl-P`、root drawer では `Ctrl-O n` / `Ctrl-O Ctrl-P` で選び（drawer の `Ctrl-O Ctrl-N` は New）、
+live PTY の有無ではなく tab の有無で決まる）。history tab は managed-session Closeup と root drawer のどちらでも
+`Ctrl-O f` / `Ctrl-O p` で選び、
 どちらも `Ctrl-O r` で resume できる。
 
 | 状態 | tab label | 選択時の body |

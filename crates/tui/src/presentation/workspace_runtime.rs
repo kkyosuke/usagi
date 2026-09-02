@@ -1955,6 +1955,7 @@ impl WorkspaceRuntime {
                 })
             }),
             feedback: pane.and_then(PaneState::error).map(str::to_owned),
+            full_height: self.state.root_terminal_full_height(),
         }
     }
 }
@@ -3601,6 +3602,7 @@ mod tests {
                 }],
                 pending: true,
                 feedback: None,
+                full_height: false,
             }
         );
         let rendered = runtime.render(
@@ -3671,6 +3673,11 @@ mod tests {
         ));
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminalFullHeight));
+        assert!(runtime.state().root_terminal_full_height());
+        assert!(runtime.root_terminal_projection(None).full_height);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminalFullHeight));
+        assert!(!runtime.state().root_terminal_full_height());
         let effects = runtime.handle_key(Key::Live(LiveTerminalAction::NewRootTerminal));
         assert!(matches!(
             effects.as_slice(),
@@ -3766,6 +3773,7 @@ mod tests {
                 tabs: Vec::new(),
                 pending: false,
                 feedback: None,
+                full_height: false,
             }
         );
         let rendered = runtime.render(
