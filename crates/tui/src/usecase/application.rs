@@ -176,6 +176,17 @@ pub trait WorkspaceLoader: Send {
     /// Returns an error when the workspace declaration cannot be installed.
     fn activate_prepared(&mut self, path: &Path) -> io::Result<()>;
 
+    /// Names of immediate child directories used by the New screen's path
+    /// completion. The view owns filtering and cycling; adapters own filesystem
+    /// enumeration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `parent` cannot be enumerated.
+    fn directory_names(&mut self, _parent: &Path) -> io::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// Persist the ordered set of project tabs as one Unite recent. The
     /// default keeps compatibility adapters storage-free.
     ///

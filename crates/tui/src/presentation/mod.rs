@@ -51,7 +51,7 @@ use crate::presentation::views::director_drawer::{
     self, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
     DirectorOrganizationRow, WorkRunControlProjection,
 };
-use crate::presentation::views::new::{self, Field, New};
+use crate::presentation::views::new::{self, DirectoryCompletion, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::pr_modal;
 use crate::presentation::views::quit_modal;
@@ -1665,6 +1665,8 @@ enum NewStep {
     Quit,
     /// welcome へ戻る。
     Back,
+    /// Ask the composition root to enumerate one directory's immediate children.
+    CompleteDirectory(DirectoryCompletion),
     /// 検証済みの入力で workspace 作成を実行する。screen graph が backend を 1 回呼ぶ。
     Create(NewRequest),
 }
@@ -3594,10 +3596,9 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit | Key::CtrlQ => NewStep::Quit,
-        Key::Tab => {
-            form.complete_directory();
-            NewStep::Stay
-        }
+        Key::Tab => form
+            .begin_directory_completion()
+            .map_or(NewStep::Stay, NewStep::CompleteDirectory),
         // Enter は入力を検証して作成へ進む。必須項目が欠けていれば安全なメッセージを
         // notice に出し、同画面に留まって draft を保つ。
         Key::Enter => match form.to_request() {
@@ -4637,7 +4638,8 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
                 }
             }
             if let Some(prs) = state.session_prs(*id) {
-                projected.pr_summary = crate::presentation::views::workspace::pr_summary(prs);
+                projected.pr_summary =
+                    crate::presentation::views::workspace::pr_inventory_summary(prs);
             }
             projected
         })
@@ -4759,9 +4761,12 @@ pub trait SessionWorktreeScanPort {
     fn scan(&mut self, workspace: &Path) -> Vec<String>;
 }
 
-/// Production scan: one `read_dir` over `<workspace>/.usagi/sessions`.
+/// Test-only filesystem adapter. Production owns the equivalent adapter in the
+/// binary composition root, outside this IO-free crate.
+#[cfg(test)]
 pub struct FsSessionWorktreeScanPort;
 
+#[cfg(test)]
 impl SessionWorktreeScanPort for FsSessionWorktreeScanPort {
     fn scan(&mut self, workspace: &Path) -> Vec<String> {
         let sessions = workspace.join(".usagi").join("sessions");
@@ -4778,6 +4783,14 @@ impl SessionWorktreeScanPort for FsSessionWorktreeScanPort {
             })
             .filter_map(|entry| entry.file_name().into_string().ok())
             .collect()
+    }
+}
+
+struct UnavailableSessionWorktreeScanPort;
+
+impl SessionWorktreeScanPort for UnavailableSessionWorktreeScanPort {
+    fn scan(&mut self, _: &Path) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -8878,7 +8891,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
             session_worktrees: self
                 .session_worktrees
                 .take()
-                .unwrap_or_else(|| Box::new(FsSessionWorktreeScanPort)),
+                .unwrap_or_else(|| Box::new(UnavailableSessionWorktreeScanPort)),
         }
     }
 }
@@ -8974,38 +8987,6 @@ pub fn run_with_settings(
         session_commands,
         None,
         None,
-        AvailableAgentModels::all(),
-    )
-}
-
-/// Run the Welcome / Open / Recent graph with the daemon Agent launch factory.
-///
-/// # Errors
-///
-/// Returns workspace loading or terminal IO failures from the screen graph.
-#[allow(clippy::too_many_arguments)]
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
-pub fn run_with_settings_and_agent_port_factory(
-    term: &mut dyn Terminal,
-    workspaces: Vec<Workspace>,
-    recent: Vec<Recent>,
-    now: DateTime<Utc>,
-    start: Start,
-    loader: &mut dyn WorkspaceLoader,
-    settings: &mut dyn SettingsPort,
-    session_commands: &mut dyn SessionCommandPortFactory,
-    agent_commands: &mut dyn AgentCommandPortFactory,
-) -> io::Result<Exit> {
-    run_with_settings_and_agent_port_factory_and_model_availability(
-        term,
-        workspaces,
-        recent,
-        now,
-        start,
-        loader,
-        settings,
-        session_commands,
-        agent_commands,
         AvailableAgentModels::all(),
     )
 }
@@ -9270,7 +9251,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics,
             browser: Box::new(UnavailableBrowserOpener),
-            session_worktrees: Box::new(FsSessionWorktreeScanPort),
+            session_worktrees: Box::new(UnavailableSessionWorktreeScanPort),
         }
     }
 }
@@ -9743,6 +9724,12 @@ pub fn run_screen_graph_with_backend_and_notice(
                         new_form.finish_create();
                     }
                     screen = Screen::Welcome;
+                }
+                NewStep::CompleteDirectory(completion) => {
+                    let entries = loader
+                        .directory_names(completion.parent())
+                        .unwrap_or_default();
+                    new_form.finish_directory_completion(&completion, entries);
                 }
                 NewStep::Create(request) => {
                     if pending_create.is_some() {
@@ -10479,9 +10466,11 @@ mod tests {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
             target: Target::Session(session),
             revision: 1,
-            prs: vec![usagi_core::domain::pullrequest::PrLink::new(
-                1625,
-                "https://github.com/kkyosuke/usagi/pull/1625",
+            prs: vec![usagi_core::domain::pr_inventory::PrEntry::new(
+                usagi_core::domain::pr_inventory::canonicalize(
+                    "https://github.com/kkyosuke/usagi/pull/1625",
+                )
+                .unwrap(),
             )],
         }));
         let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
@@ -11852,9 +11841,11 @@ mod tests {
                 crate::usecase::application::controller::BackendEvent::PullRequestsLoaded {
                     target: Target::Session(session),
                     revision: 1,
-                    prs: vec![usagi_core::domain::pullrequest::PrLink::new(
-                        1545,
-                        "https://example.test/pull/1545",
+                    prs: vec![usagi_core::domain::pr_inventory::PrEntry::new(
+                        usagi_core::domain::pr_inventory::canonicalize(
+                            "https://github.com/example/repository/pull/1545",
+                        )
+                        .unwrap(),
                     )],
                 },
             ),
