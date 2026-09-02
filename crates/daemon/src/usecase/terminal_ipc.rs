@@ -248,6 +248,32 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
             .map(|record| record.terminal.terminal_id.as_str())
             .collect()
     }
+    /// Lists generic terminals in one exact durable scope without including
+    /// Agent runtimes or mutating terminal state.
+    #[must_use]
+    pub fn inventory(
+        &self,
+        scope: &TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
+        self.coordinator.inventory(scope)
+    }
+
+    /// Captures one terminal's semantic screen without attaching, resizing, or
+    /// creating a subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe protocol failure for a stale terminal or a checkpoint
+    /// which cannot fit the bounded response contract.
+    pub fn inspect(
+        &self,
+        terminal: &TerminalRef,
+    ) -> Result<super::terminal::Snapshot, ProtocolError> {
+        self.coordinator
+            .terminal_snapshot(terminal)
+            .map_err(map_error)
+    }
+
     pub fn output(&mut self, terminal: &TerminalRef, bytes: Vec<u8>) -> Result<Value, ProtocolError>
     where
         P: PtyWriter,
@@ -471,7 +497,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
         &self,
         scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
     ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
-        self.coordinator.inventory(scope)
+        Self::inventory(self, scope)
     }
     fn completed_inventory(
         &self,
@@ -2189,6 +2215,28 @@ mod tests {
         assert_eq!(completed[0].kind, TerminalKind::Terminal);
         assert_eq!(completed[0].exit_status, 0);
         assert!(TerminalOwner::completed_inventory(&runtime, &foreign).is_empty());
+    }
+
+    #[test]
+    fn inspection_reads_a_snapshot_without_attach_or_pty_side_effects() {
+        let (mut runtime, terminal) = launched_runtime();
+        runtime
+            .output(&terminal, b"error: failed\r\n".to_vec())
+            .unwrap();
+        let before = serde_json::to_value(runtime.coordinator.snapshot()).unwrap();
+        let resized = runtime.pty.resized.clone();
+        let written = runtime.pty.writes.clone();
+
+        let snapshot = runtime.inspect(&terminal).unwrap();
+
+        assert_eq!(snapshot.terminal, terminal);
+        assert_eq!(snapshot.output_offset, 15);
+        assert_eq!(
+            serde_json::to_value(runtime.coordinator.snapshot()).unwrap(),
+            before
+        );
+        assert_eq!(runtime.pty.resized, resized);
+        assert_eq!(runtime.pty.writes, written);
     }
 
     #[test]

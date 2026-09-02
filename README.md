@@ -241,6 +241,7 @@ daemon が認証したその session の worktree に固定される。
 | `issue_*` | git で共有する `.usagi/issues/` のタスクを検索・更新する |
 | `memory_*` | git で共有する `.usagi/memory/` の知識を保存・検索する |
 | `agent_*` | 委譲した worker の完了報告と inbox を扱う |
+| `terminal_*` | 同じ session/worktree にある通常 terminal の出力を read-only で確認する |
 | `user_decision_*` | Agent から利用者へ判断を依頼し、TUI で回答する |
 | `supervisor_*` | 複数 step の durable な実行・再試行・確認を管理する |
 

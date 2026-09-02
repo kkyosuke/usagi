@@ -1184,7 +1184,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 48);
+        assert_eq!(tools.len(), 50);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1230,7 +1230,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 37);
+        assert_eq!(names.len(), 39);
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
@@ -2048,6 +2048,14 @@ mod tests {
                 usagi_core::usecase::client::DispatchToolAction::AgentGet,
             ),
             (
+                "terminal_list",
+                usagi_core::usecase::client::DispatchToolAction::TerminalList,
+            ),
+            (
+                "terminal_read",
+                usagi_core::usecase::client::DispatchToolAction::TerminalRead,
+            ),
+            (
                 "agent_complete",
                 usagi_core::usecase::client::DispatchToolAction::AgentComplete,
             ),
@@ -2124,6 +2132,8 @@ mod tests {
             "session_get",
             "agent_list",
             "agent_get",
+            "terminal_list",
+            "terminal_read",
             "agent_complete",
             "agent_fail",
             "agent_inbox",
