@@ -4697,6 +4697,23 @@ mod tests {
             generation: 1,
         };
 
+        let mut conflicting = provenance.clone();
+        conflicting.worker_session_id = Some(SessionId::new());
+        assert_eq!(
+            agent
+                .interrupt_supervisor_workers(workspace, &[provenance.clone(), conflicting],)
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleTarget
+        );
+
+        let mut absent = provenance.clone();
+        absent.worker_agent_id = AgentRuntimeId::new();
+        assert_eq!(
+            agent.interrupt_supervisor_workers(workspace, &[absent]),
+            Ok(0)
+        );
+
         let mut stale = provenance.clone();
         stale.worker_worktree_id = WorktreeId::new();
         assert_eq!(
@@ -4731,9 +4748,17 @@ mod tests {
             .downcast_mut::<Pty>()
             .unwrap()
             .terminate_success = true;
+        agent
+            .reported_phases
+            .insert(runtime.agent_runtime_id, AgentPhase::Running);
         assert_eq!(
             agent.interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance)),
             Ok(1)
+        );
+        assert!(
+            !agent
+                .reported_phases
+                .contains_key(&runtime.agent_runtime_id)
         );
         assert_eq!(
             agent.coordinator.snapshot().records[0].state,
@@ -4742,6 +4767,24 @@ mod tests {
         assert_eq!(
             agent.interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance)),
             Ok(0)
+        );
+
+        let mut ownership_unknown = agent.coordinator.snapshot();
+        ownership_unknown.records[0].state = super::super::runtime::RuntimeState::ReconcileRequired(
+            super::super::runtime::ReconcileState::IdentityUnknown,
+        );
+        ownership_unknown.records[0].process = None;
+        ownership_unknown.generation.terminals[0].process = None;
+        ownership_unknown.generation.terminals[0].state =
+            super::super::generation::TerminalState::IdentityUnknown;
+        agent.coordinator =
+            RuntimeCoordinator::hydrate(ownership_unknown, 16, 64 * 1024, 64).unwrap();
+        assert_eq!(
+            agent
+                .interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance))
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
         );
     }
 

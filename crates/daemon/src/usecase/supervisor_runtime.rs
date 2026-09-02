@@ -190,7 +190,7 @@ impl PendingWorkerStop {
     }
 
     #[must_use]
-    pub const fn workspace_id(&self) -> WorkspaceId {
+    pub fn workspace_id(&self) -> WorkspaceId {
         self.workspace_id
     }
 }
@@ -985,20 +985,18 @@ impl SupervisorRuntime {
         &self,
         selected_run: Option<SupervisorRunId>,
     ) -> Result<Vec<PendingWorkerStop>> {
-        let aborted = |run: &SupervisorRun| {
-            selected_run.is_none_or(|id| id == run.supervisor_run_id)
-                && matches!(
-                    run.state,
-                    SupervisorRunState::Cancelled | SupervisorRunState::Failed
-                )
-        };
         let mut pending = Vec::new();
         let state = self.load_state()?;
         for (operation_id, reservation) in state.starts {
             let Some(run) = self.supervisor.load(reservation.supervisor_run_id)? else {
                 continue;
             };
-            if !aborted(&run) {
+            if (selected_run.is_some() && selected_run != Some(run.supervisor_run_id))
+                || !matches!(
+                    run.state,
+                    SupervisorRunState::Cancelled | SupervisorRunState::Failed
+                )
+            {
                 continue;
             }
             let Some(workspace_id) = run.workspace_id else {
@@ -1027,13 +1025,24 @@ impl SupervisorRuntime {
             });
         }
 
-        for run in self.supervisor.runs()?.into_iter().filter(aborted) {
+        for run in self.supervisor.runs()? {
+            if (selected_run.is_some() && selected_run != Some(run.supervisor_run_id))
+                || !matches!(
+                    run.state,
+                    SupervisorRunState::Cancelled | SupervisorRunState::Failed
+                )
+            {
+                continue;
+            }
             let Some(workspace_id) = run.workspace_id else {
                 continue;
             };
-            for task in run.tasks.values().filter(|task| {
-                task.assigned_dispatch_run.is_none() && !run.provenance.contains_key(&task.task_id)
-            }) {
+            for task in run.tasks.values() {
+                if task.assigned_dispatch_run.is_some()
+                    || run.provenance.contains_key(&task.task_id)
+                {
+                    continue;
+                }
                 let Some(operation_id) = task.task_id.0.strip_prefix(DELEGATED_TASK_PREFIX) else {
                     continue;
                 };
@@ -1043,25 +1052,19 @@ impl SupervisorRuntime {
                 if !is_delegated_reservation(task, operation_id) {
                     continue;
                 }
-                let parent_task_id = task.parent_task_id.clone().ok_or_else(|| {
-                    anyhow::anyhow!("aborted delegated reservation has no parent task")
-                })?;
-                let parent_dispatch_run = run
-                    .provenance
-                    .get(&parent_task_id)
-                    .map(|provenance| provenance.dispatch_run_id)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "aborted delegated reservation parent provenance is missing"
-                        )
-                    })?;
+                let Some(parent_task_id) = task.parent_task_id.clone() else {
+                    anyhow::bail!("aborted delegated reservation has no parent task");
+                };
+                let Some(parent) = run.provenance.get(&parent_task_id) else {
+                    anyhow::bail!("aborted delegated reservation parent provenance is missing");
+                };
                 pending.push(PendingWorkerStop {
                     operation_id,
                     workspace_id,
                     supervisor_run_id: run.supervisor_run_id,
                     task_id: task.task_id.clone(),
                     parent_task_id: Some(parent_task_id),
-                    parent_dispatch_run: Some(parent_dispatch_run),
+                    parent_dispatch_run: Some(parent.dispatch_run_id),
                     generation: task.generation,
                     requires_session: true,
                 });
@@ -1069,11 +1072,12 @@ impl SupervisorRuntime {
         }
 
         pending.sort_by_key(PendingWorkerStop::operation_id);
-        if pending
-            .windows(2)
-            .any(|pair| pair[0].operation_id == pair[1].operation_id && pair[0] != pair[1])
-        {
-            anyhow::bail!("Agent operation belongs to multiple aborted supervisor reservations");
+        for pair in pending.windows(2) {
+            if pair[0].operation_id == pair[1].operation_id && pair[0] != pair[1] {
+                anyhow::bail!(
+                    "Agent operation belongs to multiple aborted supervisor reservations"
+                );
+            }
         }
         pending.dedup();
         Ok(pending)
@@ -1090,7 +1094,10 @@ impl SupervisorRuntime {
     pub fn acknowledge_pending_worker_stops(&self, stops: &[PendingWorkerStop]) -> Result<()> {
         let mut state = self.load_state()?;
         let mut changed = false;
-        for stop in stops.iter().filter(|stop| stop.parent_task_id.is_none()) {
+        for stop in stops {
+            if stop.parent_task_id.is_some() {
+                continue;
+            }
             let operation_id = stop.operation_id.to_string();
             let Some(reservation) = state.starts.get(&operation_id) else {
                 if state.expired_starts.contains(&operation_id) {
@@ -1101,10 +1108,9 @@ impl SupervisorRuntime {
             if reservation.supervisor_run_id != stop.supervisor_run_id {
                 anyhow::bail!("aborted Goal operation changed run ownership");
             }
-            let run = self
-                .supervisor
-                .load(stop.supervisor_run_id)?
-                .ok_or_else(|| anyhow::anyhow!("aborted Goal run disappeared"))?;
+            let Some(run) = self.supervisor.load(stop.supervisor_run_id)? else {
+                anyhow::bail!("aborted Goal run disappeared");
+            };
             if !has_unbound_goal_worker(&run) {
                 anyhow::bail!("aborted Goal worker stop acknowledgement is stale");
             }
@@ -1782,11 +1788,13 @@ impl SupervisorRuntime {
         workspace: WorkspaceId,
         id: SupervisorRunId,
     ) -> Result<Option<SupervisorRunQuery>> {
-        Ok(self
-            .supervisor
-            .load(id)?
-            .filter(|run| run.workspace_id == Some(workspace))
-            .map(|run| run.query()))
+        let Some(run) = self.supervisor.load(id)? else {
+            return Ok(None);
+        };
+        if run.workspace_id != Some(workspace) {
+            return Ok(None);
+        }
+        Ok(Some(run.query()))
     }
 
     /// Applies one human command to a run owned by the connection workspace.
@@ -1882,22 +1890,24 @@ impl SupervisorRuntime {
         selected_run: Option<SupervisorRunId>,
     ) -> Result<Vec<(WorkspaceId, RunProvenance)>> {
         let mut obligations = Vec::new();
-        for run in self.supervisor.runs()?.into_iter().filter(|run| {
-            selected_run.is_none_or(|id| id == run.supervisor_run_id)
-                && matches!(
+        for run in self.supervisor.runs()? {
+            if (selected_run.is_some() && selected_run != Some(run.supervisor_run_id))
+                || !matches!(
                     run.state,
                     SupervisorRunState::Cancelled | SupervisorRunState::Failed
                 )
-        }) {
+            {
+                continue;
+            }
             let Some(workspace) = run.workspace_id else {
                 // Legacy unscoped history cannot authorize a process signal.
                 // It is intentionally invisible to the workspace control plane.
                 continue;
             };
             for (task_id, provenance) in &run.provenance {
-                let task = run.tasks.get(task_id).ok_or_else(|| {
-                    anyhow::anyhow!("aborted supervisor provenance task is missing")
-                })?;
+                let Some(task) = run.tasks.get(task_id) else {
+                    anyhow::bail!("aborted supervisor provenance task is missing");
+                };
                 if task.assigned_dispatch_run.is_none() && provenance.generation < task.generation {
                     // A completed earlier attempt is historical provenance,
                     // not a worker still owned by the cancelled generation.
@@ -6014,6 +6024,18 @@ mod tests {
             obligations[0].1.worker_worktree_id,
             worker.terminal.worktree_id
         );
+        assert_eq!(
+            restarted
+                .worker_stop_obligations_for_run(run.supervisor_run_id)
+                .unwrap(),
+            obligations
+        );
+        assert!(
+            restarted
+                .worker_stop_obligations_for_run(SupervisorRunId::new())
+                .unwrap()
+                .is_empty()
+        );
 
         let mut prior_attempt = restarted
             .supervisor
@@ -6084,6 +6106,7 @@ mod tests {
             .unwrap();
         assert_eq!(root_stops.len(), 1);
         assert_eq!(root_stops[0].operation_id(), root_operation);
+        assert_eq!(root_stops[0].workspace_id(), workspace);
         let worker = root_worker(workspace);
         let root_provenance = root_stops[0].provenance(&worker).unwrap();
         assert_eq!(root_provenance.worker_agent_id, worker.agent_runtime_id);
@@ -6256,11 +6279,84 @@ mod tests {
         let listed = runtime.list_workspace(first).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].supervisor_run_id, visible.supervisor_run_id);
+        assert_eq!(
+            runtime
+                .get_for_workspace(first, visible.supervisor_run_id)
+                .unwrap(),
+            Some(visible)
+        );
+        assert_eq!(
+            runtime
+                .get_for_workspace(second, listed[0].supervisor_run_id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            runtime
+                .get_for_workspace(first, SupervisorRunId::new())
+                .unwrap(),
+            None
+        );
         assert!(
             runtime
                 .list_workspace(WorkspaceId::new())
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn control_helpers_validate_and_project_both_commands() {
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let cancel = SupervisorWorkspaceCommand::Cancel {
+            supervisor_run_id: run.supervisor_run_id,
+            reason: "operator cancelled".into(),
+        };
+        validate_control_command(&cancel).unwrap();
+        let invalid = SupervisorWorkspaceCommand::Cancel {
+            supervisor_run_id: run.supervisor_run_id,
+            reason: "line\nbreak".into(),
+        };
+        assert!(validate_control_command(&invalid).is_err());
+        let cancel_digest = control_semantic_digest(&cancel).unwrap();
+        assert!(cancel_digest.starts_with("sha256:"));
+        let event = control_event(
+            &run,
+            OperationId::new(),
+            cancel_digest.clone(),
+            &cancel,
+            now(),
+        );
+        assert_eq!(event.source, SupervisorEventSource::Cancel);
+        assert!(matches!(
+            event.kind,
+            SupervisorEventKind::Cancel { task_id: None, ref reason }
+                if reason == "operator cancelled"
+        ));
+
+        let escalation_id = OperationId::new();
+        let resolve = SupervisorWorkspaceCommand::ResolveEscalation {
+            supervisor_run_id: run.supervisor_run_id,
+            escalation_id,
+            decision: EscalationDecision::Fail,
+        };
+        validate_control_command(&resolve).unwrap();
+        let resolve_digest = control_semantic_digest(&resolve).unwrap();
+        assert_ne!(resolve_digest, cancel_digest);
+        let event = control_event(&run, OperationId::new(), resolve_digest, &resolve, now());
+        assert_eq!(event.source, SupervisorEventSource::Admission);
+        assert!(matches!(
+            event.kind,
+            SupervisorEventKind::ResolveEscalation {
+                escalation_id: actual,
+                decision: EscalationDecision::Fail,
+            } if actual == escalation_id
+        ));
     }
 }

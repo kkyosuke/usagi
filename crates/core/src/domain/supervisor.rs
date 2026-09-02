@@ -488,7 +488,7 @@ pub enum SupervisorWorkspaceCommand {
 
 impl SupervisorWorkspaceCommand {
     #[must_use]
-    pub const fn supervisor_run_id(&self) -> SupervisorRunId {
+    pub fn supervisor_run_id(&self) -> SupervisorRunId {
         match self {
             Self::Cancel {
                 supervisor_run_id, ..
@@ -2775,5 +2775,27 @@ mod tests {
         let decoded: TaskQuery = serde_json::from_value(query_value).unwrap();
         assert_eq!(decoded.verification_attempt, 0);
         assert_eq!(decoded.verification_retry_at, None);
+    }
+
+    #[test]
+    fn workspace_commands_project_their_exact_run_fence() {
+        let supervisor_run_id = SupervisorRunId::new();
+        assert_eq!(
+            SupervisorWorkspaceCommand::Cancel {
+                supervisor_run_id,
+                reason: "operator cancelled".into(),
+            }
+            .supervisor_run_id(),
+            supervisor_run_id
+        );
+        assert_eq!(
+            SupervisorWorkspaceCommand::ResolveEscalation {
+                supervisor_run_id,
+                escalation_id: OperationId::new(),
+                decision: EscalationDecision::Resume,
+            }
+            .supervisor_run_id(),
+            supervisor_run_id
+        );
     }
 }

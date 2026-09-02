@@ -6301,9 +6301,9 @@ fn reconcile_supervisor_workers(
     selected_run: Option<usagi_core::domain::supervisor::SupervisorRunId>,
 ) -> anyhow::Result<usize> {
     let (obligations, pending) = {
-        let runtime = supervisor
-            .lock()
-            .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?;
+        let Ok(runtime) = supervisor.lock() else {
+            anyhow::bail!("supervisor runtime is unavailable");
+        };
         match selected_run {
             Some(id) => (
                 runtime.worker_stop_obligations_for_run(id)?,
@@ -6315,9 +6315,9 @@ fn reconcile_supervisor_workers(
             ),
         }
     };
-    let mut runtime = agent
-        .lock()
-        .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?;
+    let Ok(mut runtime) = agent.lock() else {
+        anyhow::bail!("agent owner is unavailable");
+    };
     let mut pending_obligations = std::collections::BTreeMap::new();
     let mut acknowledged = Vec::new();
     for candidate in pending {
@@ -6327,7 +6327,10 @@ fn reconcile_supervisor_workers(
         };
         let (provenance, candidates) = pending_obligations
             .entry(candidate.workspace_id())
-            .or_insert_with(|| (Vec::new(), Vec::new()));
+            .or_insert((
+                Vec::<usagi_core::domain::supervisor::RunProvenance>::new(),
+                Vec::new(),
+            ));
         provenance.push(candidate.provenance(&worker)?);
         candidates.push(candidate);
     }
@@ -6335,7 +6338,7 @@ fn reconcile_supervisor_workers(
     for (workspace, provenance) in obligations {
         by_workspace
             .entry(workspace)
-            .or_insert_with(Vec::new)
+            .or_insert(Vec::<usagi_core::domain::supervisor::RunProvenance>::new())
             .push(provenance);
     }
     let mut interrupted = 0;
@@ -6344,7 +6347,9 @@ fn reconcile_supervisor_workers(
         match runtime.interrupt_supervisor_workers(workspace, &provenance) {
             Ok(count) => interrupted += count,
             Err(error) => {
-                first_failure.get_or_insert_with(|| anyhow::anyhow!(error.message));
+                if first_failure.is_none() {
+                    first_failure = Some(anyhow::anyhow!(error.message));
+                }
             }
         }
     }
@@ -6355,21 +6360,26 @@ fn reconcile_supervisor_workers(
                 acknowledged.extend(candidates);
             }
             Err(error) => {
-                first_failure.get_or_insert_with(|| anyhow::anyhow!(error.message));
+                if first_failure.is_none() {
+                    first_failure = Some(anyhow::anyhow!(error.message));
+                }
             }
         }
     }
     drop(runtime);
     if !acknowledged.is_empty() {
-        let result = supervisor
-            .lock()
-            .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-            .acknowledge_pending_worker_stops(&acknowledged);
+        let Ok(runtime) = supervisor.lock() else {
+            anyhow::bail!("supervisor runtime is unavailable");
+        };
+        let result = runtime.acknowledge_pending_worker_stops(&acknowledged);
         if let Err(error) = result {
             first_failure.get_or_insert(error);
         }
     }
-    first_failure.map_or(Ok(interrupted), Err)
+    match first_failure {
+        Some(error) => Err(error),
+        None => Ok(interrupted),
+    }
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=artifact_preparation_rejects_nonterminal_wrong_contract_and_corrupt_membership
@@ -6692,20 +6702,31 @@ fn connection_workspace_id(
 ) -> Result<WorkspaceId, usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 
-    bound
-        .sessions()
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable"))?
-        .snapshot()
-        .map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
-        })?
-        .get("workspace_id")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .ok_or_else(|| {
-            ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
-        })
+    let Ok(sessions) = bound.sessions().lock() else {
+        return Err(ProtocolError::new(
+            ErrorCode::Unavailable,
+            "session runtime is unavailable",
+        ));
+    };
+    let Ok(snapshot) = sessions.snapshot() else {
+        return Err(ProtocolError::new(
+            ErrorCode::Unavailable,
+            "workspace identity is unavailable",
+        ));
+    };
+    let Some(value) = snapshot.get("workspace_id") else {
+        return Err(ProtocolError::new(
+            ErrorCode::Unavailable,
+            "workspace identity is unavailable",
+        ));
+    };
+    match serde_json::from_value(value.clone()) {
+        Ok(workspace) => Ok(workspace),
+        Err(_) => Err(ProtocolError::new(
+            ErrorCode::Unavailable,
+            "workspace identity is unavailable",
+        )),
+    }
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=supervisor_snapshot_is_exactly_workspace_scoped
@@ -14760,6 +14781,233 @@ mod tests {
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
     use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
+
+    #[derive(Default)]
+    struct SupervisorAgentStore;
+
+    impl RuntimeStore for SupervisorAgentStore {
+        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct SupervisorAgentJournal;
+
+    impl OutputJournal for SupervisorAgentJournal {
+        fn append(&mut self, _: &Output) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct SupervisorAgentPty;
+
+    impl PtySpawner for SupervisorAgentPty {
+        fn spawn(
+            &mut self,
+            _: &DurableLaunchSnapshot,
+            _: &SpawnProvision,
+            _: &TerminalRef,
+        ) -> Result<ProcessIdentity, SpawnFailure> {
+            Ok(ProcessIdentity {
+                pid: 4_321,
+                start_identity: "supervisor-agent-fixture".into(),
+                process_group: 4_321,
+            })
+        }
+
+        fn terminate_reap(&mut self, _: &TerminalRef) -> Result<(), TerminateReapError> {
+            Ok(())
+        }
+    }
+
+    impl PtyWriter for SupervisorAgentPty {
+        fn write_all(&mut self, _: &[u8]) -> Result<(), PtyWriteError> {
+            Ok(())
+        }
+    }
+
+    fn empty_supervisor_agent(dispatch: DispatchStore) -> SharedAgentRuntime {
+        Arc::new(SharedAgentState {
+            owner: Mutex::new(AgentRuntime::with_dispatch(
+                DaemonGeneration::new(),
+                AdapterRegistry::new(),
+                SupervisorAgentStore,
+                SupervisorAgentJournal,
+                SupervisorAgentPty,
+                AgentProfileId::new("claude").unwrap(),
+                Geometry { cols: 80, rows: 24 },
+                dispatch,
+            )),
+            readiness: Arc::new(SystemAgentReadiness::default()),
+        })
+    }
+
+    #[test]
+    fn supervisor_control_errors_map_every_refusal_class() {
+        use usagi_core::infrastructure::ipc::ErrorCode;
+
+        for (message, code) in [
+            ("capacity is exhausted", ErrorCode::ResourceExhausted),
+            (
+                "operation conflicts with its reservation",
+                ErrorCode::IdempotencyConflict,
+            ),
+            (
+                "operation conflicts with its semantic payload",
+                ErrorCode::IdempotencyConflict,
+            ),
+            (
+                "operation is outside the retained window",
+                ErrorCode::IdempotencyExpired,
+            ),
+            (
+                "run does not belong to workspace",
+                ErrorCode::OwnershipUnknown,
+            ),
+            (
+                "invalid supervisor cancellation reason",
+                ErrorCode::InvalidArgument,
+            ),
+            ("InvalidTransition", ErrorCode::InvalidArgument),
+            ("ProvenanceMismatch", ErrorCode::InvalidArgument),
+            ("TerminalRun", ErrorCode::InvalidArgument),
+            ("durable store failed", ErrorCode::Unavailable),
+        ] {
+            assert_eq!(
+                supervisor_control_error(anyhow::anyhow!(message)).code,
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_worker_reconciliation_joins_bound_and_unbound_runs_exactly() {
+        use usagi_core::domain::{
+            agent::{DispatchRun, RunStatus},
+            id::{AgentId, OperationId},
+            pr_inventory::GitHubRepository,
+            supervisor::{SupervisorRunState, SupervisorWorkspaceCommand},
+        };
+        use usagi_daemon::usecase::supervisor_runtime::GoalSpecification;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temp.path());
+        let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
+        let workspace = WorkspaceId::new();
+        let dispatch_run = OperationId::new();
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: dispatch_run,
+                agent_id: AgentId::new(),
+                prompt: String::new(),
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let worker = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal, None).unwrap();
+        let goal = || {
+            GoalSpecification::new(
+                "finish the goal".into(),
+                GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+            )
+        };
+        let bound = supervisor
+            .lock()
+            .unwrap()
+            .start_for_workspace_root_dispatch(
+                "goal",
+                workspace,
+                &dispatch_run.to_string(),
+                goal(),
+                None,
+                &worker,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        supervisor
+            .lock()
+            .unwrap()
+            .control_for_workspace(
+                workspace,
+                OperationId::new(),
+                &SupervisorWorkspaceCommand::Cancel {
+                    supervisor_run_id: bound.supervisor_run_id,
+                    reason: "operator cancelled".into(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap();
+
+        let unbound_operation = OperationId::new();
+        let unbound = supervisor
+            .lock()
+            .unwrap()
+            .reserve_goal_for_workspace(
+                "goal",
+                workspace,
+                &unbound_operation.to_string(),
+                goal(),
+                None,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        supervisor
+            .lock()
+            .unwrap()
+            .control_for_workspace(
+                workspace,
+                OperationId::new(),
+                &SupervisorWorkspaceCommand::Cancel {
+                    supervisor_run_id: unbound.supervisor_run_id,
+                    reason: "operator cancelled".into(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap();
+
+        let agent = empty_supervisor_agent(dispatch);
+        assert_eq!(
+            reconcile_supervisor_run_workers(&supervisor, &agent, bound.supervisor_run_id).unwrap(),
+            0
+        );
+        assert_eq!(
+            reconcile_supervisor_run_workers(&supervisor, &agent, unbound.supervisor_run_id)
+                .unwrap(),
+            0
+        );
+        assert!(
+            supervisor
+                .lock()
+                .unwrap()
+                .pending_worker_stops_for_run(unbound.supervisor_run_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            reconcile_aborted_supervisor_workers(&supervisor, &agent).unwrap(),
+            0
+        );
+        assert_eq!(
+            supervisor
+                .lock()
+                .unwrap()
+                .get_for_workspace(workspace, bound.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SupervisorRunState::Cancelled
+        );
+    }
 
     #[test]
     fn supervisor_promotion_grace_is_exact_and_future_safe() {

@@ -380,10 +380,12 @@ impl SupervisorStore {
         let Some(first) = index.entries.first() else {
             return Ok(None);
         };
-        Ok(self
-            .read_journal_page(id, first.offset, index.entries.len())?
-            .into_iter()
-            .find(|event| event.event_id == event_id))
+        for event in self.read_journal_page(id, first.offset, index.entries.len())? {
+            if event.event_id == event_id {
+                return Ok(Some(event));
+            }
+        }
+        Ok(None)
     }
     /// Returns the redaction-safe aggregate projection.
     ///
@@ -1043,6 +1045,17 @@ mod tests {
         assert_eq!(
             store.load(id).unwrap().unwrap().query().state,
             SupervisorRunState::Running
+        );
+
+        fs::write(store.journal_path(id), []).unwrap();
+        fs::remove_file(store.checkpoint_path(id)).unwrap();
+        fs::remove_file(store.journal_index_path(id)).unwrap();
+        assert!(
+            store
+                .apply(id, 1, &first)
+                .unwrap_err()
+                .to_string()
+                .contains("applied supervisor event is not retained")
         );
     }
 
