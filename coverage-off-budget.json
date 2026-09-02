@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 516,
+  "total": 515,
   "owners": {
     "core": 9,
-    "daemon": 343,
+    "daemon": 342,
     "root-cli": 40,
     "tui": 124
   },
@@ -21,7 +21,6 @@
     "crates/daemon/src/infrastructure/session_worktree.rs": 11,
     "crates/daemon/src/infrastructure/unix_transport.rs": 36,
     "crates/daemon/src/usecase/stop.rs": 1,
-    "crates/daemon/src/usecase/supervisor_runtime.rs": 1,
     "crates/tui/src/infrastructure/daemon.rs": 1,
     "crates/tui/src/presentation/frame.rs": 1,
     "crates/tui/src/presentation/live_terminal.rs": 1,

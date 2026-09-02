@@ -19,11 +19,12 @@ use usagi_core::{
         agent::{InboxKind, RunStatus, StructuredResult},
         id::{AgentRuntimeRef, OperationId, WorkspaceId},
         supervisor::{
-            EscalationDecision, GOAL_REVIEW_READY_ARTIFACT_CONTRACT, MAX_ARTIFACT_CONTRACT_BYTES,
-            MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_TEXT_BYTES,
-            MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT, RunProvenance, SupervisorEvent,
-            SupervisorEventKind, SupervisorEventSource, SupervisorRun, SupervisorRunId,
-            SupervisorRunQuery, SupervisorRunState, TaskId, TaskNode, TaskState,
+            ArtifactContract, EscalationDecision, GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES,
+            MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT, RunProvenance,
+            SupervisorEvent, SupervisorEventKind, SupervisorEventSource, SupervisorRun,
+            SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskId, TaskNode, TaskState,
+            presentation_text_is_safe,
         },
     },
     infrastructure::{
@@ -71,8 +72,11 @@ pub struct ArtifactVerification {
 /// Provider boundary used after a worker completion has moved a contracted
 /// task into `Verifying`. Worker-controlled output is input, never authority.
 pub trait ArtifactVerifier {
-    fn verify(&mut self, contract: &str, result: Option<&StructuredResult>)
-    -> ArtifactVerification;
+    fn verify(
+        &mut self,
+        contract: ArtifactContract,
+        result: Option<&StructuredResult>,
+    ) -> ArtifactVerification;
 }
 
 /// Exact task fence and worker-reported candidate prepared under the supervisor
@@ -82,7 +86,7 @@ pub struct ArtifactVerificationRequest {
     pub supervisor_run_id: SupervisorRunId,
     pub task_id: TaskId,
     pub generation: u64,
-    pub contract: String,
+    pub contract: ArtifactContract,
     pub result: Option<StructuredResult>,
 }
 
@@ -251,8 +255,8 @@ pub struct InitialTask {
     #[serde(default)]
     pub dependencies: Vec<String>,
     pub instruction: String,
-    #[serde(default = "default_artifact_contract")]
-    pub required_artifact_contract: String,
+    #[serde(default)]
+    pub required_artifact_contract: ArtifactContract,
 }
 
 fn bounded_nonempty(name: &str, value: &str, max: usize) -> Result<()> {
@@ -262,10 +266,19 @@ fn bounded_nonempty(name: &str, value: &str, max: usize) -> Result<()> {
     Ok(())
 }
 
+fn bounded_safe_label(name: &str, value: &str, max: usize) -> Result<()> {
+    bounded_nonempty(name, value, max)?;
+    if !presentation_text_is_safe(value) {
+        anyhow::bail!(
+            "invalid {name}: control and bidirectional formatting characters are forbidden"
+        );
+    }
+    Ok(())
+}
+
 fn validate_start_input(
     operation_id: &str,
     root_task: &str,
-    root_artifact_contract: &str,
     initial_tasks: &[InitialTask],
     policy_selector: Option<&str>,
 ) -> Result<()> {
@@ -275,11 +288,6 @@ fn validate_start_input(
         MAX_SUPERVISOR_KEY_BYTES,
     )?;
     bounded_nonempty("supervisor root task", root_task, MAX_SUPERVISOR_TEXT_BYTES)?;
-    bounded_nonempty(
-        "supervisor root artifact contract",
-        root_artifact_contract,
-        MAX_ARTIFACT_CONTRACT_BYTES,
-    )?;
     if initial_tasks.len() > MAX_INITIAL_TASKS {
         anyhow::bail!("invalid initial task count: maximum is {MAX_INITIAL_TASKS}");
     }
@@ -306,18 +314,8 @@ fn validate_start_input(
             &task.instruction,
             MAX_SUPERVISOR_TEXT_BYTES,
         )?;
-        bounded_nonempty(
-            "supervisor artifact contract",
-            &task.required_artifact_contract,
-            MAX_ARTIFACT_CONTRACT_BYTES,
-        )?;
     }
     Ok(())
-}
-
-#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=start_rejects_an_unresolvable_initial_dag
-fn default_artifact_contract() -> String {
-    NO_ARTIFACT_CONTRACT.into()
 }
 
 fn push_semantic_component(key: &mut String, value: &str) {
@@ -701,7 +699,7 @@ impl SupervisorRuntime {
             Some(parent_task_id),
             BTreeSet::new(),
             instruction,
-            NO_ARTIFACT_CONTRACT.into(),
+            NO_ARTIFACT_CONTRACT,
         );
         task.instruction_digest = delegated_task_digest(child_dispatch_run);
         run = self.apply(
@@ -973,7 +971,7 @@ impl SupervisorRuntime {
         }
         let task_state = task.state;
         let generation = task.generation;
-        let contract = task.required_artifact_contract.clone();
+        let contract = task.required_artifact_contract;
         let dispatch = self
             .dispatch
             .run(dispatch_run_id)?
@@ -1085,7 +1083,7 @@ impl SupervisorRuntime {
         workspace: Option<WorkspaceId>,
         operation_id: &str,
         root_task: String,
-        root_artifact_contract: &str,
+        root_artifact_contract: ArtifactContract,
         initial_tasks: Vec<InitialTask>,
         policy_selector: Option<String>,
         now: DateTime<Utc>,
@@ -1093,14 +1091,13 @@ impl SupervisorRuntime {
         validate_start_input(
             operation_id,
             &root_task,
-            root_artifact_contract,
             &initial_tasks,
             policy_selector.as_deref(),
         )?;
         let mut semantic_key = String::new();
         push_semantic_component(&mut semantic_key, caller);
         push_semantic_component(&mut semantic_key, &root_task);
-        push_semantic_component(&mut semantic_key, root_artifact_contract);
+        push_semantic_component(&mut semantic_key, root_artifact_contract.as_str());
         push_semantic_component(&mut semantic_key, &initial_tasks.len().to_string());
         for task in &initial_tasks {
             push_semantic_component(&mut semantic_key, &task.task_id);
@@ -1113,7 +1110,7 @@ impl SupervisorRuntime {
                 push_semantic_component(&mut semantic_key, dependency);
             }
             push_semantic_component(&mut semantic_key, &task.instruction);
-            push_semantic_component(&mut semantic_key, &task.required_artifact_contract);
+            push_semantic_component(&mut semantic_key, task.required_artifact_contract.as_str());
         }
         push_semantic_component(
             &mut semantic_key,
@@ -1185,7 +1182,7 @@ impl SupervisorRuntime {
                         None,
                         BTreeSet::new(),
                         root_task,
-                        root_artifact_contract.into(),
+                        root_artifact_contract,
                     ),
                 },
             )?;
@@ -1320,6 +1317,11 @@ impl SupervisorRuntime {
         reason: String,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
+        bounded_safe_label(
+            "supervisor cancellation reason",
+            &reason,
+            MAX_SUPERVISOR_REASON_BYTES,
+        )?;
         let run = self
             .owned_run(caller, id)?
             .ok_or_else(|| anyhow::anyhow!("supervisor run does not exist for this caller"))?;
@@ -1737,7 +1739,7 @@ fn task_node(
     parent_task_id: Option<TaskId>,
     dependencies: BTreeSet<TaskId>,
     instruction: String,
-    required_artifact_contract: String,
+    required_artifact_contract: ArtifactContract,
 ) -> TaskNode {
     TaskNode {
         instruction_digest: format!("task:{}", task_id.0),
@@ -1826,7 +1828,7 @@ mod tests {
             dependencies: BTreeSet::new(),
             instruction_digest: id.into(),
             instruction_body: id.into(),
-            required_artifact_contract: "none".into(),
+            required_artifact_contract: NO_ARTIFACT_CONTRACT,
             attempt: 1,
             generation: 1,
             assigned_dispatch_run: None,
@@ -2221,7 +2223,7 @@ mod tests {
                 ..request.clone()
             },
             ArtifactVerificationRequest {
-                contract: "another-contract".into(),
+                contract: NO_ARTIFACT_CONTRACT,
                 ..request.clone()
             },
         ] {
@@ -2377,7 +2379,7 @@ mod tests {
             .tasks
             .get_mut(&TaskId::new("root").unwrap())
             .unwrap()
-            .required_artifact_contract = NO_ARTIFACT_CONTRACT.into();
+            .required_artifact_contract = NO_ARTIFACT_CONTRACT;
         scheduler.supervisor.initialize(&wrong_contract).unwrap();
         scheduler
             .dispatch
@@ -2403,7 +2405,7 @@ mod tests {
             .tasks
             .get_mut(&TaskId::new("root").unwrap())
             .unwrap();
-        corrupt_root.required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT.into();
+        corrupt_root.required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT;
         corrupt_root.state = TaskState::Dispatched;
         corrupt
             .provenance
@@ -3047,7 +3049,7 @@ mod tests {
                         Some(TaskId::new("root").unwrap()),
                         BTreeSet::new(),
                         "ordinary task".into(),
-                        NO_ARTIFACT_CONTRACT.into(),
+                        NO_ARTIFACT_CONTRACT,
                     ),
                 },
             )
@@ -3191,7 +3193,7 @@ mod tests {
                 Some(TaskId::new("root").unwrap()),
                 BTreeSet::new(),
                 "ordinary".into(),
-                NO_ARTIFACT_CONTRACT.into(),
+                NO_ARTIFACT_CONTRACT,
             );
             child.instruction_digest = digest;
             child.state = TaskState::Ready;
@@ -3733,51 +3735,37 @@ mod tests {
             parent_task_id: None,
             dependencies: Vec::new(),
             instruction: "work".into(),
-            required_artifact_contract: "none".into(),
+            required_artifact_contract: NO_ARTIFACT_CONTRACT,
         };
         assert_eq!(exact_root.len(), MAX_SUPERVISOR_TEXT_BYTES);
         validate_start_input(
             "operation",
             &exact_root,
-            NO_ARTIFACT_CONTRACT,
             std::slice::from_ref(&task),
             Some("policy"),
         )
         .unwrap();
         assert!(
-            validate_start_input(
-                "operation",
-                &(exact_root + "x"),
-                NO_ARTIFACT_CONTRACT,
-                &[task],
-                None,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("root task")
+            validate_start_input("operation", &(exact_root + "x"), &[task], None,)
+                .unwrap_err()
+                .to_string()
+                .contains("root task")
         );
         assert!(
-            validate_start_input(
-                &"x".repeat(MAX_SUPERVISOR_KEY_BYTES + 1),
-                "root",
-                NO_ARTIFACT_CONTRACT,
-                &[],
-                None,
-            )
-            .is_err()
+            validate_start_input(&"x".repeat(MAX_SUPERVISOR_KEY_BYTES + 1), "root", &[], None,)
+                .is_err()
         );
         assert!(
             validate_start_input(
                 "operation",
                 "root",
-                NO_ARTIFACT_CONTRACT,
                 &vec![
                     InitialTask {
                         task_id: "task".into(),
                         parent_task_id: None,
                         dependencies: Vec::new(),
                         instruction: "work".into(),
-                        required_artifact_contract: "none".into(),
+                        required_artifact_contract: NO_ARTIFACT_CONTRACT,
                     };
                     MAX_INITIAL_TASKS + 1
                 ],
@@ -3791,7 +3779,7 @@ mod tests {
                 parent_task_id: None,
                 dependencies: Vec::new(),
                 instruction: "work".into(),
-                required_artifact_contract: "none".into(),
+                required_artifact_contract: NO_ARTIFACT_CONTRACT,
             },
             InitialTask {
                 task_id: "task".into(),
@@ -3800,14 +3788,14 @@ mod tests {
                 ),
                 dependencies: Vec::new(),
                 instruction: "work".into(),
-                required_artifact_contract: "none".into(),
+                required_artifact_contract: NO_ARTIFACT_CONTRACT,
             },
             InitialTask {
                 task_id: "task".into(),
                 parent_task_id: None,
                 dependencies: vec!["dependency".into(); MAX_TASK_DEPENDENCIES + 1],
                 instruction: "work".into(),
-                required_artifact_contract: "none".into(),
+                required_artifact_contract: NO_ARTIFACT_CONTRACT,
             },
             InitialTask {
                 task_id: "task".into(),
@@ -3816,39 +3804,25 @@ mod tests {
                     "x".repeat(usagi_core::domain::supervisor::MAX_TASK_ID_BYTES + 1),
                 ],
                 instruction: "work".into(),
-                required_artifact_contract: "none".into(),
+                required_artifact_contract: NO_ARTIFACT_CONTRACT,
             },
             InitialTask {
                 task_id: "task".into(),
                 parent_task_id: None,
                 dependencies: Vec::new(),
                 instruction: "x".repeat(MAX_SUPERVISOR_TEXT_BYTES + 1),
-                required_artifact_contract: "none".into(),
-            },
-            InitialTask {
-                task_id: "task".into(),
-                parent_task_id: None,
-                dependencies: Vec::new(),
-                instruction: "work".into(),
-                required_artifact_contract: "x".repeat(MAX_ARTIFACT_CONTRACT_BYTES + 1),
+                required_artifact_contract: NO_ARTIFACT_CONTRACT,
             },
         ] {
-            assert!(
-                validate_start_input("operation", "root", NO_ARTIFACT_CONTRACT, &[invalid], None,)
-                    .is_err()
-            );
+            assert!(validate_start_input("operation", "root", &[invalid], None).is_err());
         }
+        assert!(validate_start_input("operation", "root", &[], Some("")).is_err());
         assert!(
-            validate_start_input("operation", "root", NO_ARTIFACT_CONTRACT, &[], Some("")).is_err()
-        );
-        assert!(
-            validate_start_input(
-                "operation",
-                "root",
-                &"x".repeat(MAX_ARTIFACT_CONTRACT_BYTES + 1),
-                &[],
-                None,
-            )
+            serde_json::from_value::<InitialTask>(serde_json::json!({
+                "task_id": "task",
+                "instruction": "work",
+                "required_artifact_contract": "unsupported"
+            }))
             .is_err()
         );
 
@@ -4195,7 +4169,7 @@ mod tests {
                 parent_task_id: None,
                 dependencies: vec!["root".into()],
                 instruction: "child".into(),
-                required_artifact_contract: "none".into(),
+                required_artifact_contract: NO_ARTIFACT_CONTRACT,
             }];
             assert!(
                 scheduler
@@ -4241,7 +4215,7 @@ mod tests {
                 parent_task_id: None,
                 dependencies: vec!["root".into()],
                 instruction: "child".into(),
-                required_artifact_contract: "none".into(),
+                required_artifact_contract: NO_ARTIFACT_CONTRACT,
             }];
             scheduler.fail_apply_at(fail_at);
             assert!(
@@ -4668,7 +4642,7 @@ mod tests {
             parent_task_id: None,
             dependencies: vec!["root".into()],
             instruction: "secret child instruction".into(),
-            required_artifact_contract: "none".into(),
+            required_artifact_contract: NO_ARTIFACT_CONTRACT,
         }];
         let started = runtime
             .start(
@@ -4837,6 +4811,47 @@ mod tests {
     }
 
     #[test]
+    fn cancel_rejects_unsafe_or_unbounded_presented_reasons() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let run = runtime
+            .start(
+                "caller",
+                "operation",
+                "root".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        for reason in [
+            String::new(),
+            "clear\u{1b}[2J".into(),
+            "line\nbreak".into(),
+            "direction\u{202e}override".into(),
+            "x".repeat(MAX_SUPERVISOR_REASON_BYTES + 1),
+        ] {
+            assert!(
+                runtime
+                    .cancel("caller", run.supervisor_run_id, reason, now())
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            runtime
+                .cancel(
+                    "caller",
+                    run.supervisor_run_id,
+                    "operator requested stop".into(),
+                    now(),
+                )
+                .unwrap()
+                .state,
+            SupervisorRunState::Cancelled
+        );
+    }
+
+    #[test]
     fn start_rejects_an_unresolvable_initial_dag() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = SupervisorRuntime::new(temp.path());
@@ -4850,7 +4865,7 @@ mod tests {
                     parent_task_id: None,
                     dependencies: vec!["missing".into()],
                     instruction: "child".into(),
-                    required_artifact_contract: "none".into(),
+                    required_artifact_contract: NO_ARTIFACT_CONTRACT,
                 }],
                 Some("strict".into()),
                 now(),
@@ -4862,7 +4877,7 @@ mod tests {
             "instruction": "body"
         }))
         .unwrap();
-        assert_eq!(parsed.required_artifact_contract, "none");
+        assert_eq!(parsed.required_artifact_contract, NO_ARTIFACT_CONTRACT);
     }
 
     #[test]

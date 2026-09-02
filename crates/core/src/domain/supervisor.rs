@@ -58,32 +58,102 @@ pub const MAX_TASK_ID_BYTES: usize = 128;
 pub const MAX_INITIAL_TASKS: usize = 128;
 pub const MAX_TASK_DEPENDENCIES: usize = 128;
 pub const MAX_SUPERVISOR_TEXT_BYTES: usize = 16 * 1024;
-pub const MAX_ARTIFACT_CONTRACT_BYTES: usize = 4 * 1024;
+pub const MAX_SUPERVISOR_REASON_BYTES: usize = 4 * 1024;
 pub const MAX_SUPERVISOR_KEY_BYTES: usize = 256;
+
+/// Closed vocabulary for independently verified task outputs.
+///
+/// The serialized spellings are the durable/wire contract. Keeping the set in
+/// the domain makes unsupported contracts impossible to admit while adapters
+/// remain responsible only for implementing a known variant.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactContract {
+    #[default]
+    None,
+    GoalReviewReadyPullRequestV1,
+}
+
+impl ArtifactContract {
+    pub const ALL: [Self; 2] = [Self::None, Self::GoalReviewReadyPullRequestV1];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::GoalReviewReadyPullRequestV1 => "goal_review_ready_pr_v1",
+        }
+    }
+
+    #[must_use]
+    pub const fn requires_verification(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+}
+
+impl fmt::Display for ArtifactContract {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ArtifactContract {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtifactContract {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::ALL
+            .into_iter()
+            .find(|contract| contract.as_str() == value)
+            .ok_or_else(|| de::Error::custom(format!("unsupported artifact contract: {value}")))
+    }
+}
+
 /// Artifact contract used when a task has no independently verified output.
-pub const NO_ARTIFACT_CONTRACT: &str = "none";
+pub const NO_ARTIFACT_CONTRACT: ArtifactContract = ArtifactContract::None;
 /// Contract for a Goal whose terminal condition is a review-ready pull request
 /// with all required checks passing.
-pub const GOAL_REVIEW_READY_ARTIFACT_CONTRACT: &str = "goal_review_ready_pr_v1";
+pub const GOAL_REVIEW_READY_ARTIFACT_CONTRACT: ArtifactContract =
+    ArtifactContract::GoalReviewReadyPullRequestV1;
 
-/// Whether a task completion report must be followed by independent artifact
-/// verification. This is the single authority for interpreting the persisted
-/// string contract; adapters may add contract-specific verifiers without
-/// duplicating the no-verification sentinel.
+/// Whether text can be embedded in terminal presentation without changing
+/// control flow or visual direction. Rendering layers still escape defensively;
+/// this is the admission authority for values which are themselves UI labels.
 #[must_use]
-pub fn requires_artifact_verification(contract: &str) -> bool {
-    contract != NO_ARTIFACT_CONTRACT
+pub fn presentation_text_is_safe(value: &str) -> bool {
+    value.chars().all(|character| {
+        !character.is_control()
+            && !matches!(
+                character,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{206f}'
+            )
+    })
 }
 
 impl TaskId {
     /// Creates an opaque task key.
     ///
     /// # Errors
-    /// Returns [`SupervisorError::InvalidTaskId`] for an empty key or one over
-    /// [`MAX_TASK_ID_BYTES`] UTF-8 bytes.
+    /// Returns [`SupervisorError::InvalidTaskId`] for an empty key, an unsafe
+    /// presentation character, or one over [`MAX_TASK_ID_BYTES`] UTF-8 bytes.
     pub fn new(value: impl Into<String>) -> Result<Self, SupervisorError> {
         let value = value.into();
-        if value.trim().is_empty() || value.len() > MAX_TASK_ID_BYTES {
+        if value.trim().is_empty()
+            || value.len() > MAX_TASK_ID_BYTES
+            || !presentation_text_is_safe(&value)
+        {
             return Err(SupervisorError::InvalidTaskId);
         }
         Ok(Self(value))
@@ -174,7 +244,7 @@ pub struct TaskNode {
     pub dependencies: BTreeSet<TaskId>,
     pub instruction_digest: String,
     pub instruction_body: String,
-    pub required_artifact_contract: String,
+    pub required_artifact_contract: ArtifactContract,
     pub attempt: u64,
     pub generation: u64,
     pub assigned_dispatch_run: Option<OperationId>,
@@ -541,7 +611,7 @@ pub struct TaskQuery {
     pub parent_task_id: Option<TaskId>,
     pub dependencies: BTreeSet<TaskId>,
     pub instruction_digest: String,
-    pub required_artifact_contract: String,
+    pub required_artifact_contract: ArtifactContract,
     pub attempt: u64,
     pub generation: u64,
     pub assigned_dispatch_run: Option<OperationId>,
@@ -554,7 +624,7 @@ impl From<&TaskNode> for TaskQuery {
             parent_task_id: task.parent_task_id.clone(),
             dependencies: task.dependencies.clone(),
             instruction_digest: task.instruction_digest.clone(),
-            required_artifact_contract: task.required_artifact_contract.clone(),
+            required_artifact_contract: task.required_artifact_contract,
             attempt: task.attempt,
             generation: task.generation,
             assigned_dispatch_run: task.assigned_dispatch_run,
@@ -893,9 +963,7 @@ fn set_task(
         task.state = TaskState::Retrying;
         return Ok(());
     }
-    if state == TaskState::Succeeded
-        && requires_artifact_verification(&task.required_artifact_contract)
-    {
+    if state == TaskState::Succeeded && task.required_artifact_contract.requires_verification() {
         task.state = TaskState::Verifying;
         return Ok(());
     }
@@ -1067,7 +1135,7 @@ mod tests {
             dependencies: deps.iter().map(|v| TaskId::new(*v).unwrap()).collect(),
             instruction_digest: "digest".into(),
             instruction_body: "secret prompt".into(),
-            required_artifact_contract: NO_ARTIFACT_CONTRACT.into(),
+            required_artifact_contract: NO_ARTIFACT_CONTRACT,
             attempt: 1,
             generation: 1,
             assigned_dispatch_run: None,
@@ -1090,10 +1158,37 @@ mod tests {
         assert!(SupervisorRunState::Failed.is_finished());
         assert!(SupervisorRunState::Cancelled.is_finished());
         assert!(!SupervisorRunState::Running.is_finished());
-        assert!(!requires_artifact_verification(NO_ARTIFACT_CONTRACT));
-        assert!(requires_artifact_verification(
-            GOAL_REVIEW_READY_ARTIFACT_CONTRACT
-        ));
+        assert!(!NO_ARTIFACT_CONTRACT.requires_verification());
+        assert!(GOAL_REVIEW_READY_ARTIFACT_CONTRACT.requires_verification());
+    }
+
+    #[test]
+    fn artifact_contract_and_presented_task_id_are_closed_domain_values() {
+        assert_eq!(
+            serde_json::to_string(&GOAL_REVIEW_READY_ARTIFACT_CONTRACT).unwrap(),
+            r#""goal_review_ready_pr_v1""#
+        );
+        assert_eq!(
+            GOAL_REVIEW_READY_ARTIFACT_CONTRACT.to_string(),
+            "goal_review_ready_pr_v1"
+        );
+        assert_eq!(NO_ARTIFACT_CONTRACT.to_string(), "none");
+        assert_eq!(
+            serde_json::from_str::<ArtifactContract>(r#""none""#).unwrap(),
+            NO_ARTIFACT_CONTRACT
+        );
+        assert!(serde_json::from_str::<ArtifactContract>(r#""unknown""#).is_err());
+        for unsafe_id in [
+            "line\nbreak",
+            "escape\u{1b}[2J",
+            "direction\u{202e}override",
+            "isolate\u{2066}text",
+            "deprecated-direction\u{206a}text",
+        ] {
+            assert_eq!(TaskId::new(unsafe_id), Err(SupervisorError::InvalidTaskId));
+            assert!(!presentation_text_is_safe(unsafe_id));
+        }
+        assert_eq!(TaskId::new("安全な-task_1").unwrap().0, "安全な-task_1");
     }
     fn event(seq: u64, kind: SupervisorEventKind) -> SupervisorEvent {
         SupervisorEvent {
@@ -1410,7 +1505,7 @@ mod tests {
                 retry_backoff_seconds: 30,
             });
         let mut artifact = task(run.supervisor_run_id, "artifact", &[]);
-        artifact.required_artifact_contract = "commit-fence".into();
+        artifact.required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT;
         reduce(
             &mut run,
             &event(1, SupervisorEventKind::AddTask { task: artifact }),
@@ -1492,7 +1587,7 @@ mod tests {
                 retry_backoff_seconds: 30,
             });
         let mut retry_task = task(run.supervisor_run_id, "retry", &[]);
-        retry_task.required_artifact_contract = "commit-fence".into();
+        retry_task.required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT;
         reduce(
             &mut run,
             &event(1, SupervisorEventKind::AddTask { task: retry_task }),

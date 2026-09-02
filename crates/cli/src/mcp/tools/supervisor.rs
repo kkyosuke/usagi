@@ -7,7 +7,7 @@
 use crate::mcp::tool::Tool;
 use std::sync::OnceLock;
 use usagi_core::domain::supervisor::{
-    MAX_ARTIFACT_CONTRACT_BYTES, MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES,
+    ArtifactContract, MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES,
     MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES, MAX_TASK_ID_BYTES,
 };
 
@@ -52,9 +52,10 @@ impl Tool for SupervisorStart {
                                     "items": bounded_string(MAX_TASK_ID_BYTES),
                                 },
                                 "instruction": bounded_string(MAX_SUPERVISOR_TEXT_BYTES),
-                                "required_artifact_contract": bounded_string(
-                                    MAX_ARTIFACT_CONTRACT_BYTES,
-                                ),
+                                "required_artifact_contract": {
+                                    "type": "string",
+                                    "enum": ArtifactContract::all(),
+                                },
                             },
                             "required": ["task_id", "instruction"],
                             "additionalProperties": false,
@@ -112,7 +113,19 @@ impl Tool for SupervisorCancel {
         "権限と fence を検証して supervisor run を cancel する"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"supervisor_run_id":{"type":"string"},"reason":{"type":"string"}},"required":["supervisor_run_id","reason"],"additionalProperties":false}"#
+        static SCHEMA: OnceLock<String> = OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "supervisor_run_id": {"type": "string"},
+                    "reason": bounded_string(MAX_SUPERVISOR_REASON_BYTES),
+                },
+                "required": ["supervisor_run_id", "reason"],
+                "additionalProperties": false,
+            })
+            .to_string()
+        })
     }
 }
 pub struct SupervisorResolveEscalation;
@@ -161,12 +174,22 @@ mod tests {
         assert_eq!(task["task_id"]["maxLength"], MAX_TASK_ID_BYTES);
         assert_eq!(task["dependencies"]["maxItems"], MAX_TASK_DEPENDENCIES);
         assert_eq!(
-            task["required_artifact_contract"]["maxLength"],
-            MAX_ARTIFACT_CONTRACT_BYTES
+            task["required_artifact_contract"]["enum"],
+            serde_json::json!(ArtifactContract::all())
         );
         assert_eq!(
             properties["idempotency_key"]["maxLength"],
             MAX_SUPERVISOR_KEY_BYTES
+        );
+    }
+
+    #[test]
+    fn cancel_schema_uses_the_domain_reason_budget() {
+        let schema: serde_json::Value =
+            serde_json::from_str(SupervisorCancel.input_schema()).unwrap();
+        assert_eq!(
+            schema["properties"]["reason"]["x-maxUtf8Bytes"],
+            MAX_SUPERVISOR_REASON_BYTES
         );
     }
 }
