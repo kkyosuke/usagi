@@ -8,11 +8,13 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [画面と入力](#画面と入力)
 - [project tab と workspace deck](#project-tab-と-workspace-deck)
 - [workspace の離脱と終了](#workspace-の離脱と終了)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
+- [Production screen graph harness](#production-screen-graph-harness)
 - [Home と target](#home-と-target)
   - [Switch の右ペインは cursor の preview](#switch-の右ペインは-cursor-の-preview)
 - [workspace terminal drawer](#workspace-terminal-drawer)
@@ -37,6 +39,13 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [exited terminal の completed entry](#exited-terminal-の-completed-entry)
 - [interrupted Agent の tab 投影と明示 resume](#interrupted-agent-の-tab-投影と明示-resume)
 - [feedback と終了](#feedback-と終了)
+
+## この文書の読み方
+
+前半は Welcome から Home までの画面遷移、workspace deck、入力所有を扱う。Home を変更するときは target と drawer、
+frame loop、sidebar / modal の順に確認し、session の個別 pane を変更するときは Closeup 以降を読む。後半の resume と
+feedback は TUI-local な投影だけを所有し、resource identity と wire は [4. daemon IPC](04-ipc.md)、session / Agent の
+lifecycle は [5. daemon](05-daemon.md) を参照する。
 
 ## 画面と入力
 
@@ -205,7 +214,7 @@ daemon](#workspace-の選択と-daemon)）。多くの場合その接続先は�
 
 戻り先の Welcome は**開いた時点の Recent 順序を保つ**。workspace を開いた時点で `record_opened` 済みなので
 離れた workspace は先頭にあり、entry 画面が daemon も store も読み直さない原則（[workspace の選択と
-daemon](#workspace-の選択と-daemon)）をそのまま守る。ただし `usagi <path>` / `usagi open <path>` のように
+daemon](#workspace-の選択と-daemon)）をそのまま守る。ただし `usagi open <path>` のように
 workspace を直接開いた入口には背後に Welcome が無いため、離脱時に合成ルートが Recent を読み直して
 entry 画面へ入る。
 
@@ -256,7 +265,7 @@ Overview / Closeup を生成する Home runtime へ渡す。この束縛は work
 
 session 一覧・scope・PR inventory は daemon が権威である。daemon は起動した workspace に加えて、**client が選んだ
 workspace を adopt して同時に serve する**（[5. daemon#tenant registry](05-daemon.md#tenant-registry)）。一方 TUI が開く workspace は、起動した
-directory ではなく利用者の選択（`usagi open <path>` / `usagi <path>`、Welcome の Recent、Open 一覧、New の作成
+directory ではなく利用者の選択（`usagi open <path>`、Welcome の Recent、Open 一覧、New の作成
 成功）で決まる。この節はその 2 つを一致させる契約の正本であり、wire の申告と admit 条件は
 [4. daemon IPC#workspace fence](04-ipc.md#workspace-fence) が正本である。
 
@@ -278,7 +287,7 @@ canonical 化して `selected` として申告するため、daemon は「serve 
 |---|---|
 | Welcome の Recent、Open 一覧 | その画面に留まり notice に出す。折り返して全文を表示するので理由と手順が切れない。続けて serve されている workspace を選べる |
 | New の作成成功後の open | draft を保ったまま同画面の notice に出す |
-| `usagi open <path>` / `usagi <path>` | 端末があれば **Welcome（切り替え画面）を開き、その 1 フレーム目に notice として出す**。端末が無ければ TUI を開かず stderr へ 1 行で出す |
+| `usagi open <path>` | 端末があれば **Welcome（切り替え画面）を開き、その 1 フレーム目に notice として出す**。端末が無ければ TUI を開かず stderr へ 1 行で出す |
 
 **daemon へ到達できないことは、この表の拒否と同じ扱いにする**。workspace が今開けない理由が
 「この daemon は別 workspace を serve している」でも「daemon へ到達できない」でも、利用者に必要なのは

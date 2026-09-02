@@ -9,6 +9,7 @@
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [なぜ 4 クレートか](#なぜ-4-クレートか)
 - [ディレクトリ構成](#ディレクトリ構成)
 - [各クレートの責務](#各クレートの責務)
@@ -24,6 +25,13 @@
 - [入口面 CLI のコマンド dispatch](#入口面-cli-のコマンド-dispatch)
 - [入口面 MCP の tool dispatch](#入口面-mcp-の-tool-dispatch)
 - [検討した代替案](#検討した代替案)
+
+## この文書の読み方
+
+最初にクレートの責務と依存ルールを確認し、永続化や Git subprocess を変更するときは続く commit / confine 契約を読む。
+process の入口を変更するときは合成ルートと該当する CLI / MCP dispatch、TUI の操作を変更するときは Overview / Closeup
+dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の詳細はそれぞれ [3. TUI](03-tui.md)、
+[4. daemon IPC](04-ipc.md)、[5. daemon](05-daemon.md) が正本である。
 
 ## なぜ 4 クレートか
 
@@ -160,12 +168,11 @@ pointer クリックは `Key::Click` を `AppEvent::Pointer`（座標＋種別�
 描画と同じ viewport 幾何で `Selection` へ hit-test して選択（single click）または
 活性化（double click）する。shell は行の hit-test を持たず、double click の判定窓だけを
 追跡する。terminal pane 内の drag / copy は Home 行契約と無関係なので shell +
-`TerminalSession` に残る。指示モード（呼び名・chord・表示・入力所有の正本は
-[3. TUI](03-tui.md#指示モードdirector-mode)）は `AppState` の専用 open/closed state と root target の
-Agent-only projection を controller が所有し、描画は `director_drawer` の right-anchored
-geometry と drawer 専用 terminal viewport を使う。root generic Terminal は同じ root pane registry に admission しつつ
-[workspace terminal drawer](03-tui.md#workspace-terminal-drawer)だけへ投影し、下端から重なる専用 geometry を使う。
-2 つの drawer の open state と foreground input は排他的であり、root Diff は pane/runtime に admission しない。前面の Pull Request
+`TerminalSession` に残る。controller は指示モードと workspace terminal drawer の open state、root target の
+projection、foreground input owner を保持する。drawer の呼び名・chord・表示・切替・入力所有は
+[指示モード](03-tui.md#指示モードdirector-mode)と
+[workspace terminal drawer](03-tui.md#workspace-terminal-drawer)が正本であり、本章ではその画面挙動を重複定義しない。
+root Diff は pane/runtime に admission しない。前面の Pull Request
 一覧・Markdown preview は controller の `Overlay::Prs` / `Overlay::Preview` が所有し、
 素材は `Effect::LoadPullRequests` / `LoadPreview` で要求して
 `BackendEvent::PullRequestsLoaded` / `PreviewLoaded`（失敗は対応する `*Error`）として

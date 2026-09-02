@@ -2,6 +2,10 @@
 
 > [設計提案一覧](README.md) ｜ 現在仕様: [TUI](../03-tui.md) ｜ 実装履歴: #674
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `e889a6be0c681820db36bf28f8f5f876f8ad22ab`（2026-08-14）。本文は session garden を導入した時点の snapshot であり、現在仕様ではない。現行仕様は [TUI の session garden](../03-tui.md#session-garden) を参照する。
+
 session を庭の区画、その agent を区画にいるうさぎとして表す Home の screen saver UI を導入した際の
 設計記録である。現在の表示・入力契約は [3. TUI#session garden](../03-tui.md#session-garden) が正本であり、
 本書は採用理由と実装履歴を残す。Garden の目的は session 数や実行状態を一覧表より速く把握できることと、

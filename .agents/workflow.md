@@ -8,7 +8,7 @@ The documentation index is [document/README.md](../document/README.md).
 
 ### 0. 着手する issue を選ぶ
 
-実装すべきタスク（issue）は usagi の issue ストア（`.usagi/issues/`）に `NNN-feature.md` 形式で管理されている。`usagi issue list` / `usagi issue show <番号>`（CLI）や MCP ツール（`issue_search` / `issue_get`）で一覧・参照する。
+実装すべきタスク（issue）は usagi の issue ストア（`.usagi/issues/`）に `NNN-feature.md` 形式で管理されている。MCP ツールの `issue_search` / `issue_get` で一覧・参照する。
 
 - 各 issue のメタデータ（`status` / `priority` / `dependson`）を確認し、`dependson` が満たされている `todo` を選ぶ。
 - **root/コーディネータは issue の定義（起票・本文編集）も行わない**。issue ファイルは git 追跡下なので、root が
@@ -17,7 +17,7 @@ The documentation index is [document/README.md](../document/README.md).
   トリアージ/設計 session を起こし、その session が worktree 内で `issue_create` して PR に載せる。既存の committed
   issue を遂行する場合だけ、root は `session_delegate_issue` で `issue-<番号>` session に委譲する。
 - **`status` の書き手はその issue を担当する session だけ**（「単一書き手」）。root/コーディネータは `status` を一切書かない。`main`（リポジトリルート）で root が `status` を触ると、その差分が並行する session の PR と分岐・衝突するためである。`status` を書くのは常にその session の枝だけ、という書き手の一本化で衝突を防ぐ。
-- **status ライフサイクルは自枝でこう回す**（`usagi issue update <番号> --status ...` または MCP `issue_update`。すべてその issue を担当する session の worktree 内で行う。issue の書き込みは worktree に routing され、ブランチに乗って PR で `main` へ反映される）:
+- **status ライフサイクルは自枝でこう回す**（MCP `issue_update` を、その issue を担当する session の worktree 内で実行する。issue の書き込みは worktree に routing され、ブランチに乗って PR で `main` へ反映される）:
 
   | 遷移 | いつ | どこで |
   |---|---|---|

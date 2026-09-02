@@ -2,6 +2,10 @@
 
 > [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [workspace open 時の pane 復元](11-workspace-restore-panes.md)
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `c0601f8c466d5cafadf738fe9ac92109d2b3fa68`（2026-07-24）。本文は semantic terminal checkpoint を導入した時点の snapshot であり、現在仕様ではない。現行仕様は [daemon IPC](../04-ipc.md#snapshot-payload-と-revision) と [TUI](../03-tui.md#snapshot-negotiation-と-legacy-限定表示) を参照する。
+
 本書は [#524](../../.usagi/issues/524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md)（P1 correctness）の設計記録である。attach / resync snapshot を「blank parser に任意の raw 64 KiB tail」から **versioned semantic screen checkpoint** へ置き換え、daemon を terminal grid/scrollback の唯一の権威とする設計判断を確定した。
 
 **この設計は実装済みであり、正本は [4. daemon IPC](../04-ipc.md#snapshot-payload-と-revision)（snapshot schema / capability / revision / geometry / offset / allocation 上限）と [3. TUI](../03-tui.md#snapshot-negotiation-と-legacy-限定表示)（visible + primary/copy-history restore と legacy 限定表示）に移った**。本書は採用に至った判断（なぜ daemon が parser を持つ必要があるか、なぜ checkpoint + contiguous suffix に分けるか）の記録として残す。以降の記述は当時の設計判断であり、現在の挙動は上記の正本を参照する。

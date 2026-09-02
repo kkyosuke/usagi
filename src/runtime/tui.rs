@@ -4760,7 +4760,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             let registry = loader.storage.load_workspaces().map_err(io_error)?;
             // A direct workspace entry has no Welcome behind it, so leaving
             // continues into the entry screens in this same process rather
-            // than ending it: `usagi <path>` switches workspaces too (#556).
+            // than ending it: `usagi open <path>` switches workspaces too (#556).
             // The workspace's ports are already dropped by the time the
             // controller returns, so the switcher starts with no connection
             // to the workspace that was left.

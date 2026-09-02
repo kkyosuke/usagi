@@ -7,31 +7,40 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [identity と fence](#identity-と-fence)
 - [frame と handshake](#frame-と-handshake)
+- [daemon rollover request](#daemon-rollover-request)
 - [workspace fence](#workspace-fence)
 - [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget)
   - [terminal lane の per-request budget](#terminal-lane-の-per-request-budget)
   - [bootstrap section の bounded wait](#bootstrap-section-の-bounded-wait)
 - [envelope とエラー](#envelope-とエラー)
-- [owner generation routing](#owner-generation-routing)
-- [daemon rollover request](#daemon-rollover-request)
-- [Unix transport](#unix-transport)
-- [client の失敗処理](#client-の失敗処理)
-  - [stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)
-- [managed session request](#managed-session-request)
 - [daemon metrics](#daemon-metrics)
   - [agent concurrency projection](#agent-concurrency-projection)
 - [PR inventory snapshot](#pr-inventory-snapshot)
+- [managed session request](#managed-session-request)
 - [agent launch request](#agent-launch-request)
   - [agent operation identity と final の相関](#agent-operation-identity-と-final-の相関)
 - [Codex structured capture request](#codex-structured-capture-request)
 - [agent phase report request](#agent-phase-report-request)
+- [provider conversation resume request](#provider-conversation-resume-request)
 - [dispatch request](#dispatch-request)
 - [generic terminal request](#generic-terminal-request)
   - [snapshot payload と revision](#snapshot-payload-と-revision)
   - [terminal input identity と cross-connection replay](#terminal-input-identity-と-cross-connection-replay)
 - [exited tombstone visibility](#exited-tombstone-visibility)
+- [owner generation routing](#owner-generation-routing)
+- [Unix transport](#unix-transport)
+- [client の失敗処理](#client-の失敗処理)
+  - [stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)
+
+## この文書の読み方
+
+前半は接続を成立させる共通契約（identity、handshake、workspace fence、deadline、envelope）、中盤は
+session・Agent・terminal など request ごとの payload と状態遷移、後半は generation をまたぐ routing、Unix transport、
+client の復旧契約を扱う。特定の request を実装するときも、まず前半の共通 fence を確認し、次に対象 request、最後に
+後半の transport と失敗処理を確認する。
 
 ## identity と fence
 

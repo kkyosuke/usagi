@@ -275,6 +275,10 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 
 ## CLI
 
+ここでは日常的に使う入口をコマンド系統ごとに示す。公開 CLI の完全な command tree と各 verb の役割は
+[プロジェクト概要#入口面](document/01-overview.md#入口面)を正本とし、オプションの最終的な構文は
+`usagi <command> --help` で確認する。
+
 | コマンド | 用途 |
 |---|---|
 | `usagi` / `usagi hop` | Welcome TUI を開く |
@@ -288,9 +292,8 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
-| `usagi session ...` | daemon-owned session を作成・削除・resume する |
-| `usagi daemon start\|status\|stop\|restart` | daemon lifecycle を操作する |
-| `usagi daemon install-service` | daemon を OS の service として登録する（macOS は LaunchAgent、Linux は systemd user unit） |
+| `usagi session <command>` | daemon-owned session の作成・削除・resume・setup・prompt を操作する |
+| `usagi daemon <command>` | daemon の起動・状態確認・tenant解放・停止・入替・service登録を操作する |
 
 `usagi clean` は dry-run で候補だけを表示する。`--apply` は欠損 path の workspace 登録、欠損 workspace の
 daemon data、lifecycle に存在しない `usagi/*` branch と `.usagi/sessions/*` worktree を削除する。dirty worktree と
@@ -314,7 +317,7 @@ service 登録は macOS（LaunchAgent）と Linux（systemd user unit。systemd 
 詳細は [service supervision](document/05-daemon.md#service-supervision) を参照する。
 登録しない場合も、TUI・`usagi mcp`・`usagi session ...` の接続時に daemon は自動起動し、まだ開いていない
 リポジトリも、そのリポジトリの root で実行すればその接続で開く（先に TUI で開いておく必要はない）。全コマンドの現在の動作は
-[実装状態の一覧](document/01-overview.md#現在の実装状態)を参照する。
+[入口面の一覧](document/01-overview.md#入口面)を参照する。
 
 ## アーキテクチャ
 

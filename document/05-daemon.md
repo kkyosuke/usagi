@@ -7,6 +7,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [authority と lifecycle](#authority-と-lifecycle)
 - [session tree と ignore rules](#session-tree-と-ignore-rules)
 - [daemon process lifecycle](#daemon-process-lifecycle)
@@ -25,10 +26,16 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [final retention と aggregate GC](#final-retention-と-aggregate-gc)
 - [supervisor scheduler](#supervisor-scheduler)
 - [supervisor policy and verification](#supervisor-policy-and-verification)
+- [metrics observer](#metrics-observer)
 - [cross-process generation authority](#cross-process-generation-authority)
 - [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 - [generation と orphan safety](#generation-と-orphan-safety)
-- [metrics observer](#metrics-observer)
+
+## この文書の読み方
+
+前半は session と daemon process の lifecycle・永続化、中盤は background worker、terminal、Agent、supervisor の所有権、
+後半は metrics と cross-process generation の handoff・回収契約を扱う。IPC の wire、request payload、client retry を調べる
+場合は [4. daemon IPC](04-ipc.md) を先に参照し、本書では daemon が保持する state と effect の境界を確認する。
 
 ## authority と lifecycle
 

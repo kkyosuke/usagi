@@ -2,6 +2,10 @@
 
 > [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [agent dispatch MCP](08-agent-dispatch-mcp.md)
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `bcc9cee03288f2dbd1aaabe97706fa754a9f1616`（2026-07-18）。本文は user decision MCP を導入した時点の snapshot であり、現在仕様ではない。現行仕様は [TUI](../03-tui.md) と [MCP サーバ](../07-mcp.md) を参照する。
+
 agent が人間の判断を要求する MCP、durable decision、TUI 回答の設計記録。正本の実行契約は
 [MCP サーバ](../07-mcp.md) に置く。#329/#330 は domain 型・store・TUI reducer skeleton、#378 は
 MCP/daemon の durable store 接続、#379 は TUI の本番接続・自動表示、#383 は daemon-managed agent の

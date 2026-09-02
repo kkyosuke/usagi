@@ -2,6 +2,10 @@
 
 > [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md)
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `e61dd43d7697a0534cc9904c2e06a0ed9ac1c4cb`（2026-07-20）。本文は workspace-root scope を導入した時点の snapshot であり、現在仕様ではない。現行仕様は [TUI](../03-tui.md)、[daemon IPC](../04-ipc.md)、[daemon](../05-daemon.md) を参照する。
+
 TUI sidebar の `⌂ root`（workspace root / `main` チェックアウト）を active にしたまま Agent と
 Terminal を作成・所有・操作できるようにする設計。実装契約は
 [04-ipc.md](../04-ipc.md) / [05-daemon.md](../05-daemon.md) / [03-tui.md](../03-tui.md) の各正本へ

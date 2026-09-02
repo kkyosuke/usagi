@@ -2,6 +2,10 @@
 
 > [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [PTY crash continuation](07-pty-crash-continuation.md)
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `e1fc8cface0e17edc6121b0173c0125df59c609d`（2026-07-18）。本文は dispatch MCP 導入時点（7 tool、`claude` / `codex` runtime）の snapshot であり、現在仕様ではない。現行仕様は [アーキテクチャ](../02-architecture.md)、[daemon](../05-daemon.md)、[MCP サーバ](../07-mcp.md) を参照する。
+
 `usagi` の agent 向け MCP に、**特定の agent へ指示を出して即時実行させ、完了時は機械的に記録した
 呼び出し元 agent へ確実に報告する** dispatch 契約を導入した際の設計記録である。現在の実行契約は
 [02-architecture.md](../02-architecture.md) / [05-daemon.md](../05-daemon.md) /
@@ -254,7 +258,7 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
 |---|---|---|
 | #321 | Agent / DispatchRun / DispatchBinding / InboxMessage / StructuredResult のドメイン型と durable store（daemon state dir、atomic + lock）。100% ユニットテスト。MCP/daemon 配線はしない | — |
 | #322 | `DaemonRequest` に dispatch を追加し、session upsert・agent 解決・`initial_prompt` 即時 launch・run/binding 永続化・run_id 返却・PTY exit 時の「報告なし」合成配送を接続 | #321 |
-| #323 | 7 tool を daemon IPC client として実装し、caller/run をコンテキスト推論。互換・移行を正本 docs へ反映 | #321, #322 |
+| #323 | 導入時点の 7 tool を daemon IPC client として実装し、caller/run をコンテキスト推論。互換・移行を正本 docs へ反映 | #321, #322 |
 | #331 | workspace runtime/model allowlist、injectable executable locator、MCP schema snapshot、`agent_cli` の段階的移行 | #323 |
 | #332 | dispatch launch 前の current allowlist / executable 再検証と safe error | #322, #331 |
 
@@ -272,7 +276,7 @@ models = ["sonnet", "opus"]
 models = ["gpt-5-codex", "o4-mini"]
 ```
 
-`runtime` は `claude` と `codex` の closed vocabulary とする。各 `models` はその runtime だけで許可する文字列の集合であり、section 不在・空 allowlist・空文字・制御文字・重複を含む値は当該 runtime を選択不能にする。global UI settings、code-defined adapter catalog、CLI が返すアカウントの model list は allowlist の正本ではない。provider API と Claude/Codex CLI の非対話 model listing は、設定を暗黙に拡張するため使用しない。
+導入時点の `runtime` は `claude` と `codex` の closed vocabulary とした。各 `models` はその runtime だけで許可する文字列の集合であり、section 不在・空 allowlist・空文字・制御文字・重複を含む値は当該 runtime を選択不能にする設計だった。global UI settings、code-defined adapter catalog、CLI が返すアカウントの model list は allowlist の正本にせず、provider API と Claude/Codex CLI の非対話 model listing で設定を暗黙に拡張しない判断を採用した。
 
 MCP server は起動時に workspace 設定と PATH executable locator を一度だけ読み、`RuntimeModelSnapshot` を作る。production locator は `claude` / `codex` を PATH 上で探索し、test は `ExecutableLocator` port へ fake を注入する。allowlist が非空で対応 CLI が存在する runtime だけを schema に載せる。`session_dispatch.agent` は次の排他的 branch を JSON Schema `oneOf` で表す。
 
@@ -298,6 +302,6 @@ MCP は runtime/model 以外の path、argv、environment、credential、CLI raw
 ## 10. 非目標
 
 - queue/live 配送モードの再設計（`session_prompt` の既存挙動は変えない）。
-- `claude` / `codex` 以外の runtime adapter 追加や model allowlist の UI 化（定義済みの語彙に従う）。
+- 提案時点では、`claude` / `codex` 以外の runtime adapter 追加や model allowlist の UI 化をスコープ外とした。
 - daemon crash 後の PTY FD 継続（[07-pty-crash-continuation.md](07-pty-crash-continuation.md) の範疇）。
 - TUI からの dispatch 表示／操作 UX（別 issue）。

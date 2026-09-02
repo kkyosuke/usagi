@@ -1,5 +1,9 @@
 # 設計: TUI modal/overlay の共通コンポーネント整理
 
+> **Status:** 完了済み issue の historical design（現行仕様ではない）
+>
+> **Baseline:** 原版 commit `fbe00da6844fe778e08c0dd2b41724ad17472b33`（2026-07-20）。本文は issue #372–#374 の設計・移行前調査時点の snapshot である。現在の TUI 構成と挙動は [TUI 仕様](../../document/03-tui.md) と [アーキテクチャ](../../document/02-architecture.md) を参照する。
+
 **対象 issue**: #372（基盤）/ #373（confirmation 統一）/ #374（形別コンポーネント）
 **目的**: Home の overlay 群と関連 modal が個別に手組みしている frame・padding・footer/help・confirmation button・scroll の重複を、`widgets/modal.rs` の共通コンポーネントへ寄せて境界を明確化する。各 modal の固有 state・キー・内容は view/controller に残し、表示と入力 semantics は回帰させない。
 
@@ -7,11 +11,11 @@
 
 ---
 
-## 1. 現状整理
+## 1. 設計時点の現状整理
 
 ### 1.1 frame primitive は集約済み
 
-`crates/tui/src/presentation/widgets/modal.rs` が枠・配置の primitive を既に持つ。
+設計時点では `crates/tui/src/presentation/widgets/modal.rs` が枠・配置の primitive を既に持っていた。
 
 | primitive | 役割 |
 |---|---|

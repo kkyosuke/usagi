@@ -8,6 +8,7 @@
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [起動と経路](#起動と経路)
 - [プロトコルとライフサイクル](#プロトコルとライフサイクル)
 - [JSON-RPC メソッド](#json-rpc-メソッド)
@@ -16,6 +17,12 @@
 - [tool descriptor と追加手順](#tool-descriptor-と追加手順)
 - [resource 面](#resource-面)
 - [orchestration ガイド](#orchestration-ガイド)
+
+## この文書の読み方
+
+接続や互換性を変更するときは起動経路、protocol lifecycle、JSON-RPC method の順に読む。公開 API を変更するときは
+tool / resource 面と descriptor の追加手順を確認し、Agent の作業フローは最後の orchestration ガイドを参照する。
+tool が呼ぶ daemon request の wire と lifecycle は [4. daemon IPC](04-ipc.md) と [5. daemon](05-daemon.md) が正本である。
 
 ## 起動と経路
 
@@ -203,6 +210,9 @@ payload を成功応答としてエコーしない。
 `session_create` / `session_remove` の成功応答は
 `accepted operation <operation_id> (revision <revision>)` である。この文字列は **operation が受理され durable state に
 記録された**ことを意味する。
+
+`session_create` は Git worktree の作成と lifecycle store の completion を同じ request 内で同期的に終えてから
+成功応答を返す。したがって応答時点で session は利用可能であり、作成処理中は応答を待つ必要がある。
 
 `session_remove` の受理は「worktree を削除し終えた」ことを意味しない。daemon は session を `deleting` に
 遷移させた時点で応答し、worktree の撤去は daemon 所有の teardown worker が続ける

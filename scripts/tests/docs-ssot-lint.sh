@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/../.." && pwd)
+subject=$repo/scripts/ci/docs-ssot-lint.rb
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/usagi-docs-ssot.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+
+make_fixture() {
+  local destination=$1
+  mkdir -p "$destination/crates/cli/src/cli" "$destination/crates/cli/src/mcp/tools" "$destination/crates/cli/src/mcp/guides"
+  cp "$repo/Cargo.toml" "$destination/Cargo.toml"
+  cp -R "$repo/document" "$destination/document"
+  cp -R "$repo/.agents" "$destination/.agents"
+  cp "$repo/README.md" "$destination/README.md"
+  cp "$repo/crates/cli/src/cli/mod.rs" "$destination/crates/cli/src/cli/mod.rs"
+  cp "$repo/crates/cli/src/mcp/tools/session.rs" "$destination/crates/cli/src/mcp/tools/session.rs"
+  cp "$repo/crates/cli/src/mcp/guides/orchestration.md" "$destination/crates/cli/src/mcp/guides/orchestration.md"
+}
+
+expect_fail() {
+  local fixture=$1 expected=$2
+  if output=$(ruby "$subject" "$fixture" 2>&1); then
+    echo "expected docs SSoT fixture to fail: $expected" >&2
+    exit 1
+  fi
+  case "$output" in
+    *"$expected"*) ;;
+    *) echo "expected '$expected', got: $output" >&2; exit 1 ;;
+  esac
+}
+
+ruby "$subject" "$repo"
+
+make_fixture "$tmp/dependency"
+sed -i.bak '/| `syn` |/d' "$tmp/dependency/document/06-conventions.md"
+expect_fail "$tmp/dependency" 'missing workspace dependency `syn`'
+
+make_fixture "$tmp/stale-dependency"
+sed -i.bak '/| `syn` |/a\
+| `not-a-crate` | 古い記述 | dev |' "$tmp/stale-dependency/document/06-conventions.md"
+expect_fail "$tmp/stale-dependency" 'documents stale workspace dependency `not-a-crate`'
+
+make_fixture "$tmp/command"
+sed -i.bak '/pub enum Command {/a\
+    DocsProbe,' "$tmp/command/crates/cli/src/cli/mod.rs"
+expect_fail "$tmp/command" 'missing public CLI command `usagi docs-probe`'
+
+make_fixture "$tmp/command-outside-table"
+sed -i.bak '/| `usagi update /d' "$tmp/command-outside-table/document/01-overview.md"
+sed -i.bak '/^## 実行モデル/i\
+説明文では `usagi update` に言及する。\
+' "$tmp/command-outside-table/document/01-overview.md"
+expect_fail "$tmp/command-outside-table" 'missing public CLI command `usagi update`'
+
+make_fixture "$tmp/unknown-command"
+sed -i.bak '/| `usagi open \[path\]` |/a\
+| `usagi frobnicate` | 存在しない command |' "$tmp/unknown-command/document/01-overview.md"
+expect_fail "$tmp/unknown-command" 'documents unknown public CLI command `usagi frobnicate`'
+
+make_fixture "$tmp/breadcrumb"
+sed -i.bak '3s/(10-session-roles.md)/(missing.md)/' "$tmp/breadcrumb/document/09-env.md"
+expect_fail "$tmp/breadcrumb" 'breadcrumb is missing next document 10-session-roles.md'
+
+make_fixture "$tmp/contents"
+sed -i.bak '/^- \[検討した代替案\]/d' "$tmp/contents/document/02-architecture.md"
+expect_fail "$tmp/contents" '02-architecture.md top-level contents do not match body heading order'
+
+make_fixture "$tmp/history"
+sed -i.bak '/> \*\*Status:\*\*/d' "$tmp/history/document/proposals/17-multi-workspace-daemon.md"
+expect_fail "$tmp/history" '17-multi-workspace-daemon.md is missing a machine-visible history status'
+
+make_fixture "$tmp/baseline"
+sed -i.bak '/> \*\*Baseline:\*\*/d' "$tmp/baseline/document/proposals/17-multi-workspace-daemon.md"
+expect_fail "$tmp/baseline" '17-multi-workspace-daemon.md is missing a machine-visible history baseline'
+
+make_fixture "$tmp/imprecise-baseline"
+sed -i.bak 's/ea6fe2b3caa3d97f04465c7a684487f3d9a5d132/deadbeef/' "$tmp/imprecise-baseline/document/proposals/17-multi-workspace-daemon.md"
+expect_fail "$tmp/imprecise-baseline" '17-multi-workspace-daemon.md history baseline is missing an exact origin commit and date'
+
+make_fixture "$tmp/reading-map"
+sed -i.bak '/^## この文書の読み方$/d' "$tmp/reading-map/document/07-mcp.md"
+expect_fail "$tmp/reading-map" '07-mcp.md exceeds 300 lines without a reading map'
+
+make_fixture "$tmp/design-index"
+sed -i.bak '/designs\/258-controller-runtime-migration.md/d' "$tmp/design-index/.agents/README.md"
+expect_fail "$tmp/design-index" '.agents/README.md does not list designs/258-controller-runtime-migration.md'
+
+make_fixture "$tmp/legacy"
+printf '\n`usagi issue list`\n' >> "$tmp/legacy/.agents/README.md"
+expect_fail "$tmp/legacy" 'contains nonexistent issue CLI'
+
+make_fixture "$tmp/delegate-guide"
+sed -i.bak '/worker を作るため、既存 agent の `id` は指定できない/d' "$tmp/delegate-guide/crates/cli/src/mcp/guides/orchestration.md"
+expect_fail "$tmp/delegate-guide" 'orchestration guide does not explain that session_delegate_brief rejects an existing agent id'
+
+make_fixture "$tmp/delegate-schema"
+sed -i.bak 's/"agent":{"oneOf":\[{"type":"object","properties":{"runtime"/"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"},"runtime"/' "$tmp/delegate-schema/crates/cli/src/mcp/tools/session.rs"
+expect_fail "$tmp/delegate-schema" 'orchestration guide rejects an existing agent id that the session_delegate_brief schema accepts'
+
+make_fixture "$tmp/create-description"
+sed -i.bak 's/worktree 作成と lifecycle store 更新が完了してから応答する/作成は非同期に受理される/' "$tmp/create-description/crates/cli/src/mcp/tools/session.rs"
+expect_fail "$tmp/create-description" 'session_create descriptor must state that worktree and lifecycle completion precede its response'
+
+echo "docs-ssot fixtures: ok"

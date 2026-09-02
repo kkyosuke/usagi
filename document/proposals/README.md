@@ -11,6 +11,13 @@
 残す。実装済みと記した proposal も現在仕様の正本にはならない。
 ロードマップ（実装タスク）は issue ストア（`.usagi/issues/`）で追跡する。
 
+各 proposal の冒頭に `Status` と `Baseline` を置く。`Baseline` の commit SHA と日付は、この履歴文書の原版を
+リポジトリ内で再現する基準であり、続くリンクは現在仕様の参照先である。`Status` が「採用済みの設計履歴」の文書は
+採用理由を保存する履歴であり、本文中の schema・コマンド・実装状況を現在の contract として使わない。
+「提案中（未実装）」の文書も将来案であり、現在のビルドで利用できる機能を表さない。いずれも実行時の
+判断では、banner と一覧からリンクされた `document/` 直下の現行仕様を優先する。「一部採用済み・一部提案中」は、
+Baseline が現在仕様へリンクした範囲だけが実装済みで、本文で後続とした範囲は将来案である。
+
 ## 一覧
 
 | # | ドキュメント | 内容 | 状態 |
@@ -20,6 +27,7 @@
 | 3 | [03-ipc-protocol.md](03-ipc-protocol.md) | envelope、handshake、stream、idempotency、bounded transport、error | [04-ipc.md](../04-ipc.md) へ畳み込み済み |
 | 4 | [04-daemon-api.md](04-daemon-api.md) | terminal/session command・event と socket/workspace/launch security | [04-ipc.md](../04-ipc.md) / [05-daemon.md](../05-daemon.md) へ畳み込み済み |
 | 5 | [05-daemon-lifecycle.md](05-daemon-lifecycle.md) | active/draining restart、crash orphan、配置、実装 issue、test strategy | [05-daemon.md](../05-daemon.md) へ畳み込み済み |
+| 6 | — | 欠番（旧提案ファイルは現リポジトリに存在せず、番号は再利用しない） | 予約済み |
 | 7 | [07-pty-crash-continuation.md](07-pty-crash-continuation.md) | PTY broker／FD handoff による daemon crash 後の terminal 継続 | 提案（MVP 非依存） |
 | 8 | [08-agent-dispatch-mcp.md](08-agent-dispatch-mcp.md) | 他 session の特定 agent への即時 dispatch、runtime/model validation、caller の durable inbox への確実な完了報告（MCP 契約） | [02-architecture.md](../02-architecture.md) / [05-daemon.md](../05-daemon.md) / [07-mcp.md](../07-mcp.md) へ畳み込み済み（実装 issue #321–#323, #331–#332） |
 | 9 | [09-user-decision-mcp.md](09-user-decision-mcp.md) | agent の user decision request と durable な回答配送・TUI 操作 | [03-tui.md](../03-tui.md) / [07-mcp.md](../07-mcp.md) へ畳み込み済み（実装 issue #329–#330, #378–#379, #383, #406） |

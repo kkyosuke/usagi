@@ -2,6 +2,10 @@
 
 > [設計提案一覧](README.md) ｜ 関連する現在仕様: [TUI](../03-tui.md) / [daemon](../05-daemon.md) / [MCP](../07-mcp.md) / [session role](../10-session-roles.md)
 
+> **Status:** 一部採用済み・一部提案中の設計履歴
+>
+> **Baseline:** 原版 commit `f229360d5fd41c2affaa496ee8993c1026454b13`（2026-09-01）。goal-bound Director v1 の現在仕様は [TUI](../03-tui.md#goal-driven-workflow) と [daemon](../05-daemon.md#agent-admission-transaction) を参照する。SupervisorRun dashboard / verifier など本文で後続とした段階は現在契約ではない。
+
 「目的を一度入力すれば、PR が Ready for review になるか、明示的な人間判断が必要になるまで、再プロンプトなしで
 進む」goal-driven UI の target design である。Config、Goal Composer、goal-bound Director admission からなる v1 は実装済みで、
 現在仕様は [TUI](../03-tui.md#goal-driven-workflow) と [daemon](../05-daemon.md#agent-admission-transaction) を正本とする。

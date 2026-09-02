@@ -57,10 +57,10 @@ live Agent がいる場合はエラーになる。
 committed issue は `session_delegate_issue`、事前 issue の無い依頼は `session_delegate_brief` を使う。
 `session_delegate_issue` は daemon が worktree を作成した後、同じ session identity の queue へ初回 prompt を
 保存する。`session_delegate_brief` は caller credential を検証してから worktree を作成し、worker を直ちに
-dispatch する。brief の `agent` は
-allowlist にある `{"runtime":"codex","model":"gpt-5"}` のような新規 worker selector を指定する。
-作成前の session に既存 worker は所属できないため `id` による再利用は受け付けない。実行可能な selector が
-1 つも無い場合、この tool 自体が `tools/list` に現れない。credential・selector・session 作成のいずれかが
+dispatch する。brief の `agent` には allowlist にある
+`{"runtime":"codex","model":"gpt-5"}` 形式だけを指定する。この呼び出しが新しい session と
+worker を作るため、既存 agent の `id` は指定できない。credential・selector・session 作成のいずれかが
+実行可能な selector が 1 つも無い場合、この tool 自体が `tools/list` に現れない。credential・selector・session 作成のいずれかが
 失敗した場合は queue へフォールバックしない。
 
 ```json

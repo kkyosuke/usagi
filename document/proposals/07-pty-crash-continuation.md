@@ -2,6 +2,10 @@
 
 > [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [daemon lifecycle](05-daemon-lifecycle.md) ｜ 次へ → [agent dispatch MCP](08-agent-dispatch-mcp.md)
 
+> **Status:** 提案中（未実装）
+>
+> **Baseline:** 原版 commit `8762ee82ee4af889dbee25342bb4a3d392004b4e`（2026-07-13）。本文は将来の PTY continuation 案であり、現在ビルドの contract ではない。現行の crash 契約は [daemon の generation と orphan safety](../05-daemon.md#generation-と-orphan-safety) を参照する。
+
 本書は **v2 MVP の後にだけ評価する未実装設計**である。PTY master fd を daemon crash 後にも継続利用するための broker と planned restart 時の Unix FD handoff を比較し、採否と着手条件を定める。本書がこの将来機構の設計判断の正本であり、MVP の crash 契約は [5. daemon](../05-daemon.md#generation-と-orphan-safety) を正本とする。
 
 ## 目次
