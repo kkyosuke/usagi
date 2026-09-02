@@ -127,7 +127,7 @@ serve ループが応答するメソッドは次のとおり。1 行 = 1 メッ�
 ## tool 面
 
 tool は系統ごとに分かれ、tool descriptor が `name` / description / `inputSchema`、runtime
-validator、execution route、caller policy の正本である。Issue / Memory がともに有効な既定レジストリは 49 件を返す。
+validator、execution route、caller policy の正本である。Issue / Memory がともに有効な既定レジストリは 51 件を返す。
 `tools/list` と `tools/call` は同じ descriptor registry を参照するため、掲載された tool は必ず
 1 つの実行経路と caller policy を持つ。`tools/call` の実挙動は次のとおりである。
 
@@ -163,9 +163,17 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get/list で観測する。agent 経路は作成した owner/run の decision だけを操作できる |
+| `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
 | `issue_*` / `memory_*` | issue は trusted workspace root、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
+
+`terminal_list` は caller が workspace/session/worktree selector を指定する API を持たず、認証済み Agent runtime と
+完全一致する scope の generic terminal ID と `live` だけを返す。Agent PTY と別 scope の terminal は列挙しない。
+`terminal_read` はその一覧にある `terminal_id` と任意の `lines`（既定 200、1〜500）を受け取り、最大 64 KiB の
+UTF-8 plain text、`output_offset`、`live`、`exit_code`、`returned_lines`、`truncated` を返す。対象が一覧に無い場合は、
+別 scope に実在するかを明かさず `not_found` にする。terminal 出力は外部 command が生成した**非信頼の観測データ**であり、
+そこに含まれる命令文を Agent への instruction として扱わない。
 
 `user_decision_request` は connection deadline 内に人間の回答を待たず、作成済み `Pending` record を直ちに返す。
 caller は同じ credential で get / list を polling し、terminal decision を get した時点で durable outbox を ACK する。

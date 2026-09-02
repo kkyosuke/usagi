@@ -41,6 +41,7 @@ use usagi_core::{
             WorktreeId,
         },
         supervisor::RunProvenance,
+        terminal_launch::TerminalLaunchScope,
     },
     infrastructure::ipc::{ErrorCode, ProtocolError, agent_operation_digest},
     infrastructure::runtime_model::{
@@ -255,6 +256,11 @@ pub struct AuthenticatedDispatchCaller {
     pub workspace_id: WorkspaceId,
     pub run_id: OperationId,
     pub caller: CallerRef,
+    /// Exact terminal scope owned by the authenticated Agent runtime.
+    ///
+    /// Read-only tools use this daemon-derived fence instead of accepting a
+    /// workspace, session, or worktree selector from the MCP caller.
+    pub terminal_scope: TerminalLaunchScope,
 }
 
 /// Accepts both provider-inherited and provider-isolated MCP process groups.
@@ -1118,11 +1124,17 @@ impl AgentRuntime {
             session_id: binding.worker.session_id,
             agent_id: binding.worker.agent_id,
         };
+        let terminal_scope = TerminalLaunchScope {
+            workspace_id,
+            session_id: record.runtime.session_id,
+            worktree_id: record.runtime.terminal.worktree_id,
+        };
         (self.dispatch.workspace_for_agent(caller.agent_id).ok()?? == workspace_id).then_some(
             AuthenticatedDispatchCaller {
                 workspace_id,
                 run_id,
                 caller,
+                terminal_scope,
             },
         )
     }
@@ -8685,6 +8697,14 @@ mod tests {
         assert_eq!(authenticated.workspace_id, workspace);
         assert_eq!(authenticated.run_id.to_string(), operation);
         assert_eq!(authenticated.caller.session_id, Some(session));
+        assert_eq!(
+            authenticated.terminal_scope,
+            TerminalLaunchScope {
+                workspace_id: admission.terminal.workspace_id,
+                session_id: admission.terminal.session_id,
+                worktree_id: admission.terminal.worktree_id,
+            }
+        );
         assert!(runtime.mcp_dispatch_caller("forged").is_none());
         let runtime_ref = runtime
             .coordinator
