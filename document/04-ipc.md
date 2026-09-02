@@ -341,8 +341,8 @@ connection epoch を進める。その結果、全 pane が
 この「破棄する」帰結が、budget を frame 予算まで小さくしない理由である。lane を落とすと全 pane が再 attach し、その
 window に打たれた keystroke は遅れて届くのではなく **feedback 付きで拒否される**。busy なだけの daemon で発火する
 budget は、負荷の高いマシンで実入力を失わせる。各 budget は「負荷下でも健全な round trip」より上、「freeze と呼ばれる
-時間」より下に置く。描画スレッドの露出そのものをさらに縮めるのは frame 予算の問題であり、
-[#551](../.usagi/issues/551-fix-tui-home-frame-loop-daemon-rpc.md) が扱う。
+時間」より下に置く。描画スレッドの露出そのものをさらに縮めるのは
+[TUI の frame 予算](03-tui.md#frame-予算)が扱う。
 
 input の budget 超過は **effect unknown** であり、blind retry しない。daemon が既に PTY へ書いた可能性があるため、
 client は同じ producer `OperationId` で read-only な `input_outcome` を照会して `final` / `unknown` に収束させる
@@ -615,7 +615,7 @@ item は durable operation timestamp と stable runtime ID で決定的に並ぶ
 欠落は `AgentContinuationRef`、TUI dismissal、slot の削除を認可しない。TUI open は terminal inventory の前後 snapshot と
 この `AgentInventory` が coherent な場合だけ全量を適用し、partial / cross-RPC 不整合では pane restore 全体を retry する。
 Agent history / exit history / dismissal の allocator・retention・GC は
-[#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務であり、この request は
+[daemon の final retention と aggregate GC](05-daemon.md#final-retention-と-aggregate-gc)の責務であり、この request は
 削除 authority を返さない。
 
 `agent_workspace_observation` は process-level の read-only view が別 workspace を観測する request で、名指しした
@@ -1009,7 +1009,7 @@ monotonic lattice で、`revision` を伴う。
 client は `completed_inventory` が返した exact `TerminalRef` の visibility だけを操作し、名前・pane・
 continuation で別 incarnation へ fallback しない。TUI の projection 契約は
 [3. TUI](03-tui.md) を正本とする。aggregate retention / GC は
-[#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務である。
+[daemon の final retention と aggregate GC](05-daemon.md#final-retention-と-aggregate-gc)の責務である。
 
 ## owner generation routing
 
@@ -1216,9 +1216,9 @@ accept 時は OS peer credential の UID が daemon UID と一致しなければ
 （[owner generation routing](#owner-generation-routing)）。
 
 cross-process standby handoff は
-[#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md) が、
+[daemon の cross-process generation authority](05-daemon.md#cross-process-generation-authority)、
 owner-generation runtime shard は
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) が
+[daemon の owner-generation runtime shard と global resource allocator](05-daemon.md#owner-generation-runtime-shard-と-global-resource-allocator)が
 提供し、client 側の owner routing は本節の契約として実装済みである。shipping の `serve` は自分の
 generation を durable registry の active として登録するため、`generations.json` は production に存在する
 （[5. daemon の first activation](05-daemon.md#first-activation)）。shipping の `daemon restart` は live runtime が

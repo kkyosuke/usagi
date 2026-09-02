@@ -1,7 +1,7 @@
 //! Issue CRUD operations over the issue store.
 //!
-//! The application-level operations both the human CLI (`usagi issue …`) and the
-//! agent-facing MCP tools (`issue_*`) call: create (allocating the next number),
+//! The application-level operations called by the agent-facing MCP tools
+//! (`issue_*`): create (allocating the next number),
 //! fetch, list, update, and delete a task issue. Each takes the injected
 //! [`IssueStore`] and, for the mutating operations, the current time (`now`), so
 //! this layer stays clock-free and fully testable; the concrete store and clock

@@ -232,14 +232,14 @@ PR がすべて merged になり Agent が作業中でない session は、Overv
 ## AI エージェントとの連携
 
 daemon から起動した Agent には usagi の stdio MCP server が組み込まれる。Agent は作業中の session から、
-次のような操作を行える。MCP child の cwd が provider によって変わっても、issue / memory の保存先は
-daemon が認証したその session の worktree に固定される。
+次のような操作を行える。MCP child の cwd が provider によって変わっても、issue の保存先は daemon が認証した
+その session の worktree、memory の保存先は Git 追跡外にある workspace 専用の daemon data home に固定される。
 
 | 系統 | 用途 |
 |---|---|
 | `session_*` | session の作成・削除・状態確認、prompt 配送、別 Agent への委譲 |
 | `issue_*` | git で共有する `.usagi/issues/` のタスクを検索・更新する |
-| `memory_*` | git で共有する `.usagi/memory/` の知識を保存・検索する |
+| `memory_*` | 同じ workspace の root/session Agent で共有する Git 追跡外の知識を保存・検索する |
 | `agent_*` | 委譲した worker の完了報告と inbox を扱う |
 | `terminal_*` | 同じ session/worktree にある通常 terminal の出力を read-only で確認する |
 | `user_decision_*` | Agent から利用者へ判断を依頼し、TUI で回答する |
@@ -257,7 +257,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
 | Base branch | workspace で新しい session を作るときの既定 branch |
-| Workflow | `classic`（既定）の会話 picker、または `goal-driven` の Goal Composer。後者は Director の New で目的を一度入力し、open・non-draft・checks passing の review-ready PR または明示判断まで進める |
+| Workflow | `classic`（既定）の会話 picker、または `goal-driven` の Goal Composer。後者は Director の New で目的を一度入力し、review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す |
 | Team | Enterで構造図付きカードを開き、`none` / 階層型 / フラット / パイプラインから session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |

@@ -127,6 +127,12 @@ numbered_docs.each_with_index do |path, position|
   if content.match?(/\]\((?:proposals\/|\.\.\/\.usagi\/issues\/)[^)]+\)\s*が正本/)
     failures << "#{basename} makes proposal or issue history the current specification authority"
   end
+  content.split(/\n{2,}/).each do |paragraph|
+    next unless paragraph.include?("../.usagi/issues/")
+    next if paragraph.match?(/設計経緯|実装履歴|履歴参照|完了済み/)
+
+    failures << "#{basename} uses issue history as current specification authority"
+  end
   if content.lines.length > 300 && !content.include?("## この文書の読み方")
     failures << "#{basename} exceeds 300 lines without a reading map"
   end
@@ -189,10 +195,23 @@ current_markdown = [
 ].uniq
 {
   "usagi <path>" => "legacy positional workspace entry",
+  "usagi launch <path>" => "nonexistent workspace launch command",
   "usagi issue " => "nonexistent issue CLI"
 }.each do |token, description|
   current_markdown.each do |path|
     next unless File.file?(path)
+    next unless File.read(path).include?(token)
+
+    failures << "#{path.delete_prefix("#{root}/")} contains #{description}: #{token}"
+  end
+end
+
+{
+  "usagi <path>" => "legacy positional workspace entry",
+  "usagi launch <path>" => "nonexistent workspace launch command",
+  "usagi issue " => "nonexistent issue CLI"
+}.each do |token, description|
+  rust_sources.each do |path|
     next unless File.read(path).include?(token)
 
     failures << "#{path.delete_prefix("#{root}/")} contains #{description}: #{token}"

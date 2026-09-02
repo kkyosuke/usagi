@@ -1940,7 +1940,7 @@ mod tests {
         assert!(runtime.retained_resources().is_empty());
     }
 
-    /// The wire contract of #519: one operation identity, one PTY write, and a
+    /// The terminal-input wire contract: one operation identity, one PTY write, and a
     /// read-only query that answers the same final on a different connection —
     /// including after the terminal has exited, when the write path is closed.
     #[test]

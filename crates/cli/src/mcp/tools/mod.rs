@@ -2,10 +2,9 @@
 //! `session` / `terminal` / `supervisor`）、各 tool が 1 struct として `Tool` を実装する。registry は metadata、schema
 //! validator、execution route、caller policy を 1 つの `ToolDescriptor` に束ねる。
 //!
-//! 各アダプタは presentation に徹する — store 系は usagi-core の usecase を直接呼び、
-//! session 系は usagi-core の IPC クライアント経由で daemon に委譲し、結果を JSON に
-//! 整形する（独自のビジネスロジックは持たない）。CLI のコマンドハンドラ
-//! （`crate::cli::commands`）は同じ core usecase を呼ぶ兄弟である。
+//! 各アダプタは presentation に徹する — issue / memory の Store route は usagi-core の
+//! store usecase を直接呼び、session / agent / terminal / supervisor route は usagi-core の
+//! IPC client 経由で daemon に委譲する（独自のビジネスロジックは持たない）。
 
 pub mod issue;
 mod issue_wire;
@@ -22,7 +21,7 @@ use usagi_core::usecase::client::{DispatchToolAction, SessionAction, SupervisorT
 
 use super::tool::{CallerPolicy, Tool, ToolDescriptor, ToolRoute, validate_schema_definition};
 
-/// 公開する全 MCP tool のレジストリ（issue / memory / session を連結）。
+/// 公開する全 MCP tool のレジストリ（issue / memory / session / terminal / supervisor を連結）。
 ///
 /// # Panics
 ///

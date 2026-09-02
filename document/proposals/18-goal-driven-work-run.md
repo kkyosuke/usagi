@@ -4,15 +4,16 @@
 
 > **Status:** 一部採用済み・一部提案中の設計履歴
 >
-> **Baseline:** 原版 commit `f229360d5fd41c2affaa496ee8993c1026454b13`（2026-09-01）。goal-bound Director v1 の現在仕様は [TUI](../03-tui.md#goal-driven-workflow)、[daemon IPC](../04-ipc.md#agent-launch-request)、[daemon](../05-daemon.md#agent-admission-transaction) を参照する。SupervisorRun dashboard / verifier など本文で後続とした段階は現在契約ではない。
+> **Baseline:** 原版 commit `f229360d5fd41c2affaa496ee8993c1026454b13`（2026-09-01）。goal-bound Director v1 の現在仕様は [TUI](../03-tui.md#goal-driven-workflow)、[daemon IPC](../04-ipc.md#agent-launch-request)、[daemon](../05-daemon.md#agent-admission-transaction) を参照する。現在契約にない後続段階は、選択可能な複数 run 一覧、独立 Run Closeup、run-scoped defaults である。
 
 「目的を一度入力すれば、PR が Ready for review になるか、明示的な人間判断が必要になるまで、再プロンプトなしで
 進む」goal-driven UI の target design である。Config、Goal Composer、goal-bound Director admission からなる v1 は実装済みで、
 現在仕様は [TUI](../03-tui.md#goal-driven-workflow)、[daemon IPC](../04-ipc.md#agent-launch-request)、
 [daemon](../05-daemon.md#agent-admission-transaction) を正本とする。
 durable SupervisorRun の compact な Active work banner、Director 内 task progress、Goal submit から workspace 所有 Run への
-idempotent な昇格、root Agent dispatchとのdurableな相関とterminal進捗を現在の画面とdaemonが提供する。本書の複数 run 一覧、選択可能な独立 Run Closeup、Run-scoped team defaults、
-独立PR/CI verificationは後続提案である。
+idempotent な昇格、root Agent dispatch との durable な相関と terminal 進捗、daemon-owned の独立 PR/CI verification と
+restart recovery を現在の画面と daemon が提供する。本書の複数 run 一覧、選択可能な独立 Run Closeup、
+Run-scoped team defaults は後続提案である。
 
 現在の usagi は session、Agent、terminal、Director、Garden、durable decision、supervisor aggregate を個別に持つ。
 本提案はそれらを置き換えず、利用者が投入した 1 つの目的を **Work Run** として束ねる。画面の主語を
@@ -21,7 +22,7 @@ idempotent な昇格、root Agent dispatchとのdurableな相関とterminal進�
 ## 目次
 
 - [目標と非目標](#目標と非目標)
-- [現在の v1](#現在の-v1)
+- [導入時の v1](#導入時の-v1)
 - [情報階層と権威](#情報階層と権威)
 - [画面フロー](#画面フロー)
 - [各画面](#各画面)
@@ -53,9 +54,9 @@ idempotent な昇格、root Agent dispatchとのdurableな相関とterminal進�
 - すべての作業を Work Run に強制すること。単独 session、terminal、手動 Director は残す。
 - 未実装の supervisor loop を UI だけで動いているように見せること。
 
-## 現在の v1
+## 導入時の v1
 
-v1 は既存の Director、session delegation、user decision、PR inventory を一つの goal-bound root Agent から利用できるように
+原版時点の v1 は既存の Director、session delegation、user decision、PR inventory を一つの goal-bound root Agent から利用できるように
 する縦切りである。Work Run の新しい lifecycle や成功判定は追加せず、既存 authority のまま再 prompt を減らす。
 
 ```text
@@ -80,9 +81,10 @@ Config: Workflow = goal-driven（既定は classic）
 - 状態は Director terminal、Organization、Session/Garden、Decision、PR の既存面に表示する。v1 は会話出力を
   authoritative Work Run state と呼ばず、CI/PR 完了を独自に判定しない。
 
-したがって v1 は目的を一度で渡して既存組織を走らせる入口を実装するが、daemon crash 後の objective-level resume、
-typed task stop reason、PR/CI の独立した terminal condition はまだ保証しない。それらを満たす target が以下の
-SupervisorRun-based design である。
+したがって原版時点の v1 は目的を一度で渡して既存組織を走らせる入口を実装するが、daemon crash 後の
+objective-level resume、typed task stop reason、PR/CI の独立した terminal condition はまだ保証していなかった。
+それらを満たす target として記録したのが、以下の SupervisorRun-based design である。現在の採用範囲は冒頭 banner から
+現行仕様へ辿る。
 
 ## 情報階層と権威
 

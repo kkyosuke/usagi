@@ -5654,7 +5654,7 @@ mod tests {
         );
     }
 
-    /// The contract of Home's three background observation lanes (#551).
+    /// The contract of Home's three background observation lanes.
     ///
     /// Each lane's cadence must sit inside the pump's bounded window — that is
     /// what caps the idle request rate — and cold-start authority must belong to

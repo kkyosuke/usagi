@@ -22,6 +22,8 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | session 作成 | `session_create` | daemon が session を lifecycle store に記録し、git worktree を作る |
 | 一覧・進捗観測 | `session_list` / `session_status` | lifecycle snapshot と agent phase・worktree の dirty/merged を返す |
 | 追加指示 | `session_prompt` | live Agent PTY または durable next-launch queue へ prompt を配送する |
+| resume 候補の観測 | `agent_resume_inventory` | workspace の Agent history から provider ID を含まない safe metadata と exact target を返す |
+| 明示 resume | `session_resume` | inventory が返した exact target から新しい daemon-owned Agent runtime を起動する |
 | issue 委譲 | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う |
 | ブリーフ委譲 | `session_delegate_brief` | session 作成と authenticated worker の即時 dispatch を不可分に行う |
 | PR 観測 | `session_pr` | `name` 省略時は呼び出し元自身、指定時は対象 session の daemon-owned PR inventory と merged 集約を返す |
@@ -51,6 +53,16 @@ live Agent がいる場合はエラーになる。
 {"jsonrpc":"2.0","id":3,"method":"tools/call",
  "params":{"name":"session_prompt","arguments":{"name":"issue-403","prompt":"追加の回帰テストも固定してください"}}}
 ```
+
+## 中断 Agent を明示 resume する
+
+中断履歴は `agent_resume_inventory` に `workspace_id` を渡して観測する。返された item のうち resume 可能なものが持つ
+opaque な exact `target` を変更せず `session_resume` へ渡す。workspace、session、worktree、runtime、adapter revision の
+どれかを名前や provider ID から推測して補完しない。resume は新しい daemon-owned Agent runtime を起動する明示操作であり、
+inventory の取得、workspace open、daemon reconnect だけでは発火しない。
+
+人間向け `usagi session` の subcommand 名は `resume-inventory` / `resume-exact` だが、MCP wire の tool 名は
+`agent_resume_inventory` / `session_resume` である。利用時は常に `tools/list` の schema を正本とする。
 
 ## delegate
 

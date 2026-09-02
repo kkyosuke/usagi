@@ -103,7 +103,8 @@ agent ── stdio MCP ──┘
 - daemon は managed lifecycle と live runtime の単一書き手である。
 - client は daemon が発行した workspace / session / worktree / terminal / operation identity を使い、名前や
   path だけから effect 対象を推測しない。
-- repository 内の issue / memory は Markdown source が権威で、derived index は再構築可能である。
+- issue は caller worktree の `.usagi/issues/`、daemon-provisioned memory は Git 追跡外の workspace store を使う
+  （手動 MCP は cwd root の互換経路）。どちらも Markdown source が権威で、derived index は再構築可能である。
 - settings は Global と Workspace の2層、role catalog は Global / Workspace / repository の合成で解決する。
 - 非対話環境では TUI entry の1フレームを出力して終了し、Doctor は診断結果と終了 status を返す。
 

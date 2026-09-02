@@ -19,9 +19,9 @@
 //! process. The registry and the current locator are the real durable files, so
 //! the client resolves endpoints exactly the way the shipping client does.
 //!
-//! The real `usagi daemon restart` end to end — a second daemon *process* and a
-//! real provider PTY — stays with #507, which owns enabling the shipping
-//! rollover once this routing exists.
+//! The full `usagi daemon restart` product path with a second daemon process and
+//! a real provider PTY is covered by `tests/agent_ipc_e2e.rs`; this suite keeps
+//! the lower-level owner-routing seam focused.
 
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;

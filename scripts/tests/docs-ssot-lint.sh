@@ -71,6 +71,10 @@ make_fixture "$tmp/history-authority"
 printf '\n[古い提案](proposals/01-entry-surfaces.md) が正本である。\n' >> "$tmp/history-authority/document/09-env.md"
 expect_fail "$tmp/history-authority" '09-env.md makes proposal or issue history the current specification authority'
 
+make_fixture "$tmp/issue-authority"
+printf '\n[完了 issue](../.usagi/issues/999-example.md) の契約に従う。\n' >> "$tmp/issue-authority/document/09-env.md"
+expect_fail "$tmp/issue-authority" '09-env.md uses issue history as current specification authority'
+
 make_fixture "$tmp/source-doc-link"
 sed -i.bak 's#document/05-daemon.md#document/proposals/missing.md#' "$tmp/source-doc-link/crates/daemon/src/lib.rs"
 expect_fail "$tmp/source-doc-link" 'crates/daemon/src/lib.rs references missing documentation document/proposals/missing.md'
@@ -98,6 +102,10 @@ expect_fail "$tmp/design-index" '.agents/README.md does not list designs/258-con
 make_fixture "$tmp/legacy"
 printf '\n`usagi issue list`\n' >> "$tmp/legacy/.agents/README.md"
 expect_fail "$tmp/legacy" 'contains nonexistent issue CLI'
+
+make_fixture "$tmp/legacy-source"
+printf '\n// Legacy entry: usagi <path>\n' >> "$tmp/legacy-source/crates/daemon/src/lib.rs"
+expect_fail "$tmp/legacy-source" 'crates/daemon/src/lib.rs contains legacy positional workspace entry'
 
 make_fixture "$tmp/historical-legacy"
 printf '\n設計当時は `usagi <path>` と記載していた。\n' >> "$tmp/historical-legacy/.agents/designs/258-controller-runtime-migration.md"

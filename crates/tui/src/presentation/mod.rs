@@ -1722,7 +1722,7 @@ enum WorkspaceStep {
 
 impl WorkspaceStep {
     /// workspace ループの停止理由を TUI 全体の終了理由へ投影する。workspace を
-    /// 直接開いた入口（`usagi <path>`）は Welcome を持たないため、合成ルートが
+    /// 直接開いた入口（`usagi open <path>`）は Welcome を持たないため、合成ルートが
     /// [`Exit::Welcome`] を受けて screen graph へ入り直す。
     fn exit(self) -> Exit {
         match self {
@@ -4647,7 +4647,7 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
 /// Render a single static Home frame from a workspace snapshot, using the same
 /// controller projection as the interactive loop.
 ///
-/// This is the non-interactive `usagi launch <path>` fallback (no terminal), so
+/// This is the non-interactive `usagi open <path>` fallback (no terminal), so
 /// it shows the initial project bar and Home surface: root selected/active, the
 /// snapshot's sessions, and the `+ new session` row.
 #[must_use]
@@ -15128,8 +15128,8 @@ mod tests {
         }
 
         /// A retry — an admission after the first — ran on a tick that drew
-        /// nothing. This is the contract #554 has to keep, and the observation
-        /// the loop is driven until it makes.
+        /// nothing. This is the frame-skip contract the loop is driven until it
+        /// observes.
         fn retry_admitted_on_a_skipped_tick(&self) -> bool {
             self.admitted_jobs()
                 .iter()
@@ -28864,7 +28864,7 @@ mod tests {
 
     #[test]
     fn render_home_snapshot_draws_the_initial_home_surface() {
-        // The non-interactive `usagi launch <path>` fallback renders one static
+        // The non-interactive `usagi open <path>` fallback renders one static
         // project bar plus Home frame through the controller projection: the
         // workspace name, its sessions, and both creation affordances.
         let rows = render_home_snapshot(30, 100, &snapshot("demo"));
@@ -30912,7 +30912,7 @@ mod tests {
         assert!(contains_wrapped(&welcome, REFUSAL), "{welcome}");
     }
 
-    /// A workspace opened directly (`usagi <path>`) has no Welcome behind it, so
+    /// A workspace opened directly (`usagi open <path>`) has no Welcome behind it, so
     /// the runner reports the choice and the composition root decides. Quitting
     /// and leaving must be different answers here too.
     #[test]

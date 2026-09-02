@@ -1,12 +1,12 @@
-//! MCP サーバ（`usagi mcp`）の presentation。エージェント向けの tool 面（IF）を持つ:
-//! どんな tool・入力があるかを `Tool` トレイト実装のレジストリ（`tools`）で定義し、
-//! dispatch は名前でレジストリを引いて `Tool::call` を呼ぶ一様な経路にする。
+//! MCP サーバ（`usagi mcp`）の presentation。エージェント向けの tool 面（IF）を持つ。
+//! `tools` の [`tool::ToolDescriptor`] registry が metadata、schema、execution route、
+//! caller policy を一つに束ね、dispatch は名前で descriptor を引いて schema を検証してから
+//! route ごとの実行先へ送る。
 //!
 //! stdio 上の JSON-RPC 2.0 の serve ループ（`initialize` / `tools/list` / `tools/call`）は
-//! [`serve`] が担う。`tools/list` と `initialize` は実際に応答し、`tools/call` は tool を
-//! 名前で引いて呼ぶ。issue / memory tool は接続時に固定した store root を core usecase 経由で操作する。
-//! ロジックは usagi-core の usecase（issue / memory）と daemon への IPC（session）へ
-//! 委譲する方針で、CLI のコマンドハンドラと同じ core usecase を呼ぶ兄弟。
+//! [`serve`] が担う。issue / memory の Store route は接続時に固定した store root を core
+//! usecase 経由で操作し、session / agent / terminal / supervisor route は core IPC client を
+//! 介して daemon-owned usecase へ委譲する。presentation 自身は business logic を所有しない。
 
 pub mod protocol;
 pub mod resources;
@@ -22,7 +22,10 @@ pub use serve::{
 };
 use tool::ToolError;
 
-/// tool 名でレジストリを引いて実行する（`tools/call` の実体）。
+/// tool 名でレジストリを引き、Store route の adapter seam を直接実行する。
+///
+/// stdio の `tools/call` は [`serve`] が descriptor route を解釈する。daemon route はこの
+/// helper を通らない。
 ///
 /// # Errors
 ///
@@ -50,7 +53,7 @@ mod tests {
 
     #[test]
     fn dispatch_routes_to_a_known_tool() {
-        // 枠だけなので既知の tool は未実装スタブを返す（配線が通っていることの確認）。
+        // Store route ではない既知 tool は、この direct helper では未実装になる。
         assert_eq!(
             dispatch("session_create", "{}"),
             Err(ToolError::Unimplemented("session_create"))

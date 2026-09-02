@@ -1,5 +1,5 @@
-//! memory 系 MCP tool（`.usagi/memory/` のエージェントメモリ操作）。CLI の `usagi` には
-//! 出さないエージェント向けの IF で、CLI コマンドと同じ core usecase を呼ぶ兄弟。
+//! memory 系 MCP tool（`.usagi/memory/` のエージェントメモリ操作）。人間向け CLI には出さない
+//! エージェント向け IF で、Store route から core memory usecase を呼ぶ。
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};

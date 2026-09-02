@@ -1607,8 +1607,8 @@ background のいずれも同じ規則に従う。
 | completion channel の消失（workspace exit） | worker の送信は無害に捨てられ、stream client も launch client も worker と一緒に失われない |
 | late / 重複 / 未 admit の completion | launch fence が一致した completion だけが admission slot を解放し、operation fence が一致した pane だけを完了させる |
 
-hung request 自体の deadline は本節の責務ではなく、[#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md)
-の IPC request deadline が所有する。
+hung request 自体の deadline は本節の責務ではなく、
+[IPC の attempt deadline と reconnect budget](04-ipc.md#attempt-deadline-と-reconnect-budget)が所有する。
 
 #### 同一 process の pending operation identity
 
@@ -2037,7 +2037,7 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
   成功後も dedicated restore port を保持する。restore socket の passive EOF を検知し、current endpoint が再び接続可能になった
   ときだけ monotonic / coalesced connection epoch を 1 件発行して、その epoch につき fresh observation を一度送る。frame tick
   自体は inventory RPC を発行しない。restore request が slow / hung でも off-thread worker 内に隔離されるが、request deadline
-  そのものは [#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) の責務である。
+  そのものは [IPC の attempt deadline と reconnect budget](04-ipc.md#attempt-deadline-と-reconnect-budget)の責務である。
 - **投影**: saved Agent は完全な `TerminalRef` が両 inventory で trusted live と確認できたときだけ保存順で復元する。
   inventory にだけある live Agent は continuation / terminal fence の決定的順序で末尾へ追加し、duplicate snapshot は
   exact ref で 1 枚へ収束する。managed session の generic Terminal はその後ろへ決定的に追加し、root scope の generic
@@ -2100,7 +2100,7 @@ identity は daemon-issued `AgentContinuationRef` だけである。表示名、
 |---|---|---|
 | saved managed session target が snapshot に無い | target identity が stale | active pane にせず、Home は surviving session または `+ new session` へ reconcile する |
 | saved `TerminalRef` が live inventory に無いが continuation history は残る | attach 不可 | slot を保持し live tab は投影しない |
-| inventory から continuation が消えた | absence は retention / GC の証明ではない | slot を保持する。aggregate allocator / retention policy は [#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務 |
+| inventory から continuation が消えた | absence は retention / GC の証明ではない | slot を保持する。aggregate allocator / retention policy は [daemon の final retention と aggregate GC](05-daemon.md#final-retention-と-aggregate-gc)の責務 |
 | terminal ID が同じでも daemon generation など fencing field が異なる | old / stale data | trusted owner が無ければ attach せず、名前や ID から置換しない |
 | attach / resync が ownership unknown または transport failure | 継続性を証明できない | safe feedback を表示し input を無効化する |
 
@@ -2172,7 +2172,7 @@ label・detail・feedback・log のいずれにも出さない。
 | resumable item が無い / `available: false` / reason が `explicit_resume_available` でない | metadata 不足・live 保持・supersede 済み | tab は表示するが resume 不可にし、safe reason だけを出す |
 | target の lineage / runtime / workspace / session / worktree が当該 runtime と一致しない | 信頼できない target | target を捨て、resume 不可として表示する |
 
-saved 表示順（[#506](../.usagi/issues/506-feat-tui-agent-tab-intent-daemon-inventory-open-reconcile.md) の slot 順）を
+saved 表示順（[workspace open 時の two-source reconciliation](#workspace-open-時の-pane-復元)の slot 順）を
 持つ lineage はその位置を保ち、local state に無い lineage だけが決定的な順序でその後に続く。したがって local state を
 失っても inventory から安全に再構成でき、provider ID を推測しない。
 
@@ -2219,8 +2219,8 @@ live PTY の有無ではなく tab の有無で決まる）。history tab は ma
    resume 中にする。tab の位置・selection・他 tab は変わらない。
 2. 応答が[明示 resume の検証](#明示-resume-の検証)をすべて満たしたときだけ、同じ slot の tab を新しい exact
    `TerminalRef` の live Agent tab へ置き換える。foreground だった tab だけが attach / resync する。
-3. 置換した lineage は #506 の slot intent へ新しい `TerminalRef` として commit するので、次の observation でも
-   同じ位置に残る。
+3. 置換した lineage は [two-source reconciliation](#workspace-open-時の-pane-復元)の slot intent へ新しい
+   `TerminalRef` として commit するので、次の observation でも同じ位置に残る。
 4. 拒否・失敗は tab を interrupted のまま残して safe feedback を出す。in-flight な operation を持つ tab は、
    inventory から source が消えても消滅しない（利用者の request が答えを受け取るまで tab が残る）。
 5. live tab の `Ctrl-O x` は CLI へ `Ctrl-D` と同じ EOT を送り、daemon が runtime の終了を観測した時点で tab を閉じる。
@@ -2232,9 +2232,8 @@ daemon request を作らない。inventory refresh・reconnect・workspace open�
 
 planned な `daemon restart` は旧 generation の PTY を保持したまま control authority だけを移す別 failure mode である。
 その間の tab は interrupted ではなく、owner generation の endpoint へ配送される live tab のままである
-（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。TUI client を owner routing に
-載せるのは [#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md)、rollover 自体の起動は
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の責務であり、
+（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。TUI client の routing は同 IPC 契約、
+rollover 自体の起動は [daemon の planned replacement](05-daemon.md#planned-replacement)の責務であり、
 本 projection は crash / cold restart を旧 PTY の継続と偽らないことだけを保証する。
 
 ## feedback と終了

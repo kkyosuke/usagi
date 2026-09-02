@@ -1571,9 +1571,8 @@ per-terminal の bound（64 KiB の replay window、exit 時の PTY / FD 解放�
 Agent runtime の final tombstone（durable record・bounded replay・journal）だけを対象とし、launch operation
 outcome / relation の retention は
 [operation ledger の retention / expiry / GC](#operation-ledger-の-retention--expiry--gc)、input sequence / ACK
-ledger は [#519] の契約に従う（本節では削除も再定義もしない）。
-
-[#519]: ../.usagi/issues/519-feat-ipc-terminal-input-ack-loss-cross-connection-replay.md
+ledger は [IPC の terminal input identity と cross-connection replay](04-ipc.md#terminal-input-identity-と-cross-connection-replay)
+の契約に従う（本節では削除も再定義もしない）。
 
 ### budget
 

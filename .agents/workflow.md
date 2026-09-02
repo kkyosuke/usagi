@@ -32,7 +32,7 @@ The documentation index is [document/README.md](../document/README.md).
 
 `main` を直接触らず、隔離された作業ツリーで進める。**ただし環境によって手順が異なる**。
 
-- **usagi セッション内で起動している場合**（`usagi agent` / `terminal` が起動する worktree。
+- **usagi セッション内で起動している場合**（TUI の `agent` / `terminal` command が起動する worktree。
   カレントが `.usagi/sessions/<name>/` 配下）: **すでに隔離された worktree 内にいるので、新しく
   worktree を作成しない。そのまま作業を進める**。作業ブランチは `usagi/<name>`（セッション名 `<name>` を `usagi/` 名前空間に収めたもの）。
   Session and worktree lifecycle state is owned by the daemon.
