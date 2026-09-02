@@ -15016,7 +15016,6 @@ mod tests {
             SupervisorRunState::Cancelled
         );
     }
-
     #[test]
     fn supervisor_control_errors_distinguish_refusal_from_unknown_effect() {
         use usagi_core::infrastructure::ipc::{RetryMode, SideEffect};
