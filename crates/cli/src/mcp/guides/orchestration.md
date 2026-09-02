@@ -89,6 +89,8 @@ credential を必要とする。手動で
 
 `session_dispatch` は session 名と worker selector、prompt を受け取る。session は存在すれば再利用し、
 無ければ作成する。新規 worker の runtime/model は `tools/list` の schema に列挙された組だけを使う。
+`session.role` は任意で、省略時はeffective catalogのsession defaultを使う。明示するIDは選択中のTeamまたは
+global/workspace `roles.toml` に存在し、session scopeを許可する必要がある。未知IDやscope不一致はdaemonが拒否する。
 
 ```json
 {"name":"session_dispatch","arguments":{"session":{"name":"issue-123","role":"worker"},
@@ -101,22 +103,23 @@ credential を必要とする。手動で
 ## 階層的に委譲する
 
 dispatch された worker も authenticated caller なので、さらに `session_delegate_brief`、`session_create`、
-または `session_dispatch` を呼び出せる。これにより Director → Manager → Executor の階層を同じ仕組みで作る。
+または `session_dispatch` を呼び出せる。組み込みの hierarchical Team では、これにより
+Director → Manager → Worker の階層を同じ仕組みで作る。
 session の親は、その session を新規作成した authenticated caller の session として lifecycle state に一度だけ
 保存する。既存 session への `session_dispatch` は所属を変更しない。完了報告の immediate caller は実行ごとに
 daemon が保存する `DispatchBinding` を権威にする。
 
 ```text
 Director
-├─ Executor                         小さいタスク
+├─ Worker                           小さいタスク
 └─ Manager                          大きいタスク
-   ├─ Executor
-   └─ Executor
+   ├─ Worker
+   └─ Worker
 ```
 
 下向きの指示は各 caller が子 worker を dispatch し、上向きの報告は子が `agent_complete` / `agent_fail`
 （互換の `session_complete` でも成功報告のみ可）を呼ぶ。報告先は常に immediate caller である。
-Executor の報告は Manager の inbox に入り、Manager が検証・統合してから自身の caller へ一度だけ報告する。
+Worker の報告は Manager の inbox に入り、Manager が検証・統合してから自身の caller へ一度だけ報告する。
 worker は宛先 ID や `:root` を指定しない。親から dispatch されず単独で launch された Agent は self-binding を持つため、
 存在しない親を root として補完せず、自身の inbox が報告先になる。
 

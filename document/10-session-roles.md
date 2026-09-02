@@ -9,6 +9,7 @@ filesystem sandbox、MCP authorization、session lifecycle の権限ではない
 
 - [モデル](#モデル)
 - [catalog](#catalog)
+  - [`roles.toml` の設定例](#rolestoml-の設定例)
 - [割り当てと入口](#割り当てと入口)
 - [daemon 検証](#daemon-検証)
 - [prompt 合成](#prompt-合成)
@@ -27,6 +28,8 @@ filesystem sandbox、MCP authorization、session lifecycle の権限ではない
 
 `RoleId` は 1–64 byte の小文字 ASCII kebab-case である。session 名から role を推測せず、session の途中で `role_id` を変更しない。
 role を変える場合は別 session を作成する。
+現在の Team と role catalog は workspace 単位であり、Work Run ごとの Team override / snapshot は持たない。
+goal-driven の root Agent とそこから委譲する session も、launch 時点の同じ effective catalog を使う。
 
 ## catalog
 
@@ -34,12 +37,12 @@ Config の `Team` は次の組み込み catalog を選ぶ。global の値は wor
 その workspace で優先される。Team 行で `Enter` を押すと3種類を構造図付きカードで比較でき、狭い端末では同じ候補を
 縦リストで表示する。`none` はカードとは別の `Use no template` actionで選択する。
 
-| 表示 | `team_template` | root default | session default | 許可する委譲経路 |
-|---|---|---|---|---|
-| none | `none` | 未指定 | 未指定 | 組み込み role なし |
-| hierarchical | `hierarchical` | Director | Manager | Director → Manager / Worker、Manager → Worker |
-| flat | `flat` | Director | Worker | Director → Worker |
-| pipeline | `pipeline` | Director | Planner | Director → Planner → Implementer → Tester |
+| 表示 | `team_template` | root default | session default | 許可する委譲経路 | `max_depth` |
+|---|---|---|---|---|---:|
+| none | `none` | 未指定 | 未指定 | 組み込み role なし | — |
+| hierarchical | `hierarchical` | Director | Manager | Director → Manager / Worker、Manager → Worker | 2 |
+| flat | `flat` | Director | Worker | Director → Worker | 1 |
+| pipeline | `pipeline` | Director | Planner | Director → Planner → Implementer → Tester | 3 |
 
 `none` は既定値であり、組み込み catalog を注入しない。未知の `team_template` token、および読み取れないworkspace設定も
 委譲権限を暗黙に増やさないよう `none` へ縮退する。
@@ -57,6 +60,58 @@ default は各 layer で指定された scope だけを上書きする。
 
 `roles.toml` は `version = 1` を持つ。選択したテンプレートを土台に差分定義を重ねられるため、テンプレート選択と
 catalog 編集は両立する。`none` を選び両ファイルも無い場合は role を適用しない。
+
+### `roles.toml` の設定例
+
+組み込み Team をそのまま使う場合は `roles.toml` を作る必要はない。独自 role、既定 role、委譲制限を追加または
+上書きする場合は、Overview で `roles workspace`（既定）または `roles global` を開いて次の形式を編集する。
+
+```toml
+version = 1
+
+[defaults]
+root = "director"
+session = "manager"
+
+[roles.director]
+summary = "全体方針と結果統合"
+scopes = ["root"]
+instructions = "要求を分解し、Managerへ委譲して結果を統合する。"
+
+[roles.director.delegation]
+enabled = true
+child_roles = ["manager", "worker"]
+max_depth = 2
+max_concurrency = 4
+
+[roles.manager]
+summary = "タスクの分解と統合"
+scopes = ["session"]
+instructions = "担当範囲をWorkerへ委譲し、結果を検証してcallerへ報告する。"
+
+[roles.manager.delegation]
+enabled = true
+child_roles = ["worker"]
+max_depth = 2
+max_concurrency = 4
+
+[roles.worker]
+summary = "実行と検証"
+scopes = ["session"]
+instructions = "依頼された作業を実行し、結果と検証内容をcallerへ報告する。"
+
+[roles.worker.delegation]
+enabled = false
+```
+
+`defaults.root` / `defaults.session` は省略できる。各 role の `summary`、`scopes`、`instructions` は必須で、
+`scopes` は `root` / `session` の一方以上を指定する。`delegation` block は任意だが、省略は既存catalogとの互換のため
+従来の許可動作を維持する。新しい委譲policyでは leaf roleにも `enabled = false` を明記し、許可境界を曖昧にしない。
+block 内で省略した場合は `enabled = false`、`child_roles = []`、`max_depth = 8`、`max_concurrency = 4` になる。
+
+1ファイルは最大1 MiB、role IDは1–64 byteの小文字ASCII kebab-case、roleごとの`instructions`は最大16 KiBである。
+未知field、空の`scopes`、未知scope、NUL、対応scopeを持たないdefaultは保存時または次のlaunch admissionで拒否する。
+workspace layerで同じrole IDを定義するとglobalまたはbuilt-inの定義全体を置換するため、必要なfieldをすべて書く。
 
 role は組織上の責務を prompt として与える。階層型チームで Director が小さいタスクを Worker へ直接 dispatch
 する場合は 2 層、大きいタスクを Manager へ dispatch し、その Manager が Worker session を作る場合は
@@ -77,8 +132,9 @@ sidebar は各session名の横に `◆ Manager` / `● Worker` と階層イン�
 したがって launch 方法によらず同じ dispatch binding が作られ、worker の `session_complete` は直近の親 inbox だけへ届く。
 子の inbox commit 後は、live な Manager には通知を送り、停止中なら通知を next-launch queue に永続化する。
 いずれかの effective role に `delegation` block がある場合は、credential のない `session_delegate_issue` を拒否する。
-`max_concurrency` は実行中の子だけでなく未起動の delegated prompt も予約枠として数え、Agent の runtime/model を変更しても
-同じ session の利用数と絶対深度を引き継ぐ。上限判定と一時枠の取得は dispatch store の同じ lock 内で行い、session
+`max_concurrency` は同じ親 session の実行中の子だけでなく未起動の delegated prompt も予約枠として数える。
+root Agent からの委譲は workspace の root scope を1つの親として数え、Agent の runtime/model を変更しても
+同じ親の利用数と絶対深度を引き継ぐ。上限判定と一時枠の取得は dispatch store の同じ lock 内で行い、session
 作成や worker spawn の前に予約する。成功時は durable queue/run が枠を引き継ぎ、失敗時は guard が解放するため、並行 request
 が check と publish の間をすり抜けない。session の親は終了 run の retention 対象ではない immutable lineage に保存し、古い
 binding が削除された後も深度・sidebar・Garden の親子関係を維持する。
@@ -91,8 +147,11 @@ default を拒否する。workspace catalog の権威は target session branch �
 CLI は optional `--role` を受け取る。
 
 ```text
-usagi session create review-auth --role reviewer
+usagi session create implementation --role worker
 ```
+
+この例の `worker` は `hierarchical` / `flat` Team に含まれる。Team が `none` の場合は、先に
+`roles workspace` または `roles global` で同じ ID の session-scope role を定義する。
 
 MCP の `session_create` / `session_delegate_issue` / `session_delegate_brief` は top-level `role`、`session_dispatch` は
 `session.role` を受け取る。wire に送るのは role ID だけで、instruction は送らない。
