@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use usagi_core::domain::{
     agent::StructuredResult,
     pr_inventory::{PrChecksState, PrState, canonicalize},
-    supervisor::GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+    supervisor::{ArtifactContract, GOAL_REVIEW_READY_ARTIFACT_CONTRACT},
 };
 
 use super::{
@@ -55,7 +55,7 @@ fn rejected(reason: &'static str) -> ArtifactVerification {
 impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
     fn verify(
         &mut self,
-        contract: &str,
+        contract: ArtifactContract,
         result: Option<&StructuredResult>,
     ) -> ArtifactVerification {
         if contract != GOAL_REVIEW_READY_ARTIFACT_CONTRACT {
@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_invalid_unsupported_and_provider_failures_are_safe_rejections() {
+    fn missing_invalid_and_provider_failures_are_safe_rejections() {
         let mut unavailable = GoalArtifactVerifier::new(Runner([Err(())].into()));
         assert!(
             !unavailable
@@ -198,14 +198,14 @@ mod tests {
         );
         let mut never_called = GoalArtifactVerifier::new(Runner(VecDeque::new()));
         for (contract, result) in [
+            (
+                ArtifactContract::None,
+                result(Some("https://github.com/acme/repo/pull/42")),
+            ),
             (GOAL_REVIEW_READY_ARTIFACT_CONTRACT, result(None)),
             (
                 GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
                 result(Some("not a pr")),
-            ),
-            (
-                "unknown",
-                result(Some("https://github.com/acme/repo/pull/42")),
             ),
         ] {
             assert!(!never_called.verify(contract, Some(&result)).passed);

@@ -6055,7 +6055,7 @@ fn verify_completed_goal_artifact(
     // The provider process runs outside the supervisor mutex. A slow or broken
     // remote can delay only this report request, never task/run observation.
     let verification =
-        GoalArtifactVerifier::new(GhProcess).verify(&request.contract, request.result.as_ref());
+        GoalArtifactVerifier::new(GhProcess).verify(request.contract, request.result.as_ref());
     supervisor
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?

@@ -3231,8 +3231,8 @@ mod tests {
     use usagi_core::domain::role::RoleId;
     use usagi_core::domain::session_lifecycle::{AgentPhase, FailureStage, SessionLifecycle};
     use usagi_core::domain::supervisor::{
-        ExecutionPolicy, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskId,
-        TaskQuery, TaskState,
+        ArtifactContract, ExecutionPolicy, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
+        TaskId, TaskQuery, TaskState,
     };
 
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -3268,7 +3268,7 @@ mod tests {
             parent_task_id: None,
             dependencies: BTreeSet::new(),
             instruction_digest: format!("digest-{index}"),
-            required_artifact_contract: "none".into(),
+            required_artifact_contract: ArtifactContract::default(),
             attempt: 1,
             generation: 1,
             assigned_dispatch_run: None,

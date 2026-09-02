@@ -649,7 +649,7 @@ mod tests {
     use std::collections::BTreeSet;
     use usagi_core::domain::id::OperationId;
     use usagi_core::domain::supervisor::{
-        EscalationRecord, ExecutionPolicy, SupervisorRunId, TaskId, TaskQuery,
+        ArtifactContract, EscalationRecord, ExecutionPolicy, SupervisorRunId, TaskId, TaskQuery,
     };
 
     fn work_run() -> SupervisorRunQuery {
@@ -669,7 +669,7 @@ mod tests {
                     parent_task_id: None,
                     dependencies: BTreeSet::new(),
                     instruction_digest: format!("digest-{index}"),
-                    required_artifact_contract: "none".into(),
+                    required_artifact_contract: ArtifactContract::default(),
                     attempt: 1,
                     generation: 1,
                     assigned_dispatch_run: None,

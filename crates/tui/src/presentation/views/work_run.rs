@@ -117,7 +117,9 @@ const fn run_priority(state: SupervisorRunState) -> u8 {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use usagi_core::domain::supervisor::{ExecutionPolicy, SupervisorRunId, TaskId, TaskQuery};
+    use usagi_core::domain::supervisor::{
+        ArtifactContract, ExecutionPolicy, SupervisorRunId, TaskId, TaskQuery,
+    };
 
     fn run(state: SupervisorRunState, task_states: &[TaskState]) -> SupervisorRunQuery {
         SupervisorRunQuery {
@@ -137,7 +139,7 @@ mod tests {
                     parent_task_id: None,
                     dependencies: BTreeSet::new(),
                     instruction_digest: format!("digest-{index}"),
-                    required_artifact_contract: "none".into(),
+                    required_artifact_contract: ArtifactContract::default(),
                     attempt: 1,
                     generation: 1,
                     assigned_dispatch_run: None,
