@@ -76,7 +76,9 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
         "session_list" => (SessionRoute(Session::List), Public),
         "session_status" => (SessionRoute(Session::Status), Public),
         "session_complete" => (SessionRoute(Session::Complete), SessionCredential),
-        "session_pr" => (SessionRoute(Session::Pr), Public),
+        // An explicit name remains public-compatible, while an authenticated
+        // caller may omit it and let the daemon resolve its stable session ID.
+        "session_pr" => (SessionRoute(Session::Pr), SessionCredential),
         "session_remove" => (SessionRoute(Session::Remove), Public),
         "session_resume" => (AgentResume, Public),
         "agent_resume_inventory" => (AgentInventory, Public),
