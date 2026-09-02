@@ -13,7 +13,10 @@
 //! client feeds into the screen restored from the checkpoint.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Mutex, MutexGuard, PoisonError,
+    atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 use usagi_core::domain::id::{ClientId, ConnectionId, OperationId, RequestId, TerminalRef};
@@ -48,6 +51,10 @@ static RETENTION_COALESCED_BYTES: AtomicU64 = AtomicU64::new(0);
 static SCREEN_TRIMMED_ROWS: AtomicU64 = AtomicU64::new(0);
 static CHECKPOINT_TRIMMED_ROWS: AtomicU64 = AtomicU64::new(0);
 static RETAINED_SCREEN_CELLS: AtomicU64 = AtomicU64::new(0);
+/// Serializes process-shared screen growth from preflight through accounting.
+/// Different terminal actors otherwise could both observe the same remaining
+/// allowance and commit grids whose combined retention exceeds the ceiling.
+static SCREEN_BUDGET_MUTATION: Mutex<()> = Mutex::new(());
 
 /// Process-local terminal retention counters. Values are byte, row and cell
 /// counts only and never contain terminal output or identity data.
@@ -582,6 +589,10 @@ pub enum RegistryError {
     IdempotencyConflict,
     Exited,
     PtyResizeFailed,
+    /// The requested visible grid cannot fit the per-terminal or process-wide
+    /// screen budget. The registry rejects it before allocating cells or
+    /// resizing the PTY.
+    ScreenBudgetExceeded,
     /// The screen cannot be captured inside the frame budget even with all of
     /// its history dropped. The daemon emits no oversized frame and no partial
     /// screen; the client keeps its current state and retries.
@@ -672,6 +683,10 @@ pub struct TerminalRegistry {
     checkpoint_bytes_limit: usize,
     screen_cells_limit: usize,
     screen_cells_aggregate_limit: usize,
+    /// Production registries share the process counter. Test-only budget
+    /// overrides account this registry alone so parallel fixtures cannot spend
+    /// one another's deliberately tiny ceilings.
+    screen_cells_process_shared: bool,
     /// Cross-connection input operation finals. It lives beside `entries`
     /// instead of inside one, so reusing an operation identity for a second
     /// terminal is detected as a conflict rather than written twice.
@@ -688,6 +703,7 @@ impl TerminalRegistry {
             checkpoint_bytes_limit: CHECKPOINT_BYTES_MAX,
             screen_cells_limit: SCREEN_CELLS_PER_TERMINAL_MAX,
             screen_cells_aggregate_limit: SCREEN_CELLS_AGGREGATE_MAX,
+            screen_cells_process_shared: true,
             operations: InputOperationLedger::new(InputOperationBounds::default()),
         }
     }
@@ -722,6 +738,7 @@ impl TerminalRegistry {
     /// budget and whatever the ceiling leaves after the other terminals'
     /// current retention, so a test can isolate either bound.
     #[must_use]
+    #[cfg(test)]
     pub const fn with_screen_cell_budgets(
         mut self,
         per_terminal: usize,
@@ -729,6 +746,7 @@ impl TerminalRegistry {
     ) -> Self {
         self.screen_cells_limit = per_terminal;
         self.screen_cells_aggregate_limit = process_aggregate;
+        self.screen_cells_process_shared = false;
         self
     }
 
@@ -745,6 +763,8 @@ impl TerminalRegistry {
         if self.entries.contains_key(&key) {
             return Err(RegistryError::StaleTarget);
         }
+        let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
+        ensure_screen_geometry_fits(geometry, self.screen_budgets(), 0)?;
         let (rows, cols) = screen_dimensions(geometry);
         let screen = VtScreen::new(rows, cols);
         let screen_cells = screen.retained_cells();
@@ -800,6 +820,7 @@ impl TerminalRegistry {
         writer: Option<&mut dyn PtyWriter>,
     ) -> Result<Attached, RegistryError> {
         let checkpoint_bytes_limit = self.checkpoint_bytes_limit;
+        let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
         let budgets = self.screen_budgets();
         let entry = self.entry_mut(reference)?;
         let existing = entry
@@ -889,6 +910,7 @@ impl TerminalRegistry {
         connection: ConnectionId,
         writer: &mut dyn PtyWriter,
     ) -> Result<(), RegistryError> {
+        let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
         let budgets = self.screen_budgets();
         let entry = self.entry_mut(reference)?;
         match entry.attachments.get(&subscription) {
@@ -905,6 +927,7 @@ impl TerminalRegistry {
     /// Releases only this connection's subscriptions.  It intentionally leaves
     /// the PTY, output journal and process ownership alive.
     pub fn disconnect(&mut self, connection: ConnectionId, writer: &mut dyn PtyWriter) {
+        let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
         let budgets = self.screen_budgets();
         for entry in self.entries.values_mut() {
             let before = entry.attachments.len();
@@ -959,6 +982,7 @@ impl TerminalRegistry {
         data: Vec<u8>,
     ) -> Result<(Output, Vec<u8>), RegistryError> {
         let limit = self.journal_limit;
+        let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
         let budgets = self.screen_budgets();
         let entry = self.entry_mut(reference)?;
         // The screen is the authority: it sees every accepted byte, including
@@ -1086,6 +1110,7 @@ impl TerminalRegistry {
         // racing an already validated resize, so a client observes either the
         // old or the new geometry with its matching revision, never a mix.
         let checkpoint_bytes_limit = self.checkpoint_bytes_limit;
+        let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
         let budgets = self.screen_budgets();
         let entry = self.entry_mut(reference)?;
         if entry.exited.is_some() {
@@ -1110,6 +1135,7 @@ impl TerminalRegistry {
         // internal caller on a terminal nobody is watching — the request stands.
         let target = requested_geometry(entry).unwrap_or(geometry);
         if target != entry.geometry {
+            ensure_screen_geometry_fits(target, budgets, entry.screen_cells)?;
             writer
                 .resize(reference, target)
                 .map_err(|_| RegistryError::PtyResizeFailed)?;
@@ -1364,10 +1390,18 @@ impl TerminalRegistry {
         self.entries.remove(&key(reference)).is_some()
     }
 
-    const fn screen_budgets(&self) -> ScreenBudgets {
+    fn screen_budgets(&self) -> ScreenBudgets {
         ScreenBudgets {
             per_terminal: self.screen_cells_limit,
             process_aggregate: self.screen_cells_aggregate_limit,
+            retained_cells: if self.screen_cells_process_shared {
+                RETAINED_SCREEN_CELLS.load(Ordering::Relaxed)
+            } else {
+                self.entries
+                    .values()
+                    .map(|entry| counted(entry.screen_cells))
+                    .sum()
+            },
         }
     }
 
@@ -1419,6 +1453,9 @@ fn reconcile_geometry(
         return;
     };
     if geometry == entry.geometry {
+        return;
+    }
+    if ensure_screen_geometry_fits(geometry, budgets, entry.screen_cells).is_err() {
         return;
     }
     let reference = entry.reference.clone();
@@ -1493,21 +1530,52 @@ fn release_screen_cells(cells: usize) {
     RETAINED_SCREEN_CELLS.fetch_sub(counted(cells), Ordering::Relaxed);
 }
 
+fn lock_screen_budget(process_shared: bool) -> Option<MutexGuard<'static, ()>> {
+    process_shared.then(|| {
+        SCREEN_BUDGET_MUTATION
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    })
+}
+
 /// The screen retention budgets one registry enforces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScreenBudgets {
     per_terminal: usize,
     process_aggregate: usize,
+    /// Accounted cells before the current mutation. This is process-global in
+    /// production and registry-local for an injected test budget.
+    retained_cells: u64,
+}
+
+/// Refuses a visible grid that cannot fit before `VtScreen` allocates or a PTY
+/// observes the new dimensions. `current_cells` is excluded from the process
+/// total for resize because that screen is replaced rather than added.
+fn ensure_screen_geometry_fits(
+    geometry: Geometry,
+    budgets: ScreenBudgets,
+    current_cells: usize,
+) -> Result<(), RegistryError> {
+    let (rows, cols) = screen_dimensions(geometry);
+    let visible = rows.saturating_mul(cols);
+    let retained_elsewhere = budgets
+        .retained_cells
+        .saturating_sub(counted(current_cells));
+    let aggregate_available = counted(budgets.process_aggregate).saturating_sub(retained_elsewhere);
+    let fits = visible <= budgets.per_terminal && counted(visible) <= aggregate_available;
+    fits.then_some(())
+        .ok_or(RegistryError::ScreenBudgetExceeded)
 }
 
 /// Re-accounts this screen's retention and trims its oldest history until it
 /// fits both the per-terminal budget and whatever the process aggregate ceiling
 /// leaves after the other terminals' current retention.
 fn enforce_screen_budget(entry: &mut Entry, budgets: ScreenBudgets) {
+    let previous_cells = entry.screen_cells;
     let cells = account_screen(entry);
-    let others = RETAINED_SCREEN_CELLS
-        .load(Ordering::Relaxed)
-        .saturating_sub(counted(cells));
+    let others = budgets
+        .retained_cells
+        .saturating_sub(counted(previous_cells));
     let aggregate_share =
         usize::try_from(counted(budgets.process_aggregate).saturating_sub(others)).unwrap_or(0);
     let budget = budgets.per_terminal.min(aggregate_share);
@@ -2078,6 +2146,58 @@ mod tests {
         );
         assert_eq!(screen_dimensions(Geometry { cols: 0, rows: 0 }), (1, 1));
         assert_eq!(screen_dimensions(Geometry { cols: 80, rows: 24 }), (24, 80));
+    }
+
+    #[test]
+    fn visible_grids_are_refused_before_allocation_or_pty_resize() {
+        let terminal = reference();
+        let before = output_pipeline_counters().retained_screen_cells;
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
+            .with_screen_cell_budgets(16, usize::MAX);
+
+        assert_eq!(
+            registry.register(terminal.clone(), Geometry { cols: 5, rows: 4 }),
+            Err(RegistryError::ScreenBudgetExceeded)
+        );
+        assert_eq!(output_pipeline_counters().retained_screen_cells, before);
+
+        let initial = Geometry { cols: 4, rows: 4 };
+        registry.register(terminal.clone(), initial).unwrap();
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        registry
+            .attach_for_client(&terminal, connection, client, None, &mut Writer::default())
+            .unwrap();
+        let mut writer = Writer::default();
+        let oversized = Geometry { cols: 5, rows: 4 };
+        assert_eq!(
+            registry.resize(&terminal, oversized, Some(&client), &mut writer),
+            Err(RegistryError::ScreenBudgetExceeded)
+        );
+        // A rejected resize still records the client's requested viewport. A
+        // later attach reconciles that claim but must refuse it before asking
+        // the PTY to allocate the same oversized grid.
+        registry
+            .attach_for_client(&terminal, connection, client, Some(oversized), &mut writer)
+            .unwrap();
+        assert!(writer.resized.is_empty());
+        assert_eq!(registry.snapshot(&terminal).unwrap().geometry, initial);
+    }
+
+    #[test]
+    fn registration_refuses_a_visible_grid_beyond_the_remaining_process_budget() {
+        let ceiling = 32;
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
+            .with_screen_cell_budgets(usize::MAX, ceiling);
+        for _ in 0..2 {
+            registry
+                .register(reference(), Geometry { cols: 4, rows: 4 })
+                .unwrap();
+        }
+        assert_eq!(
+            registry.register(reference(), Geometry { cols: 1, rows: 1 }),
+            Err(RegistryError::ScreenBudgetExceeded)
+        );
     }
 
     #[test]

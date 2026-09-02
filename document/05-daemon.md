@@ -1138,8 +1138,9 @@ registry は terminal grid / scrollback の唯一の権威でもある。termina
 受理した全 byte を feed し、resize で screen を reshape するため、attach / resync / resize の snapshot は
 bounded journal の先頭位置に依存しない完全な screen state を返せる（wire 表現と revision の正本は
 [4. IPC](04-ipc.md#snapshot-payload-と-revision)）。screen の retention は per-terminal の cell budget と
-process-local の aggregate cell budget で bound し、超過分は古い scrollback から trim して trim 行数を
-counter に計上する。checkpoint payload が frame budget を超える場合も payload 側の古い scrollback を
+process-local の aggregate cell budget で bound する。新規登録と resize は可視 grid がいずれかの予算を
+超える geometry を cell 確保と PTY effect の前に拒否し、出力で増えた超過分は古い scrollback から trim して
+trim 行数を counter に計上する。checkpoint payload が frame budget を超える場合も payload 側の古い scrollback を
 落として収め、可視 grid だけでも収まらないときは部分的な screen を返さず fail closed とする。
 
 daemon-owned PTY では registry の VT screen が terminal endpoint でもある。child が `CSI 6n` で現在の

@@ -32,7 +32,7 @@ use super::{
         GenericPtySpawner, GenericTerminalCoordinator, GenericTerminalError,
         TerminalProfileResolver, TerminalStore,
     },
-    terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
+    terminal::{Geometry, InputRequest, PtyWriter, RegistryError, SCREEN_CELLS_PER_TERMINAL_MAX},
     terminal_owner::{
         TerminalOwner as TerminalOwnerPort, TerminalRequestContext, TerminalResponse,
     },
@@ -506,10 +506,12 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q>
 /// memory amplifier: dimensions are bounded by the checkpoint's `ROWS_MAX` /
 /// `COLS_MAX` and rejected rather than silently clamped.
 pub(super) fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolError> {
+    let visible_cells = usize::from(value.rows).saturating_mul(usize::from(value.cols));
     let bounded = value.cols > 0
         && value.rows > 0
         && u32::from(value.rows) <= ROWS_MAX
-        && u32::from(value.cols) <= COLS_MAX;
+        && u32::from(value.cols) <= COLS_MAX
+        && visible_cells <= SCREEN_CELLS_PER_TERMINAL_MAX;
     bounded
         .then_some(Geometry {
             cols: value.cols,
@@ -518,7 +520,7 @@ pub(super) fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolErro
         .ok_or_else(|| {
             ProtocolError::new(
                 ErrorCode::InvalidArgument,
-                "terminal geometry must be non-zero and within the supported bounds",
+                "terminal geometry must be non-zero and fit the supported screen budget",
             )
         })
 }
@@ -533,11 +535,13 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
         GenericTerminalError::Terminal(RegistryError::ResyncRequired) => ErrorCode::ResyncRequired,
         GenericTerminalError::Terminal(RegistryError::PtyResizeFailed)
         | GenericTerminalError::SpawnFailed => ErrorCode::Unavailable,
-        // The screen does not fit one frame: no partial screen is emitted and
-        // the client keeps its current state until a retry succeeds.
-        GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable) => {
-            ErrorCode::ResourceExhausted
-        }
+        // Screen/frame, concurrency, and final-retention bounds all refuse the
+        // effect before dropping protected state or emitting a partial result.
+        GenericTerminalError::Terminal(
+            RegistryError::CheckpointUnavailable | RegistryError::ScreenBudgetExceeded,
+        )
+        | GenericTerminalError::ConcurrencyExhausted
+        | GenericTerminalError::RetentionExhausted(_) => ErrorCode::ResourceExhausted,
         // One durable operation identity presented for different bytes or
         // another terminal: nothing was written and nothing is replayed.
         GenericTerminalError::Terminal(RegistryError::IdempotencyConflict) => {
@@ -550,10 +554,6 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
         GenericTerminalError::UnknownTerminal
         | GenericTerminalError::TerminalGenerationMismatch
         | GenericTerminalError::Terminal(_) => ErrorCode::StaleTarget,
-        // A launch whose worst-case final does not fit the aggregate retention
-        // budget is refused before spawn, like any other exhausted capacity.
-        GenericTerminalError::ConcurrencyExhausted
-        | GenericTerminalError::RetentionExhausted(_) => ErrorCode::ResourceExhausted,
         // Retention collected this terminal's final. The client is told the
         // history expired rather than being handed another terminal's.
         GenericTerminalError::FinalEvicted(_) => ErrorCode::NotFound,
@@ -1666,6 +1666,10 @@ mod tests {
                 cols: u16::try_from(COLS_MAX).unwrap() + 1,
                 rows: 1,
             },
+            TerminalGeometry {
+                cols: u16::try_from(COLS_MAX).unwrap(),
+                rows: u16::try_from(SCREEN_CELLS_PER_TERMINAL_MAX / COLS_MAX as usize + 1).unwrap(),
+            },
         ] {
             assert_eq!(
                 runtime
@@ -1687,11 +1691,12 @@ mod tests {
                 "geometry {size:?}"
             );
         }
-        // The largest supported geometry is accepted.
+        // The largest grid inside the cell budget is accepted even when one
+        // dimension reaches its independent checkpoint bound.
         assert!(
             geometry(TerminalGeometry {
                 cols: u16::try_from(COLS_MAX).unwrap(),
-                rows: u16::try_from(ROWS_MAX).unwrap(),
+                rows: u16::try_from(SCREEN_CELLS_PER_TERMINAL_MAX / COLS_MAX as usize,).unwrap(),
             })
             .is_ok()
         );
@@ -1795,6 +1800,7 @@ mod tests {
 
         let errors = [
             GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable),
+            GenericTerminalError::Terminal(RegistryError::ScreenBudgetExceeded),
             GenericTerminalError::Terminal(RegistryError::PtyResizeFailed),
             GenericTerminalError::Terminal(RegistryError::IdempotencyExpired),
             GenericTerminalError::Terminal(RegistryError::SequenceGap),
@@ -1820,6 +1826,7 @@ mod tests {
             ),
         ];
         let expected = [
+            ErrorCode::ResourceExhausted,
             ErrorCode::ResourceExhausted,
             ErrorCode::Unavailable,
             ErrorCode::IdempotencyExpired,
