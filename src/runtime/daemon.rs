@@ -6295,6 +6295,7 @@ fn reconcile_supervisor_run_workers(
     reconcile_supervisor_workers(supervisor, agent, Some(supervisor_run_id))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-08-31 tests=supervisor_worker_reconciliation_joins_bound_and_unbound_runs_exactly,workspace_control_is_durable_scoped_and_projects_exact_stop_obligations,supervisor_stop_validates_every_fence_and_retries_an_orphaned_process
 fn reconcile_supervisor_workers(
     supervisor: &SharedSupervisorRuntime,
     agent: &SharedAgentRuntime,
@@ -6697,6 +6698,7 @@ fn dispatch_supervisor_tool(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-08-31 tests=supervisor_snapshot_is_exactly_workspace_scoped
 fn connection_workspace_id(
     bound: &ConnectionWorkspace,
 ) -> Result<WorkspaceId, usagi_core::infrastructure::ipc::ProtocolError> {
@@ -14888,6 +14890,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One reconciliation fixture joins bound and unbound run obligations.
     fn supervisor_worker_reconciliation_joins_bound_and_unbound_runs_exactly() {
         use usagi_core::domain::{
             agent::{DispatchRun, RunStatus},

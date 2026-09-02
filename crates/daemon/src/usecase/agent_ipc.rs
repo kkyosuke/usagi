@@ -4658,6 +4658,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fixture exercises every ownership fence and orphan retry outcome.
     fn supervisor_stop_validates_every_fence_and_retries_an_orphaned_process() {
         let workspace = WorkspaceId::new();
         let resolved = scope();

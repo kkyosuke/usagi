@@ -1948,6 +1948,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One scenario keeps the immutable expectation and bounded deferral sequence visible.
     fn verification_expectation_is_immutable_and_deadline_is_future_bounded() {
         let (mut run, id) = verifying_artifact_run();
         let expectation = ArtifactExpectation::new(

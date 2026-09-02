@@ -1075,9 +1075,9 @@ impl SupervisorRuntime {
         pending.sort_by_key(PendingWorkerStop::operation_id);
         for pair in pending.windows(2) {
             if pair[0].operation_id == pair[1].operation_id && pair[0] != pair[1] {
-                anyhow::bail!(
-                    "Agent operation belongs to multiple aborted supervisor reservations"
-                );
+                return Err(anyhow::Error::msg(
+                    "Agent operation belongs to multiple aborted supervisor reservations",
+                ));
             }
         }
         pending.dedup();
@@ -2579,6 +2579,49 @@ mod tests {
             verification_retry_at: None,
             verification_expectation: None,
             state: TaskState::Pending,
+        }
+    }
+    fn aborted_run(workspace: Option<WorkspaceId>) -> SupervisorRun {
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        run.workspace_id = workspace;
+        run.state = SupervisorRunState::Cancelled;
+        run.terminal_at = Some(now());
+        run.terminal_reason = Some("operator cancelled".into());
+        run
+    }
+    fn unbound_goal_run(workspace: Option<WorkspaceId>) -> SupervisorRun {
+        let mut run = aborted_run(workspace);
+        let mut root = task(run.supervisor_run_id, "root", None);
+        root.required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT;
+        run.tasks.insert(root.task_id.clone(), root);
+        run
+    }
+    fn start_reservation(supervisor_run_id: SupervisorRunId) -> StartReservation {
+        StartReservation {
+            semantic_key: "test".into(),
+            supervisor_run_id,
+        }
+    }
+    fn root_pending_stop(
+        operation_id: OperationId,
+        workspace_id: WorkspaceId,
+        supervisor_run_id: SupervisorRunId,
+    ) -> PendingWorkerStop {
+        PendingWorkerStop {
+            operation_id,
+            workspace_id,
+            supervisor_run_id,
+            task_id: TaskId::new("root").unwrap(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            generation: 1,
+            requires_session: false,
         }
     }
     fn event(run: &SupervisorRun, kind: SupervisorEventKind) -> SupervisorEvent {
@@ -6214,6 +6257,436 @@ mod tests {
         assert_eq!(child.parent_dispatch_run, Some(parent_operation));
         assert_eq!(child.dispatch_run_id, child_operation);
         assert!(child.worker_session_id.is_some());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One corruption matrix proves every fail-closed unbound-worker recovery boundary.
+    fn pending_worker_stop_recovery_rejects_every_corrupt_reservation_shape() {
+        let workspace = WorkspaceId::new();
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let running = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        runtime.supervisor.initialize(&running).unwrap();
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            OperationId::new().to_string(),
+            start_reservation(SupervisorRunId::new()),
+        );
+        state.starts.insert(
+            OperationId::new().to_string(),
+            start_reservation(running.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(runtime.pending_worker_stops().unwrap().is_empty());
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let unscoped = unbound_goal_run(None);
+        let missing_root = aborted_run(Some(workspace));
+        runtime.supervisor.initialize(&unscoped).unwrap();
+        runtime.supervisor.initialize(&missing_root).unwrap();
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            OperationId::new().to_string(),
+            start_reservation(unscoped.supervisor_run_id),
+        );
+        state.starts.insert(
+            OperationId::new().to_string(),
+            start_reservation(missing_root.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(runtime.pending_worker_stops().unwrap().is_empty());
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let root = unbound_goal_run(Some(workspace));
+        runtime.supervisor.initialize(&root).unwrap();
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            "invalid-operation".into(),
+            start_reservation(root.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .pending_worker_stops()
+                .unwrap_err()
+                .to_string()
+                .contains("operation is invalid")
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut invalid_operation = aborted_run(Some(workspace));
+        let invalid_task = task(
+            invalid_operation.supervisor_run_id,
+            "delegated-invalid-operation",
+            None,
+        );
+        invalid_operation
+            .tasks
+            .insert(invalid_task.task_id.clone(), invalid_task);
+        let operation = OperationId::new();
+        let mut wrong_digest = aborted_run(Some(workspace));
+        let mut wrong_digest_task = task(
+            wrong_digest.supervisor_run_id,
+            &format!("{DELEGATED_TASK_PREFIX}{operation}"),
+            None,
+        );
+        wrong_digest_task.instruction_digest = "wrong digest".into();
+        wrong_digest
+            .tasks
+            .insert(wrong_digest_task.task_id.clone(), wrong_digest_task);
+        runtime.supervisor.initialize(&invalid_operation).unwrap();
+        runtime.supervisor.initialize(&wrong_digest).unwrap();
+        assert!(runtime.pending_worker_stops().unwrap().is_empty());
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let operation = OperationId::new();
+        let mut missing_parent = aborted_run(Some(workspace));
+        let mut child = task(
+            missing_parent.supervisor_run_id,
+            &format!("{DELEGATED_TASK_PREFIX}{operation}"),
+            None,
+        );
+        child.instruction_digest = delegated_task_digest(operation);
+        missing_parent.tasks.insert(child.task_id.clone(), child);
+        runtime.supervisor.initialize(&missing_parent).unwrap();
+        assert!(
+            runtime
+                .pending_worker_stops()
+                .unwrap_err()
+                .to_string()
+                .contains("has no parent task")
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let operation = OperationId::new();
+        let mut missing_provenance = aborted_run(Some(workspace));
+        let mut child = task(
+            missing_provenance.supervisor_run_id,
+            &format!("{DELEGATED_TASK_PREFIX}{operation}"),
+            Some("parent"),
+        );
+        child.instruction_digest = delegated_task_digest(operation);
+        missing_provenance
+            .tasks
+            .insert(child.task_id.clone(), child);
+        runtime.supervisor.initialize(&missing_provenance).unwrap();
+        assert!(
+            runtime
+                .pending_worker_stops()
+                .unwrap_err()
+                .to_string()
+                .contains("parent provenance is missing")
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let operation = OperationId::new();
+        let root = unbound_goal_run(Some(workspace));
+        runtime.supervisor.initialize(&root).unwrap();
+        let mut delegated = aborted_run(Some(workspace));
+        let parent_id = TaskId::new("parent").unwrap();
+        let parent_dispatch = OperationId::new();
+        let parent = task(delegated.supervisor_run_id, "parent", None);
+        let mut child = task(
+            delegated.supervisor_run_id,
+            &format!("{DELEGATED_TASK_PREFIX}{operation}"),
+            Some("parent"),
+        );
+        child.instruction_digest = delegated_task_digest(operation);
+        delegated.tasks.insert(parent_id.clone(), parent);
+        delegated.tasks.insert(child.task_id.clone(), child);
+        delegated.provenance.insert(
+            parent_id.clone(),
+            provenance(
+                delegated.supervisor_run_id,
+                &parent_id,
+                None,
+                parent_dispatch,
+            ),
+        );
+        runtime.supervisor.initialize(&delegated).unwrap();
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            operation.to_string(),
+            start_reservation(root.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .pending_worker_stops()
+                .unwrap_err()
+                .to_string()
+                .contains("multiple aborted supervisor reservations")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Forged acknowledgements share one matrix so no recovery fence is tested in isolation.
+    fn pending_worker_stop_acknowledgement_is_exact_and_idempotent() {
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        let stop = root_pending_stop(operation, workspace, SupervisorRunId::new());
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut delegated = stop.clone();
+        delegated.parent_task_id = Some(TaskId::new("parent").unwrap());
+        runtime
+            .acknowledge_pending_worker_stops(&[delegated])
+            .unwrap();
+        assert!(
+            runtime
+                .acknowledge_pending_worker_stops(std::slice::from_ref(&stop))
+                .unwrap_err()
+                .to_string()
+                .contains("reservation disappeared")
+        );
+
+        let mut state = RuntimeState::default();
+        state.expired_starts.insert(&operation.to_string());
+        runtime.save_state(&state).unwrap();
+        runtime
+            .acknowledge_pending_worker_stops(std::slice::from_ref(&stop))
+            .unwrap();
+
+        let owned_run = SupervisorRunId::new();
+        let mut state = RuntimeState::default();
+        state
+            .starts
+            .insert(operation.to_string(), start_reservation(owned_run));
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .acknowledge_pending_worker_stops(std::slice::from_ref(&stop))
+                .unwrap_err()
+                .to_string()
+                .contains("changed run ownership")
+        );
+
+        let missing_run = root_pending_stop(operation, workspace, owned_run);
+        assert!(
+            runtime
+                .acknowledge_pending_worker_stops(std::slice::from_ref(&missing_run))
+                .unwrap_err()
+                .to_string()
+                .contains("run disappeared")
+        );
+
+        let stale_run = aborted_run(Some(workspace));
+        runtime.supervisor.initialize(&stale_run).unwrap();
+        let stale_stop = root_pending_stop(operation, workspace, stale_run.supervisor_run_id);
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            operation.to_string(),
+            start_reservation(stale_run.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .acknowledge_pending_worker_stops(&[stale_stop])
+                .unwrap_err()
+                .to_string()
+                .contains("acknowledgement is stale")
+        );
+    }
+
+    #[test]
+    fn expired_workspace_control_operations_are_refused_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let run = runtime
+            .start_for_workspace(
+                "caller",
+                workspace,
+                "start",
+                "root".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        let operation = OperationId::new();
+        let mut state = RuntimeState::default();
+        state.expired_controls.insert(&operation.to_string());
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .control_for_workspace(
+                    workspace,
+                    operation,
+                    &SupervisorWorkspaceCommand::Cancel {
+                        supervisor_run_id: run.supervisor_run_id,
+                        reason: "operator cancelled".into(),
+                    },
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("outside the retained replay window")
+        );
+
+        let recyclable_temp = tempfile::tempdir().unwrap();
+        let recyclable = SupervisorRuntime::new(recyclable_temp.path());
+        let recyclable_run = recyclable
+            .start_for_workspace(
+                "caller",
+                workspace,
+                "recyclable",
+                "root".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        let mut state = RuntimeState::default();
+        for _ in 0..MAX_CONTROL_RESERVATIONS {
+            state.controls.insert(
+                OperationId::new().to_string(),
+                ControlReservation {
+                    semantic_digest: format!("sha256:{}", "0".repeat(64)),
+                    supervisor_run_id: SupervisorRunId::new(),
+                    reserved_at: now(),
+                },
+            );
+        }
+        recyclable.save_state(&state).unwrap();
+        assert_eq!(
+            recyclable
+                .control_for_workspace(
+                    workspace,
+                    OperationId::new(),
+                    &SupervisorWorkspaceCommand::Cancel {
+                        supervisor_run_id: recyclable_run.supervisor_run_id,
+                        reason: "operator cancelled".into(),
+                    },
+                    now(),
+                )
+                .unwrap()
+                .state,
+            SupervisorRunState::Cancelled
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One matrix covers ordering plus each corrupt durable provenance fence.
+    fn worker_stop_obligations_sort_exact_workers_and_reject_corrupt_provenance() {
+        let workspace = WorkspaceId::new();
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut running = SupervisorRun::new(
+            "caller".into(),
+            "running".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        running.workspace_id = Some(workspace);
+        runtime.supervisor.initialize(&running).unwrap();
+        for _ in 0..2 {
+            let mut run = aborted_run(Some(workspace));
+            let task_id = TaskId::new("worker").unwrap();
+            let dispatch = OperationId::new();
+            let mut worker = task(run.supervisor_run_id, "worker", None);
+            worker.assigned_dispatch_run = Some(dispatch);
+            run.tasks.insert(task_id.clone(), worker);
+            run.provenance.insert(
+                task_id.clone(),
+                provenance(run.supervisor_run_id, &task_id, None, dispatch),
+            );
+            runtime.supervisor.initialize(&run).unwrap();
+        }
+        assert_eq!(runtime.worker_stop_obligations().unwrap().len(), 2);
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut missing_task = aborted_run(Some(workspace));
+        let missing = TaskId::new("missing").unwrap();
+        missing_task.provenance.insert(
+            missing.clone(),
+            provenance(
+                missing_task.supervisor_run_id,
+                &missing,
+                None,
+                OperationId::new(),
+            ),
+        );
+        runtime.supervisor.initialize(&missing_task).unwrap();
+        assert!(
+            runtime
+                .worker_stop_obligations()
+                .unwrap_err()
+                .to_string()
+                .contains("provenance task is missing")
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut stale = aborted_run(Some(workspace));
+        let task_id = TaskId::new("worker").unwrap();
+        let dispatch = OperationId::new();
+        let mut worker = task(stale.supervisor_run_id, "worker", None);
+        worker.assigned_dispatch_run = Some(dispatch);
+        stale.tasks.insert(task_id.clone(), worker);
+        let mut stale_provenance = provenance(stale.supervisor_run_id, &task_id, None, dispatch);
+        stale_provenance.supervisor_run_id = SupervisorRunId::new();
+        stale.provenance.insert(task_id, stale_provenance);
+        runtime.supervisor.initialize(&stale).unwrap();
+        assert!(
+            runtime
+                .worker_stop_obligations()
+                .unwrap_err()
+                .to_string()
+                .contains("provenance fence is stale")
+        );
+    }
+
+    #[test]
+    fn unfinished_workspace_detection_is_scoped_and_terminal_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let run = runtime
+            .start_for_workspace(
+                "caller",
+                workspace,
+                "start",
+                "root".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        assert!(runtime.has_unfinished_workspace(workspace).unwrap());
+        assert!(
+            !runtime
+                .has_unfinished_workspace(WorkspaceId::new())
+                .unwrap()
+        );
+        runtime
+            .control_for_workspace(
+                workspace,
+                OperationId::new(),
+                &SupervisorWorkspaceCommand::Cancel {
+                    supervisor_run_id: run.supervisor_run_id,
+                    reason: "operator cancelled".into(),
+                },
+                now(),
+            )
+            .unwrap();
+        assert!(!runtime.has_unfinished_workspace(workspace).unwrap());
     }
 
     #[test]
