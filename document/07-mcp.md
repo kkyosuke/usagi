@@ -134,7 +134,8 @@ serve ループが応答するメソッドは次のとおり。1 行 = 1 メッ�
 ## tool 面
 
 tool は系統ごとに分かれ、tool descriptor が `name` / description / `inputSchema`、runtime
-validator、execution route、caller policy の正本である。Issue / Memory がともに有効な既定レジストリは 51 件を返す。
+validator、execution route、caller policy の正本である。Issue / Memory がともに有効な場合も、tool 件数は descriptor
+registry から導出し、本書へ転記しない。
 `tools/list` と `tools/call` は同じ descriptor registry を参照するため、掲載された tool は必ず
 1 つの実行経路と caller policy を持つ。`tools/call` の実挙動は次のとおりである。
 

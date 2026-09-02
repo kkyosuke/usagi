@@ -59,7 +59,8 @@ The documentation index is [document/README.md](../document/README.md).
   **clippy / full test / coverage 100% の重い full gate はローカル push では走らせず、PR CI に一本化する**
   （pre-push フックはこの gate を持たない）。ローカルで先取り確認したい場合は coverage 経路を任意で実行してよく、
   coverage がテスト実行を兼ねる経路では `cargo test --workspace --quiet` を重複実行しない。
-- docs-only（Rust 差分なし）は Rust gate を省略できるが、Markdown link check は必須である。
+- docs-only（Rust 差分なし）は Rust gate を省略できるが、`ruby scripts/ci/docs-ssot-lint.rb` と
+  Markdown link check は必須である。
 - AI エージェントの完了報告には、実行した command、結果、未実行 gate と理由、[full test / coverage gate
   必須条件](../document/06-conventions.md#品質チェックリスク比例の-gate)への該当有無を含める。
 

@@ -19,6 +19,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
   - [Switch の右ペインは cursor の preview](#switch-の右ペインは-cursor-の-preview)
 - [workspace terminal drawer](#workspace-terminal-drawer)
 - [指示モード（Director mode）](#指示モードdirector-mode)
+  - [goal-driven workflow](#goal-driven-workflow)
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [frame 予算](#frame-予算)
 - [Session sidebar rows](#session-sidebar-rows)

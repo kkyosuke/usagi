@@ -292,7 +292,7 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
-| `usagi session <command>` | daemon-owned session の作成・削除・resume・setup・prompt を操作する |
+| `usagi session <command>` | daemon-owned session の作成・削除・sleep・resume・setup・prompt を操作する |
 | `usagi daemon <command>` | daemon の起動・状態確認・tenant解放・停止・入替・service登録を操作する |
 
 `usagi clean` は dry-run で候補だけを表示する。`--apply` は欠損 path の workspace 登録、欠損 workspace の
