@@ -246,6 +246,8 @@ const TOMBSTONE_WORDS: usize = 512;
 const TOMBSTONE_HASHES: u64 = 4;
 const DELEGATED_TASK_PREFIX: &str = "delegated-";
 const DELEGATED_TASK_DIGEST_PREFIX: &str = "delegated-operation:";
+const AMBIGUOUS_STOP_RESERVATION: &str =
+    "Agent operation belongs to multiple aborted supervisor reservations";
 #[cfg(not(test))]
 const MAX_START_RESERVATIONS: usize = 256;
 #[cfg(test)]
@@ -1075,9 +1077,7 @@ impl SupervisorRuntime {
         pending.sort_by_key(PendingWorkerStop::operation_id);
         for pair in pending.windows(2) {
             if pair[0].operation_id == pair[1].operation_id && pair[0] != pair[1] {
-                return Err(anyhow::Error::msg(
-                    "Agent operation belongs to multiple aborted supervisor reservations",
-                ));
+                return Err(anyhow::Error::msg(AMBIGUOUS_STOP_RESERVATION));
             }
         }
         pending.dedup();
