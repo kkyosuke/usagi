@@ -1,6 +1,6 @@
 # 9. 環境変数設定
 
-> [ドキュメント目次](README.md) ｜ ← 前へ [8. coverage exclusion inventory](08-coverage.md)
+> [ドキュメント目次](README.md) ｜ ← 前へ [8. coverage exclusion inventory](08-coverage.md) ｜ 次へ → [10. session role](10-session-roles.md)
 
 usagi が起動する Agent / terminal の子プロセスへ注入する環境変数の設定。**本書が env 設定の正本**である
 （保存場所・スコープの合成・secret の解決・注入のタイミング）。編集 UI の操作は

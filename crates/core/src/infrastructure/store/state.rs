@@ -1,13 +1,15 @@
-//! Persistence for a single repository's [`WorkspaceState`] — the sessions
-//! created under it and the workspace-root note scratchpad.
+//! Persistence for a single repository's [`WorkspaceState`] — a legacy session
+//! projection plus the repository-local root/session scratchpads.
 //!
 //! The state lives inside the repository's channel-specific runtime directory
 //! (`<repo>/.usagi/dev/state.json` in development mode), a
 //! versioned JSON file written through a temp file + rename so a crash never
 //! leaves it half-written. `state.json` is read-modify-write (load, edit the
-//! session list, save the whole file), so mutations take the store lock across
-//! the whole sequence — several usagi processes can share one repository (the
-//! TUI plus a session's `usagi mcp` server).
+//! document, save the whole file), so mutations take the store lock across the
+//! whole sequence. The TUI and daemon may both write scratchpad metadata; the
+//! MCP server routes scratchpad mutations through the daemon rather than writing
+//! this store directly. Production session membership and lifecycle live in the
+//! daemon-owned lifecycle store, not in this legacy session projection.
 
 use std::path::{Path, PathBuf};
 

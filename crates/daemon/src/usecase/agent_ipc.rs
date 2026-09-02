@@ -76,8 +76,8 @@ use super::{
 /// A daemon-resolved, fully fenced checkout for an available scope (a managed
 /// session or the workspace root).
 ///
-/// It is produced only by the #268 scope resolver; this crate never re-derives
-/// it from a client supplied name or path.
+/// It is produced only by the injected [`SessionScopeResolver`]; this crate
+/// never re-derives it from a client supplied name or path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAgentScope {
     pub worktree_id: WorktreeId,
@@ -94,8 +94,8 @@ pub enum ScopeResolveError {
     Storage,
 }
 
-/// Input port: the scope resolver owned by #268.  Consumed here to convert a
-/// product-neutral launch scope into a fully fenced available checkout.  A
+/// Input port that converts a product-neutral launch scope into a fully fenced
+/// available checkout. A
 /// `Some` session resolves that managed session's worktree; a `None` session
 /// resolves the trusted workspace root. Name/path/argv re-resolution is
 /// intentionally impossible at this boundary.

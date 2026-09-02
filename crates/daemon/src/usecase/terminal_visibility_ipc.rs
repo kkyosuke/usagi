@@ -10,8 +10,8 @@
 //! while this authority must outlive any one connection.
 //!
 //! Aggregate retention and garbage collection of tombstones (and cross-restart
-//! persistence) is #526's responsibility; this service publishes only the
-//! observe / dismiss / visibility contract.
+//! persistence) belongs to the aggregate-retention service; this service publishes
+//! only the observe / dismiss / visibility contract.
 
 use std::sync::{Arc, Mutex, PoisonError};
 

@@ -2,6 +2,10 @@
 
 > [設計提案一覧](README.md) ｜ 関連仕様: [daemon](../05-daemon.md) ｜ [TUI](../03-tui.md) ｜ [daemon IPC](../04-ipc.md) ｜ 関連提案: [PTY crash 継続](07-pty-crash-continuation.md)
 
+> **Status:** 提案中（未実装）
+>
+> **Baseline:** 原版 commit `48070779791691c18333883563d083be257704b7`（2026-08-19）。本文は restart / crash 後の将来の復帰案であり、現在ビルドの contract ではない。現在の挙動は [daemon](../05-daemon.md)、[TUI](../03-tui.md)、[daemon IPC](../04-ipc.md) を参照する。
+
 daemon が cold restart（`daemon restart --force` / `stop` → `start`）または crash / `SIGKILL` / OS 再起動から
 復帰したとき、利用者が **開いていた作業面をそのまま取り戻せる**ようにする設計である。
 

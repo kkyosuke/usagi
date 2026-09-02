@@ -1,13 +1,14 @@
-//! Session lifecycle operations.
+//! Legacy repository-local session helpers.
 //!
-//! Two layers live here. The **state primitives** — [`list`], [`get`], [`touch`],
+//! The **state primitives** — [`list`], [`get`], [`touch`],
 //! [`record`], [`remove_record`] — read-modify-write the persisted
 //! [`WorkspaceState`](crate::domain::workspace_state::WorkspaceState) in
 //! `state.json` through the injected [`WorkspaceStateStore`], holding its
-//! cross-process lock across each mutation. The **full lifecycle** — [`create`]
-//! and [`remove`] — additionally builds and tears down the session's git worktree
-//! through the injected [`GitRunner`], composing the git and state layers with a
-//! defined order and rollback (see each function).
+//! cross-process lock across each mutation. [`create`] and [`remove`] are legacy
+//! composition helpers that also build or tear down a Git worktree through the
+//! injected [`GitRunner`]. Production session membership, identity, and lifecycle
+//! are owned by the daemon lifecycle store; shipping CLI/TUI/MCP paths must use
+//! daemon IPC rather than treating these `state.json` rows as authority.
 //!
 //! The clock is passed in (`now`) so these stay clock-free and fully testable.
 
@@ -127,7 +128,7 @@ pub struct NewSession {
     pub started_from: Option<String>,
 }
 
-/// Create a session: add its git worktree, then record it in `state.json`.
+/// Legacy helper: add a session worktree, then record it in `state.json`.
 ///
 /// The worktree is a new branch `usagi/<name>` checked out at
 /// `<repo_root>/.usagi/sessions/<name>`, branched from the repository's current
@@ -172,7 +173,7 @@ pub fn create(
     Ok(session)
 }
 
-/// Remove a session: tear down its git worktree, then forget it from `state.json`.
+/// Legacy helper: tear down a session worktree, then forget it from `state.json`.
 ///
 /// The **worktree is removed first**; if that fails (e.g. it is dirty and `force`
 /// is not set) the error propagates and the record is left intact so the caller

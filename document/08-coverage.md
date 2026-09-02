@@ -15,22 +15,15 @@ v2 の `#[coverage(off)]` の移行 inventory。許可条件と更新手順の�
 
 ## 基準値
 
-2026-07-21 の inventory 開始時点では v2 に 892 件あり、#485–#487 と後続の root・CLI 返済で一度は
-129 件まで減った。その後の実装で例外が再び増え、2026-08-29 の source scan は 494 件である。inline metadata や
-allowlist 登録は item の責務が許可理由に適合する証明ではないため、増加分を返済済みとは扱わない。
+履歴として、2026-07-21 の inventory 開始時点では v2 に 892 件あり、#485–#487 と後続の root・CLI 返済で一度は
+129 件まで減った。2026-08-29 の source scan は 494 件だった。これらは各時点の返済経過を示す snapshot であり、
+現在件数としては使わない。inline metadata や allowlist 登録は item の責務が許可理由に適合する証明ではないため、
+件数の増減だけで返済済みとは扱わない。
 
 [`coverage-off-budget.json`](../coverage-off-budget.json) が owner / path ごとの現在件数を列挙する機械可読な
 inventory である。`scripts/coverage-off-lint.rb` は source scan と全件一致することを検証し、属性の追加・削除・移動で
 inventory が更新されていない変更を拒否する。budget の更新は件数変更を review 上で明示するためのもので、増加を
-正当化するものではない。
-
-| owner | 件数 | 返済先 |
-|---|---:|---|
-| core | 9 | parser / validation / persistence 判断を優先して再審査 |
-| daemon | 333 | `src/runtime/daemon.rs` の composition 集中を最優先で分離・再審査 |
-| root・CLI | 33 | process / stdio 合成と pure helper を分離して再審査 |
-| TUI | 119 | presentation / production adapter と reducer の境界を再審査 |
-| **合計** | **494** | 詳細は machine-readable inventory に全 path と件数を列挙 |
+正当化するものではない。owner・path・合計の current count は Markdown に転記せず、この JSON だけを参照する。
 
 ## 領域別返済順序
 
@@ -48,7 +41,8 @@ stale symbol として CI が失敗する。
 ## TUI の返済結果
 
 #487 では controller reducer、Effect routing、presentation 分岐を coverage 対象へ戻したが、その後の実装を含む
-現行 scan は owner `tui` を 119 件数える。理由付き metadata があっても自動的に許可済みとはせず、controller reducer、
+例外数は変動している。現在件数は `coverage-off-budget.json` を参照する。理由付き metadata があっても自動的に
+許可済みとはせず、controller reducer、
 Effect executor、entry selection、completion、input classifier、error projection に例外を残さない方針で再審査する。
 production graph の検査方法は [Production screen graph harness](03-tui.md#production-screen-graph-harness) を参照する。
 
@@ -60,8 +54,8 @@ runtime executable snapshot を束ねる `serve_with_client` を `composition` �
 単相化される issue adapter の `cfg(test)` instance だけを `generic_monomorphization` 例外とし、shipping instance は coverage
 対象に保つ。direct unit と production E2E の双方で parser・store error・projection を検証する。
 
-#626 は root 側の `migration_debt` 14 件を返済し、判断と error mapping を coverage 対象へ戻した。現行 scan は
-owner `root-cli` を 33 件数えるため、過去の返済結果を現在の残存許可数としては使わない。path 別の現在件数は
+#626 は root 側の `migration_debt` 14 件を返済し、判断と error mapping を coverage 対象へ戻した。その後も
+例外数は変動しているため、過去の返済結果を現在の残存許可数としては使わない。path 別の現在件数は
 `coverage-off-budget.json` を正本とし、production の process・filesystem・環境を束ねる item と pure helper を
 再分離する。
 

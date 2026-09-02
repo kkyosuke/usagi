@@ -1,8 +1,8 @@
 #![cfg_attr(test, coverage(off))]
 // coverage: reason=generic_monomorphization owner=root-cli expires=2027-01-31 tests=every_issue_adapter_maps_malformed_json_to_invalid_params,shipping_issue_adapters_cover_defensive_parsing_and_missing_projection,mcp_store_tools_round_trip_through_stdio_and_durable_files
 
-//! issue 系 MCP tool（`.usagi/issues/` のタスク issue 操作）。CLI の `usagi` には
-//! 出さないエージェント向けの IF で、CLI コマンドと同じ core usecase を呼ぶ兄弟。
+//! issue 系 MCP tool（`.usagi/issues/` のタスク issue 操作）。人間向け CLI には出さない
+//! エージェント向け IF で、Store route から core issue usecase を呼ぶ。
 use chrono::Utc;
 use std::path::Path;
 use usagi_core::infrastructure::store::issue::IssueStore;

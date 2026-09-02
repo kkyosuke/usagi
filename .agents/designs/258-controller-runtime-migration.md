@@ -1,15 +1,19 @@
 # 設計: 実端末 Workspace runtime を controller 経路へ移行する
 
+> **Status:** 完了済み issue の historical design（現行仕様ではない）
+>
+> **Baseline:** 原版 commit `268f858a187130e321f492e9fb2f8766e2cced23`（2026-07-18）。本文は issue #258 の設計・移行前調査時点の snapshot である。現在の TUI 構成と挙動は [TUI 仕様](../../document/03-tui.md) と [アーキテクチャ](../../document/02-architecture.md) を参照する。
+
 **対象 issue**: #258「fix(tui): Home の root-first row contract を runtime まで一元化する」
 **目的**: 実端末の Workspace runtime（`presentation::drive_workspace_*` + 旧 `Workspace` view）を、controller の `AppState` / `HomeProjection` / `render_home` 経路に一本化し、Home 画面の state・入力・描画の二重定義を解消する。
 
 ---
 
-## 1. 現状整理
+## 1. 設計時点の現状整理
 
 ### 1.1 二系統の並存
 
-v2 TUI には現在、同じ Workspace 画面を定義する 2 つの系統がある。
+設計時点の v2 TUI には、同じ Workspace 画面を定義する 2 つの系統があった。
 
 ```
 【実端末で動いている系統（旧経路）】
@@ -30,9 +34,9 @@ AppState（usecase/application/controller.rs）
 
 controller 経路は #256 / #267 / #269 / #279 / #293 / #295 / #305 で reducer・投影・入力契約が整備済みだが、**実端末のフレームループには接続されていない**。旧 `Workspace` view が実 runtime の source of truth のまま残っている。
 
-### 1.2 issue #258 調査結果からの現状差分
+### 1.2 issue #258 調査時点の差分
 
-issue 本文の調査結果のうち「旧 `Workspace` は sessions → root を保持する」は現行コードでは解消済みで、旧 view も既に root-first（`selected == 0` が root）である。**残っている本質的な課題は行順ではなく、次の 2 点**。
+issue 本文の調査結果のうち「旧 `Workspace` は sessions → root を保持する」は設計時点のコードでは解消済みで、旧 view も既に root-first（`selected == 0` が root）だった。**当時残っていた本質的な課題は行順ではなく、次の 2 点**。
 
 1. 旧 view が `selected: usize` の index 契約（`0` = root、`len+1` = `+ new session`）で navigation・render・hit-test を推測しており、controller の stable な `Selection` / `Target` identity と二重定義になっている。
 2. 実端末の入力・描画・イベント dispatch が controller（`update` / `HomeProjection` / `render_home`）を経由していない。

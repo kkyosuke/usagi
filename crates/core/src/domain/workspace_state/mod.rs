@@ -1,15 +1,13 @@
-//! The `WorkspaceState` aggregate: everything usagi tracks for one workspace,
-//! persisted as development-mode runtime state (`<repo>/.usagi/dev/state.json`).
+//! Repository-local compatibility state persisted at
+//! `<repo>/.usagi/dev/state.json` in development mode.
 //!
-//! A workspace is fully described by the sessions created under it, plus a note
-//! scratchpad attached to the workspace **root** (the `⌂ root` row, which belongs
-//! to no session). This is the root of the repository-local persisted state and
-//! the aggregate the repo store
-//! ([`crate::infrastructure::store::state`]) reads and writes.
-//!
-//! Per-worktree git status (branch status, diff, ahead/behind) is derived from
-//! git and will attach to sessions when the git layer lands; it is intentionally
-//! absent here for now.
+//! [`WorkspaceState`] retains the legacy session projection needed to locate
+//! per-session scratchpads, plus the scratchpad attached to the workspace root
+//! (`⌂ root`). It does **not** fully describe a workspace: production session
+//! membership/lifecycle is daemon-owned, while Git status and PR state are
+//! derived projections. The repository store
+//! ([`crate::infrastructure::store::state`]) reads and writes this compatibility
+//! document without promoting its session rows to lifecycle authority.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,11 +15,12 @@ use serde::{Deserialize, Serialize};
 use crate::domain::note::Scratchpad;
 use crate::domain::session::SessionRecord;
 
-/// State of a workspace: the sessions created under it plus the root scratchpad.
+/// Legacy session/scratchpad compatibility state for one repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceState {
-    /// Sessions created under `.usagi/sessions/`, across all repositories in the
-    /// workspace tree. Empty (and omitted from the file) when none exist.
+    /// Legacy session rows used for repository-local scratchpad lookup.
+    /// Production lifecycle membership is not derived from this list. Empty (and
+    /// omitted from the file) when none exist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<SessionRecord>,
     /// The note scratchpad attached to the workspace **root** — the same scratch

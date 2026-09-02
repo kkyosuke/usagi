@@ -9,7 +9,7 @@
 //! blocking on the daemon.
 //!
 //! Three properties beyond "not on the render thread" are the pump's own
-//! responsibility (#527):
+//! responsibility:
 //!
 //! * **Bounded cadence.** A silent terminal backs the fetch interval off from
 //!   the interactive [`ACTIVE_INTERVAL`] to [`IDLE_MAX_INTERVAL`], so an idle

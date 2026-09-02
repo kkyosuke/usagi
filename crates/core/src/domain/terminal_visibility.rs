@@ -16,8 +16,8 @@
 //! or resurrect a completed entry.
 //!
 //! This module owns only the visibility/observed/dismissed contract. Aggregate
-//! retention and garbage collection of tombstones is delegated to #526, and
-//! provider resume / replacement spawn is never triggered here.
+//! retention and garbage collection of tombstones is delegated to the daemon's
+//! aggregate-retention service, and provider resume / replacement spawn is never triggered here.
 
 use std::collections::BTreeMap;
 
@@ -144,7 +144,7 @@ impl TerminalVisibility {
 ///
 /// It carries no argv, environment values, secrets, or provider transcript, so
 /// it is safe to send on the wire. The exact [`TerminalRef`] is also the
-/// retention identity; aggregate retention/GC is #526's responsibility.
+/// retention identity; aggregate retention/GC belongs to the daemon's retention service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedTerminalEntry {
     pub terminal: TerminalRef,

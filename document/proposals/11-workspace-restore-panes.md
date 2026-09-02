@@ -2,6 +2,10 @@
 
 > [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [workspace-root scope](10-workspace-root-scope.md) ｜ 次へ → [terminal VT snapshot](12-terminal-vt-snapshot.md)
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `eac8fb8db14ffda756e91376b2f182d77702dfda`（2026-07-20）。本文は workspace pane 復元を導入した時点の snapshot であり、現在仕様ではない。現行仕様は [TUI](../03-tui.md)、[daemon IPC](../04-ipc.md)、[daemon](../05-daemon.md) を参照する。
+
 workspace を開き直したときに、その workspace/session/root scope に属する **生存中の** daemon-owned
 Agent / Terminal runtime を、stable identity と durable Agent display intent で pane tab に復元する設計。
 現在の実装契約の正本は [3. TUI](../03-tui.md)・[4. daemon IPC](../04-ipc.md)・

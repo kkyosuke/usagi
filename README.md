@@ -17,7 +17,7 @@
 [![Test](https://github.com/KKyosuke/usagi/actions/workflows/test.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/test.yml)
 [![Coverage](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg?logo=rust&logoColor=white)](https://rust-lang.org/)
 
 </div>
 
@@ -82,6 +82,7 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O t` / `Ctrl-O Ctrl-T` | workspace root の Shell drawer を開閉する |
 | `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
 | `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
+| `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Director と Work Run 一覧・操作面を開く |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
@@ -232,14 +233,14 @@ PR がすべて merged になり Agent が作業中でない session は、Overv
 ## AI エージェントとの連携
 
 daemon から起動した Agent には usagi の stdio MCP server が組み込まれる。Agent は作業中の session から、
-次のような操作を行える。MCP child の cwd が provider によって変わっても、issue / memory の保存先は
-daemon が認証したその session の worktree に固定される。
+次のような操作を行える。MCP child の cwd が provider によって変わっても、issue の保存先は daemon が認証した
+その session の worktree、memory の保存先は Git 追跡外にある workspace 専用の daemon data home に固定される。
 
 | 系統 | 用途 |
 |---|---|
 | `session_*` | session の作成・削除・状態確認、prompt 配送、別 Agent への委譲 |
 | `issue_*` | git で共有する `.usagi/issues/` のタスクを検索・更新する |
-| `memory_*` | git で共有する `.usagi/memory/` の知識を保存・検索する |
+| `memory_*` | 同じ workspace の root/session Agent で共有する Git 追跡外の知識を保存・検索する |
 | `agent_*` | 委譲した worker の完了報告と inbox を扱う |
 | `terminal_*` | 同じ session/worktree にある通常 terminal の出力を read-only で確認する |
 | `user_decision_*` | Agent から利用者へ判断を依頼し、TUI で回答する |
@@ -257,15 +258,16 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
 | Base branch | workspace で新しい session を作るときの既定 branch |
-| Workflow | `classic`（既定）の会話 picker、または `goal-driven` の Goal Composer。後者は Director の New で目的を一度入力し、open・non-draft・checks passing の review-ready PR または明示判断まで進める |
+| Workflow | `classic`（既定）の会話 picker、または `goal-driven` の Goal Composer。後者は Director の New で目的を一度入力し、review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す |
 | Team | Enterで構造図付きカードを開き、`none` / 階層型 / フラット / パイプラインから session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
 | Roles | session / root ごとの追加 instruction と既定 role |
 
 `goal-driven` を選んだ workspace では `Ctrl-O Ctrl-G` → `New` が Goal Composer になり、目的と provider を確定して
-Work Run を開始する。進行と停止理由は Director output、blocking choice は Decision、成果 PR は既存 PR 一覧に表示する。
-詳細な操作と現行 v1 の境界は [goal-driven workflow](document/03-tui.md#goal-driven-workflow)を参照する。
+Work Run を開始する。進行と停止理由は Director に表示し、`Ctrl-O w` で最大16件の Run を選択して cancel または
+supervisor escalation の retry / cancel / fail を実行できる。一般の blocking choice は既存 Decision、成果 PR は既存 PR 一覧に表示する。
+詳細な操作と現行契約は [goal-driven workflow](document/03-tui.md#goal-driven-workflow)を参照する。
 
 環境変数は Config の `Env  [ N variables ]`、Overview の `env [workspace|global]`、Closeup の `env` で編集する。
 Workspace Config と Closeup は同じ複数行 editor で
@@ -274,6 +276,10 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 保存場所、解決順序、予約変数は [環境変数設定](document/09-env.md)を参照する。
 
 ## CLI
+
+ここでは日常的に使う入口をコマンド系統ごとに示す。公開 CLI の完全な command tree と各 verb の役割は
+[プロジェクト概要#入口面](document/01-overview.md#入口面)を正本とし、オプションの最終的な構文は
+`usagi <command> --help` で確認する。
 
 | コマンド | 用途 |
 |---|---|
@@ -288,9 +294,8 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
-| `usagi session ...` | daemon-owned session を作成・削除・resume する |
-| `usagi daemon start\|status\|stop\|restart` | daemon lifecycle を操作する |
-| `usagi daemon install-service` | daemon を OS の service として登録する（macOS は LaunchAgent、Linux は systemd user unit） |
+| `usagi session <command>` | daemon-owned session の作成・削除・sleep・resume・setup・prompt を操作する |
+| `usagi daemon <command>` | daemon の起動・状態確認・tenant解放・停止・入替・service登録を操作する |
 
 `usagi clean` は dry-run で候補だけを表示する。`--apply` は欠損 path の workspace 登録、欠損 workspace の
 daemon data、lifecycle に存在しない `usagi/*` branch と `.usagi/sessions/*` worktree を削除する。dirty worktree と
@@ -314,7 +319,7 @@ service 登録は macOS（LaunchAgent）と Linux（systemd user unit。systemd 
 詳細は [service supervision](document/05-daemon.md#service-supervision) を参照する。
 登録しない場合も、TUI・`usagi mcp`・`usagi session ...` の接続時に daemon は自動起動し、まだ開いていない
 リポジトリも、そのリポジトリの root で実行すればその接続で開く（先に TUI で開いておく必要はない）。全コマンドの現在の動作は
-[実装状態の一覧](document/01-overview.md#現在の実装状態)を参照する。
+[入口面の一覧](document/01-overview.md#入口面)を参照する。
 
 ## アーキテクチャ
 

@@ -2099,6 +2099,16 @@ mod tests {
     }
 
     #[test]
+    fn non_reservation_entries_are_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let authority = sequence(tmp.path());
+        fs::create_dir_all(authority.reservations_dir()).unwrap();
+        fs::write(authority.reservations_dir().join("README"), "ignored").unwrap();
+
+        assert_eq!(authority.max_reservation().unwrap(), 0);
+    }
+
+    #[test]
     fn path_validation_errors_do_not_materialize_authority_state() {
         let tmp = tempfile::tempdir().unwrap();
         let overlong = tmp.path().join("x".repeat(4096));

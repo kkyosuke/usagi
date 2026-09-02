@@ -2,6 +2,10 @@
 
 > [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [daemon API](04-daemon-api.md) ｜ 次へ → [PTY crash 継続](07-pty-crash-continuation.md)
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `785fec57eba04e7e3cd294ac8ab92bc4772c5e90`（2026-07-12）。本文は daemon lifecycle を導入した時点の snapshot であり、現在仕様ではない。現行仕様は [アーキテクチャ](../02-architecture.md)、[daemon IPC](../04-ipc.md)、[daemon](../05-daemon.md) を参照する。
+
 この文書は daemon lifecycle の実装前提案として使われていた履歴 stub である。実装済みの
 daemon process lifecycle と配置は [2. アーキテクチャ](../02-architecture.md)、IPC transport は
 [4. daemon IPC](../04-ipc.md)、authority・terminal ownership・generation rollover・orphan safety は

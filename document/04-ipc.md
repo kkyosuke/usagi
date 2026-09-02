@@ -7,31 +7,41 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [identity と fence](#identity-と-fence)
 - [frame と handshake](#frame-と-handshake)
+- [daemon rollover request](#daemon-rollover-request)
 - [workspace fence](#workspace-fence)
 - [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget)
   - [terminal lane の per-request budget](#terminal-lane-の-per-request-budget)
   - [bootstrap section の bounded wait](#bootstrap-section-の-bounded-wait)
 - [envelope とエラー](#envelope-とエラー)
-- [owner generation routing](#owner-generation-routing)
-- [daemon rollover request](#daemon-rollover-request)
-- [Unix transport](#unix-transport)
-- [client の失敗処理](#client-の失敗処理)
-  - [stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)
-- [managed session request](#managed-session-request)
 - [daemon metrics](#daemon-metrics)
   - [agent concurrency projection](#agent-concurrency-projection)
 - [PR inventory snapshot](#pr-inventory-snapshot)
+- [managed session request](#managed-session-request)
 - [agent launch request](#agent-launch-request)
   - [agent operation identity と final の相関](#agent-operation-identity-と-final-の相関)
 - [Codex structured capture request](#codex-structured-capture-request)
 - [agent phase report request](#agent-phase-report-request)
+- [provider conversation resume request](#provider-conversation-resume-request)
+- [Work Run observation and control](#work-run-observation-and-control)
 - [dispatch request](#dispatch-request)
 - [generic terminal request](#generic-terminal-request)
   - [snapshot payload と revision](#snapshot-payload-と-revision)
   - [terminal input identity と cross-connection replay](#terminal-input-identity-と-cross-connection-replay)
 - [exited tombstone visibility](#exited-tombstone-visibility)
+- [owner generation routing](#owner-generation-routing)
+- [Unix transport](#unix-transport)
+- [client の失敗処理](#client-の失敗処理)
+  - [stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)
+
+## この文書の読み方
+
+前半は接続を成立させる共通契約（identity、handshake、workspace fence、deadline、envelope）、中盤は
+session・Agent・terminal など request ごとの payload と状態遷移、後半は generation をまたぐ routing、Unix transport、
+client の復旧契約を扱う。特定の request を実装するときも、まず前半の共通 fence を確認し、次に対象 request、最後に
+後半の transport と失敗処理を確認する。
 
 ## identity と fence
 
@@ -332,8 +342,8 @@ connection epoch を進める。その結果、全 pane が
 この「破棄する」帰結が、budget を frame 予算まで小さくしない理由である。lane を落とすと全 pane が再 attach し、その
 window に打たれた keystroke は遅れて届くのではなく **feedback 付きで拒否される**。busy なだけの daemon で発火する
 budget は、負荷の高いマシンで実入力を失わせる。各 budget は「負荷下でも健全な round trip」より上、「freeze と呼ばれる
-時間」より下に置く。描画スレッドの露出そのものをさらに縮めるのは frame 予算の問題であり、
-[#551](../.usagi/issues/551-fix-tui-home-frame-loop-daemon-rpc.md) が扱う。
+時間」より下に置く。描画スレッドの露出そのものをさらに縮めるのは
+[TUI の frame 予算](03-tui.md#frame-予算)が扱う。
 
 input の budget 超過は **effect unknown** であり、blind retry しない。daemon が既に PTY へ書いた可能性があるため、
 client は同じ producer `OperationId` で read-only な `input_outcome` を照会して `final` / `unknown` に収束させる
@@ -606,7 +616,7 @@ item は durable operation timestamp と stable runtime ID で決定的に並ぶ
 欠落は `AgentContinuationRef`、TUI dismissal、slot の削除を認可しない。TUI open は terminal inventory の前後 snapshot と
 この `AgentInventory` が coherent な場合だけ全量を適用し、partial / cross-RPC 不整合では pane restore 全体を retry する。
 Agent history / exit history / dismissal の allocator・retention・GC は
-[#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務であり、この request は
+[daemon の final retention と aggregate GC](05-daemon.md#final-retention-と-aggregate-gc)の責務であり、この request は
 削除 authority を返さない。
 
 `agent_workspace_observation` は process-level の read-only view が別 workspace を観測する request で、名指しした
@@ -615,21 +625,6 @@ Agent history / exit history / dismissal の allocator・retention・GC は
 `running > starting > failed > idle > exited` の共通順位で決定的に集約し、`session list` と同じ値になる。root Agent、
 provider-native identity、prompt、path は map に含めない。この request は mutation を持たないため、fresh connection で
 安全に retry できる。
-
-`supervisor_snapshot` は local TUI が接続先 workspace の durable Work Run を観測する read-only request である。
-payload の `WorkspaceId` は connection が束縛する workspace と完全一致する場合だけ受理し、foreign workspace は
-`ownership_unknown` で拒否する。response は task instruction とevent provenanceを含まない `SupervisorRunQuery` の最大16件で、
-判断待ち、失敗、実行中、計画中、終了済みの順（同順位は新しい順）に並ぶ。response が supervisor query の
-512 KiB 上限に達する場合は低順位の末尾から落とす。TUI は専用background laneから再読し、fresh connectionへのretryが安全である。
-
-`supervisor_control`はlocal TUIのhuman mutation専用requestで、`workspace`、UUIDの`operation_id`、型付き
-`command`（`cancel { supervisor_run_id, reason }`または
-`resolve_escalation { supervisor_run_id, escalation_id, decision }`）だけを持つ。Agent MCP credentialやcaller名、path、
-PID、terminal IDは受け取らない。payload workspaceとconnection workspace、runに保存されたworkspaceの3者が一致しない
-requestは`ownership_unknown`でeffect zeroになる。operationはdaemonのdurable semantic reservationとSupervisor event IDで
-replayされるためfresh connectionへのretryが可能で、同じIDの別commandは`idempotency_conflict`になる。cancel/failの成功は
-exact Supervisor provenanceから選んだAgent workerのterminate/reapまで含み、停止に失敗した応答も既にcommit済みのrunを
-recovery workerが再停止する。
 
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで
@@ -677,6 +672,23 @@ lineage を変えずに hook・MCP provision だけを再解決する。通常�
 旧 daemon がこの診断 vocabulary を実装していない場合、live Agent が無ければ通常 rollover を行う。live Agent がある場合は
 一覧を返して停止を保留し、`--restart-agents --force` が同時に指定された場合だけ既存の cold restart を使う。この互換経路は
 generic terminal も停止し得るが、再起動後も今回停止した runtime ID に対応する exact target だけを resume する。
+
+## Work Run observation and control
+
+`supervisor_snapshot` は local TUI が接続先 workspace の durable Work Run を観測する read-only request である。
+payload の `WorkspaceId` は connection が束縛する workspace と完全一致する場合だけ受理し、foreign workspace は
+`ownership_unknown` で拒否する。response は task instruction と event provenance を含まない `SupervisorRunQuery` の最大16件で、
+判断待ち、失敗、実行中、計画中、終了済みの順（同順位は新しい順）に並ぶ。response が supervisor query の
+512 KiB 上限に達する場合は低順位の末尾から落とす。TUI は専用 background lane から再読し、fresh connection への retry が安全である。
+
+`supervisor_control` は local TUI の human mutation 専用 request で、`workspace`、UUID の `operation_id`、型付き
+`command`（`cancel { supervisor_run_id, reason }` または
+`resolve_escalation { supervisor_run_id, escalation_id, decision }`）だけを持つ。Agent MCP credential や caller 名、path、
+PID、terminal ID は受け取らない。payload workspace と connection workspace、run に保存された workspace の3者が一致しない
+request は `ownership_unknown` で effect zero になる。operation は daemon の durable semantic reservation と Supervisor event ID で
+replay されるため fresh connection への retry が可能で、同じ ID の別 command は `idempotency_conflict` になる。cancel/fail の成功は
+exact Supervisor provenance から選んだ Agent worker の terminate/reap まで含み、停止に失敗した応答も既に commit 済みの run を
+recovery worker が再停止する。
 
 ## dispatch request
 
@@ -1000,7 +1012,7 @@ monotonic lattice で、`revision` を伴う。
 client は `completed_inventory` が返した exact `TerminalRef` の visibility だけを操作し、名前・pane・
 continuation で別 incarnation へ fallback しない。TUI の projection 契約は
 [3. TUI](03-tui.md) を正本とする。aggregate retention / GC は
-[#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務である。
+[daemon の final retention と aggregate GC](05-daemon.md#final-retention-と-aggregate-gc)の責務である。
 
 ## owner generation routing
 
@@ -1207,9 +1219,9 @@ accept 時は OS peer credential の UID が daemon UID と一致しなければ
 （[owner generation routing](#owner-generation-routing)）。
 
 cross-process standby handoff は
-[#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md) が、
+[daemon の cross-process generation authority](05-daemon.md#cross-process-generation-authority)、
 owner-generation runtime shard は
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) が
+[daemon の owner-generation runtime shard と global resource allocator](05-daemon.md#owner-generation-runtime-shard-と-global-resource-allocator)が
 提供し、client 側の owner routing は本節の契約として実装済みである。shipping の `serve` は自分の
 generation を durable registry の active として登録するため、`generations.json` は production に存在する
 （[5. daemon の first activation](05-daemon.md#first-activation)）。shipping の `daemon restart` は live runtime が

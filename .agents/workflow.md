@@ -8,7 +8,7 @@ The documentation index is [document/README.md](../document/README.md).
 
 ### 0. 着手する issue を選ぶ
 
-実装すべきタスク（issue）は usagi の issue ストア（`.usagi/issues/`）に `NNN-feature.md` 形式で管理されている。`usagi issue list` / `usagi issue show <番号>`（CLI）や MCP ツール（`issue_search` / `issue_get`）で一覧・参照する。
+実装すべきタスク（issue）は usagi の issue ストア（`.usagi/issues/`）に `NNN-feature.md` 形式で管理されている。MCP ツールの `issue_search` / `issue_get` で一覧・参照する。
 
 - 各 issue のメタデータ（`status` / `priority` / `dependson`）を確認し、`dependson` が満たされている `todo` を選ぶ。
 - **root/コーディネータは issue の定義（起票・本文編集）も行わない**。issue ファイルは git 追跡下なので、root が
@@ -17,7 +17,7 @@ The documentation index is [document/README.md](../document/README.md).
   トリアージ/設計 session を起こし、その session が worktree 内で `issue_create` して PR に載せる。既存の committed
   issue を遂行する場合だけ、root は `session_delegate_issue` で `issue-<番号>` session に委譲する。
 - **`status` の書き手はその issue を担当する session だけ**（「単一書き手」）。root/コーディネータは `status` を一切書かない。`main`（リポジトリルート）で root が `status` を触ると、その差分が並行する session の PR と分岐・衝突するためである。`status` を書くのは常にその session の枝だけ、という書き手の一本化で衝突を防ぐ。
-- **status ライフサイクルは自枝でこう回す**（`usagi issue update <番号> --status ...` または MCP `issue_update`。すべてその issue を担当する session の worktree 内で行う。issue の書き込みは worktree に routing され、ブランチに乗って PR で `main` へ反映される）:
+- **status ライフサイクルは自枝でこう回す**（MCP `issue_update` を、その issue を担当する session の worktree 内で実行する。issue の書き込みは worktree に routing され、ブランチに乗って PR で `main` へ反映される）:
 
   | 遷移 | いつ | どこで |
   |---|---|---|
@@ -32,7 +32,7 @@ The documentation index is [document/README.md](../document/README.md).
 
 `main` を直接触らず、隔離された作業ツリーで進める。**ただし環境によって手順が異なる**。
 
-- **usagi セッション内で起動している場合**（`usagi agent` / `terminal` が起動する worktree。
+- **usagi セッション内で起動している場合**（TUI の `agent` / `terminal` command が起動する worktree。
   カレントが `.usagi/sessions/<name>/` 配下）: **すでに隔離された worktree 内にいるので、新しく
   worktree を作成しない。そのまま作業を進める**。作業ブランチは `usagi/<name>`（セッション名 `<name>` を `usagi/` 名前空間に収めたもの）。
   Session and worktree lifecycle state is owned by the daemon.
@@ -59,7 +59,8 @@ The documentation index is [document/README.md](../document/README.md).
   **clippy / full test / coverage 100% の重い full gate はローカル push では走らせず、PR CI に一本化する**
   （pre-push フックはこの gate を持たない）。ローカルで先取り確認したい場合は coverage 経路を任意で実行してよく、
   coverage がテスト実行を兼ねる経路では `cargo test --workspace --quiet` を重複実行しない。
-- docs-only（Rust 差分なし）は Rust gate を省略できるが、Markdown link check は必須である。
+- docs-only（Rust 差分なし）は Rust gate を省略できるが、`ruby scripts/ci/docs-ssot-lint.rb` と
+  Markdown link check は必須である。
 - AI エージェントの完了報告には、実行した command、結果、未実行 gate と理由、[full test / coverage gate
   必須条件](../document/06-conventions.md#品質チェックリスク比例の-gate)への該当有無を含める。
 
@@ -83,7 +84,7 @@ The documentation index is [document/README.md](../document/README.md).
 ```bash
 git push origin HEAD:refs/heads/<branch>
 gh pr create --head <branch> --draft --title "<type>: <説明>" --body "<概要>"
-# CI（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になったら:
+# CI（fmt / clippy / full test / coverage 100%、documentation SSoT lint、該当時は Markdown link check）が green になったら:
 gh pr ready <number>
 ```
 

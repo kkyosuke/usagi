@@ -7,6 +7,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [authority と lifecycle](#authority-と-lifecycle)
 - [session tree と ignore rules](#session-tree-と-ignore-rules)
 - [daemon process lifecycle](#daemon-process-lifecycle)
@@ -25,10 +26,16 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [final retention と aggregate GC](#final-retention-と-aggregate-gc)
 - [supervisor scheduler](#supervisor-scheduler)
 - [supervisor policy and verification](#supervisor-policy-and-verification)
+- [metrics observer](#metrics-observer)
 - [cross-process generation authority](#cross-process-generation-authority)
 - [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 - [generation と orphan safety](#generation-と-orphan-safety)
-- [metrics observer](#metrics-observer)
+
+## この文書の読み方
+
+前半は session と daemon process の lifecycle・永続化、中盤は background worker、terminal、Agent、supervisor の所有権、
+後半は metrics と cross-process generation の handoff・回収契約を扱う。IPC の wire、request payload、client retry を調べる
+場合は [4. daemon IPC](04-ipc.md) を先に参照し、本書では daemon が保持する state と effect の境界を確認する。
 
 ## authority と lifecycle
 
@@ -336,7 +343,7 @@ data directory が消えている場合は record を読まずに（＝tree に�
 喪失後の cleanup は通常の retirement path を通る。ただし data directory がすでに消えている場合、endpoint retirement と
 record clear は **no-op として成功**する（解放した tree を lock 取得のために再作成しない）。client が 0 でも live PTY と
 supervisor schedule を所有するため、idle timeout は終了根拠として採用しない（[13. daemon singleton と session
-teardown](proposals/13-daemon-singleton-and-teardown.md) が正本）。
+teardown](proposals/13-daemon-singleton-and-teardown.md) はこの契約を採用した設計判断の履歴であり、現行契約の正本は本節）。
 
 IPC endpoint は `serve` が lock を取得して exact process-owner record を登録した後に、明示的な ready hook からだけ公開する。
 lock を取得できない replacement は ready hook に到達しないため session request を受理できず、endpoint 公開に
@@ -1564,9 +1571,8 @@ per-terminal の bound（64 KiB の replay window、exit 時の PTY / FD 解放�
 Agent runtime の final tombstone（durable record・bounded replay・journal）だけを対象とし、launch operation
 outcome / relation の retention は
 [operation ledger の retention / expiry / GC](#operation-ledger-の-retention--expiry--gc)、input sequence / ACK
-ledger は [#519] の契約に従う（本節では削除も再定義もしない）。
-
-[#519]: ../.usagi/issues/519-feat-ipc-terminal-input-ack-loss-cross-connection-replay.md
+ledger は [IPC の terminal input identity と cross-connection replay](04-ipc.md#terminal-input-identity-と-cross-connection-replay)
+の契約に従う（本節では削除も再定義もしない）。
 
 ### budget
 
@@ -2405,8 +2411,9 @@ mismatch は active generation を変えず、candidate を standby のまま保
 current generation の exact fence は stale request の誤適用を防ぎ、owner generation routing は planned restart 中の
 旧 PTY を draining endpoint へ送り続ける。回収待ちの draining が generation slot を占有している間の次の restart は
 typed `draining collection pending` で拒否し、slot を空けるために live PTY を落とさない。shipping binary・2 daemon
-process・実 PTY を通した最終回帰は
-[#574](../.usagi/issues/574-test-daemon-seamless-rollover-product-e2e-2-daemon-process-pty.md) が正本である。
+process・実 PTY を通す契約の正本は本節で、最終回帰は
+[`tests/agent_ipc_e2e.rs`](../tests/agent_ipc_e2e.rs) が固定する。
+[#574](../.usagi/issues/574-test-daemon-seamless-rollover-product-e2e-2-daemon-process-pty.md) はその実装履歴である。
 
 spawn reservation は process spawn より先に保存する。crash 後に process identity を証明できない terminal は
 `identity_unknown` として扱い、replacement spawn、input、kill を自動で行わない。PID の生存だけでは ownership
