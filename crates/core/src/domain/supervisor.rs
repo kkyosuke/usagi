@@ -490,7 +490,7 @@ pub enum SupervisorWorkspaceCommand {
 
 impl SupervisorWorkspaceCommand {
     #[must_use]
-    pub const fn supervisor_run_id(&self) -> SupervisorRunId {
+    pub fn supervisor_run_id(&self) -> SupervisorRunId {
         match self {
             Self::Cancel {
                 supervisor_run_id, ..
@@ -2010,6 +2010,27 @@ mod tests {
             run.tasks[&id].verification_expectation.as_ref(),
             Some(&expectation)
         );
+        let retry_at = now() + chrono::Duration::seconds(1);
+        reduce(
+            &mut run,
+            &event(
+                6,
+                SupervisorEventKind::VerificationDeferred {
+                    task_id: id.clone(),
+                    generation: 1,
+                    result_digest: "provider-unavailable".into(),
+                    safe_summary: "provider temporarily unavailable".into(),
+                    retry_at,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            run.tasks[&id].verification_digest.as_deref(),
+            Some("provider-unavailable")
+        );
+        assert_eq!(run.tasks[&id].verification_attempt, 1);
+        assert_eq!(run.tasks[&id].verification_retry_at, Some(retry_at));
         let conflicting = ArtifactExpectation::new(
             GitHubRepository::from_name_with_owner("other/repo").unwrap(),
             "0123456789012345678901234567890123456789",
@@ -2019,7 +2040,7 @@ mod tests {
             reduce(
                 &mut run,
                 &event(
-                    6,
+                    7,
                     SupervisorEventKind::VerificationExpectationRecorded {
                         task_id: id.clone(),
                         generation: 1,
@@ -2756,5 +2777,27 @@ mod tests {
         let decoded: TaskQuery = serde_json::from_value(query_value).unwrap();
         assert_eq!(decoded.verification_attempt, 0);
         assert_eq!(decoded.verification_retry_at, None);
+    }
+
+    #[test]
+    fn workspace_commands_project_their_exact_run_fence() {
+        let supervisor_run_id = SupervisorRunId::new();
+        assert_eq!(
+            SupervisorWorkspaceCommand::Cancel {
+                supervisor_run_id,
+                reason: "operator cancelled".into(),
+            }
+            .supervisor_run_id(),
+            supervisor_run_id
+        );
+        assert_eq!(
+            SupervisorWorkspaceCommand::ResolveEscalation {
+                supervisor_run_id,
+                escalation_id: OperationId::new(),
+                decision: EscalationDecision::Resume,
+            }
+            .supervisor_run_id(),
+            supervisor_run_id
+        );
     }
 }

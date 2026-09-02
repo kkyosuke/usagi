@@ -42,6 +42,7 @@ pub mod stop;
 pub mod supervisor_runtime;
 pub mod tenant;
 pub mod terminal;
+pub mod terminal_inspection;
 pub mod terminal_ipc;
 pub mod terminal_owner;
 pub mod terminal_profile;

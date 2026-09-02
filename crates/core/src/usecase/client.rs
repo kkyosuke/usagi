@@ -304,6 +304,8 @@ pub enum DispatchToolAction {
     SessionGet,
     AgentList,
     AgentGet,
+    TerminalList,
+    TerminalRead,
     AgentComplete,
     AgentFail,
     AgentInbox,
@@ -326,6 +328,8 @@ impl DispatchToolAction {
             Self::SessionGet
                 | Self::AgentList
                 | Self::AgentGet
+                | Self::TerminalList
+                | Self::TerminalRead
                 | Self::AgentInbox
                 | Self::UserDecisionGet
                 | Self::UserDecisionList
@@ -3138,6 +3142,18 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::AgentInbox,
+                operation_id: String::new(),
+                payload: session_payload(),
+                caller_context: None,
+            },
+            DaemonRequest::DispatchTool {
+                action: DispatchToolAction::TerminalList,
+                operation_id: String::new(),
+                payload: session_payload(),
+                caller_context: None,
+            },
+            DaemonRequest::DispatchTool {
+                action: DispatchToolAction::TerminalRead,
                 operation_id: String::new(),
                 payload: session_payload(),
                 caller_context: None,

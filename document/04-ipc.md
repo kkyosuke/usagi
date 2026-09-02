@@ -1286,4 +1286,7 @@ queue / replay せず、unknown inputをblind retryしない。
 MCP の dispatch request は `DispatchTool` action として送る。daemon が session upsert、agent/run/binding
 の解決、inbox の読み書きを行い、MCP は durable state を直接読んだり書いたりしない。完了・失敗は worker
 の current run と binding が一意に一致するときだけ配送し、不一致は completion fence と同じ fail-closed
-方針で no-op にする。
+方針で no-op にする。`TerminalList` / `TerminalRead` も同じ daemon 発行 credential から Agent runtime の
+exact workspace/session/worktree scope を導出する。caller が scope や path を渡す field はなく、generic terminal
+inventory に完全一致した `TerminalRef` の semantic checkpoint だけを read-only で投影する。別 scope と Agent PTY は
+存在しないものとして扱い、attach、subscription、input、resize の terminal command へ変換しない。
