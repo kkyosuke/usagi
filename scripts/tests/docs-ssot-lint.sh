@@ -8,7 +8,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 make_fixture() {
   local destination=$1
-  mkdir -p "$destination/crates/cli/src/cli" "$destination/crates/cli/src/mcp/tools" "$destination/crates/cli/src/mcp/guides"
+  mkdir -p "$destination/crates/cli/src/cli" "$destination/crates/cli/src/mcp/tools" "$destination/crates/cli/src/mcp/guides" "$destination/crates/daemon/src"
   cp "$repo/Cargo.toml" "$destination/Cargo.toml"
   cp -R "$repo/document" "$destination/document"
   cp -R "$repo/.agents" "$destination/.agents"
@@ -16,6 +16,7 @@ make_fixture() {
   cp "$repo/crates/cli/src/cli/mod.rs" "$destination/crates/cli/src/cli/mod.rs"
   cp "$repo/crates/cli/src/mcp/tools/session.rs" "$destination/crates/cli/src/mcp/tools/session.rs"
   cp "$repo/crates/cli/src/mcp/guides/orchestration.md" "$destination/crates/cli/src/mcp/guides/orchestration.md"
+  cp "$repo/crates/daemon/src/lib.rs" "$destination/crates/daemon/src/lib.rs"
 }
 
 expect_fail() {
@@ -65,6 +66,14 @@ expect_fail "$tmp/breadcrumb" 'breadcrumb is missing next document 10-session-ro
 make_fixture "$tmp/contents"
 sed -i.bak '/^- \[検討した代替案\]/d' "$tmp/contents/document/02-architecture.md"
 expect_fail "$tmp/contents" '02-architecture.md top-level contents do not match body heading order'
+
+make_fixture "$tmp/history-authority"
+printf '\n[古い提案](proposals/01-entry-surfaces.md) が正本である。\n' >> "$tmp/history-authority/document/09-env.md"
+expect_fail "$tmp/history-authority" '09-env.md makes proposal or issue history the current specification authority'
+
+make_fixture "$tmp/source-doc-link"
+sed -i.bak 's#document/05-daemon.md#document/proposals/missing.md#' "$tmp/source-doc-link/crates/daemon/src/lib.rs"
+expect_fail "$tmp/source-doc-link" 'crates/daemon/src/lib.rs references missing documentation document/proposals/missing.md'
 
 make_fixture "$tmp/history"
 sed -i.bak '/> \*\*Status:\*\*/d' "$tmp/history/document/proposals/17-multi-workspace-daemon.md"

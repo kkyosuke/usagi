@@ -124,6 +124,9 @@ numbered_docs.each_with_index do |path, position|
   unless contents_labels == body_headings
     failures << "#{basename} top-level contents do not match body heading order"
   end
+  if content.match?(/\]\((?:proposals\/|\.\.\/\.usagi\/issues\/)[^)]+\)\s*が正本/)
+    failures << "#{basename} makes proposal or issue history the current specification authority"
+  end
   if content.lines.length > 300 && !content.include?("## この文書の読み方")
     failures << "#{basename} exceeds 300 lines without a reading map"
   end
@@ -135,6 +138,18 @@ numbered_docs.each_with_index do |path, position|
   if position < numbered_docs.length - 1
     following = File.basename(numbered_docs[position + 1])
     failures << "#{basename} breadcrumb is missing next document #{following}" unless content.lines.first(8).join.include?("(#{following})")
+  end
+end
+
+rust_sources = [
+  *Dir.glob(File.join(root, "src/**/*.rs")),
+  *Dir.glob(File.join(root, "crates/**/*.rs"))
+]
+rust_sources.each do |path|
+  File.read(path).scan(%r{document/[A-Za-z0-9_./-]+\.md}).uniq.each do |reference|
+    next if File.file?(File.join(root, reference))
+
+    failures << "#{path.delete_prefix("#{root}/")} references missing documentation #{reference}"
   end
 end
 

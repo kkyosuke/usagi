@@ -343,7 +343,7 @@ data directory が消えている場合は record を読まずに（＝tree に�
 喪失後の cleanup は通常の retirement path を通る。ただし data directory がすでに消えている場合、endpoint retirement と
 record clear は **no-op として成功**する（解放した tree を lock 取得のために再作成しない）。client が 0 でも live PTY と
 supervisor schedule を所有するため、idle timeout は終了根拠として採用しない（[13. daemon singleton と session
-teardown](proposals/13-daemon-singleton-and-teardown.md) が正本）。
+teardown](proposals/13-daemon-singleton-and-teardown.md) はこの契約を採用した設計判断の履歴であり、現行契約の正本は本節）。
 
 IPC endpoint は `serve` が lock を取得して exact process-owner record を登録した後に、明示的な ready hook からだけ公開する。
 lock を取得できない replacement は ready hook に到達しないため session request を受理できず、endpoint 公開に
@@ -2412,8 +2412,9 @@ mismatch は active generation を変えず、candidate を standby のまま保
 current generation の exact fence は stale request の誤適用を防ぎ、owner generation routing は planned restart 中の
 旧 PTY を draining endpoint へ送り続ける。回収待ちの draining が generation slot を占有している間の次の restart は
 typed `draining collection pending` で拒否し、slot を空けるために live PTY を落とさない。shipping binary・2 daemon
-process・実 PTY を通した最終回帰は
-[#574](../.usagi/issues/574-test-daemon-seamless-rollover-product-e2e-2-daemon-process-pty.md) が正本である。
+process・実 PTY を通す契約の正本は本節で、最終回帰は
+[`tests/agent_ipc_e2e.rs`](../tests/agent_ipc_e2e.rs) が固定する。
+[#574](../.usagi/issues/574-test-daemon-seamless-rollover-product-e2e-2-daemon-process-pty.md) はその実装履歴である。
 
 spawn reservation は process spawn より先に保存する。crash 後に process identity を証明できない terminal は
 `identity_unknown` として扱い、replacement spawn、input、kill を自動で行わない。PID の生存だけでは ownership
