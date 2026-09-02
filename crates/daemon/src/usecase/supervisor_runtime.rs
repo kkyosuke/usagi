@@ -14,6 +14,7 @@ use std::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use usagi_core::{
     domain::{
         agent::{InboxKind, RunStatus, StructuredResult},
@@ -25,8 +26,8 @@ use usagi_core::{
             MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES,
             MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT, RunProvenance,
             SupervisorEvent, SupervisorEventKind, SupervisorEventSource, SupervisorRun,
-            SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskId, TaskNode, TaskState,
-            presentation_text_is_safe,
+            SupervisorRunId, SupervisorRunQuery, SupervisorRunState, SupervisorWorkspaceCommand,
+            TaskId, TaskNode, TaskState, presentation_text_is_safe, reduce,
         },
     },
     infrastructure::{
@@ -141,6 +142,59 @@ pub struct PendingArtifactVerification {
     pub dispatch_run_id: OperationId,
 }
 
+/// An aborted task whose Agent admission may have succeeded before Supervisor
+/// provenance was bound. The durable Supervisor reservation prepares every
+/// field except the Agent-owned runtime fence; recovery joins that exact
+/// operation outcome without guessing by workspace, session name, or process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWorkerStop {
+    operation_id: OperationId,
+    workspace_id: WorkspaceId,
+    supervisor_run_id: SupervisorRunId,
+    task_id: TaskId,
+    parent_task_id: Option<TaskId>,
+    parent_dispatch_run: Option<OperationId>,
+    generation: u64,
+    requires_session: bool,
+}
+
+impl PendingWorkerStop {
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    /// Completes the stop fence from the exact Agent operation outcome.
+    ///
+    /// # Errors
+    /// Returns an error when the admitted runtime is outside the reserved
+    /// workspace or root/delegated scope.
+    pub fn provenance(&self, worker: &AgentRuntimeRef) -> Result<RunProvenance> {
+        if worker.terminal.workspace_id != self.workspace_id
+            || worker.terminal.session_id != worker.session_id
+            || self.requires_session != worker.session_id.is_some()
+        {
+            anyhow::bail!("unbound supervisor worker is outside its reserved scope");
+        }
+        Ok(RunProvenance {
+            supervisor_run_id: self.supervisor_run_id,
+            task_id: self.task_id.clone(),
+            parent_task_id: self.parent_task_id.clone(),
+            parent_dispatch_run: self.parent_dispatch_run,
+            dispatch_run_id: self.operation_id,
+            worker_session_id: worker.session_id,
+            worker_agent_id: worker.agent_runtime_id,
+            worker_worktree_id: worker.terminal.worktree_id,
+            generation: self.generation,
+        })
+    }
+
+    #[must_use]
+    pub fn workspace_id(&self) -> WorkspaceId {
+        self.workspace_id
+    }
+}
+
 /// Composition-root adapter. Implementations use the persisted parent
 /// provenance to resolve/restart the parent session and send the request.
 pub trait DecisionWaker {
@@ -155,9 +209,13 @@ struct RuntimeState {
     wakes: BTreeMap<String, WakeReservation>,
     starts: BTreeMap<String, StartReservation>,
     #[serde(default)]
+    controls: BTreeMap<String, ControlReservation>,
+    #[serde(default)]
     expired_wakes: KeyTombstones,
     #[serde(default)]
     expired_starts: KeyTombstones,
+    #[serde(default)]
+    expired_controls: KeyTombstones,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WakeReservation {
@@ -170,6 +228,13 @@ struct StartReservation {
     supervisor_run_id: SupervisorRunId,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ControlReservation {
+    semantic_digest: String,
+    supervisor_run_id: SupervisorRunId,
+    reserved_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct KeyTombstones {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -180,6 +245,8 @@ const TOMBSTONE_WORDS: usize = 512;
 const TOMBSTONE_HASHES: u64 = 4;
 const DELEGATED_TASK_PREFIX: &str = "delegated-";
 const DELEGATED_TASK_DIGEST_PREFIX: &str = "delegated-operation:";
+const AMBIGUOUS_STOP_RESERVATION: &str =
+    "Agent operation belongs to multiple aborted supervisor reservations";
 #[cfg(not(test))]
 const MAX_START_RESERVATIONS: usize = 256;
 #[cfg(test)]
@@ -190,6 +257,10 @@ const MAX_WAKE_RESERVATIONS: usize = 512;
 const MAX_WAKE_RESERVATIONS: usize = 8;
 #[cfg(not(test))]
 const RETAIN_DELIVERED_WAKES: usize = 128;
+#[cfg(not(test))]
+const MAX_CONTROL_RESERVATIONS: usize = 512;
+#[cfg(test)]
+const MAX_CONTROL_RESERVATIONS: usize = 8;
 #[cfg(test)]
 const RETAIN_DELIVERED_WAKES: usize = 4;
 
@@ -238,10 +309,26 @@ impl RuntimeState {
         let tombstones_are_valid = |tombstones: &KeyTombstones| {
             tombstones.words.is_empty() || tombstones.words.len() == TOMBSTONE_WORDS
         };
+        let controls_are_valid = self.controls.iter().all(|(operation, reservation)| {
+            OperationId::parse(operation).is_ok()
+                && reservation.semantic_digest.len() == 71
+                && reservation
+                    .semantic_digest
+                    .strip_prefix("sha256:")
+                    .is_some_and(|digest| {
+                        digest.len() == 64
+                            && digest
+                                .bytes()
+                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    })
+        });
         if self.starts.len() > MAX_START_RESERVATIONS
             || self.wakes.len() > MAX_WAKE_RESERVATIONS
+            || self.controls.len() > MAX_CONTROL_RESERVATIONS
+            || !controls_are_valid
             || !tombstones_are_valid(&self.expired_starts)
             || !tombstones_are_valid(&self.expired_wakes)
+            || !tombstones_are_valid(&self.expired_controls)
         {
             anyhow::bail!("supervisor runtime metadata exceeds or violates its hard limit");
         }
@@ -351,6 +438,69 @@ fn validate_start_input(
     Ok(())
 }
 
+fn control_semantic_digest(command: &SupervisorWorkspaceCommand) -> Result<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let encoded = serde_json::to_vec(command)?;
+    let digest = Sha256::digest(encoded);
+    let mut value = String::with_capacity("sha256:".len() + digest.len() * 2);
+    value.push_str("sha256:");
+    for byte in digest {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(value)
+}
+
+fn validate_control_command(command: &SupervisorWorkspaceCommand) -> Result<()> {
+    if let SupervisorWorkspaceCommand::Cancel { reason, .. } = command {
+        bounded_safe_label(
+            "supervisor cancellation reason",
+            reason,
+            MAX_SUPERVISOR_REASON_BYTES,
+        )?;
+    }
+    Ok(())
+}
+
+fn control_event(
+    run: &SupervisorRun,
+    operation_id: OperationId,
+    semantic_digest: String,
+    command: &SupervisorWorkspaceCommand,
+    now: DateTime<Utc>,
+) -> SupervisorEvent {
+    let (source, kind) = match command {
+        SupervisorWorkspaceCommand::Cancel { reason, .. } => (
+            SupervisorEventSource::Cancel,
+            SupervisorEventKind::Cancel {
+                task_id: None,
+                reason: reason.clone(),
+            },
+        ),
+        SupervisorWorkspaceCommand::ResolveEscalation {
+            escalation_id,
+            decision,
+            ..
+        } => (
+            SupervisorEventSource::Admission,
+            SupervisorEventKind::ResolveEscalation {
+                escalation_id: *escalation_id,
+                decision: *decision,
+            },
+        ),
+    };
+    SupervisorEvent {
+        sequence: run.state_revision + 1,
+        event_id: operation_id,
+        causation_id: None,
+        correlation_id: None,
+        observed_at: now,
+        payload_digest: semantic_digest,
+        source,
+        kind,
+    }
+}
+
 fn push_semantic_component(key: &mut String, value: &str) {
     key.push_str(&value.len().to_string());
     key.push(':');
@@ -363,6 +513,18 @@ fn delegated_task_id(operation: OperationId) -> Result<TaskId> {
 
 fn delegated_task_digest(operation: OperationId) -> String {
     format!("{DELEGATED_TASK_DIGEST_PREFIX}{operation}")
+}
+
+fn has_unbound_goal_worker(run: &SupervisorRun) -> bool {
+    run.state.is_finished()
+        && run.workspace_id.is_some()
+        && TaskId::new("root").is_ok_and(|root| {
+            run.tasks.get(&root).is_some_and(|task| {
+                task.required_artifact_contract == GOAL_REVIEW_READY_ARTIFACT_CONTRACT
+                    && task.assigned_dispatch_run.is_none()
+                    && !run.provenance.contains_key(&root)
+            })
+        })
 }
 
 fn is_delegated_reservation(task: &TaskNode, operation: OperationId) -> bool {
@@ -797,6 +959,169 @@ impl SupervisorRuntime {
             }
         }
         Ok(pending)
+    }
+
+    /// Lists exact operation joins for Agents admitted before an aborted
+    /// Supervisor task could bind provenance.
+    ///
+    /// # Errors
+    /// Returns an error for malformed durable reservations, ambiguous operation
+    /// ownership, or missing delegated parent provenance.
+    pub fn pending_worker_stops(&self) -> Result<Vec<PendingWorkerStop>> {
+        self.pending_worker_stops_for(None)
+    }
+
+    /// Restricts unbound stop recovery to one run for a synchronous human
+    /// control response.
+    ///
+    /// # Errors
+    /// Returns the same durable-state errors as [`Self::pending_worker_stops`].
+    pub fn pending_worker_stops_for_run(
+        &self,
+        supervisor_run_id: SupervisorRunId,
+    ) -> Result<Vec<PendingWorkerStop>> {
+        self.pending_worker_stops_for(Some(supervisor_run_id))
+    }
+
+    fn pending_worker_stops_for(
+        &self,
+        selected_run: Option<SupervisorRunId>,
+    ) -> Result<Vec<PendingWorkerStop>> {
+        let mut pending = Vec::new();
+        let state = self.load_state()?;
+        for (operation_id, reservation) in state.starts {
+            let Some(run) = self.supervisor.load(reservation.supervisor_run_id)? else {
+                continue;
+            };
+            if (selected_run.is_some() && selected_run != Some(run.supervisor_run_id))
+                || !matches!(
+                    run.state,
+                    SupervisorRunState::Cancelled | SupervisorRunState::Failed
+                )
+            {
+                continue;
+            }
+            let Some(workspace_id) = run.workspace_id else {
+                continue;
+            };
+            let root_id = TaskId::new("root")?;
+            let Some(root) = run.tasks.get(&root_id) else {
+                continue;
+            };
+            if root.required_artifact_contract != GOAL_REVIEW_READY_ARTIFACT_CONTRACT
+                || run.provenance.contains_key(&root_id)
+            {
+                continue;
+            }
+            let operation_id = OperationId::parse(&operation_id)
+                .map_err(|_| anyhow::anyhow!("aborted Goal operation is invalid"))?;
+            pending.push(PendingWorkerStop {
+                operation_id,
+                workspace_id,
+                supervisor_run_id: run.supervisor_run_id,
+                task_id: root_id,
+                parent_task_id: None,
+                parent_dispatch_run: None,
+                generation: root.generation,
+                requires_session: false,
+            });
+        }
+
+        for run in self.supervisor.runs()? {
+            if (selected_run.is_some() && selected_run != Some(run.supervisor_run_id))
+                || !matches!(
+                    run.state,
+                    SupervisorRunState::Cancelled | SupervisorRunState::Failed
+                )
+            {
+                continue;
+            }
+            let Some(workspace_id) = run.workspace_id else {
+                continue;
+            };
+            for task in run.tasks.values() {
+                if task.assigned_dispatch_run.is_some()
+                    || run.provenance.contains_key(&task.task_id)
+                {
+                    continue;
+                }
+                let Some(operation_id) = task.task_id.0.strip_prefix(DELEGATED_TASK_PREFIX) else {
+                    continue;
+                };
+                let Ok(operation_id) = OperationId::parse(operation_id) else {
+                    continue;
+                };
+                if !is_delegated_reservation(task, operation_id) {
+                    continue;
+                }
+                let Some(parent_task_id) = task.parent_task_id.clone() else {
+                    anyhow::bail!("aborted delegated reservation has no parent task");
+                };
+                let Some(parent) = run.provenance.get(&parent_task_id) else {
+                    anyhow::bail!("aborted delegated reservation parent provenance is missing");
+                };
+                pending.push(PendingWorkerStop {
+                    operation_id,
+                    workspace_id,
+                    supervisor_run_id: run.supervisor_run_id,
+                    task_id: task.task_id.clone(),
+                    parent_task_id: Some(parent_task_id),
+                    parent_dispatch_run: Some(parent.dispatch_run_id),
+                    generation: task.generation,
+                    requires_session: true,
+                });
+            }
+        }
+
+        pending.sort_by_key(PendingWorkerStop::operation_id);
+        for pair in pending.windows(2) {
+            if pair[0].operation_id == pair[1].operation_id && pair[0] != pair[1] {
+                return Err(anyhow::Error::msg(AMBIGUOUS_STOP_RESERVATION));
+            }
+        }
+        pending.dedup();
+        Ok(pending)
+    }
+
+    /// Releases root-operation replay metadata only after Agent reconciliation
+    /// proved that an aborted, unbound worker is absent or stopped. Delegated
+    /// operation identity remains encoded in its retained task and needs no
+    /// separate scheduler reservation.
+    ///
+    /// # Errors
+    /// Returns an error when a root candidate no longer matches the exact
+    /// terminal run reservation or the durable state cannot be saved.
+    pub fn acknowledge_pending_worker_stops(&self, stops: &[PendingWorkerStop]) -> Result<()> {
+        let mut state = self.load_state()?;
+        let mut changed = false;
+        for stop in stops {
+            if stop.parent_task_id.is_some() {
+                continue;
+            }
+            let operation_id = stop.operation_id.to_string();
+            let Some(reservation) = state.starts.get(&operation_id) else {
+                if state.expired_starts.contains(&operation_id) {
+                    continue;
+                }
+                anyhow::bail!("aborted Goal operation reservation disappeared");
+            };
+            if reservation.supervisor_run_id != stop.supervisor_run_id {
+                anyhow::bail!("aborted Goal operation changed run ownership");
+            }
+            let Some(run) = self.supervisor.load(stop.supervisor_run_id)? else {
+                anyhow::bail!("aborted Goal run disappeared");
+            };
+            if !has_unbound_goal_worker(&run) {
+                anyhow::bail!("aborted Goal worker stop acknowledgement is stale");
+            }
+            state.starts.remove(&operation_id);
+            state.expired_starts.insert(&operation_id);
+            changed = true;
+        }
+        if changed {
+            self.save_state(&state)?;
+        }
+        Ok(())
     }
 
     /// Lists completed contracted dispatches whose verification can be safely
@@ -1454,6 +1779,159 @@ impl SupervisorRuntime {
         self.supervisor.workspace_runs(workspace, MAX_TUI_WORK_RUNS)
     }
 
+    /// Reads one run only when its durable workspace fence matches.
+    ///
+    /// # Errors
+    /// Returns an error when durable state cannot be read consistently.
+    pub fn get_for_workspace(
+        &self,
+        workspace: WorkspaceId,
+        id: SupervisorRunId,
+    ) -> Result<Option<SupervisorRunQuery>> {
+        let Some(run) = self.supervisor.load(id)? else {
+            return Ok(None);
+        };
+        if run.workspace_id != Some(workspace) {
+            return Ok(None);
+        }
+        Ok(Some(run.query()))
+    }
+
+    /// Applies one human command to a run owned by the connection workspace.
+    ///
+    /// The operation reservation is saved before the aggregate event. A retry
+    /// after any storage or connection failure therefore either commits that
+    /// exact semantic command or replays its already-committed event; reusing
+    /// the operation identity for another command is rejected globally.
+    ///
+    /// # Errors
+    /// Returns an error for a foreign run, invalid transition, conflicting or
+    /// expired operation identity, capacity exhaustion, or durable IO failure.
+    pub fn control_for_workspace(
+        &self,
+        workspace: WorkspaceId,
+        operation_id: OperationId,
+        command: &SupervisorWorkspaceCommand,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
+        let supervisor_run_id = command.supervisor_run_id();
+        let run = self
+            .supervisor
+            .load(supervisor_run_id)?
+            .filter(|run| run.workspace_id == Some(workspace))
+            .ok_or_else(|| anyhow::anyhow!("supervisor run does not belong to this workspace"))?;
+        validate_control_command(command)?;
+        let semantic_digest = control_semantic_digest(command)?;
+        let operation_key = operation_id.to_string();
+        let mut state = self.load_state()?;
+        if state.expired_controls.contains(&operation_key) {
+            anyhow::bail!("supervisor control operation is outside the retained replay window");
+        }
+        if let Some(existing) = state.controls.get(&operation_key) {
+            if existing.supervisor_run_id != supervisor_run_id
+                || existing.semantic_digest != semantic_digest
+            {
+                anyhow::bail!("supervisor control operation conflicts with its reservation");
+            }
+        } else {
+            let event = control_event(&run, operation_id, semantic_digest.clone(), command, now);
+            // Prove the domain transition before reserving the operation. Once
+            // this check passes, every later failure is storage-only and the
+            // durable reservation can be retried without changing semantics.
+            let mut candidate = run.clone();
+            reduce(&mut candidate, &event).map_err(anyhow::Error::msg)?;
+            self.ensure_control_capacity(&mut state)?;
+            state.controls.insert(
+                operation_key,
+                ControlReservation {
+                    semantic_digest: semantic_digest.clone(),
+                    supervisor_run_id,
+                    reserved_at: now,
+                },
+            );
+            self.save_state(&state)?;
+        }
+
+        let event = control_event(&run, operation_id, semantic_digest, command, now);
+        if matches!(
+            run.event_id_status(operation_id),
+            usagi_core::domain::supervisor::AppliedEventStatus::Fresh
+        ) {
+            let mut candidate = run.clone();
+            reduce(&mut candidate, &event).map_err(anyhow::Error::msg)?;
+        }
+        self.apply_event(&run, &event).map(|run| run.query())
+    }
+
+    /// Returns exact worker provenance still owned by aborted runs. Agent
+    /// records are the termination authority; this list is the durable join
+    /// from a terminal Supervisor fact to those exact runtime identities.
+    ///
+    /// # Errors
+    /// Returns an error when durable state is corrupt or provenance no longer
+    /// fences the task generation and dispatch recorded by its run.
+    pub fn worker_stop_obligations(&self) -> Result<Vec<(WorkspaceId, RunProvenance)>> {
+        self.worker_stop_obligations_for(None)
+    }
+
+    /// Restricts bound stop recovery to one run for a synchronous control.
+    ///
+    /// # Errors
+    /// Returns the same durable-state errors as [`Self::worker_stop_obligations`].
+    pub fn worker_stop_obligations_for_run(
+        &self,
+        supervisor_run_id: SupervisorRunId,
+    ) -> Result<Vec<(WorkspaceId, RunProvenance)>> {
+        self.worker_stop_obligations_for(Some(supervisor_run_id))
+    }
+
+    fn worker_stop_obligations_for(
+        &self,
+        selected_run: Option<SupervisorRunId>,
+    ) -> Result<Vec<(WorkspaceId, RunProvenance)>> {
+        let mut obligations = Vec::new();
+        for run in self.supervisor.runs()? {
+            if (selected_run.is_some() && selected_run != Some(run.supervisor_run_id))
+                || !matches!(
+                    run.state,
+                    SupervisorRunState::Cancelled | SupervisorRunState::Failed
+                )
+            {
+                continue;
+            }
+            let Some(workspace) = run.workspace_id else {
+                // Legacy unscoped history cannot authorize a process signal.
+                // It is intentionally invisible to the workspace control plane.
+                continue;
+            };
+            for (task_id, provenance) in &run.provenance {
+                let Some(task) = run.tasks.get(task_id) else {
+                    anyhow::bail!("aborted supervisor provenance task is missing");
+                };
+                if task.assigned_dispatch_run.is_none() && provenance.generation < task.generation {
+                    // A completed earlier attempt is historical provenance,
+                    // not a worker still owned by the cancelled generation.
+                    continue;
+                }
+                if provenance.supervisor_run_id != run.supervisor_run_id
+                    || provenance.task_id != *task_id
+                    || provenance.generation != task.generation
+                    || task.assigned_dispatch_run != Some(provenance.dispatch_run_id)
+                {
+                    anyhow::bail!("aborted supervisor worker provenance fence is stale");
+                }
+                obligations.push((workspace, provenance.clone()));
+            }
+        }
+        obligations.sort_by_key(|(workspace, provenance)| {
+            (
+                workspace.to_string(),
+                provenance.worker_agent_id.as_str().clone(),
+            )
+        });
+        obligations.dedup();
+        Ok(obligations)
+    }
     /// Reports whether a workspace still owns a non-terminal supervised run.
     /// Legacy unscoped snapshots cannot be attributed and are excluded.
     ///
@@ -1804,8 +2282,16 @@ impl SupervisorRuntime {
             source,
             kind,
         };
+        self.apply_event(run, &event)
+    }
+
+    fn apply_event(
+        &self,
+        run: &usagi_core::domain::supervisor::SupervisorRun,
+        event: &SupervisorEvent,
+    ) -> Result<usagi_core::domain::supervisor::SupervisorRun> {
         self.supervisor
-            .apply(run.supervisor_run_id, run.state_revision, &event)
+            .apply(run.supervisor_run_id, run.state_revision, event)
     }
     fn reserve_parent_wake(
         &self,
@@ -1904,7 +2390,7 @@ impl SupervisorRuntime {
         for (key, reservation) in &state.starts {
             match self.supervisor.load(reservation.supervisor_run_id)? {
                 None => recyclable.push((None, key.clone())),
-                Some(run) if run.state.is_finished() => {
+                Some(run) if run.state.is_finished() && !has_unbound_goal_worker(&run) => {
                     recyclable.push((run.terminal_at.or(Some(run.updated_at)), key.clone()));
                 }
                 Some(_) => {}
@@ -1920,6 +2406,34 @@ impl SupervisorRuntime {
         }
         if state.starts.len() >= MAX_START_RESERVATIONS {
             anyhow::bail!("supervisor start reservation capacity is exhausted");
+        }
+        Ok(())
+    }
+
+    fn ensure_control_capacity(&self, state: &mut RuntimeState) -> Result<()> {
+        if state.controls.len() < MAX_CONTROL_RESERVATIONS {
+            return Ok(());
+        }
+        let mut recyclable = Vec::new();
+        for (key, reservation) in &state.controls {
+            match self.supervisor.load(reservation.supervisor_run_id)? {
+                None => recyclable.push((reservation.reserved_at, key.clone())),
+                Some(run) if run.state.is_finished() => {
+                    recyclable.push((reservation.reserved_at, key.clone()));
+                }
+                Some(_) => {}
+            }
+        }
+        recyclable.sort();
+        for (_, key) in recyclable {
+            if state.controls.len() < MAX_CONTROL_RESERVATIONS {
+                break;
+            }
+            state.controls.remove(&key);
+            state.expired_controls.insert(&key);
+        }
+        if state.controls.len() >= MAX_CONTROL_RESERVATIONS {
+            anyhow::bail!("supervisor control reservation capacity is exhausted");
         }
         Ok(())
     }
@@ -2063,6 +2577,49 @@ mod tests {
             verification_retry_at: None,
             verification_expectation: None,
             state: TaskState::Pending,
+        }
+    }
+    fn aborted_run(workspace: Option<WorkspaceId>) -> SupervisorRun {
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        run.workspace_id = workspace;
+        run.state = SupervisorRunState::Cancelled;
+        run.terminal_at = Some(now());
+        run.terminal_reason = Some("operator cancelled".into());
+        run
+    }
+    fn unbound_goal_run(workspace: Option<WorkspaceId>) -> SupervisorRun {
+        let mut run = aborted_run(workspace);
+        let mut root = task(run.supervisor_run_id, "root", None);
+        root.required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT;
+        run.tasks.insert(root.task_id.clone(), root);
+        run
+    }
+    fn start_reservation(supervisor_run_id: SupervisorRunId) -> StartReservation {
+        StartReservation {
+            semantic_key: "test".into(),
+            supervisor_run_id,
+        }
+    }
+    fn root_pending_stop(
+        operation_id: OperationId,
+        workspace_id: WorkspaceId,
+        supervisor_run_id: SupervisorRunId,
+    ) -> PendingWorkerStop {
+        PendingWorkerStop {
+            operation_id,
+            workspace_id,
+            supervisor_run_id,
+            task_id: TaskId::new("root").unwrap(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            generation: 1,
+            requires_session: false,
         }
     }
     fn event(run: &SupervisorRun, kind: SupervisorEventKind) -> SupervisorEvent {
@@ -4348,7 +4905,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // Start and wake retention share one durable metadata contract.
+    #[allow(clippy::too_many_lines)] // Start, wake, and human-control retention share one durable metadata contract.
     fn runtime_metadata_compacts_safe_history_and_backpressures_live_state() {
         let temp = tempfile::tempdir().unwrap();
         let scheduler = SupervisorRuntime::new(temp.path());
@@ -4506,6 +5063,59 @@ mod tests {
             .reserve_parent_wake(&mut run, &parent_id, child, InboxKind::Completed, now())
             .unwrap();
         assert!(scheduler.load_state().unwrap().wakes.is_empty());
+
+        let control_run = SupervisorRun::new(
+            "workspace-operator".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        scheduler.supervisor.initialize(&control_run).unwrap();
+        let command = SupervisorWorkspaceCommand::Cancel {
+            supervisor_run_id: control_run.supervisor_run_id,
+            reason: "capacity fixture".into(),
+        };
+        let digest = control_semantic_digest(&command).unwrap();
+        let mut controls = RuntimeState::default();
+        let mut oldest = None;
+        for index in 0..MAX_CONTROL_RESERVATIONS {
+            let operation = OperationId::new().to_string();
+            oldest.get_or_insert_with(|| operation.clone());
+            controls.controls.insert(
+                operation,
+                ControlReservation {
+                    semantic_digest: digest.clone(),
+                    supervisor_run_id: control_run.supervisor_run_id,
+                    reserved_at: now() + chrono::Duration::seconds(i64::try_from(index).unwrap()),
+                },
+            );
+        }
+        assert!(
+            scheduler
+                .ensure_control_capacity(&mut controls)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+        let mut finished_control = control_run;
+        finished_control.state = SupervisorRunState::Cancelled;
+        finished_control.terminal_at = Some(now());
+        json_file::write_atomic(
+            scheduler
+                .supervisor
+                .snapshot_path(finished_control.supervisor_run_id)
+                .parent()
+                .unwrap(),
+            &scheduler
+                .supervisor
+                .snapshot_path(finished_control.supervisor_run_id),
+            &finished_control,
+        )
+        .unwrap();
+        scheduler.ensure_control_capacity(&mut controls).unwrap();
+        assert_eq!(controls.controls.len(), MAX_CONTROL_RESERVATIONS - 1);
+        assert!(controls.expired_controls.contains(&oldest.unwrap()));
     }
 
     #[test]
@@ -4530,6 +5140,24 @@ mod tests {
         state.wakes.clear();
         state.expired_starts.words.push(1);
         json_file::write_atomic(temp.path(), &scheduler.state_path, &state).unwrap();
+        assert!(
+            scheduler
+                .load_state()
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+
+        let mut malformed_control = RuntimeState::default();
+        malformed_control.controls.insert(
+            "not-an-operation-id".into(),
+            ControlReservation {
+                semantic_digest: "unbounded-or-invalid".into(),
+                supervisor_run_id: SupervisorRunId::new(),
+                reserved_at: now(),
+            },
+        );
+        json_file::write_atomic(temp.path(), &scheduler.state_path, &malformed_control).unwrap();
         assert!(
             scheduler
                 .load_state()
@@ -5355,6 +5983,725 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One lifecycle fixture proves workspace fencing, restart replay, conflicts, and stop recovery selection together.
+    fn workspace_control_is_durable_scoped_and_projects_exact_stop_obligations() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let dispatch = DispatchStore::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let dispatch_run = OperationId::new();
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: dispatch_run,
+                agent_id: AgentId::new(),
+                prompt: String::new(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let worker = root_worker(workspace);
+        let run = runtime
+            .start_for_workspace_root_dispatch(
+                "goal-composer",
+                workspace,
+                &dispatch_run.to_string(),
+                goal("finish the goal"),
+                Some("standard".into()),
+                &worker,
+                now(),
+            )
+            .unwrap();
+        let operation = OperationId::new();
+        let command = SupervisorWorkspaceCommand::Cancel {
+            supervisor_run_id: run.supervisor_run_id,
+            reason: "operator cancelled".into(),
+        };
+        let cancelled = runtime
+            .control_for_workspace(workspace, operation, &command, now())
+            .unwrap();
+        assert_eq!(cancelled.state, SupervisorRunState::Cancelled);
+        assert_eq!(cancelled.provenance.len(), 1);
+
+        let restarted = SupervisorRuntime::new(temp.path());
+        assert_eq!(
+            restarted
+                .control_for_workspace(
+                    workspace,
+                    operation,
+                    &command,
+                    now() + chrono::Duration::minutes(1),
+                )
+                .unwrap(),
+            cancelled
+        );
+        assert!(
+            restarted
+                .control_for_workspace(
+                    workspace,
+                    operation,
+                    &SupervisorWorkspaceCommand::Cancel {
+                        supervisor_run_id: run.supervisor_run_id,
+                        reason: "different reason".into(),
+                    },
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with its reservation")
+        );
+        assert!(
+            restarted
+                .control_for_workspace(WorkspaceId::new(), OperationId::new(), &command, now())
+                .unwrap_err()
+                .to_string()
+                .contains("does not belong")
+        );
+
+        let obligations = restarted.worker_stop_obligations().unwrap();
+        assert_eq!(obligations.len(), 1);
+        assert_eq!(obligations[0].0, workspace);
+        assert_eq!(obligations[0].1.worker_agent_id, worker.agent_runtime_id);
+        assert_eq!(
+            obligations[0].1.worker_worktree_id,
+            worker.terminal.worktree_id
+        );
+        assert_eq!(
+            restarted
+                .worker_stop_obligations_for_run(run.supervisor_run_id)
+                .unwrap(),
+            obligations
+        );
+        assert!(
+            restarted
+                .worker_stop_obligations_for_run(SupervisorRunId::new())
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut prior_attempt = restarted
+            .supervisor
+            .load(run.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        let root = prior_attempt
+            .tasks
+            .get_mut(&TaskId::new("root").unwrap())
+            .unwrap();
+        root.generation += 1;
+        root.assigned_dispatch_run = None;
+        json_file::write_atomic(
+            restarted
+                .supervisor
+                .snapshot_path(run.supervisor_run_id)
+                .parent()
+                .unwrap(),
+            &restarted.supervisor.snapshot_path(run.supervisor_run_id),
+            &prior_attempt,
+        )
+        .unwrap();
+        assert!(restarted.worker_stop_obligations().unwrap().is_empty());
+
+        let mut legacy = SupervisorRun::new(
+            "legacy".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        legacy.state = SupervisorRunState::Cancelled;
+        legacy.terminal_at = Some(now());
+        restarted.supervisor.initialize(&legacy).unwrap();
+        assert!(restarted.worker_stop_obligations().unwrap().is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Root and delegated crash windows share one exact operation-join contract.
+    fn aborted_unbound_promotions_join_only_the_exact_agent_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let root_operation = OperationId::new();
+        let root_run = runtime
+            .reserve_goal_for_workspace(
+                "goal-composer",
+                workspace,
+                &root_operation.to_string(),
+                goal("unbound root"),
+                None,
+                now(),
+            )
+            .unwrap();
+        runtime
+            .control_for_workspace(
+                workspace,
+                OperationId::new(),
+                &SupervisorWorkspaceCommand::Cancel {
+                    supervisor_run_id: root_run.supervisor_run_id,
+                    reason: "cancel unbound root".into(),
+                },
+                now(),
+            )
+            .unwrap();
+        let root_stops = runtime
+            .pending_worker_stops_for_run(root_run.supervisor_run_id)
+            .unwrap();
+        assert_eq!(root_stops.len(), 1);
+        assert_eq!(root_stops[0].operation_id(), root_operation);
+        assert_eq!(root_stops[0].workspace_id(), workspace);
+        let worker = root_worker(workspace);
+        let root_provenance = root_stops[0].provenance(&worker).unwrap();
+        assert_eq!(root_provenance.worker_agent_id, worker.agent_runtime_id);
+        assert!(
+            root_stops[0]
+                .provenance(&delegated_worker(workspace))
+                .unwrap_err()
+                .to_string()
+                .contains("outside its reserved scope")
+        );
+        let mut full = runtime.load_state().unwrap();
+        for index in 1..MAX_START_RESERVATIONS {
+            let live = SupervisorRun::new(
+                "caller".into(),
+                format!("live-{index}"),
+                "input".into(),
+                "policy".into(),
+                now(),
+            );
+            runtime.supervisor.initialize(&live).unwrap();
+            full.starts.insert(
+                format!("live-{index}"),
+                StartReservation {
+                    semantic_key: format!("live-{index}"),
+                    supervisor_run_id: live.supervisor_run_id,
+                },
+            );
+        }
+        assert!(
+            runtime
+                .ensure_start_capacity(&mut full)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+        assert!(full.starts.contains_key(&root_operation.to_string()));
+        runtime
+            .acknowledge_pending_worker_stops(&root_stops)
+            .unwrap();
+        runtime
+            .acknowledge_pending_worker_stops(&root_stops)
+            .unwrap();
+        assert!(
+            runtime
+                .pending_worker_stops_for_run(root_run.supervisor_run_id)
+                .unwrap()
+                .is_empty()
+        );
+
+        let delegated_temp = tempfile::tempdir().unwrap();
+        let delegated_runtime = SupervisorRuntime::new(delegated_temp.path());
+        let dispatch = DispatchStore::new(delegated_temp.path());
+        let parent_operation = OperationId::new();
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: parent_operation,
+                agent_id: AgentId::new(),
+                prompt: String::new(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let parent = delegated_runtime
+            .start_for_workspace_root_dispatch(
+                "goal-composer",
+                workspace,
+                &parent_operation.to_string(),
+                goal("delegated parent"),
+                None,
+                &root_worker(workspace),
+                now(),
+            )
+            .unwrap();
+        let child_operation = OperationId::new();
+        delegated_runtime
+            .reserve_delegated_dispatch(
+                parent_operation,
+                &child_operation.to_string(),
+                "delegated child".into(),
+                now(),
+            )
+            .unwrap()
+            .unwrap();
+        delegated_runtime
+            .control_for_workspace(
+                workspace,
+                OperationId::new(),
+                &SupervisorWorkspaceCommand::Cancel {
+                    supervisor_run_id: parent.supervisor_run_id,
+                    reason: "cancel unbound child".into(),
+                },
+                now(),
+            )
+            .unwrap();
+        let delegated_stops = delegated_runtime
+            .pending_worker_stops_for_run(parent.supervisor_run_id)
+            .unwrap();
+        assert_eq!(delegated_stops.len(), 1);
+        assert_eq!(delegated_stops[0].operation_id(), child_operation);
+        let child = delegated_stops[0]
+            .provenance(&delegated_worker(workspace))
+            .unwrap();
+        assert_eq!(child.parent_dispatch_run, Some(parent_operation));
+        assert_eq!(child.dispatch_run_id, child_operation);
+        assert!(child.worker_session_id.is_some());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One corruption matrix proves every fail-closed unbound-worker recovery boundary.
+    fn pending_worker_stop_recovery_rejects_every_corrupt_reservation_shape() {
+        let workspace = WorkspaceId::new();
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut state = RuntimeState::default();
+        for operation in [OperationId::new(), OperationId::new()] {
+            let run = unbound_goal_run(Some(workspace));
+            runtime.supervisor.initialize(&run).unwrap();
+            state.starts.insert(
+                operation.to_string(),
+                start_reservation(run.supervisor_run_id),
+            );
+        }
+        runtime.save_state(&state).unwrap();
+        assert_eq!(runtime.pending_worker_stops().unwrap().len(), 2);
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let running = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        runtime.supervisor.initialize(&running).unwrap();
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            OperationId::new().to_string(),
+            start_reservation(SupervisorRunId::new()),
+        );
+        state.starts.insert(
+            OperationId::new().to_string(),
+            start_reservation(running.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(runtime.pending_worker_stops().unwrap().is_empty());
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let unscoped = unbound_goal_run(None);
+        let missing_root = aborted_run(Some(workspace));
+        runtime.supervisor.initialize(&unscoped).unwrap();
+        runtime.supervisor.initialize(&missing_root).unwrap();
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            OperationId::new().to_string(),
+            start_reservation(unscoped.supervisor_run_id),
+        );
+        state.starts.insert(
+            OperationId::new().to_string(),
+            start_reservation(missing_root.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(runtime.pending_worker_stops().unwrap().is_empty());
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let root = unbound_goal_run(Some(workspace));
+        runtime.supervisor.initialize(&root).unwrap();
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            "invalid-operation".into(),
+            start_reservation(root.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .pending_worker_stops()
+                .unwrap_err()
+                .to_string()
+                .contains("operation is invalid")
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut invalid_operation = aborted_run(Some(workspace));
+        let invalid_task = task(
+            invalid_operation.supervisor_run_id,
+            "delegated-invalid-operation",
+            None,
+        );
+        invalid_operation
+            .tasks
+            .insert(invalid_task.task_id.clone(), invalid_task);
+        let operation = OperationId::new();
+        let mut wrong_digest = aborted_run(Some(workspace));
+        let mut wrong_digest_task = task(
+            wrong_digest.supervisor_run_id,
+            &format!("{DELEGATED_TASK_PREFIX}{operation}"),
+            None,
+        );
+        wrong_digest_task.instruction_digest = "wrong digest".into();
+        wrong_digest
+            .tasks
+            .insert(wrong_digest_task.task_id.clone(), wrong_digest_task);
+        runtime.supervisor.initialize(&invalid_operation).unwrap();
+        runtime.supervisor.initialize(&wrong_digest).unwrap();
+        assert!(runtime.pending_worker_stops().unwrap().is_empty());
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let operation = OperationId::new();
+        let mut missing_parent = aborted_run(Some(workspace));
+        let mut child = task(
+            missing_parent.supervisor_run_id,
+            &format!("{DELEGATED_TASK_PREFIX}{operation}"),
+            None,
+        );
+        child.instruction_digest = delegated_task_digest(operation);
+        missing_parent.tasks.insert(child.task_id.clone(), child);
+        runtime.supervisor.initialize(&missing_parent).unwrap();
+        assert!(
+            runtime
+                .pending_worker_stops()
+                .unwrap_err()
+                .to_string()
+                .contains("has no parent task")
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let operation = OperationId::new();
+        let mut missing_provenance = aborted_run(Some(workspace));
+        let mut child = task(
+            missing_provenance.supervisor_run_id,
+            &format!("{DELEGATED_TASK_PREFIX}{operation}"),
+            Some("parent"),
+        );
+        child.instruction_digest = delegated_task_digest(operation);
+        missing_provenance
+            .tasks
+            .insert(child.task_id.clone(), child);
+        runtime.supervisor.initialize(&missing_provenance).unwrap();
+        assert!(
+            runtime
+                .pending_worker_stops()
+                .unwrap_err()
+                .to_string()
+                .contains("parent provenance is missing")
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let operation = OperationId::new();
+        let root = unbound_goal_run(Some(workspace));
+        runtime.supervisor.initialize(&root).unwrap();
+        let mut delegated = aborted_run(Some(workspace));
+        let parent_id = TaskId::new("parent").unwrap();
+        let parent_dispatch = OperationId::new();
+        let parent = task(delegated.supervisor_run_id, "parent", None);
+        let mut child = task(
+            delegated.supervisor_run_id,
+            &format!("{DELEGATED_TASK_PREFIX}{operation}"),
+            Some("parent"),
+        );
+        child.instruction_digest = delegated_task_digest(operation);
+        delegated.tasks.insert(parent_id.clone(), parent);
+        delegated.tasks.insert(child.task_id.clone(), child);
+        delegated.provenance.insert(
+            parent_id.clone(),
+            provenance(
+                delegated.supervisor_run_id,
+                &parent_id,
+                None,
+                parent_dispatch,
+            ),
+        );
+        runtime.supervisor.initialize(&delegated).unwrap();
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            operation.to_string(),
+            start_reservation(root.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .pending_worker_stops()
+                .unwrap_err()
+                .to_string()
+                .contains("multiple aborted supervisor reservations")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Forged acknowledgements share one matrix so no recovery fence is tested in isolation.
+    fn pending_worker_stop_acknowledgement_is_exact_and_idempotent() {
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        let stop = root_pending_stop(operation, workspace, SupervisorRunId::new());
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut delegated = stop.clone();
+        delegated.parent_task_id = Some(TaskId::new("parent").unwrap());
+        runtime
+            .acknowledge_pending_worker_stops(&[delegated])
+            .unwrap();
+        assert!(
+            runtime
+                .acknowledge_pending_worker_stops(std::slice::from_ref(&stop))
+                .unwrap_err()
+                .to_string()
+                .contains("reservation disappeared")
+        );
+
+        let mut state = RuntimeState::default();
+        state.expired_starts.insert(&operation.to_string());
+        runtime.save_state(&state).unwrap();
+        runtime
+            .acknowledge_pending_worker_stops(std::slice::from_ref(&stop))
+            .unwrap();
+
+        let owned_run = SupervisorRunId::new();
+        let mut state = RuntimeState::default();
+        state
+            .starts
+            .insert(operation.to_string(), start_reservation(owned_run));
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .acknowledge_pending_worker_stops(std::slice::from_ref(&stop))
+                .unwrap_err()
+                .to_string()
+                .contains("changed run ownership")
+        );
+
+        let missing_run = root_pending_stop(operation, workspace, owned_run);
+        assert!(
+            runtime
+                .acknowledge_pending_worker_stops(std::slice::from_ref(&missing_run))
+                .unwrap_err()
+                .to_string()
+                .contains("run disappeared")
+        );
+
+        let stale_run = aborted_run(Some(workspace));
+        runtime.supervisor.initialize(&stale_run).unwrap();
+        let stale_stop = root_pending_stop(operation, workspace, stale_run.supervisor_run_id);
+        let mut state = RuntimeState::default();
+        state.starts.insert(
+            operation.to_string(),
+            start_reservation(stale_run.supervisor_run_id),
+        );
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .acknowledge_pending_worker_stops(&[stale_stop])
+                .unwrap_err()
+                .to_string()
+                .contains("acknowledgement is stale")
+        );
+    }
+
+    #[test]
+    fn expired_workspace_control_operations_are_refused_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let run = runtime
+            .start_for_workspace(
+                "caller",
+                workspace,
+                "start",
+                "root".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        let operation = OperationId::new();
+        let mut state = RuntimeState::default();
+        state.expired_controls.insert(&operation.to_string());
+        runtime.save_state(&state).unwrap();
+        assert!(
+            runtime
+                .control_for_workspace(
+                    workspace,
+                    operation,
+                    &SupervisorWorkspaceCommand::Cancel {
+                        supervisor_run_id: run.supervisor_run_id,
+                        reason: "operator cancelled".into(),
+                    },
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("outside the retained replay window")
+        );
+
+        let recyclable_temp = tempfile::tempdir().unwrap();
+        let recyclable = SupervisorRuntime::new(recyclable_temp.path());
+        let recyclable_run = recyclable
+            .start_for_workspace(
+                "caller",
+                workspace,
+                "recyclable",
+                "root".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        let mut state = RuntimeState::default();
+        for _ in 0..MAX_CONTROL_RESERVATIONS {
+            state.controls.insert(
+                OperationId::new().to_string(),
+                ControlReservation {
+                    semantic_digest: format!("sha256:{}", "0".repeat(64)),
+                    supervisor_run_id: SupervisorRunId::new(),
+                    reserved_at: now(),
+                },
+            );
+        }
+        recyclable.save_state(&state).unwrap();
+        assert_eq!(
+            recyclable
+                .control_for_workspace(
+                    workspace,
+                    OperationId::new(),
+                    &SupervisorWorkspaceCommand::Cancel {
+                        supervisor_run_id: recyclable_run.supervisor_run_id,
+                        reason: "operator cancelled".into(),
+                    },
+                    now(),
+                )
+                .unwrap()
+                .state,
+            SupervisorRunState::Cancelled
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One matrix covers ordering plus each corrupt durable provenance fence.
+    fn worker_stop_obligations_sort_exact_workers_and_reject_corrupt_provenance() {
+        let workspace = WorkspaceId::new();
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut running = SupervisorRun::new(
+            "caller".into(),
+            "running".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        running.workspace_id = Some(workspace);
+        runtime.supervisor.initialize(&running).unwrap();
+        for _ in 0..2 {
+            let mut run = aborted_run(Some(workspace));
+            let task_id = TaskId::new("worker").unwrap();
+            let dispatch = OperationId::new();
+            let mut worker = task(run.supervisor_run_id, "worker", None);
+            worker.assigned_dispatch_run = Some(dispatch);
+            run.tasks.insert(task_id.clone(), worker);
+            run.provenance.insert(
+                task_id.clone(),
+                provenance(run.supervisor_run_id, &task_id, None, dispatch),
+            );
+            runtime.supervisor.initialize(&run).unwrap();
+        }
+        assert_eq!(runtime.worker_stop_obligations().unwrap().len(), 2);
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut missing_task = aborted_run(Some(workspace));
+        let missing = TaskId::new("missing").unwrap();
+        missing_task.provenance.insert(
+            missing.clone(),
+            provenance(
+                missing_task.supervisor_run_id,
+                &missing,
+                None,
+                OperationId::new(),
+            ),
+        );
+        runtime.supervisor.initialize(&missing_task).unwrap();
+        assert!(
+            runtime
+                .worker_stop_obligations()
+                .unwrap_err()
+                .to_string()
+                .contains("provenance task is missing")
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let mut stale = aborted_run(Some(workspace));
+        let task_id = TaskId::new("worker").unwrap();
+        let dispatch = OperationId::new();
+        let mut worker = task(stale.supervisor_run_id, "worker", None);
+        worker.assigned_dispatch_run = Some(dispatch);
+        stale.tasks.insert(task_id.clone(), worker);
+        let mut stale_provenance = provenance(stale.supervisor_run_id, &task_id, None, dispatch);
+        stale_provenance.supervisor_run_id = SupervisorRunId::new();
+        stale.provenance.insert(task_id, stale_provenance);
+        runtime.supervisor.initialize(&stale).unwrap();
+        assert!(
+            runtime
+                .worker_stop_obligations()
+                .unwrap_err()
+                .to_string()
+                .contains("provenance fence is stale")
+        );
+    }
+
+    #[test]
+    fn unfinished_workspace_detection_is_scoped_and_terminal_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let run = runtime
+            .start_for_workspace(
+                "caller",
+                workspace,
+                "start",
+                "root".into(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+        assert!(runtime.has_unfinished_workspace(workspace).unwrap());
+        assert!(
+            !runtime
+                .has_unfinished_workspace(WorkspaceId::new())
+                .unwrap()
+        );
+        runtime
+            .control_for_workspace(
+                workspace,
+                OperationId::new(),
+                &SupervisorWorkspaceCommand::Cancel {
+                    supervisor_run_id: run.supervisor_run_id,
+                    reason: "operator cancelled".into(),
+                },
+                now(),
+            )
+            .unwrap();
+        assert!(!runtime.has_unfinished_workspace(workspace).unwrap());
+    }
+
+    #[test]
     fn start_rejects_an_unresolvable_initial_dag() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = SupervisorRuntime::new(temp.path());
@@ -5418,11 +6765,84 @@ mod tests {
         let listed = runtime.list_workspace(first).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].supervisor_run_id, visible.supervisor_run_id);
+        assert_eq!(
+            runtime
+                .get_for_workspace(first, visible.supervisor_run_id)
+                .unwrap(),
+            Some(visible)
+        );
+        assert_eq!(
+            runtime
+                .get_for_workspace(second, listed[0].supervisor_run_id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            runtime
+                .get_for_workspace(first, SupervisorRunId::new())
+                .unwrap(),
+            None
+        );
         assert!(
             runtime
                 .list_workspace(WorkspaceId::new())
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn control_helpers_validate_and_project_both_commands() {
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let cancel = SupervisorWorkspaceCommand::Cancel {
+            supervisor_run_id: run.supervisor_run_id,
+            reason: "operator cancelled".into(),
+        };
+        validate_control_command(&cancel).unwrap();
+        let invalid = SupervisorWorkspaceCommand::Cancel {
+            supervisor_run_id: run.supervisor_run_id,
+            reason: "line\nbreak".into(),
+        };
+        assert!(validate_control_command(&invalid).is_err());
+        let cancel_digest = control_semantic_digest(&cancel).unwrap();
+        assert!(cancel_digest.starts_with("sha256:"));
+        let event = control_event(
+            &run,
+            OperationId::new(),
+            cancel_digest.clone(),
+            &cancel,
+            now(),
+        );
+        assert_eq!(event.source, SupervisorEventSource::Cancel);
+        assert!(matches!(
+            event.kind,
+            SupervisorEventKind::Cancel { task_id: None, ref reason }
+                if reason == "operator cancelled"
+        ));
+
+        let escalation_id = OperationId::new();
+        let resolve = SupervisorWorkspaceCommand::ResolveEscalation {
+            supervisor_run_id: run.supervisor_run_id,
+            escalation_id,
+            decision: EscalationDecision::Fail,
+        };
+        validate_control_command(&resolve).unwrap();
+        let resolve_digest = control_semantic_digest(&resolve).unwrap();
+        assert_ne!(resolve_digest, cancel_digest);
+        let event = control_event(&run, OperationId::new(), resolve_digest, &resolve, now());
+        assert_eq!(event.source, SupervisorEventSource::Admission);
+        assert!(matches!(
+            event.kind,
+            SupervisorEventKind::ResolveEscalation {
+                escalation_id: actual,
+                decision: EscalationDecision::Fail,
+            } if actual == escalation_id
+        ));
     }
 }

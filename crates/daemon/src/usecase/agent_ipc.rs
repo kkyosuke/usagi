@@ -40,6 +40,7 @@ use usagi_core::{
             DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId,
             WorktreeId,
         },
+        supervisor::RunProvenance,
         terminal_launch::TerminalLaunchScope,
     },
     infrastructure::ipc::{ErrorCode, ProtocolError, agent_operation_digest},
@@ -909,6 +910,14 @@ impl AgentRuntime {
             .map(|operation| operation.outcome.clone())
     }
 
+    /// Resolves the exact retained Agent runtime admitted by one durable
+    /// operation. This internal join remains available after the process-local
+    /// replay cache ages out. Durable hydration rejects duplicate ownership.
+    #[must_use]
+    pub fn runtime_for_operation(&self, operation_id: OperationId) -> Option<AgentRuntimeRef> {
+        self.coordinator.runtime_for_operation(operation_id)
+    }
+
     #[must_use]
     pub fn dispatch_store(&self) -> &DispatchStore {
         &self.dispatch
@@ -1623,6 +1632,89 @@ impl AgentRuntime {
         self.reported_phases
             .retain(|runtime, _| !runtime_ids.contains(&runtime.as_str()));
         Ok((result, diagnosis))
+    }
+
+    /// Stops only the Agent runtimes fenced by durable Supervisor provenance.
+    ///
+    /// Every selected runtime is validated before any PTY is signalled. A
+    /// recycled or corrupt Agent identity therefore fails the whole pass
+    /// closed instead of falling back to another runtime in the workspace.
+    /// Missing or already-exited records are converged no-ops, which makes the
+    /// operation safe for daemon-startup and periodic recovery.
+    pub fn interrupt_supervisor_workers(
+        &mut self,
+        workspace: WorkspaceId,
+        provenance: &[RunProvenance],
+    ) -> Result<usize, ProtocolError> {
+        let mut expected = BTreeMap::new();
+        for worker in provenance {
+            let scope = (worker.worker_session_id, worker.worker_worktree_id);
+            if expected
+                .insert(worker.worker_agent_id, scope)
+                .is_some_and(|existing| existing != scope)
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::StaleTarget,
+                    "supervisor worker provenance conflicts for one Agent runtime",
+                ));
+            }
+        }
+
+        let records = self.coordinator.snapshot().records;
+        let mut runtime_ids = BTreeSet::new();
+        for (runtime_id, (session_id, worktree_id)) in expected {
+            let Some(record) = records
+                .iter()
+                .find(|record| record.runtime.agent_runtime_id == runtime_id)
+            else {
+                continue;
+            };
+            if record.runtime.terminal.workspace_id != workspace
+                || record.runtime.session_id != session_id
+                || record.runtime.terminal.session_id != session_id
+                || record.runtime.terminal.worktree_id != worktree_id
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::StaleTarget,
+                    "supervisor worker provenance no longer fences its Agent runtime",
+                ));
+            }
+            match record.state {
+                super::runtime::RuntimeState::Reserved
+                | super::runtime::RuntimeState::Running
+                | super::runtime::RuntimeState::ReconcileRequired(
+                    super::runtime::ReconcileState::SpawnAmbiguous
+                    | super::runtime::ReconcileState::PersistAfterSpawn
+                    | super::runtime::ReconcileState::OrphanRunning,
+                ) => {
+                    runtime_ids.insert(runtime_id.as_str().clone());
+                }
+                super::runtime::RuntimeState::Interrupted
+                | super::runtime::RuntimeState::Sleeping
+                | super::runtime::RuntimeState::Exited
+                | super::runtime::RuntimeState::SpawnFailed
+                | super::runtime::RuntimeState::Reclaimed => {}
+                super::runtime::RuntimeState::ReconcileRequired(_) => {
+                    return Err(ProtocolError::new(
+                        ErrorCode::OwnershipUnknown,
+                        "supervisor worker process ownership requires reconciliation",
+                    ));
+                }
+            }
+        }
+
+        if runtime_ids.is_empty() {
+            return Ok(0);
+        }
+        let interrupted = self
+            .coordinator
+            .interrupt_agents(&runtime_ids, &mut *self.store, &mut *self.pty)
+            .map_err(map_runtime_error)?;
+        self.mcp_callers
+            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id.as_str()));
+        self.reported_phases
+            .retain(|runtime, _| !runtime_ids.contains(&runtime.as_str()));
+        Ok(interrupted)
     }
 
     /// Returns one deterministic, secret-free inventory for workspace-root and
@@ -3930,6 +4022,7 @@ mod tests {
     use usagi_core::domain::{
         agent::Agent,
         id::{AgentId, AgentResumeSourceId, ClientId, RequestId},
+        supervisor::{SupervisorRunId, TaskId},
     };
     use usagi_core::usecase::client::TerminalAction;
 
@@ -4561,6 +4654,173 @@ mod tests {
         assert_eq!(
             agent.sleep_session(session).unwrap_err().code,
             ErrorCode::Unavailable
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture exercises every ownership fence and orphan retry outcome.
+    fn supervisor_stop_validates_every_fence_and_retries_an_orphaned_process() {
+        let workspace = WorkspaceId::new();
+        let resolved = scope();
+        let mut agent = AgentRuntime::new(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        );
+        let admission = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: None,
+                },
+                &FakeScope(Ok(resolved)),
+            )
+            .unwrap();
+        let runtime = agent
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap();
+        let provenance = RunProvenance {
+            supervisor_run_id: SupervisorRunId::new(),
+            task_id: TaskId::new("root").unwrap(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id: OperationId::new(),
+            worker_session_id: runtime.session_id,
+            worker_agent_id: runtime.agent_runtime_id,
+            worker_worktree_id: runtime.terminal.worktree_id,
+            generation: 1,
+        };
+
+        let mut conflicting = provenance.clone();
+        conflicting.worker_session_id = Some(SessionId::new());
+        assert_eq!(
+            agent
+                .interrupt_supervisor_workers(workspace, &[provenance.clone(), conflicting],)
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleTarget
+        );
+
+        let mut absent = provenance.clone();
+        absent.worker_agent_id = AgentRuntimeId::new();
+        assert_eq!(
+            agent.interrupt_supervisor_workers(workspace, &[absent]),
+            Ok(0)
+        );
+
+        let mut stale = provenance.clone();
+        stale.worker_worktree_id = WorktreeId::new();
+        assert_eq!(
+            agent
+                .interrupt_supervisor_workers(workspace, &[stale])
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleTarget
+        );
+        assert_eq!(
+            agent.coordinator.snapshot().records[0].state,
+            super::super::runtime::RuntimeState::Running
+        );
+
+        assert_eq!(
+            agent
+                .interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance))
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(
+            agent.coordinator.snapshot().records[0].state,
+            super::super::runtime::RuntimeState::ReconcileRequired(
+                super::super::runtime::ReconcileState::OrphanRunning
+            )
+        );
+
+        agent
+            .pty
+            .as_any_mut()
+            .downcast_mut::<Pty>()
+            .unwrap()
+            .terminate_success = true;
+        agent
+            .reported_phases
+            .insert(runtime.agent_runtime_id, AgentPhase::Running);
+        assert_eq!(
+            agent.interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance)),
+            Ok(1)
+        );
+        assert!(
+            !agent
+                .reported_phases
+                .contains_key(&runtime.agent_runtime_id)
+        );
+        assert_eq!(
+            agent.coordinator.snapshot().records[0].state,
+            super::super::runtime::RuntimeState::Exited
+        );
+        assert_eq!(
+            agent.interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance)),
+            Ok(0)
+        );
+
+        let mut ownership_unknown = agent.coordinator.snapshot();
+        ownership_unknown.records[0].state = super::super::runtime::RuntimeState::ReconcileRequired(
+            super::super::runtime::ReconcileState::IdentityUnknown,
+        );
+        ownership_unknown.records[0].process = None;
+        ownership_unknown.generation.terminals[0].process = None;
+        ownership_unknown.generation.terminals[0].state =
+            super::super::generation::TerminalState::IdentityUnknown;
+        agent.coordinator =
+            RuntimeCoordinator::hydrate(ownership_unknown, 16, 64 * 1024, 64).unwrap();
+        assert_eq!(
+            agent
+                .interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance))
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+    }
+
+    #[test]
+    fn runtime_operation_join_is_exact_and_durable_ownership_is_unique() {
+        let mut agent = runtime();
+        let first_operation = OperationId::new();
+        let first = agent
+            .launch(
+                &first_operation.to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        assert_eq!(
+            agent.runtime_for_operation(first_operation),
+            agent.coordinator.runtime_for_terminal(&first.terminal)
+        );
+        assert_eq!(agent.runtime_for_operation(OperationId::new()), None);
+
+        let second_operation = OperationId::new();
+        agent
+            .launch(
+                &second_operation.to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let mut duplicate = agent.coordinator.snapshot();
+        for record in &mut duplicate.records {
+            record.operation.operation_id = first_operation;
+        }
+        assert_eq!(
+            RuntimeCoordinator::hydrate(duplicate, 16, 64 * 1024, 64).unwrap_err(),
+            super::super::runtime::RuntimeSnapshotError::DuplicateOperation
         );
     }
 

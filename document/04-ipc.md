@@ -622,6 +622,15 @@ payload の `WorkspaceId` は connection が束縛する workspace と完全一�
 判断待ち、失敗、実行中、計画中、終了済みの順（同順位は新しい順）に並ぶ。response が supervisor query の
 512 KiB 上限に達する場合は低順位の末尾から落とす。TUI は専用background laneから再読し、fresh connectionへのretryが安全である。
 
+`supervisor_control`はlocal TUIのhuman mutation専用requestで、`workspace`、UUIDの`operation_id`、型付き
+`command`（`cancel { supervisor_run_id, reason }`または
+`resolve_escalation { supervisor_run_id, escalation_id, decision }`）だけを持つ。Agent MCP credentialやcaller名、path、
+PID、terminal IDは受け取らない。payload workspaceとconnection workspace、runに保存されたworkspaceの3者が一致しない
+requestは`ownership_unknown`でeffect zeroになる。operationはdaemonのdurable semantic reservationとSupervisor event IDで
+replayされるためfresh connectionへのretryが可能で、同じIDの別commandは`idempotency_conflict`になる。cancel/failの成功は
+exact Supervisor provenanceから選んだAgent workerのterminate/reapまで含み、停止に失敗した応答も既にcommit済みのrunを
+recovery workerが再停止する。
+
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで
 構成する。

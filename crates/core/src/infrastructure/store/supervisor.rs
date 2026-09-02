@@ -335,6 +335,12 @@ impl SupervisorStore {
             .ok_or_else(|| anyhow::anyhow!("supervisor run does not exist"))?;
         match run.event_id_status(event.event_id) {
             crate::domain::supervisor::AppliedEventStatus::Recent => {
+                let retained = self
+                    .retained_event(id, event.event_id)?
+                    .ok_or_else(|| anyhow::anyhow!("applied supervisor event is not retained"))?;
+                if retained.payload_digest != event.payload_digest {
+                    bail!("supervisor event id conflicts with its semantic payload");
+                }
                 self.checkpoint_current_journal(id, run.state_revision)?;
                 return Ok(run);
             }
@@ -363,6 +369,23 @@ impl SupervisorStore {
         self.checkpoint_current_journal(id, run.state_revision)?;
         self.refresh_run_list_index(&run);
         Ok(run)
+    }
+
+    fn retained_event(
+        &self,
+        id: SupervisorRunId,
+        event_id: crate::domain::id::OperationId,
+    ) -> Result<Option<SupervisorEvent>> {
+        let index = self.journal_index(id)?;
+        let Some(first) = index.entries.first() else {
+            return Ok(None);
+        };
+        for event in self.read_journal_page(id, first.offset, index.entries.len())? {
+            if event.event_id == event_id {
+                return Ok(Some(event));
+            }
+        }
+        Ok(None)
     }
     /// Returns the redaction-safe aggregate projection.
     ///
@@ -1005,6 +1028,16 @@ mod tests {
                 .starts_with("stale supervisor state revision"),
         );
         assert_eq!(store.apply(id, 1, &first).unwrap().state_revision, 1);
+        let mut conflicting_replay = first.clone();
+        conflicting_replay.payload_digest = "different-semantic-command".into();
+        assert!(
+            store
+                .apply(id, 1, &conflicting_replay)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with its semantic payload")
+        );
+        assert_eq!(store.retained_event(id, OperationId::new()).unwrap(), None);
         let (events, cursor) = store
             .events(id, EventCursor { next_sequence: 1 }, 10)
             .unwrap();
@@ -1013,6 +1046,17 @@ mod tests {
         assert_eq!(
             store.load(id).unwrap().unwrap().query().state,
             SupervisorRunState::Running
+        );
+
+        fs::write(store.journal_path(id), []).unwrap();
+        fs::remove_file(store.checkpoint_path(id)).unwrap();
+        fs::remove_file(store.journal_index_path(id)).unwrap();
+        assert!(
+            store
+                .apply(id, 1, &first)
+                .unwrap_err()
+                .to_string()
+                .contains("applied supervisor event is not retained")
         );
     }
 

@@ -122,6 +122,14 @@ pub enum DaemonRequest {
     /// Read the redaction-safe durable Work Runs owned by the connection's
     /// workspace. This TUI-only observation never accepts an Agent credential.
     SupervisorSnapshot { workspace: WorkspaceId },
+    /// Mutate one durable Supervisor Run through the workspace-bound human
+    /// control plane. The daemon verifies the requested workspace against the
+    /// connection and replays the command by its durable operation identity.
+    SupervisorControl {
+        workspace: WorkspaceId,
+        operation_id: OperationId,
+        command: crate::domain::supervisor::SupervisorWorkspaceCommand,
+    },
     /// Diagnose launch-time hook/MCP integration revisions against the invoking
     /// binary without exposing rendered configuration or provider identity.
     DiagnoseAgents {
@@ -1751,6 +1759,7 @@ impl RetryEligibility {
                 }
             }
             DaemonRequest::Rollover { .. }
+            | DaemonRequest::SupervisorControl { .. }
             | DaemonRequest::Agent { .. }
             | DaemonRequest::AgentGoal { .. }
             | DaemonRequest::ResumeAgent { .. }
@@ -3187,6 +3196,14 @@ mod deadline_and_retry_tests {
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,
+            },
+            DaemonRequest::SupervisorControl {
+                workspace: WorkspaceId::new(),
+                operation_id: OperationId::new(),
+                command: crate::domain::supervisor::SupervisorWorkspaceCommand::Cancel {
+                    supervisor_run_id: crate::domain::supervisor::SupervisorRunId::new(),
+                    reason: "operator cancelled".into(),
+                },
             },
             DaemonRequest::Agent {
                 operation_id: "op".into(),

@@ -1177,7 +1177,9 @@ impl RuntimeCoordinator {
 
         let mut interrupted = 0;
         for (key, record) in targets {
-            if !matches!(record.state, RuntimeState::Reserved | RuntimeState::Running) {
+            if record.state != RuntimeState::Reserved
+                && !runtime_state_requires_termination(record.state)
+            {
                 continue;
             }
             if record.process.is_some() && spawner.terminate_reap(&record.runtime.terminal).is_err()
@@ -1522,6 +1524,19 @@ impl RuntimeCoordinator {
             .find(|record| record.runtime.terminal.fences(terminal))
             .map(|record| record.runtime.clone())
     }
+
+    /// Resolves the runtime admitted by one durable operation fence.
+    ///
+    /// Operation ownership is unique by construction: hydration rejects a
+    /// duplicate and launch refuses to reserve one twice.
+    #[must_use]
+    pub fn runtime_for_operation(&self, operation_id: OperationId) -> Option<AgentRuntimeRef> {
+        self.records
+            .values()
+            .find(|record| record.operation.operation_id == operation_id)
+            .map(|record| record.runtime.clone())
+    }
+
     /// Lists only Agent runtimes in the exact requested durable scope. Each
     /// entry is tagged `Agent` and marked `live` only while the current daemon
     /// generation still owns a running PTY, so a restoring client attaches to
