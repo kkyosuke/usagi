@@ -1308,6 +1308,11 @@ mod tests {
     }
 
     #[test]
+    fn control_prompt_identifies_a_missing_selection_as_unknown() {
+        assert_eq!(control_prompt_rows(None, "prompt", "footer")[0], "#unknown");
+    }
+
+    #[test]
     #[should_panic(expected = "closed control uses the normal drawer")]
     fn closed_work_run_control_cannot_enter_the_control_renderer() {
         let projection = DirectorDrawerProjection::default();
