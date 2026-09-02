@@ -697,10 +697,27 @@ fn git(repo: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+/// Escapes one value already surrounded by POSIX shell double quotes.
+/// Cargo target paths may contain a literal `$HOME`; fixture materialization
+/// must preserve it as path text instead of evaluating it a second time.
+fn shell_double_quote_content(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('"', r#"\""#)
+        .replace('$', r"\$")
+        .replace('`', r"\`")
+}
+
 fn materialize_fixture_script(script: &str, log: &Path, argv: &Path) -> String {
     let script = script
-        .replace("$USAGI_MCP_FIXTURE_LOG", log.to_str().unwrap())
-        .replace("$USAGI_E2E_USAGI", env!("CARGO_BIN_EXE_usagi"));
+        .replace(
+            "$USAGI_MCP_FIXTURE_LOG",
+            &shell_double_quote_content(log.to_str().unwrap()),
+        )
+        .replace(
+            "$USAGI_E2E_USAGI",
+            &shell_double_quote_content(env!("CARGO_BIN_EXE_usagi")),
+        );
     let capture = format!(
         "if ! [ \"$1\" = login ] || ! [ \"$2\" = status ]; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; fi\n",
         argv.display()
@@ -709,6 +726,20 @@ fn materialize_fixture_script(script: &str, log: &Path, argv: &Path) -> String {
         || format!("{capture}{script}"),
         |body| format!("#!/bin/sh\n{capture}{body}"),
     )
+}
+
+#[test]
+fn fixture_materialization_preserves_shell_metacharacters_as_path_text() {
+    let value = r#"/tmp/$HOME/`target`/a"b\c"#;
+    let output = Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("printf '%s' \"{}\"", shell_double_quote_content(value)),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, value.as_bytes());
 }
 
 fn install_fixture_agent(

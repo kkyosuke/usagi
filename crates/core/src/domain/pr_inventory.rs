@@ -10,6 +10,77 @@ use serde::{Deserialize, Serialize};
 /// the whole allowance, later automatic discoveries are ignored.
 pub const PR_INVENTORY_ENTRIES_MAX: usize = 256;
 
+/// Canonical, case-insensitive GitHub repository identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct GitHubRepository(String);
+
+impl GitHubRepository {
+    /// Parses an HTTPS, SSH URL, or SCP-style GitHub remote without accepting
+    /// credentials, ports, query strings, or paths outside one repository.
+    #[must_use]
+    pub fn from_remote(remote: &str) -> Option<Self> {
+        if remote.chars().any(char::is_control) {
+            return None;
+        }
+        let path = remote
+            .strip_prefix("https://github.com/")
+            .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+            .or_else(|| remote.strip_prefix("git@github.com:"))?;
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        Self::from_name_with_owner(path)
+    }
+
+    /// Parses GitHub's `owner/repository` identity.
+    #[must_use]
+    pub fn from_name_with_owner(value: &str) -> Option<Self> {
+        let (owner, repository) = value.split_once('/')?;
+        if repository.contains('/')
+            || !valid_github_owner(owner)
+            || !valid_github_repository(repository)
+        {
+            return None;
+        }
+        Some(Self(format!(
+            "{}/{}",
+            owner.to_ascii_lowercase(),
+            repository.to_ascii_lowercase()
+        )))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn valid_github_owner(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn valid_github_repository(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+impl<'de> Deserialize<'de> for GitHubRepository {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_name_with_owner(&value)
+            .ok_or_else(|| serde::de::Error::custom("invalid GitHub repository identity"))
+    }
+}
+
 /// Canonical GitHub pull-request identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PrIdentity(String);
@@ -38,6 +109,12 @@ impl PrIdentity {
             .next()
             .and_then(|number| number.parse().ok())
             .unwrap_or(0)
+    }
+
+    /// Whether this pull request belongs to the trusted repository.
+    #[must_use]
+    pub fn belongs_to(&self, repository: &GitHubRepository) -> bool {
+        GitHubRepository::from_name_with_owner(self.repository()).as_ref() == Some(repository)
     }
 }
 
@@ -442,6 +519,47 @@ mod tests {
                 .as_url(),
             "https://github.com/o/r/pull/1"
         );
+    }
+
+    #[test]
+    fn repository_identity_accepts_only_one_canonical_github_remote() {
+        let expected = GitHubRepository::from_name_with_owner("Acme/Widgets").unwrap();
+        assert_eq!(expected.as_str(), "acme/widgets");
+        for remote in [
+            "https://github.com/Acme/Widgets.git",
+            "ssh://git@github.com/acme/widgets.git",
+            "git@github.com:ACME/WIDGETS.git",
+        ] {
+            assert_eq!(
+                GitHubRepository::from_remote(remote),
+                Some(expected.clone())
+            );
+        }
+        for invalid in [
+            "https://example.com/acme/widgets.git",
+            "https://user@github.com/acme/widgets.git",
+            "https://github.com/acme/widgets/extra",
+            "https://github.com/acme/widgets?ref=other",
+            "https://github.com/acme/widgets#fragment",
+            "git@github.com:acme/widgets\nother",
+        ] {
+            assert!(GitHubRepository::from_remote(invalid).is_none());
+        }
+        assert!(
+            canonicalize("https://github.com/ACME/widgets/pull/42")
+                .unwrap()
+                .belongs_to(&expected)
+        );
+        assert!(
+            !canonicalize("https://github.com/other/widgets/pull/42")
+                .unwrap()
+                .belongs_to(&expected)
+        );
+        assert_eq!(
+            serde_json::from_str::<GitHubRepository>(r#""ACME/Widgets""#).unwrap(),
+            expected
+        );
+        assert!(serde_json::from_str::<GitHubRepository>(r#""acme/widgets/extra""#).is_err());
     }
     #[test]
     fn rejects_unsafe_candidates() {

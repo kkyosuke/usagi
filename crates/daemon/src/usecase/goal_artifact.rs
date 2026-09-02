@@ -4,19 +4,22 @@
 //! and asks the provider through a fixed argv boundary before producing the
 //! redaction-safe fact accepted by the supervisor reducer.
 
+use std::path::Path;
+
 use sha2::{Digest, Sha256};
 use usagi_core::domain::{
     agent::StructuredResult,
-    pr_inventory::{PrChecksState, PrState, canonicalize},
-    supervisor::{ArtifactContract, GOAL_REVIEW_READY_ARTIFACT_CONTRACT},
+    pr_inventory::{GitHubRepository, PrChecksState, PrState, canonicalize},
+    supervisor::{ArtifactContract, ArtifactExpectation, GOAL_REVIEW_READY_ARTIFACT_CONTRACT},
 };
 
 use super::{
     pr_inventory::{GhProcessPort, gh_pr_view_argv, parse_gh_pr_view},
-    supervisor_runtime::{ArtifactVerification, ArtifactVerifier},
+    supervisor_runtime::{ArtifactVerification, ArtifactVerificationStatus, ArtifactVerifier},
 };
 
 const VERIFY_TIMEOUT_MS: u64 = 5_000;
+const GIT_FACT_TIMEOUT_MS: u64 = 2_000;
 
 /// Goal artifact verifier with an injected provider process boundary.
 pub struct GoalArtifactVerifier<R> {
@@ -46,10 +49,66 @@ fn evidence_digest(value: &str) -> String {
 
 fn rejected(reason: &'static str) -> ArtifactVerification {
     ArtifactVerification {
-        passed: false,
+        status: ArtifactVerificationStatus::Rejected,
         result_digest: evidence_digest(reason),
         safe_summary: reason.into(),
     }
+}
+
+fn retryable(reason: &'static str) -> ArtifactVerification {
+    ArtifactVerification {
+        status: ArtifactVerificationStatus::Retryable,
+        result_digest: evidence_digest(reason),
+        safe_summary: reason.into(),
+    }
+}
+
+/// Resolves the repository before a Goal worker is spawned.
+///
+/// # Errors
+/// Returns a retryable verification fact when trusted Git identity cannot be
+/// obtained or validated.
+pub fn resolve_artifact_repository<R: GhProcessPort>(
+    runner: &mut R,
+    workspace_root: &Path,
+) -> Result<GitHubRepository, ArtifactVerification> {
+    let Some(root) = workspace_root.to_str() else {
+        return Err(retryable("workspace Git identity is unavailable"));
+    };
+    let argv = ["-C", root, "remote", "get-url", "origin"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let remote = runner
+        .run("git", &argv, GIT_FACT_TIMEOUT_MS)
+        .map_err(|_| retryable("workspace Git remote is unavailable"))?;
+    GitHubRepository::from_remote(remote.trim())
+        .ok_or_else(|| retryable("workspace GitHub repository identity is unavailable"))
+}
+
+/// Resolves the exact completed revision while retaining the repository pinned
+/// before worker spawn. The root path is an argv value, never shell syntax.
+///
+/// # Errors
+/// Returns a retryable verification fact when the Git revision cannot be
+/// obtained or validated.
+pub fn resolve_artifact_expectation<R: GhProcessPort>(
+    runner: &mut R,
+    workspace_root: &Path,
+    repository: GitHubRepository,
+) -> Result<ArtifactExpectation, ArtifactVerification> {
+    let Some(root) = workspace_root.to_str() else {
+        return Err(retryable("workspace Git identity is unavailable"));
+    };
+    let argv = ["-C", root, "rev-parse", "HEAD"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let head = runner
+        .run("git", &argv, GIT_FACT_TIMEOUT_MS)
+        .map_err(|_| retryable("workspace Git revision is unavailable"))?;
+    ArtifactExpectation::new(repository, head.trim())
+        .ok_or_else(|| retryable("workspace Git revision is invalid"))
 }
 
 impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
@@ -57,6 +116,7 @@ impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
         &mut self,
         contract: ArtifactContract,
         result: Option<&StructuredResult>,
+        expectation: &ArtifactExpectation,
     ) -> ArtifactVerification {
         if contract != GOAL_REVIEW_READY_ARTIFACT_CONTRACT {
             return rejected("unsupported artifact contract");
@@ -67,14 +127,17 @@ impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
         let Some(identity) = canonicalize(candidate.trim()) else {
             return rejected("completion reported an invalid GitHub pull request URL");
         };
+        if !identity.belongs_to(expectation.repository()) {
+            return rejected("pull request belongs to another repository");
+        }
         let Ok(output) = self
             .runner
             .run("gh", &gh_pr_view_argv(&identity), VERIFY_TIMEOUT_MS)
         else {
-            return rejected("pull request verification provider is unavailable");
+            return retryable("pull request verification provider is unavailable");
         };
         let Some(view) = parse_gh_pr_view(&output) else {
-            return rejected("pull request verification returned an invalid response");
+            return retryable("pull request verification returned an invalid response");
         };
         if view.state != PrState::Open {
             return rejected("pull request is not open");
@@ -82,11 +145,14 @@ impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
         if view.draft {
             return rejected("pull request is still a draft");
         }
-        if matches!(
-            view.checks,
-            Some(PrChecksState::Failing | PrChecksState::Pending)
-        ) {
+        if !view.head_oid.eq_ignore_ascii_case(expectation.head_oid()) {
+            return rejected("pull request head does not match the completed workspace revision");
+        }
+        if view.checks == Some(PrChecksState::Failing) {
             return rejected("pull request checks are not passing");
+        }
+        if view.checks == Some(PrChecksState::Pending) {
+            return retryable("pull request checks are still pending");
         }
         // Failing and pending returned above. Keep the accepted-state mapping
         // closed over only the two values which can actually reach evidence.
@@ -102,7 +168,7 @@ impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
             )
         };
         ArtifactVerification {
-            passed: true,
+            status: ArtifactVerificationStatus::Verified,
             result_digest: evidence_digest(&format!(
                 "url={}\nhead={}\nstate=open\ndraft=false\nchecks={checks}",
                 identity.as_url(),
@@ -135,6 +201,26 @@ mod tests {
         }
     }
 
+    struct GitRunner {
+        outputs: VecDeque<Result<String, ()>>,
+        calls: Vec<(String, Vec<String>, u64)>,
+    }
+
+    impl GhProcessPort for GitRunner {
+        type Error = ();
+
+        fn run(
+            &mut self,
+            program: &str,
+            argv: &[String],
+            timeout_ms: u64,
+        ) -> Result<String, Self::Error> {
+            self.calls
+                .push((program.to_owned(), argv.to_vec(), timeout_ms));
+            self.outputs.pop_front().unwrap()
+        }
+    }
+
     fn result(pr: Option<&str>) -> StructuredResult {
         StructuredResult {
             pr: pr.map(str::to_owned),
@@ -148,18 +234,42 @@ mod tests {
         )
     }
 
+    fn expectation() -> ArtifactExpectation {
+        ArtifactExpectation::new(
+            usagi_core::domain::pr_inventory::GitHubRepository::from_name_with_owner("acme/repo")
+                .unwrap(),
+            "0123456789012345678901234567890123456789",
+        )
+        .unwrap()
+    }
+
     #[test]
     fn only_an_open_non_draft_pr_with_passing_checks_satisfies_the_contract() {
         let cases = [
-            (view("OPEN", false, r#"[{"conclusion":"SUCCESS"}]"#), true),
-            (view("OPEN", false, "[]"), true),
-            (view("OPEN", true, r#"[{"conclusion":"SUCCESS"}]"#), false),
+            (
+                view("OPEN", false, r#"[{"conclusion":"SUCCESS"}]"#),
+                ArtifactVerificationStatus::Verified,
+            ),
+            (
+                view("OPEN", false, "[]"),
+                ArtifactVerificationStatus::Verified,
+            ),
+            (
+                view("OPEN", true, r#"[{"conclusion":"SUCCESS"}]"#),
+                ArtifactVerificationStatus::Rejected,
+            ),
             (
                 view("CLOSED", false, r#"[{"conclusion":"SUCCESS"}]"#),
-                false,
+                ArtifactVerificationStatus::Rejected,
             ),
-            (view("OPEN", false, r#"[{"conclusion":"PENDING"}]"#), false),
-            (view("OPEN", false, r#"[{"conclusion":"FAILURE"}]"#), false),
+            (
+                view("OPEN", false, r#"[{"conclusion":"PENDING"}]"#),
+                ArtifactVerificationStatus::Retryable,
+            ),
+            (
+                view("OPEN", false, r#"[{"conclusion":"FAILURE"}]"#),
+                ArtifactVerificationStatus::Rejected,
+            ),
         ];
         for (provider, expected) in cases {
             let mut verifier = GoalArtifactVerifier::new(Runner([Ok(provider)].into()));
@@ -167,9 +277,10 @@ mod tests {
                 verifier
                     .verify(
                         GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
-                        Some(&result(Some("https://github.com/acme/repo/pull/42")))
+                        Some(&result(Some("https://github.com/acme/repo/pull/42"))),
+                        &expectation(),
                     )
-                    .passed,
+                    .status,
                 expected
             );
         }
@@ -178,20 +289,23 @@ mod tests {
     #[test]
     fn missing_invalid_and_provider_failures_are_safe_rejections() {
         let mut unavailable = GoalArtifactVerifier::new(Runner([Err(())].into()));
-        assert!(
-            !unavailable
+        assert_eq!(
+            unavailable
                 .verify(
                     GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
-                    Some(&result(Some("https://github.com/acme/repo/pull/42")))
+                    Some(&result(Some("https://github.com/acme/repo/pull/42"))),
+                    &expectation(),
                 )
-                .passed
+                .status,
+            ArtifactVerificationStatus::Retryable
         );
         let mut malformed = GoalArtifactVerifier::new(Runner([Ok("not json".into())].into()));
         let malformed = malformed.verify(
             GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
             Some(&result(Some("https://github.com/acme/repo/pull/42"))),
+            &expectation(),
         );
-        assert!(!malformed.passed);
+        assert_eq!(malformed.status, ArtifactVerificationStatus::Retryable);
         assert_eq!(
             malformed.safe_summary,
             "pull request verification returned an invalid response"
@@ -208,7 +322,171 @@ mod tests {
                 result(Some("not a pr")),
             ),
         ] {
-            assert!(!never_called.verify(contract, Some(&result)).passed);
+            assert_eq!(
+                never_called
+                    .verify(contract, Some(&result), &expectation())
+                    .status,
+                ArtifactVerificationStatus::Rejected
+            );
+        }
+
+        let wrong_repository = never_called.verify(
+            GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            Some(&result(Some("https://github.com/other/repo/pull/42"))),
+            &expectation(),
+        );
+        assert_eq!(
+            wrong_repository.status,
+            ArtifactVerificationStatus::Rejected
+        );
+        assert_eq!(
+            wrong_repository.safe_summary,
+            "pull request belongs to another repository"
+        );
+
+        let wrong_head = ArtifactExpectation::new(
+            usagi_core::domain::pr_inventory::GitHubRepository::from_name_with_owner("acme/repo")
+                .unwrap(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let mut verifier = GoalArtifactVerifier::new(Runner(
+            [Ok(view("OPEN", false, r#"[{"conclusion":"SUCCESS"}]"#))].into(),
+        ));
+        let wrong_head = verifier.verify(
+            GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            Some(&result(Some("https://github.com/acme/repo/pull/42"))),
+            &wrong_head,
+        );
+        assert_eq!(wrong_head.status, ArtifactVerificationStatus::Rejected);
+        assert_eq!(
+            wrong_head.safe_summary,
+            "pull request head does not match the completed workspace revision"
+        );
+    }
+
+    #[test]
+    fn workspace_git_facts_use_fixed_argv_and_are_normalized_once() {
+        let root = Path::new("/tmp/work tree;not-shell");
+        let mut runner = GitRunner {
+            outputs: [
+                Ok("git@github.com:Acme/Repo.git\n".into()),
+                Ok("ABCDEF0123456789ABCDEF0123456789ABCDEF01\n".into()),
+            ]
+            .into(),
+            calls: Vec::new(),
+        };
+        let repository = resolve_artifact_repository(&mut runner, root).unwrap();
+        let expectation = resolve_artifact_expectation(&mut runner, root, repository).unwrap();
+        assert_eq!(expectation.repository().as_str(), "acme/repo");
+        assert_eq!(
+            expectation.head_oid(),
+            "abcdef0123456789abcdef0123456789abcdef01"
+        );
+        assert_eq!(
+            runner.calls,
+            vec![
+                (
+                    "git".into(),
+                    vec![
+                        "-C".into(),
+                        "/tmp/work tree;not-shell".into(),
+                        "remote".into(),
+                        "get-url".into(),
+                        "origin".into(),
+                    ],
+                    GIT_FACT_TIMEOUT_MS,
+                ),
+                (
+                    "git".into(),
+                    vec![
+                        "-C".into(),
+                        "/tmp/work tree;not-shell".into(),
+                        "rev-parse".into(),
+                        "HEAD".into(),
+                    ],
+                    GIT_FACT_TIMEOUT_MS,
+                ),
+            ]
+        );
+
+        let mut invalid = GitRunner {
+            outputs: [
+                Ok("https://github.com/acme/repo.git".into()),
+                Ok("not-a-git-object".into()),
+            ]
+            .into(),
+            calls: Vec::new(),
+        };
+        let repository = resolve_artifact_repository(&mut invalid, root).unwrap();
+        assert_eq!(
+            resolve_artifact_expectation(&mut invalid, root, repository)
+                .unwrap_err()
+                .status,
+            ArtifactVerificationStatus::Retryable
+        );
+    }
+
+    #[test]
+    fn workspace_git_fact_failures_are_retryable_and_effect_free() {
+        let root = Path::new("/tmp/work tree;not-shell");
+        for mut unavailable in [
+            GitRunner {
+                outputs: [Err(())].into(),
+                calls: Vec::new(),
+            },
+            GitRunner {
+                outputs: [Ok("not-a-github-remote".into())].into(),
+                calls: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                resolve_artifact_repository(&mut unavailable, root)
+                    .unwrap_err()
+                    .status,
+                ArtifactVerificationStatus::Retryable
+            );
+        }
+        let mut revision_unavailable = GitRunner {
+            outputs: [Err(())].into(),
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            resolve_artifact_expectation(
+                &mut revision_unavailable,
+                root,
+                usagi_core::domain::pr_inventory::GitHubRepository::from_name_with_owner(
+                    "acme/repo",
+                )
+                .unwrap(),
+            )
+            .unwrap_err()
+            .status,
+            ArtifactVerificationStatus::Retryable
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let non_utf8 = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&[0xff]));
+            let mut never_called = GitRunner {
+                outputs: VecDeque::new(),
+                calls: Vec::new(),
+            };
+            assert!(resolve_artifact_repository(&mut never_called, &non_utf8).is_err());
+            assert!(
+                resolve_artifact_expectation(
+                    &mut never_called,
+                    &non_utf8,
+                    usagi_core::domain::pr_inventory::GitHubRepository::from_name_with_owner(
+                        "acme/repo",
+                    )
+                    .unwrap(),
+                )
+                .is_err()
+            );
+            assert!(never_called.calls.is_empty());
         }
     }
 }

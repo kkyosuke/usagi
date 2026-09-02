@@ -11,7 +11,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use uuid::Uuid;
 
-use crate::domain::id::{AgentRuntimeId, OperationId, SessionId, WorkspaceId, WorktreeId};
+use crate::domain::{
+    id::{AgentRuntimeId, OperationId, SessionId, WorkspaceId, WorktreeId},
+    pr_inventory::GitHubRepository,
+};
 
 /// A `UUIDv7` identity for one never-reused supervisor run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -60,6 +63,56 @@ pub const MAX_TASK_DEPENDENCIES: usize = 128;
 pub const MAX_SUPERVISOR_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_SUPERVISOR_REASON_BYTES: usize = 4 * 1024;
 pub const MAX_SUPERVISOR_KEY_BYTES: usize = 256;
+/// Artifact provider retries begin here and never exceed the maximum below.
+pub const ARTIFACT_RETRY_BASE_SECONDS: i64 = 5;
+pub const ARTIFACT_RETRY_MAX_SECONDS: i64 = 5 * 60;
+
+/// Trusted repository and immutable revision an artifact must prove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ArtifactExpectationWire")]
+pub struct ArtifactExpectation {
+    repository: GitHubRepository,
+    head_oid: String,
+}
+
+#[derive(Deserialize)]
+struct ArtifactExpectationWire {
+    repository: GitHubRepository,
+    head_oid: String,
+}
+
+impl ArtifactExpectation {
+    #[must_use]
+    pub fn new(repository: GitHubRepository, head_oid: &str) -> Option<Self> {
+        if !matches!(head_oid.len(), 40 | 64)
+            || !head_oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        Some(Self {
+            repository,
+            head_oid: head_oid.to_ascii_lowercase(),
+        })
+    }
+
+    #[must_use]
+    pub const fn repository(&self) -> &GitHubRepository {
+        &self.repository
+    }
+
+    #[must_use]
+    pub fn head_oid(&self) -> &str {
+        &self.head_oid
+    }
+}
+
+impl TryFrom<ArtifactExpectationWire> for ArtifactExpectation {
+    type Error = &'static str;
+
+    fn try_from(wire: ArtifactExpectationWire) -> Result<Self, Self::Error> {
+        Self::new(wire.repository, &wire.head_oid).ok_or("invalid artifact expectation")
+    }
+}
 
 /// Closed vocabulary for independently verified task outputs.
 ///
@@ -87,11 +140,6 @@ impl ArtifactContract {
     #[must_use]
     pub const fn requires_verification(self) -> bool {
         !matches!(self, Self::None)
-    }
-
-    #[must_use]
-    pub const fn all() -> &'static [Self] {
-        &Self::ALL
     }
 }
 
@@ -248,12 +296,26 @@ pub struct TaskNode {
     pub attempt: u64,
     pub generation: u64,
     pub assigned_dispatch_run: Option<OperationId>,
+    /// Set only for a task durably reserved before Agent admission. It lets
+    /// recovery distinguish a live in-flight promotion from an orphan.
+    #[serde(default)]
+    pub promotion_reserved_at: Option<DateTime<Utc>>,
     /// The deterministic retry deadline.  It is part of the aggregate rather
     /// than scheduler memory so a restart cannot make a retry run early.
     pub retry_at: Option<DateTime<Utc>>,
     /// A worker report is not evidence.  Tasks with a non-`none` contract are
     /// held in `Verifying` until an independently recorded result is accepted.
     pub verification_digest: Option<String>,
+    /// Retry state for provider-unavailable verification. Both fields are
+    /// durable so restart cannot retry early or forget exponential progress.
+    #[serde(default)]
+    pub verification_attempt: u32,
+    #[serde(default)]
+    pub verification_retry_at: Option<DateTime<Utc>>,
+    /// Pinned before the first remote provider call so later workspace changes
+    /// cannot silently redefine the artifact being proved.
+    #[serde(default)]
+    pub verification_expectation: Option<ArtifactExpectation>,
     pub state: TaskState,
 }
 
@@ -364,6 +426,21 @@ pub enum SupervisorEventKind {
         #[serde(default)]
         safe_summary: String,
     },
+    /// Records a retryable provider observation without turning it into a
+    /// semantic artifact rejection.
+    VerificationDeferred {
+        task_id: TaskId,
+        generation: u64,
+        result_digest: String,
+        safe_summary: String,
+        retry_at: DateTime<Utc>,
+    },
+    /// Pins daemon-resolved Git facts before any remote provider call.
+    VerificationExpectationRecorded {
+        task_id: TaskId,
+        generation: u64,
+        expectation: ArtifactExpectation,
+    },
     /// Cancelling is a reducer fact so late dispatch completion cannot revive
     /// the task or run.
     Cancel {
@@ -412,6 +489,10 @@ pub struct SupervisorRun {
     /// workspace-scoped observer rather than being guessed into one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<WorkspaceId>,
+    /// Trusted before a Goal worker is spawned. Generic and legacy runs omit
+    /// it and therefore cannot satisfy a repository-bound artifact contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_repository: Option<GitHubRepository>,
     pub root_caller_ref: String,
     pub root_task_digest: String,
     pub root_input_digest: String,
@@ -482,6 +563,7 @@ impl SupervisorRun {
         Self {
             supervisor_run_id,
             workspace_id: None,
+            artifact_repository: None,
             root_caller_ref,
             root_task_digest,
             root_input_digest,
@@ -615,6 +697,10 @@ pub struct TaskQuery {
     pub attempt: u64,
     pub generation: u64,
     pub assigned_dispatch_run: Option<OperationId>,
+    #[serde(default)]
+    pub verification_attempt: u32,
+    #[serde(default)]
+    pub verification_retry_at: Option<DateTime<Utc>>,
     pub state: TaskState,
 }
 impl From<&TaskNode> for TaskQuery {
@@ -628,6 +714,8 @@ impl From<&TaskNode> for TaskQuery {
             attempt: task.attempt,
             generation: task.generation,
             assigned_dispatch_run: task.assigned_dispatch_run,
+            verification_attempt: task.verification_attempt,
+            verification_retry_at: task.verification_retry_at,
             state: task.state,
         }
     }
@@ -730,22 +818,10 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
             task_id,
             generation,
         } => retry_ready(&mut next, task_id, *generation, event.observed_at)?,
-        SupervisorEventKind::VerificationResult {
-            task_id,
-            generation,
-            passed,
-            result_digest,
-            safe_summary,
-        } => {
-            verification_result(
-                &mut next,
-                task_id,
-                *generation,
-                *passed,
-                result_digest,
-                safe_summary,
-                event,
-            )?;
+        SupervisorEventKind::VerificationResult { .. }
+        | SupervisorEventKind::VerificationDeferred { .. }
+        | SupervisorEventKind::VerificationExpectationRecorded { .. } => {
+            reduce_verification_event(&mut next, event)?;
         }
         SupervisorEventKind::Cancel { task_id, reason } => {
             cancel(&mut next, task_id.as_ref(), reason, event.observed_at)?;
@@ -774,6 +850,50 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
     next.applied_events.insert(event.event_id);
     *run = next;
     Ok(())
+}
+
+fn reduce_verification_event(
+    run: &mut SupervisorRun,
+    event: &SupervisorEvent,
+) -> Result<(), SupervisorError> {
+    match &event.kind {
+        SupervisorEventKind::VerificationResult {
+            task_id,
+            generation,
+            passed,
+            result_digest,
+            safe_summary,
+        } => verification_result(
+            run,
+            task_id,
+            *generation,
+            *passed,
+            result_digest,
+            safe_summary,
+            event,
+        ),
+        SupervisorEventKind::VerificationDeferred {
+            task_id,
+            generation,
+            result_digest,
+            safe_summary,
+            retry_at,
+        } => verification_deferred(
+            run,
+            task_id,
+            *generation,
+            result_digest,
+            safe_summary,
+            *retry_at,
+            event.observed_at,
+        ),
+        SupervisorEventKind::VerificationExpectationRecorded {
+            task_id,
+            generation,
+            expectation,
+        } => record_verification_expectation(run, task_id, *generation, expectation),
+        _ => unreachable!("caller selects only verification events"),
+    }
 }
 
 fn add_task(run: &mut SupervisorRun, mut task: TaskNode) -> Result<(), SupervisorError> {
@@ -960,6 +1080,10 @@ fn set_task(
             .saturating_mul(1_i64 << (task.attempt - 2).min(30));
         task.retry_at = Some(run.updated_at + chrono::Duration::seconds(delay));
         task.assigned_dispatch_run = None;
+        task.verification_digest = None;
+        task.verification_attempt = 0;
+        task.verification_retry_at = None;
+        task.verification_expectation = None;
         task.state = TaskState::Retrying;
         return Ok(());
     }
@@ -1013,6 +1137,7 @@ fn verification_result(
         return Err(SupervisorError::InvalidTransition);
     }
     task.verification_digest = Some(digest.into());
+    task.verification_retry_at = None;
     if passed {
         task.state = TaskState::Succeeded;
         project_ready(&mut run.tasks);
@@ -1032,6 +1157,63 @@ fn verification_result(
         );
     }
     Ok(())
+}
+
+fn verification_deferred(
+    run: &mut SupervisorRun,
+    task_id: &TaskId,
+    generation: u64,
+    digest: &str,
+    safe_summary: &str,
+    retry_at: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
+) -> Result<(), SupervisorError> {
+    let task = run
+        .tasks
+        .get_mut(task_id)
+        .ok_or(SupervisorError::MissingTask)?;
+    if task.generation != generation {
+        return Err(SupervisorError::StaleGeneration);
+    }
+    let latest = observed_at + chrono::Duration::seconds(ARTIFACT_RETRY_MAX_SECONDS);
+    if task.state != TaskState::Verifying
+        || retry_at <= observed_at
+        || retry_at > latest
+        || digest.is_empty()
+        || safe_summary.is_empty()
+    {
+        return Err(SupervisorError::InvalidTransition);
+    }
+    task.verification_digest = Some(digest.into());
+    task.verification_attempt = task.verification_attempt.saturating_add(1);
+    task.verification_retry_at = Some(retry_at);
+    Ok(())
+}
+
+fn record_verification_expectation(
+    run: &mut SupervisorRun,
+    task_id: &TaskId,
+    generation: u64,
+    expectation: &ArtifactExpectation,
+) -> Result<(), SupervisorError> {
+    let task = run
+        .tasks
+        .get_mut(task_id)
+        .ok_or(SupervisorError::MissingTask)?;
+    if task.generation != generation {
+        return Err(SupervisorError::StaleGeneration);
+    }
+    if task.state != TaskState::Verifying {
+        return Err(SupervisorError::InvalidTransition);
+    }
+    match &task.verification_expectation {
+        Some(existing) if existing == expectation => Ok(()),
+        Some(_) => Err(SupervisorError::ProvenanceMismatch),
+        None => {
+            task.verification_expectation = Some(expectation.clone());
+            Ok(())
+        }
+    }
 }
 fn cancel(
     run: &mut SupervisorRun,
@@ -1139,8 +1321,12 @@ mod tests {
             attempt: 1,
             generation: 1,
             assigned_dispatch_run: None,
+            promotion_reserved_at: None,
             retry_at: None,
             verification_digest: None,
+            verification_attempt: 0,
+            verification_retry_at: None,
+            verification_expectation: None,
             state: TaskState::Pending,
         }
     }
@@ -1178,6 +1364,67 @@ mod tests {
             NO_ARTIFACT_CONTRACT
         );
         assert!(serde_json::from_str::<ArtifactContract>(r#""unknown""#).is_err());
+        let repository = GitHubRepository::from_name_with_owner("acme/repo").unwrap();
+        assert!(ArtifactExpectation::new(repository.clone(), "not-an-oid").is_none());
+        let expectation = ArtifactExpectation::new(
+            repository.clone(),
+            "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+        )
+        .unwrap();
+        assert_eq!(expectation.repository(), &repository);
+        assert_eq!(
+            expectation.head_oid(),
+            "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        );
+        let mut invalid_head = serde_json::to_value(&expectation).unwrap();
+        invalid_head["head_oid"] = serde_json::json!("not-an-oid");
+        assert!(serde_json::from_value::<ArtifactExpectation>(invalid_head).is_err());
+        let mut missing_head = serde_json::to_value(&expectation).unwrap();
+        missing_head.as_object_mut().unwrap().remove("head_oid");
+        assert!(serde_json::from_value::<ArtifactExpectation>(missing_head).is_err());
+        let missing_repository = serde_json::json!({
+            "head_oid": "0123456789012345678901234567890123456789"
+        });
+        assert!(serde_json::from_value::<ArtifactExpectation>(missing_repository).is_err());
+        let expectation_event = SupervisorEventKind::VerificationExpectationRecorded {
+            task_id: TaskId::new("root").unwrap(),
+            generation: 1,
+            expectation,
+        };
+        let expectation_event_wire = serde_json::to_value(&expectation_event).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SupervisorEventKind>(expectation_event_wire.clone()).unwrap(),
+            expectation_event
+        );
+        let mut missing_expectation = expectation_event_wire.clone();
+        missing_expectation["VerificationExpectationRecorded"]
+            .as_object_mut()
+            .unwrap()
+            .remove("expectation");
+        assert!(serde_json::from_value::<SupervisorEventKind>(missing_expectation).is_err());
+        let mut invalid_event_expectation = expectation_event_wire;
+        invalid_event_expectation["VerificationExpectationRecorded"]["expectation"]["head_oid"] =
+            serde_json::json!("not-an-oid");
+        assert!(serde_json::from_value::<SupervisorEventKind>(invalid_event_expectation).is_err());
+        assert!(
+            serde_json::from_str::<ArtifactExpectation>(
+                r#"{"repository":"acme/repo","repository":"other/repo","head_oid":"0123456789012345678901234567890123456789"}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ArtifactExpectation>(
+                r#"{"repository":"acme/repo","head_oid":"0123456789012345678901234567890123456789","head_oid":"0123456789012345678901234567890123456789"}"#,
+            )
+            .is_err()
+        );
+        let with_unknown = serde_json::json!({
+            "repository": "acme/repo",
+            "head_oid": "0123456789012345678901234567890123456789",
+            "future_field": true
+        });
+        assert!(serde_json::from_value::<ArtifactExpectation>(with_unknown).is_ok());
+        assert!(serde_json::from_str::<ArtifactExpectation>(r#""not-an-expectation""#).is_err());
         for unsafe_id in [
             "line\nbreak",
             "escape\u{1b}[2J",
@@ -1201,6 +1448,29 @@ mod tests {
             source: SupervisorEventSource::Admission,
             kind,
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "caller selects only verification events")]
+    fn verification_reducer_rejects_a_non_verification_event() {
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        reduce_verification_event(
+            &mut run,
+            &event(
+                1,
+                SupervisorEventKind::SetRunState {
+                    state: SupervisorRunState::Failed,
+                    terminal_reason: Some("invalid routing fixture".into()),
+                },
+            ),
+        )
+        .unwrap();
     }
     #[test]
     fn dag_projects_only_satisfied_tasks_and_duplicate_is_noop() {
@@ -1494,8 +1764,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn verification_and_retry_are_durable_gates() {
+    fn verifying_artifact_run() -> (SupervisorRun, TaskId) {
         let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now())
             .with_policy(ExecutionPolicy {
                 max_dispatches: 3,
@@ -1559,6 +1828,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.tasks[&id].state, TaskState::Verifying);
+        (run, id)
+    }
+
+    #[test]
+    fn verification_and_retry_are_durable_gates() {
+        let (mut run, id) = verifying_artifact_run();
         reduce(
             &mut run,
             &event(
@@ -1574,6 +1849,170 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.tasks[&id].state, TaskState::Succeeded);
+    }
+
+    #[test]
+    fn verification_generation_and_state_fences_are_explicit() {
+        let (run, id) = verifying_artifact_run();
+        let expectation = ArtifactExpectation::new(
+            GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+            "0123456789012345678901234567890123456789",
+        )
+        .unwrap();
+        let mut stale_retry = run.clone();
+        assert!(matches!(
+            reduce(
+                &mut stale_retry,
+                &event(
+                    5,
+                    SupervisorEventKind::VerificationDeferred {
+                        task_id: id.clone(),
+                        generation: 2,
+                        result_digest: "provider".into(),
+                        safe_summary: "unavailable".into(),
+                        retry_at: now() + chrono::Duration::seconds(1),
+                    },
+                ),
+            ),
+            Err(SupervisorError::StaleGeneration)
+        ));
+        let mut stale_expectation = run.clone();
+        assert!(matches!(
+            reduce(
+                &mut stale_expectation,
+                &event(
+                    5,
+                    SupervisorEventKind::VerificationExpectationRecorded {
+                        task_id: id.clone(),
+                        generation: 2,
+                        expectation: expectation.clone(),
+                    },
+                ),
+            ),
+            Err(SupervisorError::StaleGeneration)
+        ));
+        let mut invalid_state = run.clone();
+        invalid_state.tasks.get_mut(&id).unwrap().state = TaskState::Running;
+        assert!(matches!(
+            reduce(
+                &mut invalid_state,
+                &event(
+                    5,
+                    SupervisorEventKind::VerificationExpectationRecorded {
+                        task_id: id.clone(),
+                        generation: 1,
+                        expectation: expectation.clone(),
+                    },
+                ),
+            ),
+            Err(SupervisorError::InvalidTransition)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One scenario keeps the immutable expectation and bounded deferral sequence visible.
+    fn verification_expectation_is_immutable_and_deadline_is_future_bounded() {
+        let (mut run, id) = verifying_artifact_run();
+        let expectation = ArtifactExpectation::new(
+            GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+            "0123456789012345678901234567890123456789",
+        )
+        .unwrap();
+        for retry_at in [
+            now(),
+            now() + chrono::Duration::seconds(ARTIFACT_RETRY_MAX_SECONDS + 1),
+        ] {
+            assert!(matches!(
+                reduce(
+                    &mut run,
+                    &event(
+                        5,
+                        SupervisorEventKind::VerificationDeferred {
+                            task_id: id.clone(),
+                            generation: 1,
+                            result_digest: "provider".into(),
+                            safe_summary: "unavailable".into(),
+                            retry_at,
+                        },
+                    ),
+                ),
+                Err(SupervisorError::InvalidTransition)
+            ));
+        }
+        for (result_digest, safe_summary) in [("", "unavailable"), ("provider", "")] {
+            assert!(matches!(
+                reduce(
+                    &mut run,
+                    &event(
+                        5,
+                        SupervisorEventKind::VerificationDeferred {
+                            task_id: id.clone(),
+                            generation: 1,
+                            result_digest: result_digest.into(),
+                            safe_summary: safe_summary.into(),
+                            retry_at: now() + chrono::Duration::seconds(1),
+                        },
+                    ),
+                ),
+                Err(SupervisorError::InvalidTransition)
+            ));
+        }
+        reduce(
+            &mut run,
+            &event(
+                5,
+                SupervisorEventKind::VerificationExpectationRecorded {
+                    task_id: id.clone(),
+                    generation: 1,
+                    expectation: expectation.clone(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            run.tasks[&id].verification_expectation.as_ref(),
+            Some(&expectation)
+        );
+        let retry_at = now() + chrono::Duration::seconds(1);
+        reduce(
+            &mut run,
+            &event(
+                6,
+                SupervisorEventKind::VerificationDeferred {
+                    task_id: id.clone(),
+                    generation: 1,
+                    result_digest: "provider-unavailable".into(),
+                    safe_summary: "provider temporarily unavailable".into(),
+                    retry_at,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            run.tasks[&id].verification_digest.as_deref(),
+            Some("provider-unavailable")
+        );
+        assert_eq!(run.tasks[&id].verification_attempt, 1);
+        assert_eq!(run.tasks[&id].verification_retry_at, Some(retry_at));
+        let conflicting = ArtifactExpectation::new(
+            GitHubRepository::from_name_with_owner("other/repo").unwrap(),
+            "0123456789012345678901234567890123456789",
+        )
+        .unwrap();
+        assert!(matches!(
+            reduce(
+                &mut run,
+                &event(
+                    7,
+                    SupervisorEventKind::VerificationExpectationRecorded {
+                        task_id: id.clone(),
+                        generation: 1,
+                        expectation: conflicting,
+                    },
+                ),
+            ),
+            Err(SupervisorError::ProvenanceMismatch)
+        ));
     }
 
     #[test]
@@ -2253,17 +2692,47 @@ mod tests {
     }
 
     #[test]
-    fn legacy_run_without_workspace_stays_unscoped() {
-        let run = SupervisorRun::new(
+    fn legacy_supervisor_values_default_only_their_compatible_additions() {
+        let mut run = SupervisorRun::new(
             "caller".into(),
             "task".into(),
             "input".into(),
             "policy".into(),
             now(),
         );
-        let mut value = serde_json::to_value(run).unwrap();
+        let task = task(run.supervisor_run_id, "root", &[]);
+        run.tasks.insert(task.task_id.clone(), task.clone());
+        let mut value = serde_json::to_value(&run).unwrap();
         value.as_object_mut().unwrap().remove("workspace_id");
+        value.as_object_mut().unwrap().remove("artifact_repository");
+        let serialized_task = value["tasks"]["root"].as_object_mut().unwrap();
+        for field in [
+            "promotion_reserved_at",
+            "verification_attempt",
+            "verification_retry_at",
+            "verification_expectation",
+        ] {
+            serialized_task.remove(field);
+        }
         let decoded: SupervisorRun = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.workspace_id, None);
+        assert_eq!(decoded.artifact_repository, None);
+        assert_eq!(decoded.tasks[&task.task_id].promotion_reserved_at, None);
+        assert_eq!(decoded.tasks[&task.task_id].verification_attempt, 0);
+        assert_eq!(decoded.tasks[&task.task_id].verification_retry_at, None);
+        assert_eq!(decoded.tasks[&task.task_id].verification_expectation, None);
+
+        let mut query_value = serde_json::to_value(TaskQuery::from(&task)).unwrap();
+        query_value
+            .as_object_mut()
+            .unwrap()
+            .remove("verification_attempt");
+        query_value
+            .as_object_mut()
+            .unwrap()
+            .remove("verification_retry_at");
+        let decoded: TaskQuery = serde_json::from_value(query_value).unwrap();
+        assert_eq!(decoded.verification_attempt, 0);
+        assert_eq!(decoded.verification_retry_at, None);
     }
 }
