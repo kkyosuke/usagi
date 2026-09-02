@@ -15011,7 +15011,6 @@ mod tests {
             SupervisorRunState::Cancelled
         );
     }
-
     #[test]
     fn supervisor_promotion_grace_is_exact_and_future_safe() {
         let reserved_at = chrono::Utc::now();

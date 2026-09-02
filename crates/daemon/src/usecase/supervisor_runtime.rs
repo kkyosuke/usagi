@@ -1932,7 +1932,6 @@ impl SupervisorRuntime {
         obligations.dedup();
         Ok(obligations)
     }
-
     /// Reports whether a workspace still owns a non-terminal supervised run.
     /// Legacy unscoped snapshots cannot be attributed and are excluded.
     ///
