@@ -102,10 +102,10 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 }
 
 #[test]
-fn production_tools_list_fixes_the_49_tool_schema_contract() {
+fn production_tools_list_fixes_the_51_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 49);
+    assert_eq!(tools.len(), 51);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -115,6 +115,8 @@ fn production_tools_list_fixes_the_49_tool_schema_contract() {
             .as_object()
             .expect("every production tool publishes object properties");
     }
+    assert!(names.contains("terminal_list"));
+    assert!(names.contains("terminal_read"));
 }
 
 #[test]
@@ -126,11 +128,13 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 38);
+    assert_eq!(names.len(), 40);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
     assert!(names.contains(&"session_list"));
+    assert!(names.contains(&"terminal_list"));
+    assert!(names.contains(&"terminal_read"));
 
     for name in ["issue_search", "memory_search", "session_delegate_issue"] {
         let response = mcp.tool(name, &json!({}));
