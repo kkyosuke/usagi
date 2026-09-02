@@ -169,7 +169,7 @@ end
 current_markdown = [
   File.join(root, "README.md"),
   *numbered_docs,
-  *Dir.glob(File.join(root, ".agents/**/*.md")),
+  *Dir.glob(File.join(root, ".agents/*.md")),
   File.join(root, "crates/cli/src/mcp/guides/orchestration.md")
 ].uniq
 {

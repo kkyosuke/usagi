@@ -90,6 +90,10 @@ make_fixture "$tmp/legacy"
 printf '\n`usagi issue list`\n' >> "$tmp/legacy/.agents/README.md"
 expect_fail "$tmp/legacy" 'contains nonexistent issue CLI'
 
+make_fixture "$tmp/historical-legacy"
+printf '\n設計当時は `usagi <path>` と記載していた。\n' >> "$tmp/historical-legacy/.agents/designs/258-controller-runtime-migration.md"
+ruby "$subject" "$tmp/historical-legacy" >/dev/null
+
 make_fixture "$tmp/delegate-guide"
 sed -i.bak '/worker を作るため、既存 agent の `id` は指定できない/d' "$tmp/delegate-guide/crates/cli/src/mcp/guides/orchestration.md"
 expect_fail "$tmp/delegate-guide" 'orchestration guide does not explain that session_delegate_brief rejects an existing agent id'
