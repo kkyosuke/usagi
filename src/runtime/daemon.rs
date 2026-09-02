@@ -8255,8 +8255,33 @@ fn dispatch_session_action(
             }))
         }
         SessionAction::Pr => {
-            let name = string("name")?;
-            let id = named_session(name)?;
+            let (name, id) = if payload.get("name").is_some() {
+                let name = string("name")?;
+                (name.to_owned(), named_session(name)?)
+            } else {
+                let id = caller_scope()?.session_id;
+                let lifecycle = bound
+                    .sessions()
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .snapshot()
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                let name = lifecycle
+                    .get("sessions")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|sessions| {
+                        sessions.iter().find(|session| {
+                            session.get("session_id") == Some(&serde_json::json!(id))
+                                && session.get("lifecycle").and_then(serde_json::Value::as_str)
+                                    == Some("available")
+                        })
+                    })
+                    .and_then(|session| session.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(SessionRuntimeError::ScopeUnavailable)?
+                    .to_owned();
+                (name, id)
+            };
             let snapshot = pr_inventory
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?

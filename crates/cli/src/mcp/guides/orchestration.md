@@ -24,7 +24,7 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | 追加指示 | `session_prompt` | live Agent PTY または durable next-launch queue へ prompt を配送する |
 | issue 委譲 | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う |
 | ブリーフ委譲 | `session_delegate_brief` | session 作成と authenticated worker の即時 dispatch を不可分に行う |
-| PR 観測 | `session_pr` | daemon-owned PR inventory と merged 集約を返す |
+| PR 観測 | `session_pr` | `name` 省略時は呼び出し元自身、指定時は対象 session の daemon-owned PR inventory と merged 集約を返す |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
 | session 破棄 | `session_remove` | daemon が worktree を破棄し、lifecycle store を更新する |
@@ -37,6 +37,9 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 
 `session_list` は durable session identity の軽量一覧、`session_status` は Git 観測を含む詳細一覧である。
 coordinator は session の生存を `session_status`、成果の統合を `session_pr` の `merged` で判定する。
+認証済み worker は `session_pr {}` で自分の session を読み、coordinator は
+`session_pr {"name":"issue-403"}` のように対象名を明示する。name 省略時に caller credential が無ければ、
+daemon は cwd や branch から session を推測しない。
 
 `session_prompt` の `mode` は `live`（既定）/ `queue` である。`live` は live Agent の PTY へ送り、
 live Agent が無ければエラーになる。停止中の Agent を起動して実行させる場合は
