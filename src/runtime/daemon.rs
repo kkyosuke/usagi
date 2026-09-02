@@ -25,7 +25,9 @@ use usagi_core::domain::agent::{
     AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName, aggregate_agent_status,
 };
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
-use usagi_core::domain::id::{ConnectionId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
+use usagi_core::domain::id::{
+    ConnectionId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+};
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::DefaultModel;
 use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
@@ -5201,7 +5203,7 @@ fn start_ipc_accept_loop(
                                             runtime: agent_owner,
                                             disconnected: connection_disconnected,
                                         },
-                                        SharedTerminal(terminal),
+                                        SharedTerminal(Arc::clone(&terminal)),
                                         visibility,
                                         retention,
                                     );
@@ -5241,7 +5243,7 @@ fn start_ipc_accept_loop(
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, supervisor: &supervisor }, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, supervisor: &supervisor }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
                                             let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
@@ -5430,6 +5432,7 @@ impl Drop for ShutdownOnIpcWorkerExit {
 
 struct DispatchToolContext<'a> {
     agent: &'a SharedAgentRuntime,
+    terminal: &'a SharedTerminalRuntime,
     bound: &'a ConnectionWorkspace,
     pr_inventory: &'a SharedPrInventory,
     decisions: &'a UserDecisionStore,
@@ -5456,6 +5459,8 @@ fn dispatch_dispatch_tool(
                 | DispatchToolAction::SessionGet
                 | DispatchToolAction::AgentList
                 | DispatchToolAction::AgentGet
+                | DispatchToolAction::TerminalList
+                | DispatchToolAction::TerminalRead
                 | DispatchToolAction::AgentComplete
                 | DispatchToolAction::AgentFail
                 | DispatchToolAction::AgentInbox
@@ -5464,6 +5469,7 @@ fn dispatch_dispatch_tool(
     }) {
         dispatch_agent_tool(
             context.agent,
+            context.terminal,
             context.bound,
             context.pr_inventory,
             context.supervisor,
@@ -5487,6 +5493,7 @@ fn dispatch_dispatch_tool(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 fn dispatch_agent_tool(
     agent: &SharedAgentRuntime,
+    terminal: &SharedTerminalRuntime,
     bound: &ConnectionWorkspace,
     pr_inventory: &SharedPrInventory,
     supervisor: &SharedSupervisorRuntime,
@@ -5542,6 +5549,17 @@ fn dispatch_agent_tool(
     #[derive(Deserialize)]
     struct InboxAckPayload {
         cursor: u64,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TerminalReadPayload {
+        terminal_id: TerminalId,
+        #[serde(default = "default_terminal_read_lines")]
+        lines: usize,
+    }
+
+    fn default_terminal_read_lines() -> usize {
+        usagi_core::usecase::terminal_observation::TERMINAL_READ_DEFAULT_LINES
     }
 
     let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
@@ -5606,6 +5624,91 @@ fn dispatch_agent_tool(
             ));
         }
         let parent_dispatch_run = authenticated.run_id;
+        if matches!(
+            action,
+            DispatchToolAction::TerminalList | DispatchToolAction::TerminalRead
+        ) {
+            let scope = authenticated.terminal_scope;
+            drop(runtime);
+            let terminal = terminal.lock().map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "terminal owner is unavailable")
+            })?;
+            return match action {
+                DispatchToolAction::TerminalList => {
+                    if payload.as_object().is_none_or(|object| !object.is_empty()) {
+                        Err(ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "terminal_list accepts no arguments",
+                        ))
+                    } else {
+                        let terminals = terminal
+                            .inventory(&scope)
+                            .into_iter()
+                            .map(|entry| {
+                                serde_json::json!({
+                                    "terminal_id": entry.terminal.terminal_id,
+                                    "live": entry.live,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        Ok((
+                            ResponseOutcome::Ok,
+                            serde_json::json!({"terminals": terminals}),
+                        ))
+                    }
+                }
+                DispatchToolAction::TerminalRead => {
+                    let input =
+                        serde_json::from_value::<TerminalReadPayload>(payload).map_err(|_| {
+                            ProtocolError::new(
+                                ErrorCode::InvalidArgument,
+                                "invalid terminal_read payload",
+                            )
+                        })?;
+                    if !(1..=usagi_core::usecase::terminal_observation::TERMINAL_READ_MAX_LINES)
+                        .contains(&input.lines)
+                    {
+                        return Err(ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "terminal read line limit is out of range",
+                        ));
+                    }
+                    let reference = terminal
+                        .inventory(&scope)
+                        .into_iter()
+                        .find(|entry| entry.terminal.terminal_id == input.terminal_id)
+                        .map(|entry| entry.terminal)
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                ErrorCode::NotFound,
+                                "terminal was not found in the caller scope",
+                            )
+                        })?;
+                    let snapshot = terminal.inspect(&reference)?;
+                    let observation =
+                        usagi_daemon::usecase::terminal_inspection::inspect_terminal(
+                            snapshot,
+                            input.lines,
+                        )
+                        .map_err(|error| match error {
+                            usagi_daemon::usecase::terminal_inspection::TerminalInspectionError::InvalidLineLimit => {
+                                ProtocolError::new(
+                                    ErrorCode::InvalidArgument,
+                                    "terminal read line limit is out of range",
+                                )
+                            }
+                            usagi_daemon::usecase::terminal_inspection::TerminalInspectionError::InvalidCheckpoint(_) => {
+                                ProtocolError::new(
+                                    ErrorCode::OwnershipUnknown,
+                                    "terminal snapshot is unavailable",
+                                )
+                            }
+                        })?;
+                    Ok((ResponseOutcome::Ok, serde_json::json!(observation)))
+                }
+                _ => unreachable!("terminal action was matched above"),
+            };
+        }
         let caller = authenticated.caller;
         let store = runtime.dispatch_store();
         let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {

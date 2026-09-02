@@ -1,5 +1,5 @@
 //! MCP tool アダプタの置き場。tool は系統ごとにファイルを分け（`issue` / `memory` /
-//! `session`）、各 tool が 1 struct として `Tool` を実装する。registry は metadata、schema
+//! `session` / `terminal` / `supervisor`）、各 tool が 1 struct として `Tool` を実装する。registry は metadata、schema
 //! validator、execution route、caller policy を 1 つの `ToolDescriptor` に束ねる。
 //!
 //! 各アダプタは presentation に徹する — store 系は usagi-core の usecase を直接呼び、
@@ -12,6 +12,7 @@ mod issue_wire;
 pub mod memory;
 pub mod session;
 pub mod supervisor;
+pub mod terminal;
 
 use std::collections::HashSet;
 use std::fmt;
@@ -54,6 +55,7 @@ pub fn registry_with_families(families: McpToolFamilies) -> Vec<ToolDescriptor> 
             .into_iter()
             .filter(|tool| families.issue || tool.name() != "session_delegate_issue"),
     );
+    tools.extend(terminal::tools());
     tools.extend(supervisor::tools());
     let descriptors = tools.into_iter().map(descriptor).collect::<Vec<_>>();
     validate_registry(&descriptors).expect("invalid MCP tool descriptor registry");
@@ -97,6 +99,8 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
         "session_get" => (DispatchRoute(Dispatch::SessionGet), AgentCredential),
         "agent_list" => (DispatchRoute(Dispatch::AgentList), AgentCredential),
         "agent_get" => (DispatchRoute(Dispatch::AgentGet), AgentCredential),
+        "terminal_list" => (DispatchRoute(Dispatch::TerminalList), AgentCredential),
+        "terminal_read" => (DispatchRoute(Dispatch::TerminalRead), AgentCredential),
         "agent_complete" => (DispatchRoute(Dispatch::AgentComplete), AgentCredential),
         "agent_fail" => (DispatchRoute(Dispatch::AgentFail), AgentCredential),
         "agent_inbox" => (DispatchRoute(Dispatch::AgentInbox), AgentCredential),
@@ -307,7 +311,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 49); // issue 6 + memory 4 + session 33 + supervisor 6
+        assert_eq!(reg.len(), 50); // issue 6 + memory 4 + session 32 + terminal 2 + supervisor 6
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -403,7 +407,8 @@ mod tests {
     fn each_category_contributes_its_tools() {
         assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
-        assert_eq!(super::session::tools().len(), 33);
+        assert_eq!(super::session::tools().len(), 32);
+        assert_eq!(super::terminal::tools().len(), 2);
         assert_eq!(super::supervisor::tools().len(), 6);
     }
 
@@ -449,14 +454,14 @@ mod tests {
             issue: false,
             memory: false,
         });
-        assert_eq!(neither.len(), 38);
+        assert_eq!(neither.len(), 39);
         assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));
     }
 
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
-        assert_eq!(registry.len(), 49);
+        assert_eq!(registry.len(), 50);
         validate_registry(&registry).unwrap();
         for descriptor in &registry {
             assert!(!descriptor.description().is_empty());
