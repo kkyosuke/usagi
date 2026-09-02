@@ -5483,6 +5483,10 @@ mod tests {
             }),
             Err("Work Run progress is unavailable".to_owned())
         );
+        assert_eq!(
+            decode_work_run_snapshot_reply(DaemonReply::Ok(serde_json::Value::Null)),
+            Err("daemon returned invalid Work Run progress".to_owned())
+        );
     }
 
     #[test]

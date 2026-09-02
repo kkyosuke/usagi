@@ -508,7 +508,7 @@ fn work_run_control_body(
             rows.extend(control_prompt_rows(
                 control.selected,
                 "The action outcome is not confirmed",
-                "Enter retry same operation · Esc return",
+                "Enter retry same operation · Esc close",
             ));
             finish_control_rows(&mut rows, height);
         }
@@ -1197,8 +1197,9 @@ mod tests {
     fn work_run_control_renders_selection_confirmation_decision_and_retry() {
         let run = work_run();
         let selected = run.supervisor_run_id;
+        let another = work_run();
         let base = DirectorDrawerProjection::default()
-            .with_work_runs(WorkRunProjection::fresh(vec![run]))
+            .with_work_runs(WorkRunProjection::fresh(vec![run, another]))
             .with_work_run_control(WorkRunControlProjection {
                 mode: WorkRunControlMode::List,
                 selected: Some(selected),
@@ -1211,12 +1212,14 @@ mod tests {
             .join("\n");
         assert!(list.contains("Work Runs"));
         assert!(list.contains("› #"));
+        assert!(list.contains("  #"));
         assert!(list.contains("Enter actions"));
 
         let confirmation = DirectorDrawerProjection {
             work_run_control: WorkRunControlProjection {
                 mode: WorkRunControlMode::ConfirmCancel,
                 selected: Some(selected),
+                feedback: Some("review this action".into()),
                 ..WorkRunControlProjection::default()
             },
             ..base.clone()
@@ -1228,6 +1231,7 @@ mod tests {
             .join("\n");
         assert!(confirmation.contains("stop its active Agents"));
         assert!(confirmation.contains("Enter confirm"));
+        assert!(confirmation.contains("review this action"));
 
         let decision = DirectorDrawerProjection {
             work_run_control: WorkRunControlProjection {
@@ -1288,6 +1292,25 @@ mod tests {
             .join("\n");
         assert!(retry.contains("outcome unavailable"));
         assert!(retry.contains("retry same operation"));
+
+        let empty =
+            DirectorDrawerProjection::default().with_work_run_control(WorkRunControlProjection {
+                mode: WorkRunControlMode::List,
+                ..WorkRunControlProjection::default()
+            });
+        let empty = drawer_body(60, 12, &empty)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(empty.contains("No Work Runs yet"));
+    }
+
+    #[test]
+    #[should_panic(expected = "closed control uses the normal drawer")]
+    fn closed_work_run_control_cannot_enter_the_control_renderer() {
+        let projection = DirectorDrawerProjection::default();
+        let _ = work_run_control_body(60, 12, vec![], &projection);
     }
 
     #[test]

@@ -661,7 +661,7 @@ Goal-driven Director では `Ctrl-O w` が同じ projection の最大16件を st
 進行中 run の cancel は確認を必須とし、escalated run は観測した exact escalation ID に対する Retry work / Cancel run /
 Mark failed だけを提示する。完了済み run は read-only である。観測が失敗した cached snapshot と初回 pending は操作を拒否し、
 fresh snapshot を取得してからだけ typed command を送る。送信中の連打は消費し、応答が未確認なら `Enter` は新しい操作を作らず
-同じ operation ID を再送する。副作用なしの確定拒否は再試行画面にせず理由を表示して一覧へ戻る。`Esc` は確認・判断・再試行画面から戻り、cancel 自体を暗黙に実行しない。
+同じ operation ID を再送する。副作用なしの確定拒否は再試行画面にせず理由を表示して一覧へ戻る。`Esc` は確認・判断画面から一覧へ戻り、cancel 自体を暗黙に実行しない。結果不明の再試行画面では operation ID を破棄せず操作面だけを閉じ、再度開いたときに同じ operation の再試行へ戻す。
 
 snapshot と command は workspace ごとの単一 `WorkRunPort` lane を直列に共有するため、古い観測が操作結果を追い越さない。
 snapshot は workspace・件数上限・重複・private provenance を、command 応答は exact run ID・private provenance を境界で検証し、

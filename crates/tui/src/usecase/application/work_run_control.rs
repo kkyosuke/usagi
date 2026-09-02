@@ -414,8 +414,11 @@ impl WorkRunControl {
     fn handle_retry(&mut self, action: WorkRunControlAction) -> WorkRunControlOutcome {
         match action {
             WorkRunControlAction::Escape => {
-                self.mode = WorkRunControlMode::List;
-                self.retry = None;
+                // An unconfirmed durable effect may already have committed.
+                // Closing may hide it, but must not discard the only operation
+                // identity that can be replayed without duplicating the action.
+                self.mode = WorkRunControlMode::Closed;
+                self.feedback = None;
                 self.escalation_fence = None;
                 WorkRunControlOutcome::Consumed
             }
@@ -659,6 +662,80 @@ mod tests {
     }
 
     #[test]
+    fn command_confirmation_rechecks_fresh_state_and_result_semantics() {
+        let running = run(SupervisorRunState::Running);
+        let runs = vec![running.clone()];
+        let mut stale_cancel = WorkRunControl::default();
+        let _ = stale_cancel.handle(WorkRunControlAction::Toggle, &runs, true);
+        let _ = stale_cancel.handle(WorkRunControlAction::Enter, &runs, true);
+        let _ = stale_cancel.handle(WorkRunControlAction::Enter, &runs, false);
+        assert_eq!(stale_cancel.mode(), WorkRunControlMode::List);
+        assert_eq!(
+            stale_cancel.feedback(),
+            Some("Refresh Work Runs before changing one")
+        );
+
+        let mut changed_cancel = WorkRunControl::default();
+        let _ = changed_cancel.handle(WorkRunControlAction::Toggle, &runs, true);
+        let _ = changed_cancel.handle(WorkRunControlAction::Enter, &runs, true);
+        let mut finished = running.clone();
+        finished.state = SupervisorRunState::Succeeded;
+        let _ = changed_cancel.handle(WorkRunControlAction::Enter, &[finished], true);
+        assert_eq!(changed_cancel.mode(), WorkRunControlMode::List);
+        assert_eq!(
+            changed_cancel.feedback(),
+            Some("The Work Run action changed; review it again")
+        );
+
+        let escalated = escalated_run();
+        let escalation_id = escalated.escalation.as_ref().unwrap().escalation_id;
+        let mut stale_decision = WorkRunControl::default();
+        let _ = stale_decision.handle(
+            WorkRunControlAction::Toggle,
+            std::slice::from_ref(&escalated),
+            true,
+        );
+        let _ = stale_decision.handle(
+            WorkRunControlAction::Enter,
+            std::slice::from_ref(&escalated),
+            true,
+        );
+        let _ = stale_decision.handle(
+            WorkRunControlAction::Enter,
+            std::slice::from_ref(&escalated),
+            false,
+        );
+        assert_eq!(stale_decision.mode(), WorkRunControlMode::List);
+        assert_eq!(
+            stale_decision.feedback(),
+            Some("Refresh Work Runs before changing one")
+        );
+
+        for (decision, state) in [
+            (EscalationDecision::Resume, SupervisorRunState::Running),
+            (EscalationDecision::Cancel, SupervisorRunState::Cancelled),
+            (EscalationDecision::Fail, SupervisorRunState::Failed),
+        ] {
+            let request = WorkRunControlRequest {
+                operation_id: OperationId::new(),
+                command: SupervisorWorkspaceCommand::ResolveEscalation {
+                    supervisor_run_id: escalated.supervisor_run_id,
+                    escalation_id,
+                    decision,
+                },
+                observed_state_revision: escalated.state_revision,
+            };
+            let mut result = escalated.clone();
+            result.state_revision += 1;
+            result.state = state;
+            result.escalation = None;
+            assert!(request.accepts_result(&result));
+            result.escalation = escalated.escalation.clone();
+            assert!(!request.accepts_result(&result));
+        }
+    }
+
+    #[test]
     fn list_navigation_and_confirmation_are_total_and_stable_by_id() {
         let first = run(SupervisorRunState::Running);
         let finished = run(SupervisorRunState::Succeeded);
@@ -736,7 +813,9 @@ mod tests {
         control.sync_selection(&runs);
         let _ = control.handle(WorkRunControlAction::Enter, &runs, true);
         let _ = control.handle(WorkRunControlAction::Escape, &runs, true);
-        assert_eq!(control.mode(), WorkRunControlMode::List);
+        assert_eq!(control.mode(), WorkRunControlMode::Closed);
+        let _ = control.handle(WorkRunControlAction::Toggle, &runs, true);
+        assert_eq!(control.mode(), WorkRunControlMode::Retry);
 
         control.mode = WorkRunControlMode::ConfirmCancel;
         control.selected = None;

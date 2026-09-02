@@ -20629,7 +20629,13 @@ mod tests {
     fn work_run_observation_is_single_flight_and_bounded() {
         let mut lane = super::WorkRunObservation::new();
         let now = std::time::Duration::from_secs(1);
+        lane.next_due = now;
+        lane.refresh_now();
+        assert_eq!(lane.next_due, std::time::Duration::ZERO);
         assert!(lane.begin_if_due(now));
+        lane.next_due = now + super::WORK_RUN_OBSERVATION_BACKOFF;
+        lane.refresh_now();
+        assert_eq!(lane.next_due, now + super::WORK_RUN_OBSERVATION_BACKOFF);
         assert!(!lane.begin_if_due(now));
         lane.complete(now, true);
         assert!(!lane.begin_if_due(now + super::WORK_RUN_OBSERVATION_INTERVAL / 2));
@@ -20638,6 +20644,29 @@ mod tests {
         lane.complete(next, false);
         assert!(!lane.begin_if_due(next + super::WORK_RUN_OBSERVATION_BACKOFF / 2));
         assert!(lane.begin_if_due(next + super::WORK_RUN_OBSERVATION_BACKOFF));
+    }
+
+    #[test]
+    fn unavailable_work_run_port_fails_observation_and_control_closed() {
+        use super::WorkRunPort as _;
+
+        let workspace = WorkspaceId::new();
+        let mut port = super::UnavailableWorkRunPort;
+        assert_eq!(
+            port.snapshot(workspace).unwrap_err(),
+            "Work Run progress is unavailable"
+        );
+        let command = usagi_core::domain::supervisor::SupervisorWorkspaceCommand::Cancel {
+            supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId::new(),
+            reason: "operator cancelled".into(),
+        };
+        assert_eq!(
+            port.control(workspace, OperationId::new(), command)
+                .unwrap_err(),
+            super::WorkRunControlError::Rejected(
+                "Work Run action is unavailable; refresh and try again".into()
+            )
+        );
     }
 
     #[test]
@@ -23852,6 +23881,48 @@ mod tests {
         assert!(runtime.state().director_drawer_open());
         assert_eq!(control.mode(), super::WorkRunControlMode::List);
         assert_eq!(control.selected(), Some(run.supervisor_run_id));
+
+        for key in [Key::Up, Key::Down, Key::Left, Key::Right] {
+            assert!(
+                super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &key,)
+                    .is_some()
+            );
+        }
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Enter,)
+                .is_some()
+        );
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Escape,)
+                .is_some()
+        );
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Char('x'),
+            )
+            .is_some()
+        );
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Resize,)
+                .is_none()
+        );
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Live(LiveTerminalAction::Director),
+            )
+            .is_none()
+        );
+        assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Resize,)
+                .is_none()
+        );
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
