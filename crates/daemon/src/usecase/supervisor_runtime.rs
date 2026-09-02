@@ -6265,6 +6265,20 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = SupervisorRuntime::new(temp.path());
+        let mut state = RuntimeState::default();
+        for operation in [OperationId::new(), OperationId::new()] {
+            let run = unbound_goal_run(Some(workspace));
+            runtime.supervisor.initialize(&run).unwrap();
+            state.starts.insert(
+                operation.to_string(),
+                start_reservation(run.supervisor_run_id),
+            );
+        }
+        runtime.save_state(&state).unwrap();
+        assert_eq!(runtime.pending_worker_stops().unwrap().len(), 2);
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
         let running = SupervisorRun::new(
             "caller".into(),
             "task".into(),
