@@ -84,7 +84,7 @@ The documentation index is [document/README.md](../document/README.md).
 ```bash
 git push origin HEAD:refs/heads/<branch>
 gh pr create --head <branch> --draft --title "<type>: <説明>" --body "<概要>"
-# CI（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になったら:
+# CI（fmt / clippy / full test / coverage 100%、documentation SSoT lint、該当時は Markdown link check）が green になったら:
 gh pr ready <number>
 ```
 
