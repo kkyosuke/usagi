@@ -297,6 +297,17 @@ const CODEX_LINEAGE: &str = "tui-codex-lineage";
 const CODEX_TRANSCRIPT: &str = "/must/not/be/read.jsonl";
 const CODEX_CAPTURED_CWD: &str = "/must/not/be/shown";
 
+/// Escape one UTF-8 path for the double-quoted shell word in the provider
+/// script. Instrumented target paths may contain a literal `$HOME`, which must
+/// remain path text rather than being expanded by the fixture shell.
+fn shell_double_quote_content(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('$', "\\$")
+        .replace('`', "\\`")
+        .replace('"', "\\\"")
+}
+
 /// PATH 上に置く Codex / Claude fixture と、その観測用ファイル群。
 ///
 /// 各 provider は spawn ごとに count へ 1 行、argv へ 1 行を追記する。したがって
@@ -337,7 +348,7 @@ impl AgentFixtures {
             lineage = CODEX_LINEAGE,
             transcript = CODEX_TRANSCRIPT,
             cwd = CODEX_CAPTURED_CWD,
-            usagi = env!("CARGO_BIN_EXE_usagi"),
+            usagi = shell_double_quote_content(env!("CARGO_BIN_EXE_usagi")),
             count = self.codex_count.display(),
         );
         // 起動 argv も 1 spawn 1 行として記録し、live 配線（`--settings` / system prompt）と、

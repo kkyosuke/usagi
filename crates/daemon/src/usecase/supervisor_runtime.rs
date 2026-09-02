@@ -24,10 +24,11 @@ use usagi_core::{
             ARTIFACT_RETRY_BASE_SECONDS, ARTIFACT_RETRY_MAX_SECONDS, ArtifactContract,
             ArtifactExpectation, EscalationDecision, GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
             MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES,
-            MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT, RunProvenance,
-            SupervisorEvent, SupervisorEventKind, SupervisorEventSource, SupervisorRun,
-            SupervisorRunId, SupervisorRunQuery, SupervisorRunState, SupervisorWorkspaceCommand,
-            TaskId, TaskNode, TaskState, presentation_text_is_safe, reduce,
+            MAX_SUPERVISOR_TEXT_BYTES, MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS,
+            MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT, RunProvenance, SupervisorEvent,
+            SupervisorEventKind, SupervisorEventSource, SupervisorRun, SupervisorRunId,
+            SupervisorRunQuery, SupervisorRunState, SupervisorWorkspaceCommand, TaskId, TaskNode,
+            TaskState, presentation_text_is_safe, reduce,
         },
     },
     infrastructure::{
@@ -1769,8 +1770,8 @@ impl SupervisorRuntime {
     /// Returns an error when the durable supervisor index or a selected run
     /// snapshot cannot be read consistently.
     pub fn list_workspace(&self, workspace: WorkspaceId) -> Result<Vec<SupervisorRunQuery>> {
-        const MAX_TUI_WORK_RUNS: usize = 16;
-        self.supervisor.workspace_runs(workspace, MAX_TUI_WORK_RUNS)
+        self.supervisor
+            .workspace_runs(workspace, MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS)
     }
 
     /// Reads one run only when its durable workspace fence matches.

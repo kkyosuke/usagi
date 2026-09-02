@@ -88,9 +88,27 @@ impl WorkRunProjection {
         self.freshness
     }
 
-    #[cfg(test)]
-    pub(crate) fn runs(&self) -> &[SupervisorRunQuery] {
+    #[must_use]
+    pub fn runs(&self) -> &[SupervisorRunQuery] {
         &self.runs
+    }
+
+    /// Applies the daemon-authoritative result of a human control before the
+    /// next observation. The result replaces only an already-observed exact
+    /// run and is sorted through the same `SSoT` as a full snapshot. An
+    /// unexpected identity is ignored so a single response cannot grow the
+    /// bounded snapshot or invent a row.
+    pub fn apply_control(&mut self, run: SupervisorRunQuery) {
+        if let Some(existing) = self
+            .runs
+            .iter_mut()
+            .find(|existing| existing.supervisor_run_id == run.supervisor_run_id)
+            && (run.state_revision > existing.state_revision || run == *existing)
+        {
+            *existing = run;
+        }
+        sort_runs(&mut self.runs);
+        self.freshness = WorkRunFreshness::Fresh;
     }
 }
 
@@ -210,5 +228,28 @@ mod tests {
                 max_agents: run.policy.max_concurrency,
             }
         );
+    }
+
+    #[test]
+    fn control_results_replace_exact_runs_monotonically_and_resort() {
+        let mut running = run(SupervisorRunState::Running, &[]);
+        running.state_revision = 4;
+        let id = running.supervisor_run_id;
+        let mut projection = WorkRunProjection::fresh(vec![running.clone()]);
+
+        let mut cancelled = running.clone();
+        cancelled.state_revision = 5;
+        cancelled.state = SupervisorRunState::Cancelled;
+        projection.apply_control(cancelled.clone());
+        assert_eq!(projection.runs(), std::slice::from_ref(&cancelled));
+        assert_eq!(projection.freshness(), WorkRunFreshness::Fresh);
+
+        projection.apply_control(running);
+        assert_eq!(projection.runs(), std::slice::from_ref(&cancelled));
+
+        let failed = run(SupervisorRunState::Failed, &[]);
+        projection.apply_control(failed);
+        assert_eq!(projection.runs(), std::slice::from_ref(&cancelled));
+        assert_eq!(projection.runs()[0].supervisor_run_id, id);
     }
 }

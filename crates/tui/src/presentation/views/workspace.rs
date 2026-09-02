@@ -3196,6 +3196,7 @@ mod tests {
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
         self, DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
+        WorkRunControlProjection,
     };
     use crate::presentation::views::root_terminal_drawer::{
         ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
@@ -4435,6 +4436,7 @@ mod tests {
             feedback: None,
             new: DirectorNewProjection::default(),
             work_runs: WorkRunProjection::default(),
+            work_run_control: WorkRunControlProjection::default(),
         };
 
         let closed_state = AppState::home(workspace, Vec::new());

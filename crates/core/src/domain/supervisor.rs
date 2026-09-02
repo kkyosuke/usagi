@@ -63,6 +63,8 @@ pub const MAX_TASK_DEPENDENCIES: usize = 128;
 pub const MAX_SUPERVISOR_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_SUPERVISOR_REASON_BYTES: usize = 4 * 1024;
 pub const MAX_SUPERVISOR_KEY_BYTES: usize = 256;
+/// Maximum daemon-authoritative Work Runs in one workspace UI snapshot.
+pub const MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS: usize = 16;
 /// Artifact provider retries begin here and never exceed the maximum below.
 pub const ARTIFACT_RETRY_BASE_SECONDS: i64 = 5;
 pub const ARTIFACT_RETRY_MAX_SECONDS: i64 = 5 * 60;

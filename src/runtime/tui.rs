@@ -94,6 +94,9 @@ use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSubscription,
 };
+use usagi_tui::usecase::application::work_run_control::{
+    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError,
+};
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::doctor::{self, DoctorPort};
 use usagi_tui::usecase::overview;
@@ -2038,15 +2041,76 @@ impl presentation::WorkRunPort for DaemonWorkRunPort {
         let mut client =
             crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        match client
-            .request(usagi_core::usecase::client::DaemonRequest::SupervisorSnapshot { workspace })
-            .map_err(|_| "Work Run progress is unavailable".to_owned())?
+        decode_work_run_snapshot_reply(
+            client
+                .request(
+                    usagi_core::usecase::client::DaemonRequest::SupervisorSnapshot { workspace },
+                )
+                .map_err(|_| "Work Run progress is unavailable".to_owned())?,
+        )
+    }
+
+    fn control(
+        &mut self,
+        workspace: WorkspaceId,
+        operation_id: usagi_core::domain::id::OperationId,
+        command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
+    ) -> Result<usagi_core::domain::supervisor::SupervisorRunQuery, WorkRunControlError> {
+        let mut client =
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| {
+                    WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned())
+                })?;
+        decode_work_run_control_reply(
+            client
+                .request(
+                    usagi_core::usecase::client::DaemonRequest::SupervisorControl {
+                        workspace,
+                        operation_id,
+                        command,
+                    },
+                )
+                .map_err(work_run_control_client_error)?,
+        )
+    }
+}
+
+fn decode_work_run_snapshot_reply(
+    reply: DaemonReply,
+) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
+    match reply {
+        DaemonReply::Ok(body) => serde_json::from_value(body)
+            .map_err(|_| "daemon returned invalid Work Run progress".to_owned()),
+        DaemonReply::Accepted { .. } => Err("Work Run progress is unavailable".to_owned()),
+    }
+}
+
+fn decode_work_run_control_reply(
+    reply: DaemonReply,
+) -> Result<usagi_core::domain::supervisor::SupervisorRunQuery, WorkRunControlError> {
+    match reply {
+        DaemonReply::Ok(body) => serde_json::from_value(body).map_err(|_| {
+            WorkRunControlError::Unconfirmed(
+                "daemon returned an invalid Work Run result".to_owned(),
+            )
+        }),
+        // A durable Accepted acknowledgement proves admission, not the final
+        // aggregate. Treating its optional body as final could make the UI
+        // forget the only operation identity safe to replay after ambiguity.
+        DaemonReply::Accepted { .. } => Err(WorkRunControlError::Unconfirmed(
+            WORK_RUN_ACTION_UNCONFIRMED.to_owned(),
+        )),
+    }
+}
+
+fn work_run_control_client_error(error: ClientError) -> WorkRunControlError {
+    match error {
+        ClientError::Protocol(protocol)
+            if protocol.side_effect == usagi_core::infrastructure::ipc::SideEffect::None =>
         {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
-                serde_json::from_value(body)
-                    .map_err(|_| "daemon returned invalid Work Run progress".to_owned())
-            }
+            WorkRunControlError::Rejected(protocol.message)
         }
+        _ => WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned()),
     }
 }
 
@@ -5322,19 +5386,21 @@ mod tests {
         LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
         RepoEnvironmentStore, RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start,
         StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
-        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult, agent_goal_request,
+        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult,
+        WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, agent_goal_request,
         agent_inventory_request, agent_launch_request, classify_terminal_input,
         classify_workspace_directory, correlate_agent_goal, correlate_agent_launch,
         created_session_hook, current_agent_integrations, daemon_error_reason, decision_cadence,
         decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
-        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
-        provider_resume_projection, reduced_motion_from_environment, reply_geometry,
-        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
-        version_result_from_observation, workspace_directory_missing, workspace_open_error,
+        decode_work_run_control_reply, decode_work_run_snapshot_reply, doctor_diagnosis_io_error,
+        doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
+        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
+        pr_snapshot_events, probe_path, provider_resume_projection,
+        reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
+        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
+        validate_workspace_directory, version_detail, version_result_from_observation,
+        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -5349,6 +5415,74 @@ mod tests {
         for value in [None, Some(OsStr::new("0")), Some(OsStr::new("true"))] {
             assert!(!reduced_motion_from_environment(value));
         }
+    }
+
+    #[test]
+    fn work_run_control_accepts_only_a_final_typed_reply() {
+        let run = usagi_core::domain::supervisor::SupervisorRunQuery {
+            supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId::new(),
+            state_revision: 2,
+            state: usagi_core::domain::supervisor::SupervisorRunState::Cancelled,
+            terminal_at: None,
+            terminal_reason: Some("cancelled by local operator".to_owned()),
+            policy: usagi_core::domain::supervisor::ExecutionPolicy::default(),
+            escalation: None,
+            tasks: Vec::new(),
+            provenance: Vec::new(),
+        };
+        let body = serde_json::to_value(&run).unwrap();
+        assert_eq!(
+            decode_work_run_control_reply(DaemonReply::Ok(body.clone())),
+            Ok(run.clone())
+        );
+        assert_eq!(
+            decode_work_run_control_reply(DaemonReply::Accepted {
+                operation_id: "durable-operation".to_owned(),
+                revision: 1,
+                body,
+            }),
+            Err(WorkRunControlError::Unconfirmed(
+                WORK_RUN_ACTION_UNCONFIRMED.to_owned()
+            ))
+        );
+        assert_eq!(
+            decode_work_run_control_reply(DaemonReply::Ok(serde_json::Value::Null)),
+            Err(WorkRunControlError::Unconfirmed(
+                "daemon returned an invalid Work Run result".to_owned()
+            ))
+        );
+
+        let rejection = usagi_core::infrastructure::ipc::ProtocolError::new(
+            usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
+            "the Work Run action is no longer valid",
+        );
+        assert_eq!(
+            work_run_control_client_error(ClientError::Protocol(rejection)),
+            WorkRunControlError::Rejected("the Work Run action is no longer valid".to_owned())
+        );
+        assert_eq!(
+            work_run_control_client_error(ClientError::Unavailable("lost acknowledgement".into())),
+            WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned())
+        );
+
+        let snapshot = usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot {
+            workspace_id: WorkspaceId::new(),
+            runs: vec![run],
+        };
+        assert_eq!(
+            decode_work_run_snapshot_reply(DaemonReply::Ok(
+                serde_json::to_value(&snapshot).unwrap()
+            )),
+            Ok(snapshot)
+        );
+        assert_eq!(
+            decode_work_run_snapshot_reply(DaemonReply::Accepted {
+                operation_id: "read-only-request".to_owned(),
+                revision: 1,
+                body: serde_json::Value::Null,
+            }),
+            Err("Work Run progress is unavailable".to_owned())
+        );
     }
 
     #[test]
