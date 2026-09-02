@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     id::{AgentRuntimeId, OperationId, SessionId, WorkspaceId, WorktreeId},
-    pr_inventory::GitHubRepository,
+    pr_inventory::{GitHubRepository, canonicalize},
 };
 
 /// A `UUIDv7` identity for one never-reused supervisor run.
@@ -63,8 +63,16 @@ pub const MAX_TASK_DEPENDENCIES: usize = 128;
 pub const MAX_SUPERVISOR_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_SUPERVISOR_REASON_BYTES: usize = 4 * 1024;
 pub const MAX_SUPERVISOR_KEY_BYTES: usize = 256;
+/// Maximum presentation-only Goal label stored in a run snapshot.
+pub const MAX_SUPERVISOR_DISPLAY_LABEL_BYTES: usize = 96;
+/// Maximum canonical pull-request URL retained as an untrusted verification
+/// candidate. The value is never exposed by supervisor query projections.
+pub const MAX_ARTIFACT_CANDIDATE_BYTES: usize = 2 * 1024;
 /// Maximum daemon-authoritative Work Runs in one workspace UI snapshot.
 pub const MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS: usize = 16;
+/// Root plus every initially admitted task can contribute one exact checkout
+/// revision to a Goal artifact expectation.
+pub const MAX_ARTIFACT_EXPECTATION_HEADS: usize = MAX_INITIAL_TASKS + 1;
 /// Artifact provider retries begin here and never exceed the maximum below.
 pub const ARTIFACT_RETRY_BASE_SECONDS: i64 = 5;
 pub const ARTIFACT_RETRY_MAX_SECONDS: i64 = 5 * 60;
@@ -75,25 +83,49 @@ pub const ARTIFACT_RETRY_MAX_SECONDS: i64 = 5 * 60;
 pub struct ArtifactExpectation {
     repository: GitHubRepository,
     head_oid: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    alternate_head_oids: Vec<String>,
 }
 
 #[derive(Deserialize)]
 struct ArtifactExpectationWire {
     repository: GitHubRepository,
     head_oid: String,
+    #[serde(default)]
+    alternate_head_oids: Vec<String>,
 }
 
 impl ArtifactExpectation {
     #[must_use]
     pub fn new(repository: GitHubRepository, head_oid: &str) -> Option<Self> {
-        if !matches!(head_oid.len(), 40 | 64)
-            || !head_oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        Self::from_heads(repository, [head_oid])
+    }
+
+    /// Builds one immutable expectation from every checkout which contributed
+    /// to the supervised result. Duplicate spellings are normalized away.
+    #[must_use]
+    pub fn from_heads<'a>(
+        repository: GitHubRepository,
+        head_oids: impl IntoIterator<Item = &'a str>,
+    ) -> Option<Self> {
+        let heads = head_oids
+            .into_iter()
+            .map(str::to_ascii_lowercase)
+            .collect::<BTreeSet<_>>();
+        if heads.is_empty()
+            || heads.len() > MAX_ARTIFACT_EXPECTATION_HEADS
+            || heads.iter().any(|head| {
+                !matches!(head.len(), 40 | 64) || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
         {
             return None;
         }
+        let mut heads = heads.into_iter();
+        let head_oid = heads.next()?;
         Some(Self {
             repository,
-            head_oid: head_oid.to_ascii_lowercase(),
+            head_oid,
+            alternate_head_oids: heads.collect(),
         })
     }
 
@@ -106,13 +138,31 @@ impl ArtifactExpectation {
     pub fn head_oid(&self) -> &str {
         &self.head_oid
     }
+
+    #[must_use]
+    pub fn matches_head(&self, candidate: &str) -> bool {
+        self.head_oid.eq_ignore_ascii_case(candidate)
+            || self
+                .alternate_head_oids
+                .iter()
+                .any(|head| head.eq_ignore_ascii_case(candidate))
+    }
+
+    pub fn head_oids(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.head_oid.as_str())
+            .chain(self.alternate_head_oids.iter().map(String::as_str))
+    }
 }
 
 impl TryFrom<ArtifactExpectationWire> for ArtifactExpectation {
     type Error = &'static str;
 
     fn try_from(wire: ArtifactExpectationWire) -> Result<Self, Self::Error> {
-        Self::new(wire.repository, &wire.head_oid).ok_or("invalid artifact expectation")
+        let mut heads = Vec::with_capacity(1 + wire.alternate_head_oids.len());
+        heads.push(wire.head_oid);
+        heads.extend(wire.alternate_head_oids);
+        Self::from_heads(wire.repository, heads.iter().map(String::as_str))
+            .ok_or("invalid artifact expectation")
     }
 }
 
@@ -443,6 +493,13 @@ pub enum SupervisorEventKind {
         generation: u64,
         expectation: ArtifactExpectation,
     },
+    /// Pins the latest authenticated Agent report before provider I/O. `None`
+    /// is also a durable candidate: it proves the report omitted a usable PR.
+    VerificationCandidateRecorded {
+        task_id: TaskId,
+        generation: u64,
+        candidate_pr: Option<String>,
+    },
     /// Cancelling is a reducer fact so late dispatch completion cannot revive
     /// the task or run.
     Cancel {
@@ -529,10 +586,18 @@ pub struct SupervisorRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_repository: Option<GitHubRepository>,
     pub root_caller_ref: String,
+    /// Bounded, presentation-safe Goal summary. Legacy runs omit it and the UI
+    /// falls back to the opaque run identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_label: Option<String>,
     pub root_task_digest: String,
     pub root_input_digest: String,
     pub policy_revision: String,
     pub policy: ExecutionPolicy,
+    /// Canonical, bounded PR candidates keyed by task. This internal input is
+    /// intentionally omitted from redaction-safe query projections.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub verification_candidates: BTreeMap<TaskId, Option<String>>,
     /// Dispatch reservations are committed by the same reducer event as the
     /// dispatch transition.  They make duplicate/replayed admission harmless.
     pub dispatch_reservations: BTreeSet<OperationId>,
@@ -600,10 +665,12 @@ impl SupervisorRun {
             workspace_id: None,
             artifact_repository: None,
             root_caller_ref,
+            display_label: None,
             root_task_digest,
             root_input_digest,
             policy_revision,
             policy: ExecutionPolicy::default(),
+            verification_candidates: BTreeMap::new(),
             dispatch_reservations: BTreeSet::new(),
             escalation: None,
             state_revision: 0,
@@ -692,6 +759,7 @@ impl SupervisorRun {
             state: self.state,
             terminal_at: self.terminal_at,
             terminal_reason: self.terminal_reason.clone(),
+            display_label: self.display_label.clone(),
             policy: self.policy.clone(),
             escalation: self.escalation.clone(),
             tasks: self.tasks.values().map(TaskQuery::from).collect(),
@@ -708,6 +776,8 @@ pub struct SupervisorRunQuery {
     pub state: SupervisorRunState,
     pub terminal_at: Option<DateTime<Utc>>,
     pub terminal_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_label: Option<String>,
     pub policy: ExecutionPolicy,
     pub escalation: Option<EscalationRecord>,
     pub tasks: Vec<TaskQuery>,
@@ -855,7 +925,8 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
         } => retry_ready(&mut next, task_id, *generation, event.observed_at)?,
         SupervisorEventKind::VerificationResult { .. }
         | SupervisorEventKind::VerificationDeferred { .. }
-        | SupervisorEventKind::VerificationExpectationRecorded { .. } => {
+        | SupervisorEventKind::VerificationExpectationRecorded { .. }
+        | SupervisorEventKind::VerificationCandidateRecorded { .. } => {
             reduce_verification_event(&mut next, event)?;
         }
         SupervisorEventKind::Cancel { task_id, reason } => {
@@ -927,6 +998,11 @@ fn reduce_verification_event(
             generation,
             expectation,
         } => record_verification_expectation(run, task_id, *generation, expectation),
+        SupervisorEventKind::VerificationCandidateRecorded {
+            task_id,
+            generation,
+            candidate_pr,
+        } => record_verification_candidate(run, task_id, *generation, candidate_pr.as_deref()),
         _ => unreachable!("caller selects only verification events"),
     }
 }
@@ -1088,20 +1164,22 @@ fn set_task(
     }
     let valid = matches!(
         (task.state, state),
-        (TaskState::Dispatched, TaskState::Running)
-            | (
-                TaskState::Running
-                    | TaskState::AwaitingDecision
-                    | TaskState::Retrying
-                    | TaskState::Verifying,
-                TaskState::Succeeded
-                    | TaskState::Failed
-                    | TaskState::Cancelled
-                    | TaskState::Blocked
-                    | TaskState::AwaitingDecision
-                    | TaskState::Retrying
-                    | TaskState::Verifying
-            )
+        (
+            TaskState::Dispatched | TaskState::AwaitingDecision,
+            TaskState::Running
+        ) | (
+            TaskState::Running
+                | TaskState::AwaitingDecision
+                | TaskState::Retrying
+                | TaskState::Verifying,
+            TaskState::Succeeded
+                | TaskState::Failed
+                | TaskState::Cancelled
+                | TaskState::Blocked
+                | TaskState::AwaitingDecision
+                | TaskState::Retrying
+                | TaskState::Verifying
+        )
     );
     if !valid {
         return Err(SupervisorError::InvalidTransition);
@@ -1119,6 +1197,7 @@ fn set_task(
         task.verification_attempt = 0;
         task.verification_retry_at = None;
         task.verification_expectation = None;
+        run.verification_candidates.remove(task_id);
         task.state = TaskState::Retrying;
         return Ok(());
     }
@@ -1250,6 +1329,38 @@ fn record_verification_expectation(
         }
     }
 }
+
+fn record_verification_candidate(
+    run: &mut SupervisorRun,
+    task_id: &TaskId,
+    generation: u64,
+    candidate_pr: Option<&str>,
+) -> Result<(), SupervisorError> {
+    let task = run.tasks.get(task_id).ok_or(SupervisorError::MissingTask)?;
+    if task.generation != generation {
+        return Err(SupervisorError::StaleGeneration);
+    }
+    if task.state != TaskState::Verifying
+        || candidate_pr.is_some_and(|candidate| {
+            candidate.is_empty()
+                || candidate.len() > MAX_ARTIFACT_CANDIDATE_BYTES
+                || !presentation_text_is_safe(candidate)
+                || canonicalize(candidate).is_none_or(|identity| identity.as_url() != candidate)
+        })
+    {
+        return Err(SupervisorError::InvalidTransition);
+    }
+    let candidate = candidate_pr.map(str::to_owned);
+    match run.verification_candidates.get(task_id) {
+        Some(existing) if existing == &candidate => Ok(()),
+        Some(_) => Err(SupervisorError::ProvenanceMismatch),
+        None => {
+            run.verification_candidates
+                .insert(task_id.clone(), candidate);
+            Ok(())
+        }
+    }
+}
 fn cancel(
     run: &mut SupervisorRun,
     task_id: Option<&TaskId>,
@@ -1301,7 +1412,7 @@ fn resolve_escalation(
 ) -> Result<(), SupervisorError> {
     let escalation = run
         .escalation
-        .as_ref()
+        .clone()
         .ok_or(SupervisorError::InvalidTransition)?;
     if escalation.escalation_id != escalation_id {
         return Err(SupervisorError::ProvenanceMismatch);
@@ -1309,6 +1420,21 @@ fn resolve_escalation(
     run.escalation = None;
     match decision {
         EscalationDecision::Resume => {
+            if let Some(task_id) = escalation.blocking_task_id
+                && let Some(task) = run.tasks.get_mut(&task_id)
+                && task.state == TaskState::Verifying
+            {
+                // A rejected artifact needs new Agent work and a fresh report,
+                // not an immediate replay of the same immutable expectation.
+                // AwaitingDecision keeps the periodic verifier quiescent until
+                // that exact dispatch reports completion again.
+                task.state = TaskState::AwaitingDecision;
+                task.verification_digest = None;
+                task.verification_attempt = 0;
+                task.verification_retry_at = None;
+                task.verification_expectation = None;
+                run.verification_candidates.remove(&task_id);
+            }
             run.state = SupervisorRunState::Running;
             run.terminal_at = None;
             run.terminal_reason = None;
@@ -1474,6 +1600,31 @@ mod tests {
             assert!(!presentation_text_is_safe(unsafe_id));
         }
         assert_eq!(TaskId::new("安全な-task_1").unwrap().0, "安全な-task_1");
+    }
+
+    #[test]
+    fn artifact_expectation_accepts_a_bounded_set_of_normalized_heads() {
+        let repository = GitHubRepository::from_name_with_owner("acme/repo").unwrap();
+        let alternate = ArtifactExpectation::from_heads(
+            repository.clone(),
+            [
+                "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+                "0123456789012345678901234567890123456789",
+                "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+        )
+        .unwrap();
+        assert!(alternate.matches_head("0123456789012345678901234567890123456789"));
+        assert!(alternate.matches_head("ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"));
+        assert_eq!(alternate.head_oids().count(), 2);
+
+        let too_many = (0..=MAX_ARTIFACT_EXPECTATION_HEADS)
+            .map(|index| format!("{index:040x}"))
+            .collect::<Vec<_>>();
+        assert!(
+            ArtifactExpectation::from_heads(repository, too_many.iter().map(String::as_str))
+                .is_none()
+        );
     }
     fn event(seq: u64, kind: SupervisorEventKind) -> SupervisorEvent {
         SupervisorEvent {
@@ -2011,11 +2162,61 @@ mod tests {
             run.tasks[&id].verification_expectation.as_ref(),
             Some(&expectation)
         );
-        let retry_at = now() + chrono::Duration::seconds(1);
+        let candidate = "https://github.com/acme/repo/pull/42";
         reduce(
             &mut run,
             &event(
                 6,
+                SupervisorEventKind::VerificationCandidateRecorded {
+                    task_id: id.clone(),
+                    generation: 1,
+                    candidate_pr: Some(candidate.into()),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.verification_candidates[&id].as_deref(), Some(candidate));
+        assert!(matches!(
+            reduce(
+                &mut run,
+                &event(
+                    7,
+                    SupervisorEventKind::VerificationCandidateRecorded {
+                        task_id: id.clone(),
+                        generation: 1,
+                        candidate_pr: Some("https://github.com/acme/repo/pull/43".into()),
+                    },
+                ),
+            ),
+            Err(SupervisorError::ProvenanceMismatch)
+        ));
+        for invalid in [
+            "https://example.com/acme/repo/pull/43".to_owned(),
+            format!(
+                "https://github.com/acme/{}/pull/43",
+                "x".repeat(MAX_ARTIFACT_CANDIDATE_BYTES)
+            ),
+        ] {
+            assert!(matches!(
+                reduce(
+                    &mut run,
+                    &event(
+                        7,
+                        SupervisorEventKind::VerificationCandidateRecorded {
+                            task_id: id.clone(),
+                            generation: 1,
+                            candidate_pr: Some(invalid),
+                        },
+                    ),
+                ),
+                Err(SupervisorError::InvalidTransition)
+            ));
+        }
+        let retry_at = now() + chrono::Duration::seconds(1);
+        reduce(
+            &mut run,
+            &event(
+                7,
                 SupervisorEventKind::VerificationDeferred {
                     task_id: id.clone(),
                     generation: 1,
@@ -2041,7 +2242,7 @@ mod tests {
             reduce(
                 &mut run,
                 &event(
-                    7,
+                    8,
                     SupervisorEventKind::VerificationExpectationRecorded {
                         task_id: id.clone(),
                         generation: 1,
@@ -2761,6 +2962,7 @@ mod tests {
         let decoded: SupervisorRun = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.workspace_id, None);
         assert_eq!(decoded.artifact_repository, None);
+        assert!(decoded.verification_candidates.is_empty());
         assert_eq!(decoded.tasks[&task.task_id].promotion_reserved_at, None);
         assert_eq!(decoded.tasks[&task.task_id].verification_attempt, 0);
         assert_eq!(decoded.tasks[&task.task_id].verification_retry_at, None);

@@ -7,8 +7,7 @@
 use crate::mcp::tool::Tool;
 use std::sync::OnceLock;
 use usagi_core::domain::supervisor::{
-    ArtifactContract, MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES,
-    MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES, MAX_TASK_ID_BYTES,
+    MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES, MAX_SUPERVISOR_TEXT_BYTES,
 };
 
 #[must_use]
@@ -38,29 +37,6 @@ impl Tool for SupervisorStart {
                 "type": "object",
                 "properties": {
                     "root_task": bounded_string(MAX_SUPERVISOR_TEXT_BYTES),
-                    "initial_task_dag": {
-                        "type": "array",
-                        "maxItems": MAX_INITIAL_TASKS,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "task_id": bounded_string(MAX_TASK_ID_BYTES),
-                                "parent_task_id": bounded_string(MAX_TASK_ID_BYTES),
-                                "dependencies": {
-                                    "type": "array",
-                                    "maxItems": MAX_TASK_DEPENDENCIES,
-                                    "items": bounded_string(MAX_TASK_ID_BYTES),
-                                },
-                                "instruction": bounded_string(MAX_SUPERVISOR_TEXT_BYTES),
-                                "required_artifact_contract": {
-                                    "type": "string",
-                                    "enum": ArtifactContract::ALL,
-                                },
-                            },
-                            "required": ["task_id", "instruction"],
-                            "additionalProperties": false,
-                        },
-                    },
                     "policy_selector": bounded_string(MAX_SUPERVISOR_KEY_BYTES),
                     "idempotency_key": bounded_string(MAX_SUPERVISOR_KEY_BYTES),
                 },
@@ -166,17 +142,7 @@ mod tests {
             properties["root_task"]["x-maxUtf8Bytes"],
             MAX_SUPERVISOR_TEXT_BYTES
         );
-        assert_eq!(
-            properties["initial_task_dag"]["maxItems"],
-            MAX_INITIAL_TASKS
-        );
-        let task = &properties["initial_task_dag"]["items"]["properties"];
-        assert_eq!(task["task_id"]["maxLength"], MAX_TASK_ID_BYTES);
-        assert_eq!(task["dependencies"]["maxItems"], MAX_TASK_DEPENDENCIES);
-        assert_eq!(
-            task["required_artifact_contract"]["enum"],
-            serde_json::json!(ArtifactContract::ALL)
-        );
+        assert!(properties.get("initial_task_dag").is_none());
         assert_eq!(
             properties["idempotency_key"]["maxLength"],
             MAX_SUPERVISOR_KEY_BYTES

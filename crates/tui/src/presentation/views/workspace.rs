@@ -2358,12 +2358,18 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
     let observation = if home.work_runs.freshness() == WorkRunFreshness::Unavailable {
         "⚠ Stale work"
+    } else if matches!(
+        run.state,
+        SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated
+    ) {
+        "⚠ Action needed"
     } else {
         "● Active work"
     };
+    let label = run.display_label.as_deref().unwrap_or("Untitled Work Run");
     widgets::clip_to_width(
         &format!(
-            "  {observation} #{short_id} · {} · {}/{} tasks · {}/{} agents · Director for details",
+            "  {observation} {label} #{short_id} · {} · {}/{} tasks · {}/{} agents · Director for details",
             work_run_state_label(run.state),
             progress.succeeded_tasks,
             progress.total_tasks,
@@ -3252,6 +3258,7 @@ mod tests {
             state: SupervisorRunState::Running,
             terminal_at: None,
             terminal_reason: None,
+            display_label: Some("Ship Work Run".into()),
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),

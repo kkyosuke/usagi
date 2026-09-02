@@ -18,17 +18,18 @@ use sha2::{Digest, Sha256};
 use usagi_core::{
     domain::{
         agent::{InboxKind, RunStatus, StructuredResult},
-        id::{AgentRuntimeRef, OperationId, WorkspaceId},
-        pr_inventory::GitHubRepository,
+        id::{AgentRuntimeRef, OperationId, SessionId, WorkspaceId, WorktreeId},
+        pr_inventory::{GitHubRepository, canonicalize},
         supervisor::{
             ARTIFACT_RETRY_BASE_SECONDS, ARTIFACT_RETRY_MAX_SECONDS, ArtifactContract,
             ArtifactExpectation, EscalationDecision, GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
-            MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES,
-            MAX_SUPERVISOR_TEXT_BYTES, MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS,
-            MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT, RunProvenance, SupervisorEvent,
-            SupervisorEventKind, SupervisorEventSource, SupervisorRun, SupervisorRunId,
-            SupervisorRunQuery, SupervisorRunState, SupervisorWorkspaceCommand, TaskId, TaskNode,
-            TaskState, presentation_text_is_safe, reduce,
+            MAX_INITIAL_TASKS, MAX_SUPERVISOR_DISPLAY_LABEL_BYTES, MAX_SUPERVISOR_KEY_BYTES,
+            MAX_SUPERVISOR_REASON_BYTES, MAX_SUPERVISOR_TEXT_BYTES,
+            MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT,
+            RunProvenance, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
+            SupervisorRun, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
+            SupervisorWorkspaceCommand, TaskId, TaskNode, TaskState, presentation_text_is_safe,
+            reduce,
         },
     },
     infrastructure::{
@@ -105,7 +106,15 @@ pub trait ArtifactVerifier {
         contract: ArtifactContract,
         result: Option<&StructuredResult>,
         expectation: &ArtifactExpectation,
+        previous_verification_digest: Option<&str>,
     ) -> ArtifactVerification;
+}
+
+/// Exact checkout identity which may have contributed the Goal artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArtifactWorktreeRef {
+    pub session_id: Option<SessionId>,
+    pub worktree_id: WorktreeId,
 }
 
 /// Exact task fence and worker-reported candidate prepared under the supervisor
@@ -116,11 +125,18 @@ pub struct ArtifactVerificationRequest {
     pub task_id: TaskId,
     pub generation: u64,
     pub verification_attempt: u32,
+    pub previous_verification_digest: Option<String>,
     pub workspace_id: WorkspaceId,
     pub contract: ArtifactContract,
     pub repository: GitHubRepository,
     pub result: Option<StructuredResult>,
     pub expectation: Option<ArtifactExpectation>,
+    pub worktrees: Vec<ArtifactWorktreeRef>,
+}
+
+enum ArtifactReportTrigger {
+    Recovery,
+    Fresh(Option<StructuredResult>),
 }
 
 /// Durable Goal operation whose reserved root still needs exact provenance.
@@ -141,6 +157,14 @@ pub struct PendingDelegatedPromotion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingArtifactVerification {
     pub dispatch_run_id: OperationId,
+}
+
+/// Exact live Agent and safe context needed for a human-requested retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryWork {
+    pub provenance: RunProvenance,
+    pub reason: String,
+    pub safe_evidence: String,
 }
 
 /// An aborted task whose Agent admission may have succeeded before Supervisor
@@ -258,6 +282,9 @@ const MAX_WAKE_RESERVATIONS: usize = 512;
 const MAX_WAKE_RESERVATIONS: usize = 8;
 #[cfg(not(test))]
 const RETAIN_DELIVERED_WAKES: usize = 128;
+/// Runtime metadata is rewritten atomically and read on recovery paths. Bound
+/// the complete document so a corrupt or legacy payload cannot dictate memory.
+const MAX_RUNTIME_STATE_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(not(test))]
 const MAX_CONTROL_RESERVATIONS: usize = 512;
 #[cfg(test)]
@@ -312,20 +339,15 @@ impl RuntimeState {
         };
         let controls_are_valid = self.controls.iter().all(|(operation, reservation)| {
             OperationId::parse(operation).is_ok()
-                && reservation.semantic_digest.len() == 71
-                && reservation
-                    .semantic_digest
-                    .strip_prefix("sha256:")
-                    .is_some_and(|digest| {
-                        digest.len() == 64
-                            && digest
-                                .bytes()
-                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                    })
+                && is_semantic_digest(&reservation.semantic_digest)
+        });
+        let starts_are_valid = self.starts.iter().all(|(operation, reservation)| {
+            !operation.is_empty() && is_semantic_digest(&reservation.semantic_key)
         });
         if self.starts.len() > MAX_START_RESERVATIONS
             || self.wakes.len() > MAX_WAKE_RESERVATIONS
             || self.controls.len() > MAX_CONTROL_RESERVATIONS
+            || !starts_are_valid
             || !controls_are_valid
             || !tombstones_are_valid(&self.expired_starts)
             || !tombstones_are_valid(&self.expired_wakes)
@@ -334,6 +356,17 @@ impl RuntimeState {
             anyhow::bail!("supervisor runtime metadata exceeds or violates its hard limit");
         }
         Ok(())
+    }
+
+    fn migrate_start_semantics(&mut self) -> bool {
+        let mut changed = false;
+        for reservation in self.starts.values_mut() {
+            if !is_semantic_digest(&reservation.semantic_key) {
+                reservation.semantic_key = semantic_digest(reservation.semantic_key.as_bytes());
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn compact_delivered_wakes(&mut self) {
@@ -365,6 +398,16 @@ impl RuntimeState {
             self.expired_wakes.insert(&key);
         }
     }
+}
+
+fn is_semantic_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.strip_prefix("sha256:").is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,16 +483,24 @@ fn validate_start_input(
 }
 
 fn control_semantic_digest(command: &SupervisorWorkspaceCommand) -> Result<String> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let encoded = serde_json::to_vec(command)?;
-    let digest = Sha256::digest(encoded);
+    Ok(semantic_digest(&encoded))
+}
+
+fn semantic_digest(value: &[u8]) -> String {
+    encode_digest(Sha256::digest(value))
+}
+
+fn encode_digest(digest: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = digest.as_ref();
     let mut value = String::with_capacity("sha256:".len() + digest.len() * 2);
     value.push_str("sha256:");
-    for byte in digest {
+    for &byte in digest {
         value.push(char::from(HEX[usize::from(byte >> 4)]));
         value.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    Ok(value)
+    value
 }
 
 fn validate_control_command(command: &SupervisorWorkspaceCommand) -> Result<()> {
@@ -502,10 +553,22 @@ fn control_event(
     }
 }
 
-fn push_semantic_component(key: &mut String, value: &str) {
-    key.push_str(&value.len().to_string());
-    key.push(':');
-    key.push_str(value);
+fn update_semantic_component(digest: &mut Sha256, value: &str) {
+    digest.update(value.len().to_string().as_bytes());
+    digest.update(b":");
+    digest.update(value.as_bytes());
+}
+
+fn work_run_display_label(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() || !presentation_text_is_safe(&normalized) {
+        return None;
+    }
+    let mut end = normalized.len().min(MAX_SUPERVISOR_DISPLAY_LABEL_BYTES);
+    while !normalized.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(normalized[..end].to_owned())
 }
 
 fn delegated_task_id(operation: OperationId) -> Result<TaskId> {
@@ -704,16 +767,73 @@ impl SupervisorRuntime {
     ) -> Result<SupervisorRunQuery> {
         let dispatch_run_id = OperationId::parse(operation_id)
             .map_err(|_| anyhow::anyhow!("supervisor root dispatch operation is invalid"))?;
+        if self.dispatch.run(dispatch_run_id)?.is_some() {
+            let state = self.load_state()?;
+            if let Some(reservation) = state.starts.get(operation_id)
+                && self
+                    .load_started_run(reservation.supervisor_run_id)?
+                    .artifact_repository
+                    .is_none()
+            {
+                anyhow::bail!("reserved supervisor run is not a Goal run");
+            }
+        }
+        self.bind_reserved_root_task(
+            operation_id,
+            dispatch_run_id,
+            worker,
+            GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            true,
+            now,
+        )
+    }
+
+    /// Binds a generic `supervisor_start` root to the exact authenticated Agent
+    /// dispatch which invoked the tool. This makes a public run observable from
+    /// its first turn instead of manufacturing an unowned Ready task.
+    ///
+    /// # Errors
+    /// Returns an error when the reservation or exact caller dispatch fence is
+    /// missing, conflicting, or cannot be persisted.
+    pub fn bind_reserved_caller_dispatch(
+        &self,
+        start_operation_id: &str,
+        dispatch_run_id: OperationId,
+        worker: &AgentRuntimeRef,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
+        self.bind_reserved_root_task(
+            start_operation_id,
+            dispatch_run_id,
+            worker,
+            NO_ARTIFACT_CONTRACT,
+            false,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_reserved_root_task(
+        &self,
+        start_operation_id: &str,
+        dispatch_run_id: OperationId,
+        worker: &AgentRuntimeRef,
+        expected_contract: ArtifactContract,
+        require_workspace_root: bool,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
         if self.dispatch.run(dispatch_run_id)?.is_none() {
             anyhow::bail!("supervisor root dispatch does not exist");
         }
         let state = self.load_state()?;
         let reservation = state
             .starts
-            .get(operation_id)
+            .get(start_operation_id)
             .ok_or_else(|| anyhow::anyhow!("supervisor root reservation does not exist"))?;
         let mut run = self.load_started_run(reservation.supervisor_run_id)?;
-        if run.workspace_id != Some(worker.terminal.workspace_id) || worker.session_id.is_some() {
+        if run.workspace_id != Some(worker.terminal.workspace_id)
+            || (require_workspace_root && worker.session_id.is_some())
+        {
             anyhow::bail!("supervisor root worker is outside the workspace root scope");
         }
         let root_id = TaskId::new("root")?;
@@ -721,8 +841,8 @@ impl SupervisorRuntime {
             .tasks
             .get(&root_id)
             .ok_or_else(|| anyhow::anyhow!("supervisor root task is missing"))?;
-        if root.required_artifact_contract != GOAL_REVIEW_READY_ARTIFACT_CONTRACT {
-            anyhow::bail!("supervisor root reservation is not a Goal run");
+        if root.required_artifact_contract != expected_contract {
+            anyhow::bail!("supervisor root reservation has another artifact contract");
         }
         let root_generation = root.generation;
         let provenance = RunProvenance {
@@ -775,6 +895,29 @@ impl SupervisorRuntime {
         self.supervisor
             .load(id)?
             .ok_or_else(|| anyhow::anyhow!("supervisor run disappeared during root binding"))
+    }
+
+    fn load_indexed_runs(
+        &self,
+        ids: impl IntoIterator<Item = SupervisorRunId>,
+    ) -> Result<Vec<SupervisorRun>> {
+        let mut runs = Vec::new();
+        for id in ids {
+            runs.push(
+                self.supervisor
+                    .load(id)?
+                    .ok_or_else(|| anyhow::anyhow!("indexed supervisor run disappeared"))?,
+            );
+        }
+        Ok(runs)
+    }
+
+    fn unfinished_runs(&self) -> Result<Vec<SupervisorRun>> {
+        self.load_indexed_runs(self.supervisor.unfinished_run_ids()?)
+    }
+
+    fn aborted_runs(&self) -> Result<Vec<SupervisorRun>> {
+        self.load_indexed_runs(self.supervisor.aborted_run_ids()?)
     }
 
     /// Lists Goal reservations whose root dispatch still needs provenance. The
@@ -884,7 +1027,7 @@ impl SupervisorRuntime {
         )?;
         let child_dispatch_run = OperationId::parse(child_operation_id)
             .map_err(|_| anyhow::anyhow!("delegated dispatch operation is invalid"))?;
-        let mut matches = self.supervisor.runs()?.into_iter().filter_map(|run| {
+        let mut matches = self.unfinished_runs()?.into_iter().filter_map(|run| {
             let task = run
                 .provenance
                 .iter()
@@ -935,7 +1078,7 @@ impl SupervisorRuntime {
     /// Returns an error when retained supervisor state is malformed.
     pub fn pending_delegated_promotions(&self) -> Result<Vec<PendingDelegatedPromotion>> {
         let mut pending = Vec::new();
-        for run in self.supervisor.runs()? {
+        for run in self.unfinished_runs()? {
             if run.state.is_finished() {
                 continue;
             }
@@ -1028,7 +1171,7 @@ impl SupervisorRuntime {
             });
         }
 
-        for run in self.supervisor.runs()? {
+        for run in self.aborted_runs()? {
             if (selected_run.is_some() && selected_run != Some(run.supervisor_run_id))
                 || !matches!(
                     run.state,
@@ -1136,7 +1279,16 @@ impl SupervisorRuntime {
         now: DateTime<Utc>,
     ) -> Result<Vec<PendingArtifactVerification>> {
         let mut pending = Vec::new();
-        for run in self.supervisor.runs()? {
+        let completed = self
+            .dispatch_runs()?
+            .into_iter()
+            .filter(|dispatch| dispatch.status == RunStatus::Completed)
+            .map(|dispatch| dispatch.run_id)
+            .collect::<BTreeSet<_>>();
+        for id in self.supervisor.unfinished_run_ids()? {
+            let Some(run) = self.supervisor.load(id)? else {
+                continue;
+            };
             if run.state != SupervisorRunState::Running {
                 continue;
             }
@@ -1158,11 +1310,7 @@ impl SupervisorRuntime {
                 {
                     anyhow::bail!("contracted supervisor task provenance fence is stale");
                 }
-                if self
-                    .dispatch
-                    .run(provenance.dispatch_run_id)?
-                    .is_some_and(|dispatch| dispatch.status == RunStatus::Completed)
-                {
+                if completed.contains(&provenance.dispatch_run_id) {
                     pending.push(PendingArtifactVerification {
                         dispatch_run_id: provenance.dispatch_run_id,
                     });
@@ -1187,7 +1335,7 @@ impl SupervisorRuntime {
         let operation = OperationId::parse(child_operation_id)
             .map_err(|_| anyhow::anyhow!("delegated dispatch operation is invalid"))?;
         let task_id = delegated_task_id(operation)?;
-        let mut matches = self.supervisor.runs()?.into_iter().filter_map(|run| {
+        let mut matches = self.unfinished_runs()?.into_iter().filter_map(|run| {
             let task = run.tasks.get(&task_id)?.clone();
             is_delegated_reservation(&task, operation).then_some((run, task))
         });
@@ -1254,7 +1402,7 @@ impl SupervisorRuntime {
             anyhow::bail!("delegated dispatch does not exist");
         }
         let task_id = delegated_task_id(child_dispatch_run)?;
-        let mut matches = self.supervisor.runs()?.into_iter().filter_map(|run| {
+        let mut matches = self.unfinished_runs()?.into_iter().filter_map(|run| {
             let task = run.tasks.get(&task_id)?.clone();
             is_delegated_reservation(&task, child_dispatch_run).then_some((run, task))
         });
@@ -1333,7 +1481,40 @@ impl SupervisorRuntime {
         dispatch_run_id: OperationId,
         now: DateTime<Utc>,
     ) -> Result<Option<ArtifactVerificationRequest>> {
-        let mut found = self.supervisor.runs()?.into_iter().filter_map(|run| {
+        self.prepare_artifact_verification_with_trigger(
+            dispatch_run_id,
+            now,
+            ArtifactReportTrigger::Recovery,
+        )
+    }
+
+    /// Prepares verification after the exact worker explicitly reported again.
+    /// This is the only path which can leave artifact-rework waiting state.
+    ///
+    /// # Errors
+    /// Returns an error when dispatch, candidate, or supervisor provenance is
+    /// inconsistent or cannot be persisted.
+    pub fn prepare_artifact_verification_after_report(
+        &self,
+        dispatch_run_id: OperationId,
+        result: Option<StructuredResult>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ArtifactVerificationRequest>> {
+        self.prepare_artifact_verification_with_trigger(
+            dispatch_run_id,
+            now,
+            ArtifactReportTrigger::Fresh(result),
+        )
+    }
+
+    fn prepare_artifact_verification_with_trigger(
+        &self,
+        dispatch_run_id: OperationId,
+        now: DateTime<Utc>,
+        trigger: ArtifactReportTrigger,
+    ) -> Result<Option<ArtifactVerificationRequest>> {
+        let fresh_report = matches!(&trigger, ArtifactReportTrigger::Fresh(_));
+        let mut found = self.unfinished_runs()?.into_iter().filter_map(|run| {
             let task = run
                 .provenance
                 .iter()
@@ -1359,14 +1540,16 @@ impl SupervisorRuntime {
         let task_state = task.state;
         let generation = task.generation;
         let verification_attempt = task.verification_attempt;
+        let previous_verification_digest = task.verification_digest.clone();
         let expectation = task.verification_expectation.clone();
         let contract = task.required_artifact_contract;
         let workspace_id = run
             .workspace_id
             .ok_or_else(|| anyhow::anyhow!("artifact run workspace is missing"))?;
-        if task
-            .verification_retry_at
-            .is_some_and(|retry_at| retry_at > now)
+        if !fresh_report
+            && task
+                .verification_retry_at
+                .is_some_and(|retry_at| retry_at > now)
         {
             return Ok(None);
         }
@@ -1388,7 +1571,9 @@ impl SupervisorRuntime {
                 },
             )?;
         }
-        if matches!(task_state, TaskState::Dispatched | TaskState::Running) {
+        if matches!(task_state, TaskState::Dispatched | TaskState::Running)
+            || (fresh_report && task_state == TaskState::AwaitingDecision)
+        {
             run = self.apply(
                 &run,
                 now,
@@ -1406,26 +1591,74 @@ impl SupervisorRuntime {
             self.reject_missing_artifact_repository(&run, task_id, generation, now)?;
             return Ok(None);
         };
-        let result = match self.dispatch.binding(dispatch_run_id)? {
-            Some(binding) => self
-                .dispatch
-                .inbox(&binding.caller)?
-                .into_iter()
-                .find(|message| message.run_id == dispatch_run_id)
-                .and_then(|message| message.result),
-            None => None,
-        };
+        let (run, result) = self.prepare_artifact_candidate(
+            run,
+            &task_id,
+            generation,
+            dispatch_run_id,
+            trigger,
+            now,
+        )?;
+        let worktrees = artifact_worktrees(&run);
         Ok(Some(ArtifactVerificationRequest {
             supervisor_run_id: run.supervisor_run_id,
             task_id,
             generation,
             verification_attempt,
+            previous_verification_digest,
             workspace_id,
             contract,
             repository,
             result,
             expectation,
+            worktrees,
         }))
+    }
+
+    fn prepare_artifact_candidate(
+        &self,
+        mut run: SupervisorRun,
+        task_id: &TaskId,
+        generation: u64,
+        dispatch_run_id: OperationId,
+        trigger: ArtifactReportTrigger,
+        now: DateTime<Utc>,
+    ) -> Result<(SupervisorRun, Option<StructuredResult>)> {
+        let (fresh, reported_result) = match trigger {
+            ArtifactReportTrigger::Fresh(result) => (true, result),
+            ArtifactReportTrigger::Recovery => {
+                let result = match self.dispatch.binding(dispatch_run_id)? {
+                    Some(binding) => self
+                        .dispatch
+                        .inbox(&binding.caller)?
+                        .into_iter()
+                        .find(|message| message.run_id == dispatch_run_id)
+                        .and_then(|message| message.result),
+                    None => None,
+                };
+                (false, result)
+            }
+        };
+        let candidate_pr = reported_result
+            .as_ref()
+            .and_then(|result| result.pr.as_deref())
+            .and_then(canonicalize)
+            .map(|identity| identity.as_url().to_owned());
+        if fresh || !run.verification_candidates.contains_key(task_id) {
+            run = self.apply(
+                &run,
+                now,
+                SupervisorEventSource::Verification,
+                SupervisorEventKind::VerificationCandidateRecorded {
+                    task_id: task_id.clone(),
+                    generation,
+                    candidate_pr,
+                },
+            )?;
+        }
+        let mut result = reported_result.unwrap_or_default();
+        result.pr = run.verification_candidates.get(task_id).cloned().flatten();
+        Ok((run, Some(result)))
     }
 
     fn reject_missing_artifact_repository(
@@ -1605,34 +1838,38 @@ impl SupervisorRuntime {
             &initial_tasks,
             policy_selector.as_deref(),
         )?;
-        let mut semantic_key = String::new();
-        push_semantic_component(&mut semantic_key, caller);
-        push_semantic_component(&mut semantic_key, &root_task);
-        push_semantic_component(&mut semantic_key, root_artifact_contract.as_str());
-        push_semantic_component(
-            &mut semantic_key,
+        let mut start_semantics = Sha256::new();
+        update_semantic_component(&mut start_semantics, caller);
+        update_semantic_component(&mut start_semantics, &root_task);
+        update_semantic_component(&mut start_semantics, root_artifact_contract.as_str());
+        update_semantic_component(
+            &mut start_semantics,
             artifact_repository
                 .as_ref()
                 .map_or("none", GitHubRepository::as_str),
         );
-        push_semantic_component(&mut semantic_key, &initial_tasks.len().to_string());
+        update_semantic_component(&mut start_semantics, &initial_tasks.len().to_string());
         for task in &initial_tasks {
-            push_semantic_component(&mut semantic_key, &task.task_id);
-            push_semantic_component(
-                &mut semantic_key,
+            update_semantic_component(&mut start_semantics, &task.task_id);
+            update_semantic_component(
+                &mut start_semantics,
                 task.parent_task_id.as_deref().unwrap_or("root"),
             );
-            push_semantic_component(&mut semantic_key, &task.dependencies.len().to_string());
+            update_semantic_component(&mut start_semantics, &task.dependencies.len().to_string());
             for dependency in &task.dependencies {
-                push_semantic_component(&mut semantic_key, dependency);
+                update_semantic_component(&mut start_semantics, dependency);
             }
-            push_semantic_component(&mut semantic_key, &task.instruction);
-            push_semantic_component(&mut semantic_key, task.required_artifact_contract.as_str());
+            update_semantic_component(&mut start_semantics, &task.instruction);
+            update_semantic_component(
+                &mut start_semantics,
+                task.required_artifact_contract.as_str(),
+            );
         }
-        push_semantic_component(
-            &mut semantic_key,
+        update_semantic_component(
+            &mut start_semantics,
             policy_selector.as_deref().unwrap_or("default"),
         );
+        let semantic_key = encode_digest(start_semantics.finalize());
         let mut state = self.load_state()?;
         let reservation = match state.starts.get(operation_id) {
             Some(existing) if existing.semantic_key == semantic_key => existing.clone(),
@@ -1677,6 +1914,7 @@ impl SupervisorRuntime {
             );
             run.workspace_id = workspace;
             run.artifact_repository = artifact_repository;
+            run.display_label = work_run_display_label(&root_task);
             self.supervisor.initialize(&run)?;
             run
         };
@@ -1798,6 +2036,50 @@ impl SupervisorRuntime {
         Ok(Some(run.query()))
     }
 
+    /// Resolves a Retry action to the exact blocking Agent before the control
+    /// event clears its escalation fence.
+    ///
+    /// # Errors
+    /// Returns an error when the aggregate is corrupt or cannot be read.
+    pub fn retry_work_for_workspace(
+        &self,
+        workspace: WorkspaceId,
+        id: SupervisorRunId,
+        escalation_id: OperationId,
+    ) -> Result<Option<RetryWork>> {
+        let Some(run) = self.supervisor.load(id)? else {
+            return Ok(None);
+        };
+        if run.workspace_id != Some(workspace) || run.state != SupervisorRunState::Escalated {
+            return Ok(None);
+        }
+        let escalation = run
+            .escalation
+            .as_ref()
+            .filter(|item| item.escalation_id == escalation_id)
+            .ok_or_else(|| anyhow::anyhow!("supervisor retry escalation fence is stale"))?;
+        let Some(task_id) = escalation.blocking_task_id.as_ref() else {
+            return Ok(None);
+        };
+        let Some(provenance) = run.provenance.get(task_id) else {
+            return Ok(None);
+        };
+        let task = run
+            .tasks
+            .get(task_id)
+            .ok_or_else(|| anyhow::anyhow!("supervisor retry task is missing"))?;
+        if provenance.generation != task.generation
+            || task.assigned_dispatch_run != Some(provenance.dispatch_run_id)
+        {
+            anyhow::bail!("supervisor retry provenance fence is stale");
+        }
+        Ok(Some(RetryWork {
+            provenance: provenance.clone(),
+            reason: escalation.reason.clone(),
+            safe_evidence: escalation.safe_evidence.clone(),
+        }))
+    }
+
     /// Applies one human command to a run owned by the connection workspace.
     ///
     /// The operation reservation is saved before the aggregate event. A retry
@@ -1891,7 +2173,7 @@ impl SupervisorRuntime {
         selected_run: Option<SupervisorRunId>,
     ) -> Result<Vec<(WorkspaceId, RunProvenance)>> {
         let mut obligations = Vec::new();
-        for run in self.supervisor.runs()? {
+        for run in self.aborted_runs()? {
             if (selected_run.is_some() && selected_run != Some(run.supervisor_run_id))
                 || !matches!(
                     run.state,
@@ -1939,11 +2221,7 @@ impl SupervisorRuntime {
     /// # Errors
     /// Returns an error when the durable supervisor index cannot be read.
     pub fn has_unfinished_workspace(&self, workspace: WorkspaceId) -> Result<bool> {
-        Ok(self
-            .supervisor
-            .runs()?
-            .into_iter()
-            .any(|run| run.workspace_id == Some(workspace) && !run.state.is_finished()))
+        self.supervisor.has_unfinished_workspace(workspace)
     }
 
     /// Reads one caller-owned durable run.
@@ -2076,10 +2354,17 @@ impl SupervisorRuntime {
     /// # Errors
     /// Returns the first durable reconciliation or wake delivery failure.
     pub fn tick_all(&self, now: DateTime<Utc>, waker: &mut dyn DecisionWaker) -> Result<()> {
-        for run in self.supervisor.runs()? {
-            self.tick(run.supervisor_run_id, now, waker)?;
+        let dispatch_runs = self.dispatch_runs()?;
+        let mut first_failure = None;
+        for id in self.supervisor.unfinished_run_ids()? {
+            if let Err(error) = self.tick_run(id, now, &dispatch_runs) {
+                first_failure.get_or_insert(error);
+            }
         }
-        Ok(())
+        if let Err(error) = self.deliver_reserved(now, waker) {
+            first_failure.get_or_insert(error);
+        }
+        first_failure.map_or(Ok(()), Err)
     }
 
     fn owned_run(&self, caller: &str, id: SupervisorRunId) -> Result<Option<SupervisorRun>> {
@@ -2108,10 +2393,20 @@ impl SupervisorRuntime {
         now: DateTime<Utc>,
         waker: &mut dyn DecisionWaker,
     ) -> Result<()> {
+        let dispatch_runs = self.dispatch_runs()?;
+        self.tick_run(id, now, &dispatch_runs)?;
+        self.deliver_reserved(now, waker)
+    }
+
+    fn tick_run(
+        &self,
+        id: SupervisorRunId,
+        now: DateTime<Utc>,
+        dispatch_runs: &[usagi_core::domain::agent::DispatchRun],
+    ) -> Result<()> {
         let Some(mut run) = self.supervisor.load(id)? else {
             return Ok(());
         };
-        let dispatch_runs = self.dispatch_runs()?;
         // Retry eligibility is a persisted deadline, not an in-memory timer.
         // Reconciliation therefore cannot dispatch a retry before its deadline
         // and can resume one after a daemon restart without polling.
@@ -2196,7 +2491,7 @@ impl SupervisorRuntime {
                 },
             )?;
         }
-        self.deliver_reserved(waker)
+        Ok(())
     }
 
     fn finalize_terminal_tasks(
@@ -2303,6 +2598,11 @@ impl SupervisorRuntime {
         now: DateTime<Utc>,
     ) -> Result<()> {
         let parent = run.tasks.get(parent_id).cloned().expect("parent exists");
+        let key = format!("{}:{}:{}", child_run, parent_id.0, parent.generation);
+        let mut state = self.load_state()?;
+        if state.wakes.contains_key(&key) || state.expired_wakes.contains(&key) {
+            return Ok(());
+        }
         if parent.state == TaskState::Running {
             let event = SupervisorEventKind::SetTaskState {
                 task_id: parent_id.clone(),
@@ -2319,11 +2619,6 @@ impl SupervisorRuntime {
             return Ok(());
         };
         let outcome = self.outcome(child_run, kind)?;
-        let key = format!("{}:{}:{}", child_run, parent_id.0, parent.generation);
-        let mut state = self.load_state()?;
-        if state.wakes.contains_key(&key) || state.expired_wakes.contains(&key) {
-            return Ok(());
-        }
         state.compact_delivered_wakes();
         if state.wakes.len() >= MAX_WAKE_RESERVATIONS {
             anyhow::bail!("supervisor wake reservation capacity is exhausted");
@@ -2368,17 +2663,65 @@ impl SupervisorRuntime {
             },
         ))
     }
-    fn deliver_reserved(&self, waker: &mut dyn DecisionWaker) -> Result<()> {
+    fn deliver_reserved(&self, now: DateTime<Utc>, waker: &mut dyn DecisionWaker) -> Result<()> {
         let mut state = self.load_state()?;
         let mut changed = false;
-        for reservation in state.wakes.values_mut().filter(|item| !item.delivered) {
-            waker.wake(&reservation.wake)?;
-            reservation.delivered = true;
-            changed = true;
+        let mut first_failure = None;
+        let pending = state
+            .wakes
+            .iter()
+            .filter(|(_, item)| !item.delivered)
+            .map(|(key, item)| (key.clone(), item.wake.clone()))
+            .collect::<Vec<_>>();
+        for (key, wake) in pending {
+            let delivered = waker
+                .wake(&wake)
+                .and_then(|()| self.resume_parent_after_wake(&wake, now));
+            match delivered {
+                Ok(()) => {
+                    if let Some(reservation) = state.wakes.get_mut(&key) {
+                        reservation.delivered = true;
+                        changed = true;
+                    }
+                }
+                Err(error) => {
+                    first_failure.get_or_insert(error);
+                }
+            }
         }
         if changed {
             state.compact_delivered_wakes();
             self.save_state(&state)?;
+        }
+        first_failure.map_or(Ok(()), Err)
+    }
+
+    fn resume_parent_after_wake(&self, wake: &DecisionWake, now: DateTime<Utc>) -> Result<()> {
+        let Some(run) = self.supervisor.load(wake.supervisor_run_id)? else {
+            anyhow::bail!("supervisor parent wake run is unavailable");
+        };
+        let task = run
+            .tasks
+            .get(&wake.parent_task_id)
+            .ok_or_else(|| anyhow::anyhow!("supervisor parent wake task is unavailable"))?;
+        if task.generation != wake.parent_generation
+            || run.provenance.get(&wake.parent_task_id) != Some(&wake.parent)
+        {
+            anyhow::bail!("supervisor parent wake fence is stale");
+        }
+        if task.state == TaskState::AwaitingDecision {
+            self.apply(
+                &run,
+                now,
+                SupervisorEventSource::Admission,
+                SupervisorEventKind::SetTaskState {
+                    task_id: wake.parent_task_id.clone(),
+                    generation: wake.parent_generation,
+                    state: TaskState::Running,
+                },
+            )?;
+        } else if task.state != TaskState::Running && !task.state.terminal() {
+            anyhow::bail!("supervisor parent wake task is not resumable");
         }
         Ok(())
     }
@@ -2440,12 +2783,21 @@ impl SupervisorRuntime {
     }
 
     fn load_state(&self) -> Result<RuntimeState> {
-        let state: RuntimeState = json_file::read(&self.state_path)?.unwrap_or_default();
+        let mut state: RuntimeState =
+            json_file::read_bounded(&self.state_path, MAX_RUNTIME_STATE_BYTES)?.unwrap_or_default();
+        let migrated = state.migrate_start_semantics();
         state.validate_limits()?;
+        if migrated {
+            self.save_state(&state)?;
+        }
         Ok(state)
     }
     fn save_state(&self, state: &RuntimeState) -> Result<()> {
         state.validate_limits()?;
+        anyhow::ensure!(
+            serde_json::to_vec(state)?.len() <= MAX_RUNTIME_STATE_BYTES,
+            "supervisor runtime metadata exceeds its serialized byte limit"
+        );
         json_file::write_atomic(
             self.state_path.parent().expect("state path has parent"),
             &self.state_path,
@@ -2481,6 +2833,25 @@ fn task_node(
         verification_expectation: None,
         state: TaskState::Pending,
     }
+}
+
+fn artifact_worktrees(run: &SupervisorRun) -> Vec<ArtifactWorktreeRef> {
+    let mut worktrees = run
+        .provenance
+        .iter()
+        .filter_map(|(id, provenance)| {
+            let current = run.tasks.get(id)?;
+            (current.generation == provenance.generation
+                && matches!(current.state, TaskState::Succeeded | TaskState::Verifying))
+            .then_some(ArtifactWorktreeRef {
+                session_id: provenance.worker_session_id,
+                worktree_id: provenance.worker_worktree_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    worktrees.sort();
+    worktrees.dedup();
+    worktrees
 }
 
 fn terminal(status: RunStatus) -> Option<(TaskState, InboxKind)> {
@@ -2603,7 +2974,7 @@ mod tests {
     }
     fn start_reservation(supervisor_run_id: SupervisorRunId) -> StartReservation {
         StartReservation {
-            semantic_key: "test".into(),
+            semantic_key: semantic_digest(b"test"),
             supervisor_run_id,
         }
     }
@@ -2662,6 +3033,109 @@ mod tests {
             self.wakes.push(wake.clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn wake_delivery_isolates_failures_and_persists_later_successes() {
+        struct SelectiveWaker {
+            failing_child: OperationId,
+            attempted: Vec<OperationId>,
+        }
+        impl DecisionWaker for SelectiveWaker {
+            fn wake(&mut self, wake: &DecisionWake) -> Result<()> {
+                self.attempted.push(wake.child_run_id);
+                if wake.child_run_id == self.failing_child {
+                    anyhow::bail!("injected wake failure");
+                }
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let mut state = RuntimeState::default();
+        let mut runs = Vec::new();
+        for (key, index) in [("a-fail", 0), ("b-pass", 1)] {
+            let mut run = SupervisorRun::new(
+                "caller".into(),
+                "root".into(),
+                "input".into(),
+                "policy".into(),
+                now(),
+            );
+            run.state = SupervisorRunState::Running;
+            let parent_id = TaskId::new(format!("parent-{index}")).unwrap();
+            let parent_dispatch = OperationId::new();
+            let mut parent = task(run.supervisor_run_id, &parent_id.0, None);
+            parent.state = TaskState::AwaitingDecision;
+            parent.assigned_dispatch_run = Some(parent_dispatch);
+            let parent_provenance =
+                provenance(run.supervisor_run_id, &parent_id, None, parent_dispatch);
+            run.tasks.insert(parent_id.clone(), parent);
+            run.provenance
+                .insert(parent_id.clone(), parent_provenance.clone());
+            scheduler.supervisor.initialize(&run).unwrap();
+
+            let child_run_id = OperationId::new();
+            state.wakes.insert(
+                key.into(),
+                WakeReservation {
+                    wake: DecisionWake {
+                        supervisor_run_id: run.supervisor_run_id,
+                        parent_task_id: parent_id.clone(),
+                        parent_generation: 1,
+                        parent: parent_provenance,
+                        child_run_id,
+                        outcome: WakeOutcome {
+                            kind: InboxKind::Completed,
+                            summary: "done".into(),
+                        },
+                        dag: Vec::new(),
+                        remaining_budget_summary: "none".into(),
+                    },
+                    delivered: false,
+                },
+            );
+            runs.push((run.supervisor_run_id, parent_id, child_run_id));
+        }
+        scheduler.save_state(&state).unwrap();
+
+        let mut waker = SelectiveWaker {
+            failing_child: runs[0].2,
+            attempted: Vec::new(),
+        };
+        assert!(
+            scheduler
+                .deliver_reserved(now(), &mut waker)
+                .unwrap_err()
+                .to_string()
+                .contains("injected wake failure")
+        );
+        assert_eq!(waker.attempted, vec![runs[0].2, runs[1].2]);
+        let state = scheduler.load_state().unwrap();
+        assert!(!state.wakes["a-fail"].delivered);
+        assert!(state.wakes["b-pass"].delivered);
+        assert_eq!(
+            scheduler.supervisor.load(runs[0].0).unwrap().unwrap().tasks[&runs[0].1].state,
+            TaskState::AwaitingDecision
+        );
+        assert_eq!(
+            scheduler.supervisor.load(runs[1].0).unwrap().unwrap().tasks[&runs[1].1].state,
+            TaskState::Running
+        );
+
+        let mut retry = Waker::default();
+        scheduler.deliver_reserved(now(), &mut retry).unwrap();
+        assert_eq!(retry.wakes.len(), 1);
+        assert_eq!(retry.wakes[0].child_run_id, runs[0].2);
+        assert!(
+            scheduler
+                .load_state()
+                .unwrap()
+                .wakes
+                .values()
+                .all(|wake| wake.delivered)
+        );
     }
 
     #[test]
@@ -2876,9 +3350,51 @@ mod tests {
                 due,
             )
             .unwrap();
+        assert!(
+            scheduler
+                .prepare_artifact_verification(operation, due)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scheduler
+                .supervisor
+                .load(first.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .verification_candidates
+                .is_empty()
+        );
         let retry = scheduler
-            .prepare_artifact_verification(operation, due)
+            .prepare_artifact_verification_after_report(
+                operation,
+                Some(StructuredResult {
+                    pr: Some("https://github.com/acme/repo/pull/2".into()),
+                    ..StructuredResult::default()
+                }),
+                due,
+            )
             .unwrap()
+            .unwrap();
+        assert_eq!(
+            retry
+                .result
+                .as_ref()
+                .and_then(|result| result.pr.as_deref()),
+            Some("https://github.com/acme/repo/pull/2")
+        );
+        assert_eq!(
+            scheduler
+                .supervisor
+                .load(first.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .verification_candidates[&TaskId::new("root").unwrap()]
+                .as_deref(),
+            Some("https://github.com/acme/repo/pull/2")
+        );
+        let retry = scheduler
+            .record_artifact_expectation(&retry, &artifact_expectation(), due)
             .unwrap();
         let completed = scheduler
             .record_artifact_verification(
@@ -3824,7 +4340,7 @@ mod tests {
         state.starts.insert(
             OperationId::new().to_string(),
             StartReservation {
-                semantic_key: "orphan".into(),
+                semantic_key: semantic_digest(b"orphan"),
                 supervisor_run_id: SupervisorRunId::new(),
             },
         );
@@ -4924,7 +5440,7 @@ mod tests {
             state.starts.insert(
                 format!("start-{index}"),
                 StartReservation {
-                    semantic_key: format!("semantic-{index}"),
+                    semantic_key: semantic_digest(format!("semantic-{index}").as_bytes()),
                     supervisor_run_id: run.supervisor_run_id,
                 },
             );
@@ -4981,7 +5497,7 @@ mod tests {
             missing.starts.insert(
                 format!("missing-{index}"),
                 StartReservation {
-                    semantic_key: format!("missing-semantic-{index}"),
+                    semantic_key: semantic_digest(format!("missing-semantic-{index}").as_bytes()),
                     supervisor_run_id: SupervisorRunId::new(),
                 },
             );
@@ -5165,6 +5681,33 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("hard limit")
+        );
+
+        let mut legacy = RuntimeState::default();
+        legacy.starts.insert(
+            "legacy-operation".into(),
+            StartReservation {
+                semantic_key: "legacy raw semantic material".into(),
+                supervisor_run_id: SupervisorRunId::new(),
+            },
+        );
+        json_file::write_atomic(temp.path(), &scheduler.state_path, &legacy).unwrap();
+        let migrated = scheduler.load_state().unwrap();
+        assert_eq!(
+            migrated.starts["legacy-operation"].semantic_key,
+            semantic_digest(b"legacy raw semantic material")
+        );
+
+        std::fs::File::create(&scheduler.state_path)
+            .unwrap()
+            .set_len(u64::try_from(MAX_RUNTIME_STATE_BYTES + 1).unwrap())
+            .unwrap();
+        assert!(
+            scheduler
+                .load_state()
+                .unwrap_err()
+                .to_string()
+                .contains("JSON limit")
         );
     }
 
@@ -5677,6 +6220,19 @@ mod tests {
                 run.state_revision,
                 &event(
                     &run,
+                    SupervisorEventKind::SetRunState {
+                        state: SupervisorRunState::Running,
+                        terminal_reason: None,
+                    },
+                ),
+            )
+            .unwrap();
+        run = store
+            .apply(
+                id,
+                run.state_revision,
+                &event(
+                    &run,
                     SupervisorEventKind::AddTask {
                         task: task(id, "parent", None),
                     },
@@ -5755,9 +6311,25 @@ mod tests {
         scheduler.tick(id, now(), &mut waker).unwrap();
         let saved = store.load(id).unwrap().unwrap();
         assert_eq!(saved.tasks[&child_id].state, TaskState::Succeeded);
-        assert_eq!(saved.tasks[&parent_id].state, TaskState::AwaitingDecision);
+        assert_eq!(saved.tasks[&parent_id].state, TaskState::Running);
         assert_eq!(waker.wakes.len(), 1);
         assert_eq!(waker.wakes[0].child_run_id, child_run);
+
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: parent_run,
+                agent_id: AgentId::new(),
+                prompt: "parent".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            })
+            .unwrap();
+        scheduler.tick(id, now(), &mut waker).unwrap();
+        let saved = store.load(id).unwrap().unwrap();
+        assert_eq!(saved.tasks[&parent_id].state, TaskState::Succeeded);
+        assert_eq!(saved.state, SupervisorRunState::Succeeded);
+        assert_eq!(waker.wakes.len(), 1);
 
         let restarted = SupervisorRuntime::new(temp.path());
         restarted.tick(id, now(), &mut waker).unwrap();
@@ -6173,7 +6745,7 @@ mod tests {
             full.starts.insert(
                 format!("live-{index}"),
                 StartReservation {
-                    semantic_key: format!("live-{index}"),
+                    semantic_key: semantic_digest(format!("live-{index}").as_bytes()),
                     supervisor_run_id: live.supervisor_run_id,
                 },
             );
