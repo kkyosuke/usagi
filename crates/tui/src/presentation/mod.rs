@@ -25624,6 +25624,9 @@ mod tests {
         open_delay: std::time::Duration,
         registry_refresh: Option<FakeRegistryRefresh>,
         registry_refresh_dispatches: usize,
+        directory_entries: Vec<String>,
+        directory_error: Option<io::ErrorKind>,
+        directory_requests: Vec<PathBuf>,
     }
 
     impl WorkspaceLoader for FakeLoader {
@@ -25670,6 +25673,15 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .unwrap_or("workspace");
             Ok(snapshot(name))
+        }
+
+        fn directory_names(&mut self, parent: &Path) -> io::Result<Vec<String>> {
+            self.directory_requests.push(parent.to_path_buf());
+            if let Some(kind) = self.directory_error {
+                Err(io::Error::new(kind, "directory is unavailable"))
+            } else {
+                Ok(self.directory_entries.clone())
+            }
         }
 
         fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
@@ -27131,6 +27143,43 @@ mod tests {
                 .all(|frame| frame.join("\n").contains("New Project"))
         );
         assert!(term.frames[5].join("\n").contains("Menu"));
+    }
+
+    #[test]
+    fn new_form_directory_completion_uses_the_loader_and_tolerates_io_failure() {
+        let keys = [Key::Char('e'), Key::Right, Key::Down]
+            .into_iter()
+            .chain("/tmp/al".chars().map(Key::Char))
+            .chain([Key::Tab, Key::Quit])
+            .collect::<Vec<_>>();
+
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader {
+            directory_entries: vec!["alpine".to_owned(), "alpha".to_owned()],
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.directory_requests, [PathBuf::from("/tmp")]);
+        assert!(term.frames.iter().any(|frame| {
+            crate::presentation::widgets::strip_ansi(&frame.join("\n")).contains("/tmp/alpha/")
+        }));
+
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader {
+            directory_error: Some(io::ErrorKind::PermissionDenied),
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.directory_requests, [PathBuf::from("/tmp")]);
+        assert!(term.frames.iter().any(|frame| {
+            crate::presentation::widgets::strip_ansi(&frame.join("\n")).contains("/tmp/al")
+        }));
     }
 
     #[test]

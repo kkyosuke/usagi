@@ -183,9 +183,7 @@ pub trait WorkspaceLoader: Send {
     /// # Errors
     ///
     /// Returns an error when `parent` cannot be enumerated.
-    fn directory_names(&mut self, _parent: &Path) -> io::Result<Vec<String>> {
-        Ok(Vec::new())
-    }
+    fn directory_names(&mut self, parent: &Path) -> io::Result<Vec<String>>;
 
     /// Persist the ordered set of project tabs as one Unite recent. The
     /// default keeps compatibility adapters storage-free.
