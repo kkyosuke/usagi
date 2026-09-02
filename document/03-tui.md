@@ -517,7 +517,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `v` | OpenPullRequests | focused session の Pull Request modal を開く |
 | `Ctrl-O` `,` | OpenGarden | 前面 modal が無い workspace の session garden を開く |
 | `Ctrl-O` `g` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
-| `Ctrl-O` `w` | WorkRuns | Goal-driven Director の Work Run 一覧・操作面を開く。通常モードまたは Director 外では何も変更せず、leader のない `w` / `Ctrl-W` は PTY が所有する |
+| `Ctrl-O` `w` | WorkRuns | goal-driven workspace の Work Run 一覧・操作面を開く。Director が閉じていれば同じ操作で drawer も開く。classic、overlay 表示中、Director の New / launch 中は Work Run 面へ遷移せず、leader のない `w` / `Ctrl-W` は PTY が所有する |
 | `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する |
 | `Ctrl-O` `z` | WorkspaceTerminalFullHeight | workspace terminal の高さを通常 drawer / 画面いっぱいで切り替える |
 | `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する。workspace terminal では新しい terminal tab を開く |
@@ -668,8 +668,11 @@ IPCは行わない。
 workspace 所有情報を持たない旧 run は別 workspace へ推測せず表示しない。
 
 Goal-driven Director では `Ctrl-O w` が同じ projection の最大16件を stable run ID で選べる Work Run 操作面を開く。
-進行中 run の cancel は確認を必須とし、escalated run は観測した exact escalation ID に対する Retry work / Cancel run /
-Mark failed だけを提示する。完了済み run は read-only である。観測が失敗した cached snapshot と初回 pending は操作を拒否し、
+Director が閉じていれば同時に drawer を開き、操作面の一覧では `↑` / `↓`（`←` / `→` も同じ）で Run を選び、
+`Enter` で状態に応じた action へ進み、`Esc` または一覧上の `Ctrl-O w` で閉じる。終了済みと Escalated 以外の run の
+cancel は再度 `Enter` を押す確認を必須とする。Escalated run は観測した exact escalation ID に対する
+Retry work / Cancel run / Mark failed だけを提示し、`↑` / `↓` / `←` / `→` で選択して `Enter` で確定する。
+完了済み run は read-only である。観測が失敗した cached snapshot と初回 pending は操作を拒否し、
 fresh snapshot を取得してからだけ typed command を送る。送信中の連打は消費し、応答が未確認なら `Enter` は新しい操作を作らず
 同じ operation ID を再送する。副作用なしの確定拒否は再試行画面にせず理由を表示して一覧へ戻る。`Esc` は確認・判断画面から一覧へ戻り、cancel 自体を暗黙に実行しない。結果不明の再試行画面では operation ID を破棄せず操作面だけを閉じ、再度開いたときに同じ operation の再試行へ戻す。
 

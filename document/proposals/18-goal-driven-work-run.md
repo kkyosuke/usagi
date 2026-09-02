@@ -4,16 +4,16 @@
 
 > **Status:** 一部採用済み・一部提案中の設計履歴
 >
-> **Baseline:** 原版 commit `f229360d5fd41c2affaa496ee8993c1026454b13`（2026-09-01）。goal-bound Director v1 の現在仕様は [TUI](../03-tui.md#goal-driven-workflow)、[daemon IPC](../04-ipc.md#agent-launch-request)、[daemon](../05-daemon.md#agent-admission-transaction) を参照する。現在契約にない後続段階は、選択可能な複数 run 一覧、独立 Run Closeup、run-scoped defaults である。
+> **Baseline:** 原版 commit `f229360d5fd41c2affaa496ee8993c1026454b13`（2026-09-01）。goal-bound Director と Work Run 操作面の現在仕様は [TUI](../03-tui.md#goal-driven-workflow)、[AgentGoal IPC](../04-ipc.md#agent-launch-request)、[Work Run IPC](../04-ipc.md#work-run-observation-and-control)、[daemon scheduler](../05-daemon.md#supervisor-scheduler) を参照する。現在契約にない後続段階は、独立 Run Closeup と run-scoped defaults である。
 
 「目的を一度入力すれば、PR が Ready for review になるか、明示的な人間判断が必要になるまで、再プロンプトなしで
 進む」goal-driven UI の target design である。Config、Goal Composer、goal-bound Director admission からなる v1 は実装済みで、
-現在仕様は [TUI](../03-tui.md#goal-driven-workflow)、[daemon IPC](../04-ipc.md#agent-launch-request)、
-[daemon](../05-daemon.md#agent-admission-transaction) を正本とする。
+現在仕様は [TUI](../03-tui.md#goal-driven-workflow)、[AgentGoal IPC](../04-ipc.md#agent-launch-request)、
+[Work Run IPC](../04-ipc.md#work-run-observation-and-control)、[daemon](../05-daemon.md#supervisor-scheduler) を正本とする。
 durable SupervisorRun の compact な Active work banner、Director 内 task progress、Goal submit から workspace 所有 Run への
 idempotent な昇格、root Agent dispatch との durable な相関と terminal 進捗、daemon-owned の独立 PR/CI verification と
-restart recovery を現在の画面と daemon が提供する。本書の複数 run 一覧、選択可能な独立 Run Closeup、
-Run-scoped team defaults は後続提案である。
+restart recovery に加え、Director 内の複数 Run 一覧、cancel、escalation 解決を現在の画面と daemon が提供する。
+本書の選択可能な独立 Run Closeup と Run-scoped team defaults は後続提案である。
 
 現在の usagi は session、Agent、terminal、Director、Garden、durable decision、supervisor aggregate を個別に持つ。
 本提案はそれらを置き換えず、利用者が投入した 1 つの目的を **Work Run** として束ねる。画面の主語を
@@ -368,12 +368,15 @@ Agent が次を自己申告しても、それだけでは terminal success に�
 0. **goal-bound Director v1（実装済み）**: classic-default setting、Director 内 Goal Composer、goal を含む idempotent
    `AgentGoal` admission、固定 operating contract を接続する。既存 session / decision / PR surface を利用し、Run state は作らない。
 1. **実行ループを閉じる**: Ready → dispatch → completion → next/retry → verification → terminal を daemon 内で接続し、restart を跨ぐ production E2E を追加する。
-2. **read-only Run projection（一部実装済み）**: Home のcompact `Active work` bannerとDirector内task progressで既存 supervisor runを観測する。複数run一覧、選択可能な独立Run Closeup、cancel/drill-downは後続とする。
+2. **Run projection と基本操作（実装済み）**: Home の compact `Active work` banner と Director 内 task progress で
+   supervisor run を観測する。Director 内の最大16件の一覧、確認付き cancel、exact escalation に対する
+   retry/cancel/fail も接続済みである。選択可能な独立 Run Closeup と task drill-down は後続とする。
 3. **Goal を SupervisorRun へ昇格する**: v1 の Goal submit と idempotent supervisor start は接続されている。
    target では visible defaults、Run-scoped team/policy snapshot、root Agent conversation の Discuss detail 化も加える。
-4. **判断と停止理由**: user decision と escalation を共通 component へ投影し、typed reason と許可 action を接続する。
+4. **判断と停止理由（一部実装済み）**: supervisor escalation の typed reason と retry/cancel/fail は Work Run 操作面へ
+   接続済みである。既存 user decision と escalation を共通 component に統合する段階は後続とする。
 5. **PR completion**: canonical PR、CI、Draft/Ready を independent verifier と Completed 画面へ接続する。
-6. **復元と polish**: reopen、複数 Run、narrow terminal、keyboard/mouse、screen graph、Garden/PR への遷移を固定する。
+6. **復元と polish**: 独立 Run Closeup の reopen、narrow terminal、mouse、screen graph、Garden/PR への遷移を固定する。
 
 各段階は、未接続の action を表示しない。Goal Composer は既存daemon-owned root Agentを起動する面のままで、
 それ自体をSupervisorRunとして表示しない。authoritative progressはdaemonに実在しworkspace ownershipを持つ

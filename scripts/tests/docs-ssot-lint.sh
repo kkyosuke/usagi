@@ -8,7 +8,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 make_fixture() {
   local destination=$1
-  mkdir -p "$destination/crates/cli/src/cli" "$destination/crates/cli/src/mcp/tools" "$destination/crates/cli/src/mcp/guides" "$destination/crates/daemon/src"
+  mkdir -p "$destination/crates/cli/src/cli" "$destination/crates/cli/src/mcp/tools" "$destination/crates/cli/src/mcp/guides" "$destination/crates/core/src/usecase" "$destination/crates/daemon/src" "$destination/crates/tui/src/usecase"
   cp "$repo/Cargo.toml" "$destination/Cargo.toml"
   cp -R "$repo/document" "$destination/document"
   cp -R "$repo/.agents" "$destination/.agents"
@@ -16,7 +16,9 @@ make_fixture() {
   cp "$repo/crates/cli/src/cli/mod.rs" "$destination/crates/cli/src/cli/mod.rs"
   cp "$repo/crates/cli/src/mcp/tools/session.rs" "$destination/crates/cli/src/mcp/tools/session.rs"
   cp "$repo/crates/cli/src/mcp/guides/orchestration.md" "$destination/crates/cli/src/mcp/guides/orchestration.md"
+  cp "$repo/crates/core/src/usecase/client.rs" "$destination/crates/core/src/usecase/client.rs"
   cp "$repo/crates/daemon/src/lib.rs" "$destination/crates/daemon/src/lib.rs"
+  cp "$repo/crates/tui/src/usecase/terminal_input.rs" "$destination/crates/tui/src/usecase/terminal_input.rs"
 }
 
 expect_fail() {
@@ -66,6 +68,23 @@ expect_fail "$tmp/breadcrumb" 'breadcrumb is missing next document 10-session-ro
 make_fixture "$tmp/contents"
 sed -i.bak '/^- \[検討した代替案\]/d' "$tmp/contents/document/02-architecture.md"
 expect_fail "$tmp/contents" '02-architecture.md top-level contents do not match body heading order'
+
+make_fixture "$tmp/work-run-tui"
+sed -i.bak '/| `Ctrl-O` `w` | WorkRuns |/d' "$tmp/work-run-tui/document/03-tui.md"
+expect_fail "$tmp/work-run-tui" 'document/03-tui.md is missing the implemented WorkRuns shortcut'
+
+make_fixture "$tmp/work-run-readme"
+sed -i.bak '/| `Ctrl-O w` \/ `Ctrl-O Ctrl-W` |/d' "$tmp/work-run-readme/README.md"
+expect_fail "$tmp/work-run-readme" 'README.md is missing the implemented WorkRuns shortcut'
+
+make_fixture "$tmp/work-run-ipc"
+sed -i.bak '/^- \[Work Run observation and control\]/d' "$tmp/work-run-ipc/document/04-ipc.md"
+sed -i.bak '/^## Work Run observation and control$/d' "$tmp/work-run-ipc/document/04-ipc.md"
+expect_fail "$tmp/work-run-ipc" 'document/04-ipc.md must own the implemented Work Run observation and control requests'
+
+make_fixture "$tmp/work-run-history"
+sed -i.bak 's/現在契約にない後続段階は、独立 Run Closeup/現在契約にない後続段階は、選択可能な複数 run 一覧、独立 Run Closeup/' "$tmp/work-run-history/document/proposals/18-goal-driven-work-run.md"
+expect_fail "$tmp/work-run-history" 'proposal 18 classifies the implemented Work Run list as future work'
 
 make_fixture "$tmp/history-authority"
 printf '\n[古い提案](proposals/01-entry-surfaces.md) が正本である。\n' >> "$tmp/history-authority/document/09-env.md"

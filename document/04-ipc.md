@@ -25,6 +25,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [Codex structured capture request](#codex-structured-capture-request)
 - [agent phase report request](#agent-phase-report-request)
 - [provider conversation resume request](#provider-conversation-resume-request)
+- [Work Run observation and control](#work-run-observation-and-control)
 - [dispatch request](#dispatch-request)
 - [generic terminal request](#generic-terminal-request)
   - [snapshot payload と revision](#snapshot-payload-と-revision)
@@ -625,21 +626,6 @@ Agent history / exit history / dismissal の allocator・retention・GC は
 provider-native identity、prompt、path は map に含めない。この request は mutation を持たないため、fresh connection で
 安全に retry できる。
 
-`supervisor_snapshot` は local TUI が接続先 workspace の durable Work Run を観測する read-only request である。
-payload の `WorkspaceId` は connection が束縛する workspace と完全一致する場合だけ受理し、foreign workspace は
-`ownership_unknown` で拒否する。response は task instruction とevent provenanceを含まない `SupervisorRunQuery` の最大16件で、
-判断待ち、失敗、実行中、計画中、終了済みの順（同順位は新しい順）に並ぶ。response が supervisor query の
-512 KiB 上限に達する場合は低順位の末尾から落とす。TUI は専用background laneから再読し、fresh connectionへのretryが安全である。
-
-`supervisor_control`はlocal TUIのhuman mutation専用requestで、`workspace`、UUIDの`operation_id`、型付き
-`command`（`cancel { supervisor_run_id, reason }`または
-`resolve_escalation { supervisor_run_id, escalation_id, decision }`）だけを持つ。Agent MCP credentialやcaller名、path、
-PID、terminal IDは受け取らない。payload workspaceとconnection workspace、runに保存されたworkspaceの3者が一致しない
-requestは`ownership_unknown`でeffect zeroになる。operationはdaemonのdurable semantic reservationとSupervisor event IDで
-replayされるためfresh connectionへのretryが可能で、同じIDの別commandは`idempotency_conflict`になる。cancel/failの成功は
-exact Supervisor provenanceから選んだAgent workerのterminate/reapまで含み、停止に失敗した応答も既にcommit済みのrunを
-recovery workerが再停止する。
-
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで
 構成する。
@@ -686,6 +672,23 @@ lineage を変えずに hook・MCP provision だけを再解決する。通常�
 旧 daemon がこの診断 vocabulary を実装していない場合、live Agent が無ければ通常 rollover を行う。live Agent がある場合は
 一覧を返して停止を保留し、`--restart-agents --force` が同時に指定された場合だけ既存の cold restart を使う。この互換経路は
 generic terminal も停止し得るが、再起動後も今回停止した runtime ID に対応する exact target だけを resume する。
+
+## Work Run observation and control
+
+`supervisor_snapshot` は local TUI が接続先 workspace の durable Work Run を観測する read-only request である。
+payload の `WorkspaceId` は connection が束縛する workspace と完全一致する場合だけ受理し、foreign workspace は
+`ownership_unknown` で拒否する。response は task instruction と event provenance を含まない `SupervisorRunQuery` の最大16件で、
+判断待ち、失敗、実行中、計画中、終了済みの順（同順位は新しい順）に並ぶ。response が supervisor query の
+512 KiB 上限に達する場合は低順位の末尾から落とす。TUI は専用 background lane から再読し、fresh connection への retry が安全である。
+
+`supervisor_control` は local TUI の human mutation 専用 request で、`workspace`、UUID の `operation_id`、型付き
+`command`（`cancel { supervisor_run_id, reason }` または
+`resolve_escalation { supervisor_run_id, escalation_id, decision }`）だけを持つ。Agent MCP credential や caller 名、path、
+PID、terminal ID は受け取らない。payload workspace と connection workspace、run に保存された workspace の3者が一致しない
+request は `ownership_unknown` で effect zero になる。operation は daemon の durable semantic reservation と Supervisor event ID で
+replay されるため fresh connection への retry が可能で、同じ ID の別 command は `idempotency_conflict` になる。cancel/fail の成功は
+exact Supervisor provenance から選んだ Agent worker の terminate/reap まで含み、停止に失敗した応答も既に commit 済みの run を
+recovery worker が再停止する。
 
 ## dispatch request
 

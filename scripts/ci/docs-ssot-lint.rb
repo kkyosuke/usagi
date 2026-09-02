@@ -147,6 +147,32 @@ numbered_docs.each_with_index do |path, position|
   end
 end
 
+work_run_input = read.call("crates/tui/src/usecase/terminal_input.rs")
+work_run_client = read.call("crates/core/src/usecase/client.rs")
+tui_spec = read.call("document/03-tui.md")
+ipc_spec = read.call("document/04-ipc.md")
+root_readme = read.call("README.md")
+work_run_history = read.call("document/proposals/18-goal-driven-work-run.md")
+
+if work_run_input.match?(/^\s*WorkRuns,\s*$/)
+  unless tui_spec.include?("| `Ctrl-O` `w` | WorkRuns |")
+    failures << "document/03-tui.md is missing the implemented WorkRuns shortcut"
+  end
+  unless root_readme.include?("| `Ctrl-O w` / `Ctrl-O Ctrl-W` |")
+    failures << "README.md is missing the implemented WorkRuns shortcut"
+  end
+  if work_run_history.lines.first(24).join.match?(/選択可能な複数\s+run\s+一覧/i)
+    failures << "proposal 18 classifies the implemented Work Run list as future work"
+  end
+end
+
+if work_run_client.include?("SupervisorSnapshot") && work_run_client.include?("SupervisorControl")
+  work_run_ipc = ipc_spec[/^## Work Run observation and control\n(.*?)(?=^## )/m, 1].to_s
+  unless work_run_ipc.include?("`supervisor_snapshot`") && work_run_ipc.include?("`supervisor_control`")
+    failures << "document/04-ipc.md must own the implemented Work Run observation and control requests"
+  end
+end
+
 rust_sources = [
   *Dir.glob(File.join(root, "src/**/*.rs")),
   *Dir.glob(File.join(root, "crates/**/*.rs"))

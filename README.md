@@ -17,7 +17,7 @@
 [![Test](https://github.com/KKyosuke/usagi/actions/workflows/test.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/test.yml)
 [![Coverage](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg?logo=rust&logoColor=white)](https://rust-lang.org/)
 
 </div>
 
@@ -82,6 +82,7 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O t` / `Ctrl-O Ctrl-T` | workspace root の Shell drawer を開閉する |
 | `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
 | `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
+| `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Director と Work Run 一覧・操作面を開く |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
@@ -264,8 +265,9 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | Roles | session / root ごとの追加 instruction と既定 role |
 
 `goal-driven` を選んだ workspace では `Ctrl-O Ctrl-G` → `New` が Goal Composer になり、目的と provider を確定して
-Work Run を開始する。進行と停止理由は Director output、blocking choice は Decision、成果 PR は既存 PR 一覧に表示する。
-詳細な操作と現行 v1 の境界は [goal-driven workflow](document/03-tui.md#goal-driven-workflow)を参照する。
+Work Run を開始する。進行と停止理由は Director に表示し、`Ctrl-O w` で最大16件の Run を選択して cancel または
+supervisor escalation の retry / cancel / fail を実行できる。一般の blocking choice は既存 Decision、成果 PR は既存 PR 一覧に表示する。
+詳細な操作と現行契約は [goal-driven workflow](document/03-tui.md#goal-driven-workflow)を参照する。
 
 環境変数は Config の `Env  [ N variables ]`、Overview の `env [workspace|global]`、Closeup の `env` で編集する。
 Workspace Config と Closeup は同じ複数行 editor で
