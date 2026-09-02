@@ -111,6 +111,20 @@ fn fixture_repo() -> tempfile::TempDir {
     repo
 }
 
+fn fixture_goal_repo() -> tempfile::TempDir {
+    let repo = fixture_repo();
+    git(
+        repo.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/usagi-goal-fixture.git",
+        ],
+    );
+    repo
+}
+
 fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
     write_codex_cli(bin, "codex", count, ready_status);
 }
@@ -1050,7 +1064,7 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
 #[test]
 fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
     let _serial = serial();
-    let repo = fixture_repo();
+    let repo = fixture_goal_repo();
     let home = short_dir("usagi-goal-");
     let bin = home.path().join("bin");
     let count = home.path().join("spawn-count");

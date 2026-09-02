@@ -3118,6 +3118,8 @@ const CLIENT_CONNECTION_FDS: u64 = 3;
 /// write: expiry no longer takes the store lock or fsyncs unless something
 /// actually changed.
 const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
+const SUPERVISOR_RECOVERY_TICK: Duration = Duration::from_secs(1);
+const SUPERVISOR_PROMOTION_GRACE: chrono::Duration = chrono::Duration::seconds(30);
 struct ProductionRefreshClock {
     started: Instant,
 }
@@ -3527,7 +3529,12 @@ fn spawn_ipc_server(
             "supervisor startup reconciliation deferred: {error}"
         ));
     }
-    background_workers.push(start_goal_artifact_recovery(Arc::clone(&supervisor))?);
+    background_workers.push(start_goal_artifact_recovery(
+        Arc::clone(&supervisor),
+        Arc::clone(&agent),
+        Arc::clone(&workspaces),
+        Arc::clone(&shutdown),
+    )?);
     background_workers.push(start_agent_observer(
         Arc::downgrade(&agent),
         agent_observations,
@@ -3575,6 +3582,7 @@ fn spawn_ipc_server(
         DaemonWorkspaceActivity {
             terminal: Arc::clone(&terminal),
             agent: Arc::clone(&agent),
+            supervisor: Arc::clone(&supervisor),
         },
         Arc::clone(&shutdown),
     )?);
@@ -4170,6 +4178,7 @@ const TENANT_IDLE_RETIREMENT: Duration = Duration::from_mins(10);
 struct DaemonWorkspaceActivity {
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
+    supervisor: SharedSupervisorRuntime,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
@@ -4188,10 +4197,15 @@ impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
             .agent
             .lock()
             .map_or(true, |agent| agent.has_running_agent(workspace));
+        let running_supervisor = self.supervisor.lock().map_or(true, |supervisor| {
+            supervisor
+                .has_unfinished_workspace(workspace)
+                .unwrap_or(true)
+        });
         let unfinished = runtime.lock().map_or(true, |runtime| {
             runtime.has_unfinished_work().unwrap_or(true)
         });
-        running_terminal || running_agent || unfinished
+        running_terminal || running_agent || running_supervisor || unfinished
     }
 }
 
@@ -6040,6 +6054,7 @@ fn dispatch_agent_tool(
                     .inspect_err(|_| ErrorLog::record("reported PR projection failed"))?;
                 verify_completed_goal_artifact(
                     supervisor,
+                    &bound.workspaces,
                     delivery.committed.as_ref().map(|message| message.run_id),
                 )?;
                 Ok((
@@ -6130,11 +6145,13 @@ fn project_reported_pr(
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=only_an_open_non_draft_pr_with_passing_checks_satisfies_the_contract
 fn verify_completed_goal_artifact(
     supervisor: &SharedSupervisorRuntime,
+    workspaces: &Workspaces,
     dispatch_run_id: Option<usagi_core::domain::id::OperationId>,
 ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     use usagi_daemon::usecase::{
-        goal_artifact::GoalArtifactVerifier, supervisor_runtime::ArtifactVerifier,
+        goal_artifact::{GoalArtifactVerifier, resolve_artifact_expectation},
+        supervisor_runtime::{ArtifactVerification, ArtifactVerificationStatus, ArtifactVerifier},
     };
 
     let Some(dispatch_run_id) = dispatch_run_id else {
@@ -6150,8 +6167,59 @@ fn verify_completed_goal_artifact(
     };
     // The provider process runs outside the supervisor mutex. A slow or broken
     // remote can delay only this report request, never task/run observation.
-    let verification =
-        GoalArtifactVerifier::new(GhProcess).verify(request.contract, request.result.as_ref());
+    let Some(tenant) = workspaces.workspace(request.workspace_id) else {
+        supervisor
+            .lock()
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
+            .record_artifact_verification(
+                &request,
+                ArtifactVerification {
+                    status: ArtifactVerificationStatus::Retryable,
+                    result_digest: "workspace-unavailable".into(),
+                    safe_summary: "Goal workspace is not currently held by this daemon".into(),
+                },
+                chrono::Utc::now(),
+            )
+            .map_err(supervisor_error)?;
+        return Ok(());
+    };
+    let request = match request.expectation.clone() {
+        Some(_) => request,
+        None => match resolve_artifact_expectation(
+            &mut GhProcess,
+            tenant.root(),
+            request.repository.clone(),
+        ) {
+            Ok(expectation) => supervisor
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable")
+                })?
+                .record_artifact_expectation(&request, &expectation, chrono::Utc::now())
+                .map_err(supervisor_error)?,
+            Err(verification) => {
+                supervisor
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable")
+                    })?
+                    .record_artifact_verification(&request, verification, chrono::Utc::now())
+                    .map_err(supervisor_error)?;
+                return Ok(());
+            }
+        },
+    };
+    let expectation = request.expectation.as_ref().ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::Unavailable,
+            "Goal artifact expectation is unavailable",
+        )
+    })?;
+    let verification = GoalArtifactVerifier::new(GhProcess).verify(
+        request.contract,
+        request.result.as_ref(),
+        expectation,
+    );
     supervisor
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
@@ -6163,28 +6231,52 @@ fn verify_completed_goal_artifact(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
 fn start_goal_artifact_recovery(
     supervisor: SharedSupervisorRuntime,
+    agent: SharedAgentRuntime,
+    workspaces: Workspaces,
+    shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("usagi-goal-artifact-recovery".to_owned())
         .spawn(move || {
-            if let Err(error) = reconcile_pending_goal_artifacts(&supervisor) {
-                ErrorLog::record(&format!(
-                    "Goal artifact verification reconciliation deferred: {error}"
-                ));
+            let worker_health =
+                shutdown.monitor_background_worker(BackgroundWorker::SupervisorRecovery);
+            while !shutdown.is_requested() {
+                let now = chrono::Utc::now();
+                if let Err(error) = reconcile_pending_supervisor_promotions(&supervisor, &agent) {
+                    ErrorLog::record(&format!(
+                        "supervisor promotion reconciliation deferred: {error}"
+                    ));
+                }
+                if let Err(error) = reconcile_pending_goal_artifacts(&supervisor, &workspaces, now)
+                {
+                    ErrorLog::record(&format!(
+                        "Goal artifact verification reconciliation deferred: {error}"
+                    ));
+                }
+                if shutdown.wait_for_tick(SUPERVISOR_RECOVERY_TICK) {
+                    break;
+                }
             }
+            worker_health.finish_planned();
         })
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=artifact_preparation_rejects_nonterminal_wrong_contract_and_corrupt_membership
-fn reconcile_pending_goal_artifacts(supervisor: &SharedSupervisorRuntime) -> anyhow::Result<usize> {
+fn reconcile_pending_goal_artifacts(
+    supervisor: &SharedSupervisorRuntime,
+    workspaces: &Workspaces,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<usize> {
     let pending = supervisor
         .lock()
         .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-        .pending_artifact_verifications()?;
+        .pending_artifact_verifications(now)?;
     let mut reconciled = 0;
     let mut first_failure = None;
     for item in pending {
-        if let Err(error) = verify_completed_goal_artifact(supervisor, Some(item.dispatch_run_id)) {
+        if let Err(error) =
+            verify_completed_goal_artifact(supervisor, workspaces, Some(item.dispatch_run_id))
+        {
             first_failure.get_or_insert_with(|| {
                 anyhow::anyhow!(
                     "artifact verification {} remains pending: {}",
@@ -8799,9 +8891,15 @@ fn admit_agent_dispatch_request(
         })?;
     run_agent_readiness(agent, preflight.as_ref())?;
     let reserved_goal = match request {
-        AgentDispatchRequest::Goal(operation_id, intent) => {
-            Some(reserve_goal_supervisor_run(supervisor, operation_id, intent)?.supervisor_run_id)
-        }
+        AgentDispatchRequest::Goal(operation_id, intent) => Some(
+            reserve_goal_supervisor_run(
+                supervisor,
+                operation_id,
+                intent,
+                resolve_goal_artifact_repository(supervisor, scope, operation_id, intent)?,
+            )?
+            .supervisor_run_id,
+        ),
         _ => None,
     };
     let admission_result =
@@ -8880,6 +8978,7 @@ fn reserve_goal_supervisor_run(
     supervisor: &SharedSupervisorRuntime,
     operation_id: &str,
     intent: &usagi_core::usecase::client::AgentGoalIntent,
+    artifact_repository: usagi_core::domain::pr_inventory::GitHubRepository,
 ) -> Result<
     usagi_core::domain::supervisor::SupervisorRunQuery,
     usagi_core::infrastructure::ipc::ProtocolError,
@@ -8896,11 +8995,49 @@ fn reserve_goal_supervisor_run(
             &goal_supervisor_caller(intent.workspace),
             intent.workspace,
             operation_id,
-            intent.goal.clone(),
+            usagi_daemon::usecase::supervisor_runtime::GoalSpecification::new(
+                intent.goal.clone(),
+                artifact_repository,
+            ),
             Some("standard".into()),
             Utc::now(),
         )
         .map_err(supervisor_error)
+}
+
+fn resolve_goal_artifact_repository(
+    supervisor: &SharedSupervisorRuntime,
+    scope: &dyn SessionScopeResolver,
+    operation_id: &str,
+    intent: &usagi_core::usecase::client::AgentGoalIntent,
+) -> Result<
+    usagi_core::domain::pr_inventory::GitHubRepository,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    if let Some(repository) = supervisor
+        .lock()
+        .map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+        })?
+        .reserved_goal_repository(operation_id)
+        .map_err(supervisor_error)?
+    {
+        return Ok(repository);
+    }
+    let resolved = scope
+        .resolve_available_scope(intent.workspace, None)
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "Goal workspace is unavailable"))?;
+    usagi_daemon::usecase::goal_artifact::resolve_artifact_repository(
+        &mut GhProcess,
+        &resolved.working_directory,
+    )
+    .map_err(|_| {
+        ProtocolError::new(
+            ErrorCode::Unavailable,
+            "Goal workspace GitHub repository is unavailable",
+        )
+    })
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=goal_supervisor_promotion_maps_a_poisoned_owner_to_unavailable
@@ -8950,19 +9087,33 @@ fn start_goal_supervisor_run(
     usagi_core::domain::supervisor::SupervisorRunQuery,
     usagi_core::infrastructure::ipc::ProtocolError,
 > {
-    reserve_goal_supervisor_run(supervisor, operation_id, intent)?;
+    reserve_goal_supervisor_run(
+        supervisor,
+        operation_id,
+        intent,
+        usagi_core::domain::pr_inventory::GitHubRepository::from_name_with_owner("acme/repo")
+            .expect("test repository is valid"),
+    )?;
     bind_goal_supervisor_run(supervisor, operation_id, worker)
 }
 
 /// Replays only durable, exact Goal promotions. Missing Agent outcomes remain
 /// pending; definite Agent failures close the reservation; successful outcomes
 /// bind the persisted runtime fence without spawning anything.
+fn promotion_grace_elapsed(
+    reserved_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    now.signed_duration_since(reserved_at) >= SUPERVISOR_PROMOTION_GRACE
+}
+
 #[allow(clippy::too_many_lines)] // Root and delegated reservations share one best-effort reconciliation pass.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn reconcile_pending_supervisor_promotions(
     supervisor: &SharedSupervisorRuntime,
     agent: &SharedAgentRuntime,
 ) -> anyhow::Result<usize> {
+    let now = chrono::Utc::now();
     let pending = supervisor
         .lock()
         .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
@@ -8983,7 +9134,7 @@ fn reconcile_pending_supervisor_promotions(
                         .bind_reserved_workspace_root_dispatch(
                             &item.operation_id,
                             &admission.runtime,
-                            chrono::Utc::now(),
+                            now,
                         )?;
                     Ok::<_, anyhow::Error>(())
                 })();
@@ -9008,7 +9159,7 @@ fn reconcile_pending_supervisor_promotions(
                         .fail_reserved_goal(
                             &item.operation_id,
                             "Agent admission failed before Goal promotion".into(),
-                            chrono::Utc::now(),
+                            now,
                         )?;
                     Ok::<_, anyhow::Error>(())
                 })();
@@ -9016,6 +9167,29 @@ fn reconcile_pending_supervisor_promotions(
                     first_failure.get_or_insert_with(|| {
                         anyhow::anyhow!(
                             "Goal failure {} remains pending: {failure}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(_)) | None if promotion_grace_elapsed(item.reserved_at, now) => {
+                let result = (|| {
+                    supervisor
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+                        .fail_reserved_goal(
+                            &item.operation_id,
+                            "Agent admission was not durably recorded before Goal promotion".into(),
+                            now,
+                        )?;
+                    Ok::<_, anyhow::Error>(())
+                })();
+                if let Err(failure) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "stale Goal reservation {} remains pending: {failure}",
                             item.operation_id
                         )
                     });
@@ -9060,13 +9234,32 @@ fn reconcile_pending_supervisor_promotions(
                     supervisor
                         .lock()
                         .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-                        .fail_reserved_delegated_dispatch(&item.operation_id, chrono::Utc::now())?;
+                        .fail_reserved_delegated_dispatch(&item.operation_id, now)?;
                     Ok::<_, anyhow::Error>(())
                 })();
                 if let Err(failure) = result {
                     first_failure.get_or_insert_with(|| {
                         anyhow::anyhow!(
                             "delegated failure {} remains pending: {failure}",
+                            item.operation_id
+                        )
+                    });
+                } else {
+                    reconciled += 1;
+                }
+            }
+            Some(Err(_)) | None if promotion_grace_elapsed(item.reserved_at, now) => {
+                let result = (|| {
+                    supervisor
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+                        .fail_reserved_delegated_dispatch(&item.operation_id, now)?;
+                    Ok::<_, anyhow::Error>(())
+                })();
+                if let Err(failure) = result {
+                    first_failure.get_or_insert_with(|| {
+                        anyhow::anyhow!(
+                            "stale delegated reservation {} remains pending: {failure}",
                             item.operation_id
                         )
                     });
@@ -14305,6 +14498,23 @@ mod tests {
     };
     use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
 
+    #[test]
+    fn supervisor_promotion_grace_is_exact_and_future_safe() {
+        let reserved_at = chrono::Utc::now();
+        assert!(!promotion_grace_elapsed(
+            reserved_at,
+            reserved_at + SUPERVISOR_PROMOTION_GRACE - chrono::Duration::milliseconds(1)
+        ));
+        assert!(promotion_grace_elapsed(
+            reserved_at,
+            reserved_at + SUPERVISOR_PROMOTION_GRACE
+        ));
+        assert!(!promotion_grace_elapsed(
+            reserved_at + chrono::Duration::seconds(1),
+            reserved_at
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn readiness_timeout_coalesces_and_reaps_the_exact_child() {
@@ -15405,6 +15615,7 @@ mod tests {
                 false,
             )
             .unwrap(),
+            supervisor: Arc::new(Mutex::new(SupervisorRuntime::new(&data.join("daemon")))),
         }
     }
 
@@ -15516,6 +15727,38 @@ mod tests {
         // A fresh workspace has no runtime and no unfinished lifecycle work, so
         // the real observer reports it idle; a session mid-creation does not.
         let activity = daemon_activity(&data, &first_root, generation, &tenants);
+        assert!(!activity.has_work(adopted.workspace_id(), adopted.runtime()));
+        let goal_operation = usagi_core::domain::id::OperationId::new().to_string();
+        activity
+            .supervisor
+            .lock()
+            .unwrap()
+            .reserve_goal_for_workspace(
+                "goal",
+                adopted.workspace_id(),
+                &goal_operation,
+                usagi_daemon::usecase::supervisor_runtime::GoalSpecification::new(
+                    "finish".into(),
+                    usagi_core::domain::pr_inventory::GitHubRepository::from_name_with_owner(
+                        "acme/repo",
+                    )
+                    .unwrap(),
+                ),
+                None,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        assert!(activity.has_work(adopted.workspace_id(), adopted.runtime()));
+        activity
+            .supervisor
+            .lock()
+            .unwrap()
+            .fail_reserved_goal(
+                &goal_operation,
+                "fixture complete".into(),
+                chrono::Utc::now(),
+            )
+            .unwrap();
         assert!(!activity.has_work(adopted.workspace_id(), adopted.runtime()));
 
         // A handle held outside the registry keeps the workspace whatever the
@@ -22961,6 +23204,156 @@ instructions = "{instructions}"
         };
         assert!(
             matches!(outcome, ResponseOutcome::Error(error) if error.code == ErrorCode::OwnershipUnknown)
+        );
+    }
+
+    struct GoalScope(
+        Result<
+            usagi_daemon::usecase::agent_ipc::ResolvedAgentScope,
+            usagi_daemon::usecase::agent_ipc::ScopeResolveError,
+        >,
+    );
+    impl usagi_daemon::usecase::agent_ipc::SessionScopeResolver for GoalScope {
+        fn resolve_available_scope(
+            &self,
+            _: WorkspaceId,
+            _: Option<SessionId>,
+        ) -> Result<
+            usagi_daemon::usecase::agent_ipc::ResolvedAgentScope,
+            usagi_daemon::usecase::agent_ipc::ScopeResolveError,
+        > {
+            self.0.clone()
+        }
+    }
+
+    fn goal_intent(workspace: WorkspaceId) -> usagi_core::usecase::client::AgentGoalIntent {
+        usagi_core::usecase::client::AgentGoalIntent {
+            workspace,
+            profile: None,
+            goal: "prepare the requested change for review".into(),
+        }
+    }
+
+    #[test]
+    fn goal_repository_resolution_reuses_the_reservation_and_maps_scope_failure() {
+        use usagi_core::domain::{id::OperationId, pr_inventory::GitHubRepository};
+        use usagi_daemon::usecase::agent_ipc::ScopeResolveError;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceId::new();
+        let intent = goal_intent(workspace);
+        let repository = GitHubRepository::from_name_with_owner("acme/repo").unwrap();
+        let reserved_operation = OperationId::new().to_string();
+        let reserved = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("reserved"),
+        )));
+        reserve_goal_supervisor_run(&reserved, &reserved_operation, &intent, repository.clone())
+            .unwrap();
+        assert_eq!(
+            resolve_goal_artifact_repository(
+                &reserved,
+                &GoalScope(Err(ScopeResolveError::Unavailable)),
+                &reserved_operation,
+                &intent,
+            )
+            .unwrap(),
+            repository
+        );
+
+        let unresolved = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("unresolved"),
+        )));
+        let operation = OperationId::new().to_string();
+        assert_eq!(
+            resolve_goal_artifact_repository(
+                &unresolved,
+                &GoalScope(Err(ScopeResolveError::Unavailable)),
+                &operation,
+                &intent,
+            )
+            .unwrap_err()
+            .message,
+            "Goal workspace is unavailable"
+        );
+    }
+
+    #[test]
+    fn goal_repository_resolution_validates_git_and_owner_health() {
+        use usagi_core::domain::{id::OperationId, pr_inventory::GitHubRepository};
+        use usagi_daemon::usecase::agent_ipc::ResolvedAgentScope;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceId::new();
+        let intent = goal_intent(workspace);
+        let repository = GitHubRepository::from_name_with_owner("acme/repo").unwrap();
+        let operation = OperationId::new().to_string();
+        let unresolved = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("unresolved"),
+        )));
+
+        let non_repository = temporary.path().join("not-a-repository");
+        std::fs::create_dir(&non_repository).unwrap();
+        let unavailable_git = GoalScope(Ok(ResolvedAgentScope {
+            worktree_id: WorktreeId::new(),
+            working_directory: non_repository,
+        }));
+        assert_eq!(
+            resolve_goal_artifact_repository(&unresolved, &unavailable_git, &operation, &intent)
+                .unwrap_err()
+                .message,
+            "Goal workspace GitHub repository is unavailable"
+        );
+
+        let git_repository = temporary.path().join("repository");
+        std::fs::create_dir(&git_repository).unwrap();
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg("--quiet")
+                .arg(&git_repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&git_repository)
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/acme/repo.git",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let available_git = GoalScope(Ok(ResolvedAgentScope {
+            worktree_id: WorktreeId::new(),
+            working_directory: git_repository,
+        }));
+        assert_eq!(
+            resolve_goal_artifact_repository(&unresolved, &available_git, &operation, &intent)
+                .unwrap(),
+            repository
+        );
+
+        let poisoned = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("poisoned-resolution"),
+        )));
+        let poison_owner = Arc::clone(&poisoned);
+        std::thread::spawn(move || {
+            let _guard = poison_owner.lock().unwrap();
+            panic!("poison goal repository resolver owner");
+        })
+        .join()
+        .unwrap_err();
+        assert_eq!(
+            resolve_goal_artifact_repository(&poisoned, &available_git, &operation, &intent)
+                .unwrap_err()
+                .message,
+            "supervisor runtime is unavailable"
         );
     }
 
