@@ -3517,6 +3517,11 @@ fn spawn_ipc_server(
             "supervisor promotion reconciliation deferred: {error}"
         ));
     }
+    if let Err(error) = reconcile_aborted_supervisor_workers(&supervisor, &agent) {
+        ErrorLog::record(&format!(
+            "supervisor worker termination reconciliation deferred: {error}"
+        ));
+    }
     if let Ok(runtime) = supervisor.lock()
         && let Err(error) = runtime.tick_all(
             chrono::Utc::now(),
@@ -3527,7 +3532,7 @@ fn spawn_ipc_server(
             "supervisor startup reconciliation deferred: {error}"
         ));
     }
-    background_workers.push(start_goal_artifact_recovery(
+    background_workers.push(start_supervisor_recovery(
         Arc::clone(&supervisor),
         Arc::clone(&agent),
         Arc::clone(&workspaces),
@@ -5261,6 +5266,7 @@ fn start_ipc_accept_loop(
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                         },
                                         Some("supervisor_snapshot") => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
+                                        Some("supervisor_control") => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
                                         Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                         }
@@ -6133,14 +6139,14 @@ fn verify_completed_goal_artifact(
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
-fn start_goal_artifact_recovery(
+fn start_supervisor_recovery(
     supervisor: SharedSupervisorRuntime,
     agent: SharedAgentRuntime,
     workspaces: Workspaces,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
-        .name("usagi-goal-artifact-recovery".to_owned())
+        .name("usagi-supervisor-recovery".to_owned())
         .spawn(move || {
             let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::SupervisorRecovery);
@@ -6151,10 +6157,23 @@ fn start_goal_artifact_recovery(
                         "supervisor promotion reconciliation deferred: {error}"
                     ));
                 }
+                if let Err(error) = reconcile_aborted_supervisor_workers(&supervisor, &agent) {
+                    ErrorLog::record(&format!(
+                        "supervisor worker termination reconciliation deferred: {error}"
+                    ));
+                }
                 if let Err(error) = reconcile_pending_goal_artifacts(&supervisor, &workspaces, now)
                 {
                     ErrorLog::record(&format!(
                         "Goal artifact verification reconciliation deferred: {error}"
+                    ));
+                }
+                if let Ok(runtime) = supervisor.lock()
+                    && let Err(error) =
+                        runtime.tick_all(now, &mut AgentDecisionWaker { agent: &agent })
+                {
+                    ErrorLog::record(&format!(
+                        "supervisor state reconciliation deferred: {error}"
                     ));
                 }
                 if shutdown.wait_for_tick(SUPERVISOR_RECOVERY_TICK) {
@@ -6163,6 +6182,98 @@ fn start_goal_artifact_recovery(
             }
             worker_health.finish_planned();
         })
+}
+
+fn reconcile_aborted_supervisor_workers(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+) -> anyhow::Result<usize> {
+    reconcile_supervisor_workers(supervisor, agent, None)
+}
+
+fn reconcile_supervisor_run_workers(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+    supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId,
+) -> anyhow::Result<usize> {
+    reconcile_supervisor_workers(supervisor, agent, Some(supervisor_run_id))
+}
+
+fn reconcile_supervisor_workers(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+    selected_run: Option<usagi_core::domain::supervisor::SupervisorRunId>,
+) -> anyhow::Result<usize> {
+    let (obligations, pending) = {
+        let runtime = supervisor
+            .lock()
+            .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?;
+        match selected_run {
+            Some(id) => (
+                runtime.worker_stop_obligations_for_run(id)?,
+                runtime.pending_worker_stops_for_run(id)?,
+            ),
+            None => (
+                runtime.worker_stop_obligations()?,
+                runtime.pending_worker_stops()?,
+            ),
+        }
+    };
+    let mut runtime = agent
+        .lock()
+        .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?;
+    let mut pending_obligations = std::collections::BTreeMap::new();
+    let mut acknowledged = Vec::new();
+    for candidate in pending {
+        let Some(worker) = runtime.runtime_for_operation(candidate.operation_id()) else {
+            acknowledged.push(candidate);
+            continue;
+        };
+        let (provenance, candidates) = pending_obligations
+            .entry(candidate.workspace_id())
+            .or_insert_with(|| (Vec::new(), Vec::new()));
+        provenance.push(candidate.provenance(&worker)?);
+        candidates.push(candidate);
+    }
+    let mut by_workspace = std::collections::BTreeMap::new();
+    for (workspace, provenance) in obligations {
+        by_workspace
+            .entry(workspace)
+            .or_insert_with(Vec::new)
+            .push(provenance);
+    }
+    let mut interrupted = 0;
+    let mut first_failure = None;
+    for (workspace, provenance) in by_workspace {
+        match runtime.interrupt_supervisor_workers(workspace, &provenance) {
+            Ok(count) => interrupted += count,
+            Err(error) => {
+                first_failure.get_or_insert_with(|| anyhow::anyhow!(error.message));
+            }
+        }
+    }
+    for (workspace, (provenance, candidates)) in pending_obligations {
+        match runtime.interrupt_supervisor_workers(workspace, &provenance) {
+            Ok(count) => {
+                interrupted += count;
+                acknowledged.extend(candidates);
+            }
+            Err(error) => {
+                first_failure.get_or_insert_with(|| anyhow::anyhow!(error.message));
+            }
+        }
+    }
+    drop(runtime);
+    if !acknowledged.is_empty() {
+        let result = supervisor
+            .lock()
+            .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
+            .acknowledge_pending_worker_stops(&acknowledged);
+        if let Err(error) = result {
+            first_failure.get_or_insert(error);
+        }
+    }
+    first_failure.map_or(Ok(interrupted), Err)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=artifact_preparation_rejects_nonterminal_wrong_contract_and_corrupt_membership
@@ -6480,6 +6591,27 @@ fn dispatch_supervisor_tool(
     }
 }
 
+fn connection_workspace_id(
+    bound: &ConnectionWorkspace,
+) -> Result<WorkspaceId, usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    bound
+        .sessions()
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable"))?
+        .snapshot()
+        .map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+        })?
+        .get("workspace_id")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+        })
+}
+
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=supervisor_snapshot_is_exactly_workspace_scoped
 fn dispatch_supervisor_snapshot(
     runtime: &SharedSupervisorRuntime,
@@ -6502,22 +6634,7 @@ fn dispatch_supervisor_snapshot(
                 "invalid supervisor snapshot request",
             ));
         };
-        let workspace = bound
-            .sessions()
-            .lock()
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
-            })?
-            .snapshot()
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
-            })?
-            .get("workspace_id")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .ok_or_else(|| {
-                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
-            })?;
+        let workspace = connection_workspace_id(bound)?;
         if requested != workspace {
             return Err(ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
@@ -6553,6 +6670,101 @@ fn dispatch_supervisor_snapshot(
                 Err(error) => return Err(supervisor_error(error)),
             }
         }
+    })();
+    match result {
+        Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=workspace_control_is_durable_scoped_and_projects_exact_stop_obligations,supervisor_stop_validates_every_fence_and_retries_an_orphaned_process
+fn dispatch_supervisor_control(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+    bound: &ConnectionWorkspace,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use chrono::Utc;
+    use usagi_core::domain::supervisor::SupervisorRunState;
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::DaemonRequest;
+
+    let result = (|| {
+        let Ok(DaemonRequest::SupervisorControl {
+            workspace: requested,
+            operation_id,
+            command,
+        }) = serde_json::from_value::<DaemonRequest>(body.clone())
+        else {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid supervisor control request",
+            ));
+        };
+        let workspace = connection_workspace_id(bound)?;
+        if requested != workspace {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "supervisor control belongs to another workspace",
+            ));
+        }
+
+        let mut run = supervisor
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+            })?
+            .control_for_workspace(workspace, operation_id, &command, Utc::now())
+            .map_err(supervisor_control_error)?;
+
+        if matches!(
+            run.state,
+            SupervisorRunState::Cancelled | SupervisorRunState::Failed
+        ) {
+            reconcile_supervisor_run_workers(supervisor, agent, run.supervisor_run_id).map_err(
+                |_| {
+                    ProtocolError::new(
+                        ErrorCode::Unavailable,
+                        "supervisor workers could not be stopped safely",
+                    )
+                },
+            )?;
+        } else if run.state == SupervisorRunState::Running {
+            let runtime = supervisor.lock().map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+            })?;
+            runtime
+                .tick(
+                    run.supervisor_run_id,
+                    Utc::now(),
+                    &mut AgentDecisionWaker { agent },
+                )
+                .map_err(supervisor_control_error)?;
+            run = runtime
+                .get_for_workspace(workspace, run.supervisor_run_id)
+                .map_err(supervisor_control_error)?
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::OwnershipUnknown,
+                        "supervisor run is unavailable to this workspace",
+                    )
+                })?;
+        }
+
+        // Match the read-only TUI projection: worker/session/worktree
+        // provenance is an internal control input, not human UI response data.
+        run.provenance.clear();
+        let value = serde_json::to_value(run).map_err(|_| {
+            ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
+        })?;
+        bounded_supervisor_query(value).map_err(supervisor_control_error)
     })();
     match result {
         Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
@@ -6644,14 +6856,65 @@ fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::Pr
     drop(error);
     let code = if message.contains("capacity is exhausted") {
         ErrorCode::ResourceExhausted
-    } else if message.contains("reused") {
+    } else if message.contains("reused") || message.contains("conflicts with its reservation") {
         ErrorCode::IdempotencyConflict
-    } else if message.contains("does not exist") {
+    } else if message.contains("does not exist") || message.contains("does not belong") {
         ErrorCode::OwnershipUnknown
+    } else if message.contains("failed to")
+        || message.contains("is unavailable")
+        || message.contains("stale supervisor state revision")
+    {
+        ErrorCode::Unavailable
     } else {
         ErrorCode::InvalidArgument
     };
     ProtocolError::new(code, message)
+}
+
+fn supervisor_control_error(
+    error: anyhow::Error,
+) -> usagi_core::infrastructure::ipc::ProtocolError {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    let message = error.to_string();
+    drop(error);
+    if message.contains("capacity is exhausted") {
+        ProtocolError::new(
+            ErrorCode::ResourceExhausted,
+            "supervisor control capacity is exhausted",
+        )
+    } else if message.contains("conflicts with its reservation")
+        || message.contains("conflicts with its semantic payload")
+    {
+        ProtocolError::new(
+            ErrorCode::IdempotencyConflict,
+            "supervisor control operation was reused for another command",
+        )
+    } else if message.contains("outside the retained") {
+        ProtocolError::new(
+            ErrorCode::IdempotencyExpired,
+            "supervisor control operation is outside the retained replay window",
+        )
+    } else if message.contains("does not belong") {
+        ProtocolError::new(
+            ErrorCode::OwnershipUnknown,
+            "supervisor run is unavailable to this workspace",
+        )
+    } else if message.starts_with("invalid supervisor cancellation reason")
+        || matches!(
+            message.as_str(),
+            "InvalidTransition" | "ProvenanceMismatch" | "TerminalRun"
+        )
+    {
+        ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "supervisor control command is invalid or stale",
+        )
+    } else {
+        ProtocolError::new(
+            ErrorCode::Unavailable,
+            "supervisor control could not be persisted",
+        )
+    }
 }
 
 /// PR events are deliberately only hints; the IPC request always returns this

@@ -1660,7 +1660,9 @@ output、argv、provider-native ID は含まない。
 ## supervisor scheduler
 
 daemon は connection ごとではなく一つの `SupervisorRuntime` を所有する。completion、failure、
-NoReport、起動時 reconcile、明示 wake は対象 run の有限な tick を起動し、idle 時に poll しない。
+NoReport、起動時 reconcile、明示 wake は対象 run の有限な tick を起動する。加えて daemon-lifetime の
+`SupervisorRecovery` worker が durable deadline と未収束effectだけを周期的に再評価する。client connection は
+recovery の生存条件ではなく、tick は新しいworkerを推測してspawnしない。
 
 supervisor の durable caller は socket の `ConnectionId` ではない。daemon 発行の live MCP credential から検証した
 root/session と Agent scope を、handshake の client incarnation と束縛した descriptor を semantic retry と全 ownership
@@ -1674,6 +1676,13 @@ local TUIの `supervisor_snapshot` はこの値がconnection workspaceと一致�
 旧snapshotは推測で補完せず非表示にする。TUI projectionは最大16件、512 KiB以下に制限し、観測がscheduler tickや
 control authorityを発生させることはない。
 
+人が行うcancel / escalation decisionはAgent credentialを受け取るMCP surfaceと分離した
+`supervisor_control`を通る。requestの`WorkspaceId`はconnection workspaceと完全一致させ、対象runの保存済み
+workspaceも一致した場合だけcommandを適用する。commandはcore domainのtagged enumが正本であり、任意JSON fieldや
+caller文字列からauthorityを組み立てない。daemonは`OperationId`とcommand全体のSHA-256 semantic digestを
+`supervisor-scheduler.json`へ先に予約し、そのIDをevent IDとしてaggregateへCAS適用する。応答断後の再送は同じeventを
+返し、同じIDを別run・別reason・別decisionへ再利用すると`idempotency_conflict`でeffect zeroになる。
+
 tick は dispatch run ID と supervisor provenance を照合して terminal fact を reducer event として保存する。
 child terminal 後に parent が `Running` なら `AwaitingDecision` に遷移し、parent provenance と child run、
 safe completion summary、DAG state、decision generation を含む wake reservation を durable に保存してから
@@ -1686,9 +1695,15 @@ tick 時点で `Ready` task に dispatch reservation が無い場合は、schedu
 `DispatchFailure` event と resume/cancel の durable escalation を保存する。operator は events/get から停止理由を
 観測でき、selector を修復するまで自動 retry は行わない。
 
-`supervisor-scheduler.json` は start reservation を最大256件、wake reservation を最大512件に制限する。
-終了 run の start と配送済み wake は固定長 tombstone へ移して retry を `expired` として effect-zero にし、
-live run / 未配送 wake だけで上限へ達した場合はそれらを捨てず、新規 start / wake を capacity error で拒否する。
+`supervisor-scheduler.json` は start reservation を最大256件、wake reservationを最大512件、human control
+reservationを最大512件に制限する。終了runのstart/controlと配送済みwakeは固定長tombstoneへ移してretryを
+`expired`としてeffect-zeroにし、live run / 未配送wakeだけで上限へ達した場合はそれらを捨てず、新規
+start / wake / controlをcapacity errorで拒否する。
+Agent admission後・Supervisor provenance保存前にrunがcancel / failした場合、rootのstart reservationは通常の終了履歴として
+回収しない。recoveryはそのdurable operation IDをAgent recordへexact joinし、workspace / root-or-session scopeを検証して
+停止する。対応recordが存在しないか停止が完了した後にだけstart reservationをtombstoneへ移すため、容量回収との競合でも
+workerを名前やPIDから推測せず、未停止workerのoperation fenceを失わない。delegated taskもstable task markerと保存済み
+parent provenanceから同じexact joinを行う。
 ここで終了 run は `Succeeded` / `Failed` / `Cancelled` だけを指す。`Escalated` は通常eventをfenceする休止状態だが、
 人間の判断で再開できるlive stateなので、run retentionとstart reservationのどちらからも回収しない。終了判定の正本は
 core domainの `SupervisorRunState::is_finished` であり、storeとschedulerが共用する。
@@ -1714,6 +1729,14 @@ read-only response はすべて 512 KiB 以下とし、1 run の安全な projec
 `Dispatch` reducer event は policy admission と同時に dispatch reservation を保存する。dispatch budget、concurrency、depth のいずれかを超える event は worker effect へ進まず、safe evidence と resume/cancel の選択肢を持つ durable `EscalationRecord` を保存して run を `Escalated` にする。escalation を scheduler が自律的に解除することはない。
 
 failure は policy の attempt 上限内だけ `Retrying` へ遷移し、generation と `retry_at` を保存する。scheduler は deadline 後にだけ `RetryReady` event を保存するため、restart や duplicate completion は retry を早めない。run/task の cancel event は未完了 node を `Cancelled` にし、finishedまたはquiescentなrunへの late completion は reducer が拒否する。
+
+run全体のcancel、またはescalationをcancel/failで終端化した後は、Supervisor stateの変更だけで成功にしない。
+daemonはrunのworkspace、task generation、dispatch run、Agent runtime、worktree、sessionを持つ保存済みprovenanceを
+Agent ownerへ渡し、全fenceが一致したruntimeだけをdaemon所有PTY経由でterminate/reapする。workspace/session全体を
+閉じるAPIへfallbackしない。一件でも同じruntime IDのscopeが矛盾すればsignal前に全件を拒否する。Supervisor eventを
+先に永続化するため、終了signalやAgent store writeが失敗してもrunが再開することはない。`SupervisorRecovery`は
+`Cancelled` / `Failed` runから同じexact obligationを再構成し、`OrphanRunning`も再度terminateする。既にExited、GC済み、
+または以前のretry generationに属するworkerは収束済みno-opとして扱う。
 
 artifact contract は core domain の閉じた列挙型を正本とし、wire と永続化では `none` / `goal_review_ready_pr_v1` の文字列として表す。未知の contract は admission で拒否される。no-verification 以外の worker completion は `Succeeded` ではなく `Verifying` へ遷移する。worker report の PR URL は候補にすぎない。daemon は Goal worker の spawn 前に run が所有する workspace の `origin` を固定 argv の Git 呼び出しで解決して run へ保存し、idempotent admission replay では保存値だけを使う。worker completion 後は `HEAD` を解決し、最初の provider 呼び出しより前に repository と head OID の immutable な artifact expectation を task へ保存する。その後、同じ repository の canonical GitHub PR identity に対して固定 argv の `gh pr view` を実行し、PR の head OID が保存済み expectation と一致し、state が open、draft が false、checks が passing または未設定の場合だけ、redaction-safe な SHA-256 evidence digest を伴う `VerificationResult` を passed として保存する。別 repository、別 head、closed/draft PR、failing checks は safe summary を持つ escalation になり、worker の summary や PR URL 単独では success gate を通らない。provider unavailable、invalid response、pending checks、または workspace が一時的に未保有の場合は rejection と区別した `VerificationDeferred` を保存し、5 秒から最大 5 分までの durable exponential backoff 後に再検証する。Resume 後は保存済み候補と expectation を再検証できるが、Escalated 中に自動で gate を解除しない。completion inbox の commit 後に daemon が停止しても、daemon-lifetime の recovery worker が `Running` run の contracted task、exact provenance generation、terminal dispatch outcome を照合して期限到来済みの検証だけを再実行する。この remote IO は supervisor mutex と client 接続経路の外で行い、通常の観測を待たせない。未完了の supervised run は workspace retirement の blocker である。
 

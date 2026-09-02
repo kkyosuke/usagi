@@ -467,6 +467,39 @@ pub enum EscalationDecision {
     Fail,
 }
 
+/// Typed human command for a workspace-owned Supervisor Run.
+///
+/// This command is deliberately separate from the Agent-authenticated MCP
+/// surface.  A local UI supplies only durable identities and bounded domain
+/// values; workspace authority is resolved from the daemon connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SupervisorWorkspaceCommand {
+    Cancel {
+        supervisor_run_id: SupervisorRunId,
+        reason: String,
+    },
+    ResolveEscalation {
+        supervisor_run_id: SupervisorRunId,
+        escalation_id: OperationId,
+        decision: EscalationDecision,
+    },
+}
+
+impl SupervisorWorkspaceCommand {
+    #[must_use]
+    pub const fn supervisor_run_id(&self) -> SupervisorRunId {
+        match self {
+            Self::Cancel {
+                supervisor_run_id, ..
+            }
+            | Self::ResolveEscalation {
+                supervisor_run_id, ..
+            } => *supervisor_run_id,
+        }
+    }
+}
+
 /// Append-only event envelope.  `event_id` is the idempotency key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorEvent {
@@ -1280,6 +1313,9 @@ fn resolve_escalation(
         }
         EscalationDecision::Cancel => cancel(run, None, "escalation cancelled", now)?,
         EscalationDecision::Fail => {
+            for task in run.tasks.values_mut().filter(|task| !task.state.terminal()) {
+                task.state = TaskState::Failed;
+            }
             run.state = SupervisorRunState::Failed;
             run.terminal_at = Some(now);
             run.terminal_reason = Some("escalation resolved as failure".into());
@@ -2514,6 +2550,8 @@ mod tests {
                 "policy".into(),
                 now(),
             );
+            let root = task(run.supervisor_run_id, "root", &[]);
+            run.tasks.insert(root.task_id.clone(), root);
             reduce(
                 &mut run,
                 &event(
@@ -2589,6 +2627,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(failed.state, SupervisorRunState::Failed);
+        assert_eq!(
+            failed.tasks[&TaskId::new("root").unwrap()].state,
+            TaskState::Failed
+        );
     }
 
     #[test]
