@@ -8,7 +8,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 make_fixture() {
   local destination=$1
-  mkdir -p "$destination/crates/cli/src/cli" "$destination/crates/cli/src/mcp/tools" "$destination/crates/cli/src/mcp/guides" "$destination/crates/core/src/usecase" "$destination/crates/daemon/src" "$destination/crates/tui/src/usecase"
+  mkdir -p "$destination/crates/cli/src/cli" "$destination/crates/cli/src/mcp/tools" "$destination/crates/cli/src/mcp/guides" "$destination/crates/core/src/domain/settings" "$destination/crates/core/src/infrastructure" "$destination/crates/core/src/usecase" "$destination/crates/daemon/src" "$destination/crates/tui/src/usecase"
   cp "$repo/Cargo.toml" "$destination/Cargo.toml"
   cp -R "$repo/document" "$destination/document"
   cp -R "$repo/.agents" "$destination/.agents"
@@ -16,6 +16,8 @@ make_fixture() {
   cp "$repo/crates/cli/src/cli/mod.rs" "$destination/crates/cli/src/cli/mod.rs"
   cp "$repo/crates/cli/src/mcp/tools/session.rs" "$destination/crates/cli/src/mcp/tools/session.rs"
   cp "$repo/crates/cli/src/mcp/guides/orchestration.md" "$destination/crates/cli/src/mcp/guides/orchestration.md"
+  cp "$repo/crates/core/src/domain/settings/mod.rs" "$destination/crates/core/src/domain/settings/mod.rs"
+  cp "$repo/crates/core/src/infrastructure/role_catalog.rs" "$destination/crates/core/src/infrastructure/role_catalog.rs"
   cp "$repo/crates/core/src/usecase/client.rs" "$destination/crates/core/src/usecase/client.rs"
   cp "$repo/crates/daemon/src/lib.rs" "$destination/crates/daemon/src/lib.rs"
   cp "$repo/crates/tui/src/usecase/terminal_input.rs" "$destination/crates/tui/src/usecase/terminal_input.rs"
@@ -85,6 +87,22 @@ expect_fail "$tmp/work-run-ipc" 'document/04-ipc.md must own the implemented Wor
 make_fixture "$tmp/work-run-history"
 sed -i.bak 's/現在契約にない後続段階は、独立 Run Closeup/現在契約にない後続段階は、選択可能な複数 run 一覧、独立 Run Closeup/' "$tmp/work-run-history/document/proposals/18-goal-driven-work-run.md"
 expect_fail "$tmp/work-run-history" 'proposal 18 classifies the implemented Work Run list as future work'
+
+make_fixture "$tmp/team-template"
+sed -i.bak '/| pipeline | `pipeline` |/d' "$tmp/team-template/document/10-session-roles.md"
+expect_fail "$tmp/team-template" 'document/10-session-roles.md is missing implemented Team template pipeline'
+
+make_fixture "$tmp/team-readme"
+sed -i.bak 's/`pipeline`（パイプライン）/パイプライン/' "$tmp/team-readme/README.md"
+expect_fail "$tmp/team-readme" 'README.md is missing implemented Team template pipeline'
+
+make_fixture "$tmp/team-depth"
+sed -i.bak 's/Director → Planner → Implementer → Tester | 3 |/Director → Planner → Implementer → Tester | 4 |/' "$tmp/team-depth/document/10-session-roles.md"
+expect_fail "$tmp/team-depth" 'document/10-session-roles.md does not reflect built-in pipeline roles and depth'
+
+make_fixture "$tmp/team-guide"
+sed -i.bak 's/Director → Manager → Worker/Director → Manager → Executor/' "$tmp/team-guide/crates/cli/src/mcp/guides/orchestration.md"
+expect_fail "$tmp/team-guide" 'orchestration guide does not use the hierarchical Team role vocabulary'
 
 make_fixture "$tmp/history-authority"
 printf '\n[古い提案](proposals/01-entry-surfaces.md) が正本である。\n' >> "$tmp/history-authority/document/09-env.md"
