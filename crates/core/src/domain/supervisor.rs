@@ -2714,17 +2714,47 @@ mod tests {
     }
 
     #[test]
-    fn legacy_run_without_workspace_stays_unscoped() {
-        let run = SupervisorRun::new(
+    fn legacy_supervisor_values_default_only_their_compatible_additions() {
+        let mut run = SupervisorRun::new(
             "caller".into(),
             "task".into(),
             "input".into(),
             "policy".into(),
             now(),
         );
-        let mut value = serde_json::to_value(run).unwrap();
+        let task = task(run.supervisor_run_id, "root", &[]);
+        run.tasks.insert(task.task_id.clone(), task.clone());
+        let mut value = serde_json::to_value(&run).unwrap();
         value.as_object_mut().unwrap().remove("workspace_id");
+        value.as_object_mut().unwrap().remove("artifact_repository");
+        let serialized_task = value["tasks"]["root"].as_object_mut().unwrap();
+        for field in [
+            "promotion_reserved_at",
+            "verification_attempt",
+            "verification_retry_at",
+            "verification_expectation",
+        ] {
+            serialized_task.remove(field);
+        }
         let decoded: SupervisorRun = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.workspace_id, None);
+        assert_eq!(decoded.artifact_repository, None);
+        assert_eq!(decoded.tasks[&task.task_id].promotion_reserved_at, None);
+        assert_eq!(decoded.tasks[&task.task_id].verification_attempt, 0);
+        assert_eq!(decoded.tasks[&task.task_id].verification_retry_at, None);
+        assert_eq!(decoded.tasks[&task.task_id].verification_expectation, None);
+
+        let mut query_value = serde_json::to_value(TaskQuery::from(&task)).unwrap();
+        query_value
+            .as_object_mut()
+            .unwrap()
+            .remove("verification_attempt");
+        query_value
+            .as_object_mut()
+            .unwrap()
+            .remove("verification_retry_at");
+        let decoded: TaskQuery = serde_json::from_value(query_value).unwrap();
+        assert_eq!(decoded.verification_attempt, 0);
+        assert_eq!(decoded.verification_retry_at, None);
     }
 }
