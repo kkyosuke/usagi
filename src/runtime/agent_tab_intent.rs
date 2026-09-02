@@ -1499,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    fn idempotent_close_advances_its_fence_before_an_older_reopen() {
+    fn stale_interrupted_close_advances_its_fence_before_an_older_reopen() {
         let (_root, mut store, workspace) = fixture();
         let observed = observation(workspace);
         let opened = store
@@ -1509,7 +1509,7 @@ mod tests {
                 AgentTabIntentMutation::Upsert {
                     session_id: None,
                     continuation: observed.continuation,
-                    terminal: observed.terminal,
+                    terminal: observed.terminal.clone(),
                     select: true,
                 },
             )
@@ -1525,15 +1525,18 @@ mod tests {
             .unwrap();
         let reopen_expected_revision = initially_closed.intent.revision;
 
-        // Another TUI closes the same visible lineage after the Reopen client
-        // loaded rev2. Its expected rev1 is stale and the key is already
-        // dismissed, but this newer user action must still publish rev3.
+        // Another TUI closes the same interrupted lineage after the Reopen
+        // client loaded rev2. Its expected rev1 is stale and the key is already
+        // dismissed, but this newer user action must still publish rev3 without
+        // replacing the exact terminal bound to the slot.
         let newer_close = store
             .mutate(
                 workspace,
                 opened.intent.revision,
-                AgentTabIntentMutation::Dismiss {
+                AgentTabIntentMutation::DismissInterrupted {
+                    session_id: None,
                     continuation: observed.continuation,
+                    terminal: observed.terminal.clone(),
                 },
             )
             .unwrap();
@@ -1545,6 +1548,11 @@ mod tests {
                 .intent
                 .dismissed
                 .contains(&observed.continuation)
+        );
+        assert!(
+            newer_close.intent.targets[0].tabs[0]
+                .terminal
+                .fences(&observed.terminal)
         );
         let path = store.state_path(workspace);
         let bytes_after_close = fs::read(&path).unwrap();
