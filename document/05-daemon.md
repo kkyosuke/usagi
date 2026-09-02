@@ -1317,6 +1317,11 @@ pre-spawn の terminal 登録までに失敗した launch は、dispatch admissi
 `Failed` / ownership unknown へ reconcile される。admission metadata を持たない legacy run、または runtime
 ownership を証明できない incomplete record も新しい child を spawn せず、unknown/failed として扱う。
 
+process-local の operation replay cache は canonical intent 本文を複製せず SHA-256 digest だけを持ち、終了・失敗履歴を
+2,048 件、2 MiB、24 時間で古い順に回収する。live runtime と durable final が参照する operation は回収対象外であり、
+対応する runtime record が aggregate final retention から消えた maintenance pass で通常の cache budget に戻る。
+MCP caller credential と報告 phase は runtime の正常終了時にも即時破棄し、session close まで残さない。
+
 通常の `Agent` launch と opt-in の `AgentGoal` launch はこの同じ transaction を使うが、request と semantic key は
 別である。`AgentGoal` は workspace root だけを対象にし、非空かつ 16 KiB 以下の Goal を固定 operating contract と結合して
 `LaunchRequest.initial_prompt` に保存する。semantic key は workspace、profile、root scope に Goal の長さと本文を加えるため、

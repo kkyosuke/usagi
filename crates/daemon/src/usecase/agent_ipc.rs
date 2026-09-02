@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use usagi_core::{
     domain::session_lifecycle::AgentPhase,
     domain::{
@@ -164,11 +164,79 @@ pub struct PromptDelivery {
     pub queued: bool,
 }
 
-/// One durable Agent operation, replayed identically on resend/reconnect.
+/// One process-local Agent operation, replayed identically on resend/reconnect.
+/// Only the semantic digest is kept here: the durable runtime/dispatch stores
+/// own the canonical intent under their independent byte/count retention.
 #[derive(Debug, Clone)]
 struct AgentOperation {
-    semantic_key: Option<String>,
+    semantic_digest: Option<String>,
     outcome: Result<AgentAdmission, ProtocolError>,
+    recorded_at: DateTime<Utc>,
+}
+
+impl AgentOperation {
+    fn new(
+        semantic_key: Option<&str>,
+        outcome: Result<AgentAdmission, ProtocolError>,
+        recorded_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            semantic_digest: semantic_key.map(agent_operation_digest),
+            outcome,
+            recorded_at,
+        }
+    }
+
+    fn conflicts_with(&self, semantic_key: &str) -> bool {
+        self.semantic_digest
+            .as_ref()
+            .is_some_and(|digest| digest != &agent_operation_digest(semantic_key))
+    }
+
+    fn matches(&self, semantic_key: &str) -> bool {
+        self.semantic_digest.as_deref() == Some(agent_operation_digest(semantic_key).as_str())
+    }
+
+    fn retained_bytes(&self, operation_id: &str) -> usize {
+        let semantic = self.semantic_digest.as_ref().map_or(0, String::capacity);
+        let outcome = match &self.outcome {
+            Ok(admission) => {
+                std::mem::size_of::<AgentAdmission>()
+                    + admission.operation_id.capacity()
+                    + admission
+                        .semantic_digest
+                        .as_ref()
+                        .map_or(0, String::capacity)
+            }
+            Err(error) => {
+                std::mem::size_of::<ProtocolError>()
+                    + error.message.capacity()
+                    + error.error_id.capacity()
+                    + error
+                        .details
+                        .as_ref()
+                        .map_or(0, |details| details.to_string().len())
+            }
+        };
+        std::mem::size_of::<Self>() + operation_id.len() + semantic + outcome
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AgentOperationBounds {
+    operations: usize,
+    bytes: usize,
+    age_seconds: i64,
+}
+
+impl Default for AgentOperationBounds {
+    fn default() -> Self {
+        Self {
+            operations: 2_048,
+            bytes: 2 * 1024 * 1024,
+            age_seconds: 24 * 60 * 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +355,7 @@ pub struct AgentRuntime {
     dispatch: DispatchStore,
     locator: Box<dyn ExecutableLocator>,
     operations: BTreeMap<String, AgentOperation>,
+    operation_bounds: AgentOperationBounds,
     mcp_callers: BTreeMap<String, McpCaller>,
     /// Last phase each live runtime reported through its own lifecycle hook.
     /// Like the caller credentials, it is in-memory only: a phase report refines
@@ -379,11 +448,7 @@ impl AgentRuntime {
     ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
         let semantic = semantic_key(intent);
         if let Some(existing) = self.operations.get(operation_id) {
-            if existing
-                .semantic_key
-                .as_ref()
-                .is_some_and(|key| key != &semantic)
-            {
+            if existing.conflicts_with(&semantic) {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different agent launch",
@@ -414,11 +479,7 @@ impl AgentRuntime {
         validate_goal(intent)?;
         let semantic = goal_semantic_key(intent);
         if let Some(existing) = self.operations.get(operation_id) {
-            if existing
-                .semantic_key
-                .as_ref()
-                .is_some_and(|key| key != &semantic)
-            {
+            if existing.conflicts_with(&semantic) {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different goal launch",
@@ -468,11 +529,7 @@ impl AgentRuntime {
         semantic: &str,
     ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
         if let Some(existing) = self.operations.get(operation_id) {
-            if existing
-                .semantic_key
-                .as_ref()
-                .is_some_and(|key| key != semantic)
-            {
+            if existing.conflicts_with(semantic) {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different agent resume",
@@ -677,6 +734,7 @@ impl AgentRuntime {
             dispatch,
             locator: Box::new(locator),
             operations: BTreeMap::new(),
+            operation_bounds: AgentOperationBounds::default(),
             mcp_callers: BTreeMap::new(),
             reported_phases: BTreeMap::new(),
         }
@@ -741,6 +799,7 @@ impl AgentRuntime {
         dispatch
             .reconcile_incomplete_admissions()
             .map_err(|_| super::runtime::RuntimeSnapshotError::DispatchReconcile)?;
+        let recorded_at = Utc::now();
         let operations = coordinator
             .snapshot()
             .records
@@ -750,10 +809,7 @@ impl AgentRuntime {
                 let outcome = durable_operation_outcome(&record);
                 (
                     operation_id,
-                    AgentOperation {
-                        semantic_key: record.semantic_key,
-                        outcome,
-                    },
+                    AgentOperation::new(record.semantic_key.as_deref(), outcome, recorded_at),
                 )
             })
             .collect();
@@ -769,11 +825,70 @@ impl AgentRuntime {
             dispatch,
             locator: Box::new(locator),
             operations,
+            operation_bounds: AgentOperationBounds::default(),
             // Credentials and reported phases intentionally fail closed across
             // daemon restart.
             mcp_callers: BTreeMap::new(),
             reported_phases: BTreeMap::new(),
         })
+    }
+
+    fn remember_operation(
+        &mut self,
+        operation_id: &str,
+        semantic_key: Option<&str>,
+        outcome: Result<AgentAdmission, ProtocolError>,
+    ) {
+        let now = Utc::now();
+        self.operations.insert(
+            operation_id.to_owned(),
+            AgentOperation::new(semantic_key, outcome, now),
+        );
+        self.prune_operations(now);
+    }
+
+    fn prune_operations(&mut self, now: DateTime<Utc>) {
+        let protected = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .map(|record| record.operation.operation_id.to_string())
+            .collect::<BTreeSet<_>>();
+        let max_age_seconds = self.operation_bounds.age_seconds;
+        self.operations.retain(|operation_id, operation| {
+            protected.contains(operation_id)
+                || now
+                    .signed_duration_since(operation.recorded_at)
+                    .num_seconds()
+                    <= max_age_seconds
+        });
+
+        let mut retained_bytes = self
+            .operations
+            .iter()
+            .map(|(operation_id, operation)| operation.retained_bytes(operation_id))
+            .sum::<usize>();
+        while self.operations.len() > self.operation_bounds.operations
+            || retained_bytes > self.operation_bounds.bytes
+        {
+            let Some(oldest) = self
+                .operations
+                .iter()
+                .filter(|(operation_id, _)| !protected.contains(*operation_id))
+                .min_by(|(left_id, left), (right_id, right)| {
+                    left.recorded_at
+                        .cmp(&right.recorded_at)
+                        .then_with(|| left_id.cmp(right_id))
+                })
+                .map(|(operation_id, _)| operation_id.clone())
+            else {
+                break;
+            };
+            if let Some(removed) = self.operations.remove(&oldest) {
+                retained_bytes = retained_bytes.saturating_sub(removed.retained_bytes(&oldest));
+            }
+        }
     }
 
     /// Returns the durable outcome of a previously admitted operation, so a
@@ -1288,11 +1403,7 @@ impl AgentRuntime {
     ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = semantic_key(intent);
         if let Some(existing) = self.operations.get(operation_id) {
-            if existing
-                .semantic_key
-                .as_ref()
-                .is_some_and(|key| key != &semantic_key)
-            {
+            if existing.conflicts_with(&semantic_key) {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different agent launch",
@@ -1301,13 +1412,7 @@ impl AgentRuntime {
             return existing.outcome.clone();
         }
         let outcome = self.admit(operation_id, intent, scope, None, &semantic_key);
-        self.operations.insert(
-            operation_id.to_owned(),
-            AgentOperation {
-                semantic_key: Some(semantic_key),
-                outcome: outcome.clone(),
-            },
-        );
+        self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
 
@@ -1323,11 +1428,7 @@ impl AgentRuntime {
         validate_goal(intent)?;
         let semantic_key = goal_semantic_key(intent);
         if let Some(existing) = self.operations.get(operation_id) {
-            if existing
-                .semantic_key
-                .as_ref()
-                .is_some_and(|key| key != &semantic_key)
-            {
+            if existing.conflicts_with(&semantic_key) {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different goal launch",
@@ -1342,13 +1443,7 @@ impl AgentRuntime {
         };
         let prompt = autonomous_goal_prompt(&intent.goal);
         let outcome = self.admit(operation_id, &launch, scope, Some(&prompt), &semantic_key);
-        self.operations.insert(
-            operation_id.to_owned(),
-            AgentOperation {
-                semantic_key: Some(semantic_key),
-                outcome: outcome.clone(),
-            },
-        );
+        self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
 
@@ -1624,11 +1719,7 @@ impl AgentRuntime {
     ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = resume_semantic_key(target);
         if let Some(existing) = self.operations.get(operation_id) {
-            if existing
-                .semantic_key
-                .as_ref()
-                .is_some_and(|key| key != &semantic_key)
-            {
+            if existing.conflicts_with(&semantic_key) {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different agent resume",
@@ -1637,13 +1728,7 @@ impl AgentRuntime {
             return existing.outcome.clone();
         }
         let outcome = self.admit_resume_exact(operation_id, target, &semantic_key, scope, None);
-        self.operations.insert(
-            operation_id.to_owned(),
-            AgentOperation {
-                semantic_key: Some(semantic_key),
-                outcome: outcome.clone(),
-            },
-        );
+        self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
 
@@ -1660,7 +1745,7 @@ impl AgentRuntime {
     ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = repair_resume_semantic_key(target, expected_revision);
         if let Some(existing) = self.operations.get(operation_id) {
-            if existing.semantic_key.as_deref() != Some(&semantic_key) {
+            if !existing.matches(&semantic_key) {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different agent repair resume",
@@ -1675,13 +1760,7 @@ impl AgentRuntime {
             scope,
             Some(expected_revision),
         );
-        self.operations.insert(
-            operation_id.to_owned(),
-            AgentOperation {
-                semantic_key: Some(semantic_key),
-                outcome: outcome.clone(),
-            },
-        );
+        self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
 
@@ -2017,11 +2096,7 @@ impl AgentRuntime {
             intent.session_name, worker.agent_id, intent.prompt
         );
         if let Some(existing) = self.operations.get(operation_id) {
-            if existing
-                .semantic_key
-                .as_ref()
-                .is_some_and(|key| key != &semantic)
-            {
+            if existing.conflicts_with(&semantic) {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different dispatch",
@@ -2055,13 +2130,7 @@ impl AgentRuntime {
             &semantic,
             scope,
         );
-        self.operations.insert(
-            operation_id.to_owned(),
-            AgentOperation {
-                semantic_key: Some(semantic),
-                outcome: outcome.clone(),
-            },
-        );
+        self.remember_operation(operation_id, Some(&semantic), outcome.clone());
         outcome
     }
 
@@ -2751,6 +2820,10 @@ impl AgentRuntime {
             Err(error) => Err(error.clone()),
         };
         self.synthesize_no_report(&runtime)?;
+        self.mcp_callers
+            .retain(|_, caller| caller.runtime.agent_runtime_id != runtime.agent_runtime_id);
+        self.reported_phases.remove(&runtime.agent_runtime_id);
+        self.prune_operations(Utc::now());
         Ok(())
     }
 
@@ -3074,7 +3147,9 @@ impl AgentRuntime {
     /// periodically so an idle daemon still ages its finals out of the budget.
     pub fn collect_retention_garbage(&mut self) -> usize {
         self.coordinator.retention().collect();
-        self.coordinator.collect_garbage(&mut *self.store)
+        let collected = self.coordinator.collect_garbage(&mut *self.store);
+        self.prune_operations(Utc::now());
+        collected
     }
 
     /// Closes every Agent runtime belonging to a managed session.
@@ -5236,10 +5311,11 @@ mod tests {
         let launch_operation = OperationId::new().to_string();
         runtime.operations.insert(
             launch_operation.clone(),
-            AgentOperation {
-                semantic_key: Some(semantic_key(&launch)),
-                outcome: Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
-            },
+            AgentOperation::new(
+                Some(&semantic_key(&launch)),
+                Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
+                Utc::now(),
+            ),
         );
         assert!(
             runtime
@@ -5281,10 +5357,11 @@ mod tests {
         let resume_operation = OperationId::new().to_string();
         runtime.operations.insert(
             resume_operation.clone(),
-            AgentOperation {
-                semantic_key: Some(resume_semantic_key(&stale_target)),
-                outcome: Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
-            },
+            AgentOperation::new(
+                Some(&resume_semantic_key(&stale_target)),
+                Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
+                Utc::now(),
+            ),
         );
         assert!(
             runtime
@@ -5352,10 +5429,11 @@ mod tests {
         );
         runtime.operations.insert(
             dispatch_operation.clone(),
-            AgentOperation {
-                semantic_key: None,
-                outcome: Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
-            },
+            AgentOperation::new(
+                None,
+                Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
+                Utc::now(),
+            ),
         );
         assert!(
             runtime
@@ -5653,6 +5731,160 @@ mod tests {
     }
 
     #[test]
+    fn process_local_operation_replay_is_bounded_without_retaining_intent_text() {
+        let mut runtime = runtime();
+        runtime.operation_bounds = AgentOperationBounds {
+            operations: 2,
+            bytes: usize::MAX,
+            age_seconds: 60,
+        };
+        let launch = intent(None);
+        let base = Utc::now();
+        let operations = [
+            OperationId::new().to_string(),
+            OperationId::new().to_string(),
+            OperationId::new().to_string(),
+        ];
+        for (index, operation) in operations.iter().enumerate() {
+            assert!(
+                runtime
+                    .launch(
+                        operation,
+                        &launch,
+                        &FakeScope(Err(ScopeResolveError::Unavailable)),
+                    )
+                    .is_err()
+            );
+            if let Some(retained) = runtime.operations.get_mut(operation) {
+                retained.recorded_at = base
+                    + chrono::Duration::seconds(i64::try_from(index).expect("three fixtures fit"));
+            }
+        }
+        assert_eq!(runtime.operations.len(), 2);
+        assert!(runtime.operation_outcome(&operations[0]).is_none());
+        assert!(runtime.operation_outcome(&operations[1]).is_some());
+        assert!(runtime.operation_outcome(&operations[2]).is_some());
+
+        let long_intent = "private prompt ".repeat(1_000);
+        let digested = OperationId::new().to_string();
+        runtime.operation_bounds.operations = 3;
+        let mut detailed_error = ProtocolError::new(ErrorCode::Unavailable, "fixture");
+        detailed_error.details = Some(serde_json::json!({ "reason": "fixture" }));
+        runtime.remember_operation(&digested, Some(&long_intent), Err(detailed_error));
+        let retained = runtime.operations.get(&digested).unwrap();
+        assert_eq!(retained.semantic_digest.as_ref().unwrap().len(), 64);
+        assert_ne!(
+            retained.semantic_digest.as_deref(),
+            Some(long_intent.as_str())
+        );
+
+        runtime.operation_bounds.bytes = 1;
+        runtime.prune_operations(Utc::now());
+        assert!(runtime.operations.is_empty());
+    }
+
+    #[test]
+    fn operation_replay_age_expires_only_unprotected_history() {
+        let mut runtime = runtime();
+        runtime.operation_bounds = AgentOperationBounds {
+            operations: 0,
+            bytes: 0,
+            age_seconds: 1,
+        };
+        let expired = OperationId::new().to_string();
+        runtime.remember_operation(
+            &expired,
+            Some("expired"),
+            Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
+        );
+        assert!(
+            runtime.operations.is_empty(),
+            "byte/count pressure is immediate"
+        );
+
+        runtime.operation_bounds = AgentOperationBounds {
+            operations: 8,
+            bytes: usize::MAX,
+            age_seconds: 1,
+        };
+        runtime.remember_operation(
+            &expired,
+            Some("expired"),
+            Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
+        );
+        runtime.operations.get_mut(&expired).unwrap().recorded_at =
+            Utc::now() - chrono::Duration::seconds(2);
+        runtime.prune_operations(Utc::now());
+        assert!(!runtime.operations.contains_key(&expired));
+
+        runtime.operation_bounds = AgentOperationBounds {
+            operations: 0,
+            bytes: 0,
+            age_seconds: 0,
+        };
+        let protected = OperationId::new().to_string();
+        runtime
+            .launch(&protected, &intent(None), &FakeScope(Ok(scope())))
+            .unwrap();
+        assert!(runtime.operations.contains_key(&protected));
+    }
+
+    #[test]
+    fn operation_replay_eviction_breaks_timestamp_ties_by_identity() {
+        let mut runtime = runtime();
+        runtime.operation_bounds = AgentOperationBounds {
+            operations: 1,
+            bytes: usize::MAX,
+            age_seconds: 60,
+        };
+        let recorded_at = Utc::now();
+        let mut operations = [
+            OperationId::new().to_string(),
+            OperationId::new().to_string(),
+        ];
+        operations.sort();
+        for operation in &operations {
+            runtime.operations.insert(
+                operation.clone(),
+                AgentOperation::new(
+                    Some("same intent"),
+                    Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
+                    recorded_at,
+                ),
+            );
+        }
+
+        runtime.prune_operations(recorded_at);
+
+        assert!(!runtime.operations.contains_key(&operations[0]));
+        assert!(runtime.operations.contains_key(&operations[1]));
+    }
+
+    #[test]
+    fn normal_exit_releases_ephemeral_caller_and_phase_state() {
+        let mut runtime = runtime();
+        let operation = OperationId::new().to_string();
+        let admission = runtime
+            .launch(&operation, &intent(None), &FakeScope(Ok(scope())))
+            .unwrap();
+        let runtime_id = runtime
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap()
+            .agent_runtime_id;
+        runtime
+            .reported_phases
+            .insert(runtime_id, AgentPhase::Running);
+        assert_eq!(runtime.mcp_callers.len(), 1);
+
+        runtime.exit(&admission.terminal, 0).unwrap();
+
+        assert!(runtime.mcp_callers.is_empty());
+        assert!(!runtime.reported_phases.contains_key(&runtime_id));
+        assert!(runtime.operations.contains_key(&operation));
+    }
+
+    #[test]
     fn session_close_removes_the_agent_from_runtime_inventory_and_replay() {
         let mut runtime = runtime();
         pty_mut(&mut runtime).terminate_success = true;
@@ -5769,6 +6001,50 @@ mod tests {
         assert_eq!(
             runtime
                 .report_agent_phase(&credential, AgentPhase::Running)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+    }
+
+    #[test]
+    fn stale_process_local_credentials_fail_closed_at_structured_boundaries() {
+        let mut runtime = codex_runtime();
+        let admission = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace: WorkspaceId::new(),
+                    session: Some(SessionId::new()),
+                    profile: Some(AgentProfileId::new("codex").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let runtime_ref = runtime
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        runtime
+            .coordinator
+            .exit(&runtime_ref, 0, &mut *runtime.store)
+            .unwrap();
+        assert!(runtime.mcp_callers.contains_key(&credential));
+
+        assert_eq!(
+            runtime
+                .report_agent_phase(&credential, AgentPhase::Running)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(
+            runtime
+                .capture_codex_session(
+                    &credential,
+                    ProviderSessionId::new("late-session").unwrap(),
+                )
                 .unwrap_err()
                 .code,
             ErrorCode::OwnershipUnknown
