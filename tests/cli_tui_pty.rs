@@ -2793,20 +2793,21 @@ fn agent_process_for(processes: &[(TerminalRef, u64)], terminal: &TerminalRef) -
 /// resume する product E2E。
 ///
 /// `tests/agent_ipc_e2e.rs` の cold-restart flow は shipping TUI の reducer を直接呼ぶ。ここは
-/// TUI binary を実 PTY で起動し、`Ctrl-O r` / `Ctrl-O x` の実キー入力だけで操作して、
+/// TUI binary を実 PTY で起動し、`Ctrl-O r` / `Ctrl-O Ctrl-X` の実キー入力だけで操作して、
 /// 次を process 境界で押さえる。
 ///
 /// * root と managed session の history が distinct な tab として描画され、label は closed
 ///   vocabulary（`Claude (interrupted)` / `Codex (interrupted)` / `Agent (interrupted)`）だけである。
-/// * fresh start・TUI open・inventory・Agent tab close・reconnect は provider を 1 度も起動しない。
+/// * fresh start・TUI open・inventory・interrupted tab close・reconnect は provider を 1 度も起動しない。
 ///   provider を起動するのは `Ctrl-O r` の実キー入力だけである。
+/// * interrupted tab close は exact lineage を永続化し、inventory refresh と TUI reopen でも復活しない。
 /// * `Ctrl-O r` の 2 連打（double click）が daemon operation 1 件・child spawn 1 件・live tab 1 枚へ
 ///   収束し、resume argv が exact な provider session ID を運ぶ。選ばなかった lineage は変わらない。
 /// * provider が使えない間の resume は tab を interrupted のまま残し、retry が成功する。
 /// * provider ID・argv・cwd・transcript は描画 frame と log（同じ PTY へ落ちる stderr）に出ない。
 #[test]
 #[allow(clippy::too_many_lines)] // 1 本の cold-restart product flow を時系列のまま検証する。
-fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_keys() {
+fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_from_real_keys() {
     let _serial = serial();
     let home = short_home();
     let workspace_root = tempfile::tempdir().unwrap();
@@ -3092,9 +3093,9 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
         "claude-input:claude-root-after-resume",
     );
 
-    // ── 6. The managed session resumes through the same UX and fencing. Its
-    // history remains visible when `Ctrl-O x` is pressed; the close attempt does
-    // not start a provider or require a reopen command.
+    // ── 6. Remove the managed-session history with the semantic Ctrl-O Ctrl-X
+    // chord. There is no live PTY to terminate, so this persists the exact
+    // lineage dismissal and closes only that tab without starting a provider.
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, cold_baseline, "[switch]");
     send(&mut master, b"\r");
@@ -3105,65 +3106,20 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
         cold_baseline,
         "Claude (interrupted)",
     );
-    send(&mut master, b"\x0fx");
-    assert!(read_agent_intent(home.path()).dismissed.is_empty());
+    send(&mut master, b"\x0f\x18");
+    let dismissed = wait_for_agent_intent(home.path(), |intent| {
+        intent.dismissed.contains(&session_claude)
+    });
+    assert_eq!(dismissed.dismissed, [session_claude].into());
+    wait_for_screen_absent_since(&captured, cold_baseline, "Claude (interrupted)");
     assert_eq!(
         fixtures.claude_spawns(),
         3,
         "closing a history tab must not spawn a provider"
     );
-    select_tab_by_label(
-        &mut master,
-        &captured,
-        cold_baseline,
-        "Claude (interrupted)",
-    );
-    assert_eq!(
-        fixtures.claude_spawns(),
-        3,
-        "the visible tab remains interrupted until explicit resume"
-    );
 
-    send(&mut master, b"\x0fr");
-    assert_spawns_settle(&fixtures.claude_count, 4);
-    let resumed_session = agent_processes(home.path(), 3);
-    let (resumed_session_terminal, resumed_session_pid) = resumed_session
-        .iter()
-        .find(|(terminal, _)| terminal.session_id == Some(session_id))
-        .cloned()
-        .expect("the managed session owns a live replacement");
-    assert!(!resumed_session_terminal.fences(&session_claude_terminal));
-    wait_for_screen_since(
-        &captured,
-        cold_baseline,
-        &format!("claude-resumed-unique:{resumed_session_pid}"),
-    );
-    let session_resume_argv = fixtures.claude_launch_argv();
-    assert!(
-        session_resume_argv[3].contains(&format!("--resume {session_claude_id}")),
-        "{session_resume_argv:?}"
-    );
-    assert_eq!(
-        session_resume_argv[3]
-            .matches("--append-system-prompt")
-            .count(),
-        1,
-        "{session_resume_argv:?}"
-    );
-    assert!(
-        session_resume_argv[3].contains("セッション専用の worktree"),
-        "{session_resume_argv:?}"
-    );
-    send(&mut master, b"claude-session-after-resume\r");
-    wait_for_screen_since(
-        &captured,
-        cold_baseline,
-        "claude-input:claude-session-after-resume",
-    );
-
-    // ── 7. Reconnect: closing and reopening the TUI keeps every replacement live
-    // and adds no spawn. The managed session owns exactly one tab, so its retained
-    // output is the deterministic reconnect fence.
+    // ── 7. Reconnect: both resumed root conversations stay live, while the
+    // dismissed managed history remains absent and no provider is added.
     assert!(
         quit_workspace(&mut master, &mut cold, &captured, cold_baseline).success(),
         "the resumed TUI quits normally"
@@ -3173,18 +3129,14 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     open_registered_workspace(&mut master, &captured, reconnect_baseline);
     send(&mut master, b"\r");
     wait_for_screen_since(&captured, reconnect_baseline, "[closeup]");
-    wait_for_screen_since(
-        &captured,
-        reconnect_baseline,
-        "claude-input:claude-session-after-resume",
-    );
+    wait_for_screen_absent_since(&captured, reconnect_baseline, "Claude (interrupted)");
     let reconnected_screen = screen_since(&captured, reconnect_baseline).unwrap_or_default();
     assert!(
         !reconnected_screen.contains("(interrupted)"),
         "every lineage converged onto its live replacement: {reconnected_screen}"
     );
     assert_eq!(fixtures.codex_spawns(), 2);
-    assert_eq!(fixtures.claude_spawns(), 4);
+    assert_eq!(fixtures.claude_spawns(), 3);
     assert_eq!(daemon_pid(home.path()), fresh_daemon, "daemon PID changed");
     assert_eq!(
         daemon_generation(home.path()),
@@ -3192,8 +3144,8 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
         "daemon generation changed"
     );
     assert_eq!(
-        agent_processes(home.path(), 3),
-        resumed_session,
+        agent_processes(home.path(), 2),
+        resumed_root,
         "reconnect must not replace any Agent process"
     );
     assert!(

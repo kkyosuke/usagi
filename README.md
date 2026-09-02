@@ -96,6 +96,8 @@ generic terminal の `Ctrl-C` は foreground command を割り込んで画面を
 `Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、再度開くと新しい terminal になる。Director は画面の
 右側を高さ一杯に使い、workspace Shell と同時に開ける。選択 session の Agent は両 drawer の背面でも
 可視領域へ resize して出力を更新し続ける。
+live Agent では同じ close chord が `Ctrl-D` と同じ終了入力になり、interrupted Agent では選択中の tab を
+永続的に閉じる。interrupted tab の close は Agent の resume や新規起動を行わない。
 
 ## 必要なもの
 

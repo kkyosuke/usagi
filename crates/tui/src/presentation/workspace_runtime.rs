@@ -1227,8 +1227,9 @@ impl WorkspaceRuntime {
                 detach: None,
                 cancel: Some(*operation),
             },
-            // An interrupted tab owns no daemon transport. Callers keep Agent
-            // history visible and therefore do not route its close here.
+            // An interrupted tab owns no daemon transport. Its durable
+            // visibility mutation is handled by the caller before this local
+            // registry close.
             PaneSelection::Tab(TabSelection::Interrupted(_))
             | PaneSelection::Target(_)
             | PaneSelection::None => CloseOutcome::default(),

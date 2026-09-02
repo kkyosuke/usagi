@@ -13,7 +13,12 @@ use usagi_core::domain::id::{AgentContinuationRef, SessionId, TerminalRef, Works
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 
 /// Current on-disk schema understood by the Agent-tab intent store.
-pub const AGENT_TAB_INTENT_SCHEMA: u32 = 1;
+///
+/// Schema 2 distinguishes current user-owned interrupted-tab dismissals from
+/// schema 1 values written before Agent close changed to terminate live
+/// runtimes. The file adapter migrates schema 1 by clearing those legacy hide
+/// flags once.
+pub const AGENT_TAB_INTENT_SCHEMA: u32 = 2;
 
 /// One continuation-backed tab slot in the user's saved order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,16 +48,14 @@ pub struct AgentTabIntent {
     /// Monotonic store revision used as a compare-and-swap fence.
     pub revision: u64,
     pub targets: Vec<AgentTabTargetIntent>,
-    /// Legacy close intent retained for schema compatibility. A coherent
-    /// [`AgentTabIntentMutation::ObserveAll`] clears it before projection.
+    /// Conversation lineages the user explicitly removed from the tab strip.
+    /// A dismissal is durable across inventory refresh and TUI restart.
     pub dismissed: BTreeSet<AgentContinuationRef>,
-    /// Legacy terminal-scoped close intent retained for schema compatibility.
-    /// A coherent [`AgentTabIntentMutation::ObserveAll`] clears it before
-    /// projection.
+    /// Terminal-scoped close intent for a live Agent whose continuation has not
+    /// been observed yet.
     ///
-    /// The field is additive within [`AGENT_TAB_INTENT_SCHEMA`]: an older build
-    /// reading this state simply forgets the deferred fences instead of having
-    /// its whole file quarantined as a future schema.
+    /// The field remains optional so schema 1 files can be decoded by the file
+    /// adapter before their one-time migration.
     #[serde(default)]
     pub dismissed_terminals: BTreeSet<TerminalRef>,
 }
@@ -149,15 +152,6 @@ impl AgentTabIntent {
                 agents,
                 allowed_sessions,
             } => Some(self.reconcile(&terminals, &agents, &allowed_sessions)),
-            AgentTabIntentMutation::ObserveAll {
-                terminals,
-                agents,
-                allowed_sessions,
-            } => {
-                self.dismissed.clear();
-                self.dismissed_terminals.clear();
-                Some(self.reconcile(&terminals, &agents, &allowed_sessions))
-            }
             AgentTabIntentMutation::Upsert {
                 session_id,
                 continuation,
@@ -175,6 +169,26 @@ impl AgentTabIntent {
                 None
             }
             AgentTabIntentMutation::Dismiss { continuation } => {
+                self.dismiss(continuation);
+                None
+            }
+            AgentTabIntentMutation::DismissInterrupted {
+                session_id,
+                continuation,
+                terminal,
+            } => {
+                // Interrupted inventory can discover a lineage after local tab
+                // intent was lost. Bind its exact, already-validated scope and
+                // dismiss it in one durable mutation so refresh cannot restore
+                // the just-closed tab.
+                if !self.targets.iter().any(|target| {
+                    target
+                        .tabs
+                        .iter()
+                        .any(|slot| slot.continuation == continuation)
+                }) {
+                    self.upsert(session_id, continuation, terminal, false);
+                }
                 self.dismiss(continuation);
                 None
             }
@@ -658,13 +672,6 @@ pub enum AgentTabIntentMutation {
         agents: AgentInventory,
         allowed_sessions: BTreeSet<SessionId>,
     },
-    /// Reconcile a coherent inventory and retire legacy hide intent. Current
-    /// TUI policy displays every daemon-owned Agent.
-    ObserveAll {
-        terminals: Vec<TerminalInventoryEntry>,
-        agents: AgentInventory,
-        allowed_sessions: BTreeSet<SessionId>,
-    },
     /// Record a newly admitted or replacement Agent runtime.
     Upsert {
         session_id: Option<SessionId>,
@@ -680,6 +687,14 @@ pub enum AgentTabIntentMutation {
     },
     /// Hide one lineage without stopping its runtime or provider conversation.
     Dismiss { continuation: AgentContinuationRef },
+    /// Persistently remove one projected interrupted tab. Unlike [`Self::Dismiss`],
+    /// this carries enough exact scope to create the durable slot when the
+    /// lineage was discovered from daemon inventory alone.
+    DismissInterrupted {
+        session_id: Option<SessionId>,
+        continuation: AgentContinuationRef,
+        terminal: TerminalRef,
+    },
     /// Hide one exact live terminal whose lineage has not been observed yet.
     /// The next observation that binds it promotes the close to its lineage.
     DismissTerminal { terminal: TerminalRef },
@@ -887,25 +902,43 @@ mod tests {
     }
 
     #[test]
-    fn observe_all_retires_legacy_dismissals_and_projects_every_live_agent() {
+    fn interrupted_dismissal_creates_a_durable_slot_before_hiding_the_lineage() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let worktree = WorktreeId::new();
         let continuation = AgentContinuationRef::new();
-        let terminal = terminal(workspace, Some(session), worktree);
+        let interrupted_terminal = terminal(workspace, Some(session), worktree);
         let mut intent = AgentTabIntent::empty(workspace);
-        intent.upsert(Some(session), continuation, terminal.clone(), false);
-        intent.dismissed.insert(continuation);
-        intent.dismissed_terminals.insert(terminal.clone());
 
+        intent.apply(AgentTabIntentMutation::DismissInterrupted {
+            session_id: Some(session),
+            continuation,
+            terminal: interrupted_terminal.clone(),
+        });
+
+        assert_eq!(intent.targets.len(), 1);
+        assert_eq!(intent.targets[0].session_id, Some(session));
+        assert_eq!(intent.targets[0].tabs.len(), 1);
+        assert_eq!(intent.targets[0].tabs[0].continuation, continuation);
+        assert!(
+            intent.targets[0].tabs[0]
+                .terminal
+                .fences(&interrupted_terminal)
+        );
+        assert_eq!(intent.dismissed, BTreeSet::from([continuation]));
+        assert!(intent.dismissed_terminals.is_empty());
+        assert_eq!(intent.validate(workspace), Ok(()));
+
+        // If the same lineage later becomes live, the explicit removal still
+        // suppresses it until an explicit reopen clears this exact key.
         let projection = intent
-            .apply(AgentTabIntentMutation::ObserveAll {
-                terminals: vec![live_entry(terminal.clone())],
+            .apply(AgentTabIntentMutation::Observe {
+                terminals: vec![live_entry(interrupted_terminal.clone())],
                 agents: AgentInventory {
                     workspace_id: workspace,
                     runtimes: vec![runtime(
                         continuation,
-                        &terminal,
+                        &interrupted_terminal,
                         AgentRuntimeInventoryState::Live,
                     )],
                     resumable: Vec::new(),
@@ -913,11 +946,26 @@ mod tests {
                 allowed_sessions: BTreeSet::from([session]),
             })
             .expect("observation projects live Agents");
+        assert!(projection.targets.is_empty());
+        assert_eq!(intent.dismissed, BTreeSet::from([continuation]));
 
-        assert!(intent.dismissed.is_empty());
-        assert!(intent.dismissed_terminals.is_empty());
-        assert_eq!(projection.targets.len(), 1);
-        assert_eq!(projection.targets[0].tabs[0].continuation, continuation);
+        // A stale close still wins on visibility, but it must not replace a
+        // newer exact terminal already bound to the same lineage.
+        let replacement = terminal(workspace, Some(session), worktree);
+        intent.apply(AgentTabIntentMutation::Upsert {
+            session_id: Some(session),
+            continuation,
+            terminal: replacement.clone(),
+            select: false,
+        });
+        intent.apply(AgentTabIntentMutation::Reopen { continuation });
+        intent.apply(AgentTabIntentMutation::DismissInterrupted {
+            session_id: Some(session),
+            continuation,
+            terminal: interrupted_terminal,
+        });
+        assert!(intent.targets[0].tabs[0].terminal.fences(&replacement));
+        assert_eq!(intent.dismissed, BTreeSet::from([continuation]));
     }
 
     #[test]
