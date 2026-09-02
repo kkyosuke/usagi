@@ -1972,6 +1972,27 @@ mod tests {
             run.tasks[&id].verification_expectation.as_ref(),
             Some(&expectation)
         );
+        let retry_at = now() + chrono::Duration::seconds(1);
+        reduce(
+            &mut run,
+            &event(
+                6,
+                SupervisorEventKind::VerificationDeferred {
+                    task_id: id.clone(),
+                    generation: 1,
+                    result_digest: "provider-unavailable".into(),
+                    safe_summary: "provider temporarily unavailable".into(),
+                    retry_at,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            run.tasks[&id].verification_digest.as_deref(),
+            Some("provider-unavailable")
+        );
+        assert_eq!(run.tasks[&id].verification_attempt, 1);
+        assert_eq!(run.tasks[&id].verification_retry_at, Some(retry_at));
         let conflicting = ArtifactExpectation::new(
             GitHubRepository::from_name_with_owner("other/repo").unwrap(),
             "0123456789012345678901234567890123456789",
@@ -1981,7 +2002,7 @@ mod tests {
             reduce(
                 &mut run,
                 &event(
-                    6,
+                    7,
                     SupervisorEventKind::VerificationExpectationRecorded {
                         task_id: id.clone(),
                         generation: 1,
