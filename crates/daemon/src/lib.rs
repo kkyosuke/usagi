@@ -2,8 +2,9 @@
 
 //! usagi-daemon — 常駐プロセス（`usagi daemon`）のサーバ面クレート。
 //!
-//! agent / シェルの PTY 所有・セッション監視・委譲 queue の消化
-//! （document/proposals/02-daemon.md）をここに実装する。
+//! agent / シェルの PTY 所有・セッション監視・委譲 queue の消化をここに実装する。
+//! 現行の daemon 契約は `document/05-daemon.md`、クレート境界は
+//! `document/02-architecture.md` を参照する。
 //! usagi-core にのみ依存し、usagi-tui には依存しない（TUI との通信は
 //! usagi-core の IPC プロトコル型を介して行う）。
 //!

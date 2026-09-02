@@ -5,9 +5,10 @@
 //! siblings), writes one markdown file, then rebuilds the derived `index.json`
 //! / `MEMORY.md` by scanning the whole directory. The per-file write is atomic
 //! (temp + rename, see [`super::json_file`]), but the *sequence*
-//! is not: the MCP server and the TUI write the same `.usagi/issues/` and
-//! `.usagi/memory/` directories concurrently, so two processes can interleave
-//! and lose data (e.g. both allocate the same number, or a stale rebuild wins).
+//! is not: multiple MCP server processes can write the same issue root (workers
+//! in one session) or workspace-shared memory root concurrently, so two
+//! processes can interleave and lose data (e.g. both allocate the same number,
+//! or a stale rebuild wins).
 //!
 //! [`StoreLock`] serialises those sequences across processes with an exclusive
 //! advisory lock (`flock`-style, via the `fs2` crate) held on a per-store
@@ -32,7 +33,7 @@ pub const LOCK_FILE_NAME: &str = ".lock";
 /// normally releases within milliseconds (one read-modify-write of a small
 /// directory), so this generously absorbs contention while still turning a stuck
 /// holder — a live process wedged mid-operation — into a reported error rather
-/// than an indefinitely frozen UI. (A *crashed* holder is not the concern: the
+/// than an indefinitely blocked caller. (A *crashed* holder is not the concern: the
 /// OS drops an `flock` when the holding process dies.)
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often [`StoreLock::acquire`] re-tries while waiting for the lock.

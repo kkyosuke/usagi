@@ -5,8 +5,8 @@
 //! 1 接続の lifecycle state と行単位の validation/routing を `handle_line_with_client` に閉じ込め、
 //! `serve` は実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、routing は
 //! ユニットテストできる。`tools/call` は実装済み tool を対応する store / daemon 経路へ送り、
-//! issue / memory は接続時に固定した root の core store usecase、session 系は daemon client へ接続し、
-//! tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
+//! issue / memory は接続時に固定した root の core store usecase、session / agent / terminal /
+//! supervisor 系は daemon client へ接続し、tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -197,9 +197,10 @@ fn serve_with_client_and_caller_scoped(
     )
 }
 
-/// Serves one daemon-claimed MCP child with the store root authenticated by
-/// the daemon. This keeps issue and memory operations bound to the caller's
-/// session even when the provider starts the child from another directory.
+/// Compatibility path for a daemon-claimed MCP child that supplies one
+/// authenticated store root. Both issue and memory operations are bound to that
+/// root even when the provider starts the child from another directory. Current
+/// daemons call [`serve_with_client_and_caller_at_roots`] with separate roots.
 ///
 /// # Errors
 ///

@@ -8,15 +8,18 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [画面と入力](#画面と入力)
 - [project tab と workspace deck](#project-tab-と-workspace-deck)
 - [workspace の離脱と終了](#workspace-の離脱と終了)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
+- [Production screen graph harness](#production-screen-graph-harness)
 - [Home と target](#home-と-target)
   - [Switch の右ペインは cursor の preview](#switch-の右ペインは-cursor-の-preview)
 - [workspace terminal drawer](#workspace-terminal-drawer)
 - [指示モード（Director mode）](#指示モードdirector-mode)
+  - [goal-driven workflow](#goal-driven-workflow)
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [frame 予算](#frame-予算)
 - [Session sidebar rows](#session-sidebar-rows)
@@ -37,6 +40,13 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [exited terminal の completed entry](#exited-terminal-の-completed-entry)
 - [interrupted Agent の tab 投影と明示 resume](#interrupted-agent-の-tab-投影と明示-resume)
 - [feedback と終了](#feedback-と終了)
+
+## この文書の読み方
+
+前半は Welcome から Home までの画面遷移、workspace deck、入力所有を扱う。Home を変更するときは target と drawer、
+frame loop、sidebar / modal の順に確認し、session の個別 pane を変更するときは Closeup 以降を読む。後半の resume と
+feedback は TUI-local な投影だけを所有し、resource identity と wire は [4. daemon IPC](04-ipc.md)、session / Agent の
+lifecycle は [5. daemon](05-daemon.md) を参照する。
 
 ## 画面と入力
 
@@ -205,7 +215,7 @@ daemon](#workspace-の選択と-daemon)）。多くの場合その接続先は�
 
 戻り先の Welcome は**開いた時点の Recent 順序を保つ**。workspace を開いた時点で `record_opened` 済みなので
 離れた workspace は先頭にあり、entry 画面が daemon も store も読み直さない原則（[workspace の選択と
-daemon](#workspace-の選択と-daemon)）をそのまま守る。ただし `usagi <path>` / `usagi open <path>` のように
+daemon](#workspace-の選択と-daemon)）をそのまま守る。ただし `usagi open <path>` のように
 workspace を直接開いた入口には背後に Welcome が無いため、離脱時に合成ルートが Recent を読み直して
 entry 画面へ入る。
 
@@ -256,7 +266,7 @@ Overview / Closeup を生成する Home runtime へ渡す。この束縛は work
 
 session 一覧・scope・PR inventory は daemon が権威である。daemon は起動した workspace に加えて、**client が選んだ
 workspace を adopt して同時に serve する**（[5. daemon#tenant registry](05-daemon.md#tenant-registry)）。一方 TUI が開く workspace は、起動した
-directory ではなく利用者の選択（`usagi open <path>` / `usagi <path>`、Welcome の Recent、Open 一覧、New の作成
+directory ではなく利用者の選択（`usagi open <path>`、Welcome の Recent、Open 一覧、New の作成
 成功）で決まる。この節はその 2 つを一致させる契約の正本であり、wire の申告と admit 条件は
 [4. daemon IPC#workspace fence](04-ipc.md#workspace-fence) が正本である。
 
@@ -278,7 +288,7 @@ canonical 化して `selected` として申告するため、daemon は「serve 
 |---|---|
 | Welcome の Recent、Open 一覧 | その画面に留まり notice に出す。折り返して全文を表示するので理由と手順が切れない。続けて serve されている workspace を選べる |
 | New の作成成功後の open | draft を保ったまま同画面の notice に出す |
-| `usagi open <path>` / `usagi <path>` | 端末があれば **Welcome（切り替え画面）を開き、その 1 フレーム目に notice として出す**。端末が無ければ TUI を開かず stderr へ 1 行で出す |
+| `usagi open <path>` | 端末があれば **Welcome（切り替え画面）を開き、その 1 フレーム目に notice として出す**。端末が無ければ TUI を開かず stderr へ 1 行で出す |
 
 **daemon へ到達できないことは、この表の拒否と同じ扱いにする**。workspace が今開けない理由が
 「この daemon は別 workspace を serve している」でも「daemon へ到達できない」でも、利用者に必要なのは
@@ -507,7 +517,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `v` | OpenPullRequests | focused session の Pull Request modal を開く |
 | `Ctrl-O` `,` | OpenGarden | 前面 modal が無い workspace の session garden を開く |
 | `Ctrl-O` `g` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
-| `Ctrl-O` `w` | WorkRuns | Goal-driven Director の Work Run 一覧・操作面を開く。通常モードまたは Director 外では何も変更せず、leader のない `w` / `Ctrl-W` は PTY が所有する |
+| `Ctrl-O` `w` | WorkRuns | goal-driven workspace の Work Run 一覧・操作面を開く。Director が閉じていれば同じ操作で drawer も開く。classic、overlay 表示中、Director の New / launch 中は Work Run 面へ遷移せず、leader のない `w` / `Ctrl-W` は PTY が所有する |
 | `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する |
 | `Ctrl-O` `z` | WorkspaceTerminalFullHeight | workspace terminal の高さを通常 drawer / 画面いっぱいで切り替える |
 | `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する。workspace terminal では新しい terminal tab を開く |
@@ -658,8 +668,11 @@ IPCは行わない。
 workspace 所有情報を持たない旧 run は別 workspace へ推測せず表示しない。
 
 Goal-driven Director では `Ctrl-O w` が同じ projection の最大16件を stable run ID で選べる Work Run 操作面を開く。
-進行中 run の cancel は確認を必須とし、escalated run は観測した exact escalation ID に対する Retry work / Cancel run /
-Mark failed だけを提示する。完了済み run は read-only である。観測が失敗した cached snapshot と初回 pending は操作を拒否し、
+Director が閉じていれば同時に drawer を開き、操作面の一覧では `↑` / `↓`（`←` / `→` も同じ）で Run を選び、
+`Enter` で状態に応じた action へ進み、`Esc` または一覧上の `Ctrl-O w` で閉じる。終了済みと Escalated 以外の run の
+cancel は再度 `Enter` を押す確認を必須とする。Escalated run は観測した exact escalation ID に対する
+Retry work / Cancel run / Mark failed だけを提示し、`↑` / `↓` / `←` / `→` で選択して `Enter` で確定する。
+完了済み run は read-only である。観測が失敗した cached snapshot と初回 pending は操作を拒否し、
 fresh snapshot を取得してからだけ typed command を送る。送信中の連打は消費し、応答が未確認なら `Enter` は新しい操作を作らず
 同じ operation ID を再送する。副作用なしの確定拒否は再試行画面にせず理由を表示して一覧へ戻る。`Esc` は確認・判断画面から一覧へ戻り、cancel 自体を暗黙に実行しない。結果不明の再試行画面では operation ID を破棄せず操作面だけを閉じ、再度開いたときに同じ operation の再試行へ戻す。
 
@@ -1597,8 +1610,8 @@ background のいずれも同じ規則に従う。
 | completion channel の消失（workspace exit） | worker の送信は無害に捨てられ、stream client も launch client も worker と一緒に失われない |
 | late / 重複 / 未 admit の completion | launch fence が一致した completion だけが admission slot を解放し、operation fence が一致した pane だけを完了させる |
 
-hung request 自体の deadline は本節の責務ではなく、[#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md)
-の IPC request deadline が所有する。
+hung request 自体の deadline は本節の責務ではなく、
+[IPC の attempt deadline と reconnect budget](04-ipc.md#attempt-deadline-と-reconnect-budget)が所有する。
 
 #### 同一 process の pending operation identity
 
@@ -2027,7 +2040,7 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
   成功後も dedicated restore port を保持する。restore socket の passive EOF を検知し、current endpoint が再び接続可能になった
   ときだけ monotonic / coalesced connection epoch を 1 件発行して、その epoch につき fresh observation を一度送る。frame tick
   自体は inventory RPC を発行しない。restore request が slow / hung でも off-thread worker 内に隔離されるが、request deadline
-  そのものは [#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) の責務である。
+  そのものは [IPC の attempt deadline と reconnect budget](04-ipc.md#attempt-deadline-と-reconnect-budget)の責務である。
 - **投影**: saved Agent は完全な `TerminalRef` が両 inventory で trusted live と確認できたときだけ保存順で復元する。
   inventory にだけある live Agent は continuation / terminal fence の決定的順序で末尾へ追加し、duplicate snapshot は
   exact ref で 1 枚へ収束する。managed session の generic Terminal はその後ろへ決定的に追加し、root scope の generic
@@ -2090,7 +2103,7 @@ identity は daemon-issued `AgentContinuationRef` だけである。表示名、
 |---|---|---|
 | saved managed session target が snapshot に無い | target identity が stale | active pane にせず、Home は surviving session または `+ new session` へ reconcile する |
 | saved `TerminalRef` が live inventory に無いが continuation history は残る | attach 不可 | slot を保持し live tab は投影しない |
-| inventory から continuation が消えた | absence は retention / GC の証明ではない | slot を保持する。aggregate allocator / retention policy は [#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務 |
+| inventory から continuation が消えた | absence は retention / GC の証明ではない | slot を保持する。aggregate allocator / retention policy は [daemon の final retention と aggregate GC](05-daemon.md#final-retention-と-aggregate-gc)の責務 |
 | terminal ID が同じでも daemon generation など fencing field が異なる | old / stale data | trusted owner が無ければ attach せず、名前や ID から置換しない |
 | attach / resync が ownership unknown または transport failure | 継続性を証明できない | safe feedback を表示し input を無効化する |
 
@@ -2162,7 +2175,7 @@ label・detail・feedback・log のいずれにも出さない。
 | resumable item が無い / `available: false` / reason が `explicit_resume_available` でない | metadata 不足・live 保持・supersede 済み | tab は表示するが resume 不可にし、safe reason だけを出す |
 | target の lineage / runtime / workspace / session / worktree が当該 runtime と一致しない | 信頼できない target | target を捨て、resume 不可として表示する |
 
-saved 表示順（[#506](../.usagi/issues/506-feat-tui-agent-tab-intent-daemon-inventory-open-reconcile.md) の slot 順）を
+saved 表示順（[workspace open 時の two-source reconciliation](#workspace-open-時の-pane-復元)の slot 順）を
 持つ lineage はその位置を保ち、local state に無い lineage だけが決定的な順序でその後に続く。したがって local state を
 失っても inventory から安全に再構成でき、provider ID を推測しない。
 
@@ -2209,8 +2222,8 @@ live PTY の有無ではなく tab の有無で決まる）。history tab は ma
    resume 中にする。tab の位置・selection・他 tab は変わらない。
 2. 応答が[明示 resume の検証](#明示-resume-の検証)をすべて満たしたときだけ、同じ slot の tab を新しい exact
    `TerminalRef` の live Agent tab へ置き換える。foreground だった tab だけが attach / resync する。
-3. 置換した lineage は #506 の slot intent へ新しい `TerminalRef` として commit するので、次の observation でも
-   同じ位置に残る。
+3. 置換した lineage は [two-source reconciliation](#workspace-open-時の-pane-復元)の slot intent へ新しい
+   `TerminalRef` として commit するので、次の observation でも同じ位置に残る。
 4. 拒否・失敗は tab を interrupted のまま残して safe feedback を出す。in-flight な operation を持つ tab は、
    inventory から source が消えても消滅しない（利用者の request が答えを受け取るまで tab が残る）。
 5. live tab の `Ctrl-O x` は CLI へ `Ctrl-D` と同じ EOT を送り、daemon が runtime の終了を観測した時点で tab を閉じる。
@@ -2222,9 +2235,8 @@ daemon request を作らない。inventory refresh・reconnect・workspace open�
 
 planned な `daemon restart` は旧 generation の PTY を保持したまま control authority だけを移す別 failure mode である。
 その間の tab は interrupted ではなく、owner generation の endpoint へ配送される live tab のままである
-（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。TUI client を owner routing に
-載せるのは [#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md)、rollover 自体の起動は
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の責務であり、
+（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。TUI client の routing は同 IPC 契約、
+rollover 自体の起動は [daemon の planned replacement](05-daemon.md#planned-replacement)の責務であり、
 本 projection は crash / cold restart を旧 PTY の継続と偽らないことだけを保証する。
 
 ## feedback と終了

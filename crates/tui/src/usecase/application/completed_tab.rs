@@ -85,9 +85,9 @@ fn tab(entry: &CompletedTerminalEntry, reopened: bool) -> CompletedTab {
 /// Projects the current completed inventory into read-only tabs and the
 /// visibility commands to issue.
 ///
-/// * `suppressed` are the exact terminals whose #506 continuation lineage
-///   forbids auto-show. The mapping from a continuation to its terminal is
-///   owned by #506; this reducer never infers it.
+/// * `suppressed` are the exact terminals whose continuation lineage forbids
+///   auto-show. The Agent-tab intent/dismissal projection supplies the mapping
+///   from a continuation to its terminal; this reducer never infers it.
 /// * `reopened` are the exact terminals the user explicitly reopened from
 ///   history.
 ///

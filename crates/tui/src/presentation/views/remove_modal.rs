@@ -123,9 +123,10 @@ impl RemoveModal {
     }
 }
 
-/// A session record has no durable ID in the current daemon projection. This
-/// fence prevents a refresh from retargeting a checked row to a same-named new
-/// record until #258 supplies that durable identity end-to-end.
+/// `SessionRecord` itself carries no durable ID. At this legacy/display-record
+/// boundary, the composite fields fence a refresh from retargeting a checked row
+/// to a same-named new record; the TUI keeps daemon lifecycle IDs in a separate
+/// projection.
 #[must_use]
 pub fn same_incarnation(left: &SessionRecord, right: &SessionRecord) -> bool {
     left.name == right.name && left.root == right.root && left.created_at == right.created_at

@@ -8,6 +8,7 @@
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [起動と経路](#起動と経路)
 - [プロトコルとライフサイクル](#プロトコルとライフサイクル)
 - [JSON-RPC メソッド](#json-rpc-メソッド)
@@ -16,6 +17,12 @@
 - [tool descriptor と追加手順](#tool-descriptor-と追加手順)
 - [resource 面](#resource-面)
 - [orchestration ガイド](#orchestration-ガイド)
+
+## この文書の読み方
+
+接続や互換性を変更するときは起動経路、protocol lifecycle、JSON-RPC method の順に読む。公開 API を変更するときは
+tool / resource 面と descriptor の追加手順を確認し、Agent の作業フローは最後の orchestration ガイドを参照する。
+tool が呼ぶ daemon request の wire と lifecycle は [4. daemon IPC](04-ipc.md) と [5. daemon](05-daemon.md) が正本である。
 
 ## 起動と経路
 
@@ -127,7 +134,8 @@ serve ループが応答するメソッドは次のとおり。1 行 = 1 メッ�
 ## tool 面
 
 tool は系統ごとに分かれ、tool descriptor が `name` / description / `inputSchema`、runtime
-validator、execution route、caller policy の正本である。Issue / Memory がともに有効な既定レジストリは 51 件を返す。
+validator、execution route、caller policy の正本である。Issue / Memory がともに有効な場合も、tool 件数は descriptor
+registry から導出し、本書へ転記しない。
 `tools/list` と `tools/call` は同じ descriptor registry を参照するため、掲載された tool は必ず
 1 つの実行経路と caller policy を持つ。`tools/call` の実挙動は次のとおりである。
 
@@ -157,6 +165,8 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
 | `session_prompt` | `live`（既定）は handshake で fence した workspace と optional session が一致する live Agent PTY へ配送し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ durable queue へ配送する。停止中の Agent を起動する入口は `session_dispatch` とする |
+| `agent_resume_inventory` | daemon の workspace-wide Agent inventory から provider ID を含まない safe metadata と opaque な exact resume target を列挙する |
+| `session_resume` | `agent_resume_inventory` が返した exact target を受け取り、新しい daemon-owned Agent runtime を明示的に起動する。`usagi session` の subcommand 名 `resume-inventory` / `resume-exact` とは wire 名が異なる |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
 | `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する。失敗時は作成した session を巻き戻す（[delegation の atomicity](#delegation-の-atomicity)） |
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。明示した `name` を読む既存経路も維持する |
@@ -164,7 +174,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get/list で観測する。agent 経路は作成した owner/run の decision だけを操作できる |
 | `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
-| `issue_*` / `memory_*` | issue は trusted workspace root、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
+| `issue_*` / `memory_*` | issue は authenticated caller の trusted worktree（root caller は workspace root）、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 
@@ -203,6 +213,9 @@ payload を成功応答としてエコーしない。
 `session_create` / `session_remove` の成功応答は
 `accepted operation <operation_id> (revision <revision>)` である。この文字列は **operation が受理され durable state に
 記録された**ことを意味する。
+
+`session_create` は Git worktree の作成と lifecycle store の completion を同じ request 内で同期的に終えてから
+成功応答を返す。したがって応答時点で session は利用可能であり、作成処理中は応答を待つ必要がある。
 
 `session_remove` の受理は「worktree を削除し終えた」ことを意味しない。daemon は session を `deleting` に
 遷移させた時点で応答し、worktree の撤去は daemon 所有の teardown worker が続ける
@@ -292,8 +305,8 @@ restart で明示的に失効し、restart 後は新しい credential が同じ 
 cancel と escalation resolution は run 作成時に daemon が記録したこの caller provenance と一致する request だけを受理する。daemon は起動時と Agent completion 時に共有
 `SupervisorRuntime` を tick し、dispatch の terminal fact を aggregate へ反映する。
 
-issue / memory の store 系 tool は、CLI 面と同じ `usagi-core` usecase に store root と実時計を
-束縛する薄い adapter である。daemon が起動した Agent の MCP child は、OS process lineage で claim した
+issue / memory の store 系 tool は、`usagi-core` usecase に store root と実時計を束縛する薄い adapter である。
+daemon が起動した Agent の MCP child は、OS process lineage で claim した
 credential と同時に issue 用の exact trusted root と memory 用の workspace 共有 root を受け取り、接続中は固定する。
 issue root は caller session の worktree（root caller は workspace）、memory root は Git 追跡外の daemon data home
 `agent-memory/<workspace-id>` であり、同じ workspace の root/session caller が共有する。provider が MCP child を

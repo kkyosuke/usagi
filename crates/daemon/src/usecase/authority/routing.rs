@@ -15,9 +15,8 @@
 //!
 //! A refusal here happens *before* [`super::rollover::execute_rollover`] writes
 //! anything: the registry, the current locator, the admission barrier, and every
-//! PTY are exactly as they were. That is what makes it safe for `main` to carry
-//! this authority while the shipping `daemon restart` that would drive it is
-//! still #507's to enable.
+//! PTY are exactly as they were. The shipping `daemon restart` consults this
+//! authority before it starts a rollover.
 //!
 //! The client half of the contract is
 //! [`usagi_core::usecase::owner_routing`].

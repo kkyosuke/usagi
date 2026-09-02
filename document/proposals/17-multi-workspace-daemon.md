@@ -2,11 +2,15 @@
 
 > [設計提案一覧](README.md) ｜ 関連仕様: [daemon](../05-daemon.md) ｜ [daemon IPC](../04-ipc.md) ｜ [TUI](../03-tui.md) ｜ 関連提案: [daemon の単一インスタンスと teardown](13-daemon-singleton-and-teardown.md) ｜ [restart 後の状態復帰](16-restart-state-restoration.md)
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `ea6fe2b3caa3d97f04465c7a684487f3d9a5d132`（2026-08-21）。本文は multi-workspace daemon 導入前の snapshot であり、現在仕様ではない。現行仕様は [daemon](../05-daemon.md)、[daemon IPC](../04-ipc.md)、[TUI](../03-tui.md) を参照する。
+
 1 つの daemon process が **複数の workspace を同時に serve する**設計である。workspace の追加は
 process の追加ではなく、その daemon が **tenant を adopt する**ことで行う。
 
-現在は data directory ごとに active daemon が 1 つで、その daemon が serve する workspace も起動時 cwd で
-1 つに確定する。そのため Welcome の Open / Recent に並ぶ workspace のうち、**いま serve している 1 つ以外は開けない**。
+提案時点では data directory ごとに active daemon が 1 つで、その daemon が serve する workspace も起動時 cwd で
+1 つに確定していた。そのため Welcome の Open / Recent に並ぶ workspace のうち、**serve 中の 1 つ以外は開けなかった**。
 
 ```text
 $ usagi            # daemon は AccelHack を serve している
@@ -22,7 +26,7 @@ fence そのものは残す。
 ## 目次
 
 - [目標と非目標](#目標と非目標)
-- [今の実装はどこまで multi-workspace か](#今の実装はどこまで-multi-workspace-か)
+- [提案時点の実装はどこまで multi-workspace だったか](#提案時点の実装はどこまで-multi-workspace-だったか)
 - [機構](#機構)
   - [tenant registry と workspace fence の多重保持](#tenant-registry-と-workspace-fence-の多重保持)
   - [handshake の admission](#handshake-の-admission)
@@ -48,9 +52,9 @@ fence そのものは残す。
 | 非目標 | runtime mode（`production` / `development` / `local`）の分離規則の変更 |
 | 非目標 | tenant 境界での障害隔離（[受け入れるコスト](#受け入れるコスト)） |
 
-## 今の実装はどこまで multi-workspace か
+## 提案時点の実装はどこまで multi-workspace だったか
 
-domain 層は**すでに workspace 次元を持っている**。単一 workspace 前提なのは、その外側の薄い層だけである。
+提案時点でも domain 層は**すでに workspace 次元を持っていた**。単一 workspace 前提だったのは、その外側の薄い層だけである。
 
 | すでに workspace 次元を持つ | 形 |
 |---|---|
@@ -103,7 +107,7 @@ adopt は 1 workspace につき直列化し、同時 adopt 数と tenant 総数�
 [workspace fence](../04-ipc.md#workspace-fence) の申告（`unbound` / `bound` / `selected`）と決定順は変えない。
 変えるのは daemon 側の判定である。
 
-| 申告 | 現在 | 本提案 |
+| 申告 | 提案時点 | 採用案 |
 |---|---|---|
 | `selected` | 唯一の trusted root と完全一致なら admit | adopt 済み tenant と完全一致なら admit。未 adopt なら **その場で adopt** して admit |
 | `bound` | 唯一の trusted root の配下なら admit | adopt 済み tenant のいずれかの配下なら admit（最長一致でその tenant へ解決）。どれにも属さなければ、その root を adopt して admit |
@@ -185,8 +189,8 @@ TUI の [workspace の離脱と終了](../03-tui.md#workspace-の離脱と終了
 | 案 | 却下理由 |
 |---|---|
 | **workspace ごとに daemon process を立てる**（本書の初版） | daemon の中身はほぼ無変更で済む代わりに、client 側が複雑になる。workspace digest の subtree、`root.json` の最長一致による cwd 解決、`sun_path` 104 byte の長さ予算、generation socket sweep の分離、`daemon status/stop --workspace|--all`、workspace ごとの supervisor install がすべて必要になる。加えて domain が既に持つ workspace 次元を **process 分割で二重に表現する**ことになり、横断ビューの道を塞ぐ |
-| 現状維持（refusal の文面改善だけ） | Welcome の Open / Recent は登録済み workspace を全件出すのに 1 つしか開けない。切り替えのたびに `daemon stop` が要り、live Agent を持つ daemon の stop は `--force`（= 実行中の Agent を捨てる）になる |
-| workspace ごとに `$USAGI_HOME` を分ける（現在の回避策） | 動くが、`workspaces.json`（Recent）・`settings.json`（global 設定・env）・logs・agent state まで割れる。すべての shell で env を正しく設定し続ける規律も要求する。**回避策として案内するが、製品の答えにはしない** |
+| 提案時点の現状維持（refusal の文面改善だけ） | Welcome の Open / Recent は登録済み workspace を全件出すのに 1 つしか開けない。切り替えのたびに `daemon stop` が要り、live Agent を持つ daemon の stop は `--force`（= 実行中の Agent を捨てる）になる |
+| workspace ごとに `$USAGI_HOME` を分ける（提案時点の回避策） | 動くが、`workspaces.json`（Recent）・`settings.json`（global 設定・env）・logs・agent state まで割れる。すべての shell で env を正しく設定し続ける規律も要求する。**回避策として案内するが、製品の答えにはしない** |
 | TUI が切り替え時に自動で stop → start する | live runtime があれば結局拒否になり、無ければ他 workspace の Agent を落とす |
 | tenant ごとに child process を持つ（daemon が supervisor になる） | 障害の隔離は得られるが、PTY・generation・allocator の所有が親子に分かれ、rollover と custody の議論をすべて 2 階層でやり直すことになる。隔離の価値は [07](07-pty-crash-continuation.md) の PTY broker で別途取りにいくほうが安い |
 

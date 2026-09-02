@@ -730,7 +730,7 @@ pub enum TerminalRequest {
         /// Producer-issued durable identity of this logical input, stable across
         /// request retry, reconnect, and reattach. Additive on the wire: a peer
         /// that predates the ledger simply omits it and keeps the
-        /// connection-local sequence contract (#519).
+        /// connection-local sequence contract.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_operation: Option<OperationId>,
         bytes: Vec<u8>,
@@ -1440,8 +1440,8 @@ impl ClientPolicy {
 /// tight enough to trip on a *busy* daemon would therefore lose real input on a
 /// loaded machine. Each budget is sized above a healthy round trip under load and
 /// below anything a user would call a freeze; shrinking the render thread's
-/// exposure further is a frame-budget question, tracked by
-/// [#551](../../../.usagi/issues/551-fix-tui-home-frame-loop-daemon-rpc.md).
+/// exposure further is a [TUI frame-budget](../../../document/03-tui.md#frame-予算)
+/// question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalLaneBudget;
 

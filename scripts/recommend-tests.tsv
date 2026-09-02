@@ -1,5 +1,7 @@
 # pattern<TAB>area<TAB>reason<TAB>commands separated by |<TAB>reachable witness path
 # First match wins. Keep exceptions above generic rules. `--validate-map` checks every witness.
+scripts/ci/docs-ssot-lint.rb	policy	documentation SSoT checker changed	bash scripts/tests/docs-ssot-lint.sh|ruby scripts/ci/docs-ssot-lint.rb	scripts/ci/docs-ssot-lint.rb
+scripts/tests/docs-ssot-lint.sh	policy	documentation SSoT fixtures changed	bash scripts/tests/docs-ssot-lint.sh	scripts/tests/docs-ssot-lint.sh
 crates/core/tests/*.rs	core	usagi-core integration test target changed	cargo test -p usagi-core --test {test}	crates/core/tests/agent_contract.rs
 crates/core/src/test_support.rs	shared-test	shared usagi-core test support affects consumers	cargo test -p usagi-core|cargo test --workspace --quiet	crates/core/src/test_support.rs
 crates/core/src/infrastructure/ipc/*	shared-protocol	shared IPC protocol affects multiple workspace packages	cargo test -p usagi-core|cargo test --workspace --quiet	crates/core/src/infrastructure/ipc/mod.rs

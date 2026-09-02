@@ -9,6 +9,7 @@
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [なぜ 4 クレートか](#なぜ-4-クレートか)
 - [ディレクトリ構成](#ディレクトリ構成)
 - [各クレートの責務](#各クレートの責務)
@@ -24,6 +25,13 @@
 - [入口面 CLI のコマンド dispatch](#入口面-cli-のコマンド-dispatch)
 - [入口面 MCP の tool dispatch](#入口面-mcp-の-tool-dispatch)
 - [検討した代替案](#検討した代替案)
+
+## この文書の読み方
+
+最初にクレートの責務と依存ルールを確認し、永続化や Git subprocess を変更するときは続く commit / confine 契約を読む。
+process の入口を変更するときは合成ルートと該当する CLI / MCP dispatch、TUI の操作を変更するときは Overview / Closeup
+dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の詳細はそれぞれ [3. TUI](03-tui.md)、
+[4. daemon IPC](04-ipc.md)、[5. daemon](05-daemon.md) が正本である。
 
 ## なぜ 4 クレートか
 
@@ -65,7 +73,7 @@
 │   │       ├── cli/             # 人間向けサブコマンド（引数解析・dispatch・結果整形）
 │   │       │   └── commands/         # サブコマンドハンドラ（store 系は core usecase 直呼び、session 系は daemon IPC）
 │   │       └── mcp/             # MCP サーバ（stdio JSON-RPC の解釈・dispatch）
-│   │           └── tools/            # tool アダプタ（commands と同じ core usecase を呼ぶ兄弟）
+│   │           └── tools/            # tool descriptor（store 系は core usecase、session / agent / terminal / supervisor 系は daemon IPC）
 │   ├── daemon/           # usagi-daemon: daemon 面
 │   │   └── src/
 │   │       ├── lib.rs
@@ -160,12 +168,11 @@ pointer クリックは `Key::Click` を `AppEvent::Pointer`（座標＋種別�
 描画と同じ viewport 幾何で `Selection` へ hit-test して選択（single click）または
 活性化（double click）する。shell は行の hit-test を持たず、double click の判定窓だけを
 追跡する。terminal pane 内の drag / copy は Home 行契約と無関係なので shell +
-`TerminalSession` に残る。指示モード（呼び名・chord・表示・入力所有の正本は
-[3. TUI](03-tui.md#指示モードdirector-mode)）は `AppState` の専用 open/closed state と root target の
-Agent-only projection を controller が所有し、描画は `director_drawer` の right-anchored
-geometry と drawer 専用 terminal viewport を使う。root generic Terminal は同じ root pane registry に admission しつつ
-[workspace terminal drawer](03-tui.md#workspace-terminal-drawer)だけへ投影し、下端から重なる専用 geometry を使う。
-2 つの drawer の open state と foreground input は排他的であり、root Diff は pane/runtime に admission しない。前面の Pull Request
+`TerminalSession` に残る。controller は指示モードと workspace terminal drawer の open state、root target の
+projection、foreground input owner を保持する。drawer の呼び名・chord・表示・切替・入力所有は
+[指示モード](03-tui.md#指示モードdirector-mode)と
+[workspace terminal drawer](03-tui.md#workspace-terminal-drawer)が正本であり、本章ではその画面挙動を重複定義しない。
+root Diff は pane/runtime に admission しない。前面の Pull Request
 一覧・Markdown preview は controller の `Overlay::Prs` / `Overlay::Preview` が所有し、
 素材は `Effect::LoadPullRequests` / `LoadPreview` で要求して
 `BackendEvent::PullRequestsLoaded` / `PreviewLoaded`（失敗は対応する `*Error`）として
@@ -215,7 +222,7 @@ issue / memory store の永続化契約は本節を正本とする。source of t
 `MEMORY.md` は source から破棄・再生成できる derived file である。derived file のための
 durable source migration は行わない。
 
-CLI の既定 store root は cwd だが、daemon provisioned MCP は issue と memory を分離する。issue は
+手動起動した MCP server の既定 store root は cwd だが、daemon provisioned MCP は issue と memory を分離する。issue は
 authenticated session の trusted worktree、memory は data home の `agent-memory/<workspace-id>` を root にする。
 後者は Git 追跡外かつ同じ workspace の root/session Agent 間で共有されるため、コーディネータの運用知見を
 session をまたいで再利用できる。
@@ -743,8 +750,9 @@ shell command は durable record、IPC event、通常 log に保存しない。g
 `AgentRuntimeId`、AgentProfile、phase token を作らず、agent hook / MCP injection / adapter provisioning を
 呼ばない。
 
-attach / detach / replay / verified exit / reclaim は既存 `TerminalRegistry` と #251 の reservation contract を
-使う。disconnect は attachment だけを外して PTY を生存させる。同じ durable record の identity unknown、orphan、
+attach / detach / replay / verified exit / reclaim は既存 `TerminalRegistry` と
+[daemon の admission reservation](05-daemon.md#admission-reservation)を使う。disconnect は attachment だけを外して
+PTY を生存させる。同じ durable record の identity unknown、orphan、
 ambiguous spawn は replacement spawn と slot release を block し、verified exit または `Gone` の reclaim だけが
 slot を解放する。generic Terminal Launch は producer `OperationId` を wire に持ち、daemon は durable record を
 その id と canonical intent digest で索引する。したがって spawn 後の response が失われて client が launch を再送
@@ -755,7 +763,8 @@ slot を解放する。generic Terminal Launch は producer `OperationId` を wi
 
 ### Agent orchestration の fence
 
-`usecase::orchestration::AdapterRegistry` は Claude と Codex を同じ typed orchestration port に登録する。
+`usecase::orchestration::AdapterRegistry` は Claude、Codex、Codex grammar を使う Sakana AI を同じ typed
+orchestration port に登録する。
 daemon は profile ID によって registry を引くだけで、product 名による lifecycle・authorization 分岐を持たない。
 MCP wiring は profile の `McpWiring` capability と、別個の workspace/session authorization の両方が通った launch
 だけで adapter の scoped provisioner に要求する。provision failure は spawn 前に typed error として止まり、secret・
@@ -1111,15 +1120,17 @@ terminal environment が guard の前提を差し替えない。
 
 ## 入口面 MCP の tool dispatch
 
-dispatch MCP の正本は本節である。`session_dispatch`、`session_get`、`agent_list`、`agent_get`、
+dispatch MCP のクレート配置と依存境界の正本は本節であり、公開 tool の schema・route・caller policy・実挙動は
+[7. MCP サーバ](07-mcp.md#tool-面)を正本とする。`session_dispatch`、`session_get`、`session_resume`、
+`agent_resume_inventory`、`agent_list`、`agent_get`、
 `agent_complete`、`agent_fail`、`agent_inbox`、`agent_inbox_ack` は tool schema と daemon IPC request 型を公開する。
 daemon は private caller credential を live runtime と照合し、session lifecycle、Agent runtime、dispatch
 store と caller inbox を一つの durable 経路として compose する。credential の無い呼び出しや current run と
 一致しない完了報告は fail-closed で拒否し、payload の caller identity は信用しない。
 
 `session_dispatch` の新規 agent は workspace の `.usagi/config.toml` にある
-`[agents.claude].models` / `[agents.codex].models` allowlist だけから選ぶ。MCP server は起動時に
-allowlist と PATH 上の `claude` / `codex` の存在を snapshot し、非空 allowlist と executable の
+`[agents.claude].models` / `[agents.codex].models` / `[agents.sakana-ai].models` allowlist だけから選ぶ。MCP server は起動時に
+allowlist と PATH 上の `claude` / `codex` / `codex-fugu` の存在を snapshot し、非空 allowlist と executable の
 両方を持つ runtime だけを `tools/list` の `agent.runtime` / `agent.model` enum に載せる。既存 agent は
 `agent.id` branch を使い、runtime/model branch とは JSON Schema `oneOf` で排他的である。snapshot は
 server lifetime 中は変わらないため、設定、PATH、CLI install/uninstall の変更を反映するには MCP server の
@@ -1137,30 +1148,37 @@ server lifetime 中は変わらないため、設定、PATH、CLI install/uninst
 `session_complete` は引き続き利用できる。
 
 `crates/cli` の `mcp/` は、エージェント向けの tool 面（IF）を持つ。CLI が人間向けの
-`usagi <cmd>` を提供するのに対し、MCP は issue / memory / session の tool を JSON-RPC で
+`usagi <cmd>` を提供するのに対し、MCP は issue / memory / session / agent / terminal / supervisor の tool を JSON-RPC で
 公開する（設計は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。CLI の
-`Run` トレイトに対応する一様化を `Tool` トレイトで行う。
+`Run` トレイトに対応する metadata の一様化を `Tool` と `ToolDescriptor` で行う。
 
 ```text
 stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize ─► serverInfo/capabilities
  (1 行 = 1 JSON-RPC)                              ├─ tools/list ─► registry の name/description/inputSchema
-                                                  └─ tools/call ─► dispatch(name, args) ─► Tool::call
+                                                  └─ tools/call ─► descriptor lookup / schema validation
+                                                                       │
+                                     ┌─────────────────────────────────┴──────────────────────────────┐
+                                     ▼                                                                ▼
+                         Store route ─► Tool::call ─► core store usecase       daemon route ─► core IPC client
+                         （issue / memory）                                  （session / agent / terminal / supervisor）
 ```
 
 - **`Tool` トレイト**: `name` / `description` / `input_schema`（`tools/list` に載る IF）と
-  `call`（実行）を持つ。`call` は既定が未実装スタブで、中身を実装する tool だけが
-  オーバーライドする（枠＝既定実装）。tool は **系統ごとにファイル**（`mcp/tools/issue.rs` /
-  `memory.rs` / `session.rs`）に置き、各 tool が 1 struct として実装する。
-- **レジストリと dispatch**: `tools::registry()` が全 tool を連結し、MCP serve は Global / Workspace の実効設定で
-  issue / memory 系統を filter した同じ descriptor 集合を listing と call に使う。`mcp::dispatch(name, params)` は
-  名前で引いて `call` を呼ぶ。CLI の `Command::into_handler` に対応する一様な経路。
+  `call`（Store route の実行）を持つ。`call` は既定が未実装スタブで、issue / memory の store tool だけが
+  core usecase を呼ぶ実装へオーバーライドする。tool は **系統ごとにファイル**（`mcp/tools/issue.rs` /
+  `memory.rs` / `session.rs` / `terminal.rs` / `supervisor.rs`）に置き、各 tool が 1 struct として実装する。
+- **レジストリと dispatch**: `tools::registry()` が metadata、schema validator、`ToolRoute`、caller policy を持つ
+  descriptor を連結する。MCP serve は Global / Workspace の実効設定で issue / memory 系統を filter した同じ集合を
+  listing と call に使い、name lookup と schema validation の後、descriptor の route に従って Store または daemon IPC へ送る。
+  全 tool に一様な入口を与えるが、全 tool が `Tool::call` を通るわけではない。
 - **serve ループ**（`mcp/serve.rs`）: stdio 上の JSON-RPC 2.0 を 1 行ずつ処理する。純粋な
   ルーティング（`handle_line`: str → 応答 or 通知の無応答）と実 IO の反復（`serve`）を分け、
   応答エンベロープの整形は `mcp/protocol.rs` に集約する。`initialize` と `tools/list` は実際に
   応答し、`tools/call` は tool を名前で引いて store または daemon の実行経路へ送る。tool または
   daemon の失敗は JSON-RPC エラーに変換する。配布 version は合成ルートが `serve` に注入する。
-- CLI のコマンドハンドラと MCP の tool は **同じ core usecase を呼ぶ兄弟**で、共有ロジックは
-  すべて `usagi-core` に置く（[入口面 CLI のコマンド dispatch](#入口面-cli-のコマンド-dispatch)）。
+- issue / memory の Store route は core store usecase を直接呼ぶ。session / agent / terminal / supervisor tool は
+  core IPC client を介して daemon の usecase へ委譲する。共有ロジックは
+  `usagi-core`、daemon-owned effect は `usagi-daemon` に置く（[入口面 CLI のコマンド dispatch](#入口面-cli-のコマンド-dispatch)）。
 
 ## 検討した代替案
 
@@ -1170,4 +1188,4 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
 |---|---|
 | 単一クレート内のモジュール分割 | 面・層の依存方向をコンパイラで強制できない。ビルド・テストのクレート単位並列性も得られない |
 | 層ごとのクレート分割（domain / usecase / infrastructure / presentation を各クレート化） | 実行面（TUI / daemon）の境界を表現できず、daemon 専用と TUI 専用の infrastructure が同じクレートに同居する |
-| TUI / daemon を別バイナリとして配布 | リリース CI（4 プラットフォーム）と配布手順の変更が大きい。単一バイナリ＋サブコマンドなら現行リリース機構が無変更で使える |
+| TUI / daemon を別バイナリとして配布 | リリース CI（3 プラットフォーム）と配布手順の変更が大きい。単一バイナリ＋サブコマンドなら現行リリース機構が無変更で使える |

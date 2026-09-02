@@ -2,6 +2,10 @@
 
 > [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [terminal VT snapshot](12-terminal-vt-snapshot.md)
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `5ab4bb4d9a60670ec8c2bb58abbda8c83140f026`（2026-07-25）。本文は singleton fence と teardown worker を導入した時点の snapshot であり、現在仕様ではない。現行仕様は [daemon](../05-daemon.md) と [MCP サーバ](../07-mcp.md) を参照する。
+
 本書は、v2 daemon の**単一インスタンス保証**と**session teardown の実行位置**についての設計である。
 3 つの設計はいずれも実装済みで、契約の正本は
 [5. daemon の custody 喪失による self-shutdown](../05-daemon.md#custody-喪失による-self-shutdown)、
@@ -9,8 +13,9 @@
 [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker)、
 [7. MCP サーバの session lifecycle の受理契約](../07-mcp.md#session-lifecycle-の受理契約) に移った。
 本書に残るのは、その採用理由と却下した代替案である。
-実地調査で 3 つの独立した欠陥を確認した。本書が採用機構・却下した代替案・fence の単位・crash 時の再開契約の設計判断の正本であり、実装が確定した
-部分は [5. daemon](../05-daemon.md) と [7. MCP サーバ](../07-mcp.md) へ畳み込む（[docs 畳み込み先](#docs-畳み込み先)）。
+実地調査で 3 つの独立した欠陥を確認した。本書は、採用機構・却下した代替案・fence の単位・crash 時の
+再開契約を選んだ理由の履歴である。実装が確定した部分は [5. daemon](../05-daemon.md) と
+[7. MCP サーバ](../07-mcp.md) へ畳み込み済みである（[docs 畳み込み先](#docs-畳み込み先)）。
 
 ## 目次
 

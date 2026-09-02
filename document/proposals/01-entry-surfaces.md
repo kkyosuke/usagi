@@ -2,6 +2,10 @@
 
 > [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ 次へ → [IPC／ID overview](02-ipc-id.md)
 
+> **Status:** 採用済みの設計履歴
+>
+> **Baseline:** 原版 commit `c256935cadb806b220d56d94382969958481a76e`（2026-07-12）。本文は入口面を導入した時点の snapshot であり、現在仕様ではない。現行仕様は [アーキテクチャ](../02-architecture.md) と [MCP サーバ](../07-mcp.md) を参照する。
+
 ## 目次
 
 - [要旨](#要旨)

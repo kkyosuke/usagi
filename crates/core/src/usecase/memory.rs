@@ -1,7 +1,7 @@
 //! Memory CRUD operations over the memory store.
 //!
-//! The application-level operations both the human CLI and the agent-facing MCP
-//! tools (`memory_*`) call: save (create or overwrite by name), fetch, list, and
+//! The application-level operations called by the agent-facing MCP tools
+//! (`memory_*`): save (create or overwrite by name), fetch, list, and
 //! delete a durable agent memory. Each takes the injected [`MemoryStore`] and,
 //! for [`save`], the current time (`now`), so this layer stays clock-free and
 //! testable; the concrete store and clock are bound by the caller.

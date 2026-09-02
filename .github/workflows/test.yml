@@ -169,6 +169,12 @@ jobs:
     - name: Enforce root README contract
       run: bash scripts/ci/root-readme.sh README.md
 
+    - name: Test documentation SSoT checker
+      run: bash scripts/tests/docs-ssot-lint.sh
+
+    - name: Enforce documentation SSoT boundaries
+      run: ruby scripts/ci/docs-ssot-lint.rb
+
     - id: security-exceptions
       name: Validate RustSec exceptions
       run: ruby scripts/ci/security-audit-exceptions.rb >> "$GITHUB_OUTPUT"

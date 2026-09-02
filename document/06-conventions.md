@@ -1,12 +1,13 @@
 # 6. 開発規約
 
-> [ドキュメント目次](README.md) ｜ ← 前へ [2. アーキテクチャ](02-architecture.md) ｜ 次へ → [7. MCP サーバ](07-mcp.md)
+> [ドキュメント目次](README.md) ｜ ← 前へ [5. daemon](05-daemon.md) ｜ 次へ → [7. MCP サーバ](07-mcp.md)
 
 v2 の開発で守るべき規約。**開発者・AI エージェントの双方**が従う。
 プロジェクト全体像は [1. プロジェクト概要](01-overview.md) を参照。
 
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [アーキテクチャ](#アーキテクチャ)
 - [依存クレート](#依存クレート)
 - [ブランチ名](#ブランチ名)
@@ -23,6 +24,12 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 - [Git Hooks（lefthook）](#git-hookslefthook)
 - [CI（GitHub Actions）](#cigithub-actions)
 - [リリース](#リリース)
+
+## この文書の読み方
+
+実装前はアーキテクチャと依存クレート、変更を提出するときはブランチ・commit・PR、文書を更新するときは
+ドキュメント規約を確認する。検証では品質チェックを入口に、変更箇所からの推奨テストと CI を組み合わせる。
+coverage 例外、daemon E2E、背景 worker、release は該当する変更を含む場合だけ追加で参照する。
 
 ## アーキテクチャ
 
@@ -64,6 +71,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `libc` | `usagi-core` infrastructure の atomic temp file 検証（Unix の no-follow・所有者・link identity）と合成ルートでの daemon process-start identity 観測・exact-owner signal | 本依存 |
 | `signal-hook` | 合成ルートで daemon の SIGINT / SIGTERM handler と同期 wait を worker spawn 前に準備する | 本依存 |
 | `tempfile` | ストアのユニットテスト用の一時ディレクトリ | dev |
+| `syn` | Rust source の AST 検査（architecture・coverage attribute などの構造テスト） | dev |
 
 `usagi-core` の `domain/`（`Workspace` / `Issue` / `Memory` / `DaemonRecord` / `Recent` / typed ID …）は
 `chrono` / `serde` / `uuid` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
@@ -145,6 +153,9 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 - **1 ファイル = 1 トピック**。番号付きファイル（`01-` …）で構成する（[目次](README.md) 参照）。
 - ファイルが長くなりすぎたら分割する（目安: 1 ファイル 300 行を超えたら要検討）。実装の内部詳細（コード構造・
   拡張点）は仕様ドキュメントに書かず、`02-architecture.md` か該当コードへのポインタにとどめる。
+- 300 行は自動分割の閾値ではなく、情報設計を再審査する trigger である。複数ファイルへ分けると1つの protocol / lifecycle
+  contract が断片化し、既存 anchor の安定性と SSoT が損なわれる場合は、1トピックの正本として保持してよい。その場合は
+  冒頭に読解順を示す「この文書の読み方」を置き、目次を本文順に保ち、各節から別トピックの正本へリンクする。
 
 ### ナビゲーション
 
@@ -178,8 +189,8 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 |---|---|---|
 | 編集中 | フォーマット差分の確認 / コンパイル確認 / 変更 crate・module の test | `cargo fmt --all -- --check` / `cargo check --workspace --all-targets` / 変更箇所に対応する `cargo test -p <crate>` |
 | commit 前 | Lint / risk-based selected tests | `cargo clippy --workspace --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` が示す test（または同等以上の理由付き selected tests） |
-| push 前（ローカル） | Markdown link check（Markdown 差分あり） | `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
-| PR・CI（最終 full gate） | 対象差分の fmt / clippy / full test / coverage 100% / Markdown link check と、全 PR での aggregate context 報告 | `.github/workflows/test.yml` が fmt / clippy / `cargo test --workspace --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する。対象外差分は重い job を省略し、stable aggregate は success を報告する |
+| push 前（ローカル） | documentation SSoT lint と Markdown link check（Markdown 差分あり） | `ruby scripts/ci/docs-ssot-lint.rb` / `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
+| PR・CI（最終 full gate） | 対象差分の fmt / clippy / full test / coverage 100% / documentation SSoT lint / Markdown link check と、全 PR での aggregate context 報告 | `.github/workflows/test.yml` が fmt / clippy / `cargo test --workspace --quiet` と repository policy、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する。対象外差分は重い job を省略し、stable aggregate は success を報告する |
 
 PR は Draft で開き、上表の CI 必須チェックが green になってから Ready for review にする（[プルリクエスト](#プルリクエスト)）。
 最終的な full gate（clippy / full test / coverage 100%）の green は CI で確認するのが正であり、ローカルで先取りして
@@ -192,7 +203,7 @@ coverage_enforce
 ```
 
 docs-only（Rust 差分なし）は Rust gate（`cargo check` / `cargo clippy` / `cargo test` / coverage）を省略できる。ただし
-Markdown 差分を含むため、Markdown link check は必須である。
+documentation SSoT lint と Markdown link check は必須である。
 
 CI で full test / coverage gate が必須となる条件は次のとおり（この gate は CI が強制する）。
 
@@ -404,6 +415,9 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
   具体的な `rationale` を登録する。`expires` は検証日から 90 日以内とし、期限切れ・必須項目欠落・未知フィールド・重複は
   audit 前の checker が拒否する。更新には改めて owner と rationale のレビューを必要とし、恒久的な除外は認めない。
 - リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
+- `test.yml` の policy check は `scripts/ci/docs-ssot-lint.rb` で、公開 CLI command tree、workspace dependency 一覧、
+  番号付き仕様の index と前後 breadcrumb、proposal / design の履歴 banner、廃止済み入口表記、埋め込み orchestration
+  guide の selector 境界を実装と照合する。checker 自体は `scripts/tests/docs-ssot-lint.sh` の fixture test で検証する。
 - `test.yml` は `scripts/ci/root-readme.sh` でルート `README.md` の最低限の contract（`# usagi` 見出し・`document/` の正本へのリンク・truncation 検出のための本文行数）を検証する。リンクチェックはリンクが 0 本になった README を通してしまい、実際にルート README が 1 行へ破壊されたまま `main` に残った事故があるため、この checker が独立した gate として必要である。checker 自体は `scripts/tests/root-readme.sh` の fixture test で検証する。
 - Rust の test / coverage workflow は PR または branch ごとに最新の実行だけを継続し、古い commit の実行をキャンセルする。
 - required status check、review count、bypass actor の正本は `.github/required-contexts.json` である。ruleset `17627257` は `test`、
