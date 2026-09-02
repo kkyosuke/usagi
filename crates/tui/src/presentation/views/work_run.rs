@@ -143,6 +143,8 @@ mod tests {
                     attempt: 1,
                     generation: 1,
                     assigned_dispatch_run: None,
+                    verification_attempt: 0,
+                    verification_retry_at: None,
                     state,
                 })
                 .collect(),

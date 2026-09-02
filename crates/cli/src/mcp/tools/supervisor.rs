@@ -54,7 +54,7 @@ impl Tool for SupervisorStart {
                                 "instruction": bounded_string(MAX_SUPERVISOR_TEXT_BYTES),
                                 "required_artifact_contract": {
                                     "type": "string",
-                                    "enum": ArtifactContract::all(),
+                                    "enum": ArtifactContract::ALL,
                                 },
                             },
                             "required": ["task_id", "instruction"],
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(task["dependencies"]["maxItems"], MAX_TASK_DEPENDENCIES);
         assert_eq!(
             task["required_artifact_contract"]["enum"],
-            serde_json::json!(ArtifactContract::all())
+            serde_json::json!(ArtifactContract::ALL)
         );
         assert_eq!(
             properties["idempotency_key"]["maxLength"],

@@ -18,8 +18,10 @@ use usagi_core::{
     domain::{
         agent::{InboxKind, RunStatus, StructuredResult},
         id::{AgentRuntimeRef, OperationId, WorkspaceId},
+        pr_inventory::GitHubRepository,
         supervisor::{
-            ArtifactContract, EscalationDecision, GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            ARTIFACT_RETRY_BASE_SECONDS, ARTIFACT_RETRY_MAX_SECONDS, ArtifactContract,
+            ArtifactExpectation, EscalationDecision, GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
             MAX_INITIAL_TASKS, MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES,
             MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT, RunProvenance,
             SupervisorEvent, SupervisorEventKind, SupervisorEventSource, SupervisorRun,
@@ -64,9 +66,33 @@ pub struct WakeOutcome {
 /// artifact verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactVerification {
-    pub passed: bool,
+    pub status: ArtifactVerificationStatus,
     pub result_digest: String,
     pub safe_summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactVerificationStatus {
+    Verified,
+    Rejected,
+    Retryable,
+}
+
+/// Goal instruction and repository provenance admitted as one semantic unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalSpecification {
+    pub instruction: String,
+    pub artifact_repository: GitHubRepository,
+}
+
+impl GoalSpecification {
+    #[must_use]
+    pub const fn new(instruction: String, artifact_repository: GitHubRepository) -> Self {
+        Self {
+            instruction,
+            artifact_repository,
+        }
+    }
 }
 
 /// Provider boundary used after a worker completion has moved a contracted
@@ -76,6 +102,7 @@ pub trait ArtifactVerifier {
         &mut self,
         contract: ArtifactContract,
         result: Option<&StructuredResult>,
+        expectation: &ArtifactExpectation,
     ) -> ArtifactVerification;
 }
 
@@ -86,19 +113,25 @@ pub struct ArtifactVerificationRequest {
     pub supervisor_run_id: SupervisorRunId,
     pub task_id: TaskId,
     pub generation: u64,
+    pub verification_attempt: u32,
+    pub workspace_id: WorkspaceId,
     pub contract: ArtifactContract,
+    pub repository: GitHubRepository,
     pub result: Option<StructuredResult>,
+    pub expectation: Option<ArtifactExpectation>,
 }
 
 /// Durable Goal operation whose reserved root still needs exact provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingGoalPromotion {
     pub operation_id: String,
+    pub reserved_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingDelegatedPromotion {
     pub operation_id: String,
+    pub reserved_at: DateTime<Utc>,
 }
 
 /// Completed contracted dispatch whose independent artifact verification has
@@ -390,6 +423,7 @@ impl SupervisorRuntime {
             operation_id,
             root_task,
             NO_ARTIFACT_CONTRACT,
+            None,
             initial_tasks,
             policy_selector,
             now,
@@ -421,6 +455,7 @@ impl SupervisorRuntime {
             operation_id,
             root_task,
             NO_ARTIFACT_CONTRACT,
+            None,
             initial_tasks,
             policy_selector,
             now,
@@ -439,7 +474,7 @@ impl SupervisorRuntime {
         caller: &str,
         workspace: WorkspaceId,
         operation_id: &str,
-        root_task: String,
+        goal: GoalSpecification,
         policy_selector: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
@@ -447,8 +482,9 @@ impl SupervisorRuntime {
             caller,
             Some(workspace),
             operation_id,
-            root_task,
+            goal.instruction,
             GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            Some(goal.artifact_repository),
             Vec::new(),
             policy_selector,
             now,
@@ -474,7 +510,7 @@ impl SupervisorRuntime {
         caller: &str,
         workspace: WorkspaceId,
         operation_id: &str,
-        root_task: String,
+        goal: GoalSpecification,
         policy_selector: Option<String>,
         worker: &AgentRuntimeRef,
         now: DateTime<Utc>,
@@ -483,7 +519,7 @@ impl SupervisorRuntime {
             caller,
             workspace,
             operation_id,
-            root_task,
+            goal,
             policy_selector,
             now,
         )?;
@@ -600,10 +636,27 @@ impl SupervisorRuntime {
             }) && !run.provenance.contains_key(&root)
                 && !run.state.is_finished()
             {
-                pending.push(PendingGoalPromotion { operation_id });
+                pending.push(PendingGoalPromotion {
+                    operation_id,
+                    reserved_at: run.created_at,
+                });
             }
         }
         Ok(pending)
+    }
+
+    /// Returns the repository pinned by an existing Goal reservation so an
+    /// idempotent admission replay never consults worker-mutable Git config.
+    ///
+    /// # Errors
+    /// Returns an error when scheduler metadata or the reserved run is invalid.
+    pub fn reserved_goal_repository(&self, operation_id: &str) -> Result<Option<GitHubRepository>> {
+        let state = self.load_state()?;
+        let Some(reservation) = state.starts.get(operation_id) else {
+            return Ok(None);
+        };
+        let run = self.load_started_run(reservation.supervisor_run_id)?;
+        Ok(run.artifact_repository)
     }
 
     /// Marks a pre-spawn Goal reservation failed after Agent admission proves a
@@ -702,6 +755,7 @@ impl SupervisorRuntime {
             NO_ARTIFACT_CONTRACT,
         );
         task.instruction_digest = delegated_task_digest(child_dispatch_run);
+        task.promotion_reserved_at = Some(now);
         run = self.apply(
             &run,
             now,
@@ -738,6 +792,7 @@ impl SupervisorRuntime {
                 }
                 pending.push(PendingDelegatedPromotion {
                     operation_id: operation_id.into(),
+                    reserved_at: task.promotion_reserved_at.unwrap_or(run.created_at),
                 });
             }
         }
@@ -750,7 +805,10 @@ impl SupervisorRuntime {
     ///
     /// # Errors
     /// Returns an error when retained supervisor or dispatch state is invalid.
-    pub fn pending_artifact_verifications(&self) -> Result<Vec<PendingArtifactVerification>> {
+    pub fn pending_artifact_verifications(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<PendingArtifactVerification>> {
         let mut pending = Vec::new();
         for run in self.supervisor.runs()? {
             if run.state != SupervisorRunState::Running {
@@ -758,6 +816,9 @@ impl SupervisorRuntime {
             }
             for task in run.tasks.values().filter(|task| {
                 task.required_artifact_contract == GOAL_REVIEW_READY_ARTIFACT_CONTRACT
+                    && task
+                        .verification_retry_at
+                        .is_none_or(|retry_at| retry_at <= now)
                     && matches!(
                         task.state,
                         TaskState::Dispatched | TaskState::Running | TaskState::Verifying
@@ -971,7 +1032,18 @@ impl SupervisorRuntime {
         }
         let task_state = task.state;
         let generation = task.generation;
+        let verification_attempt = task.verification_attempt;
+        let expectation = task.verification_expectation.clone();
         let contract = task.required_artifact_contract;
+        let workspace_id = run
+            .workspace_id
+            .ok_or_else(|| anyhow::anyhow!("artifact run workspace is missing"))?;
+        if task
+            .verification_retry_at
+            .is_some_and(|retry_at| retry_at > now)
+        {
+            return Ok(None);
+        }
         let dispatch = self
             .dispatch
             .run(dispatch_run_id)?
@@ -1004,6 +1076,10 @@ impl SupervisorRuntime {
         } else if task_state != TaskState::Verifying {
             return Ok(None);
         }
+        let Some(repository) = run.artifact_repository.clone() else {
+            self.reject_missing_artifact_repository(&run, task_id, generation, now)?;
+            return Ok(None);
+        };
         let result = match self.dispatch.binding(dispatch_run_id)? {
             Some(binding) => self
                 .dispatch
@@ -1017,9 +1093,83 @@ impl SupervisorRuntime {
             supervisor_run_id: run.supervisor_run_id,
             task_id,
             generation,
+            verification_attempt,
+            workspace_id,
             contract,
+            repository,
             result,
+            expectation,
         }))
+    }
+
+    fn reject_missing_artifact_repository(
+        &self,
+        run: &SupervisorRun,
+        task_id: TaskId,
+        generation: u64,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.apply(
+            run,
+            now,
+            SupervisorEventSource::Verification,
+            SupervisorEventKind::VerificationResult {
+                task_id,
+                generation,
+                passed: false,
+                result_digest: "missing-pre-spawn-repository".into(),
+                safe_summary: "artifact repository was not recorded before Goal worker spawn"
+                    .into(),
+            },
+        )
+        .map(drop)
+    }
+
+    /// Durably pins trusted Git facts before the provider is queried. Replays
+    /// with the same expectation are idempotent; a changed expectation is a
+    /// provenance violation.
+    ///
+    /// # Errors
+    /// Returns an error when the request fence is stale or persistence fails.
+    pub fn record_artifact_expectation(
+        &self,
+        request: &ArtifactVerificationRequest,
+        expectation: &ArtifactExpectation,
+        now: DateTime<Utc>,
+    ) -> Result<ArtifactVerificationRequest> {
+        let run = self.load_started_run(request.supervisor_run_id)?;
+        let task = run
+            .tasks
+            .get(&request.task_id)
+            .ok_or_else(|| anyhow::anyhow!("artifact verification task is missing"))?;
+        if task.generation != request.generation
+            || task.required_artifact_contract != request.contract
+            || task.state != TaskState::Verifying
+            || task.verification_attempt != request.verification_attempt
+            || run.artifact_repository.as_ref() != Some(&request.repository)
+            || expectation.repository() != &request.repository
+        {
+            anyhow::bail!("artifact expectation fence is stale");
+        }
+        let run = if task.verification_expectation.as_ref() == Some(expectation) {
+            run
+        } else {
+            self.apply(
+                &run,
+                now,
+                SupervisorEventSource::Verification,
+                SupervisorEventKind::VerificationExpectationRecorded {
+                    task_id: request.task_id.clone(),
+                    generation: request.generation,
+                    expectation: expectation.clone(),
+                },
+            )?
+        };
+        let mut pinned = request.clone();
+        pinned
+            .expectation
+            .clone_from(&run.tasks[&request.task_id].verification_expectation);
+        Ok(pinned)
     }
 
     /// Commits one independently obtained verification result and finalizes the
@@ -1057,22 +1207,56 @@ impl SupervisorRuntime {
         }
         if task.generation != request.generation
             || task.required_artifact_contract != request.contract
+            || run.artifact_repository.as_ref() != Some(&request.repository)
             || task.state != TaskState::Verifying
         {
             anyhow::bail!("artifact verification fence is stale");
         }
-        let run = self.apply(
-            &run,
-            now,
-            SupervisorEventSource::Verification,
-            SupervisorEventKind::VerificationResult {
+        if task.verification_attempt != request.verification_attempt {
+            return if task.verification_attempt > request.verification_attempt {
+                Ok(run.query())
+            } else {
+                anyhow::bail!("artifact verification attempt fence is stale")
+            };
+        }
+        if task.verification_expectation != request.expectation {
+            anyhow::bail!("artifact verification expectation fence is stale");
+        }
+        if verification.status == ArtifactVerificationStatus::Verified
+            && request.expectation.is_none()
+        {
+            anyhow::bail!("verified artifact expectation is missing");
+        }
+        let kind = match verification.status {
+            ArtifactVerificationStatus::Verified => SupervisorEventKind::VerificationResult {
                 task_id: request.task_id.clone(),
                 generation: request.generation,
-                passed: verification.passed,
+                passed: true,
                 result_digest: verification.result_digest,
                 safe_summary: verification.safe_summary,
             },
-        )?;
+            ArtifactVerificationStatus::Rejected => SupervisorEventKind::VerificationResult {
+                task_id: request.task_id.clone(),
+                generation: request.generation,
+                passed: false,
+                result_digest: verification.result_digest,
+                safe_summary: verification.safe_summary,
+            },
+            ArtifactVerificationStatus::Retryable => {
+                let exponent = request.verification_attempt.min(30);
+                let delay = ARTIFACT_RETRY_BASE_SECONDS
+                    .saturating_mul(1_i64 << exponent)
+                    .min(ARTIFACT_RETRY_MAX_SECONDS);
+                SupervisorEventKind::VerificationDeferred {
+                    task_id: request.task_id.clone(),
+                    generation: request.generation,
+                    result_digest: verification.result_digest,
+                    safe_summary: verification.safe_summary,
+                    retry_at: now + chrono::Duration::seconds(delay),
+                }
+            }
+        };
+        let run = self.apply(&run, now, SupervisorEventSource::Verification, kind)?;
         Ok(self.finalize_terminal_tasks(run, now)?.query())
     }
 
@@ -1084,6 +1268,7 @@ impl SupervisorRuntime {
         operation_id: &str,
         root_task: String,
         root_artifact_contract: ArtifactContract,
+        artifact_repository: Option<GitHubRepository>,
         initial_tasks: Vec<InitialTask>,
         policy_selector: Option<String>,
         now: DateTime<Utc>,
@@ -1098,6 +1283,12 @@ impl SupervisorRuntime {
         push_semantic_component(&mut semantic_key, caller);
         push_semantic_component(&mut semantic_key, &root_task);
         push_semantic_component(&mut semantic_key, root_artifact_contract.as_str());
+        push_semantic_component(
+            &mut semantic_key,
+            artifact_repository
+                .as_ref()
+                .map_or("none", GitHubRepository::as_str),
+        );
         push_semantic_component(&mut semantic_key, &initial_tasks.len().to_string());
         for task in &initial_tasks {
             push_semantic_component(&mut semantic_key, &task.task_id);
@@ -1140,6 +1331,7 @@ impl SupervisorRuntime {
         let mut run = if let Some(existing) = self.supervisor.load(reservation.supervisor_run_id)? {
             if existing.root_caller_ref != caller
                 || existing.workspace_id != workspace
+                || existing.artifact_repository != artifact_repository
                 || existing.policy_revision != policy_revision
             {
                 anyhow::bail!("supervisor start reservation does not match its durable run");
@@ -1158,6 +1350,7 @@ impl SupervisorRuntime {
                 now,
             );
             run.workspace_id = workspace;
+            run.artifact_repository = artifact_repository;
             self.supervisor.initialize(&run)?;
             run
         };
@@ -1259,6 +1452,19 @@ impl SupervisorRuntime {
     pub fn list_workspace(&self, workspace: WorkspaceId) -> Result<Vec<SupervisorRunQuery>> {
         const MAX_TUI_WORK_RUNS: usize = 16;
         self.supervisor.workspace_runs(workspace, MAX_TUI_WORK_RUNS)
+    }
+
+    /// Reports whether a workspace still owns a non-terminal supervised run.
+    /// Legacy unscoped snapshots cannot be attributed and are excluded.
+    ///
+    /// # Errors
+    /// Returns an error when the durable supervisor index cannot be read.
+    pub fn has_unfinished_workspace(&self, workspace: WorkspaceId) -> Result<bool> {
+        Ok(self
+            .supervisor
+            .runs()?
+            .into_iter()
+            .any(|run| run.workspace_id == Some(workspace) && !run.state.is_finished()))
     }
 
     /// Reads one caller-owned durable run.
@@ -1752,8 +1958,12 @@ fn task_node(
         attempt: 1,
         generation: 1,
         assigned_dispatch_run: None,
+        promotion_reserved_at: None,
         retry_at: None,
         verification_digest: None,
+        verification_attempt: 0,
+        verification_retry_at: None,
+        verification_expectation: None,
         state: TaskState::Pending,
     }
 }
@@ -1785,11 +1995,25 @@ mod tests {
             AgentId, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, SessionId, TerminalId,
             TerminalRef, WorktreeId,
         },
-        supervisor::{SupervisorRun, TaskNode},
+        pr_inventory::GitHubRepository,
+        supervisor::{ArtifactExpectation, SupervisorRun, TaskNode},
     };
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 18, 0, 0, 0).unwrap()
+    }
+    fn artifact_repository() -> GitHubRepository {
+        GitHubRepository::from_name_with_owner("acme/repo").unwrap()
+    }
+    fn artifact_expectation() -> ArtifactExpectation {
+        ArtifactExpectation::new(
+            artifact_repository(),
+            "0123456789012345678901234567890123456789",
+        )
+        .unwrap()
+    }
+    fn goal(instruction: &str) -> GoalSpecification {
+        GoalSpecification::new(instruction.into(), artifact_repository())
     }
     fn root_worker(workspace: WorkspaceId) -> AgentRuntimeRef {
         AgentRuntimeRef::new(
@@ -1832,8 +2056,12 @@ mod tests {
             attempt: 1,
             generation: 1,
             assigned_dispatch_run: None,
+            promotion_reserved_at: None,
             retry_at: None,
             verification_digest: None,
+            verification_attempt: 0,
+            verification_retry_at: None,
+            verification_expectation: None,
             state: TaskState::Pending,
         }
     }
@@ -1902,7 +2130,7 @@ mod tests {
                 "goal-composer",
                 workspace,
                 &operation.to_string(),
-                "finish the requested work".into(),
+                goal("finish the requested work"),
                 Some("standard".into()),
                 now(),
             )
@@ -1924,7 +2152,7 @@ mod tests {
                 "goal-composer",
                 workspace,
                 &operation.to_string(),
-                "finish the requested work".into(),
+                goal("finish the requested work"),
                 Some("standard".into()),
                 &worker,
                 now(),
@@ -1935,7 +2163,7 @@ mod tests {
                 "goal-composer",
                 workspace,
                 &operation.to_string(),
-                "finish the requested work".into(),
+                goal("finish the requested work"),
                 Some("standard".into()),
                 &worker,
                 now(),
@@ -1979,14 +2207,15 @@ mod tests {
             .prepare_artifact_verification(operation, now())
             .unwrap()
             .unwrap();
+        assert_eq!(request.repository, artifact_repository());
         for invalid in [
             ArtifactVerification {
-                passed: true,
+                status: ArtifactVerificationStatus::Verified,
                 result_digest: String::new(),
                 safe_summary: "verified".into(),
             },
             ArtifactVerification {
-                passed: true,
+                status: ArtifactVerificationStatus::Verified,
                 result_digest: "verified".into(),
                 safe_summary: "x".repeat(MAX_SUPERVISOR_TEXT_BYTES + 1),
             },
@@ -2006,21 +2235,43 @@ mod tests {
                 .state,
             TaskState::Verifying
         );
-        let rejected = scheduler
+        let deferred = scheduler
             .record_artifact_verification(
                 &request,
                 ArtifactVerification {
-                    passed: false,
+                    status: ArtifactVerificationStatus::Retryable,
                     result_digest: "provider-unavailable".into(),
                     safe_summary: "pull request verification provider is unavailable".into(),
                 },
                 now(),
             )
             .unwrap();
-        assert_eq!(rejected.state, SupervisorRunState::Escalated);
+        assert_eq!(deferred.state, SupervisorRunState::Running);
+        assert_eq!(deferred.tasks[0].state, TaskState::Verifying);
+        assert_eq!(deferred.tasks[0].verification_attempt, 1);
         assert_eq!(
-            rejected.escalation.as_ref().unwrap().safe_evidence,
-            "pull request verification provider is unavailable"
+            deferred.tasks[0].verification_retry_at,
+            Some(now() + chrono::Duration::seconds(ARTIFACT_RETRY_BASE_SECONDS))
+        );
+        assert!(
+            scheduler
+                .pending_artifact_verifications(now())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            scheduler
+                .record_artifact_verification(
+                    &request,
+                    ArtifactVerification {
+                        status: ArtifactVerificationStatus::Retryable,
+                        result_digest: "duplicate".into(),
+                        safe_summary: "duplicate".into(),
+                    },
+                    now(),
+                )
+                .unwrap(),
+            deferred
         );
         assert!(
             scheduler
@@ -2028,35 +2279,65 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let due = now() + chrono::Duration::seconds(ARTIFACT_RETRY_BASE_SECONDS);
+        assert_eq!(
+            scheduler.pending_artifact_verifications(due).unwrap(),
+            vec![PendingArtifactVerification {
+                dispatch_run_id: operation,
+            }]
+        );
+        let retry = scheduler
+            .prepare_artifact_verification(operation, due)
+            .unwrap()
+            .unwrap();
+        let retry = scheduler
+            .record_artifact_expectation(&retry, &artifact_expectation(), due)
+            .unwrap();
+        let rejected = scheduler
+            .record_artifact_verification(
+                &retry,
+                ArtifactVerification {
+                    status: ArtifactVerificationStatus::Rejected,
+                    result_digest: "draft-pr".into(),
+                    safe_summary: "pull request is still a draft".into(),
+                },
+                due,
+            )
+            .unwrap();
+        assert_eq!(rejected.state, SupervisorRunState::Escalated);
+        assert_eq!(
+            rejected.escalation.as_ref().unwrap().safe_evidence,
+            "pull request is still a draft"
+        );
         scheduler
             .resolve_escalation(
                 "goal-composer",
                 first.supervisor_run_id,
                 rejected.escalation.unwrap().escalation_id,
                 EscalationDecision::Resume,
-                now(),
+                due,
             )
             .unwrap();
         let retry = scheduler
-            .prepare_artifact_verification(operation, now())
+            .prepare_artifact_verification(operation, due)
             .unwrap()
             .unwrap();
         let completed = scheduler
             .record_artifact_verification(
                 &retry,
                 ArtifactVerification {
-                    passed: true,
+                    status: ArtifactVerificationStatus::Verified,
                     result_digest: "verified".into(),
                     safe_summary: "verified".into(),
                 },
-                now(),
+                due,
             )
             .unwrap();
         assert_eq!(completed.tasks[0].state, TaskState::Succeeded);
         assert_eq!(completed.state, SupervisorRunState::Succeeded);
         assert!(
             scheduler
-                .pending_artifact_verifications()
+                .pending_artifact_verifications(now())
                 .unwrap()
                 .is_empty()
         );
@@ -2064,11 +2345,11 @@ mod tests {
             .record_artifact_verification(
                 &retry,
                 ArtifactVerification {
-                    passed: false,
+                    status: ArtifactVerificationStatus::Rejected,
                     result_digest: "late-provider-result".into(),
                     safe_summary: "late provider result".into(),
                 },
-                now(),
+                due,
             )
             .unwrap();
         assert_eq!(late, completed);
@@ -2136,7 +2417,7 @@ mod tests {
                 "goal",
                 workspace,
                 &operation.to_string(),
-                "finish".into(),
+                goal("finish"),
                 None,
                 &root_worker(workspace),
                 now(),
@@ -2160,7 +2441,7 @@ mod tests {
                 "another-goal",
                 workspace,
                 &second_operation.to_string(),
-                "another finish".into(),
+                goal("another finish"),
                 None,
                 &root_worker(workspace),
                 now(),
@@ -2169,7 +2450,7 @@ mod tests {
         let mut expected_pending = vec![operation, second_operation];
         expected_pending.sort_by_key(ToString::to_string);
         assert_eq!(
-            scheduler.pending_artifact_verifications().unwrap(),
+            scheduler.pending_artifact_verifications(now()).unwrap(),
             expected_pending
                 .into_iter()
                 .map(|dispatch_run_id| PendingArtifactVerification { dispatch_run_id })
@@ -2198,6 +2479,118 @@ mod tests {
                 .is_none()
         );
 
+        let verified = || ArtifactVerification {
+            status: ArtifactVerificationStatus::Verified,
+            result_digest: "verified".into(),
+            safe_summary: "verified".into(),
+        };
+        assert!(
+            scheduler
+                .record_artifact_verification(&request, verified(), now())
+                .unwrap_err()
+                .to_string()
+                .contains("verified artifact expectation is missing")
+        );
+        let missing_expectation_task = ArtifactVerificationRequest {
+            task_id: TaskId::new("missing").unwrap(),
+            ..request.clone()
+        };
+        assert!(
+            scheduler
+                .record_artifact_expectation(
+                    &missing_expectation_task,
+                    &artifact_expectation(),
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("task is missing")
+        );
+        let other_expectation = ArtifactExpectation::new(
+            GitHubRepository::from_name_with_owner("other/repo").unwrap(),
+            "0123456789012345678901234567890123456789",
+        )
+        .unwrap();
+        for stale in [
+            ArtifactVerificationRequest {
+                generation: request.generation + 1,
+                ..request.clone()
+            },
+            ArtifactVerificationRequest {
+                contract: NO_ARTIFACT_CONTRACT,
+                ..request.clone()
+            },
+            ArtifactVerificationRequest {
+                verification_attempt: request.verification_attempt + 1,
+                ..request.clone()
+            },
+            ArtifactVerificationRequest {
+                repository: GitHubRepository::from_name_with_owner("other/repo").unwrap(),
+                ..request.clone()
+            },
+        ] {
+            assert!(
+                scheduler
+                    .record_artifact_expectation(&stale, &artifact_expectation(), now())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("fence is stale")
+            );
+        }
+        assert!(
+            scheduler
+                .record_artifact_expectation(&request, &other_expectation, now())
+                .unwrap_err()
+                .to_string()
+                .contains("fence is stale")
+        );
+        scheduler.fail_apply_at(scheduler.apply_calls.get());
+        assert!(
+            scheduler
+                .record_artifact_expectation(&request, &artifact_expectation(), now())
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        let pinned = scheduler
+            .record_artifact_expectation(&request, &artifact_expectation(), now())
+            .unwrap();
+        assert_eq!(
+            scheduler
+                .record_artifact_expectation(&pinned, &artifact_expectation(), now())
+                .unwrap(),
+            pinned
+        );
+        assert!(
+            scheduler
+                .record_artifact_verification(&request, verified(), now())
+                .unwrap_err()
+                .to_string()
+                .contains("expectation fence is stale")
+        );
+        let future_attempt = ArtifactVerificationRequest {
+            verification_attempt: pinned.verification_attempt + 1,
+            ..pinned.clone()
+        };
+        assert!(
+            scheduler
+                .record_artifact_verification(&future_attempt, verified(), now())
+                .unwrap_err()
+                .to_string()
+                .contains("attempt fence is stale")
+        );
+        let wrong_expectation = ArtifactVerificationRequest {
+            expectation: Some(other_expectation),
+            ..pinned
+        };
+        assert!(
+            scheduler
+                .record_artifact_verification(&wrong_expectation, verified(), now())
+                .unwrap_err()
+                .to_string()
+                .contains("expectation fence is stale")
+        );
+
         let missing_task = ArtifactVerificationRequest {
             task_id: TaskId::new("missing").unwrap(),
             ..request.clone()
@@ -2207,7 +2600,7 @@ mod tests {
                 .record_artifact_verification(
                     &missing_task,
                     ArtifactVerification {
-                        passed: true,
+                        status: ArtifactVerificationStatus::Verified,
                         result_digest: "verified".into(),
                         safe_summary: "verified".into(),
                     },
@@ -2232,7 +2625,7 @@ mod tests {
                     .record_artifact_verification(
                         &stale,
                         ArtifactVerification {
-                            passed: true,
+                            status: ArtifactVerificationStatus::Verified,
                             result_digest: "verified".into(),
                             safe_summary: "verified".into(),
                         },
@@ -2264,7 +2657,7 @@ mod tests {
                 .record_artifact_verification(
                     &request,
                     ArtifactVerification {
-                        passed: true,
+                        status: ArtifactVerificationStatus::Verified,
                         result_digest: "verified".into(),
                         safe_summary: "verified".into(),
                     },
@@ -2294,6 +2687,67 @@ mod tests {
     }
 
     #[test]
+    fn legacy_goal_without_pre_spawn_repository_escalates_instead_of_stalling() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        scheduler
+            .dispatch
+            .upsert_run(DispatchRun {
+                run_id: operation,
+                agent_id: AgentId::new(),
+                prompt: String::new(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            })
+            .unwrap();
+        let started = scheduler
+            .start_for_workspace_root_dispatch(
+                "goal",
+                workspace,
+                &operation.to_string(),
+                goal("finish"),
+                None,
+                &root_worker(workspace),
+                now(),
+            )
+            .unwrap();
+        let mut legacy = scheduler
+            .supervisor
+            .load(started.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        legacy.artifact_repository = None;
+        scheduler.supervisor.initialize(&legacy).unwrap();
+
+        scheduler.fail_apply_at(scheduler.apply_calls.get());
+        assert!(
+            scheduler
+                .prepare_artifact_verification(operation, now())
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        assert!(
+            scheduler
+                .prepare_artifact_verification(operation, now())
+                .unwrap()
+                .is_none()
+        );
+        let escalated = scheduler
+            .get("goal", started.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(escalated.state, SupervisorRunState::Escalated);
+        assert_eq!(
+            escalated.escalation.unwrap().safe_evidence,
+            "artifact repository was not recorded before Goal worker spawn"
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One corruption fixture keeps terminal status, contracts, and provenance fences visibly related.
     fn artifact_preparation_rejects_nonterminal_wrong_contract_and_corrupt_membership() {
         let temp = tempfile::tempdir().unwrap();
@@ -2316,12 +2770,28 @@ mod tests {
                 "goal",
                 workspace,
                 &operation.to_string(),
-                "finish".into(),
+                goal("finish"),
                 None,
                 &root_worker(workspace),
                 now(),
             )
             .unwrap();
+        let mut missing_workspace = scheduler
+            .supervisor
+            .load(started.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        missing_workspace.workspace_id = None;
+        scheduler.supervisor.initialize(&missing_workspace).unwrap();
+        assert!(
+            scheduler
+                .prepare_artifact_verification(operation, now())
+                .unwrap_err()
+                .to_string()
+                .contains("workspace is missing")
+        );
+        missing_workspace.workspace_id = Some(workspace);
+        scheduler.supervisor.initialize(&missing_workspace).unwrap();
         assert!(
             scheduler
                 .prepare_artifact_verification(operation, now())
@@ -2330,7 +2800,7 @@ mod tests {
         );
         assert!(
             scheduler
-                .pending_artifact_verifications()
+                .pending_artifact_verifications(now())
                 .unwrap()
                 .is_empty()
         );
@@ -2365,7 +2835,7 @@ mod tests {
         );
         assert!(
             scheduler
-                .pending_artifact_verifications()
+                .pending_artifact_verifications(now())
                 .unwrap()
                 .is_empty()
         );
@@ -2415,7 +2885,7 @@ mod tests {
         scheduler.supervisor.initialize(&corrupt).unwrap();
         assert!(
             scheduler
-                .pending_artifact_verifications()
+                .pending_artifact_verifications(now())
                 .unwrap_err()
                 .to_string()
                 .contains("provenance fence is stale")
@@ -2439,7 +2909,7 @@ mod tests {
         scheduler.supervisor.initialize(&missing_task).unwrap();
         assert!(
             scheduler
-                .pending_artifact_verifications()
+                .pending_artifact_verifications(now())
                 .unwrap_err()
                 .to_string()
                 .contains("provenance is missing")
@@ -2467,7 +2937,7 @@ mod tests {
                     "caller",
                     workspace,
                     "not-an-operation",
-                    "root".into(),
+                    goal("root"),
                     None,
                     &worker,
                     now(),
@@ -2483,7 +2953,7 @@ mod tests {
                     "caller",
                     workspace,
                     &missing.to_string(),
-                    "root".into(),
+                    goal("root"),
                     None,
                     &worker,
                     now(),
@@ -2509,7 +2979,7 @@ mod tests {
                     "caller",
                     workspace,
                     &operation.to_string(),
-                    String::new(),
+                    goal(""),
                     None,
                     &worker,
                     now(),
@@ -2522,7 +2992,7 @@ mod tests {
                     "caller",
                     workspace,
                     &operation.to_string(),
-                    "root".into(),
+                    goal("root"),
                     None,
                     &root_worker(WorkspaceId::new()),
                     now(),
@@ -2536,7 +3006,7 @@ mod tests {
                 "caller",
                 workspace,
                 &operation.to_string(),
-                "root".into(),
+                goal("root"),
                 None,
                 &worker,
                 now(),
@@ -2548,7 +3018,7 @@ mod tests {
                     "caller",
                     workspace,
                     &operation.to_string(),
-                    "root".into(),
+                    goal("root"),
                     None,
                     &root_worker(workspace),
                     now(),
@@ -2586,7 +3056,7 @@ mod tests {
                     "caller",
                     workspace,
                     &missing_root_operation.to_string(),
-                    "root".into(),
+                    goal("root"),
                     None,
                     now(),
                 )
@@ -2603,7 +3073,7 @@ mod tests {
                     "caller",
                     workspace,
                     &missing_root_operation.to_string(),
-                    "root".into(),
+                    goal("root"),
                     None,
                     &worker,
                     now(),
@@ -2637,7 +3107,7 @@ mod tests {
                     "caller",
                     workspace,
                     &operation.to_string(),
-                    "root".into(),
+                    goal("root"),
                     None,
                     now(),
                 )
@@ -2655,7 +3125,7 @@ mod tests {
                         "caller",
                         workspace,
                         &operation.to_string(),
-                        "root".into(),
+                        goal("root"),
                         None,
                         &root_worker(workspace),
                         now(),
@@ -2745,21 +3215,50 @@ mod tests {
                 .unwrap(),
             classic_before
         );
+        assert_eq!(
+            scheduler
+                .reserved_goal_repository(&OperationId::new().to_string())
+                .unwrap(),
+            None
+        );
 
         let goal_operation = OperationId::new();
-        let goal = scheduler
+        let goal_run = scheduler
             .reserve_goal_for_workspace(
                 "goal",
                 workspace,
                 &goal_operation.to_string(),
-                "goal".into(),
+                goal("goal"),
                 None,
                 now(),
             )
             .unwrap();
+        assert_eq!(
+            scheduler
+                .reserved_goal_repository(&goal_operation.to_string())
+                .unwrap(),
+            Some(artifact_repository())
+        );
         assert!(
             scheduler
-                .pending_artifact_verifications()
+                .reserve_goal_for_workspace(
+                    "goal",
+                    workspace,
+                    &goal_operation.to_string(),
+                    GoalSpecification::new(
+                        "goal".into(),
+                        GitHubRepository::from_name_with_owner("other/repo").unwrap(),
+                    ),
+                    None,
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("different supervisor start")
+        );
+        assert!(
+            scheduler
+                .pending_artifact_verifications(now())
                 .unwrap()
                 .is_empty()
         );
@@ -2775,7 +3274,8 @@ mod tests {
         assert_eq!(
             scheduler.pending_goal_promotions().unwrap(),
             vec![PendingGoalPromotion {
-                operation_id: goal_operation.to_string()
+                operation_id: goal_operation.to_string(),
+                reserved_at: now(),
             }]
         );
 
@@ -2805,7 +3305,7 @@ mod tests {
         assert!(scheduler.pending_delegated_promotions().unwrap().is_empty());
         assert_eq!(
             scheduler
-                .get("goal", goal.supervisor_run_id)
+                .get("goal", goal_run.supervisor_run_id)
                 .unwrap()
                 .unwrap(),
             failed
@@ -2817,7 +3317,7 @@ mod tests {
                 "goal",
                 workspace,
                 &reservation_without_dispatch.to_string(),
-                "goal".into(),
+                goal("goal"),
                 None,
                 now(),
             )
@@ -2880,7 +3380,7 @@ mod tests {
                 "goal-composer",
                 workspace,
                 &root_operation.to_string(),
-                "root work".into(),
+                goal("root work"),
                 None,
                 &root_worker(workspace),
                 now(),
@@ -3080,7 +3580,7 @@ mod tests {
                 "goal",
                 workspace,
                 &root_operation.to_string(),
-                "root".into(),
+                goal("root"),
                 None,
                 &root_worker(workspace),
                 now(),
@@ -3293,7 +3793,7 @@ mod tests {
                 "goal",
                 workspace,
                 &root_operation.to_string(),
-                "root".into(),
+                goal("root"),
                 None,
                 &root_worker(workspace),
                 now(),
@@ -3387,7 +3887,7 @@ mod tests {
                 "goal-composer",
                 workspace,
                 &root_operation.to_string(),
-                "root work".into(),
+                goal("root work"),
                 None,
                 &root_worker(workspace),
                 now(),
@@ -3431,12 +3931,12 @@ mod tests {
         let scheduler = SupervisorRuntime::new(temp.path());
         let workspace = WorkspaceId::new();
         let goal_operation = OperationId::new();
-        let goal = scheduler
+        let goal_run = scheduler
             .reserve_goal_for_workspace(
                 "goal",
                 workspace,
                 &goal_operation.to_string(),
-                "goal".into(),
+                goal("goal"),
                 None,
                 now(),
             )
@@ -3451,7 +3951,7 @@ mod tests {
         );
         let mut missing_root = scheduler
             .supervisor
-            .load(goal.supervisor_run_id)
+            .load(goal_run.supervisor_run_id)
             .unwrap()
             .unwrap();
         missing_root.tasks.clear();
@@ -3483,7 +3983,7 @@ mod tests {
                 "goal",
                 workspace,
                 &root_operation.to_string(),
-                "root".into(),
+                goal("root"),
                 None,
                 &root_worker(workspace),
                 now(),
@@ -3580,7 +4080,7 @@ mod tests {
                 "goal",
                 workspace,
                 &operation.to_string(),
-                "finish".into(),
+                goal("finish"),
                 None,
                 &root_worker(workspace),
                 now(),
@@ -3607,13 +4107,16 @@ mod tests {
             .prepare_artifact_verification(operation, now())
             .unwrap()
             .unwrap();
+        let request = scheduler
+            .record_artifact_expectation(&request, &artifact_expectation(), now())
+            .unwrap();
         scheduler.fail_apply_at(scheduler.apply_calls.get());
         assert!(
             scheduler
                 .record_artifact_verification(
                     &request,
                     ArtifactVerification {
-                        passed: true,
+                        status: ArtifactVerificationStatus::Verified,
                         result_digest: "verified".into(),
                         safe_summary: "verified".into(),
                     },
