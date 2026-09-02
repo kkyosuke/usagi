@@ -813,9 +813,9 @@ mod tests {
         control.sync_selection(&runs);
         let _ = control.handle(WorkRunControlAction::Enter, &runs, true);
         let _ = control.handle(WorkRunControlAction::Escape, &runs, true);
-        assert_eq!(control.mode(), WorkRunControlMode::Closed);
+        assert_eq!(control.mode(), WorkRunControlMode::List);
         let _ = control.handle(WorkRunControlAction::Toggle, &runs, true);
-        assert_eq!(control.mode(), WorkRunControlMode::Retry);
+        assert_eq!(control.mode(), WorkRunControlMode::Closed);
 
         control.mode = WorkRunControlMode::ConfirmCancel;
         control.selected = None;
@@ -916,7 +916,7 @@ mod tests {
             WorkRunControlOutcome::Consumed
         );
         let _ = control.handle(WorkRunControlAction::Escape, &runs, true);
-        assert_eq!(control.mode(), WorkRunControlMode::List);
+        assert_eq!(control.mode(), WorkRunControlMode::Closed);
 
         control.mode = WorkRunControlMode::Retry;
         control.retry = None;
