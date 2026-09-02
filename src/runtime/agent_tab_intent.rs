@@ -13,6 +13,7 @@ use usagi_tui::usecase::application::agent_tab_intent::{
 };
 
 static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
+const LEGACY_AGENT_TAB_INTENT_SCHEMA: u32 = 1;
 
 #[cfg(test)]
 thread_local! {
@@ -91,14 +92,27 @@ impl FileAgentTabIntentStore {
         if version > AGENT_TAB_INTENT_SCHEMA {
             return Ok(AgentTabIntentLoad::FutureSchema(version));
         }
-        if version != AGENT_TAB_INTENT_SCHEMA {
+        if !matches!(
+            version,
+            LEGACY_AGENT_TAB_INTENT_SCHEMA | AGENT_TAB_INTENT_SCHEMA
+        ) {
             quarantine(path)?;
             return Ok(AgentTabIntentLoad::Corrupt);
         }
-        let Ok(intent) = serde_json::from_value::<AgentTabIntent>(value) else {
+        let Ok(mut intent) = serde_json::from_value::<AgentTabIntent>(value) else {
             quarantine(path)?;
             return Ok(AgentTabIntentLoad::Corrupt);
         };
+        if version == LEGACY_AGENT_TAB_INTENT_SCHEMA {
+            // Schema 1 dismissals came from the retired hide/reopen UX. They
+            // must not silently hide daemon-owned Agents after upgrading to the
+            // current interrupted-only close contract. From schema 2 onward a
+            // dismissal is a current user action and ordinary observations
+            // preserve it.
+            intent.schema = AGENT_TAB_INTENT_SCHEMA;
+            intent.dismissed.clear();
+            intent.dismissed_terminals.clear();
+        }
         if intent.validate(workspace).is_err() {
             quarantine(path)?;
             return Ok(AgentTabIntentLoad::Corrupt);
@@ -197,7 +211,8 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
             // revision before this close could clear the newer user intent.
             // Unknown/authoritatively removed keys remain inert.
             let force_close_fence = match &mutation {
-                AgentTabIntentMutation::Dismiss { continuation } => {
+                AgentTabIntentMutation::Dismiss { continuation }
+                | AgentTabIntentMutation::DismissInterrupted { continuation, .. } => {
                     current.targets.iter().any(|target| {
                         target
                             .tabs
@@ -217,11 +232,6 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
             let projection = if cas_conflict {
                 match mutation {
                     AgentTabIntentMutation::Observe {
-                        terminals,
-                        agents,
-                        allowed_sessions,
-                    }
-                    | AgentTabIntentMutation::ObserveAll {
                         terminals,
                         agents,
                         allowed_sessions,
@@ -297,6 +307,15 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                     AgentTabIntentMutation::Dismiss { continuation } => {
                         current.apply(AgentTabIntentMutation::Dismiss { continuation })
                     }
+                    AgentTabIntentMutation::DismissInterrupted {
+                        session_id,
+                        continuation,
+                        terminal,
+                    } => current.apply(AgentTabIntentMutation::DismissInterrupted {
+                        session_id,
+                        continuation,
+                        terminal,
+                    }),
                     // A deferred close carries the exact terminal the user saw,
                     // so it merges monotonically for the same reason. Only the
                     // stale successor preview is dropped.
@@ -766,6 +785,55 @@ mod tests {
     }
 
     #[test]
+    fn schema_one_migrates_legacy_hides_once_and_preserves_tab_identity() {
+        let (_root, mut store, workspace) = fixture();
+        let _ = store.load(workspace).unwrap();
+        let path = store.state_path(workspace);
+        let observed = observation(workspace);
+        let mut legacy = AgentTabIntent::empty(workspace);
+        legacy.apply(AgentTabIntentMutation::Upsert {
+            session_id: None,
+            continuation: observed.continuation,
+            terminal: observed.terminal.clone(),
+            select: true,
+        });
+        legacy.apply(AgentTabIntentMutation::Dismiss {
+            continuation: observed.continuation,
+        });
+        legacy.dismissed_terminals.insert(observed.terminal.clone());
+        legacy.schema = LEGACY_AGENT_TAB_INTENT_SCHEMA;
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let migrated = match store.load_status(workspace).unwrap() {
+            AgentTabIntentLoad::Loaded(intent) => intent,
+            other => panic!("schema 1 should migrate in place, got {other:?}"),
+        };
+        assert_eq!(migrated.schema, AGENT_TAB_INTENT_SCHEMA);
+        assert!(migrated.dismissed.is_empty());
+        assert!(migrated.dismissed_terminals.is_empty());
+        assert_eq!(migrated.targets, legacy.targets);
+        assert_eq!(migrated.validate(workspace), Ok(()));
+
+        // The first current user dismissal publishes schema 2. Subsequent
+        // loads preserve it instead of treating it as another legacy hide.
+        let committed = store
+            .mutate(
+                workspace,
+                migrated.revision,
+                AgentTabIntentMutation::DismissInterrupted {
+                    session_id: None,
+                    continuation: observed.continuation,
+                    terminal: observed.terminal,
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.intent.schema, AGENT_TAB_INTENT_SCHEMA);
+        assert!(committed.intent.dismissed.contains(&observed.continuation));
+        assert_eq!(store.load(workspace).unwrap(), committed.intent);
+    }
+
+    #[test]
     fn corrupt_state_is_quarantined_without_blocking_empty_fallback() {
         let (_root, mut store, workspace) = fixture();
         let _ = store.load(workspace).unwrap();
@@ -1170,37 +1238,6 @@ mod tests {
                 .all(|slot| !slot.terminal.fences(&old.terminal))
         }));
         assert!(stale_projection.targets.is_empty());
-        assert_eq!(fs::read(&path).unwrap(), bytes_before);
-
-        let stale_all_runtime =
-            AgentRuntimeRef::new(AgentRuntimeId::new(), old.terminal.clone(), None).unwrap();
-        let stale_all = store
-            .mutate(
-                workspace,
-                first.intent.revision,
-                AgentTabIntentMutation::ObserveAll {
-                    terminals: vec![TerminalInventoryEntry {
-                        terminal: old.terminal.clone(),
-                        kind: TerminalKind::Agent,
-                        live: true,
-                    }],
-                    agents: AgentInventory {
-                        workspace_id: workspace,
-                        runtimes: vec![AgentRuntimeInventoryItem {
-                            runtime: stale_all_runtime,
-                            continuation: old.continuation,
-                            state: AgentRuntimeInventoryState::Live,
-                            resumed_from: None,
-                        }],
-                        resumable: Vec::new(),
-                    },
-                    allowed_sessions: std::collections::BTreeSet::default(),
-                },
-            )
-            .unwrap();
-        assert!(stale_all.cas_conflict);
-        assert!(!stale_all.mutation_applied);
-        assert!(stale_all.projection.unwrap().targets.is_empty());
         assert_eq!(fs::read(&path).unwrap(), bytes_before);
 
         let replacement_runtime =

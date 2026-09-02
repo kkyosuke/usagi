@@ -2938,7 +2938,7 @@ impl WorkspaceUi {
         let commit = context.port.mutate(
             context.workspace,
             context.state.revision,
-            AgentTabIntentMutation::ObserveAll {
+            AgentTabIntentMutation::Observe {
                 terminals,
                 agents,
                 allowed_sessions: context.allowed_sessions.clone(),
@@ -3022,9 +3022,12 @@ impl WorkspaceUi {
             })
     }
 
-    /// No Agent lineage is hidden: daemon inventory owns visible membership.
-    fn agent_dismissed() -> BTreeSet<AgentContinuationRef> {
-        BTreeSet::new()
+    /// Lineages explicitly removed from the tab strip. Daemon inventory still
+    /// owns runtime liveness, while this local intent owns visibility.
+    fn agent_dismissed(&self) -> BTreeSet<AgentContinuationRef> {
+        self.agent_tab_intent
+            .as_ref()
+            .map_or_else(BTreeSet::new, |context| context.state.dismissed.clone())
     }
 
     fn has_agent_intent_for(&self, session_id: Option<SessionId>) -> bool {
@@ -5330,7 +5333,7 @@ fn apply_restore_completion(
         workspace,
         allowed_sessions,
         &ui.agent_slot_order(),
-        &WorkspaceUi::agent_dismissed(),
+        &ui.agent_dismissed(),
         &BTreeSet::new(),
     )
     .tabs;
@@ -5457,12 +5460,20 @@ fn close_focused_terminal_pane(
         }
         return;
     }
-    // An interrupted Agent owns no live PTY to receive Ctrl-D. Keep the history
-    // visible and tell the user how to re-establish an exit-capable runtime.
-    if runtime.focused_interrupted().is_some() {
-        runtime.surface_focused_pane_feedback(
-            "Interrupted Agent has no live process; resume it before closing",
-        );
+    // An interrupted Agent owns no live PTY to terminate. Persist its exact
+    // lineage dismissal before changing the visible registry, so refresh,
+    // reconnect, and a fresh TUI cannot resurrect the tab. The mutation also
+    // creates the saved slot when this history came from inventory alone.
+    if let Some(interrupted) = runtime.focused_interrupted().cloned() {
+        if let Err(error) = ui.mutate_agent_intent(AgentTabIntentMutation::DismissInterrupted {
+            session_id: interrupted.session_id,
+            continuation: interrupted.continuation,
+            terminal: interrupted.last_terminal,
+        }) {
+            surface_agent_tab_intent_error(runtime, error);
+            return;
+        }
+        let _ = runtime.close_focused_pane();
         return;
     }
     if let Some(terminal) = runtime.focused_terminal() {
@@ -19385,7 +19396,8 @@ mod tests {
             self.mutations.lock().unwrap().push(mutation.clone());
             let before = state.clone();
             let force_close_fence = match &mutation {
-                AgentTabIntentMutation::Dismiss { continuation } => {
+                AgentTabIntentMutation::Dismiss { continuation }
+                | AgentTabIntentMutation::DismissInterrupted { continuation, .. } => {
                     state.targets.iter().any(|target| {
                         target
                             .tabs
@@ -19403,11 +19415,6 @@ mod tests {
             let projection = if conflict {
                 match mutation {
                     AgentTabIntentMutation::Observe {
-                        terminals,
-                        agents,
-                        allowed_sessions,
-                    }
-                    | AgentTabIntentMutation::ObserveAll {
                         terminals,
                         agents,
                         allowed_sessions,
@@ -19439,6 +19446,15 @@ mod tests {
                     AgentTabIntentMutation::Dismiss { continuation } => {
                         state.apply(AgentTabIntentMutation::Dismiss { continuation })
                     }
+                    AgentTabIntentMutation::DismissInterrupted {
+                        session_id,
+                        continuation,
+                        terminal,
+                    } => state.apply(AgentTabIntentMutation::DismissInterrupted {
+                        session_id,
+                        continuation,
+                        terminal,
+                    }),
                     AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. }
                     | AgentTabIntentMutation::DismissTerminal { terminal } => {
                         state.apply(AgentTabIntentMutation::DismissTerminal { terminal })
@@ -19575,7 +19591,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_intent_port_projects_both_stale_observation_variants() {
+    fn memory_intent_port_projects_a_stale_observation_without_mutating_state() {
         let workspace = WorkspaceId::new();
         let mut durable = AgentTabIntent::empty(workspace);
         durable.revision = 1;
@@ -19589,23 +19605,20 @@ mod tests {
             resumable: Vec::new(),
         };
 
-        for mutation in [
-            AgentTabIntentMutation::Observe {
-                terminals: Vec::new(),
-                agents: inventory.clone(),
-                allowed_sessions: BTreeSet::new(),
-            },
-            AgentTabIntentMutation::ObserveAll {
-                terminals: Vec::new(),
-                agents: inventory.clone(),
-                allowed_sessions: BTreeSet::new(),
-            },
-        ] {
-            let commit = port.mutate(workspace, 0, mutation).unwrap();
-            assert!(commit.cas_conflict);
-            assert!(!commit.mutation_applied);
-            assert_eq!(commit.projection, Some(AgentTabProjection::default()));
-        }
+        let commit = port
+            .mutate(
+                workspace,
+                0,
+                AgentTabIntentMutation::Observe {
+                    terminals: Vec::new(),
+                    agents: inventory,
+                    allowed_sessions: BTreeSet::new(),
+                },
+            )
+            .unwrap();
+        assert!(commit.cas_conflict);
+        assert!(!commit.mutation_applied);
+        assert_eq!(commit.projection, Some(AgentTabProjection::default()));
     }
 
     #[test]
@@ -20769,8 +20782,8 @@ mod tests {
         assert!(!retry.complete(redispatch_at, fresh.outcome));
         assert_eq!(mutations.lock().unwrap().len(), mutation_count + 1);
         assert_eq!(runtime.focused_terminal(), Some(second_terminal.clone()));
-        assert_eq!(runtime.active_pane().tabs().len(), 2);
-        assert!(runtime.active_pane().tabs().iter().any(|tab| matches!(
+        assert_eq!(runtime.active_pane().tabs().len(), 1);
+        assert!(!runtime.active_pane().tabs().iter().any(|tab| matches!(
             tab,
             PaneTab::Live(LivePane { terminal, kind: PaneKind::Agent })
                 if terminal.fences(&first_terminal)
@@ -21304,11 +21317,11 @@ mod tests {
         assert!(matches!(
             mutations.as_slice(),
             [
-                AgentTabIntentMutation::ObserveAll {
+                AgentTabIntentMutation::Observe {
                     allowed_sessions: initial_allowed,
                     ..
                 },
-                AgentTabIntentMutation::ObserveAll {
+                AgentTabIntentMutation::Observe {
                     allowed_sessions: removed_allowed,
                     ..
                 }
@@ -21324,7 +21337,7 @@ mod tests {
                 .iter()
                 .all(|target| target.session_id != Some(removed_session))
         );
-        assert!(durable.dismissed.is_empty());
+        assert_eq!(durable.dismissed, BTreeSet::from([root_dismissed]));
         assert!(
             durable.targets[0]
                 .tabs
@@ -22007,15 +22020,10 @@ mod tests {
     fn persistence_failures_leave_close_and_reopen_ui_unchanged_with_typed_notice() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
-        let continuation = AgentContinuationRef::new();
-        let terminal = scoped_terminal_ref(workspace, Some(session));
-        let mut open_intent = AgentTabIntent::empty(workspace);
-        open_intent.apply(AgentTabIntentMutation::Upsert {
-            session_id: Some(session),
-            continuation,
-            terminal: terminal.clone(),
-            select: true,
-        });
+        let history = interrupted_history(workspace, Some(session), true);
+        let continuation = history.continuation;
+        let terminal = history.last_terminal.clone();
+        let open_intent = AgentTabIntent::empty(workspace);
         let durable = Arc::new(Mutex::new(open_intent));
         let attempts = Arc::new(AtomicUsize::new(0));
         let bytes_before = serde_json::to_vec(&*durable.lock().unwrap()).unwrap();
@@ -22042,15 +22050,13 @@ mod tests {
             fence.1,
             vec![super::PaneRestoreTarget {
                 target: Target::Session(session),
-                panes: vec![LivePane {
-                    terminal: terminal.clone(),
-                    kind: PaneKind::Agent,
-                }],
-                selected: Some(terminal.clone()),
+                panes: Vec::new(),
+                selected: None,
                 selected_interrupted: None,
-                interrupted: Vec::new(),
+                interrupted: vec![history],
             }],
         ));
+        let _ = runtime.select_tab(TabDirection::Next);
 
         super::close_focused_terminal_pane(
             &mut ui,
@@ -22058,20 +22064,28 @@ mod tests {
             &mut std::collections::HashMap::new(),
         );
 
-        assert_eq!(runtime.focused_terminal(), Some(terminal));
+        assert!(runtime.focused_terminal().is_none());
         assert_eq!(runtime.active_pane().tabs().len(), 1);
-        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(
             serde_json::to_vec(&*durable.lock().unwrap()).unwrap(),
             bytes_before
         );
         assert_eq!(
-            runtime.active_pane().error(),
-            Some("terminal session is no longer available")
+            runtime
+                .state()
+                .notice()
+                .map(|notice| notice.message.as_str()),
+            Some(AgentTabIntentError::Unavailable.safe_message())
         );
-        assert!(runtime.state().notice().is_none());
 
-        let mut closed_intent = durable.lock().unwrap().clone();
+        let mut closed_intent = AgentTabIntent::empty(workspace);
+        closed_intent.apply(AgentTabIntentMutation::Upsert {
+            session_id: Some(session),
+            continuation,
+            terminal,
+            select: true,
+        });
         closed_intent.apply(AgentTabIntentMutation::Dismiss { continuation });
         let closed = Arc::new(Mutex::new(closed_intent));
         let closed_bytes = serde_json::to_vec(&*closed.lock().unwrap()).unwrap();
@@ -22295,7 +22309,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|mutation| matches!(mutation, AgentTabIntentMutation::ObserveAll { .. }))
+                .filter(|mutation| matches!(mutation, AgentTabIntentMutation::Observe { .. }))
                 .count(),
             2
         );
@@ -28806,7 +28820,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_history_tab_keeps_it_visible_without_resuming_anything() {
+    fn closing_an_inventory_only_history_tab_persists_its_removal_without_resuming() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let history = interrupted_history(workspace, Some(session), true);
@@ -28821,27 +28835,47 @@ mod tests {
             })),
         );
         let mut pending = std::collections::HashMap::new();
-        // Seed the saved slot so the dismissal has a lineage to attach to.
-        ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
-            session_id: Some(session),
-            continuation: history.continuation,
-            terminal: history.last_terminal.clone(),
-            select: false,
-        })
-        .unwrap();
-        assert_eq!(ui.agent_slot_order(), vec![history.continuation]);
+        assert!(ui.agent_slot_order().is_empty());
 
         super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending);
 
-        assert!(runtime.active_pane().has_tabs());
-        assert!(WorkspaceUi::agent_dismissed().is_empty());
-        assert_eq!(
-            runtime.active_pane().error(),
-            Some("Interrupted Agent has no live process; resume it before closing")
-        );
+        assert!(!runtime.active_pane().has_tabs());
+        assert_eq!(ui.agent_slot_order(), vec![history.continuation]);
+        assert_eq!(ui.agent_dismissed(), BTreeSet::from([history.continuation]));
+        assert!(runtime.active_pane().error().is_none());
         assert!(runtime.state().notice().is_none());
         assert!(requests.lock().unwrap().is_empty());
         assert!(ui.pane_launches.is_empty());
+
+        // A later coherent inventory replay receives the durable dismissal and
+        // therefore cannot resurrect the tab that Ctrl-O x removed.
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: AgentRuntimeRef::new(
+                    history.target.as_ref().unwrap().runtime_id,
+                    history.last_terminal.clone(),
+                    Some(session),
+                )
+                .unwrap(),
+                continuation: history.continuation,
+                state: AgentRuntimeInventoryState::Interrupted,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        };
+        assert!(
+            crate::usecase::application::interrupted_tab::project(
+                &inventory,
+                workspace,
+                &BTreeSet::from([session]),
+                &ui.agent_slot_order(),
+                &ui.agent_dismissed(),
+                &BTreeSet::new(),
+            )
+            .tabs
+            .is_empty()
+        );
     }
 
     #[test]
