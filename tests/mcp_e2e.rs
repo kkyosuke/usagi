@@ -365,6 +365,36 @@ fn production_session_prompt_is_durable_and_status_observes_the_session() {
 }
 
 #[test]
+fn production_session_pr_resolves_the_authenticated_caller_when_name_is_omitted() {
+    let mut mcp = McpHarness::start();
+    assert!(mcp.tool("session_create", &json!({"name":"named-pr-target"}))["error"].is_null());
+
+    // Existing coordinators and standalone clients can still name a session
+    // without an Agent credential.
+    let named = mcp.tool("session_pr", &json!({"name":"named-pr-target"}));
+    assert!(named.get("error").is_none(), "{named}");
+    let named = tool_text(&named);
+    assert_eq!(named["name"], "named-pr-target");
+    assert_eq!(named["pr"], json!([]));
+
+    // Without either source of identity, the daemon must not infer a session
+    // from the MCP process cwd or checked-out branch.
+    let anonymous = mcp.tool("session_pr", &json!({}));
+    assert!(anonymous.get("error").is_some(), "{anonymous}");
+
+    drop(mcp.launch_caller());
+    let current = mcp.tool("session_pr", &json!({}));
+    assert!(current.get("error").is_none(), "{current}");
+    let current = tool_text(&current);
+    assert_eq!(current["name"], "mcp-caller");
+    assert_eq!(current["pr"], json!([]));
+
+    // Credential injection does not change the explicit-name branch.
+    let explicit = tool_text(&mcp.tool("session_pr", &json!({"name":"named-pr-target"})));
+    assert_eq!(explicit["name"], "named-pr-target");
+}
+
+#[test]
 fn production_delegate_brief_immediately_dispatches_an_isolated_triage_worker() {
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();

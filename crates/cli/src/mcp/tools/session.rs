@@ -416,10 +416,10 @@ impl Tool for SessionPr {
         "session_pr"
     }
     fn description(&self) -> &'static str {
-        "セッションに紐づく PR とそのマージ状態を取得するときに使う。委譲先の成果が基点ブランチに入ったか（done）の検知に使う。"
+        "セッションに紐づく PR とそのマージ状態を取得するときに使う。name 省略時は認証済み caller 自身のセッション、指定時はそのセッションを読む。委譲先の成果が基点ブランチに入ったか（done）の検知にも使う。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"additionalProperties":false}"#
     }
 }
 
