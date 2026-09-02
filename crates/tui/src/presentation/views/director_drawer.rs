@@ -1194,6 +1194,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One rendering matrix keeps every Work Run control state visually comparable.
     fn work_run_control_renders_selection_confirmation_decision_and_retry() {
         let run = work_run();
         let selected = run.supervisor_run_id;
