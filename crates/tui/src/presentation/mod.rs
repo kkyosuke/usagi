@@ -34,6 +34,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
+use usagi_core::domain::supervisor::{MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, SupervisorRunQuery};
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
@@ -48,7 +49,7 @@ use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::create_session_error_modal;
 use crate::presentation::views::director_drawer::{
     self, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
-    DirectorOrganizationRow,
+    DirectorOrganizationRow, WorkRunControlProjection,
 };
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
@@ -98,6 +99,11 @@ use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSel
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
+};
+pub use crate::usecase::application::work_run_control::WorkRunPort;
+use crate::usecase::application::work_run_control::{
+    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControl, WorkRunControlAction, WorkRunControlError,
+    WorkRunControlMode, WorkRunControlOutcome, WorkRunControlRequest,
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal, open_failure_notice};
 use crate::usecase::overview::SessionCommand;
@@ -861,6 +867,82 @@ fn handle_director_picker_input(runtime: &mut WorkspaceRuntime, key: &Key) -> Op
     }
 }
 
+struct WorkRunControlInput {
+    outcome: WorkRunControlOutcome,
+    effects: Vec<Effect>,
+}
+
+fn handle_work_run_control_input(
+    runtime: &mut WorkspaceRuntime,
+    control: &mut WorkRunControl,
+    runs: &WorkRunProjection,
+    key: &Key,
+) -> Option<WorkRunControlInput> {
+    let can_host = runtime.state().overlay().is_none()
+        && runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven
+        && runtime.state().director_launching().is_none()
+        && matches!(runtime.state().director_new(), DirectorNew::Idle);
+    let effects = if can_host
+        && !runtime.state().director_drawer_open()
+        && matches!(key, Key::Live(LiveTerminalAction::WorkRuns))
+    {
+        runtime.handle_key(Key::Live(LiveTerminalAction::Director))
+    } else {
+        Vec::new()
+    };
+    let eligible = can_host && runtime.state().director_drawer_open();
+    if !eligible {
+        if control.mode() != WorkRunControlMode::Submitting {
+            control.close();
+        }
+        return None;
+    }
+    if control.mode() == WorkRunControlMode::Closed
+        && !matches!(key, Key::Live(LiveTerminalAction::WorkRuns))
+    {
+        return None;
+    }
+    if matches!(key, Key::Resize | Key::Other) {
+        return None;
+    }
+    if matches!(key, Key::Live(LiveTerminalAction::Director)) {
+        control.close();
+        return None;
+    }
+    let action = match key {
+        Key::Live(LiveTerminalAction::WorkRuns) => WorkRunControlAction::Toggle,
+        Key::Up => WorkRunControlAction::Up,
+        Key::Down => WorkRunControlAction::Down,
+        Key::Left => WorkRunControlAction::PreviousDecision,
+        Key::Right => WorkRunControlAction::NextDecision,
+        Key::Enter => WorkRunControlAction::Enter,
+        Key::Escape => WorkRunControlAction::Escape,
+        _ => {
+            return Some(WorkRunControlInput {
+                outcome: WorkRunControlOutcome::Consumed,
+                effects,
+            });
+        }
+    };
+    Some(WorkRunControlInput {
+        outcome: control.handle(
+            action,
+            runs.runs(),
+            runs.freshness() == crate::presentation::views::work_run::WorkRunFreshness::Fresh,
+        ),
+        effects,
+    })
+}
+
+fn work_run_control_projection(control: &WorkRunControl) -> WorkRunControlProjection {
+    WorkRunControlProjection {
+        mode: control.mode(),
+        selected: control.selected(),
+        decision: control.decision(),
+        feedback: control.feedback().map(str::to_owned),
+    }
+}
+
 /// Whether the drawer's selected root Agent, not the drawer itself, owns `Esc`.
 ///
 /// An agent CLI reads `Esc` as its own interrupt / dismiss, so swallowing it to
@@ -1234,7 +1316,9 @@ pub struct ControllerBackendComposition {
     /// observes the *other* open projects' Agent inventory, so it never shares
     /// a connection with this workspace's own lanes.
     pub garden_inventory: Box<dyn GardenInventoryPort>,
-    /// Dedicated read-only lane for daemon-owned `SupervisorRun` progress.
+    /// Dedicated serialized lane for daemon-owned `SupervisorRun` observation
+    /// and human control. Serialization prevents an older snapshot from
+    /// overtaking a control response in the UI.
     pub work_runs: Box<dyn WorkRunPort>,
     pub agent_tab_intents: Box<dyn AgentTabIntentPort>,
     pub external_terminal: Box<dyn ExternalTerminalPort>,
@@ -1266,20 +1350,6 @@ pub trait GardenInventoryPort: Send {
     fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String>;
 }
 
-/// Read-only daemon lane for one workspace's durable Work Runs.
-pub trait WorkRunPort: Send {
-    /// Return a bounded, redaction-safe snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns a safe presentation error when the daemon cannot provide a
-    /// coherent snapshot for the requested workspace.
-    fn snapshot(
-        &mut self,
-        workspace: WorkspaceId,
-    ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>;
-}
-
 struct UnavailableWorkRunPort;
 
 impl WorkRunPort for UnavailableWorkRunPort {
@@ -1288,6 +1358,17 @@ impl WorkRunPort for UnavailableWorkRunPort {
         _: WorkspaceId,
     ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
         Err("Work Run progress is unavailable".to_owned())
+    }
+
+    fn control(
+        &mut self,
+        _: WorkspaceId,
+        _: OperationId,
+        _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
+    ) -> Result<usagi_core::domain::supervisor::SupervisorRunQuery, WorkRunControlError> {
+        Err(WorkRunControlError::Rejected(
+            "Work Run action is unavailable; refresh and try again".to_owned(),
+        ))
     }
 }
 
@@ -2065,10 +2146,16 @@ struct GardenObservationCompletion {
 
 const WORK_RUN_OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2_000);
 const WORK_RUN_OBSERVATION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5_000);
-
-struct WorkRunObservationCompletion {
-    port: Box<dyn WorkRunPort>,
-    snapshot: Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>,
+enum WorkRunLaneCompletion {
+    Observation {
+        port: Box<dyn WorkRunPort>,
+        snapshot: Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>,
+    },
+    Control {
+        port: Box<dyn WorkRunPort>,
+        operation_id: OperationId,
+        result: Box<Result<SupervisorRunQuery, WorkRunControlError>>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2101,6 +2188,12 @@ impl WorkRunObservation {
             } else {
                 WORK_RUN_OBSERVATION_BACKOFF
             };
+    }
+
+    fn refresh_now(&mut self) {
+        if !self.in_flight {
+            self.next_due = std::time::Duration::ZERO;
+        }
     }
 }
 
@@ -2181,16 +2274,72 @@ fn spawn_garden_observation_job(
 fn spawn_work_run_observation_job(
     mut port: Box<dyn WorkRunPort>,
     workspace: WorkspaceId,
-    sender: Sender<WorkRunObservationCompletion>,
+    sender: Sender<WorkRunLaneCompletion>,
 ) {
     std::thread::spawn(move || {
-        let snapshot = port.snapshot(workspace).and_then(|snapshot| {
-            (snapshot.workspace_id == workspace)
-                .then_some(snapshot)
-                .ok_or_else(|| "daemon returned another workspace's Work Runs".to_owned())
-        });
-        let _ = sender.send(WorkRunObservationCompletion { port, snapshot });
+        let snapshot =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| port.snapshot(workspace)))
+                .unwrap_or_else(|_| Err("Work Run progress is temporarily unavailable".to_owned()))
+                .and_then(|snapshot| validate_work_run_snapshot(snapshot, workspace));
+        let _ = sender.send(WorkRunLaneCompletion::Observation { port, snapshot });
     });
+}
+
+fn spawn_work_run_control_job(
+    mut port: Box<dyn WorkRunPort>,
+    workspace: WorkspaceId,
+    request: WorkRunControlRequest,
+    sender: Sender<WorkRunLaneCompletion>,
+) {
+    std::thread::spawn(move || {
+        let operation_id = request.operation_id;
+        let expected = request.command.supervisor_run_id();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            port.control(workspace, operation_id, request.command)
+        }))
+        .unwrap_or_else(|_| {
+            Err(WorkRunControlError::Unconfirmed(
+                WORK_RUN_ACTION_UNCONFIRMED.to_owned(),
+            ))
+        })
+        .and_then(|run| {
+            (run.supervisor_run_id == expected && run.provenance.is_empty())
+                .then_some(run)
+                .ok_or_else(|| {
+                    WorkRunControlError::Unconfirmed(
+                        "daemon returned an invalid Work Run result".to_owned(),
+                    )
+                })
+        });
+        let _ = sender.send(WorkRunLaneCompletion::Control {
+            port,
+            operation_id,
+            result: Box::new(result),
+        });
+    });
+}
+
+fn validate_work_run_snapshot(
+    snapshot: usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot,
+    workspace: WorkspaceId,
+) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
+    let unique = snapshot
+        .runs
+        .iter()
+        .map(|run| run.supervisor_run_id)
+        .collect::<BTreeSet<_>>()
+        .len()
+        == snapshot.runs.len();
+    if snapshot.workspace_id != workspace {
+        Err("daemon returned another workspace's Work Runs".to_owned())
+    } else if snapshot.runs.len() > MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS
+        || !unique
+        || snapshot.runs.iter().any(|run| !run.provenance.is_empty())
+    {
+        Err("daemon returned invalid Work Run progress".to_owned())
+    } else {
+        Ok(snapshot)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4122,6 +4271,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
         | LiveTerminalAction::ActivateWorkspace(_)
+        | LiveTerminalAction::WorkRuns
         | LiveTerminalAction::CloseTab
         | LiveTerminalAction::ResumeTab
         | LiveTerminalAction::MoveTabNext
@@ -4803,6 +4953,7 @@ fn director_drawer_projection(
         feedback,
         new: director_new_projection(runtime),
         work_runs: WorkRunProjection::default(),
+        work_run_control: WorkRunControlProjection::default(),
     }
 }
 
@@ -7244,7 +7395,7 @@ fn drive_workspace_controller(
     let mut pending_session_refresh: Option<Completions> = None;
     let (restore_sender, restore_completions) = mpsc::channel();
     let (garden_sender, garden_completions) = mpsc::channel::<GardenObservationCompletion>();
-    let (work_run_sender, work_run_completions) = mpsc::channel::<WorkRunObservationCompletion>();
+    let (work_run_sender, work_run_completions) = mpsc::channel::<WorkRunLaneCompletion>();
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     workspace.set_session_lifecycles(session_lifecycles);
@@ -7329,6 +7480,8 @@ fn drive_workspace_controller(
     let mut garden_observations = 0_u64;
     let mut work_run_observation = WorkRunObservation::new();
     let mut work_runs = WorkRunProjection::default();
+    let mut work_run_control = WorkRunControl::default();
+    let mut pending_work_run_control = None;
     let mut work_run_revision = 0_u64;
     // Filesystem hint for the inline create form. It is off the frame budget:
     // no scan happens while the form is closed (#554).
@@ -7489,17 +7642,39 @@ fn drive_workspace_controller(
             garden_observation.complete(restore_clock.elapsed(), observed);
         }
         for completion in work_run_completions.try_iter().take(FRAME_EVENT_BUDGET) {
-            let observed = completion.snapshot.is_ok();
-            let next = match completion.snapshot {
-                Ok(snapshot) => WorkRunProjection::fresh(snapshot.runs),
-                Err(_) => work_runs.clone().unavailable(),
-            };
-            if next != work_runs {
-                work_runs = next;
-                work_run_revision = work_run_revision.wrapping_add(1);
+            match completion {
+                WorkRunLaneCompletion::Observation { port, snapshot } => {
+                    let observed = snapshot.is_ok();
+                    let next = match snapshot {
+                        Ok(snapshot) => WorkRunProjection::fresh(snapshot.runs),
+                        Err(_) => work_runs.clone().unavailable(),
+                    };
+                    if next != work_runs {
+                        work_runs = next;
+                        work_run_control.sync_selection(work_runs.runs());
+                        work_run_revision = work_run_revision.wrapping_add(1);
+                    }
+                    work_run_port = Some(port);
+                    work_run_observation.complete(restore_clock.elapsed(), observed);
+                }
+                WorkRunLaneCompletion::Control {
+                    port,
+                    operation_id,
+                    result,
+                } => {
+                    let result = *result;
+                    let previous_control = work_run_control.clone();
+                    let accepted = work_run_control.complete(operation_id, &result);
+                    if accepted && let Ok(run) = &result {
+                        work_runs.apply_control(run.clone());
+                    }
+                    if work_run_control != previous_control || accepted {
+                        work_run_revision = work_run_revision.wrapping_add(1);
+                    }
+                    work_run_port = Some(port);
+                    work_run_observation.refresh_now();
+                }
             }
-            work_run_port = Some(completion.port);
-            work_run_observation.complete(restore_clock.elapsed(), observed);
         }
         let (terminal_height, width) = term.size()?;
         let height = terminal_height.saturating_sub(PROJECT_BAR_ROWS);
@@ -7660,7 +7835,8 @@ fn drive_workspace_controller(
         if director_material_key != Some(next_director_key) {
             let drawer_projection =
                 director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref())
-                    .with_work_runs(work_runs.clone());
+                    .with_work_runs(work_runs.clone())
+                    .with_work_run_control(work_run_control_projection(&work_run_control));
             runtime.set_director_projection(drawer_projection);
             director_material_key = Some(next_director_key);
         }
@@ -7797,7 +7973,17 @@ fn drive_workspace_controller(
                 spawn_garden_observation_job(port, targets, garden_sender.clone());
             }
         }
-        if work_run_port.is_some() && work_run_observation.begin_if_due(restore_clock.elapsed()) {
+        if work_run_port.is_some() && pending_work_run_control.is_some() {
+            let port = work_run_port
+                .take()
+                .expect("the Work Run control port was checked above");
+            let request = pending_work_run_control
+                .take()
+                .expect("the Work Run control request was checked above");
+            spawn_work_run_control_job(port, workspace_id, request, work_run_sender.clone());
+        } else if work_run_port.is_some()
+            && work_run_observation.begin_if_due(restore_clock.elapsed())
+        {
             let port = work_run_port
                 .take()
                 .expect("the Work Run observation port was checked above");
@@ -8163,12 +8349,45 @@ fn drive_workspace_controller(
         let director_header_effects = drawn_material.as_ref().and_then(|material| {
             close_director_from_header(&mut runtime, &key, material.width, &material.projection)
         });
+        if director_header_effects.is_some() {
+            let previous = work_run_control.clone();
+            work_run_control.close();
+            if work_run_control != previous {
+                work_run_revision = work_run_revision.wrapping_add(1);
+            }
+        }
+        let work_run_input = if garden_route.is_none() && director_header_effects.is_none() {
+            let previous = work_run_control.clone();
+            let input = handle_work_run_control_input(
+                &mut runtime,
+                &mut work_run_control,
+                &work_runs,
+                &key,
+            );
+            if work_run_control != previous {
+                work_run_revision = work_run_revision.wrapping_add(1);
+            }
+            input
+        } else {
+            None
+        };
+        if let Some(WorkRunControlInput {
+            outcome: WorkRunControlOutcome::Submit(request),
+            ..
+        }) = work_run_input.as_ref()
+        {
+            pending_work_run_control = Some(request.clone());
+        }
+        let work_run_effects = work_run_input.map(|input| input.effects);
         let input_route = match garden_route {
             Some(GardenInputRoute::Local(effects)) => WorkspaceInputRoute::Garden(effects),
             Some(GardenInputRoute::Project(_)) => unreachable!("project visit returned above"),
             None if director_header_effects.is_some() => {
                 WorkspaceInputRoute::Drawer(director_header_effects.expect("matched above"))
             }
+            None if work_run_effects.is_some() => WorkspaceInputRoute::Drawer(
+                work_run_effects.expect("matched Work Run control input"),
+            ),
             None => route_workspace_input_before_reducer(
                 &mut ui,
                 &mut runtime,
@@ -9867,6 +10086,10 @@ mod tests {
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session_lifecycle::AgentPhase;
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, Settings};
+    use usagi_core::domain::supervisor::{
+        ExecutionPolicy, RunProvenance, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
+        TaskId,
+    };
     use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
     use usagi_core::domain::user_decision::UserDecisionAnswer;
     use usagi_core::usecase::env::EnvScope;
@@ -9893,6 +10116,35 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    fn observed_work_run(state: SupervisorRunState) -> SupervisorRunQuery {
+        SupervisorRunQuery {
+            supervisor_run_id: SupervisorRunId::new(),
+            state_revision: 1,
+            state,
+            terminal_at: None,
+            terminal_reason: None,
+            policy: ExecutionPolicy::default(),
+            escalation: None,
+            tasks: Vec::new(),
+            provenance: Vec::new(),
+        }
+    }
+
+    fn with_private_work_run_provenance(mut run: SupervisorRunQuery) -> SupervisorRunQuery {
+        run.provenance.push(RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: TaskId::new("private-task").unwrap(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id: OperationId::new(),
+            worker_session_id: Some(SessionId::new()),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        });
+        run
     }
 
     /// Host-action routing without the resident session lane. These tests
@@ -10076,6 +10328,10 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::DirectorNew)),
             Some(AppEvent::Key(AppKey::OpenDirectorNew))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::WorkRuns)),
+            None
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::RootTerminal)),
@@ -20373,7 +20629,13 @@ mod tests {
     fn work_run_observation_is_single_flight_and_bounded() {
         let mut lane = super::WorkRunObservation::new();
         let now = std::time::Duration::from_secs(1);
+        lane.next_due = now;
+        lane.refresh_now();
+        assert_eq!(lane.next_due, std::time::Duration::ZERO);
         assert!(lane.begin_if_due(now));
+        lane.next_due = now + super::WORK_RUN_OBSERVATION_BACKOFF;
+        lane.refresh_now();
+        assert_eq!(lane.next_due, now + super::WORK_RUN_OBSERVATION_BACKOFF);
         assert!(!lane.begin_if_due(now));
         lane.complete(now, true);
         assert!(!lane.begin_if_due(now + super::WORK_RUN_OBSERVATION_INTERVAL / 2));
@@ -20382,6 +20644,29 @@ mod tests {
         lane.complete(next, false);
         assert!(!lane.begin_if_due(next + super::WORK_RUN_OBSERVATION_BACKOFF / 2));
         assert!(lane.begin_if_due(next + super::WORK_RUN_OBSERVATION_BACKOFF));
+    }
+
+    #[test]
+    fn unavailable_work_run_port_fails_observation_and_control_closed() {
+        use super::WorkRunPort as _;
+
+        let workspace = WorkspaceId::new();
+        let mut port = super::UnavailableWorkRunPort;
+        assert_eq!(
+            port.snapshot(workspace).unwrap_err(),
+            "Work Run progress is unavailable"
+        );
+        let command = usagi_core::domain::supervisor::SupervisorWorkspaceCommand::Cancel {
+            supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId::new(),
+            reason: "operator cancelled".into(),
+        };
+        assert_eq!(
+            port.control(workspace, OperationId::new(), command)
+                .unwrap_err(),
+            super::WorkRunControlError::Rejected(
+                "Work Run action is unavailable; refresh and try again".into()
+            )
+        );
     }
 
     #[test]
@@ -20401,6 +20686,18 @@ mod tests {
                     },
                 )
             }
+
+            fn control(
+                &mut self,
+                _: WorkspaceId,
+                _: OperationId,
+                _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
+            ) -> Result<
+                usagi_core::domain::supervisor::SupervisorRunQuery,
+                super::WorkRunControlError,
+            > {
+                unreachable!("observation test never controls a Work Run")
+            }
         }
 
         let requested = WorkspaceId::new();
@@ -20409,9 +20706,214 @@ mod tests {
         let completion = receiver
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the Work Run observation returns its port");
+        let super::WorkRunLaneCompletion::Observation { snapshot, .. } = completion else {
+            panic!("observation job returned a control completion");
+        };
         assert_eq!(
-            completion.snapshot.unwrap_err(),
+            snapshot.unwrap_err(),
             "daemon returned another workspace's Work Runs"
+        );
+    }
+
+    #[test]
+    fn work_run_lane_rejects_unbounded_or_private_snapshots() {
+        let workspace = WorkspaceId::new();
+        let run = observed_work_run(SupervisorRunState::Running);
+        assert_eq!(
+            super::validate_work_run_snapshot(
+                usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot {
+                    workspace_id: workspace,
+                    runs: vec![run.clone(), run.clone()],
+                },
+                workspace,
+            )
+            .unwrap_err(),
+            "daemon returned invalid Work Run progress"
+        );
+        let too_many = (0..=super::MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS)
+            .map(|_| observed_work_run(SupervisorRunState::Running))
+            .collect();
+        assert_eq!(
+            super::validate_work_run_snapshot(
+                usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot {
+                    workspace_id: workspace,
+                    runs: too_many,
+                },
+                workspace,
+            )
+            .unwrap_err(),
+            "daemon returned invalid Work Run progress"
+        );
+        assert_eq!(
+            super::validate_work_run_snapshot(
+                usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot {
+                    workspace_id: workspace,
+                    runs: vec![with_private_work_run_provenance(run.clone())],
+                },
+                workspace,
+            )
+            .unwrap_err(),
+            "daemon returned invalid Work Run progress"
+        );
+        assert!(
+            super::validate_work_run_snapshot(
+                usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot {
+                    workspace_id: workspace,
+                    runs: vec![run.clone()],
+                },
+                workspace,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn work_run_lane_rejects_mismatched_or_private_control_results() {
+        struct MismatchedControl(SupervisorRunQuery);
+        impl super::WorkRunPort for MismatchedControl {
+            fn snapshot(
+                &mut self,
+                _: WorkspaceId,
+            ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>
+            {
+                unreachable!("control test never observes Work Runs")
+            }
+
+            fn control(
+                &mut self,
+                _: WorkspaceId,
+                _: OperationId,
+                _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
+            ) -> Result<SupervisorRunQuery, super::WorkRunControlError> {
+                Ok(self.0.clone())
+            }
+        }
+
+        let workspace = WorkspaceId::new();
+        let run = observed_work_run(SupervisorRunState::Running);
+        let request = super::WorkRunControlRequest {
+            operation_id: OperationId::new(),
+            command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand::Cancel {
+                supervisor_run_id: run.supervisor_run_id,
+                reason: "operator cancelled".into(),
+            },
+            observed_state_revision: run.state_revision,
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        super::spawn_work_run_control_job(
+            Box::new(MismatchedControl(observed_work_run(
+                SupervisorRunState::Cancelled,
+            ))),
+            workspace,
+            request.clone(),
+            sender,
+        );
+        let super::WorkRunLaneCompletion::Control {
+            operation_id,
+            result,
+            ..
+        } = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the Work Run control returns its port")
+        else {
+            panic!("control job returned an observation completion");
+        };
+        assert_eq!(operation_id, request.operation_id);
+        let result = *result;
+        assert_eq!(
+            result.unwrap_err(),
+            super::WorkRunControlError::Unconfirmed(
+                "daemon returned an invalid Work Run result".to_owned()
+            )
+        );
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        super::spawn_work_run_control_job(
+            Box::new(MismatchedControl(with_private_work_run_provenance(
+                run.clone(),
+            ))),
+            workspace,
+            request,
+            sender,
+        );
+        let super::WorkRunLaneCompletion::Control { result, .. } = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the private Work Run result returns its port")
+        else {
+            panic!("control job returned an observation completion");
+        };
+        let result = *result;
+        assert_eq!(
+            result.unwrap_err(),
+            super::WorkRunControlError::Unconfirmed(
+                "daemon returned an invalid Work Run result".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn work_run_lane_recovers_ports_after_adapter_panics() {
+        struct PanickingWorkRuns;
+        impl super::WorkRunPort for PanickingWorkRuns {
+            fn snapshot(
+                &mut self,
+                _: WorkspaceId,
+            ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>
+            {
+                panic!("snapshot adapter panic")
+            }
+
+            fn control(
+                &mut self,
+                _: WorkspaceId,
+                _: OperationId,
+                _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
+            ) -> Result<SupervisorRunQuery, super::WorkRunControlError> {
+                panic!("control adapter panic")
+            }
+        }
+
+        let workspace = WorkspaceId::new();
+        let run = observed_work_run(SupervisorRunState::Running);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        super::spawn_work_run_observation_job(Box::new(PanickingWorkRuns), workspace, sender);
+        let super::WorkRunLaneCompletion::Observation { snapshot, .. } = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a panicking observation still returns its port")
+        else {
+            panic!("observation job returned a control completion");
+        };
+        assert_eq!(
+            snapshot.unwrap_err(),
+            "Work Run progress is temporarily unavailable"
+        );
+
+        let operation_id = OperationId::new();
+        let request = super::WorkRunControlRequest {
+            operation_id,
+            command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand::Cancel {
+                supervisor_run_id: run.supervisor_run_id,
+                reason: "operator cancelled".into(),
+            },
+            observed_state_revision: run.state_revision,
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        super::spawn_work_run_control_job(Box::new(PanickingWorkRuns), workspace, request, sender);
+        let super::WorkRunLaneCompletion::Control {
+            operation_id: returned_operation,
+            result,
+            ..
+        } = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a panicking control still returns its port")
+        else {
+            panic!("control job returned an observation completion");
+        };
+        assert_eq!(returned_operation, operation_id);
+        let result = *result;
+        assert_eq!(
+            result.unwrap_err(),
+            super::WorkRunControlError::Unconfirmed(super::WORK_RUN_ACTION_UNCONFIRMED.to_owned())
         );
     }
 
@@ -23356,6 +23858,85 @@ mod tests {
                 (root_agent, b"\r".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn work_run_chord_opens_only_the_goal_driven_director_control() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        let run = observed_work_run(SupervisorRunState::Running);
+        let runs = super::WorkRunProjection::fresh(vec![run.clone()]);
+        let mut control = super::WorkRunControl::default();
+
+        let input = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut control,
+            &runs,
+            &Key::Live(LiveTerminalAction::WorkRuns),
+        )
+        .expect("the Goal-driven chord owns the input");
+        assert!(input.effects.is_empty());
+        assert_eq!(input.outcome, super::WorkRunControlOutcome::Consumed);
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(control.mode(), super::WorkRunControlMode::List);
+        assert_eq!(control.selected(), Some(run.supervisor_run_id));
+
+        for key in [Key::Up, Key::Down, Key::Left, Key::Right] {
+            assert!(
+                super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &key,)
+                    .is_some()
+            );
+        }
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Enter,)
+                .is_some()
+        );
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Escape,)
+                .is_some()
+        );
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Char('x'),
+            )
+            .is_some()
+        );
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Resize,)
+                .is_none()
+        );
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Live(LiveTerminalAction::Director),
+            )
+            .is_none()
+        );
+        assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Resize,)
+                .is_none()
+        );
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Live(LiveTerminalAction::WorkRuns),
+            )
+            .is_none()
+        );
+        assert!(!runtime.state().director_drawer_open());
+        assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
     }
 
     /// `Esc` belongs to the drawer's selected root Agent — an agent CLI reads it

@@ -10,7 +10,10 @@ use crate::presentation::views::work_run::{WorkRunFreshness, WorkRunProgress, Wo
 use crate::presentation::views::workspace::TerminalViewProjection;
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::terminal_selection::TerminalPoint;
-use usagi_core::domain::supervisor::{SupervisorRunQuery, SupervisorRunState, TaskState};
+use crate::usecase::application::work_run_control::WorkRunControlMode;
+use usagi_core::domain::supervisor::{
+    EscalationDecision, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskState,
+};
 
 /// Desired lower bound while the drawer can coexist with a visible background.
 pub const MIN_DRAWER_WIDTH: usize = 56;
@@ -85,6 +88,25 @@ pub enum DirectorNewProjection {
     Launching,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkRunControlProjection {
+    pub mode: WorkRunControlMode,
+    pub selected: Option<SupervisorRunId>,
+    pub decision: EscalationDecision,
+    pub feedback: Option<String>,
+}
+
+impl Default for WorkRunControlProjection {
+    fn default() -> Self {
+        Self {
+            mode: WorkRunControlMode::Closed,
+            selected: None,
+            decision: EscalationDecision::Resume,
+            feedback: None,
+        }
+    }
+}
+
 /// Pure material accepted by the drawer renderer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirectorDrawerProjection {
@@ -101,12 +123,20 @@ pub struct DirectorDrawerProjection {
     /// Daemon-owned, redaction-safe progress. The shared projection owns
     /// ordering, aggregation, and observation freshness for every surface.
     pub work_runs: WorkRunProjection,
+    /// Explicit, confirm-before-mutate Work Run interaction.
+    pub work_run_control: WorkRunControlProjection,
 }
 
 impl DirectorDrawerProjection {
     #[must_use]
     pub fn with_work_runs(mut self, runs: WorkRunProjection) -> Self {
         self.work_runs = runs;
+        self
+    }
+
+    #[must_use]
+    pub fn with_work_run_control(mut self, control: WorkRunControlProjection) -> Self {
+        self.work_run_control = control;
         self
     }
 }
@@ -306,6 +336,10 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
         return goal_composer_body(width, height, rows, candidates, *selected, goal);
     }
 
+    if projection.work_run_control.mode != WorkRunControlMode::Closed {
+        return work_run_control_body(width, height, rows, projection);
+    }
+
     if let Some(run) = projection.work_runs.primary() {
         rows.extend(work_run_rows(width, run, projection.work_runs.freshness()));
     } else if projection.work_runs.freshness() == WorkRunFreshness::Unavailable {
@@ -318,7 +352,7 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
     }
 
     let footer_hint = if projection.goal_driven {
-        "Work Run · stop reason: output or Decision · Esc: close"
+        "Ctrl-O w: Work Runs/actions · Esc: close"
     } else {
         "Ctrl-O n / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close"
     };
@@ -375,6 +409,132 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
     rows.into_iter()
         .map(|row| widgets::clip_to_width(&row, width))
         .collect()
+}
+
+fn work_run_control_body(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    projection: &DirectorDrawerProjection,
+) -> Vec<String> {
+    let control = &projection.work_run_control;
+    rows.push(Role::Accent.style().bold().paint("Work Runs"));
+    if projection.work_runs.freshness() == WorkRunFreshness::Unavailable {
+        rows.push(
+            Role::Warning
+                .style()
+                .paint("Cached · refresh required before actions"),
+        );
+    }
+    if let Some(feedback) = &control.feedback {
+        let style = if control.mode == WorkRunControlMode::Retry {
+            Role::Warning.style()
+        } else {
+            Style::new().dim()
+        };
+        rows.push(style.paint(feedback));
+    }
+
+    match control.mode {
+        WorkRunControlMode::Closed => unreachable!("closed control uses the normal drawer"),
+        WorkRunControlMode::List => {
+            let footer = "↑↓ select · Enter actions · Esc close";
+            let capacity = height.saturating_sub(rows.len() + 1);
+            let runs = projection.work_runs.runs();
+            let selected = control
+                .selected
+                .and_then(|id| runs.iter().position(|run| run.supervisor_run_id == id))
+                .unwrap_or(0);
+            let start = selected.saturating_sub(capacity.saturating_sub(1));
+            for run in runs.iter().skip(start).take(capacity) {
+                let marker = if Some(run.supervisor_run_id) == control.selected {
+                    "›"
+                } else {
+                    " "
+                };
+                let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
+                let progress = WorkRunProgress::from_run(run);
+                rows.push(format!(
+                    "{marker} #{short_id}  {:<15} {}/{}",
+                    run_state_label(run.state),
+                    progress.succeeded_tasks,
+                    progress.total_tasks
+                ));
+            }
+            if runs.is_empty() && capacity > 0 {
+                rows.push(Style::new().dim().paint("No Work Runs yet"));
+            }
+            rows.truncate(height.saturating_sub(1));
+            rows.resize(height.saturating_sub(1), String::new());
+            rows.push(Style::new().dim().paint(footer));
+        }
+        WorkRunControlMode::ConfirmCancel => {
+            rows.extend(control_prompt_rows(
+                control.selected,
+                "Cancel this Work Run and stop its active Agents?",
+                "Enter confirm · Esc back",
+            ));
+            finish_control_rows(&mut rows, height);
+        }
+        WorkRunControlMode::ResolveEscalation => {
+            rows.extend(control_prompt_rows(
+                control.selected,
+                "Resolve the current decision",
+                "↑↓ choose · Enter confirm · Esc back",
+            ));
+            for (decision, label) in [
+                (EscalationDecision::Resume, "Retry work"),
+                (EscalationDecision::Cancel, "Cancel run"),
+                (EscalationDecision::Fail, "Mark failed"),
+            ] {
+                let marker = if decision == control.decision {
+                    "›"
+                } else {
+                    " "
+                };
+                rows.push(format!("{marker} {label}"));
+            }
+            finish_control_rows(&mut rows, height);
+        }
+        WorkRunControlMode::Submitting => {
+            rows.extend(control_prompt_rows(
+                control.selected,
+                "Applying the durable action…",
+                "Waiting for the daemon · do not repeat",
+            ));
+            finish_control_rows(&mut rows, height);
+        }
+        WorkRunControlMode::Retry => {
+            rows.extend(control_prompt_rows(
+                control.selected,
+                "The action outcome is not confirmed",
+                "Enter retry same operation · Esc close",
+            ));
+            finish_control_rows(&mut rows, height);
+        }
+    }
+    rows.into_iter()
+        .map(|row| widgets::clip_to_width(&row, width))
+        .collect()
+}
+
+fn control_prompt_rows(
+    selected: Option<SupervisorRunId>,
+    prompt: &str,
+    footer: &str,
+) -> Vec<String> {
+    let id = selected.map_or_else(
+        || "unknown".to_owned(),
+        |id| id.to_string().chars().take(8).collect(),
+    );
+    vec![format!("#{id}"), prompt.to_owned(), footer.to_owned()]
+}
+
+fn finish_control_rows(rows: &mut Vec<String>, height: usize) {
+    let footer = rows.pop().unwrap_or_default();
+    rows.truncate(height.saturating_sub(1));
+    rows.resize(height.saturating_sub(1), String::new());
+    rows.push(Style::new().dim().paint(&footer));
 }
 
 fn work_run_rows(
@@ -864,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_driven_drawer_names_the_run_and_exposes_the_stop_reason_surfaces() {
+    fn goal_driven_drawer_names_the_run_and_exposes_the_control_surface() {
         let projection = DirectorDrawerProjection {
             goal_driven: true,
             ..DirectorDrawerProjection::default()
@@ -877,7 +1037,7 @@ mod tests {
 
         assert!(body.contains("Work Run  [No conversations]"));
         assert!(body.contains("Work Run output and stop reasons appear here."));
-        assert!(body.contains("stop reason: output or Decision"));
+        assert!(body.contains("Ctrl-O w: Work Runs/actions"));
         assert!(!body.contains("Choose New to start a conversation."));
     }
 
@@ -1034,6 +1194,132 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One rendering matrix keeps every Work Run control state visually comparable.
+    fn work_run_control_renders_selection_confirmation_decision_and_retry() {
+        let run = work_run();
+        let selected = run.supervisor_run_id;
+        let another = work_run();
+        let base = DirectorDrawerProjection::default()
+            .with_work_runs(WorkRunProjection::fresh(vec![run, another]))
+            .with_work_run_control(WorkRunControlProjection {
+                mode: WorkRunControlMode::List,
+                selected: Some(selected),
+                ..WorkRunControlProjection::default()
+            });
+        let list = drawer_body(60, 12, &base)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(list.contains("Work Runs"));
+        assert!(list.contains("› #"));
+        assert!(list.contains("  #"));
+        assert!(list.contains("Enter actions"));
+
+        let confirmation = DirectorDrawerProjection {
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::ConfirmCancel,
+                selected: Some(selected),
+                feedback: Some("review this action".into()),
+                ..WorkRunControlProjection::default()
+            },
+            ..base.clone()
+        };
+        let confirmation = drawer_body(60, 12, &confirmation)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(confirmation.contains("stop its active Agents"));
+        assert!(confirmation.contains("Enter confirm"));
+        assert!(confirmation.contains("review this action"));
+
+        let decision = DirectorDrawerProjection {
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::ResolveEscalation,
+                selected: Some(selected),
+                decision: EscalationDecision::Cancel,
+                feedback: None,
+            },
+            ..base.clone()
+        };
+        let decision = drawer_body(60, 12, &decision)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(decision.contains("› Cancel run"));
+
+        let submitting = DirectorDrawerProjection {
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::Submitting,
+                selected: Some(selected),
+                ..WorkRunControlProjection::default()
+            },
+            ..base.clone()
+        };
+        let submitting = drawer_body(60, 12, &submitting)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(submitting.contains("Applying the durable action"));
+        assert!(submitting.contains("do not repeat"));
+
+        let cached = DirectorDrawerProjection {
+            work_runs: base.work_runs.clone().unavailable(),
+            ..base.clone()
+        };
+        let cached = drawer_body(60, 12, &cached)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(cached.contains("Cached · refresh required before actions"));
+
+        let retry = DirectorDrawerProjection {
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::Retry,
+                selected: Some(selected),
+                feedback: Some("outcome unavailable".into()),
+                ..WorkRunControlProjection::default()
+            },
+            ..base
+        };
+        let retry = drawer_body(60, 12, &retry)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(retry.contains("outcome unavailable"));
+        assert!(retry.contains("retry same operation"));
+
+        let empty =
+            DirectorDrawerProjection::default().with_work_run_control(WorkRunControlProjection {
+                mode: WorkRunControlMode::List,
+                ..WorkRunControlProjection::default()
+            });
+        let empty = drawer_body(60, 12, &empty)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(empty.contains("No Work Runs yet"));
+    }
+
+    #[test]
+    fn control_prompt_identifies_a_missing_selection_as_unknown() {
+        assert_eq!(control_prompt_rows(None, "prompt", "footer")[0], "#unknown");
+    }
+
+    #[test]
+    #[should_panic(expected = "closed control uses the normal drawer")]
+    fn closed_work_run_control_cannot_enter_the_control_renderer() {
+        let projection = DirectorDrawerProjection::default();
+        let _ = work_run_control_body(60, 12, vec![], &projection);
+    }
+
+    #[test]
     fn goal_driven_empty_and_launching_states_render_their_distinct_guidance() {
         let composer = DirectorDrawerProjection {
             goal_driven: true,
@@ -1116,6 +1402,7 @@ mod tests {
             feedback: None,
             new: DirectorNewProjection::Ready,
             work_runs: WorkRunProjection::default(),
+            work_run_control: WorkRunControlProjection::default(),
         };
         let frame = render_over(12, 80, &vec![String::new(); 12], &projection);
         let text = frame
@@ -1174,6 +1461,7 @@ mod tests {
             feedback: None,
             new: DirectorNewProjection::Ready,
             work_runs: WorkRunProjection::default(),
+            work_run_control: WorkRunControlProjection::default(),
         };
         let body = drawer_body(52, 9, &projection)
             .into_iter()
@@ -1230,6 +1518,7 @@ mod tests {
             feedback: Some("resume failed safely".to_owned()),
             new: DirectorNewProjection::Ready,
             work_runs: WorkRunProjection::default(),
+            work_run_control: WorkRunControlProjection::default(),
         };
         let body = drawer_body(52, 9, &projection)
             .into_iter()
@@ -1447,6 +1736,7 @@ mod tests {
             feedback: None,
             new: DirectorNewProjection::Ready,
             work_runs: WorkRunProjection::default(),
+            work_run_control: WorkRunControlProjection::default(),
         };
         for (height, width) in [(0, 0), (1, 1), (3, 8), (12, 56), (24, 200)] {
             let frame = render_over(height, width, &[], &projection);

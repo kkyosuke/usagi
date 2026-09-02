@@ -209,6 +209,10 @@ pub enum LiveTerminalAction {
     /// (`Ctrl-O n`). Plain `n` is intentionally distinct from `Ctrl-N`, which
     /// remains [`LiveTerminalAction::NextTab`].
     DirectorNew,
+    /// Open the Goal-driven Director's Work Run control surface (`Ctrl-O w`).
+    /// It is reserved behind the leader so plain `w` and `Ctrl-W` still reach
+    /// an Agent terminal.
+    WorkRuns,
     /// Toggle the bottom workspace-root generic terminal drawer (`Ctrl-O Ctrl-T`,
     /// with `Ctrl-O t` retained for compatibility).
     RootTerminal,
@@ -440,6 +444,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         ('n', '\u{e}', LiveTerminalAction::DirectorNew),
         ('p', '\u{10}', LiveTerminalAction::PreviousTab),
         ('r', '\u{12}', LiveTerminalAction::ResumeTab),
+        ('w', '\u{17}', LiveTerminalAction::WorkRuns),
         ('u', '\u{15}', LiveTerminalAction::ScrollUp),
         ('d', '\u{4}', LiveTerminalAction::ScrollDown),
         ('b', '\u{2}', LiveTerminalAction::ScrollBottom),
@@ -503,6 +508,7 @@ fn control_byte_prefix_action(bytes: &[u8]) -> Option<LiveTerminalAction> {
         [20] => Some(LiveTerminalAction::RootTerminal),
         [21] => Some(LiveTerminalAction::ScrollUp),
         [22] => Some(LiveTerminalAction::OpenPullRequests),
+        [23] => Some(LiveTerminalAction::WorkRuns),
         [24] => Some(LiveTerminalAction::CloseTab),
         [26] => Some(LiveTerminalAction::RootTerminalFullHeight),
         _ => None,
@@ -983,6 +989,14 @@ mod tests {
                 action: LiveTerminalAction::OpenPullRequests,
             },
             Case {
+                follow_up: key(KeyCode::Char('w')),
+                action: LiveTerminalAction::WorkRuns,
+            },
+            Case {
+                follow_up: ctrl('w'),
+                action: LiveTerminalAction::WorkRuns,
+            },
+            Case {
                 follow_up: key(KeyCode::End),
                 action: LiveTerminalAction::ScrollBottom,
             },
@@ -1015,6 +1029,7 @@ mod tests {
             (20, LiveTerminalAction::RootTerminal),
             (21, LiveTerminalAction::ScrollUp),
             (22, LiveTerminalAction::OpenPullRequests),
+            (23, LiveTerminalAction::WorkRuns),
             (24, LiveTerminalAction::CloseTab),
             (26, LiveTerminalAction::RootTerminalFullHeight),
         ] {
@@ -1126,7 +1141,7 @@ mod tests {
     fn plain_view_control_keys_reach_the_pty_without_a_leader() {
         // The restored follow-ups are reserved only after a Ctrl-O leader; a bare
         // press still types into the terminal.
-        for character in [',', 'c', 'x', 'u', 'd'] {
+        for character in [',', 'c', 'x', 'u', 'd', 'w'] {
             assert_eq!(
                 LiveInputClassifier::default().classify(T0, key(KeyCode::Char(character))),
                 LiveInputOutput::Passthrough(character.to_string().into_bytes())
@@ -1194,6 +1209,7 @@ mod tests {
     fn every_non_leader_key_is_forwarded_to_the_pane() {
         let cases = [
             (ctrl('r'), vec![0x12]),
+            (ctrl('w'), vec![0x17]),
             (ctrl('^'), vec![0x1e]),
             (
                 LiveInput::Key(KeyEvent::new(
