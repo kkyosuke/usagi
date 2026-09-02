@@ -5,9 +5,9 @@ status: todo
 priority: high
 labels: [product, orchestration, supervisor, verification, evidence, differentiation]
 dependson: []
-related: [324, 327]
-created_at: 2026-09-03T08:10:15+09:00
-updated_at: 2026-09-03T08:10:15+09:00
+related: [324, 327, 730, 731, 732]
+created_at: 2026-09-02T23:10:15+00:00
+updated_at: 2026-09-02T23:35:47.566271+00:00
 ---
 
 ## 目的
