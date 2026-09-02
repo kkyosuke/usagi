@@ -5467,16 +5467,7 @@ fn dispatch_dispatch_tool(
                 | DispatchToolAction::AgentInboxAck
         )
     }) {
-        dispatch_agent_tool(
-            context.agent,
-            context.terminal,
-            context.bound,
-            context.pr_inventory,
-            context.supervisor,
-            request_id,
-            body,
-            hello,
-        )
+        dispatch_agent_tool(context, request_id, body, hello)
     } else {
         dispatch_user_decision(
             context.agent,
@@ -5492,11 +5483,7 @@ fn dispatch_dispatch_tool(
 #[allow(clippy::too_many_lines)] // One handler keeps authentication and durable routing atomic.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 fn dispatch_agent_tool(
-    agent: &SharedAgentRuntime,
-    terminal: &SharedTerminalRuntime,
-    bound: &ConnectionWorkspace,
-    pr_inventory: &SharedPrInventory,
-    supervisor: &SharedSupervisorRuntime,
+    context: &DispatchToolContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -5561,6 +5548,12 @@ fn dispatch_agent_tool(
     fn default_terminal_read_lines() -> usize {
         usagi_core::usecase::terminal_observation::TERMINAL_READ_DEFAULT_LINES
     }
+
+    let agent = context.agent;
+    let terminal = context.terminal;
+    let bound = context.bound;
+    let pr_inventory = context.pr_inventory;
+    let supervisor = context.supervisor;
 
     let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
