@@ -1816,7 +1816,10 @@ daemon の cell / checkpoint frame budget で oldest row の eviction と追記�
 `Ctrl-O b` / `Ctrl-O End`（ScrollBottom）が 1 手で live bottom へ戻して追従を再開する。
 
 出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。複数の物理行にまたがる選択では、PTY の明示改行だけを改行としてコピーし、端末幅による自動折り返し境界は改行を挿入せず連結する。drag 中も
-drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。選択は右ペイン content 内の通常左クリック、次の drag が
+drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。Agent の返信描画が primary / alternate screen の
+DECSTBM scroll region を動かした場合は、VT parser が報告する retained-row motion を同じ buffer の選択表示へ適用する。
+したがってコピー対象は drag 開始時の snapshot のまま変えず、ハイライトだけが選択した行と一緒に自動スクロールする。
+scroll region から完全に押し出された行はハイライトから外す。選択は右ペイン content 内の通常左クリック、次の drag が
 新しい選択を始めるか、その terminal が論理 close / bounded cache eviction されるまで terminal identity ごとに保持する。
 別 terminal へ focus が移った間は非表示になり、focus が戻ると scroll offset・selection・feedback を復元する（release で即座に消えない）。保持中の選択は OS 標準の copy shortcut（macOS: Command+C、Linux: Ctrl+Shift+C、Windows: Ctrl+C）で再コピーできる。この click は text selection
 だけを解除し、sidebar の navigation / activation、modal の入力所有、PTY への入力を変えない。選択の可視化は選択した桁全体に及び、行末の空白 padding や

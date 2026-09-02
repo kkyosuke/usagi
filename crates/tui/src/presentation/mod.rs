@@ -39,6 +39,7 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::client::DaemonMetrics;
 use usagi_core::usecase::env::EnvScope;
+use usagi_core::usecase::vt_screen::RetainedRowMotion;
 
 use crate::presentation::live_terminal::{LiveTerminalControls, PointerRelease};
 use crate::presentation::metrics::{MetricsBackend, MetricsProjection};
@@ -2788,6 +2789,16 @@ impl WorkspaceUi {
         exited
     }
 
+    fn take_terminal_row_motions(&mut self) -> Vec<(TerminalRef, Vec<RetainedRowMotion>)> {
+        self.terminals
+            .iter_mut()
+            .filter_map(|session| {
+                let motions = session.take_retained_row_motions();
+                (!motions.is_empty()).then(|| (session.terminal().clone(), motions))
+            })
+            .collect()
+    }
+
     /// Hand the detached background tabs to the port's bounded scope-inventory
     /// lane and drain the exits it has observed since the last frame.
     ///
@@ -4691,10 +4702,18 @@ fn controller_terminal_view(
     controls.retain_terminals(&live_terminals);
     controls.sync_focus(terminal.as_ref());
     let terminal = terminal?;
-    let (buffer, row_origin, total_rows) =
-        ui.terminal_row_extent(&terminal, controls.selection())?;
+    let (buffer, _, _) = ui.terminal_row_extent(&terminal, None)?;
+    let selection = controls.selection_for(buffer);
+    let (buffer, row_origin, total_rows) = ui.terminal_row_extent(&terminal, selection)?;
     let range = controls.visible_range(buffer, row_origin, total_rows, viewport_rows);
-    let rows = ui.terminal_row_window(&terminal, range.start, range.end, controls.selection())?;
+    let rows = ui
+        .terminal_row_window(
+            &terminal,
+            range.start,
+            range.end,
+            controls.selection_for(buffer),
+        )
+        .expect("terminal extent guarantees the same attached row window");
     let mut projection = controls.project_window(rows, range.start, total_rows);
     if let Some(error) = ui.terminal_error(&terminal) {
         projection.feedback = Some(error.to_owned());
@@ -4908,12 +4927,19 @@ fn poll_and_project_terminals(
     geometry: Geometry,
 ) -> (Option<TerminalViewProjection>, usize, usize) {
     close_exited_panes(ui, runtime);
+    sync_terminal_selection_motions(ui, controls);
     let terminal_view = controller_terminal_view(ui, runtime, controls, usize::from(geometry.rows));
     let (rows_len, scroll) = match &terminal_view {
         Some(view) => (view.total_rows, controls.scroll()),
         None => (0, 0),
     };
     (terminal_view, rows_len, scroll)
+}
+
+fn sync_terminal_selection_motions(ui: &mut WorkspaceUi, controls: &mut LiveTerminalControls) {
+    for (terminal, motions) in ui.take_terminal_row_motions() {
+        controls.apply_retained_row_motions(&terminal, &motions);
+    }
 }
 
 /// Close every pane the daemon reports as exited, from either observation lane:
@@ -7495,6 +7521,7 @@ fn drive_workspace_controller(
         // Polling still runs every tick so output/admission progresses, but row
         // String creation and URL scanning run only behind the projection key.
         close_exited_panes(&mut ui, &mut runtime);
+        sync_terminal_selection_motions(&mut ui, &mut controls);
         let focused_terminal = runtime.preview_terminal();
         let mut live_terminals = runtime.background_terminals();
         if let Some(terminal) = &focused_terminal {
@@ -14688,7 +14715,7 @@ mod tests {
             Ok(TerminalAttach {
                 subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
-                output_offset: self.replay.len() as u64,
+                output_offset: u64::try_from(self.replay.len()).expect("test replay fits in u64"),
                 next_input_seq: None,
                 screen: attach_checkpoint(&self.replay, geometry),
                 exited: false,
@@ -16656,6 +16683,58 @@ mod tests {
         replay: Vec<u8>,
         inputs: Arc<Mutex<Vec<Vec<u8>>>>,
         input_error: bool,
+    }
+
+    struct ScrollingAgentPort {
+        terminal: TerminalRef,
+        replay: Vec<u8>,
+        output: Option<Vec<u8>>,
+    }
+
+    impl AgentCommandPort for ScrollingAgentPort {
+        fn launch(
+            &mut self,
+            _operation: OperationId,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Ok(AgentPaneAdmission {
+                terminal: self.terminal.clone(),
+                continuation: None,
+            })
+        }
+
+        fn attach_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            Ok(TerminalAttach {
+                subscription: TerminalSubscription { id: 1, epoch: 1 },
+                revision: 1,
+                output_offset: self.replay.len() as u64,
+                next_input_seq: None,
+                screen: attach_checkpoint(&self.replay, geometry),
+                exited: false,
+            })
+        }
+
+        fn poll_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            after_offset: u64,
+        ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            let Some(output) = self.output.take() else {
+                return Ok(Vec::new());
+            };
+            Ok(vec![TerminalChunk {
+                start_offset: after_offset,
+                end_offset: after_offset
+                    .saturating_add(u64::try_from(output.len()).expect("test output fits in u64")),
+                data: output,
+            }])
+        }
     }
 
     impl AgentCommandPort for WheelRecordingPort {
@@ -24590,6 +24669,50 @@ mod tests {
             rows[1].contains("\u{1b}[7m"),
             "blank row 1 not highlighted: {:?}",
             rows[1]
+        );
+    }
+
+    #[test]
+    fn agent_reply_auto_scroll_moves_the_retained_highlight_with_its_text() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let replay = b"\x1b[?1049hheader\x1b[13;1Hcomposer\x1b[2;3r\x1b[2;1Hone\r\ntwo".to_vec();
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScrollingAgentPort {
+                terminal: terminal.clone(),
+                replay,
+                output: Some(b"\x1b[1S\x1b[3;1Hreply".to_vec()),
+            }),
+        );
+        let geometry = terminal_geometry(20, 80);
+        let mut controls = LiveTerminalControls::default();
+        // Drain the attach replacement before the user starts selecting, then
+        // establish the alternate-buffer coordinate space from the first view.
+        super::sync_terminal_selection_motions(&mut ui, &mut controls);
+        let _ = controller_terminal_view(&ui, &runtime, &mut controls, usize::from(geometry.rows));
+        let mut selection = ui
+            .begin_terminal_selection(&terminal, TerminalPoint { row: 2, column: 0 })
+            .expect("attached Agent screen");
+        selection.extend(TerminalPoint { row: 2, column: 2 });
+        controls.begin_selection(selection);
+        assert_eq!(controls.finish_drag().as_deref(), Some("two"));
+
+        let (view, _, _) =
+            poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
+        let rows = view.expect("live Agent view").rows;
+
+        assert!(
+            rows[1].contains("\x1b[7mtwo"),
+            "Agent reply left the highlight at its old screen row: {rows:?}"
+        );
+        assert!(rows[2].contains("reply"));
+        assert_eq!(
+            controls.selection().map(TerminalSelection::text).as_deref(),
+            Some("two")
         );
     }
 
