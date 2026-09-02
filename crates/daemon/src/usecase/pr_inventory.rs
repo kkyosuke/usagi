@@ -22,6 +22,10 @@ use usagi_core::{
 /// at most [`CANDIDATE_PREFIX_MAX`] bytes.
 const CARRY_TERMINALS_MAX: usize = 256;
 
+/// GitHub titles are at most 256 Unicode characters. Four bytes per character
+/// accepts every valid title while bounding provider-controlled allocations.
+const GH_PR_TITLE_MAX_BYTES: usize = 1_024;
+
 /// Parses only bytes supplied after the terminal journal has committed them.
 ///
 /// The durable snapshot is cached in memory and written through, so projecting a
@@ -77,7 +81,11 @@ pub struct GhPrView {
 #[must_use]
 pub fn parse_gh_pr_view(output: &str) -> Option<GhPrView> {
     let value: serde_json::Value = serde_json::from_str(output).ok()?;
-    let title = value.get("title")?.as_str()?.to_owned();
+    let title = value.get("title")?.as_str()?;
+    if title.len() > GH_PR_TITLE_MAX_BYTES {
+        return None;
+    }
+    let title = title.to_owned();
     let state = match value.get("state")?.as_str()? {
         "OPEN" => PrState::Open,
         "CLOSED" => PrState::Closed,
@@ -408,6 +416,13 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         if !self.hydrated {
             self.sessions = self.store.load()?;
             self.hydrated = true;
+            let mut pruned = false;
+            for inventory in self.sessions.values_mut() {
+                pruned = inventory.enforce_retention() || pruned;
+            }
+            if pruned {
+                self.save()?;
+            }
         }
         Ok(())
     }
@@ -766,6 +781,27 @@ mod tests {
             Ok(())
         }
     }
+
+    fn legacy_pr_inventory_overflow() -> usagi_core::domain::pr_inventory::PrInventory {
+        use usagi_core::domain::pr_inventory::{PR_INVENTORY_ENTRIES_MAX, PrEntry, PrInventory};
+
+        let first = canonicalize("https://github.com/o/r/pull/1").unwrap();
+        let mut inventory = PrInventory::default();
+        inventory.discover([first.clone()]);
+        let template = inventory.entries[&first].clone();
+        for number in 2..=PR_INVENTORY_ENTRIES_MAX + 1 {
+            let identity = canonicalize(&format!("https://github.com/o/r/pull/{number}")).unwrap();
+            inventory.entries.insert(
+                identity.clone(),
+                PrEntry {
+                    identity,
+                    ..template.clone()
+                },
+            );
+        }
+        inventory
+    }
+
     #[test]
     fn joins_split_chunks_and_deduplicates_replay() {
         let session = SessionId::new();
@@ -834,6 +870,53 @@ mod tests {
             PrState::Dismissed
         );
         assert_eq!(store.values.borrow()[&b].entries.len(), 1);
+    }
+
+    #[test]
+    fn hydrate_prunes_legacy_automatic_overflow_and_persists_once() {
+        use usagi_core::domain::pr_inventory::PR_INVENTORY_ENTRIES_MAX;
+
+        let session = SessionId::new();
+        let store = Store::default();
+        store
+            .values
+            .borrow_mut()
+            .insert(session, legacy_pr_inventory_overflow());
+        let mut projector = OutputPrProjector::new(store);
+
+        assert_eq!(
+            projector.snapshot(session).unwrap().entries.len(),
+            PR_INVENTORY_ENTRIES_MAX
+        );
+        let store = projector.into_store();
+        assert_eq!(store.loads.get(), 1);
+        assert_eq!(store.saves.get(), 1);
+        assert_eq!(
+            store.values.borrow()[&session].entries.len(),
+            PR_INVENTORY_ENTRIES_MAX
+        );
+    }
+
+    #[test]
+    fn failed_legacy_compaction_discards_the_ahead_of_disk_cache() {
+        let session = SessionId::new();
+        let store = Store::default();
+        store
+            .values
+            .borrow_mut()
+            .insert(session, legacy_pr_inventory_overflow());
+        store.fail_save.set(true);
+        let mut projector = OutputPrProjector::new(store);
+
+        assert!(projector.snapshot(session).is_err());
+        assert!(!projector.hydrated);
+        assert!(projector.sessions.is_empty());
+
+        projector.store.fail_save.set(false);
+        assert!(projector.snapshot(session).is_ok());
+        assert!(projector.hydrated);
+        assert_eq!(projector.store.loads.get(), 2);
+        assert_eq!(projector.store.saves.get(), 2);
     }
     #[test]
     fn ignores_root_output_and_bounds_the_carry() {
@@ -1278,6 +1361,17 @@ mod tests {
             parse_gh_pr_view(&format!(
                 r#"{{"title":"x","state":"OPEN","headRefOid":"{HEAD_OID}","reviewDecision":"UNKNOWN"}}"#
             )),
+            None
+        );
+        assert_eq!(
+            parse_gh_pr_view(
+                &serde_json::json!({
+                    "title": "x".repeat(GH_PR_TITLE_MAX_BYTES + 1),
+                    "state": "OPEN",
+                    "headRefOid": HEAD_OID,
+                })
+                .to_string(),
+            ),
             None
         );
         for invalid in [

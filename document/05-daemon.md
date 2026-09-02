@@ -957,6 +957,12 @@ worker は timer も shutdown flag の polling も持たない。
 しない**。read は process ごとに 1 回の hydrate だけで、snapshot 応答も同じ cache から返す。write が失敗した場合は
 cache を破棄する（memory が durable より先に進んだ状態を残さない）。
 
+自動管理 entry は session ごとに 256 件までとし、上限では canonical URL 順の未保護 entry を入れ替える。
+`pinned` または `dismissed` の user-owned entry は回収せず、全枠が保護済みなら新しい自動 discovery を無視する。
+旧 snapshot の未保護な超過分も hydrate 時に回収して write-through する。canonical URL は GitHub の owner 39 byte / repository
+100 byte 制約を満たすものだけ、provider title は最大 1,024 byte だけを受理する。さらに全 session を含む durable JSON は read と
+write の両方を 8 MiB で拒否するため、process cache と whole-snapshot rewrite の最大量は有限である。
+
 同一 process 内で inventory を書くのは projector だけであり、cross-generation の single writer 契約は
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 の[他の shared writer](#他の-shared-writer) が正本である（draining owner は whole-save せず owner-local event を
