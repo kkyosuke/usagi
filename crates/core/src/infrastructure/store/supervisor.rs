@@ -1037,6 +1037,7 @@ mod tests {
                 .to_string()
                 .contains("conflicts with its semantic payload")
         );
+        assert_eq!(store.retained_event(id, OperationId::new()).unwrap(), None);
         let (events, cursor) = store
             .events(id, EventCursor { next_sequence: 1 }, 10)
             .unwrap();

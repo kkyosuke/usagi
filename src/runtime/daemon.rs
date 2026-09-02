@@ -6295,6 +6295,7 @@ fn reconcile_supervisor_run_workers(
     reconcile_supervisor_workers(supervisor, agent, Some(supervisor_run_id))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-08-31 tests=supervisor_worker_reconciliation_joins_bound_and_unbound_runs_exactly,workspace_control_is_durable_scoped_and_projects_exact_stop_obligations,supervisor_stop_validates_every_fence_and_retries_an_orphaned_process
 fn reconcile_supervisor_workers(
     supervisor: &SharedSupervisorRuntime,
     agent: &SharedAgentRuntime,
@@ -6697,6 +6698,7 @@ fn dispatch_supervisor_tool(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-08-31 tests=supervisor_snapshot_is_exactly_workspace_scoped
 fn connection_workspace_id(
     bound: &ConnectionWorkspace,
 ) -> Result<WorkspaceId, usagi_core::infrastructure::ipc::ProtocolError> {
@@ -6847,30 +6849,30 @@ fn dispatch_supervisor_control(
         ) {
             reconcile_supervisor_run_workers(supervisor, agent, run.supervisor_run_id).map_err(
                 |_| {
-                    ProtocolError::new(
-                        ErrorCode::Unavailable,
-                        "supervisor workers could not be stopped safely",
-                    )
+                    supervisor_control_unconfirmed("supervisor workers could not be stopped safely")
                 },
             )?;
         } else if run.state == SupervisorRunState::Running {
-            let runtime = supervisor.lock().map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
-            })?;
+            let runtime = supervisor
+                .lock()
+                .map_err(|_| supervisor_control_unconfirmed("supervisor runtime is unavailable"))?;
             runtime
                 .tick(
                     run.supervisor_run_id,
                     Utc::now(),
                     &mut AgentDecisionWaker { agent },
                 )
-                .map_err(supervisor_control_error)?;
+                .map_err(|_| {
+                    supervisor_control_unconfirmed("supervisor retry could not advance")
+                })?;
             run = runtime
                 .get_for_workspace(workspace, run.supervisor_run_id)
-                .map_err(supervisor_control_error)?
+                .map_err(|_| {
+                    supervisor_control_unconfirmed("supervisor control result is unavailable")
+                })?
                 .ok_or_else(|| {
-                    ProtocolError::new(
-                        ErrorCode::OwnershipUnknown,
-                        "supervisor run is unavailable to this workspace",
+                    supervisor_control_unconfirmed(
+                        "supervisor control result is unavailable to this workspace",
                     )
                 })?;
         }
@@ -6878,10 +6880,10 @@ fn dispatch_supervisor_control(
         // Match the read-only TUI projection: worker/session/worktree
         // provenance is an internal control input, not human UI response data.
         run.provenance.clear();
-        let value = serde_json::to_value(run).map_err(|_| {
-            ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
-        })?;
-        bounded_supervisor_query(value).map_err(supervisor_control_error)
+        let value = serde_json::to_value(run)
+            .map_err(|_| supervisor_control_unconfirmed("supervisor response encoding failed"))?;
+        bounded_supervisor_query(value)
+            .map_err(|_| supervisor_control_unconfirmed("supervisor response is unavailable"))
     })();
     match result {
         Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
@@ -7027,11 +7029,16 @@ fn supervisor_control_error(
             "supervisor control command is invalid or stale",
         )
     } else {
-        ProtocolError::new(
-            ErrorCode::Unavailable,
-            "supervisor control could not be persisted",
-        )
+        supervisor_control_unconfirmed("supervisor control could not be persisted")
     }
+}
+
+fn supervisor_control_unconfirmed(message: &str) -> usagi_core::infrastructure::ipc::ProtocolError {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, RetryMode, SideEffect};
+    let mut error = ProtocolError::new(ErrorCode::Unavailable, message);
+    error.retry_mode = RetryMode::SameOperation;
+    error.side_effect = SideEffect::PartialOrUnknown;
+    error
 }
 
 /// PR events are deliberately only hints; the IPC request always returns this
@@ -14883,6 +14890,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One reconciliation fixture joins bound and unbound run obligations.
     fn supervisor_worker_reconciliation_joins_bound_and_unbound_runs_exactly() {
         use usagi_core::domain::{
             agent::{DispatchRun, RunStatus},
@@ -15007,6 +15015,22 @@ mod tests {
                 .state,
             SupervisorRunState::Cancelled
         );
+    }
+
+    #[test]
+    fn supervisor_control_errors_distinguish_refusal_from_unknown_effect() {
+        use usagi_core::infrastructure::ipc::{RetryMode, SideEffect};
+
+        let refused = supervisor_control_error(anyhow::anyhow!("InvalidTransition"));
+        assert_eq!(refused.side_effect, SideEffect::None);
+        assert_eq!(refused.retry_mode, RetryMode::Never);
+
+        let unknown = supervisor_control_error(anyhow::anyhow!("durable store failed"));
+        assert_eq!(unknown.side_effect, SideEffect::PartialOrUnknown);
+        assert_eq!(unknown.retry_mode, RetryMode::SameOperation);
+        let post_commit = supervisor_control_unconfirmed("worker stop failed");
+        assert_eq!(post_commit.side_effect, SideEffect::PartialOrUnknown);
+        assert_eq!(post_commit.retry_mode, RetryMode::SameOperation);
     }
 
     #[test]
