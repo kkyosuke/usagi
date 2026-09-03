@@ -410,6 +410,7 @@ mod tests {
             Context::CloseupActions,
             Context::CreateSession,
             Context::CreateSessionError,
+            Context::TerminalLaunchError,
             Context::ExitConfirmation,
             Context::ForceRemove,
             Context::CleanupQueue,

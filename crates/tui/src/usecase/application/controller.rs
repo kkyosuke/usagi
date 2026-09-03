@@ -4363,16 +4363,13 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         dismiss_closeup_action_modal(state);
         return Vec::new();
     }
-    if matches!(
-        overlay,
-        Overlay::CreateSessionError | Overlay::TerminalLaunchError
-    ) && matches!(key, AppKey::Escape | AppKey::Enter)
-    {
-        match overlay {
-            Overlay::CreateSessionError => state.create_session_error = None,
-            Overlay::TerminalLaunchError => state.terminal_launch_error = None,
-            _ => unreachable!("only error dialogs reach this branch"),
-        }
+    if overlay == Overlay::CreateSessionError && matches!(key, AppKey::Escape | AppKey::Enter) {
+        state.create_session_error = None;
+        state.overlay = None;
+        return Vec::new();
+    }
+    if overlay == Overlay::TerminalLaunchError && matches!(key, AppKey::Escape | AppKey::Enter) {
+        state.terminal_launch_error = None;
         state.overlay = None;
         return Vec::new();
     }
