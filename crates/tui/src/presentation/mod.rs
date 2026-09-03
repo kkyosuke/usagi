@@ -62,9 +62,11 @@ use crate::presentation::views::scratchpad_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::work_run::WorkRunProjection;
+#[cfg(test)]
+use crate::presentation::views::workspace::garden_fits;
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, garden_click_at, garden_fits, garden_scroll_action,
+    Workspace as WorkspaceView, garden_click_at, garden_fits_sized, garden_scroll_action,
     home_header_action_at, render_home, render_home_at, right_pane_tab_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
@@ -6424,8 +6426,14 @@ impl HomeFrameMaterial {
         self
     }
 
-    fn with_garden_animation(mut self, tick: u64, reduced_motion: bool) -> Self {
+    fn with_garden_animation(
+        mut self,
+        tick: u64,
+        reduced_motion: bool,
+        size: usagi_core::domain::settings::GardenSize,
+    ) -> Self {
         self.projection = self.projection.with_garden_reduced_motion(reduced_motion);
+        self.projection = self.projection.with_garden_size(size);
         self.projection = self
             .projection
             .with_garden_tick(self.height, self.width, tick);
@@ -6480,6 +6488,7 @@ fn home_frame_material(
     .with_garden_animation(
         widgets::garden::runtime_tick(runtime.state().mascot_tick()),
         false,
+        usagi_core::domain::settings::GardenSize::default(),
     )
 }
 
@@ -7682,6 +7691,7 @@ fn drive_workspace_controller(
     backend_factory: &mut dyn ControllerBackendFactory,
     modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode,
     pr_auto_open: usagi_core::domain::settings::PrAutoOpen,
+    garden_size: usagi_core::domain::settings::GardenSize,
     entry_policy: WorkspaceEntryPolicy,
     mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
@@ -8026,7 +8036,7 @@ fn drive_workspace_controller(
             width: u16::try_from(width).unwrap_or(u16::MAX),
             height: u16::try_from(height).unwrap_or(u16::MAX),
         });
-        let garden_available = garden_fits(height, width);
+        let garden_available = garden_fits_sized(height, width, garden_size);
         if runtime.state().overlay() == Some(Overlay::Garden) && !garden_available {
             let _ = runtime.apply_event(AppEvent::GardenUnavailable);
         }
@@ -8266,7 +8276,7 @@ fn drive_workspace_controller(
             .with_agent_inventory(ui.agent_inventory())
             .with_work_runs(work_runs.clone())
             .with_workspace_deck_garden(deck)
-            .with_garden_animation(animation, garden_reduced_motion);
+            .with_garden_animation(animation, garden_reduced_motion, garden_size);
             let mut next_frame_key = next_source_key.clone();
             if garden_open {
                 next_frame_key.animation = material
@@ -8632,7 +8642,7 @@ fn drive_workspace_controller(
         // never re-open the garden it just closed. A terminal too small to draw
         // a garden emits no idle event at all, leaving its usable Home alone.
         let idle = idle_watch.observe(&key, pointer_clock.elapsed());
-        if garden_fits(height, width) {
+        if garden_fits_sized(height, width, garden_size) {
             let _ = runtime.apply_event(AppEvent::IdleElapsed(idle));
         }
         // Wheel, drag and raw terminal input are normally owned before the Home
@@ -9088,6 +9098,7 @@ pub fn run_workspace_controller_with_backend(
         backend_factory,
         usagi_core::domain::settings::ModalSelectionMode::Action,
         usagi_core::domain::settings::PrAutoOpen::default(),
+        usagi_core::domain::settings::GardenSize::default(),
         WorkspaceEntryPolicy::default(),
         None,
     )
@@ -9116,6 +9127,7 @@ pub fn run_workspace_controller_with_backend_and_settings(
         backend_factory,
         settings.modal_selection_mode,
         settings.pr_auto_open,
+        settings.garden_size,
         WorkspaceEntryPolicy {
             default_model: settings.default_model,
             default_branch: settings.default_branch.clone(),
@@ -9152,6 +9164,7 @@ pub fn run_workspace_controller_with_backend_and_config(
         backend_factory,
         effective.modal_selection_mode,
         effective.pr_auto_open,
+        effective.garden_size,
         WorkspaceEntryPolicy {
             available_models,
             default_model: effective.default_model,
@@ -9459,6 +9472,7 @@ fn open_snapshot_via_controller(
         backend_factory,
         effective.modal_selection_mode,
         effective.pr_auto_open,
+        effective.garden_size,
         WorkspaceEntryPolicy {
             available_models,
             default_model: effective.default_model,
@@ -26957,6 +26971,7 @@ mod tests {
     #[test]
     fn entry_help_resolves_every_entry_surface_and_config_submode() {
         use super::Screen;
+        use crate::presentation::views::config::Field as ConfigField;
         use crate::presentation::views::key_help::Context as HelpContext;
 
         let mut settings = DefaultSettingsPort;
@@ -26992,14 +27007,14 @@ mod tests {
         );
 
         let mut team = Config::load(&mut settings);
-        for _ in 0..5 {
+        while team.field() != ConfigField::TeamTemplate {
             let _ = step_config(&mut team, Key::Down, &mut settings);
         }
         let _ = step_config(&mut team, Key::Enter, &mut settings);
         assert_eq!(super::config_help_context(&team), HelpContext::TeamPicker);
 
         let mut environment = Config::load(&mut settings);
-        for _ in 0..2 {
+        while environment.field() != ConfigField::Environment {
             let _ = step_config(&mut environment, Key::Down, &mut settings);
         }
         let _ = step_config(&mut environment, Key::Enter, &mut settings);
@@ -27108,7 +27123,7 @@ mod tests {
 
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
-        for _ in 0..5 {
+        for _ in 0..6 {
             step_config(&mut config, Key::Down, &mut settings);
         }
         assert_eq!(config.field(), ConfigField::TeamTemplate);
@@ -27142,6 +27157,7 @@ mod tests {
 
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         assert_eq!(config.field(), ConfigField::Environment);
@@ -27215,6 +27231,7 @@ mod tests {
             ConfigStep::Stay
         ));
         step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
@@ -27445,7 +27462,7 @@ mod tests {
         };
         let mut config = Config::load(&mut settings);
         let _ = step_config(&mut config, Key::Right, &mut settings);
-        for _ in 0..9 {
+        for _ in 0..10 {
             let _ = step_config(&mut config, Key::Down, &mut settings);
         }
         assert!(matches!(
@@ -27507,6 +27524,7 @@ mod tests {
         let mut environment = Config::load(&mut inline);
         let _ = step_config(&mut environment, Key::Down, &mut inline);
         let _ = step_config(&mut environment, Key::Down, &mut inline);
+        let _ = step_config(&mut environment, Key::Down, &mut inline);
         let _ = step_config(&mut environment, Key::Enter, &mut inline);
         let _ = step_config(
             &mut environment,
@@ -27529,6 +27547,7 @@ mod tests {
             ..RecordingSettingsPort::default()
         };
         let mut config = Config::load(&mut settings);
+        let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Enter, &mut settings);
@@ -27585,6 +27604,7 @@ mod tests {
         let mut term = FakeTerminal::with_keys(&[
             Key::Down,
             Key::Down,
+            Key::Down,
             Key::Enter,
             Key::Paste("GLOBAL=1".to_owned()),
             Key::Management {
@@ -27613,10 +27633,11 @@ mod tests {
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Environment → Agent model → Workflow → Team →
-    // Issue → Memory → PR → Save).
-    const CONFIG_SAVE_KEYS: [Key; 11] = [
+    // Save (Theme → Modal mode → Garden size → Environment → Agent model →
+    // Workflow → Team → Issue → Memory → PR → Save).
+    const CONFIG_SAVE_KEYS: [Key; 12] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,

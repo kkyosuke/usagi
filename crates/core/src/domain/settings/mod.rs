@@ -1,9 +1,10 @@
 //! Application settings.
 //!
 //! The global, per-user preferences persisted as `settings.json` in the data
-//! directory, plus workspace settings persisted beside a project. Theme and
-//! modal interaction stay global; Agent, Workflow, Team, Issue, and Memory values are copied to
-//! a workspace when it is registered and may then be changed independently.
+//! directory, plus workspace settings persisted beside a project. Theme,
+//! modal interaction, Garden size, and PR behavior stay global; Agent,
+//! Workflow, Team, Issue, and Memory values are copied to a workspace when it
+//! is registered and may then be changed independently.
 //! Environment bindings ([`env`]) exist in both scopes and merge, so a workspace
 //! adds to — or overrides — what every workspace inherits.
 //!
@@ -36,6 +37,32 @@ pub enum Theme {
     #[default]
     #[serde(other)]
     System,
+}
+
+/// Relative scale of the Session Garden scenery and rabbits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GardenSize {
+    /// Compact 8 x 4-cell rabbits and matching scenery.
+    Small,
+    /// Large 16 x 8-cell rabbits and matching scenery.
+    Large,
+    /// Roomier 12 x 6-cell rabbits. This is the default Garden scale.
+    #[default]
+    #[serde(other)]
+    Medium,
+}
+
+impl GardenSize {
+    /// Select the adjacent size, wrapping at either edge.
+    #[must_use]
+    pub const fn cycle(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::Small, true) | (Self::Large, false) => Self::Medium,
+            (Self::Medium, true) | (Self::Small, false) => Self::Large,
+            (Self::Large, true) | (Self::Medium, false) => Self::Small,
+        }
+    }
 }
 
 /// How Overview and Closeup accept a command.
@@ -410,6 +437,8 @@ pub struct Settings {
     pub theme: Theme,
     /// The command-selection interaction used by Overview and Closeup modals.
     pub modal_selection_mode: ModalSelectionMode,
+    /// The global visual scale used by Session Garden.
+    pub garden_size: GardenSize,
     /// Whether a newly detected PR opens its modal automatically.
     pub pr_auto_open: PrAutoOpen,
     /// The provider used for Agent panes when no profile is selected explicitly.
@@ -438,6 +467,7 @@ impl Default for Settings {
         Self {
             theme: Theme::default(),
             modal_selection_mode: ModalSelectionMode::default(),
+            garden_size: GardenSize::default(),
             pr_auto_open: PrAutoOpen::default(),
             default_model: DefaultModel::default(),
             default_branch: None,
@@ -463,6 +493,7 @@ impl Settings {
     pub fn with_config(mut self, settings: &Self) -> Self {
         self.theme = settings.theme;
         self.modal_selection_mode = settings.modal_selection_mode;
+        self.garden_size = settings.garden_size;
         self.pr_auto_open = settings.pr_auto_open;
         self.default_model = settings.default_model;
         self.issue_enabled = settings.issue_enabled;
@@ -472,9 +503,9 @@ impl Settings {
         self
     }
 
-    /// Apply workspace-owned Agent, Base branch, Workflow, Team, Issue, Memory, and
-    /// environment values over this global baseline. Theme and modal interaction
-    /// always remain global.
+    /// Apply workspace-owned Agent, Base branch, Workflow, Team, Issue, Memory,
+    /// and environment values over this global baseline. Theme, modal
+    /// interaction, Garden size, and PR behavior always remain global.
     ///
     /// Environment bindings accumulate rather than replace: the workspace map is
     /// layered on top of the global one, so a same-named binding takes the

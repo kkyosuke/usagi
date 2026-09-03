@@ -357,6 +357,8 @@ pub struct HomeProjection {
     garden_scroll: usize,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
+    /// Global Config から解決した Garden の描画スケール。
+    garden_size: usagi_core::domain::settings::GardenSize,
     /// Canonical Garden animation tick supplied by the composition root's
     /// monotonic logical clock. `None` keeps pure renderer fixtures compatible
     /// with an explicitly injected wall clock; production always supplies it.
@@ -646,6 +648,7 @@ impl HomeProjection {
             garden_workspaces,
             garden_scroll: state.garden_scroll(),
             garden_motion: GardenMotion::Full,
+            garden_size: usagi_core::domain::settings::GardenSize::default(),
             garden_tick: None,
             daemon_runtimes: None,
             closeup_modal: None,
@@ -677,6 +680,13 @@ impl HomeProjection {
         self
     }
 
+    /// Attach the global Garden scale resolved by the composition root.
+    #[must_use]
+    pub fn with_garden_size(mut self, size: usagi_core::domain::settings::GardenSize) -> Self {
+        self.garden_size = size;
+        self
+    }
+
     /// Attach and canonicalize the Garden's monotonic animation clock after all
     /// active/deck Agent projections are present. Identical visible poses fold
     /// onto one value, so material equality can suppress their redraws.
@@ -691,13 +701,14 @@ impl HomeProjection {
             return self;
         };
         let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        self.garden_tick = widgets::garden::canonical_tick_scrolled(
+        self.garden_tick = widgets::garden::canonical_tick_scrolled_sized(
             height,
             width,
             sessions,
             self.garden_scroll,
             tick,
             self.garden_motion.is_reduced(),
+            self.garden_size,
         );
         self
     }
@@ -2054,7 +2065,7 @@ fn garden_frame(
 ) -> Option<widgets::garden::GardenFrame> {
     let sessions = home.garden_sessions.as_ref()?;
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    widgets::garden::render_scrolled(
+    widgets::garden::render_scrolled_sized(
         height,
         width,
         &home.garden_scope,
@@ -2062,6 +2073,7 @@ fn garden_frame(
         home.garden_scroll,
         home.garden_tick.unwrap_or_else(|| garden_tick(now)),
         home.garden_motion.is_reduced(),
+        home.garden_size,
     )
 }
 
@@ -2073,8 +2085,22 @@ fn garden_frame(
 /// 判定は [`widgets::garden::render`] と同じ正規化サイズで行う。
 #[must_use]
 pub fn garden_fits(raw_height: usize, raw_width: usize) -> bool {
+    garden_fits_sized(
+        raw_height,
+        raw_width,
+        usagi_core::domain::settings::GardenSize::default(),
+    )
+}
+
+/// Whether the configured Garden scale fits this terminal.
+#[must_use]
+pub fn garden_fits_sized(
+    raw_height: usize,
+    raw_width: usize,
+    size: usagi_core::domain::settings::GardenSize,
+) -> bool {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    height >= widgets::garden::MIN_HEIGHT && width >= widgets::garden::MIN_WIDTH
+    height >= widgets::garden::min_height(size) && width >= widgets::garden::MIN_WIDTH
 }
 
 /// Garden 上の click を、frame と同じ layout の hitbox で解決する。
@@ -3203,8 +3229,8 @@ mod tests {
         HomeProjection, LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession,
         SESSION_ROW_LINES, SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED,
         WorkRunProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
-        feedback_label, format_memory, garden_click_at, garden_fits, garden_frame,
-        garden_scroll_action, garden_tick, health_badge, health_reason_label,
+        feedback_label, format_memory, garden_click_at, garden_fits, garden_fits_sized,
+        garden_frame, garden_scroll_action, garden_tick, health_badge, health_reason_label,
         home_header_action_at, home_header_layout, home_left_pane, home_notice_banner,
         home_row_height, home_row_lines_at, home_viewport_start, load_style,
         new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
@@ -3236,6 +3262,7 @@ mod tests {
     };
     use crate::usecase::application::terminal_selection::TerminalPoint;
     use std::path::Path;
+    use usagi_core::domain::settings::GardenSize;
 
     use chrono::{DateTime, Utc};
     use std::collections::{BTreeMap, BTreeSet};
@@ -5562,6 +5589,11 @@ mod tests {
         assert!(!garden_fits(24, widgets::garden::MIN_WIDTH - 1));
         // 0 は「未知」であって「狭い」ではない。frame と同じ fallback (24x80) で判定する。
         assert!(garden_fits(0, 0));
+
+        assert!(garden_fits_sized(13, 64, GardenSize::Small));
+        assert!(garden_fits_sized(13, 64, GardenSize::Medium));
+        assert!(!garden_fits_sized(14, 64, GardenSize::Large));
+        assert!(garden_fits_sized(15, 64, GardenSize::Large));
     }
 
     #[test]
