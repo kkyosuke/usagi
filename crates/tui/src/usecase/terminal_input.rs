@@ -264,6 +264,8 @@ pub enum GlobalControlChord {
     CtrlD,
     /// Remove or dismiss the selected management object (`Ctrl-X`).
     CtrlX,
+    /// Open contextual keyboard help (`Ctrl-?` / `Ctrl-/`).
+    Help,
 }
 
 /// A classifier result that an adapter can dispatch without daemon wire types.
@@ -396,10 +398,21 @@ fn global_control_key(key: &KeyEvent) -> Option<GlobalControlChord> {
         KeyCode::Char('\u{11}') => Some(GlobalControlChord::CtrlQ),
         KeyCode::Char('\u{4}') => Some(GlobalControlChord::CtrlD),
         KeyCode::Char('\u{18}') => Some(GlobalControlChord::CtrlX),
+        // Traditional terminals encode Ctrl-/ (and often Ctrl-Shift-/) as US
+        // (`0x1f`). Modern keyboard protocols can retain the semantic `/` or
+        // `?`, so accept all distinguishable forms without claiming DEL, which
+        // many terminals use for Backspace.
+        KeyCode::Char('\u{1f}') => Some(GlobalControlChord::Help),
         KeyCode::Char('c') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlC),
         KeyCode::Char('q') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlQ),
         KeyCode::Char('d') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlD),
         KeyCode::Char('x') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlX),
+        KeyCode::Char('/' | '7') if is_only_control(key.modifiers) => {
+            Some(GlobalControlChord::Help)
+        }
+        KeyCode::Char('?' | '_') if is_control_without_alt_or_meta(key.modifiers) => {
+            Some(GlobalControlChord::Help)
+        }
         _ => None,
     }
 }
@@ -410,8 +423,13 @@ fn global_control_bytes(bytes: &[u8]) -> Option<GlobalControlChord> {
         [17] => Some(GlobalControlChord::CtrlQ),
         [4] => Some(GlobalControlChord::CtrlD),
         [24] => Some(GlobalControlChord::CtrlX),
+        [31] => Some(GlobalControlChord::Help),
         _ => None,
     }
+}
+
+fn is_control_without_alt_or_meta(modifiers: Modifiers) -> bool {
+    modifiers.control && !modifiers.alt && !modifiers.super_ && !modifiers.hyper && !modifiers.meta
 }
 
 fn is_only_control(modifiers: Modifiers) -> bool {
@@ -1222,6 +1240,36 @@ mod tests {
             (ctrl('x'), GlobalControlChord::CtrlX),
             (key(KeyCode::Char('\u{18}')), GlobalControlChord::CtrlX),
             (LiveInput::Raw(vec![24]), GlobalControlChord::CtrlX),
+            (ctrl('/'), GlobalControlChord::Help),
+            // Crossterm's legacy control-byte decoder may expose US (`0x1f`)
+            // through the equivalent Ctrl-7 chord.
+            (ctrl('7'), GlobalControlChord::Help),
+            (key(KeyCode::Char('\u{1f}')), GlobalControlChord::Help),
+            (LiveInput::Raw(vec![31]), GlobalControlChord::Help),
+            (
+                LiveInput::Key(KeyEvent::new(
+                    KeyCode::Char('_'),
+                    Modifiers {
+                        control: true,
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                    KeyEventKind::Press,
+                )),
+                GlobalControlChord::Help,
+            ),
+            (
+                LiveInput::Key(KeyEvent::new(
+                    KeyCode::Char('?'),
+                    Modifiers {
+                        control: true,
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                    KeyEventKind::Press,
+                )),
+                GlobalControlChord::Help,
+            ),
         ];
         for (input, expected) in cases {
             assert_eq!(

@@ -9,6 +9,7 @@ TUI 仕様を正本とする。
 ## 目次
 
 - [割り振り規則](#割り振り規則)
+- [全画面共通](#全画面共通)
 - [workspace 共通コマンド](#workspace-共通コマンド)
 - [entry 画面](#entry-画面)
 - [workspace 画面](#workspace-画面)
@@ -20,6 +21,7 @@ TUI 仕様を正本とする。
 
 | 種別 | 規則 |
 |---|---|
+| ヘルプ | `Ctrl-?`（portable alias: `Ctrl-/`）で現在の最前面surfaceに有効なキーだけを表示する |
 | workspace 共通操作 | `Ctrl-O` を leader とする 2 打鍵へ集約し、2 打目は 1 action だけを持つ |
 | tab | `[` / `]` は前 / 次の選択、`{` / `}` は前 / 次への並べ替えとする |
 | 対象の除去 | `Ctrl-X` は選択中の対象を安全に remove / detach / dismiss する。plain `x` / `X` に副作用を割り当てない |
@@ -31,6 +33,18 @@ TUI 仕様を正本とする。
 同じ scope で異なる action が同じ入力を持つ状態を衝突とする。`Ctrl-X` の remove / detach / dismiss のように、
 異なる画面でも「現在選択している対象を一覧から除く」という同じ意味を保つ割り当ては同じ action family とする。
 `Enter` / `Esc` / 矢印などの標準 modal 操作も同じ意味で再利用する。
+
+## 全画面共通
+
+| 入力 | 動作 |
+|---|---|
+| `Ctrl-?` / `Ctrl-/` | 現在の画面、modal、drawerで使用できるコマンドを表示 |
+| help表示中の `Ctrl-?` / `Ctrl-/` / `Esc` | helpを閉じる |
+
+従来型terminalが `Ctrl-/` または `Ctrl-Shift-/` を raw `0x1f` として送る場合も同じhelpとして扱う。
+`0x7f` はterminalによってBackspaceを表すためhelpには割り当てない。helpは最前面の入力ownerになり、表示中の
+その他の入力を背面のフォームやlive terminalへ渡さない。workspaceではdaemon更新とterminal観測を止めずに
+表示を更新する。
 
 ## workspace 共通コマンド
 

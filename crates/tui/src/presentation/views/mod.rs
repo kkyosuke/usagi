@@ -11,6 +11,7 @@ pub mod create_session_error_modal;
 pub mod daemon_modal;
 pub mod decision_modal;
 pub mod director_drawer;
+pub mod key_help;
 pub mod new;
 pub mod open;
 pub mod overview_modal;

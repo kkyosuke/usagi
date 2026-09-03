@@ -3946,6 +3946,7 @@ fn classify_terminal_input(
             GlobalControlChord::CtrlQ => Key::CtrlQ,
             GlobalControlChord::CtrlD => Key::CtrlD,
             GlobalControlChord::CtrlX => Key::CtrlX,
+            GlobalControlChord::Help => Key::Help,
         }),
         LiveInputOutput::Swallowed => None,
         LiveInputOutput::Passthrough(bytes) => match input {
@@ -4081,6 +4082,8 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     match key.code {
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
         KeyCode::Left => Key::Left,
         KeyCode::Right => Key::Right,
         KeyCode::Home => Key::Home,
@@ -8119,6 +8122,8 @@ mod tests {
         for (code, expected) in [
             (KeyCode::Up, Key::Up),
             (KeyCode::Down, Key::Down),
+            (KeyCode::PageUp, Key::PageUp),
+            (KeyCode::PageDown, Key::PageDown),
             (KeyCode::Left, Key::Left),
             (KeyCode::Right, Key::Right),
             (KeyCode::Home, Key::Home),
@@ -8227,6 +8232,8 @@ mod tests {
             (LiveInput::Raw(vec![4]), Key::CtrlD),
             (live_key(KeyCode::Char('x'), control()), Key::CtrlX),
             (LiveInput::Raw(vec![24]), Key::CtrlX),
+            (live_key(KeyCode::Char('/'), control()), Key::Help),
+            (LiveInput::Raw(vec![31]), Key::Help),
         ];
         for (input, expected) in cases {
             assert_eq!(
