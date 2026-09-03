@@ -1125,6 +1125,16 @@ mod tests {
                 LiveInputOutput::Action(action)
             );
         }
+
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), LiveInput::Raw(vec![b'x', b'y']),),
+            LiveInputOutput::Swallowed
+        );
     }
 
     #[test]

@@ -384,6 +384,55 @@ mod tests {
     use super::{Context, render_over};
 
     #[test]
+    fn every_context_has_a_renderable_title_and_command_catalog() {
+        for context in [
+            Context::Welcome,
+            Context::Open,
+            Context::OpenUnregister,
+            Context::OpenCleanup,
+            Context::New,
+            Context::Config,
+            Context::TeamPicker,
+            Context::EnvironmentEditor,
+            Context::WorkspaceEnvironmentEditor,
+            Context::MissingWorkspace,
+            Context::Switch,
+            Context::Closeup,
+            Context::LiveTerminal,
+            Context::AddWorkspace,
+            Context::WorkspaceFinder,
+            Context::CommandList,
+            Context::Overview,
+            Context::CloseupActions,
+            Context::CreateSession,
+            Context::CreateSessionError,
+            Context::ExitConfirmation,
+            Context::ForceRemove,
+            Context::CleanupQueue,
+            Context::PullRequests,
+            Context::Preview,
+            Context::Scratchpad,
+            Context::RolesEditor,
+            Context::Daemon,
+            Context::DecisionList,
+            Context::DecisionAnswer,
+            Context::Director,
+            Context::DirectorNew,
+            Context::WorkRuns,
+            Context::WorkRunConfirmation,
+            Context::WorkRunEscalation,
+            Context::RootShell,
+            Context::Garden,
+        ] {
+            assert!(!context.title().is_empty(), "{context:?}");
+            assert!(!context.entries().is_empty(), "{context:?}");
+
+            let rendered = render_over(96, 120, &vec![String::new(); 96], context).join("\n");
+            assert!(rendered.contains(context.title()), "{context:?}");
+        }
+    }
+
+    #[test]
     fn renders_only_the_frontmost_context_with_portable_close_hint() {
         let frame = render_over(24, 100, &vec!["base".to_owned(); 24], Context::PullRequests);
         let rendered = frame.join("\n");

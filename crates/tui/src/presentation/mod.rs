@@ -77,10 +77,10 @@ use crate::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit, AgentTabProjection,
 };
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DirectorNew, Effect, EnvironmentEntry,
-    ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay,
-    PendingToken, RoleChoice, Route, SessionBranchCatalog, SessionRoleCatalog,
-    SessionRoleProjection, Target, WorkspaceDrawerFocus,
+    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState, DirectorNew,
+    Effect, EnvironmentEntry, ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice,
+    OperationResult, Overlay, PendingToken, RoleChoice, Route, SessionBranchCatalog,
+    SessionRoleCatalog, SessionRoleProjection, Target, WorkspaceDrawerFocus,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -7392,21 +7392,60 @@ fn switch_arrow_target(deck: &WorkspaceDeck, state: &AppState, key: &Key) -> Opt
     }
 }
 
-/// Resolve the frontmost visible surface before Help opens. The resulting
-/// value is held for the lifetime of that Help overlay, so background daemon
-/// updates cannot make the command list jump while it is being read.
-fn workspace_help_context(
-    deck: &WorkspaceDeck,
-    runtime: &WorkspaceRuntime,
-    work_run_control: &WorkRunControl,
-) -> KeyHelpContext {
-    if deck.add_overlay_open() {
-        return KeyHelpContext::AddWorkspace;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceDeckHelp {
+    None,
+    AddWorkspace,
+    WorkspaceFinder,
+}
+
+impl WorkspaceDeckHelp {
+    const fn new(add_open: bool, any_overlay_open: bool) -> Self {
+        if add_open {
+            Self::AddWorkspace
+        } else if any_overlay_open {
+            Self::WorkspaceFinder
+        } else {
+            Self::None
+        }
     }
-    if deck.overlay_open() {
-        return KeyHelpContext::WorkspaceFinder;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceBaseHelp {
+    Switch,
+    Closeup,
+    LiveTerminal,
+}
+
+impl WorkspaceBaseHelp {
+    const fn new(route: Route, live_input: bool) -> Self {
+        match route {
+            Route::Home(HomeMode::Switch) => Self::Switch,
+            Route::Home(HomeMode::Closeup) if live_input => Self::LiveTerminal,
+            Route::Home(HomeMode::Closeup) => Self::Closeup,
+        }
     }
-    if let Some(overlay) = runtime.state().overlay() {
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkspaceHelpState {
+    deck: WorkspaceDeckHelp,
+    overlay: Option<Overlay>,
+    decision_answer_open: bool,
+    work_run_mode: WorkRunControlMode,
+    director_new_open: bool,
+    drawer_focus: Option<WorkspaceDrawerFocus>,
+    base: WorkspaceBaseHelp,
+}
+
+fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
+    match state.deck {
+        WorkspaceDeckHelp::AddWorkspace => return KeyHelpContext::AddWorkspace,
+        WorkspaceDeckHelp::WorkspaceFinder => return KeyHelpContext::WorkspaceFinder,
+        WorkspaceDeckHelp::None => {}
+    }
+    if let Some(overlay) = state.overlay {
         return match overlay {
             Overlay::CommandHelp => KeyHelpContext::CommandList,
             Overlay::Overview => KeyHelpContext::Overview,
@@ -7418,13 +7457,8 @@ fn workspace_help_context(
             Overlay::Environment => KeyHelpContext::WorkspaceEnvironmentEditor,
             Overlay::Roles => KeyHelpContext::RolesEditor,
             Overlay::CreateSession => KeyHelpContext::CreateSession,
-            Overlay::Decisions => runtime
-                .state()
-                .decision_overlay()
-                .and_then(|decisions| decisions.editor())
-                .map_or(KeyHelpContext::DecisionList, |_| {
-                    KeyHelpContext::DecisionAnswer
-                }),
+            Overlay::Decisions if state.decision_answer_open => KeyHelpContext::DecisionAnswer,
+            Overlay::Decisions => KeyHelpContext::DecisionList,
             Overlay::CleanupQueue => KeyHelpContext::CleanupQueue,
             Overlay::Prs => KeyHelpContext::PullRequests,
             Overlay::Preview => KeyHelpContext::Preview,
@@ -7432,7 +7466,7 @@ fn workspace_help_context(
             Overlay::Garden => KeyHelpContext::Garden,
         };
     }
-    match work_run_control.mode() {
+    match state.work_run_mode {
         WorkRunControlMode::List => return KeyHelpContext::WorkRuns,
         WorkRunControlMode::ResolveEscalation => return KeyHelpContext::WorkRunEscalation,
         WorkRunControlMode::ConfirmCancel
@@ -7440,23 +7474,43 @@ fn workspace_help_context(
         | WorkRunControlMode::Retry => return KeyHelpContext::WorkRunConfirmation,
         WorkRunControlMode::Closed => {}
     }
-    if runtime.state().director_launching().is_some()
-        || !matches!(runtime.state().director_new(), DirectorNew::Idle)
-    {
+    if state.director_new_open {
         return KeyHelpContext::DirectorNew;
     }
-    match runtime.state().workspace_drawer_focus() {
+    match state.drawer_focus {
         Some(WorkspaceDrawerFocus::Director) => return KeyHelpContext::Director,
         Some(WorkspaceDrawerFocus::Terminal) => return KeyHelpContext::RootShell,
         None => {}
     }
-    match runtime.state().route() {
-        Route::Home(HomeMode::Switch) => KeyHelpContext::Switch,
-        Route::Home(HomeMode::Closeup) if runtime.wants_live_input() => {
-            KeyHelpContext::LiveTerminal
-        }
-        Route::Home(HomeMode::Closeup) => KeyHelpContext::Closeup,
+    match state.base {
+        WorkspaceBaseHelp::Switch => KeyHelpContext::Switch,
+        WorkspaceBaseHelp::Closeup => KeyHelpContext::Closeup,
+        WorkspaceBaseHelp::LiveTerminal => KeyHelpContext::LiveTerminal,
     }
+}
+
+/// Resolve the frontmost visible surface before Help opens. The resulting
+/// value is held for the lifetime of that Help overlay, so background daemon
+/// updates cannot make the command list jump while it is being read.
+fn workspace_help_context(
+    deck: &WorkspaceDeck,
+    runtime: &WorkspaceRuntime,
+    work_run_control: &WorkRunControl,
+) -> KeyHelpContext {
+    let state = runtime.state();
+    resolve_workspace_help_context(WorkspaceHelpState {
+        deck: WorkspaceDeckHelp::new(deck.add_overlay_open(), deck.overlay_open()),
+        overlay: state.overlay(),
+        decision_answer_open: state
+            .decision_overlay()
+            .and_then(DecisionOverlayState::editor)
+            .is_some(),
+        work_run_mode: work_run_control.mode(),
+        director_new_open: state.director_launching().is_some()
+            || !matches!(state.director_new(), DirectorNew::Idle),
+        drawer_focus: state.workspace_drawer_focus(),
+        base: WorkspaceBaseHelp::new(state.route(), runtime.wants_live_input()),
+    })
 }
 
 /// Maximum number of completions one Home frame may apply from each queue.
@@ -26630,6 +26684,61 @@ mod tests {
     }
 
     #[test]
+    fn entry_help_resolves_every_entry_surface_and_config_submode() {
+        use super::Screen;
+        use crate::presentation::views::key_help::Context as HelpContext;
+
+        let mut settings = DefaultSettingsPort;
+        let config = Config::load(&mut settings);
+        let mut open = Open::new(vec![ws("atlas")]);
+
+        for (screen, expected) in [
+            (Screen::Welcome, HelpContext::Welcome),
+            (Screen::Open, HelpContext::Open),
+            (Screen::New, HelpContext::New),
+            (Screen::Config, HelpContext::Config),
+        ] {
+            assert_eq!(
+                super::entry_help_context(screen, &open, &config, false),
+                expected
+            );
+        }
+        assert_eq!(
+            super::entry_help_context(Screen::Welcome, &open, &config, true),
+            HelpContext::MissingWorkspace
+        );
+
+        open.request_unregister();
+        assert_eq!(
+            super::entry_help_context(Screen::Open, &open, &config, false),
+            HelpContext::OpenUnregister
+        );
+        open.cancel_unregister();
+        open.request_cleanup();
+        assert_eq!(
+            super::entry_help_context(Screen::Open, &open, &config, false),
+            HelpContext::OpenCleanup
+        );
+
+        let mut team = Config::load(&mut settings);
+        for _ in 0..5 {
+            let _ = step_config(&mut team, Key::Down, &mut settings);
+        }
+        let _ = step_config(&mut team, Key::Enter, &mut settings);
+        assert_eq!(super::config_help_context(&team), HelpContext::TeamPicker);
+
+        let mut environment = Config::load(&mut settings);
+        for _ in 0..2 {
+            let _ = step_config(&mut environment, Key::Down, &mut settings);
+        }
+        let _ = step_config(&mut environment, Key::Enter, &mut settings);
+        assert_eq!(
+            super::config_help_context(&environment),
+            HelpContext::EnvironmentEditor
+        );
+    }
+
+    #[test]
     fn welcome_action_maps_every_destination() {
         assert!(matches!(
             welcome_action(MenuAction::Quit),
@@ -27373,6 +27482,44 @@ mod tests {
                 .iter()
                 .all(|frame| frame.join("\n").contains("Config"))
         );
+    }
+
+    #[test]
+    fn workspace_config_help_toggles_and_exclusively_owns_input() {
+        let base = vec!["home".to_owned(); 24];
+        let mut settings = RecordingSettingsPort::default();
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Help,
+            Key::Quit,
+            Key::Help,
+            Key::Help,
+            Key::Escape,
+            Key::Escape,
+        ]);
+
+        run_workspace_config(
+            &mut term,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
+
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 6);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame.contains("Keyboard help · Config"))
+                .count(),
+            3
+        );
+        assert!(!frames.last().unwrap().contains("Keyboard help"));
     }
 
     #[test]
@@ -28947,6 +29094,167 @@ mod tests {
         .unwrap();
         assert_eq!(term.frames.len(), 3);
         assert!(term.frames[1].join("\n").contains("recent-session"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One exhaustive surface-to-help table is easiest to audit intact.
+    fn workspace_help_resolver_covers_every_frontmost_surface() {
+        use super::{
+            WorkspaceBaseHelp, WorkspaceDeckHelp, WorkspaceHelpState,
+            resolve_workspace_help_context,
+        };
+        use crate::presentation::views::key_help::Context as HelpContext;
+
+        let base = WorkspaceHelpState {
+            deck: WorkspaceDeckHelp::None,
+            overlay: None,
+            decision_answer_open: false,
+            work_run_mode: super::WorkRunControlMode::Closed,
+            director_new_open: false,
+            drawer_focus: None,
+            base: WorkspaceBaseHelp::Switch,
+        };
+        assert_eq!(
+            WorkspaceDeckHelp::new(false, false),
+            WorkspaceDeckHelp::None
+        );
+        assert_eq!(
+            WorkspaceDeckHelp::new(true, true),
+            WorkspaceDeckHelp::AddWorkspace
+        );
+        assert_eq!(
+            WorkspaceDeckHelp::new(false, true),
+            WorkspaceDeckHelp::WorkspaceFinder
+        );
+        assert_eq!(
+            WorkspaceBaseHelp::new(Route::Home(HomeMode::Switch), false),
+            WorkspaceBaseHelp::Switch
+        );
+        assert_eq!(
+            WorkspaceBaseHelp::new(Route::Home(HomeMode::Closeup), false),
+            WorkspaceBaseHelp::Closeup
+        );
+        assert_eq!(
+            WorkspaceBaseHelp::new(Route::Home(HomeMode::Closeup), true),
+            WorkspaceBaseHelp::LiveTerminal
+        );
+        assert_eq!(resolve_workspace_help_context(base), HelpContext::Switch);
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                deck: WorkspaceDeckHelp::AddWorkspace,
+                ..base
+            }),
+            HelpContext::AddWorkspace
+        );
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                deck: WorkspaceDeckHelp::WorkspaceFinder,
+                ..base
+            }),
+            HelpContext::WorkspaceFinder
+        );
+
+        for (overlay, expected) in [
+            (Overlay::CommandHelp, HelpContext::CommandList),
+            (Overlay::Overview, HelpContext::Overview),
+            (Overlay::Daemon, HelpContext::Daemon),
+            (Overlay::Closeup, HelpContext::CloseupActions),
+            (Overlay::QuitConfirmation, HelpContext::ExitConfirmation),
+            (Overlay::ForceRemoveConfirmation, HelpContext::ForceRemove),
+            (Overlay::Notes, HelpContext::Scratchpad),
+            (
+                Overlay::Environment,
+                HelpContext::WorkspaceEnvironmentEditor,
+            ),
+            (Overlay::Roles, HelpContext::RolesEditor),
+            (Overlay::CreateSession, HelpContext::CreateSession),
+            (Overlay::Decisions, HelpContext::DecisionList),
+            (Overlay::CleanupQueue, HelpContext::CleanupQueue),
+            (Overlay::Prs, HelpContext::PullRequests),
+            (Overlay::Preview, HelpContext::Preview),
+            (Overlay::CreateSessionError, HelpContext::CreateSessionError),
+            (Overlay::Garden, HelpContext::Garden),
+        ] {
+            assert_eq!(
+                resolve_workspace_help_context(WorkspaceHelpState {
+                    overlay: Some(overlay),
+                    ..base
+                }),
+                expected,
+                "{overlay:?}"
+            );
+        }
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                overlay: Some(Overlay::Decisions),
+                decision_answer_open: true,
+                ..base
+            }),
+            HelpContext::DecisionAnswer
+        );
+
+        for (mode, expected) in [
+            (super::WorkRunControlMode::List, HelpContext::WorkRuns),
+            (
+                super::WorkRunControlMode::ResolveEscalation,
+                HelpContext::WorkRunEscalation,
+            ),
+            (
+                super::WorkRunControlMode::ConfirmCancel,
+                HelpContext::WorkRunConfirmation,
+            ),
+            (
+                super::WorkRunControlMode::Submitting,
+                HelpContext::WorkRunConfirmation,
+            ),
+            (
+                super::WorkRunControlMode::Retry,
+                HelpContext::WorkRunConfirmation,
+            ),
+        ] {
+            assert_eq!(
+                resolve_workspace_help_context(WorkspaceHelpState {
+                    work_run_mode: mode,
+                    ..base
+                }),
+                expected,
+                "{mode:?}"
+            );
+        }
+
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                director_new_open: true,
+                ..base
+            }),
+            HelpContext::DirectorNew
+        );
+        for (drawer_focus, expected) in [
+            (WorkspaceDrawerFocus::Director, HelpContext::Director),
+            (WorkspaceDrawerFocus::Terminal, HelpContext::RootShell),
+        ] {
+            assert_eq!(
+                resolve_workspace_help_context(WorkspaceHelpState {
+                    drawer_focus: Some(drawer_focus),
+                    ..base
+                }),
+                expected
+            );
+        }
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                base: WorkspaceBaseHelp::Closeup,
+                ..base
+            }),
+            HelpContext::Closeup
+        );
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                base: WorkspaceBaseHelp::LiveTerminal,
+                ..base
+            }),
+            HelpContext::LiveTerminal
+        );
     }
 
     #[test]

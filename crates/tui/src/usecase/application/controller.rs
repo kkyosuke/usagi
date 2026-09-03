@@ -8538,6 +8538,7 @@ mod tests {
         assert_eq!(state.selected(), Selection::NewSession);
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
         assert_eq!(state.selected(), Selection::NewSession);
+        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlX)).is_empty());
     }
 
     #[test]
