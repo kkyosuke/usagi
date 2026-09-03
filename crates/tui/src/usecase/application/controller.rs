@@ -2125,6 +2125,14 @@ pub enum AppEvent {
     /// workspace drawers may be open while Director owns focus, and replaying a
     /// toggle in that state would open/focus Shell and request a new terminal.
     RootTerminalDrawerEmptied,
+    /// The runtime observed the last active workspace-root Agent disappearing.
+    /// Interrupted history remains available when Director is opened again,
+    /// but the foreground drawer must not linger without an interactive Agent.
+    DirectorDrawerEmptied,
+    /// A pointer press moved input ownership to one of the already-open
+    /// workspace drawers. Geometry and z-order stay presentation concerns; the
+    /// reducer owns the focus invariant shared with keyboard toggles.
+    WorkspaceDrawerFocused(WorkspaceDrawerFocus),
     /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
     /// reducer resolves the row with the same viewport geometry the frame draws
     /// and either moves the cursor or, for two presses on the same stable
@@ -3475,6 +3483,30 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 state.workspace_drawer_focus = state
                     .director_drawer_open
                     .then_some(WorkspaceDrawerFocus::Director);
+            }
+            Vec::new()
+        }
+        AppEvent::DirectorDrawerEmptied => {
+            state.director_drawer_open = false;
+            state.director_new = DirectorNew::Idle;
+            state.director_goal.clear();
+            if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Director) {
+                state.workspace_drawer_focus = state
+                    .root_terminal_drawer_open
+                    .then_some(WorkspaceDrawerFocus::Terminal);
+            }
+            Vec::new()
+        }
+        AppEvent::WorkspaceDrawerFocused(focus) => {
+            let open = match focus {
+                WorkspaceDrawerFocus::Director => state.director_drawer_open,
+                WorkspaceDrawerFocus::Terminal => state.root_terminal_drawer_open,
+            };
+            if open {
+                if focus == WorkspaceDrawerFocus::Director {
+                    state.root_terminal_full_height = false;
+                }
+                state.workspace_drawer_focus = Some(focus);
             }
             Vec::new()
         }
@@ -7300,6 +7332,65 @@ mod tests {
             state.workspace_drawer_focus(),
             Some(WorkspaceDrawerFocus::Director)
         );
+    }
+
+    #[test]
+    fn empty_director_closes_and_returns_focus_to_an_open_workspace_terminal() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+
+        assert!(update(&mut state, AppEvent::DirectorDrawerEmptied).is_empty());
+        assert!(!state.director_drawer_open());
+        assert!(state.root_terminal_drawer_open());
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+    }
+
+    #[test]
+    fn pointer_focus_moves_only_to_an_open_workspace_drawer() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::WorkspaceDrawerFocused(WorkspaceDrawerFocus::Director),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.workspace_drawer_focus(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        assert!(state.root_terminal_drawer_open());
+        assert!(state.director_drawer_open());
+        let _ = update(
+            &mut state,
+            AppEvent::WorkspaceDrawerFocused(WorkspaceDrawerFocus::Terminal),
+        );
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+
+        let _ = update(
+            &mut state,
+            AppEvent::WorkspaceDrawerFocused(WorkspaceDrawerFocus::Director),
+        );
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert!(!state.root_terminal_full_height());
     }
 
     #[test]
