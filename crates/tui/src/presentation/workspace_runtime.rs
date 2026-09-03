@@ -2192,13 +2192,36 @@ mod tests {
         assert_eq!(help.context().scope, CommandScope::Workspace);
         assert_eq!(help.entries().len(), 8);
 
+        assert!(runtime.handle_key(Key::Down).is_empty());
+        assert_eq!(runtime.command_help_modal().unwrap().selected(), 1);
+        assert!(runtime.handle_key(Key::Up).is_empty());
+        assert_eq!(runtime.command_help_modal().unwrap().selected(), 0);
+        assert!(runtime.handle_key(Key::Left).is_empty());
+        assert_eq!(
+            runtime.command_help_modal().unwrap().tab(),
+            CommandHelpTab::All
+        );
+        assert!(runtime.handle_key(Key::Right).is_empty());
+        assert_eq!(
+            runtime.command_help_modal().unwrap().tab(),
+            CommandHelpTab::Available
+        );
         assert!(runtime.handle_key(Key::Tab).is_empty());
         assert_eq!(
             runtime.command_help_modal().unwrap().tab(),
             CommandHelpTab::All
         );
         assert_eq!(runtime.command_help_modal().unwrap().entries().len(), 13);
+        assert!(runtime.handle_key(Key::Other).is_empty());
+        assert_eq!(runtime.state().overlay(), Some(Overlay::CommandHelp));
+        assert!(runtime.handle_key(Key::Delete).is_empty());
+        assert_eq!(runtime.state().overlay(), Some(Overlay::CommandHelp));
 
+        assert!(runtime.handle_key(Key::Char('?')).is_empty());
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.command_help_modal().is_none());
+
+        assert!(runtime.handle_key(Key::Char('?')).is_empty());
         assert!(runtime.handle_key(Key::Escape).is_empty());
         assert_eq!(runtime.state().overlay(), None);
         assert!(runtime.command_help_modal().is_none());

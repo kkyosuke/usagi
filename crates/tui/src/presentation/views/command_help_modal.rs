@@ -330,6 +330,14 @@ mod tests {
             .map(CommandHelpEntry::name)
             .collect::<Vec<_>>();
         assert_eq!(names, ["agent", "close", "env", "terminal"]);
+
+        let unavailable = CommandHelpModal::new(CommandHelpContext {
+            scope: CommandScope::Session,
+            garden_available: false,
+            agent_available: false,
+            session_available: false,
+        });
+        assert!(plain(&unavailable).contains("no commands are available here"));
     }
 
     #[test]

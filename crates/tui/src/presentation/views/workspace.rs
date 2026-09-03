@@ -3210,6 +3210,9 @@ mod tests {
         work_run_state_label,
     };
     use crate::presentation::theme::{Color, Role, Style};
+    use crate::presentation::views::command_help_modal::{
+        CommandHelpContext, CommandHelpModal, CommandScope,
+    };
     use crate::presentation::views::director_drawer::{
         self, DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
         WorkRunControlProjection,
@@ -6788,6 +6791,26 @@ mod tests {
             "no daemon metric row without an observation"
         );
         assert!(strip(&baseline.join("\n")).contains("(o.o)?"));
+    }
+
+    #[test]
+    fn command_help_modal_is_composited_over_home() {
+        let state = AppState::home(WorkspaceId::new(), Vec::new());
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
+            .with_overlay_modals(
+                None,
+                None,
+                Some(CommandHelpModal::new(CommandHelpContext {
+                    scope: CommandScope::Workspace,
+                    garden_available: true,
+                    agent_available: true,
+                    session_available: false,
+                })),
+            );
+        let rendered = strip(&render_home(30, 100, &home).join("\n"));
+        assert!(rendered.contains("Commands"));
+        assert!(rendered.contains("Available"));
+        assert!(rendered.contains("clean"));
     }
 
     // ── daemon health indicator ─────────────────────────────────────────────
