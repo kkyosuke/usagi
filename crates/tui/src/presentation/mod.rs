@@ -49,8 +49,8 @@ use crate::presentation::theme::{Color, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::create_session_error_modal;
 use crate::presentation::views::director_drawer::{
-    self, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
-    DirectorOrganizationRow, WorkRunControlProjection,
+    self, DirectorCommandProjection, DirectorConversation, DirectorDrawerProjection,
+    DirectorNewProjection, DirectorOrganizationRow, WorkRunControlProjection,
 };
 use crate::presentation::views::new::{self, DirectoryCompletion, Field, New};
 use crate::presentation::views::open::{self, Open};
@@ -70,7 +70,9 @@ use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_deck::{
     OverlayIntent, ProjectBarTarget, WorkspaceDeck, project_bar, render_overlay,
 };
-use crate::presentation::workspace_runtime::{PaneRestoreTarget, WorkspaceRuntime};
+use crate::presentation::workspace_runtime::{
+    DirectorCommandInput, PaneRestoreTarget, WorkspaceRuntime,
+};
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
     AgentTabIntentPortCommit, AgentTabProjection,
@@ -98,8 +100,9 @@ use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
-    SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
-    TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
+    SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputError,
+    TerminalInputOutcome, TerminalInputResolution, TerminalSession, TerminalStreamPort,
+    TerminalSubscription,
 };
 pub use crate::usecase::application::work_run_control::WorkRunPort;
 use crate::usecase::application::work_run_control::{
@@ -1130,10 +1133,83 @@ fn route_workspace_input_before_reducer(
 ) -> WorkspaceInputRoute {
     if let Some(effects) = handle_director_picker_input(runtime, key) {
         WorkspaceInputRoute::Drawer(effects)
+    } else if handle_director_command_input(ui, runtime, key) {
+        WorkspaceInputRoute::Drawer(Vec::new())
     } else if forward_live_terminal_input(ui, runtime, controls, term, key) {
         WorkspaceInputRoute::Forwarded
     } else {
         WorkspaceInputRoute::Unhandled
+    }
+}
+
+fn handle_director_command_input(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    key: &Key,
+) -> bool {
+    match runtime.handle_director_command(key) {
+        DirectorCommandInput::Unhandled => false,
+        DirectorCommandInput::Consumed => true,
+        DirectorCommandInput::Submit(command) => {
+            let terminal = runtime
+                .focused_agent_terminal()
+                .expect("the Director composer gates submission on a focused Agent");
+            let mut bytes = command.into_bytes();
+            bytes.push(b'\r');
+            let delivery = ui.send_director_command_bytes(&terminal, &bytes);
+            if delivery.clear_draft {
+                runtime.complete_director_command();
+            }
+            if let Some(message) = delivery.feedback {
+                runtime.surface_focused_pane_feedback(message);
+            }
+            true
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectorCommandDelivery {
+    clear_draft: bool,
+    feedback: Option<String>,
+}
+
+impl DirectorCommandDelivery {
+    fn written() -> Self {
+        Self {
+            clear_draft: true,
+            feedback: None,
+        }
+    }
+
+    fn not_delivered(message: impl Into<String>) -> Self {
+        Self {
+            clear_draft: false,
+            feedback: Some(message.into()),
+        }
+    }
+
+    fn from_terminal_result(result: Result<(), TerminalInputError>) -> Self {
+        match result {
+            Ok(()) => Self::written(),
+            Err(error) => {
+                // Ambiguous writes must not be replayed, and a fenced command is
+                // already accepted by the ordered producer queue. Clearing both
+                // prevents Enter from accidentally enqueueing the same command
+                // a second time while still surfacing the delivery state.
+                let clear_draft = matches!(
+                    error,
+                    TerminalInputError::Rejected(
+                        TerminalInputOutcome::Ambiguous { .. } | TerminalInputOutcome::Written
+                    ) | TerminalInputError::Transport(TerminalError::InputEffectUnknown)
+                        | TerminalInputError::Fenced { .. }
+                );
+                Self {
+                    clear_draft,
+                    feedback: Some(error.message()),
+                }
+            }
+        }
     }
 }
 
@@ -2909,6 +2985,32 @@ impl WorkspaceUi {
         }
     }
 
+    /// Submit one complete Director command while preserving the durable input
+    /// contract. A definitely rejected command remains editable; an ambiguous
+    /// or already queued command is cleared so the UI never suggests replaying
+    /// bytes whose effect is unknown.
+    fn send_director_command_bytes(
+        &mut self,
+        terminal: &TerminalRef,
+        bytes: &[u8],
+    ) -> DirectorCommandDelivery {
+        let Some(agent) = self.agent.as_mut() else {
+            return DirectorCommandDelivery::not_delivered("terminal stream is unavailable");
+        };
+        let Some(session) = self
+            .terminals
+            .iter_mut()
+            .find(|session| session.terminal().fences(terminal))
+        else {
+            return DirectorCommandDelivery::not_delivered(
+                "terminal session is no longer available",
+            );
+        };
+        DirectorCommandDelivery::from_terminal_result(
+            session.send_input(&mut AgentStreamPort(agent.port.as_mut()), bytes),
+        )
+    }
+
     fn clear_terminal_for_user(&mut self, terminal: &TerminalRef) -> bool {
         self.terminals
             .iter_mut()
@@ -4262,6 +4364,7 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
 /// no vocabulary for, so they return `None`.
 fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
     match action {
+        LiveTerminalAction::CommandHelp => Some(AppKey::Char('?')),
         LiveTerminalAction::Switch => Some(AppKey::CtrlO),
         LiveTerminalAction::OpenCloseupModal => Some(AppKey::OpenCloseupOverlay),
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
@@ -4326,11 +4429,7 @@ fn foreground_terminal_geometry(
                 .expect("clamped drawer terminal height fits u16"),
         }
     } else if root_terminal_open {
-        let available_width = if director_open {
-            director_drawer::geometry(height, width).left
-        } else {
-            width
-        };
+        let available_width = width;
         let viewport = root_terminal_drawer::terminal_viewport_for_mode(
             height,
             width,
@@ -4348,17 +4447,8 @@ fn foreground_terminal_geometry(
     }
 }
 
-fn root_terminal_available_width(height: usize, width: usize, director_open: bool) -> usize {
-    if director_open {
-        let director = director_drawer::geometry(height, width);
-        if director.full_width {
-            width
-        } else {
-            director.left
-        }
-    } else {
-        width
-    }
+fn root_terminal_available_width(_height: usize, width: usize, _director_open: bool) -> usize {
+    width
 }
 
 /// Return the managed terminal underneath either workspace drawer.
@@ -4917,11 +5007,20 @@ fn director_drawer_projection(
         None
     };
     DirectorDrawerProjection {
+        focused: runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director),
         goal_driven: runtime.state().work_mode()
             == usagi_core::domain::settings::WorkMode::GoalDriven,
         conversations,
         organization: director_organization(ui),
         terminal_view,
+        command: runtime.director_terminal().map(|_| {
+            let input = runtime.director_command();
+            DirectorCommandProjection {
+                value: input.value().to_owned(),
+                cursor: input.cursor(),
+                selection: input.selection(),
+            }
+        }),
         interrupted_detail,
         feedback,
         new: director_new_projection(runtime),
@@ -5921,6 +6020,51 @@ fn is_director_new_pointer(
         && director_drawer::new_button_at(height, width, column, row, false)
 }
 
+/// Focus the visible workspace drawer under a pointer press. Director is
+/// tested first because it is composed last; a Shell remains clickable only in
+/// the portion the right-side overlay does not cover.
+fn focus_workspace_drawer_from_pointer(
+    runtime: &mut WorkspaceRuntime,
+    key: &Key,
+    height: usize,
+    width: usize,
+) -> Option<WorkspaceDrawerFocus> {
+    if runtime.state().overlay().is_some() {
+        return None;
+    }
+    let (column, row) = match key {
+        Key::Click { column, row }
+        | Key::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            column,
+            row,
+        }) => (usize::from(*column), usize::from(*row)),
+        _ => return None,
+    };
+    let director = runtime.state().director_drawer_open().then(|| {
+        let geometry = director_drawer::geometry(height, width);
+        (geometry.left..geometry.left.saturating_add(geometry.width)).contains(&column)
+            && (geometry.top..geometry.top.saturating_add(geometry.height)).contains(&row)
+    });
+    let focus = if director == Some(true) {
+        Some(WorkspaceDrawerFocus::Director)
+    } else if runtime.state().root_terminal_drawer_open() {
+        let geometry = root_terminal_drawer::geometry_for_mode(
+            height,
+            width,
+            width,
+            runtime.state().root_terminal_full_height(),
+        );
+        ((geometry.left..geometry.left.saturating_add(geometry.width)).contains(&column)
+            && (geometry.top..geometry.top.saturating_add(geometry.height)).contains(&row))
+        .then_some(WorkspaceDrawerFocus::Terminal)
+    } else {
+        None
+    }?;
+    let _ = runtime.apply_event(AppEvent::WorkspaceDrawerFocused(focus));
+    Some(focus)
+}
+
 /// Intercept the live-terminal view controls the Home reducer does not own —
 /// copy, scroll, tab close, and pointer drag — returning `true` when the key was
 /// consumed here so the shell loop skips reducer dispatch. `rows_len` / `scroll`
@@ -6325,6 +6469,7 @@ fn home_frame_material_shared(
         .with_overlay_modals(
             runtime.overview_modal().cloned(),
             runtime.closeup_modal().cloned(),
+            runtime.command_help_modal().cloned(),
         )
         // Last, once every surface that reads the animation clock is known.
         .collapse_animation_clock();
@@ -8370,6 +8515,17 @@ fn drive_workspace_controller(
         // persistent toggle before the drawer picker gets a chance to consume
         // the click, otherwise an open picker makes the visible close button
         // inert.
+        let pointer_drawer_focus =
+            focus_workspace_drawer_from_pointer(&mut runtime, &key, height, width);
+        if pointer_drawer_focus.is_some() {
+            let focused = runtime.focused_terminal();
+            controls.sync_focus(focused.as_ref());
+            terminal_rows_len = focused
+                .as_ref()
+                .and_then(|terminal| ui.terminal_row_extent(terminal, None))
+                .map_or(0, |(_, _, total_rows)| total_rows);
+            terminal_scroll = controls.scroll();
+        }
         let director_header_effects = drawn_material.as_ref().and_then(|material| {
             close_director_from_header(&mut runtime, &key, material.width, &material.projection)
         });
@@ -8441,6 +8597,14 @@ fn drive_workspace_controller(
                 terminal_scroll,
             )
         {
+            continue;
+        }
+        if pointer_drawer_focus.is_some()
+            && matches!(key, Key::Click { .. })
+            && !is_director_new_click(&key, &runtime, height, width)
+        {
+            // Drawer chrome owns its whole rectangle. A click outside the PTY
+            // viewport must not activate the Home sidebar hidden underneath.
             continue;
         }
         let daemon_overlay_was_open = runtime.state().overlay() == Some(Overlay::Daemon);
@@ -9989,28 +10153,29 @@ mod tests {
         AgentCommandPort, AgentCommandPortFactory, AgentPaneAdmission, AgentTabIntentPort,
         AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
-        DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
-        FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort,
-        Geometry, GitDiff, IdleWatch, LaunchAgentRequest, MAX_BACKGROUND_EXITS_PER_FRAME,
-        MetricsPort, MetricsPortFactory, MissingWorkspacePrompt, NewStep, NoDesktopNotifications,
-        NoMetrics, NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort,
-        PrModalClickRoute, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
-        SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
-        SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
-        TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
-        TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
-        UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
-        UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
-        UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
-        UnavailableSessionCommandPortFactory, WORKSPACE_SWITCH_LOADING_GRACE, WelcomeStep,
-        WorkspaceConfigContext, WorkspaceConfigStep, WorkspaceCreateCompletion,
-        WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute,
-        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
-        activate_workspace_responsive, adjust_project_bar_pointer, app_event_from_key,
-        cached_workspace_switch_frame, close_director_from_header, close_exited_panes,
-        compose_workspace_shell_frame, controller_terminal_view, copy_terminal_selection,
-        director_organization, dismiss_pr_modal_on_project_bar_click, drain_session_completions,
+        DesktopNotificationPort, DirectorCommandDelivery, EnvironmentStorePort, Exit,
+        ExternalTerminalPort, FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute,
+        GardenInventoryPort, Geometry, GitDiff, IdleWatch, LaunchAgentRequest,
+        MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, MissingWorkspacePrompt,
+        NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS,
+        PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
+        SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory,
+        SessionCommandResult, SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort,
+        SessionWorktreeHint, SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk,
+        TerminalError, TerminalInputError, TerminalInputOutcome, TerminalInputResolution,
+        TerminalSubscription, TerminalViewProjection, UnavailableAgentCommandPort,
+        UnavailableBackendPort, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
+        UnavailableEnvironmentStore, UnavailableExternalTerminalPort,
+        UnavailableGardenInventoryPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
+        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory,
+        WORKSPACE_SWITCH_LOADING_GRACE, WelcomeStep, WorkspaceConfigContext, WorkspaceConfigStep,
+        WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
+        WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
+        WorkspaceView, activate_workspace_responsive, adjust_project_bar_pointer,
+        app_event_from_key, cached_workspace_switch_frame, close_director_from_header,
+        close_exited_panes, compose_workspace_shell_frame, controller_terminal_view,
+        copy_terminal_selection, director_organization, dismiss_pr_modal_on_project_bar_click,
+        drain_session_completions, focus_workspace_drawer_from_pointer,
         foreground_terminal_geometry, forward_live_terminal_input, garden_click_at, garden_fits,
         garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
         intercept_live_terminal_control, is_director_header_click, is_user_activity,
@@ -10041,6 +10206,7 @@ mod tests {
     use crate::presentation::views::open::Open;
     use crate::presentation::views::welcome::MenuAction;
     use crate::presentation::views::workspace::HomeProjection;
+    use crate::presentation::views::{director_drawer, root_terminal_drawer};
     use crate::presentation::widgets::strip_ansi;
     use crate::presentation::workspace_runtime::PaneRestoreTarget;
     use crate::usecase::application::agent_tab_intent::{
@@ -10292,6 +10458,10 @@ mod tests {
 
     #[test]
     fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::CommandHelp)),
+            Some(AppEvent::Key(AppKey::Char('?')))
+        );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::Switch)),
             Some(AppEvent::Key(AppKey::CtrlO))
@@ -22500,9 +22670,9 @@ mod tests {
         );
 
         let calls = calls.lock().unwrap();
-        // The managed pane stays attached through both Director visits. Only the
-        // root conversation is detached when the drawer closes and attached
-        // again when it reopens; each attach states that surface's own viewport.
+        // The managed pane stays attached at its normal workspace geometry
+        // through both Director visits. Only the root conversation is detached
+        // when the overlay closes and attached again when it reopens.
         assert_eq!(
             calls.attach_geometries,
             [
@@ -23845,7 +24015,7 @@ mod tests {
                 &mut term,
                 &Key::Char('x'),
             ),
-            WorkspaceInputRoute::Forwarded
+            WorkspaceInputRoute::Drawer(Vec::new())
         );
         assert_eq!(
             route_workspace_input_before_reducer(
@@ -23855,14 +24025,11 @@ mod tests {
                 &mut term,
                 &Key::Enter,
             ),
-            WorkspaceInputRoute::Forwarded
+            WorkspaceInputRoute::Drawer(Vec::new())
         );
         assert_eq!(
             *inputs.lock().unwrap(),
-            vec![
-                (root_agent.clone(), b"x".to_vec()),
-                (root_agent.clone(), b"\r".to_vec()),
-            ]
+            vec![(root_agent.clone(), b"x\r".to_vec())]
         );
 
         assert_eq!(
@@ -23903,13 +24070,7 @@ mod tests {
             WorkspaceInputRoute::Drawer(Vec::new())
         );
         assert!(!runtime.state().director_drawer_open());
-        assert_eq!(
-            *inputs.lock().unwrap(),
-            vec![
-                (root_agent.clone(), b"x".to_vec()),
-                (root_agent, b"\r".to_vec()),
-            ]
-        );
+        assert_eq!(*inputs.lock().unwrap(), vec![(root_agent, b"x\r".to_vec())]);
     }
 
     #[test]
@@ -24376,9 +24537,8 @@ mod tests {
             );
         }
 
-        // Escape returns Choosing to the drawer conversation. The very next
-        // ordinary input is routed to the focused root Agent, with no stale
-        // picker ownership carried across events.
+        // Escape returns Choosing to the conversation command composer. The
+        // next committed character stays local until Enter submits one line.
         assert_eq!(
             route_workspace_input_before_reducer(
                 &mut ui,
@@ -24398,7 +24558,27 @@ mod tests {
                 &mut term,
                 &Key::Char('z'),
             ),
-            WorkspaceInputRoute::Forwarded,
+            WorkspaceInputRoute::Drawer(Vec::new()),
+        );
+        assert_eq!(runtime.director_command().value(), "z");
+        assert!(inputs.lock().unwrap().is_empty());
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Enter,
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new()),
+        );
+        assert_eq!(
+            inputs
+                .lock()
+                .unwrap()
+                .last()
+                .map(|(_, bytes)| bytes.as_slice()),
+            Some(b"z\r".as_slice())
         );
         inputs.lock().unwrap().clear();
 
@@ -24747,6 +24927,102 @@ mod tests {
         );
         // A drag that copied a selection never also opens a link.
         assert!(browser.opened.is_empty());
+    }
+
+    #[test]
+    fn clicking_the_exposed_shell_focuses_it_and_keeps_copy_available_under_director() {
+        let workspace = WorkspaceId::new();
+        let root = Target::Root(workspace);
+        let agent = scoped_terminal_ref(workspace, None);
+        let shell = scoped_terminal_ref(workspace, None);
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        assert_eq!(
+            focus_workspace_drawer_from_pointer(
+                &mut runtime,
+                &Key::Click { column: 0, row: 0 },
+                24,
+                100,
+            ),
+            None
+        );
+        for (terminal, kind) in [
+            (agent.clone(), PaneKind::Agent),
+            (shell.clone(), PaneKind::Terminal),
+        ] {
+            let operation = OperationId::new();
+            let _ = runtime.request_pane(root, operation, kind);
+            let _ = runtime.complete_pane(root, operation, terminal);
+        }
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert_eq!(
+            runtime.state().workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+
+        let root_geometry = root_terminal_drawer::geometry(24, 100);
+        assert_eq!(
+            focus_workspace_drawer_from_pointer(
+                &mut runtime,
+                &Key::Click {
+                    column: 2,
+                    row: u16::try_from(root_geometry.top + 3).unwrap(),
+                },
+                24,
+                100,
+            ),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+        assert_eq!(runtime.focused_terminal(), Some(shell.clone()));
+
+        let mut controls = LiveTerminalControls::default();
+        controls.sync_focus(Some(&shell));
+        let mut selection = TerminalSelection::begin(
+            vec!["shell output".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        );
+        selection.extend(TerminalPoint { row: 0, column: 4 });
+        controls.begin_selection(selection);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut term = FakeTerminal::default();
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &Key::TerminalCopy {
+                fallback: Vec::new(),
+            },
+        ));
+        assert_eq!(term.copied, ["shell".to_owned()]);
+
+        let director = director_drawer::geometry(24, 100);
+        assert_eq!(
+            focus_workspace_drawer_from_pointer(
+                &mut runtime,
+                &Key::Click {
+                    column: u16::try_from(director.left + 2).unwrap(),
+                    row: u16::try_from(director.top + 4).unwrap(),
+                },
+                24,
+                100,
+            ),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert_eq!(
+            focus_workspace_drawer_from_pointer(
+                &mut runtime,
+                &Key::Pointer(PointerEvent {
+                    kind: PointerKind::Down,
+                    column: u16::try_from(director.left + 3).unwrap(),
+                    row: u16::try_from(director.top + 5).unwrap(),
+                }),
+                24,
+                100,
+            ),
+            Some(WorkspaceDrawerFocus::Director)
+        );
     }
 
     #[test]
@@ -28877,7 +29153,7 @@ mod tests {
                 false,
                 Some(WorkspaceDrawerFocus::Director),
             ),
-            Geometry { cols: 56, rows: 16 }
+            Geometry { cols: 56, rows: 14 }
         );
         assert_eq!(
             foreground_terminal_geometry(
@@ -28893,6 +29169,86 @@ mod tests {
         assert_eq!(
             foreground_terminal_geometry(24, 100, false, false, false, None),
             terminal_geometry(24, 100)
+        );
+    }
+
+    #[test]
+    fn director_command_draft_is_never_offered_for_unsafe_replay() {
+        for result in [
+            Err(TerminalInputError::Rejected(
+                TerminalInputOutcome::Ambiguous { applied_prefix: 2 },
+            )),
+            Err(TerminalInputError::Transport(
+                TerminalError::InputEffectUnknown,
+            )),
+            Err(TerminalInputError::Fenced { queued: 1 }),
+        ] {
+            let delivery = DirectorCommandDelivery::from_terminal_result(result);
+            assert!(delivery.clear_draft);
+            assert!(delivery.feedback.is_some());
+        }
+
+        for result in [
+            Err(TerminalInputError::Rejected(TerminalInputOutcome::Failed)),
+            Err(TerminalInputError::Transport(TerminalError::Unavailable)),
+            Err(TerminalInputError::FenceFull { queued: 16 }),
+        ] {
+            let delivery = DirectorCommandDelivery::from_terminal_result(result);
+            assert!(!delivery.clear_draft);
+            assert!(delivery.feedback.is_some());
+        }
+
+        assert_eq!(
+            DirectorCommandDelivery::from_terminal_result(Ok(())),
+            DirectorCommandDelivery::written()
+        );
+
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut no_stream = WorkspaceUi::new(view.clone(), Box::new(UnavailableSessionCommandPort));
+        assert_eq!(
+            no_stream.send_director_command_bytes(&terminal, b"echo unavailable\r"),
+            DirectorCommandDelivery::not_delivered("terminal stream is unavailable")
+        );
+        let mut no_session = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort));
+        assert_eq!(
+            no_session.send_director_command_bytes(&terminal, b"echo missing\r"),
+            DirectorCommandDelivery::not_delivered("terminal session is no longer available")
+        );
+
+        let operation = OperationId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
+        let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut no_stream,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Char('x'),
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new())
+        );
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut no_stream,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Enter,
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new())
+        );
+        assert_eq!(runtime.director_command().value(), "x");
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some("terminal stream is unavailable")
         );
     }
 

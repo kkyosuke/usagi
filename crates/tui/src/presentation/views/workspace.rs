@@ -36,6 +36,7 @@ use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::cleanup_modal::{self, CleanupEntry, CleanupModal};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
+use crate::presentation::views::command_help_modal::{self, CommandHelpModal};
 use crate::presentation::views::daemon_modal;
 use crate::presentation::views::decision_modal;
 use crate::presentation::views::director_drawer::{self, DIRECTOR_ICON, DirectorDrawerProjection};
@@ -334,6 +335,8 @@ pub struct HomeProjection {
     /// Persisted Overview command-palette input, when its overlay is open. The
     /// runtime owns this so the caret and filter survive across frames.
     overview_modal: Option<OverviewModal>,
+    /// Context-aware command list opened with `?`.
+    command_help_modal: Option<CommandHelpModal>,
     /// Overview の `daemon` command が開く読み取り専用 status surface。
     daemon_overlay: bool,
     /// session ごとの Agent 群。sidebar の agent 行と Garden の plot が読む唯一の
@@ -634,6 +637,7 @@ impl HomeProjection {
             preview_overlay: state.preview_overlay().cloned(),
             cleanup_queue,
             overview_modal: None,
+            command_help_modal: None,
             daemon_overlay: state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Daemon),
             session_agents,
@@ -756,17 +760,19 @@ impl HomeProjection {
         self
     }
 
-    /// Attach the runtime's persisted Overview / Closeup modal input so the
+    /// Attach the runtime's persisted command modal input so the
     /// overlay renders its live caret and selection instead of a rebuilt, empty
-    /// modal. Both are `None` unless their overlay is open.
+    /// modal. Each is `None` unless its overlay is open.
     #[must_use]
     pub fn with_overlay_modals(
         mut self,
         overview: Option<OverviewModal>,
         closeup: Option<CloseupModal>,
+        command_help: Option<CommandHelpModal>,
     ) -> Self {
         self.overview_modal = overview;
         self.closeup_modal = closeup;
+        self.command_help_modal = command_help;
         self
     }
 
@@ -2170,17 +2176,9 @@ pub fn render_home_at(
     let mut frame = Vec::with_capacity(height);
     frame.push(home_header_line(width, home));
     frame.push(home_notice_banner(width, home));
-    let director_geometry = home
-        .director_drawer
-        .as_ref()
-        .map(|_| director_drawer::geometry(height, width));
-    let root_terminal_width = director_geometry.map_or(width, |geometry| {
-        if geometry.full_width {
-            width
-        } else {
-            geometry.left
-        }
-    });
+    // Both root surfaces retain their ordinary geometry. Director is composed
+    // last as a true overlay instead of shrinking the Shell beneath it.
+    let root_terminal_width = width;
     let body_height = home
         .root_terminal_drawer
         .as_ref()
@@ -2202,9 +2200,6 @@ pub fn render_home_at(
     ));
     frame.truncate(height);
     frame.resize_with(height, || " ".repeat(width));
-    if let Some(drawer) = &home.director_drawer {
-        frame = director_drawer::render_over(height, width, &frame, drawer);
-    }
     if let Some(drawer) = &home.root_terminal_drawer {
         frame = root_terminal_drawer::render_over_for(
             height,
@@ -2213,6 +2208,9 @@ pub fn render_home_at(
             &frame,
             drawer,
         );
+    }
+    if let Some(drawer) = &home.director_drawer {
+        frame = director_drawer::render_over(height, width, &frame, drawer);
     }
     render_home_modals(height, width, home, frame, now)
 }
@@ -2224,7 +2222,9 @@ fn render_home_modals(
     frame: Vec<String>,
     now: DateTime<Utc>,
 ) -> Vec<String> {
-    if let Some(modal) = &home.overview_modal {
+    if let Some(modal) = &home.command_help_modal {
+        command_help_modal::render_over(height, width, &frame, modal)
+    } else if let Some(modal) = &home.overview_modal {
         overview_modal::render_over(height, width, &frame, modal)
     } else if let Some(modal) = &home.cleanup_queue {
         cleanup_modal::render_over(height, width, &frame, modal)
@@ -3203,6 +3203,9 @@ mod tests {
         work_run_state_label,
     };
     use crate::presentation::theme::{Color, Role, Style};
+    use crate::presentation::views::command_help_modal::{
+        CommandHelpContext, CommandHelpModal, CommandScope,
+    };
     use crate::presentation::views::director_drawer::{
         self, DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
         WorkRunControlProjection,
@@ -4433,6 +4436,7 @@ mod tests {
     fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
         let workspace = WorkspaceId::new();
         let material = DirectorDrawerProjection {
+            focused: true,
             goal_driven: false,
             conversations: vec![DirectorConversation {
                 label: "root conversation".to_owned(),
@@ -4446,6 +4450,7 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
+            command: None,
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::default(),
@@ -4469,6 +4474,7 @@ mod tests {
         assert!(open_text.contains("director agent output"));
 
         let terminal_material = RootTerminalDrawerProjection {
+            focused: false,
             terminal_view: Some(TerminalViewProjection {
                 rows: vec!["workspace shell output".to_owned()],
                 row_offset: 0,
@@ -4565,7 +4571,10 @@ mod tests {
 
         let narrow_text = render_home(30, 79, &concurrent).join("\n");
         assert!(narrow_text.contains("director agent output"));
-        assert!(narrow_text.contains("workspace shell output"));
+        assert!(
+            !narrow_text.contains("workspace shell output"),
+            "a full-width Director overlay occludes the Shell at the narrow breakpoint"
+        );
     }
 
     #[test]
@@ -6829,6 +6838,26 @@ mod tests {
             "no daemon metric row without an observation"
         );
         assert!(strip(&baseline.join("\n")).contains("(o.o)?"));
+    }
+
+    #[test]
+    fn command_help_modal_is_composited_over_home() {
+        let state = AppState::home(WorkspaceId::new(), Vec::new());
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
+            .with_overlay_modals(
+                None,
+                None,
+                Some(CommandHelpModal::new(CommandHelpContext {
+                    scope: CommandScope::Workspace,
+                    garden_available: true,
+                    agent_available: true,
+                    session_available: false,
+                })),
+            );
+        let rendered = strip(&render_home(30, 100, &home).join("\n"));
+        assert!(rendered.contains("Commands"));
+        assert!(rendered.contains("Available"));
+        assert!(rendered.contains("clean"));
     }
 
     // ── daemon health indicator ─────────────────────────────────────────────

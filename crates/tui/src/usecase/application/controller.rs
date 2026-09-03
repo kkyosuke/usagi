@@ -51,6 +51,8 @@ pub enum Route {
 /// Home の一時的な重ね表示。常駐 mode には数えない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
+    /// Read-only, context-aware command list opened with `?`.
+    CommandHelp,
     /// workspace scope の command surface。
     Overview,
     /// daemon health / Agent capacity の読み取り専用 status surface。
@@ -1414,6 +1416,18 @@ impl AppState {
     pub const fn workspace(&self) -> WorkspaceId {
         self.workspace
     }
+    /// Whether the current terminal dimensions can host the Garden command.
+    #[must_use]
+    pub const fn garden_available(&self) -> bool {
+        self.garden_available
+    }
+    /// Whether the active managed session is a currently usable command scope.
+    #[must_use]
+    pub fn active_session_is_usable(&self) -> bool {
+        self.active.is_some_and(|session| {
+            self.sessions.contains(&session) && self.session_can_use(session)
+        })
+    }
     /// snapshot の stable session identity。
     #[must_use]
     pub fn sessions(&self) -> &[SessionId] {
@@ -2111,6 +2125,14 @@ pub enum AppEvent {
     /// workspace drawers may be open while Director owns focus, and replaying a
     /// toggle in that state would open/focus Shell and request a new terminal.
     RootTerminalDrawerEmptied,
+    /// The runtime observed the last active workspace-root Agent disappearing.
+    /// Interrupted history remains available when Director is opened again,
+    /// but the foreground drawer must not linger without an interactive Agent.
+    DirectorDrawerEmptied,
+    /// A pointer press moved input ownership to one of the already-open
+    /// workspace drawers. Geometry and z-order stay presentation concerns; the
+    /// reducer owns the focus invariant shared with keyboard toggles.
+    WorkspaceDrawerFocused(WorkspaceDrawerFocus),
     /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
     /// reducer resolves the row with the same viewport geometry the frame draws
     /// and either moves the cursor or, for two presses on the same stable
@@ -3464,6 +3486,30 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
+        AppEvent::DirectorDrawerEmptied => {
+            state.director_drawer_open = false;
+            state.director_new = DirectorNew::Idle;
+            state.director_goal.clear();
+            if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Director) {
+                state.workspace_drawer_focus = state
+                    .root_terminal_drawer_open
+                    .then_some(WorkspaceDrawerFocus::Terminal);
+            }
+            Vec::new()
+        }
+        AppEvent::WorkspaceDrawerFocused(focus) => {
+            let open = match focus {
+                WorkspaceDrawerFocus::Director => state.director_drawer_open,
+                WorkspaceDrawerFocus::Terminal => state.root_terminal_drawer_open,
+            };
+            if open {
+                if focus == WorkspaceDrawerFocus::Director {
+                    state.root_terminal_full_height = false;
+                }
+                state.workspace_drawer_focus = Some(focus);
+            }
+            Vec::new()
+        }
         AppEvent::OperationResult(result) => {
             let pending = state
                 .pending
@@ -4348,6 +4394,10 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         // other key is inert while the create-failure dialog owns input.
         Overlay::Prs => update_prs_overlay(state, &key),
         Overlay::Preview => update_preview_overlay(state, &key),
+        Overlay::CommandHelp if matches!(key, AppKey::Escape | AppKey::Char('?')) => {
+            state.overlay = None;
+            Vec::new()
+        }
         Overlay::Daemon | Overlay::Overview if matches!(key, AppKey::Escape) => {
             state.overlay = None;
             Vec::new()
@@ -4361,7 +4411,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             Vec::new()
         }
-        Overlay::CreateSessionError | Overlay::Daemon => Vec::new(),
+        Overlay::CreateSessionError | Overlay::Daemon | Overlay::CommandHelp => Vec::new(),
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
     }
 }
@@ -4628,6 +4678,10 @@ fn open_decisions(state: &mut AppState) -> Vec<Effect> {
 #[allow(clippy::too_many_lines)] // Exhaustive Home command ownership remains visible in one reducer table.
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
+        AppKey::Char('?') => {
+            state.overlay = Some(Overlay::CommandHelp);
+            Vec::new()
+        }
         AppKey::OpenDecisions | AppKey::Char('d') => open_decisions(state),
         AppKey::Up => {
             state.move_selection(-1);
@@ -7281,6 +7335,65 @@ mod tests {
     }
 
     #[test]
+    fn empty_director_closes_and_returns_focus_to_an_open_workspace_terminal() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+
+        assert!(update(&mut state, AppEvent::DirectorDrawerEmptied).is_empty());
+        assert!(!state.director_drawer_open());
+        assert!(state.root_terminal_drawer_open());
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+    }
+
+    #[test]
+    fn pointer_focus_moves_only_to_an_open_workspace_drawer() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::WorkspaceDrawerFocused(WorkspaceDrawerFocus::Director),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.workspace_drawer_focus(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        assert!(state.root_terminal_drawer_open());
+        assert!(state.director_drawer_open());
+        let _ = update(
+            &mut state,
+            AppEvent::WorkspaceDrawerFocused(WorkspaceDrawerFocus::Terminal),
+        );
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+
+        let _ = update(
+            &mut state,
+            AppEvent::WorkspaceDrawerFocused(WorkspaceDrawerFocus::Director),
+        );
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert!(!state.root_terminal_full_height());
+    }
+
+    #[test]
     fn director_frontmost_transition_table_keeps_modal_and_background_ownership_unique() {
         struct Case {
             name: &'static str,
@@ -7596,6 +7709,7 @@ mod tests {
     fn every_existing_modal_blocks_director_drawer_entry() {
         let (workspace, first, _) = ids();
         for overlay in [
+            Overlay::CommandHelp,
             Overlay::Overview,
             Overlay::Daemon,
             Overlay::Closeup,
@@ -7644,7 +7758,8 @@ mod tests {
                 Overlay::CleanupQueue => {
                     state.cleanup_queue = Some(CleanupQueueState::new(Vec::new()));
                 }
-                Overlay::Overview
+                Overlay::CommandHelp
+                | Overlay::Overview
                 | Overlay::Daemon
                 | Overlay::Closeup
                 | Overlay::QuitConfirmation
@@ -7855,6 +7970,7 @@ mod tests {
         // `true` means the overlay remains open after the chord. Every overlay
         // owns both keys; only the documented Ctrl-C close contracts dismiss.
         for (overlay, ctrl_c_stays_open, ctrl_q_stays_open) in [
+            (Overlay::CommandHelp, true, true),
             (Overlay::Overview, true, true),
             (Overlay::Daemon, true, true),
             (Overlay::Closeup, false, true),
@@ -9901,6 +10017,7 @@ mod tests {
     fn a_front_surface_keeps_the_idle_garden_away() {
         let (workspace, session, _) = ids();
         for overlay in [
+            Overlay::CommandHelp,
             Overlay::Overview,
             Overlay::Daemon,
             Overlay::Closeup,
