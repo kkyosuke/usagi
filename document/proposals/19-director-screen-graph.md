@@ -219,7 +219,7 @@ Agent は conversation / terminal の入力を最大化する。Goal と Organiz
 │  terminal / conversation                                    │
 │                                                              │
 │                                                              │
-│ Ctrl-O w: overview  Ctrl-O f/p: next/previous                │
+│ Ctrl-O w: overview  Ctrl-O [/]: previous/next                │
 │ Ctrl-O g: close                                               │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -246,7 +246,7 @@ Agent が interrupted / stopped になっても Agent 画面を Overview へ自�
 
 `Esc` を live Agent から戻る操作にしない。Agent CLI が中断・取消に使う既存 contract を守るためである。Overview へ戻る
 操作は既存 Work Run 操作面の `Ctrl-O w` と visible button に一本化する。`Ctrl-O g` は drawer 全体の toggle のまま保ち、
-Overview back と Director close を別 intent にする。Agent の next / previous は既存 tab 操作の `Ctrl-O f` / `Ctrl-O p` を
+Overview back と Director close を別 intent にする。Agent の previous / next は既存 tab 操作の `Ctrl-O [` / `Ctrl-O ]` を
 再利用する。
 
 mouse は描画と同じ hitbox が stable identity を返す。Goal の single click は scope 選択、tree node の double click または
@@ -278,9 +278,9 @@ stable ID または producer の `OperationId` で fence する。描画順が�
 
 - `DirectorRoute` はなく、New / Work Run control / Work Run progress / terminal / interrupted detail / Organization の表示素材の
   優先順で画面相当の内容を決めている。したがって Overview、Launcher、Agent 間の明示遷移と戻り先保持はまだない。
-- 通常の Director terminal では `Ctrl-O f` / `Ctrl-O p` が root Agent tab の next / previous を選ぶ経路を持つ。一方、selector
+- 通常の Director terminal では `Ctrl-O [` / `Ctrl-O ]` が root Agent tab の previous / next を選ぶ経路を持つ。一方、selector
   は選択中 label だけを描き、conversation 一覧の stable identity や hitbox を持たないため、mouse で Agent を直接選べない。
-- New picker / Goal Composer と Work Run control は前面 input owner であり、その間は `Ctrl-O f` / `Ctrl-O p` を含む対象外入力を
+- New picker / Goal Composer と Work Run control は前面 input owner であり、その間は `Ctrl-O [` / `Ctrl-O ]` を含む対象外入力を
   消費する。Agent を切り替えるには先に `Esc` でその一時面を閉じる必要がある。
 - goal-driven の通常 footer は Work Run action と close だけを案内し、既存の Agent next / previous を表示していない。
   keyboard 経路があっても発見しにくい。
@@ -306,7 +306,7 @@ terminal projection 更新、各一時面からの明示 back を一組として
 
 ## 段階的な実装
 
-1. 現在の drawer に visible conversation selector と stable-ID hitbox を追加し、通常面の `Ctrl-O f` / `Ctrl-O p`、click、選択後の
+1. 現在の drawer に visible conversation selector と stable-ID hitbox を追加し、通常面の `Ctrl-O [` / `Ctrl-O ]`、click、選択後の
    terminal projection を production input route まで通す regression test で固定する。
 2. `DirectorRoute` と各 route の stable selection を reducer に追加し、現在の projection precedence を明示 route へ置き換える。
 3. workflow ごとの scope 契約に従って Work Run、Organization、root Agent inventory を join した Overview renderer、keyboard /
@@ -329,7 +329,7 @@ terminal projection 更新、各一時面からの明示 back を一組として
 - live Agent の `Esc` / 通常文字 / paste は navigation に奪われず、PTY へ 1 回だけ届く。
 - Overview back と Director close は異なる intent で、どちらも背面 Home の target / pane state を変更しない。
 - root Agent は Director の Agent 画面、managed worker は既存 Session Closeup に開き、同じ terminal を 2 画面へ重複投影しない。
-- 通常の Agent 画面では visible selector の click と `Ctrl-O f` / `Ctrl-O p` が同じ stable identity を選び、次の frame で
+- 通常の Agent 画面では visible selector の click と `Ctrl-O [` / `Ctrl-O ]` が同じ stable identity を選び、次の frame で
   terminal / conversation 表示がその対象へ移る。一時面が切替を所有しない場合は、その理由と戻る操作を footer に表示する。
 - launch failure、interrupted、projection unavailable で別 Agent へ silent fallback しない。
 - goal-driven と classic の両方が同じ 3 route と戻る規則を使う。Overview の scope、typed action、Agent 巡回 group は

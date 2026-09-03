@@ -36,7 +36,8 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 
 設計上の位置づけと現在の実装範囲は
 [プロジェクト概要](document/01-overview.md)、画面とキー操作の詳細は
-[TUI 仕様](document/03-tui.md)を参照する。
+[TUI 仕様](document/03-tui.md)、全キーボード操作は
+[キーバインド](document/11-keybindings.md)を参照する。
 
 ## 画面
 
@@ -73,21 +74,28 @@ session がない workspace を開いた直後は session 行を選択しない�
 
 | 操作 | 動作 |
 |---|---|
-| `↑` / `↓`、`j` / `k` | session を選ぶ |
+| `↑` / `↓` | session を選ぶ |
 | `←` / `→` | Switch で前 / 次の project tab へ移動する |
 | `Enter` / `t` | 選択した session の Closeup、または明示選択した `+ new session` の作成を開く |
 | `Ctrl-A` | Switch で新規 session の作成を直接開く |
-| `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
-| `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
+| `Ctrl-O o` | live pane から Switch へ戻る |
+| `Ctrl-O a` | 選択中 target の action を開く |
+| `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-X` で閉じる） |
 | `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
-| `Ctrl-O` → `0` | 全 project / session の fuzzy finder を開く（`Ctrl-D` は project tab の detach） |
+| `Ctrl-O` → `0` | 全 project / session の fuzzy finder を開く（`Ctrl-X` は project tab の detach） |
 | `Ctrl-O t` / `Ctrl-O Ctrl-T` | workspace root の Shell drawer を開閉する |
 | `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
 | `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
 | `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Director と Work Run 一覧・操作面を開く |
+| `Ctrl-O [` / `Ctrl-O ]` | 前 / 次の pane tab を選ぶ |
+| `Ctrl-O {` / `Ctrl-O }` | 選択中の pane tab を前 / 次へ並べ替える |
+| `Ctrl-O p` / `Ctrl-O Ctrl-P` | Pull Request 一覧を開く |
+| `Ctrl-O v` / `Ctrl-O Ctrl-V` | Preview を開く |
+| `Ctrl-O d` / `Ctrl-O Ctrl-D` | pending Decision 一覧を開く |
+| `Ctrl-O s` / `Ctrl-O Ctrl-S` | Scratchpad を開く |
 | `?` / live pane の `Ctrl-O ?` | コマンド一覧を開く（初期表示は現在実行できるコマンド） |
 | `:` | Overview のコマンドパレットを開く |
-| `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
+| `Ctrl-X` | Switch で選択中の session を安全に削除する |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
 
 leader 後の文字 shortcut は、2 打目の `Ctrl` の有無を同一視する。たとえば `Ctrl-O n` と
@@ -225,9 +233,9 @@ daemon 再起動などで Agent が中断した場合は、自動的に別の会
 
 ### 4. 状態と PR を確認する
 
-session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。Switch の `p`、
-Closeup の `Ctrl-O v`（または `Ctrl-O Ctrl-V`）、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開き、`d` で diff、
-`n` で session の scratchpad を開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
+session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。`Ctrl-O p`
+（または `Ctrl-O Ctrl-P`）、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開く。
+Preview は `Ctrl-O v`、scratchpad は `Ctrl-O s` で開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
 検知した PR を選択した一覧を自動で開く。PR 一覧は repository 見出しの下へ番号・状態・title をまとめ、
 上部の All / Open / Closed / Merged を `←→`、PR を `↑↓` で選ぶ。枠外のクリックで閉じ、PR を選んで
 Enter を押すと既定のブラウザで開く。

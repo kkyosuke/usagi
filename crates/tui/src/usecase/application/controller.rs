@@ -1927,9 +1927,9 @@ pub enum AppKey {
     CtrlA,
     /// Ctrl-O returns Closeup to Switch. It has no effect while already in Switch.
     CtrlO,
-    /// Ctrl-O f / Ctrl-O Ctrl-F selects the next Closeup tab.
+    /// Ctrl-O ] selects the next Closeup tab.
     CtrlN,
-    /// Ctrl-O p / Ctrl-O Ctrl-P selects the previous Closeup tab.
+    /// Ctrl-O [ selects the previous Closeup tab.
     CtrlP,
     /// Home navigation. Inside a create form it is deliberately inert: this
     /// string-only reducer has no byte cursor, and must never reopen the form.
@@ -1941,6 +1941,8 @@ pub enum AppKey {
     CtrlC,
     /// Management-screen Ctrl-Q. Live Ctrl-Q is likewise PTY passthrough.
     CtrlQ,
+    /// Remove or dismiss the selected object from a management surface.
+    CtrlX,
     /// Open the detach confirmation from a reserved live-pane action.
     OpenQuitConfirmation,
     /// Toggle the frontmost Director mode drawer. Opening is ignored while an
@@ -1967,7 +1969,7 @@ pub enum AppKey {
     OpenNotes,
     /// Open the active target's environment editor.
     OpenEnvironment,
-    /// Open the active target's Pull Request list overlay (`Ctrl-O v` in Closeup).
+    /// Open the active target's Pull Request list overlay (`Ctrl-O p`).
     OpenPrs,
     /// Open the active target's Markdown preview overlay.
     OpenPreview,
@@ -2053,6 +2055,14 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
             Some(AppKey::CtrlA)
+        }
+        KeyCode::Char('\u{18}') if !key.modifiers.shift && !key.modifiers.alt => {
+            Some(AppKey::CtrlX)
+        }
+        KeyCode::Char('x')
+            if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
+        {
+            Some(AppKey::CtrlX)
         }
         KeyCode::Home => Some(AppKey::CtrlA),
         KeyCode::Enter => Some(AppKey::Enter),
@@ -4682,7 +4692,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             state.overlay = Some(Overlay::CommandHelp);
             Vec::new()
         }
-        AppKey::OpenDecisions | AppKey::Char('d') => open_decisions(state),
+        AppKey::OpenDecisions => open_decisions(state),
         AppKey::Up => {
             state.move_selection(-1);
             Vec::new()
@@ -4746,20 +4756,19 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 direction: TabDirection::Previous,
             }]
         }
-        // Switch の `x` / `X` removes only the cursor's session.  `X` forces the
-        // whole removal — a dirty worktree *and* an unmerged branch.  Keep this
-        // unavailable while an overlay owns input, and never turn the workspace
-        // root, the new-session row, or a lifecycle that cannot be removed into
-        // a deletion target.
-        AppKey::Char('x' | 'X')
+        // Ctrl-X removes only the cursor's session. Keep this unavailable while
+        // an overlay owns input, and never turn the workspace root, the new-session
+        // row, or a lifecycle that cannot be removed into a deletion target.
+        // A rejected safe removal opens the existing explicit force confirmation.
+        AppKey::CtrlX
             if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
         {
-            remove_selected_session(state, matches!(key, AppKey::Char('X')))
+            remove_selected_session(state, false)
         }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
-        AppKey::OpenPrs | AppKey::Char('p') => open_prs(state),
-        AppKey::OpenPreview | AppKey::Char('v') => open_preview(state),
+        AppKey::OpenPrs => open_prs(state),
+        AppKey::OpenPreview => open_preview(state),
         AppKey::Char('a')
             if matches!(state.route, Route::Home(HomeMode::Closeup)) && !state.has_pane_tab =>
         {
@@ -4780,6 +4789,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
         AppKey::CtrlN
         | AppKey::CtrlP
+        | AppKey::CtrlX
         | AppKey::Escape
         | AppKey::Tab
         | AppKey::Left
@@ -4864,6 +4874,7 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::CtrlO
         | AppKey::CtrlC
         | AppKey::CtrlQ
+        | AppKey::CtrlX
         | AppKey::OpenQuitConfirmation
         | AppKey::OpenOverview
         | AppKey::OpenCloseupOverlay
@@ -4900,10 +4911,8 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
 /// Snapshot reconciliation moves it only after the daemon removes the row.
 ///
 /// `force` is the whole forced removal, not just the dirty-worktree half: it
-/// also discards an unmerged session branch. Splitting the two would leave `X`
-/// unable to finish a removal whose worktree is already gone and whose branch
-/// is the only thing Git still refuses to drop, which is exactly the state a
-/// failed delete parks the session in.
+/// also discards an unmerged session branch. The keyboard never supplies it
+/// directly; only the failed-delete confirmation or an explicit command does.
 fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
     let Selection::Target(Target::Session(session)) = state.selected else {
         return Vec::new();
@@ -5223,7 +5232,7 @@ fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
             })
             .into_iter()
             .collect(),
-        AppKey::Char('d') => overlay
+        AppKey::CtrlX => overlay
             .selected_pr()
             .and_then(|pr| {
                 overlay
@@ -6612,6 +6621,9 @@ mod tests {
         }
         for code in [KeyCode::Char('\u{10}'), KeyCode::Char('p')] {
             assert_eq!(classify_management_input(ctrl_a(code)), Some(AppKey::CtrlP));
+        }
+        for code in [KeyCode::Char('\u{18}'), KeyCode::Char('x')] {
+            assert_eq!(classify_management_input(ctrl_a(code)), Some(AppKey::CtrlX));
         }
     }
 
@@ -8617,15 +8629,32 @@ mod tests {
         assert_eq!(state.selected(), Selection::NewSession);
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
         assert_eq!(state.selected(), Selection::NewSession);
+        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlX)).is_empty());
     }
 
     #[test]
-    fn switch_x_keeps_the_cursor_on_the_removing_session_and_shift_x_forces_it() {
+    fn workspace_surfaces_require_reserved_actions_instead_of_plain_letters() {
+        let (workspace, session, _) = ids();
+        for character in ['p', 'v', 'd'] {
+            let mut state = AppState::home(workspace, vec![session]);
+            assert!(
+                update(&mut state, AppEvent::Key(AppKey::Char(character))).is_empty(),
+                "plain {character} must not open a workspace surface"
+            );
+            assert_eq!(state.overlay(), None);
+            assert_eq!(state.pr_overlay(), None);
+            assert_eq!(state.preview_overlay(), None);
+            assert_eq!(state.decision_overlay(), None);
+        }
+    }
+
+    #[test]
+    fn switch_ctrl_x_removes_safely_and_plain_x_is_inert() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
 
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('x'))),
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
             vec![Effect::RemoveSession {
                 workspace,
                 session: first,
@@ -8636,15 +8665,16 @@ mod tests {
         assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
 
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        for key in [AppKey::Char('x'), AppKey::Char('X')] {
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        }
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('X'))),
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
             vec![Effect::RemoveSession {
                 workspace,
                 session: second,
-                force: true,
-                // `X` is the whole forced removal: it also discards an unmerged
-                // branch, so a delete that only Git's safe `-d` blocks finishes.
-                force_delete_branch: true,
+                force: false,
+                force_delete_branch: false,
             }]
         );
         assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
@@ -8666,7 +8696,7 @@ mod tests {
             state.selected(),
             Selection::Target(Target::Session(session))
         );
-        for key in [AppKey::Char('x'), AppKey::Char('X')] {
+        for key in [AppKey::CtrlX, AppKey::Char('x'), AppKey::Char('X')] {
             assert!(update(&mut state, AppEvent::Key(key)).is_empty());
             assert_eq!(
                 state.selected(),
@@ -8729,7 +8759,7 @@ mod tests {
         // Removal is still offered (`can_remove=true`).
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('x'))),
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
             vec![Effect::RemoveSession {
                 workspace,
                 session,
@@ -8739,12 +8769,10 @@ mod tests {
         );
     }
 
-    // The state a failed delete parks a session in — worktree already gone, the
-    // unmerged branch the only thing left — is finishable from Switch with one
-    // key. `X` carries `force_delete_branch`, so `git branch -D` runs and the
-    // retry stops landing on the same `-d` refusal.
+    // Force removal is never a single unmodified letter. Ctrl-X retries on the
+    // safe path; Enter on the failed row opens the explicit force confirmation.
     #[test]
-    fn shift_x_finishes_a_delete_that_only_an_unmerged_branch_still_blocks() {
+    fn failed_delete_ctrl_x_stays_safe_and_plain_x_is_inert() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(
@@ -8759,16 +8787,18 @@ mod tests {
             )]))),
         );
 
+        for key in [AppKey::Char('x'), AppKey::Char('X')] {
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        }
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('X'))),
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
             vec![Effect::RemoveSession {
                 workspace,
                 session,
-                force: true,
-                force_delete_branch: true,
+                force: false,
+                force_delete_branch: false,
             }]
         );
-        // The key acts directly: it never routes through the Enter confirmation.
         assert_eq!(state.overlay(), None);
         assert_eq!(state.force_remove_confirmation(), None);
         assert_eq!(
@@ -11031,7 +11061,7 @@ mod tests {
 
         // `p` requests the active target's list without showing an empty modal.
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('p'))),
+            update(&mut state, AppEvent::Key(AppKey::OpenPrs)),
             vec![Effect::LoadPullRequests { target }]
         );
         assert_eq!(state.overlay(), None);
@@ -11098,7 +11128,7 @@ mod tests {
         // Reopening from the cached revision is immediate. A duplicate response
         // cannot make the modal diverge from that sidebar projection.
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('p'))),
+            update(&mut state, AppEvent::Key(AppKey::OpenPrs)),
             vec![Effect::LoadPullRequests { target }]
         );
         assert_eq!(state.pr_overlay().unwrap().prs(), prs.as_slice());
@@ -11453,8 +11483,9 @@ mod tests {
                 url: "https://github.com/o/r/pull/1".into()
             }]
         );
+        assert!(update(&mut state, AppEvent::Key(AppKey::Char('d'))).is_empty());
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('d'))),
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
             vec![Effect::DismissPullRequest {
                 session,
                 url: "https://github.com/o/r/pull/1".into()
@@ -11683,7 +11714,7 @@ mod tests {
 
         // `v` opens the preview overlay for the active target and requests it.
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('v'))),
+            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
             vec![Effect::LoadPreview { target }]
         );
         assert_eq!(state.overlay(), Some(Overlay::Preview));

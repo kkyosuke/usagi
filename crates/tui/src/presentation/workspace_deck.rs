@@ -707,7 +707,7 @@ impl AddWorkspace {
                     self.selected.insert(path);
                 }
             }
-            Key::CtrlD => {
+            Key::CtrlX => {
                 let path = self
                     .visible()
                     .get(self.cursor)
@@ -831,7 +831,7 @@ impl ProjectSwitcher {
                     return row.intent();
                 }
             }
-            Key::CtrlD => {
+            Key::CtrlX => {
                 if let Some(FinderRow {
                     target: FinderTarget::Workspace { path, .. },
                     ..
@@ -1146,7 +1146,7 @@ fn render_add(
         body.push(modal::error_line(notice, inner));
     }
     body.push(modal::footer(
-        "type filter / Space select / Tab directory / Ctrl-D close / Enter add / Esc",
+        "type filter / Space select / Tab directory / Ctrl-X close / Enter add / Esc",
     ));
     modal::render_body_over(height, width, base, "Add workspace", inner, 13, body)
 }
@@ -1198,7 +1198,7 @@ fn render_switcher(
         body.push(modal::error_line(notice, inner));
     }
     body.push(modal::footer(
-        "type fuzzy filter / ↑↓ / Enter open / Ctrl-D close project / Esc",
+        "type fuzzy filter / ↑↓ / Enter open / Ctrl-X close project / Esc",
     ));
     modal::render_body_over(
         height,
@@ -1496,11 +1496,11 @@ mod tests {
         deck.open_add(&[alpha.workspace.clone(), beta]);
 
         assert_eq!(
-            deck.handle_overlay_key(&Key::CtrlD),
+            deck.handle_overlay_key(&Key::CtrlX),
             OverlayIntent::Close(PathBuf::from("/alpha"))
         );
         assert_eq!(deck.handle_overlay_key(&Key::Down), OverlayIntent::Stay);
-        assert_eq!(deck.handle_overlay_key(&Key::CtrlD), OverlayIntent::Stay);
+        assert_eq!(deck.handle_overlay_key(&Key::CtrlX), OverlayIntent::Stay);
 
         // Plain `x` remains filter text; close does not steal a searchable name.
         assert_eq!(
@@ -1524,7 +1524,7 @@ mod tests {
             OverlayIntent::Activate(PathBuf::from("/project-9"))
         );
         assert_eq!(
-            deck.handle_overlay_key(&Key::CtrlD),
+            deck.handle_overlay_key(&Key::CtrlX),
             OverlayIntent::Close(PathBuf::from("/project-9"))
         );
     }
@@ -1552,7 +1552,7 @@ mod tests {
             filter: String::new(),
         };
         assert_eq!(empty.handle(&Key::Enter, &[]), OverlayIntent::Stay);
-        assert_eq!(empty.handle(&Key::CtrlD, &[]), OverlayIntent::Stay);
+        assert_eq!(empty.handle(&Key::CtrlX, &[]), OverlayIntent::Stay);
     }
 
     #[test]
@@ -1976,7 +1976,7 @@ mod tests {
         );
         deck.open_add(std::slice::from_ref(&alpha.workspace));
         let add = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
-        assert!(add.iter().any(|line| line.contains("Ctrl-D close")));
+        assert!(add.iter().any(|line| line.contains("Ctrl-X close")));
         let _ = deck.handle_overlay_key(&Key::Tab);
         deck.set_notice("directory does not exist");
         let directory = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
