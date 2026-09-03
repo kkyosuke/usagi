@@ -398,6 +398,10 @@ pub enum Key {
     Up,
     /// 選択を 1 つ下へ移す。
     Down,
+    /// 長いpromptやeditorを1 page上へ移す（Page Up）。
+    PageUp,
+    /// 長いpromptやeditorを1 page下へ移す（Page Down）。
+    PageDown,
     /// キャレットやタブを 1 つ左へ／モード選択では前の選択へ（←）。
     Left,
     /// キャレットやタブを 1 つ右へ／モード選択では次の選択へ（→）。
@@ -434,8 +438,15 @@ pub enum Key {
     Quit,
     /// Ctrl-Q ends the workspace, including its live sessions.
     CtrlQ,
-    /// Ctrl-D requests an unregister confirmation only on Open Workspace.
+    /// Ctrl-D is terminal end-of-input; management surfaces leave it inert.
     CtrlD,
+    /// Ctrl-X removes or dismisses the selected management object. A focused
+    /// live terminal receives the original control byte instead.
+    CtrlX,
+    /// Open contextual keyboard help (`Ctrl-?`, with `Ctrl-/` as the portable
+    /// terminal alias). The presentation shell owns this globally so the chord
+    /// never reaches a focused live terminal or a covered surface.
+    Help,
     /// 文字キー。メニューのショートカット文字や recent の番号キーに使う。
     Char(char),
     /// 左ボタンのクリック位置（0-based terminal cell）。画面ごとの hit test は
@@ -676,6 +687,8 @@ mod tests {
         let keys = vec![
             Key::Up,
             Key::Down,
+            Key::PageUp,
+            Key::PageDown,
             Key::Left,
             Key::Right,
             Key::Enter,
@@ -684,6 +697,8 @@ mod tests {
             Key::Escape,
             Key::Quit,
             Key::CtrlD,
+            Key::CtrlX,
+            Key::Help,
             Key::Char('o'),
             Key::Click { column: 3, row: 4 },
             Key::Live(LiveTerminalAction::Switch),
