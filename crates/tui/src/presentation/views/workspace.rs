@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use usagi_core::domain::agent::{
     AgentInventory, AgentRuntimeInventoryState, ProviderResumeProjection, ProviderResumeReason,
 };
+use usagi_core::domain::pr_inventory::PrEntry;
 use usagi_core::domain::pullrequest::{PrLink, PrState};
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::session_lifecycle::{
@@ -243,7 +244,14 @@ fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, 
 }
 
 pub(crate) fn pr_summary(prs: &[PrLink]) -> Option<String> {
-    let visible = prs.iter().filter(|pr| pr.is_visible()).count();
+    summary_for_visible(prs.iter().filter(|pr| pr.is_visible()).count())
+}
+
+pub(crate) fn pr_inventory_summary(prs: &[PrEntry]) -> Option<String> {
+    summary_for_visible(prs.iter().filter(|pr| pr.is_visible()).count())
+}
+
+fn summary_for_visible(visible: usize) -> Option<String> {
     (visible > 0).then(|| format!("{PR_ICON} {visible}"))
 }
 
@@ -517,7 +525,7 @@ impl HomeProjection {
             .filter_map(|id| {
                 let mut session = (*snapshot_by_id.get(id)?).clone();
                 if let Some(prs) = state.session_prs(*id) {
-                    session.pr_summary = pr_summary(prs);
+                    session.pr_summary = pr_inventory_summary(prs);
                 }
                 session.role_id = state
                     .session_roles()
@@ -2091,8 +2099,9 @@ pub fn garden_click_at(
     }
     Some(
         frame
-            .hitboxes
+            .panel_hitboxes
             .iter()
+            .chain(&frame.hitboxes)
             .find(|hitbox| hitbox.contains(column, row))
             .and_then(|hitbox| {
                 home.garden_workspaces
@@ -3220,6 +3229,7 @@ mod tests {
         SessionId, TerminalId, TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::pr_inventory::PrEntry;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::role::RoleId;
     use usagi_core::domain::session_lifecycle::{AgentPhase, FailureStage, SessionLifecycle};
@@ -3391,7 +3401,11 @@ mod tests {
         let omitted = SessionId::new();
         let mut state = AppState::home(workspace, vec![ready, omitted]);
         for (session, number) in [(ready, 1), (omitted, 2)] {
-            let mut pr = PrLink::new(number, format!("https://github.com/o/r/pull/{number}"));
+            let identity = usagi_core::domain::pr_inventory::canonicalize(&format!(
+                "https://github.com/o/r/pull/{number}"
+            ))
+            .unwrap();
+            let mut pr = PrEntry::new(identity);
             pr.state = PrState::Merged;
             let _ = update(
                 &mut state,
@@ -5285,9 +5299,9 @@ mod tests {
         assert!(text.contains("Garden Action Center"));
         assert!(text.contains("click"));
         assert!(text.contains("any key · wake"));
-        assert!(text.contains("Notifications"));
-        assert!(!text.contains("running"));
-        assert!(!text.contains("waiting"));
+        assert!(text.contains("Agents"));
+        assert!(text.contains("running"));
+        assert!(text.contains("waiting"));
         assert!(!text.contains("1 run · 1 done"));
         assert!(!text.contains("> s0"));
         assert!(text.contains("failed · worktree missing"));
@@ -5585,6 +5599,54 @@ mod tests {
                 "the centre of a plot is its own usagi"
             );
         }
+
+        // 右 panel は左の viewport に関係なく inactive project の Agent を持ち、
+        // runtime identity を失わず click target にする。
+        let foreign_workspace = WorkspaceId::new();
+        let foreign_session = SessionId::new();
+        let foreign_agent = AgentRuntimeId::new();
+        let deck_home = home.clone().with_deck_garden(
+            "2 open projects".to_owned(),
+            vec![(
+                foreign_workspace,
+                widgets::garden::GardenSession {
+                    id: foreign_session,
+                    label: "other / review".to_owned(),
+                    lifecycle: SessionLifecycle::Available,
+                    selected: false,
+                    failure_summary: None,
+                    agents_observed: true,
+                    agents: vec![widgets::garden::GardenAgent {
+                        runtime_id: foreign_agent,
+                        phase: AgentPhase::Waiting,
+                    }],
+                    agent_status: Some(DispatchAgentStatus::Running),
+                    pending_decisions: 0,
+                    pr_merged: false,
+                },
+            )],
+        );
+        let frame = garden_frame(24, 100, &deck_home, now()).expect("Garden frame");
+        let agent_row = frame
+            .panel_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.agent == Some(foreign_agent))
+            .expect("the inactive project's Agent is listed in the right panel");
+        assert_eq!(
+            garden_click_at(
+                24,
+                100,
+                &deck_home,
+                now(),
+                u16::try_from(agent_row.column).expect("fits a u16"),
+                u16::try_from(agent_row.row).expect("fits a u16"),
+            ),
+            Some(GardenClick::Visit {
+                workspace: foreign_workspace,
+                session: foreign_session,
+                agent: Some(foreign_agent),
+            })
+        );
 
         // 庭の余白（footer 行）はうさぎではないので wake-up になる。
         assert_eq!(
@@ -5964,9 +6026,15 @@ mod tests {
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
-        let mut first = PrLink::new(7, "https://github.com/o/r/pull/7");
+        let mut first = PrEntry::new(
+            usagi_core::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/7")
+                .unwrap(),
+        );
         first.title = Some("add feature".into());
-        let mut second = PrLink::new(8, "https://github.com/o/r/pull/8");
+        let mut second = PrEntry::new(
+            usagi_core::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/8")
+                .unwrap(),
+        );
         second.title = Some("fix bug".into());
         second.state = PrState::Merged;
         let _ = update(

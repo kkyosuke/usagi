@@ -5,7 +5,7 @@ use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, rende
 fn main() {
     let sessions = sample_sessions();
     scene(
-        "120x24 · spacious world left edge + notifications",
+        "120x24 · spacious world left edge + Agent panel",
         24,
         120,
         &sessions,
@@ -13,7 +13,7 @@ fn main() {
         false,
     );
     scene_scrolled(
-        "120x24 · spacious world right edge + notifications",
+        "120x24 · spacious world right edge + Agent panel",
         24,
         120,
         &sessions,

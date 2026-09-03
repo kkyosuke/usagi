@@ -5,7 +5,9 @@
 //! [`OperationId`] と単調 revision で対応付けるため、遅延・重複 event は UI の
 //! 現在地を巻き戻さない。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
+#[cfg(test)]
+use std::collections::VecDeque;
 
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
 
@@ -451,24 +453,26 @@ fn pending_index(state: &LifecycleState, operation_id: OperationId) -> Option<us
 
 /// reducer scenario 用の fake daemon。IO を持たず request log と event queue だけを持つ。
 #[derive(Debug, Default)]
-pub struct FakeDaemon {
+#[cfg(test)]
+struct FakeDaemon {
     effects: Vec<Effect>,
     events: VecDeque<DaemonEvent>,
 }
 
+#[cfg(test)]
 impl FakeDaemon {
     /// dispatch 済み request を確認する。
     #[must_use]
-    pub fn effects(&self) -> &[Effect] {
+    fn effects(&self) -> &[Effect] {
         &self.effects
     }
     /// request log を取り出し、空にする。
     #[must_use]
-    pub fn take_effects(&mut self) -> Vec<Effect> {
+    fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }
     /// daemon event を末尾へ積む。
-    pub fn push_event(&mut self, event: DaemonEvent) {
+    fn push_event(&mut self, event: DaemonEvent) {
         self.events.push_back(event);
     }
     fn dispatch(&mut self, effect: Effect) {
@@ -480,7 +484,8 @@ impl FakeDaemon {
 }
 
 /// effects を fake daemon へ送り、queue 済み event を reducer へ戻す。
-pub fn run_fake_cycle(state: &mut LifecycleState, daemon: &mut FakeDaemon, effects: Vec<Effect>) {
+#[cfg(test)]
+fn run_fake_cycle(state: &mut LifecycleState, daemon: &mut FakeDaemon, effects: Vec<Effect>) {
     for effect in effects {
         daemon.dispatch(effect);
     }

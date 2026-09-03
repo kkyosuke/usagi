@@ -1696,6 +1696,13 @@ parent wake effect を実行する。reservation は child run と parent genera
 ACK loss、daemon restart は同じ wake を二重に作らない。parent runtime の再解決・restart は wake adapter が
 保存済み provenance だけを使って行い、session 名から target を推測しない。
 
+同じ terminal fact の確定時に、scheduler は exact task generation と dispatch runへfenceしたhandoff contextも
+`SupervisorRun` snapshotへ保存する。contextはworkerが明示したcompletion summaryとstructured resultのうち、PR、
+commit、変更file、verificationのcompactな参照だけであり、provider conversationやterminal transcriptを複製しない。
+summaryは1 KiB、artifact参照は2 KiB、1 runは新しい64件までに制限する。control文字とbidi文字を除去し、同じdispatch
+runのreconcileは同じentryへ収束する。handoff contextはinternal durable stateであり、redaction-safeなrun queryには
+含めない。
+
 tick 時点で `Ready` task に dispatch reservation が無い場合は、scheduler が生存しているように見える
 `Running` を維持しない。runtime/model selector または admission が worker run を割り当てなかったことを示す
 `DispatchFailure` event と resume/cancel の durable escalation を保存する。operator は events/get から停止理由を
@@ -1747,6 +1754,12 @@ Agent ownerへ渡し、全fenceが一致したruntimeだけをdaemon所有PTY経
 artifact contract は core domain の閉じた列挙型を正本とし、wire と永続化では `none` / `goal_review_ready_pr_v1` の文字列として表す。未知の contract は admission で拒否される。no-verification 以外の worker completion は `Succeeded` ではなく `Verifying` へ遷移する。worker report の PR URL は候補にすぎない。daemon は Goal worker の spawn 前に run が所有する workspace の `origin` を固定 argv の Git 呼び出しで解決して run へ保存し、idempotent admission replay では保存値だけを使う。worker completion 後は `HEAD` を解決し、最初の provider 呼び出しより前に repository と head OID の immutable な artifact expectation を task へ保存する。その後、同じ repository の canonical GitHub PR identity に対して固定 argv の `gh pr view` を実行し、PR の head OID が保存済み expectation と一致し、state が open、draft が false、checks が passing または未設定の場合だけ、redaction-safe な SHA-256 evidence digest を伴う `VerificationResult` を passed として保存する。別 repository、別 head、closed/draft PR、failing checks は safe summary を持つ escalation になり、worker の summary や PR URL 単独では success gate を通らない。provider unavailable、invalid response、pending checks、または workspace が一時的に未保有の場合は rejection と区別した `VerificationDeferred` を保存し、5 秒から最大 5 分までの durable exponential backoff 後に再検証する。Resume 後は保存済み候補と expectation を再検証できるが、Escalated 中に自動で gate を解除しない。completion inbox の commit 後に daemon が停止しても、daemon-lifetime の recovery worker が `Running` run の contracted task、exact provenance generation、terminal dispatch outcome を照合して期限到来済みの検証だけを再実行する。この remote IO は supervisor mutex と client 接続経路の外で行い、通常の観測を待たせない。未完了の supervised run は workspace retirement の blocker である。
 
 supervised root Agent が `session_dispatch` または `delegate_brief` で child Agent を起動する場合、daemon は child operation から導出する安定した task ID、parent dispatch provenance、instruction、promotion reservation 時刻を Agent spawn より先に同じ `SupervisorRun` の DAG へ保存する。成功後は child の exact runtime fence を束縛し、確定的な pre-spawn failure は予約 task を cancel する。spawn outcome が不明、または post-spawn binding が失敗した場合は予約を残し、daemon-lifetime の recovery worker が Agent operation の durable outcome から束縛または終端化する。durable Agent outcome が 30 秒間存在しない予約も orphan として fail-closed に終端化するため、reservation と spawn の間で daemon が停止しても run は永久に待機しない。これにより Work Run の task/agent 集計は root だけでなく、実際に委譲された worker も同じ aggregate から導出する。
+
+このdelegationの初期promptは、root goal、予約時点までに確定したhandoff context、今回のtask instructionを明示した
+daemon-owned snapshotである。context prefixは16 KiB以下、root goal部分は4 KiB以下に抑えて新しいreportから採用し、超過した古いreportを省略する。
+並行taskの後発completionを既に起動したpromptへ遡及反映しない。同じchild operationのretryはDAGへ保存した最初の
+promptを再利用するため、restartや後続completionでidempotencyの意味が変わらない。supervised provenanceを持たない
+classic delegationは従来どおりcallerが指定したpromptだけを受け取る。
 
 ## metrics observer
 

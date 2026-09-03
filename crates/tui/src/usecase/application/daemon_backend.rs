@@ -842,9 +842,9 @@ mod tests {
             completions.emit(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
                 target,
                 revision: 1,
-                prs: vec![usagi_core::domain::pullrequest::PrLink::new(
-                    7,
-                    "https://github.com/o/r/pull/7",
+                prs: vec![usagi_core::domain::pr_inventory::PrEntry::new(
+                    usagi_core::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/7")
+                        .unwrap(),
                 )],
             }));
         }

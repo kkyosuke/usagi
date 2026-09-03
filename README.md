@@ -45,12 +45,14 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 **Config** で全体設定の編集ができる。
 
 workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
-選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。`+ Open` は左右の余白を
+選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。project を再選択すると、
+その project で最後にフォーカスしていた session へ Switch のカーソルが戻る。`+ Open` は左右の余白を
 含めてクリックでき、登録済み workspace の複数選択に加えて `Tab` から既存ディレクトリを直接追加できる。overlay を
 開いている間は別の usagi が追加した workspace も自動で一覧へ反映される。Session Garden では開いている全 project の
 session を巣穴として、Agent のうさぎが池・餌場・木陰を行き来する共有の庭を見渡せる。Garden は pending decision、
-失敗、waiting / interrupted Agent のある区画を Action Center として集約する。右の `Notifications` は
-`Agent completed.` や入力待ちなど、現在の viewport の状態を短い文で表示する。workspace root の shell は header の
+失敗、waiting / interrupted Agent のある区画を Action Center として集約する。右の `Agents` は Garden の
+viewport と独立して全 project の Agent を session ごとにまとめ、1 runtime 1 行で状態を表示する。session 見出しや
+Agent 行をクリックすると、その project の Closeup または該当 Agent tab へ移動する。workspace root の shell は header の
 `[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。
 
 ```text
@@ -185,15 +187,16 @@ CLI から daemon へ直接依頼することもできる。
 
 ```bash
 usagi session create feature-login
-usagi session create review-auth --role reviewer
 usagi session create remote-fix --base refs/remotes/origin/main
+# Configでhierarchicalまたはflat Teamを選択済みの場合
+usagi session create implementation --role worker
 ```
 
 session は対象リポジトリの `.usagi/sessions/<name>/` に独立した worktree として作られる。
 Home の作成欄では `local:main` / `remote:origin/(default)` / `remote:origin/main` のように
 出所を区別した base branch を `↑↓` で選ぶ。`(default)` はその remote の既定 branch を表す。
 CLI の `--base` は同じ対象を fully-qualified ref で指定する。
-role は作業種別ごとの追加指示を選ぶ stable ID で、権限や sandbox を変更するものではない。
+role は有効なTeamまたは`roles.toml`から作業種別ごとの追加指示を選ぶ stable ID で、権限や sandbox を変更するものではない。
 詳細は [session role](document/10-session-roles.md)を参照する。
 
 ### 3. Agent または terminal を開く
@@ -261,10 +264,10 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | Agent | 新しい Agent pane の既定 CLI |
 | Base branch | workspace で新しい session を作るときの既定 branch |
 | Workflow | `classic`（既定）の会話 picker、または `goal-driven` の Goal Composer。後者は Director の New で目的を一度入力し、review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す |
-| Team | Enterで構造図付きカードを開き、`none` / 階層型 / フラット / パイプラインから session role 構造を選択 |
+| [Team](document/10-session-roles.md#catalog) | Enterで構造図付きカードを開き、`none` / `hierarchical`（階層型）/ `flat`（フラット）/ `pipeline`（パイプライン）から session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
-| Roles | session / root ごとの追加 instruction と既定 role |
+| [Roles](document/10-session-roles.md#rolestoml-の設定例) | `roles [workspace|global]` で編集する session / root ごとの追加 instruction、既定 role、委譲制限 |
 
 `goal-driven` を選んだ workspace では `Ctrl-O Ctrl-G` → `New` が Goal Composer になり、目的と provider を確定して
 Work Run を開始する。進行と停止理由は Director に表示し、`Ctrl-O w` で最大16件の Run を選択して cancel または
