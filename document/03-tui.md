@@ -1725,9 +1725,9 @@ Home の inventory（decision / session / metrics）を観測する 3 lane は
 | background inventory pump | detach 済み background tab の **exit metadata だけ** | scope 単位の `Inventory` | 2s。失敗中は 500ms から 8s 上限の指数 backoff |
 
 この分離により、idle な TUI が生む daemon request は frame rate（約 62.5Hz）ではなく上表の cadence で決まり、pane 数にも比例しない
-（foreground は可視 surface 数により高々 2 件、background は tab 数ではなく **scope 数**に比例する）。
+（foreground は attachment 対象 surface 数により高々 3 件、background は tab 数ではなく **scope 数**に比例する）。
 
-- background lane は `Attach` も terminal 単位の `Resume` も**送らない**。Director 背景として可視・attach 済みの
+- background lane は `Attach` も terminal 単位の `Resume` も**送らない**。workspace drawer の背景として attach 済みの
   managed terminal は foreground poll pump が扱い、background lane へ重複登録しない。detach 済み tab の観測 primitive は
   scope inventory だけである。
 - background で bound するのは exit metadata の観測時刻（cadence + queue 遅延 + request deadline 1 回分）だけであり、**final output byte の取得時刻は bound しない**。

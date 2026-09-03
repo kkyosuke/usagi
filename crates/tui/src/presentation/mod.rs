@@ -3261,8 +3261,9 @@ impl WorkspaceUi {
     }
 
     /// Snapshot the retained rows of a background terminal without changing its
-    /// attachment or scroll controls. Director keeps the visible managed pane
-    /// attached, so this projection advances as its live stream is drained.
+    /// attachment or scroll controls. A workspace drawer keeps the managed pane
+    /// underneath it attached, so this projection advances as its live stream is
+    /// drained even while the overlay covers it.
     fn retained_terminal_view(
         &self,
         terminal: &TerminalRef,
@@ -5064,7 +5065,7 @@ fn sync_terminal_selection_motions(ui: &mut WorkspaceUi, controls: &mut LiveTerm
 }
 
 /// Close every pane the daemon reports as exited, from either observation lane:
-/// each attached visible terminal's own `Resume` stream, and the bounded
+/// each attached display target's own `Resume` stream, and the bounded
 /// per-scope inventory that watches the detached background tabs. The runtime
 /// drops the tab (clearing `has_live_pane` when it was the last) and the shell
 /// releases whatever client state it held.
