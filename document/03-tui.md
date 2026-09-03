@@ -344,7 +344,8 @@ decision / PR / browser / notification は daemon または platform adapter の
 実端末は raw mode、alternate screen、cursor、mouse、自動折返しを合成ルートで管理する。TUI は端末非依存の
 event stream を reducer に渡し、frame diff だけを返す。TUI の実行中は自動折返しを無効化し、右下セルへの描画が
 スクロールを起こさないようにする。resize は前 frame を無効化して全体を再描画し、終了時は端末属性、折返し設定、
-alternate screen を復元する。
+alternate screen を復元する。frame diff が実端末へ渡すエスケープ列は SGR（色・文字属性）だけに限定し、view text に
+混入した画面消去・カーソル移動・DEC private mode などの端末制御列は描画境界で破棄する。
 
 ## Home と target
 
