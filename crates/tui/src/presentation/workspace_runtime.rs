@@ -754,9 +754,27 @@ impl WorkspaceRuntime {
         if advances_material {
             self.material_revision = self.material_revision.saturating_add(1);
         }
-        let effects = update(&mut self.state, event);
+        let mut effects = update(&mut self.state, event);
         self.remember_root_surface_selection(previous_drawer_focus);
         self.follow_active_target();
+        // A restored root terminal already names the exact tab the user last
+        // selected. Replaying the controller's generic `open` request would add
+        // a selected pending tab and let the daemon inventory's first entry
+        // replace that selection when the request completes. Moving focus back
+        // to the drawer needs only the normal foreground attach path; retain an
+        // `open` effect solely when no live root terminal is known locally.
+        if self.root_surface_terminal(PaneKind::Terminal).is_some() {
+            effects.retain(|effect| {
+                !matches!(
+                    effect,
+                    Effect::OpenTerminal {
+                        target: Target::Root(workspace),
+                        arguments,
+                        ..
+                    } if *workspace == self.state.workspace() && arguments == "open"
+                )
+            });
+        }
         self.sync_overlay_modals();
         effects
     }
@@ -3533,14 +3551,7 @@ mod tests {
         let effects = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
         assert!(runtime.state().root_terminal_drawer_open());
         assert_eq!(runtime.focused_terminal(), Some(root_terminal.clone()));
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::OpenTerminal {
-                target: Target::Root(actual),
-                arguments,
-                ..
-            }] if *actual == workspace && arguments == "open"
-        ));
+        assert!(effects.is_empty());
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
         assert!(!runtime.state().root_terminal_drawer_open());
@@ -3571,6 +3582,79 @@ mod tests {
             Some(WorkspaceDrawerFocus::Director)
         );
         assert_eq!(runtime.focused_terminal(), Some(root_agent));
+    }
+
+    #[test]
+    fn root_terminal_focus_restores_the_last_selected_terminal() {
+        let workspace = WorkspaceId::new();
+        let root_agent = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let first_terminal = TerminalRef {
+            terminal_id: TerminalId::new(),
+            ..root_agent.clone()
+        };
+        let second_terminal = TerminalRef {
+            terminal_id: TerminalId::new(),
+            ..root_agent.clone()
+        };
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![PaneRestoreTarget {
+                target: Target::Root(workspace),
+                panes: vec![
+                    LivePane {
+                        terminal: root_agent.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                    LivePane {
+                        terminal: first_terminal,
+                        kind: PaneKind::Terminal,
+                    },
+                    LivePane {
+                        terminal: second_terminal.clone(),
+                        kind: PaneKind::Terminal,
+                    },
+                ],
+                selected: Some(root_agent.clone()),
+                selected_interrupted: None,
+                interrupted: Vec::new(),
+            }],
+        ));
+
+        // Choose the second shell, close its drawer, and reopen it. The restored
+        // live tab satisfies `open`, so no pending tab can replace the selection.
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::RootTerminal))
+                .is_empty()
+        );
+        let _ = runtime.select_tab_selection(TabSelection::Live(second_terminal.clone()));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::RootTerminal))
+                .is_empty()
+        );
+        assert_eq!(runtime.focused_terminal(), Some(second_terminal.clone()));
+
+        // The same remembered shell wins when both drawers remain visible and
+        // focus moves back from Director.
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert_eq!(runtime.focused_terminal(), Some(root_agent));
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::RootTerminal))
+                .is_empty()
+        );
+        assert_eq!(runtime.focused_terminal(), Some(second_terminal));
     }
 
     #[test]
