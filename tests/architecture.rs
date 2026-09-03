@@ -139,16 +139,22 @@ fn cfg_test(attributes: &[Attribute]) -> bool {
 
 struct DependencyVisitor<'a> {
     forbidden: &'a BTreeSet<&'a str>,
+    required_root: Option<&'a str>,
     violations: BTreeSet<String>,
 }
 
 impl DependencyVisitor<'_> {
     fn inspect<'a>(&mut self, segments: impl IntoIterator<Item = &'a str>) {
         let segments = segments.into_iter().collect::<Vec<_>>();
-        let local = segments
-            .first()
-            .is_some_and(|segment| matches!(*segment, "crate" | "self" | "super"));
-        if local {
+        let in_scope = self.required_root.map_or_else(
+            || {
+                segments
+                    .first()
+                    .is_some_and(|segment| matches!(*segment, "crate" | "self" | "super"))
+            },
+            |root| segments.first() == Some(&root),
+        );
+        if in_scope {
             for segment in segments {
                 if self.forbidden.contains(segment) {
                     self.violations.insert(segment.to_owned());
@@ -237,12 +243,40 @@ fn layer_violations(root: &Path, forbidden: &[&str]) -> BTreeMap<PathBuf, BTreeS
             let syntax: File = syn::parse_file(&source).expect("Rust source parses");
             let mut visitor = DependencyVisitor {
                 forbidden: &forbidden,
+                required_root: None,
                 violations: BTreeSet::new(),
             };
             visitor.visit_file(&syntax);
             (!visitor.violations.is_empty()).then_some((path, visitor.violations))
         })
         .collect()
+}
+
+#[test]
+fn tui_views_are_pure_projections_without_filesystem_or_process_io() {
+    let root = workspace_root().join("crates/tui/src/presentation/views");
+    let forbidden = ["fs", "process"].into_iter().collect::<BTreeSet<_>>();
+    let mut sources = Vec::new();
+    rust_sources(&root, &mut sources);
+    let violations = sources
+        .into_iter()
+        .filter_map(|path| {
+            let source = fs::read_to_string(&path).expect("TUI view source is readable");
+            let syntax: File = syn::parse_file(&source).expect("TUI view source parses");
+            let mut visitor = DependencyVisitor {
+                forbidden: &forbidden,
+                required_root: Some("std"),
+                violations: BTreeSet::new(),
+            };
+            visitor.visit_file(&syntax);
+            (!visitor.violations.is_empty()).then_some((path, visitor.violations))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    assert!(
+        violations.is_empty(),
+        "TUI views must request IO through an injected port:\n{violations:#?}"
+    );
 }
 
 #[test]
