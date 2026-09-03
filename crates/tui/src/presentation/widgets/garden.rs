@@ -1837,6 +1837,11 @@ mod tests {
         );
         fixture.agents.clear();
 
+        fixture.pending_decisions = 1;
+        assert_eq!(message(&fixture), "1 decision need your input.");
+        fixture.pending_decisions = 2;
+        assert_eq!(message(&fixture), "2 decisions need your input.");
+        fixture.pending_decisions = 0;
         fixture.pr_merged = true;
         assert_eq!(message(&fixture), "PR merged.");
         fixture.pr_merged = false;
