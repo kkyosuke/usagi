@@ -2,8 +2,8 @@ use usagi_core::domain::id::AgentRuntimeId;
 use usagi_core::domain::session_lifecycle::AgentPhase;
 
 use super::{
-    AgentStatus, attention_rank, glyph, glyph_strip, ordered, short_label, status_line, style,
-    summary_parts,
+    AgentStatus, attention_rank, glyph, glyph_strip, label, ordered, short_label, status_line,
+    style, summary_parts,
 };
 use crate::presentation::widgets::display_width;
 
@@ -92,10 +92,23 @@ fn every_phase_has_a_single_column_glyph_a_short_label_and_a_colour() {
         let label = short_label(phase);
         assert!(!label.is_empty());
         assert!(display_width(label) <= 5, "{phase:?} の label が長すぎる");
+        assert!(!super::label(phase).is_empty());
         // 色を載せても表示桁は変わらない（ANSI は桁を持たない）。
         let painted = style(phase).paint(glyph(phase));
         assert_eq!(display_width(&painted), 1, "{phase:?}");
     }
+}
+
+#[test]
+fn one_agent_labels_are_explicit_and_fold_terminal_phases() {
+    assert_eq!(label(AgentPhase::Waiting), "waiting");
+    assert_eq!(label(AgentPhase::Running), "running");
+    assert_eq!(label(AgentPhase::Ready), "ready");
+    assert_eq!(label(AgentPhase::Interrupted), "interrupted");
+    assert_eq!(label(AgentPhase::Sleeping), "sleeping");
+    assert_eq!(label(AgentPhase::Absent), "idle");
+    assert_eq!(label(AgentPhase::Ended), "completed");
+    assert_eq!(label(AgentPhase::Exited), "completed");
 }
 
 #[test]
