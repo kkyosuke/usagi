@@ -236,6 +236,7 @@ mod tests {
         let settings = crate::domain::settings::Settings {
             theme: crate::domain::settings::Theme::Dark,
             modal_selection_mode: crate::domain::settings::ModalSelectionMode::Prompt,
+            garden_size: crate::domain::settings::GardenSize::Large,
             pr_auto_open: crate::domain::settings::PrAutoOpen::Always,
             default_model: crate::domain::settings::DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),
