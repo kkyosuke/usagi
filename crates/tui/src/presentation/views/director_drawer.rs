@@ -1085,6 +1085,17 @@ mod tests {
         )
         .join("\n");
         assert!(strip_ansi(&inactive).contains("Director · click to focus"));
+
+        let repaired = command_line(
+            20,
+            &DirectorCommandProjection {
+                value: "日本".to_owned(),
+                cursor: 1,
+                selection: Some((0, usize::MAX)),
+            },
+        );
+        assert!(repaired.contains(crate::presentation::frame::INPUT_CURSOR_MARKER));
+        assert!(display_width(&repaired) <= 20);
     }
 
     #[test]

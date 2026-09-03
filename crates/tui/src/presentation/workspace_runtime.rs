@@ -3644,6 +3644,40 @@ mod tests {
         runtime.complete_director_command();
         assert!(runtime.director_command().is_empty());
 
+        assert_eq!(
+            runtime.handle_director_command(&Key::Passthrough(vec![0xff])),
+            DirectorCommandInput::Unhandled
+        );
+        for key in [Key::Passthrough(Vec::new()), Key::Passthrough(vec![0])] {
+            assert_eq!(
+                runtime.handle_director_command(&key),
+                DirectorCommandInput::Unhandled
+            );
+        }
+        assert_eq!(
+            runtime.handle_director_command(&Key::Paste("\0".to_owned())),
+            DirectorCommandInput::Consumed
+        );
+        for key in [
+            Key::Paste("abc".to_owned()),
+            Key::Left,
+            Key::Right,
+            Key::Home,
+            Key::End,
+            Key::SelectLeft,
+            Key::SelectRight,
+            Key::SelectHome,
+            Key::SelectEnd,
+            Key::Backspace,
+            Key::Delete,
+        ] {
+            assert_eq!(
+                runtime.handle_director_command(&key),
+                DirectorCommandInput::Consumed
+            );
+        }
+        runtime.complete_director_command();
+
         let _ =
             runtime.handle_director_command(&Key::Paste("x".repeat(MAX_DIRECTOR_COMMAND_BYTES)));
         let _ = runtime.handle_director_command(&Key::SelectLeft);
@@ -4251,6 +4285,7 @@ mod tests {
                 event: PaneEvent::Select(PaneSelection::None),
             },
         );
+        assert!(!interrupted_runtime.has_interactive_root_agent_tabs());
         let _ = interrupted_runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(
             interrupted_runtime.active_pane().selected(),

@@ -1151,9 +1151,9 @@ fn handle_director_command_input(
         DirectorCommandInput::Unhandled => false,
         DirectorCommandInput::Consumed => true,
         DirectorCommandInput::Submit(command) => {
-            let Some(terminal) = runtime.focused_agent_terminal() else {
-                return true;
-            };
+            let terminal = runtime
+                .focused_agent_terminal()
+                .expect("the Director composer gates submission on a focused Agent");
             let mut bytes = command.into_bytes();
             bytes.push(b'\r');
             let delivery = ui.send_director_command_bytes(&terminal, &bytes);
@@ -24943,6 +24943,15 @@ mod tests {
         let agent = scoped_terminal_ref(workspace, None);
         let shell = scoped_terminal_ref(workspace, None);
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        assert_eq!(
+            focus_workspace_drawer_from_pointer(
+                &mut runtime,
+                &Key::Click { column: 0, row: 0 },
+                24,
+                100,
+            ),
+            None
+        );
         for (terminal, kind) in [
             (agent.clone(), PaneKind::Agent),
             (shell.clone(), PaneKind::Terminal),
@@ -25003,6 +25012,19 @@ mod tests {
                     column: u16::try_from(director.left + 2).unwrap(),
                     row: u16::try_from(director.top + 4).unwrap(),
                 },
+                24,
+                100,
+            ),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert_eq!(
+            focus_workspace_drawer_from_pointer(
+                &mut runtime,
+                &Key::Pointer(PointerEvent {
+                    kind: PointerKind::Down,
+                    column: u16::try_from(director.left + 3).unwrap(),
+                    row: u16::try_from(director.top + 5).unwrap(),
+                }),
                 24,
                 100,
             ),
@@ -29186,6 +29208,54 @@ mod tests {
         assert_eq!(
             DirectorCommandDelivery::from_terminal_result(Ok(())),
             DirectorCommandDelivery::written()
+        );
+
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut no_stream = WorkspaceUi::new(view.clone(), Box::new(UnavailableSessionCommandPort));
+        assert_eq!(
+            no_stream.send_director_command_bytes(&terminal, b"echo unavailable\r"),
+            DirectorCommandDelivery::not_delivered("terminal stream is unavailable")
+        );
+        let mut no_session = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort));
+        assert_eq!(
+            no_session.send_director_command_bytes(&terminal, b"echo missing\r"),
+            DirectorCommandDelivery::not_delivered("terminal session is no longer available")
+        );
+
+        let operation = OperationId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
+        let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut no_stream,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Char('x'),
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new())
+        );
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut no_stream,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Enter,
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new())
+        );
+        assert_eq!(runtime.director_command().value(), "x");
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some("terminal stream is unavailable")
         );
     }
 
