@@ -74,7 +74,7 @@ TUI 仕様を正本とする。
 | `Ctrl-O z` | WorkspaceTerminalFullHeight | Shell drawerの高さ切替 |
 | `Ctrl-O n` | DirectorNew / NewRootTerminal | Director New。Shell選択中は新しいterminal tab |
 | `Ctrl-O x` | CloseTab | 選択中pane tabの終了／取消／dismiss |
-| `Ctrl-O r` | ResumeTab | interrupted Agent tabの再開 |
+| `Ctrl-O r` | ResumeTab | 選択済み interrupted Agent tabの再開／再試行。resume不可なら削除確認 |
 | `Ctrl-O ↑` | ScrollUp | retained outputを1行上へ |
 | `Ctrl-O ↓` | ScrollDown | retained outputを1行下へ |
 | `Ctrl-O End` | ScrollBottom | live bottomへ戻る |

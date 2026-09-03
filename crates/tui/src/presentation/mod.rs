@@ -74,7 +74,7 @@ use crate::presentation::workspace_deck::{
     OverlayIntent, ProjectBarTarget, WorkspaceDeck, project_bar, render_overlay,
 };
 use crate::presentation::workspace_runtime::{
-    DirectorCommandInput, PaneRestoreTarget, WorkspaceRuntime,
+    DirectorCommandInput, InterruptedRemovalConfirmation, PaneRestoreTarget, WorkspaceRuntime,
 };
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -1032,6 +1032,7 @@ struct GardenProjectVisit {
 #[derive(Debug, PartialEq, Eq)]
 enum GardenInputRoute {
     Local(Vec<Effect>),
+    Agent(Vec<Effect>),
     Project(GardenProjectVisit),
 }
 
@@ -1128,8 +1129,11 @@ fn route_garden_input(
             agent,
         }));
     }
-    visit_garden_agent(ui, runtime, pointer);
-    Some(GardenInputRoute::Local(effects))
+    Some(if visit_garden_agent(ui, runtime, pointer) {
+        GardenInputRoute::Agent(effects)
+    } else {
+        GardenInputRoute::Local(effects)
+    })
 }
 
 fn route_workspace_input_before_reducer(
@@ -5744,15 +5748,11 @@ fn close_focused_terminal_pane(
     // reconnect, and a fresh TUI cannot resurrect the tab. The mutation also
     // creates the saved slot when this history came from inventory alone.
     if let Some(interrupted) = runtime.focused_interrupted().cloned() {
-        if let Err(error) = ui.mutate_agent_intent(AgentTabIntentMutation::DismissInterrupted {
-            session_id: interrupted.session_id,
-            continuation: interrupted.continuation,
-            terminal: interrupted.last_terminal,
-        }) {
-            surface_agent_tab_intent_error(runtime, error);
-            return;
-        }
-        let _ = runtime.close_focused_pane();
+        let target = runtime
+            .panes()
+            .active()
+            .expect("a focused interrupted tab belongs to an active target");
+        dismiss_interrupted_history(ui, runtime, target, interrupted);
         return;
     }
     if let Some(terminal) = runtime.focused_terminal() {
@@ -5783,6 +5783,26 @@ fn close_focused_terminal_pane(
             ui.pane_launches.remove(index);
         }
     }
+}
+
+/// Commit one exact interrupted-lineage dismissal before removing its local
+/// tab. The stable target protects modal confirmation from closing a different
+/// tab if a background projection changed focus meanwhile.
+fn dismiss_interrupted_history(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    target: Target,
+    interrupted: InterruptedTab,
+) {
+    if let Err(error) = ui.mutate_agent_intent(AgentTabIntentMutation::DismissInterrupted {
+        session_id: interrupted.session_id,
+        continuation: interrupted.continuation,
+        terminal: interrupted.last_terminal,
+    }) {
+        surface_agent_tab_intent_error(runtime, error);
+        return;
+    }
+    runtime.dismiss_interrupted_tab(target, interrupted.continuation);
 }
 
 fn surface_agent_tab_intent_error(runtime: &mut WorkspaceRuntime, error: AgentTabIntentError) {
@@ -5894,9 +5914,20 @@ fn copy_terminal_selection(controls: &mut LiveTerminalControls, term: &mut dyn T
     controls.record_copy(&text, result);
 }
 
-fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectorTabSelection {
+    Unhandled,
+    Handled,
+    Selected,
+}
+
+fn select_director_tab_outcome(
+    key: &Key,
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+) -> DirectorTabSelection {
     if !runtime.state().director_drawer_open() {
-        return false;
+        return DirectorTabSelection::Unhandled;
     }
     let direction = match key {
         Key::Live(LiveTerminalAction::NextTab) => {
@@ -5905,10 +5936,10 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
         Key::Live(LiveTerminalAction::PreviousTab) => {
             crate::usecase::application::controller::TabDirection::Previous
         }
-        _ => return false,
+        _ => return DirectorTabSelection::Unhandled,
     };
     let Some(selection) = runtime.agent_selection_after_select(direction) else {
-        return true;
+        return DirectorTabSelection::Handled;
     };
     let continuation = match &selection {
         TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
@@ -5921,10 +5952,31 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
     }) {
         Ok(()) => {
             let _ = runtime.select_tab(direction);
+            DirectorTabSelection::Selected
         }
-        Err(error) => surface_agent_tab_intent_error(runtime, error),
+        Err(error) => {
+            surface_agent_tab_intent_error(runtime, error);
+            DirectorTabSelection::Handled
+        }
     }
-    true
+}
+
+#[cfg(test)]
+fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) -> bool {
+    select_director_tab_outcome(key, ui, runtime) != DirectorTabSelection::Unhandled
+}
+
+fn select_director_tab_and_activate(
+    key: &Key,
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+) -> bool {
+    let outcome = select_director_tab_outcome(key, ui, runtime);
+    if outcome == DirectorTabSelection::Selected {
+        activate_focused_interrupted_tab(ui, runtime, pending_targets);
+    }
+    outcome != DirectorTabSelection::Unhandled
 }
 
 fn select_root_terminal_tab(key: &Key, runtime: &mut WorkspaceRuntime) -> bool {
@@ -5973,13 +6025,16 @@ fn visit_garden_agent(
     let Some(index) = runtime.agent_tab_index(runtime_id, ui.agent_inventory()) else {
         return false;
     };
-    select_right_pane_tab(ui, runtime, index);
-    true
+    select_right_pane_tab(ui, runtime, index)
 }
 
-fn select_right_pane_tab(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, index: usize) {
+fn select_right_pane_tab(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    index: usize,
+) -> bool {
     let Some(selection) = runtime.tab_selection_at(index) else {
-        return;
+        return false;
     };
     let active = runtime
         .panes()
@@ -5987,7 +6042,7 @@ fn select_right_pane_tab(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, i
         .expect("a selectable tab always belongs to an active pane");
     if !ui.has_agent_intent_for(active.session_id()) {
         let _ = runtime.select_tab_selection(selection);
-        return;
+        return true;
     }
     let continuation = match &selection {
         TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
@@ -6000,8 +6055,12 @@ fn select_right_pane_tab(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, i
     }) {
         Ok(()) => {
             let _ = runtime.select_tab_selection(selection);
+            true
         }
-        Err(error) => surface_agent_tab_intent_error(runtime, error),
+        Err(error) => {
+            surface_agent_tab_intent_error(runtime, error);
+            false
+        }
     }
 }
 
@@ -6191,7 +6250,9 @@ fn intercept_live_terminal_control(
     if !runtime.wants_pane_control_input() && pane_only_control {
         return true;
     }
-    if !select_director_tab(key, ui, runtime) && !select_root_terminal_tab(key, runtime) {
+    if !select_director_tab_and_activate(key, ui, runtime, pending_targets)
+        && !select_root_terminal_tab(key, runtime)
+    {
         match key {
             Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
             Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
@@ -6262,7 +6323,7 @@ fn intercept_live_terminal_control(
                 close_focused_terminal_pane(ui, runtime, pending_targets);
             }
             Key::Live(LiveTerminalAction::ResumeTab) => {
-                resume_focused_interrupted_tab(ui, runtime, pending_targets);
+                activate_focused_interrupted_tab(ui, runtime, pending_targets);
             }
             Key::Live(
                 action @ (LiveTerminalAction::MoveTabNext | LiveTerminalAction::MoveTabPrevious),
@@ -6357,6 +6418,9 @@ struct HomeFrameMaterial {
     height: usize,
     width: usize,
     projection: HomeProjection,
+    /// Safe label/reason and focused Remove/Keep answer for an unresumable
+    /// interrupted conversation explicitly selected by the user.
+    interrupted_removal_confirmation: Option<(String, String, bool)>,
     /// `Some(choice)` exactly while the exit prompt covers the frame, carrying
     /// the answer its focused button would commit (#556).
     quit_confirmation: Option<ExitChoice>,
@@ -6540,6 +6604,15 @@ fn home_frame_material_shared(
         height,
         width,
         projection,
+        interrupted_removal_confirmation: runtime.interrupted_removal_confirmation().map(
+            |confirmation| {
+                (
+                    confirmation.tab().safe_label(),
+                    confirmation.tab().safe_detail().to_owned(),
+                    confirmation.is_confirm_selected(),
+                )
+            },
+        ),
         quit_confirmation: (runtime.state().overlay() == Some(Overlay::QuitConfirmation))
             .then(|| runtime.state().exit_choice()),
         create_error: runtime
@@ -6572,6 +6645,26 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
     );
     // The create form renders inline in the `+ new session` sidebar row (see
     // `render_home`), so no overlay composite is needed here.
+    if let Some((label, message, confirm)) = &material.interrupted_removal_confirmation {
+        let title = Style::new()
+            .fg(Color::White)
+            .bold()
+            .paint("Remove interrupted Agent");
+        let heading = Style::new()
+            .fg(Color::White)
+            .bold()
+            .paint(&format!("Remove {label}?"));
+        let mut view = ConfirmationView::confirmation(&title, 60, heading, message);
+        view.confirm_label = "remove";
+        view.cancel_label = "keep";
+        return modal::render_confirmation_over(
+            material.height,
+            material.width,
+            &frame,
+            modal::ConfirmationModal::from_confirm_selected(*confirm),
+            view,
+        );
+    }
     if let Some(choice) = material.quit_confirmation {
         return quit_modal::render_over(material.height, material.width, &frame, choice);
     }
@@ -6873,21 +6966,27 @@ fn drain_controller_host_actions(
                 let Some(active) = runtime.panes().active() else {
                     continue;
                 };
-                let Some(next_terminal) = runtime.terminal_after_select(direction) else {
+                let Some(selection) = runtime.selection_after_select(direction) else {
                     continue;
                 };
                 if !ui.has_agent_intent_for(active.session_id()) {
                     runtime.on_effect(&Effect::SelectTab { direction });
+                    activate_focused_interrupted_tab(ui, runtime, pending_targets);
                     continue;
                 }
-                let continuation = next_terminal
-                    .as_ref()
-                    .and_then(|terminal| ui.agent_continuation_for(terminal));
+                let continuation = match &selection {
+                    TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
+                    TabSelection::Interrupted(continuation) => Some(*continuation),
+                    TabSelection::Pending(_) | TabSelection::Ready(_) => None,
+                };
                 match ui.mutate_agent_intent(AgentTabIntentMutation::Select {
                     session_id: active.session_id(),
                     continuation,
                 }) {
-                    Ok(()) => runtime.on_effect(&Effect::SelectTab { direction }),
+                    Ok(()) => {
+                        runtime.on_effect(&Effect::SelectTab { direction });
+                        activate_focused_interrupted_tab(ui, runtime, pending_targets);
+                    }
                     Err(error) => surface_agent_tab_intent_error(runtime, error),
                 }
             }
@@ -7087,7 +7186,77 @@ fn apply_exact_resume(
     debug_assert!(accepted.is_ok(), "validated exact resume remains accepted");
 }
 
-/// Start the explicit resume of the selected interrupted tab (`Ctrl-O r`).
+/// Activate an interrupted tab after an explicit user selection. Passive
+/// inventory restoration never calls this: a resumable lineage starts its
+/// exact resume, while an unresumable lineage opens a destructive prompt.
+fn activate_focused_interrupted_tab(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+) {
+    if runtime.state().overlay().is_some() {
+        return;
+    }
+    let Some(resumable) = runtime.focused_interrupted().map(InterruptedTab::resumable) else {
+        return;
+    };
+    if resumable {
+        resume_focused_interrupted_tab(ui, runtime, pending_targets);
+    } else {
+        let _ = runtime.open_interrupted_removal_confirmation();
+    }
+}
+
+/// Give the unresumable-history prompt exclusive ownership of one key.
+/// Persistence is committed before the exact tab leaves the registry; a failed
+/// commit closes the prompt but leaves the history visible with a safe notice.
+fn handle_interrupted_removal_confirmation(
+    key: &Key,
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+) -> bool {
+    let Some(confirm_selected) = runtime
+        .interrupted_removal_confirmation()
+        .map(InterruptedRemovalConfirmation::is_confirm_selected)
+    else {
+        return false;
+    };
+    match key {
+        Key::Left | Key::Right | Key::Tab => {
+            runtime.toggle_interrupted_removal_choice();
+        }
+        Key::Char('y' | 'Y') => {
+            confirm_interrupted_removal(ui, runtime);
+        }
+        Key::Enter => {
+            if confirm_selected {
+                confirm_interrupted_removal(ui, runtime);
+            } else {
+                let _ = runtime.take_interrupted_removal_confirmation();
+            }
+        }
+        Key::Escape | Key::Char('n' | 'N') => {
+            let _ = runtime.take_interrupted_removal_confirmation();
+        }
+        _ => {}
+    }
+    true
+}
+
+fn confirm_interrupted_removal(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
+    let Some(confirmation) = runtime.take_interrupted_removal_confirmation() else {
+        return;
+    };
+    dismiss_interrupted_history(
+        ui,
+        runtime,
+        confirmation.target(),
+        confirmation.tab().clone(),
+    );
+}
+
+/// Start an explicit resume of the selected interrupted tab (`Ctrl-O r` or a
+/// direct tab selection).
 ///
 /// This is the only path that asks the daemon to resume a provider conversation
 /// per tab: the request carries the daemon's own opaque target plus a fresh
@@ -7978,6 +8147,9 @@ fn drive_workspace_controller(
                     agent: Some(agent),
                 },
             );
+            if selected {
+                activate_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending_targets);
+            }
             if selected || ui.agent_inventory().is_some() {
                 pending_garden_agent = None;
             }
@@ -8356,6 +8528,11 @@ fn drive_workspace_controller(
         // Contextual New is retargeted once here so PTY forwarding, pane
         // controls, and the reducer all see one normalized key.
         let raw_key = retarget_drawer_chords(&runtime, term.read_key()?);
+        if handle_interrupted_removal_confirmation(&raw_key, &mut ui, &mut runtime) {
+            // This prompt is the exclusive frontmost owner. In particular,
+            // Ctrl-D and pane-close chords never reach a live tab behind it.
+            continue;
+        }
         if help_context.is_some() {
             if matches!(raw_key, Key::Help | Key::Escape) {
                 help_context = None;
@@ -8770,6 +8947,10 @@ fn drive_workspace_controller(
         let work_run_effects = work_run_input.map(|input| input.effects);
         let input_route = match garden_route {
             Some(GardenInputRoute::Local(effects)) => WorkspaceInputRoute::Garden(effects),
+            Some(GardenInputRoute::Agent(effects)) => {
+                activate_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending_targets);
+                WorkspaceInputRoute::Garden(effects)
+            }
             Some(GardenInputRoute::Project(_)) => unreachable!("project visit returned above"),
             None if director_header_effects.is_some() => {
                 WorkspaceInputRoute::Drawer(director_header_effects.expect("matched above"))
@@ -8866,7 +9047,13 @@ fn drive_workspace_controller(
                         runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
                     }
                     (None, Some(index)) => {
-                        select_right_pane_tab(&mut ui, &mut runtime, index);
+                        if select_right_pane_tab(&mut ui, &mut runtime, index) {
+                            activate_focused_interrupted_tab(
+                                &mut ui,
+                                &mut runtime,
+                                &mut pending_targets,
+                            );
+                        }
                         Vec::new()
                     }
                     (None, None) => runtime.apply_event(sidebar_pointer_event(
@@ -10426,13 +10613,14 @@ mod tests {
         WORKSPACE_SWITCH_LOADING_GRACE, WelcomeStep, WorkspaceConfigContext, WorkspaceConfigStep,
         WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
         WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
-        WorkspaceView, activate_workspace_responsive, adjust_project_bar_pointer,
-        app_event_from_key, cached_workspace_switch_frame, close_director_from_header,
-        close_exited_panes, compose_workspace_shell_frame, controller_terminal_view,
-        copy_terminal_selection, director_organization, dismiss_pr_modal_on_project_bar_click,
-        drain_session_completions, focus_workspace_drawer_from_pointer,
-        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at, garden_fits,
-        garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
+        WorkspaceView, activate_focused_interrupted_tab, activate_workspace_responsive,
+        adjust_project_bar_pointer, app_event_from_key, cached_workspace_switch_frame,
+        close_director_from_header, close_exited_panes, compose_workspace_shell_frame,
+        controller_terminal_view, copy_terminal_selection, director_organization,
+        dismiss_pr_modal_on_project_bar_click, drain_session_completions,
+        focus_workspace_drawer_from_pointer, foreground_terminal_geometry,
+        forward_live_terminal_input, garden_click_at, garden_fits, garden_shell_owned_wake,
+        handle_interrupted_removal_confirmation, handle_terminal_pointer, home_frame_material,
         intercept_live_terminal_control, is_director_header_click, is_user_activity,
         key_to_terminal_bytes, key_to_terminal_bytes_for_mode, new_project_notice,
         open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
@@ -12181,7 +12369,6 @@ mod tests {
         let second = live_terminal_ref(workspace, session);
         let _ = runtime.request_pane(target, second_operation, PaneKind::Terminal);
         let _ = runtime.complete_pane(target, second_operation, second);
-
         // A stale/out-of-range frame hit is inert.
         select_right_pane_tab(&mut ui, &mut runtime, usize::MAX);
         select_right_pane_tab(&mut ui, &mut runtime, 0);
@@ -12258,7 +12445,6 @@ mod tests {
             .iter()
             .position(|tab| matches!(tab, PaneTab::Pending(pane) if pane.operation == pending))
             .expect("pending tab is visible");
-
         select_right_pane_tab(&mut ui, &mut runtime, pending_index);
         select_right_pane_tab(&mut ui, &mut runtime, interrupted_index);
 
@@ -30443,6 +30629,210 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn selecting_a_resumable_interrupted_tab_starts_its_exact_resume() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let history = interrupted_history(workspace, Some(session), true);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![history],
+            launch_port(Box::new(ScriptedExactResumePort {
+                answers: Vec::new(),
+                requests,
+            })),
+        );
+
+        let mut pending_targets = std::collections::HashMap::new();
+        assert!(select_right_pane_tab(&mut ui, &mut runtime, 0));
+        activate_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending_targets);
+
+        assert_eq!(ui.pane_launches.len(), 1);
+        assert!(matches!(
+            ui.pane_launches.first(),
+            Some(PaneLaunch::ResumeExact { .. })
+        ));
+    }
+
+    #[test]
+    fn selecting_an_unresumable_tab_prompts_then_keeps_or_removes_exact_history() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let history = interrupted_history(workspace, Some(session), false);
+        let continuation = history.continuation;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![history],
+            launch_port(Box::new(ScriptedExactResumePort {
+                answers: Vec::new(),
+                requests: Arc::clone(&requests),
+            })),
+        );
+        let mut pending_targets = std::collections::HashMap::new();
+
+        assert!(select_right_pane_tab(&mut ui, &mut runtime, 0));
+        activate_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending_targets);
+        let prompt = runtime
+            .interrupted_removal_confirmation()
+            .expect("an unresumable selection opens its removal prompt");
+        assert_eq!(prompt.tab().continuation, continuation);
+        assert!(prompt.is_confirm_selected());
+        let frame = render_home_material(&home_frame_material(
+            20,
+            80,
+            &runtime,
+            "demo",
+            Path::new("/tmp/demo"),
+            &[],
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        ))
+        .join("\n");
+        assert!(frame.contains("Remove interrupted Agent"));
+        assert!(frame.contains("[ remove ]"));
+        assert!(frame.contains("[ keep"));
+        assert!(frame.contains("kept no resume metadata"));
+
+        // The prompt owns all input. A terminal EOF cannot leak to a pane
+        // behind it, and choosing Keep leaves both durable and local history.
+        assert!(handle_interrupted_removal_confirmation(
+            &Key::CtrlD,
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(runtime.interrupted_removal_confirmation().is_some());
+        assert!(handle_interrupted_removal_confirmation(
+            &Key::Right,
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(handle_interrupted_removal_confirmation(
+            &Key::Enter,
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(runtime.interrupted_removal_confirmation().is_none());
+        assert!(runtime.active_pane().has_tabs());
+        assert!(ui.agent_dismissed().is_empty());
+
+        // Selecting the same tab again reopens a fresh affirmative prompt.
+        assert!(select_right_pane_tab(&mut ui, &mut runtime, 0));
+        activate_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending_targets);
+        assert!(handle_interrupted_removal_confirmation(
+            &Key::Enter,
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(!runtime.active_pane().has_tabs());
+        assert_eq!(ui.agent_dismissed(), BTreeSet::from([continuation]));
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(ui.pane_launches.is_empty());
+    }
+
+    #[test]
+    fn selecting_an_interrupted_rabbit_opens_the_same_unresumable_prompt() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let history = interrupted_history(workspace, Some(session), false);
+        let runtime_id = AgentRuntimeId::new();
+        let continuation = history.continuation;
+        let terminal = history.last_terminal.clone();
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![history],
+            Box::new(UnavailablePaneLaunchPort),
+        );
+        ui.agent_inventory = Some(AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: AgentRuntimeRef::new(runtime_id, terminal, Some(session)).unwrap(),
+                continuation,
+                state: AgentRuntimeInventoryState::Interrupted,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        });
+        let mut pending_targets = std::collections::HashMap::new();
+        let mut pointer_gesture = false;
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let record = SessionRecord {
+            name: "interrupted".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("/tmp/demo/interrupted"),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let material = home_frame_material(
+            24,
+            80,
+            &runtime,
+            "demo",
+            Path::new("/tmp/demo"),
+            &[ProjectedSession::from_record(session, &record)],
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        )
+        .with_agent_inventory(ui.agent_inventory());
+        let click = (0..24)
+            .flat_map(|row| (0..80).map(move |column| (column, row)))
+            .find(|&(column, row)| {
+                matches!(
+                    garden_click_at(
+                        material.height,
+                        material.width,
+                        &material.projection,
+                        material.now,
+                        column,
+                        row,
+                    ),
+                    Some(GardenClick::Visit {
+                        agent: Some(selected),
+                        ..
+                    }) if selected == runtime_id
+                )
+            })
+            .expect("the interrupted rabbit is clickable");
+
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                Some(&material),
+                &Key::Click {
+                    column: click.0,
+                    row: click.1,
+                },
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Agent(Vec::new())),
+        );
+        activate_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending_targets);
+        assert_eq!(
+            runtime
+                .interrupted_removal_confirmation()
+                .map(|prompt| prompt.tab().continuation),
+            Some(continuation),
+        );
+        assert!(ui.pane_launches.is_empty());
     }
 
     #[test]

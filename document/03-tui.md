@@ -39,7 +39,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [workspace open 時の pane 復元](#workspace-open-時の-pane-復元)
 - [resume data compatibility](#resume-data-compatibility)
 - [exited terminal の completed entry](#exited-terminal-の-completed-entry)
-- [interrupted Agent の tab 投影と明示 resume](#interrupted-agent-の-tab-投影と明示-resume)
+- [interrupted Agent の tab 投影と選択時 resume](#interrupted-agent-の-tab-投影と選択時-resume)
 - [feedback と終了](#feedback-と終了)
 
 ## この文書の読み方
@@ -539,7 +539,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `{` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
 | `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる。live Agent には `Ctrl-D` と同じ EOT、interrupted Agent は lineage を永続 dismiss、generic live tab には割込み後に `exit` を送り、pending は起動待ちを取消す |
-| `Ctrl-O` `r` | ResumeTab | 選択中の [interrupted tab](#interrupted-agent-の-tab-投影と明示-resume) を明示 resume する（他の tab は変更しない） |
+| `Ctrl-O` `r` | ResumeTab | 選択中の [interrupted tab](#interrupted-agent-の-tab-投影と選択時-resume) を再開／再試行する。resume 不可なら削除確認（他の tab は変更しない） |
 | `Ctrl-O` `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 | `Ctrl-O` `End` | ScrollBottom | 右ペインを live bottom へ 1 手で戻し、新しい出力への追従を再開する |
@@ -755,10 +755,11 @@ attach request に載るので追加の往復は無く、`Resize` は pane の�
 eviction された terminal も attach 応答の `next_input_seq` を採用し、daemon ledger より前へ巻き戻さない。
 connection epoch が変わった場合だけ sequence は daemon とともに 0 へ戻る。
 
-interrupted tab は read-only で、open / reconnect / restore から provider resume を発行しない。選択中 interrupted
-tab の `Ctrl-O r` だけが既存の exact resume contract を実行し、operation / source / relation / lineage / root scope /
-new exact `TerminalRef` がすべて一致した成功だけを同 slot の live Agent tab へ置換する。drawer を閉じている間に
-応答した置換は root background entry だけを更新し、managed foreground を奪わない。
+interrupted tab は read-only で、open / reconnect / restore から provider resume を発行しない。利用者が tab click・
+next / previous・Garden のうさぎで明示選択したとき、resume 可能なら既存の exact resume contract を実行する。
+`Ctrl-O r` は選択済み tab の明示再試行にも使える。operation / source / relation / lineage / root scope / new exact
+`TerminalRef` がすべて一致した成功だけを同 slot の live Agent tab へ置換する。drawer を閉じている間に応答した置換は
+root background entry だけを更新し、managed foreground を奪わない。resume 不可の明示選択は削除確認を前面に出す。
 
 drawer open 中は focus 中の drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
 それらへ key / click / pointer を伝播しない。root Agent tab の terminal input と `Ctrl-O` tab controls、および
@@ -1523,7 +1524,7 @@ projection から毎フレーム導出する派生値であり、[metrics](04-ip
 | 入力 | 権威 |
 |---|---|
 | session ごとの lifecycle | daemon の session lifecycle snapshot |
-| session scope の Agent phase 集約 | daemon の Agent phase 報告（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と明示-resume)と同じ projection） |
+| session scope の Agent phase 集約 | daemon の Agent phase 報告（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と選択時-resume)と同じ projection） |
 
 分類は既存語彙だけで決め、新しい状態語彙を増やさない。1 session はちょうど 1 クラスに属するため、3 つの
 件数の合計が session 数を超えない。
@@ -1538,7 +1539,7 @@ projection から毎フレーム導出する派生値であり、[metrics](04-ip
 - 優先順位は `fail` > `wait` > `run` である。`failed` 行に古い phase 報告が残っている 1 フレームでも二重計上しない。
 - **`failed` は lifecycle だけが権威**である。`ended` / `exited` / `interrupted` は phase 集約の `done` へ畳まれて
   非計上となり、失敗としては数えない。`interrupted` は daemon 再起動後に runtime identity を証明できなかった
-  daemon 所有の projection 状態で、resume 可能な履歴であるため（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と明示-resume)）、
+  daemon 所有の projection 状態で、resume 可能な履歴であるため（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と選択時-resume)）、
   使用不能な checkout を意味する `failed` とは別の事実である。
 - **0 件のクラスは描かない**。3 つとも 0（session が 0 件の場合を含む）なら行自体を出さない。
 - **daemon metrics が無くても出る**。件数は metrics observation と独立に導出するため、metrics 未取得でも
@@ -2071,8 +2072,8 @@ drawer の key hint より feedback を優先する。interrupted Agent の safe
 この inventory 復元は provider conversation resume を開始しない。managed session の `identity_unknown` /
 interrupted Agent は sidebar の第 2 行、root scope の interrupted Agent は指示モードの選択中
 conversation の専用 detail 行に、ID を含まない safe reason を表示する。TUI 起動、workspace open、daemon reconnect は
-resume を自動送信せず、managed session は `session resume <name>`、root scope は drawer で選択した tab の
-`Ctrl-O r` を必須とする。
+resume を自動送信しない。利用者による interrupted tab の明示選択が exact resume を開始し、選択済み tab は
+`Ctrl-O r` でも再試行できる。managed session の CLI 操作には `session resume <name>` も使える。
 
 - **two-source reconciliation**: daemon の unified terminal / Agent inventory が membership・liveness・PTY ownership の正本、
   `<data-dir>/tui/workspaces/<workspace-id>/agent-tabs.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの選択の
@@ -2121,7 +2122,7 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
 | schema 1 の legacy dismissal が保存されている | file load 時の schema migration | dismissal を一度だけ消去し、slot identity と order は保持する |
 | schema 2 の dismissal が保存されている | current user intent | 同じ lineage の live / interrupted Agent を自動投影しない |
 | saved exact ref が trusted live | unified terminal と Agent inventory の双方に完全一致 | 保存 slot へ live tab を 1 枚投影する |
-| saved ref は non-live、同じ continuation は resumable | durable history は存在 | slot intent を保持し、interrupted tab は自動投影・resume しない |
+| saved ref は non-live、同じ continuation は resumable | durable history は存在 | slot intent を保持して interrupted tab を投影するが、復元処理から resume しない |
 | `live: false`（死んだ process / exited / orphan / identity_unknown） | attach 不可 | live tab を作らない。PTY master 復元不能は interrupted 契約に委ねる |
 | authoritative に削除された session | 成功した lifecycle snapshot の available session 集合から消えた | target / selection / slots を同一 commit で除去する |
 | allowed session 内の inventory 欠落 | session 自体は lifecycle snapshot に残る | dormant slot を保持し、別 target を復元する |
@@ -2197,7 +2198,7 @@ completed tab と visibility command を決める。projection は入力の純�
   process-local な「見た」flag を authority にしない。
 - 別 exact `TerminalRef` incarnation の visibility は独立する。close / dismiss しても別 incarnation を誤抑止しない。
 
-## interrupted Agent の tab 投影と明示 resume
+## interrupted Agent の tab 投影と選択時 resume
 
 daemon の crash / `SIGKILL` / cold stop-start / OS 再起動のあとでは旧 PTY は失われている。daemon は各 conversation
 lineage を **interrupted runtime** と exact resume source として保持し、[`agent_inventory`](04-ipc.md#provider-conversation-resume-request)
@@ -2231,8 +2232,9 @@ saved 表示順（[workspace open 時の two-source reconciliation](#workspace-o
 
 ### 明示 resume の検証
 
-resume は利用者の明示操作だけが発火する。TUI 起動、workspace open、inventory refresh、daemon reconnect、
-planned restart は resume request を作らない。要求は選択中の exact tab の `AgentResumeTarget` と新しい
+resume は利用者の明示操作だけが発火する。tab click、next / previous、Garden のうさぎ選択、または選択済み tab の
+`Ctrl-O r` が該当する。TUI 起動、workspace open、inventory refresh、daemon reconnect、planned restart は
+resume request を作らない。要求は選択中の exact tab の `AgentResumeTarget` と新しい
 `OperationId` だけを送り、応答は次を **すべて** 満たしたときにだけ同じ tab を live へ置き換える。
 
 | 検証 | 不一致時 |
@@ -2257,8 +2259,8 @@ selection は projection だけが所有する。
 cold restart 直後のように **interrupted tab しか無い target** でも、root drawer は conversation surface、
 managed-session Closeup は action launcher ではなく tab strip へ着地する（[Closeup pane](#closeup-pane) の入力所有者は
 live PTY の有無ではなく tab の有無で決まる）。history tab は managed-session Closeup と root drawer のどちらでも
-`Ctrl-O [` / `Ctrl-O ]` で選び、
-どちらも `Ctrl-O r` で resume できる。
+click または `Ctrl-O [` / `Ctrl-O ]` で明示選択する。resume 可能なら選択時に exact resume を開始し、選択済み tab は
+`Ctrl-O r` で再試行できる。resume 不可なら Remove / Keep の確認 modal を開く。
 
 | 状態 | tab label | 選択時の body |
 |---|---|---|
@@ -2268,8 +2270,8 @@ live PTY の有無ではなく tab の有無で決まる）。history tab は ma
 
 操作は次の順に進む。
 
-1. `Ctrl-O r` が選択 tab の opaque `AgentResumeTarget` と新しい `OperationId` を daemon へ送り、**その tab だけ**を
-   resume 中にする。tab の位置・selection・他 tab は変わらない。
+1. resume 可能な interrupted tab の明示選択（または選択済み tab の `Ctrl-O r`）が opaque `AgentResumeTarget` と
+   新しい `OperationId` を daemon へ送り、**その tab だけ**を resume 中にする。tab の位置・selection・他 tab は変わらない。
 2. 応答が[明示 resume の検証](#明示-resume-の検証)をすべて満たしたときだけ、同じ slot の tab を新しい exact
    `TerminalRef` の live Agent tab へ置き換える。foreground だった tab だけが attach / resync する。
 3. 置換した lineage は [two-source reconciliation](#workspace-open-時の-pane-復元)の slot intent へ新しい
@@ -2279,9 +2281,13 @@ live PTY の有無ではなく tab の有無で決まる）。history tab は ma
 5. live tab の `Ctrl-O x` は CLI へ `Ctrl-D` と同じ EOT を送り、daemon が runtime の終了を観測した時点で tab を閉じる。
    interrupted tab では EOT を送らず、exact lineage の dismissal を永続化できた時点で tab を閉じる。どちらも別 runtime の
    resume / spawn は発火しない。
+6. resume 不可の tab を明示選択すると safe reason を載せた Remove / Keep modal を開く。modal は `Enter` で
+   選択中の回答、`y` で Remove、`Esc` / `n` で Keep を確定し、`←` / `→` / `Tab` で回答を切り替える。Remove は exact lineage の
+   dismissal を永続化してからその tab だけを閉じ、失敗時は tab を残す。modal が開いている間は `Ctrl-D` を含む入力を
+   背後の pane へ渡さない。
 
-resume 不可の tab、選択されていない tab、および interrupted tab を持たない selection に対する `Ctrl-O r` は
-daemon request を作らない。inventory refresh・reconnect・workspace open・planned restart も同様である。
+resume 不可の tab の選択と `Ctrl-O r` は削除確認を開くだけで daemon request を作らない。選択されていない tab、
+interrupted tab を持たない selection、inventory refresh・reconnect・workspace open・planned restart も同様である。
 
 planned な `daemon restart` は旧 generation の PTY を保持したまま control authority だけを移す別 failure mode である。
 その間の tab は interrupted ではなく、owner generation の endpoint へ配送される live tab のままである

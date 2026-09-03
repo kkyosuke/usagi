@@ -449,6 +449,7 @@ fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
         | PaneEvent::Feedback { .. }
         | PaneEvent::ReorderSelected(_)
         | PaneEvent::CloseSelected
+        | PaneEvent::DismissInterrupted { .. }
         | PaneEvent::ResumeStarted { .. }
         | PaneEvent::ResumeReplaced { .. }
         | PaneEvent::ResumeFailed { .. } => true,
@@ -527,6 +528,9 @@ pub enum PaneEvent {
     ReorderSelected(TabDirection),
     /// Close the selected pane tab. Selecting a target without a tab is a no-op.
     CloseSelected,
+    /// Remove one interrupted tab by its stable lineage, even if its target is
+    /// no longer active when a confirmation answer is committed.
+    DismissInterrupted { continuation: AgentContinuationRef },
     /// Merge one target's projected interrupted Agent conversations (#510).
     ///
     /// The projection is authoritative for interrupted membership: a lineage it
@@ -606,6 +610,7 @@ pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
         } => restore_batch(state, panes, selected, replace_order),
         PaneEvent::ReorderSelected(direction) => reorder_selected(state, direction),
         PaneEvent::CloseSelected => close_selected(state),
+        PaneEvent::DismissInterrupted { continuation } => dismiss_interrupted(state, continuation),
         PaneEvent::RestoreInterrupted { tabs } => restore_interrupted(state, tabs),
         PaneEvent::ResumeStarted {
             continuation,
@@ -809,6 +814,36 @@ fn close_selected(state: &mut PaneState) -> Vec<PaneEffect> {
         PaneTab::Ready(ready) => ready.target,
         PaneTab::Interrupted(pane) => target_for_interrupted(&pane.tab),
     };
+    if state.tabs.is_empty() {
+        state.selected = PaneSelection::Target(target);
+        return vec![PaneEffect::ReturnToCloseup];
+    }
+    state.selected = selection_for(&state.tabs[index.min(state.tabs.len() - 1)]);
+    Vec::new()
+}
+
+fn dismiss_interrupted(
+    state: &mut PaneState,
+    continuation: AgentContinuationRef,
+) -> Vec<PaneEffect> {
+    let Some(index) = state.tabs.iter().position(|tab| {
+        matches!(
+            tab,
+            PaneTab::Interrupted(pane) if pane.tab.continuation == continuation
+        )
+    }) else {
+        return Vec::new();
+    };
+    let selected = state.selected == PaneSelection::Tab(TabSelection::Interrupted(continuation));
+    let target = match state.tabs.remove(index) {
+        PaneTab::Interrupted(pane) => target_for_interrupted(&pane.tab),
+        PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => {
+            unreachable!("the interrupted lineage lookup fixes the removed variant")
+        }
+    };
+    if !selected {
+        return Vec::new();
+    }
     if state.tabs.is_empty() {
         state.selected = PaneSelection::Target(target);
         return vec![PaneEffect::ReturnToCloseup];
@@ -2672,6 +2707,46 @@ mod tests {
             registry.active_pane().selected(),
             &PaneSelection::Target(target)
         );
+    }
+
+    #[test]
+    fn dismissing_history_by_lineage_never_closes_the_unrelated_selected_tab() {
+        let target = target();
+        let first = interrupted(target, true);
+        let second = interrupted(target, false);
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![first.clone(), second.clone()],
+            },
+        );
+
+        assert!(
+            reduce(
+                &mut state,
+                PaneEvent::DismissInterrupted {
+                    continuation: second.continuation,
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(interrupted_tabs(&state), vec![first.continuation]);
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Interrupted(first.continuation))
+        );
+
+        assert_eq!(
+            reduce(
+                &mut state,
+                PaneEvent::DismissInterrupted {
+                    continuation: first.continuation,
+                },
+            ),
+            vec![PaneEffect::ReturnToCloseup]
+        );
+        assert_eq!(state.selected(), &PaneSelection::Target(target));
     }
 
     #[test]

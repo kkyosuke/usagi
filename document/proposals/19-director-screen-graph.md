@@ -233,7 +233,7 @@ Agent の子を作る操作に見せず、新しい sibling を作ることを�
 
 Agent が interrupted / stopped になっても Agent 画面を Overview へ自動遷移させない。terminal の代わりに safe reason と
 `Resume` / `Retry` / `Overview` のうち daemon projection が許可する action を表示する。履歴の保持や exact resume は現在の
-[interrupted Agent](../03-tui.md#interrupted-agent-の-tab-投影と明示-resume)契約を再利用する。
+[interrupted Agent](../03-tui.md#interrupted-agent-の-tab-投影と選択時-resume)契約を再利用する。
 
 ## 入力と戻る操作
 
