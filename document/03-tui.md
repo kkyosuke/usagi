@@ -503,8 +503,9 @@ snapshot で session 一覧を置き換えた場合も、置換前後の click �
 Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、空の pane を
 表示する。この状態では `a` が Agent、`t` が Terminal を直接起動し、`Enter` が action modal を開く。tab が 1 つ以上ある Closeup は `LiveInputClassifier` がすべての入力を先に分類する。pending な `Ctrl-O`
 prefix（leader）が次の入力を所有し、leader が無い場合は `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` / `Ctrl-X` を control chord として解決する。
-それ以外の非 prefix 入力は、修飾キーを含めて live terminal への passthrough として扱う。leader の follow-up は下表のアクションに
-解決し、それ以外は消費する。tab 切替（`Ctrl-O [` / `Ctrl-O ]`）は reducer が所有するが、scroll・tab close・copy は
+それ以外の非 prefix 入力は、修飾キーを含めて live terminal への passthrough として扱う。leader の follow-up は `Ctrl` の有無を
+同一視して下表のアクションに解決し、それ以外は消費する。tab 切替（`Ctrl-O [` / `Ctrl-O ]`、または2打目も `Ctrl` を押したままの
+`Ctrl-O Ctrl-[` / `Ctrl-O Ctrl-]`）は reducer が所有するが、scroll・tab close・copy は
 reducer に持ち込まず shell と `TerminalSession` が所有する（scroll offset・選択・feedback は shell 側の状態）。
 
 controller reducer path も同じ投影を使う。**tab を 1 枚も持たない** target の Closeup への遷移は overlay を
