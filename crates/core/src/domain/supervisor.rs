@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use uuid::Uuid;
 
 use crate::domain::{
+    agent::InboxKind,
     id::{AgentRuntimeId, OperationId, SessionId, WorkspaceId, WorktreeId},
     pr_inventory::GitHubRepository,
 };
@@ -63,6 +64,14 @@ pub const MAX_TASK_DEPENDENCIES: usize = 128;
 pub const MAX_SUPERVISOR_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_SUPERVISOR_REASON_BYTES: usize = 4 * 1024;
 pub const MAX_SUPERVISOR_KEY_BYTES: usize = 256;
+/// Maximum task completions retained as handoff context in one Work Run.
+pub const MAX_HANDOFF_CONTEXT_ENTRIES: usize = 64;
+/// Maximum worker-authored summary retained for one handoff entry.
+pub const MAX_HANDOFF_SUMMARY_BYTES: usize = 1024;
+/// Maximum compact structured-artifact description retained per entry.
+pub const MAX_HANDOFF_ARTIFACT_BYTES: usize = 2 * 1024;
+/// Maximum context prefix synthesized into a newly delegated worker prompt.
+pub const MAX_HANDOFF_PROMPT_BYTES: usize = 16 * 1024;
 /// Maximum daemon-authoritative Work Runs in one workspace UI snapshot.
 pub const MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS: usize = 16;
 /// Artifact provider retries begin here and never exceed the maximum below.
@@ -375,6 +384,20 @@ pub struct RunProvenance {
     pub generation: u64,
 }
 
+/// Bounded, worker-authored fact available to workers delegated later in the
+/// same Work Run. Raw provider transcripts are never part of this record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffContextEntry {
+    pub task_id: TaskId,
+    pub generation: u64,
+    pub dispatch_run_id: OperationId,
+    pub outcome: InboxKind,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<String>,
+    pub recorded_at: DateTime<Utc>,
+}
+
 /// Durable cause of an accepted supervisor event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -408,6 +431,11 @@ pub enum SupervisorEventKind {
         task_id: TaskId,
         generation: u64,
         state: TaskState,
+    },
+    /// Records one exact terminal dispatch for later worker handoff. The entry
+    /// is bounded and contains no provider transcript.
+    RecordHandoff {
+        entry: HandoffContextEntry,
     },
     SetRunState {
         state: SupervisorRunState,
@@ -545,6 +573,10 @@ pub struct SupervisorRun {
     pub terminal_reason: Option<String>,
     pub tasks: BTreeMap<TaskId, TaskNode>,
     pub provenance: BTreeMap<TaskId, RunProvenance>,
+    /// Completion facts copied into future delegated prompts. This is internal
+    /// durable state and is intentionally omitted from redaction-safe queries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handoff_context: Vec<HandoffContextEntry>,
     /// Event IDs already reduced.  This is persisted so journal replay is
     /// idempotent after a crash between append and snapshot write.
     pub applied_events: BTreeSet<OperationId>,
@@ -614,6 +646,7 @@ impl SupervisorRun {
             terminal_reason: None,
             tasks: BTreeMap::new(),
             provenance: BTreeMap::new(),
+            handoff_context: Vec::new(),
             applied_events: BTreeSet::new(),
             compacted_event_tombstones: Vec::new(),
         }
@@ -839,6 +872,9 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
             generation,
             state,
         } => set_task(&mut next, task_id, *generation, *state)?,
+        SupervisorEventKind::RecordHandoff { entry } => {
+            record_handoff(&mut next, entry.clone(), event.observed_at)?;
+        }
         SupervisorEventKind::SetRunState {
             state,
             terminal_reason,
@@ -884,6 +920,63 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
     next.updated_at = event.observed_at;
     next.applied_events.insert(event.event_id);
     *run = next;
+    Ok(())
+}
+
+fn record_handoff(
+    run: &mut SupervisorRun,
+    entry: HandoffContextEntry,
+    observed_at: DateTime<Utc>,
+) -> Result<(), SupervisorError> {
+    let task = run
+        .tasks
+        .get(&entry.task_id)
+        .ok_or(SupervisorError::MissingTask)?;
+    let provenance = run
+        .provenance
+        .get(&entry.task_id)
+        .ok_or(SupervisorError::ProvenanceMismatch)?;
+    if task.generation != entry.generation
+        || task.assigned_dispatch_run != Some(entry.dispatch_run_id)
+        || provenance.generation != entry.generation
+        || provenance.dispatch_run_id != entry.dispatch_run_id
+        || entry.recorded_at != observed_at
+    {
+        return Err(SupervisorError::ProvenanceMismatch);
+    }
+    let outcome_matches_state = match entry.outcome {
+        InboxKind::Completed => {
+            task.state == TaskState::Succeeded || task.state == TaskState::Verifying
+        }
+        InboxKind::Failed | InboxKind::NoReport => task.state == TaskState::Failed,
+    };
+    if !outcome_matches_state
+        || entry.summary.trim().is_empty()
+        || entry.summary.len() > MAX_HANDOFF_SUMMARY_BYTES
+        || !presentation_text_is_safe(&entry.summary)
+        || entry.artifacts.as_ref().is_some_and(|artifacts| {
+            artifacts.trim().is_empty()
+                || artifacts.len() > MAX_HANDOFF_ARTIFACT_BYTES
+                || !presentation_text_is_safe(artifacts)
+        })
+    {
+        return Err(SupervisorError::InvalidTransition);
+    }
+    if let Some(existing) = run
+        .handoff_context
+        .iter()
+        .find(|existing| existing.dispatch_run_id == entry.dispatch_run_id)
+    {
+        return if existing == &entry {
+            Ok(())
+        } else {
+            Err(SupervisorError::ProvenanceMismatch)
+        };
+    }
+    if run.handoff_context.len() == MAX_HANDOFF_CONTEXT_ENTRIES {
+        run.handoff_context.remove(0);
+    }
+    run.handoff_context.push(entry);
     Ok(())
 }
 
@@ -1486,6 +1579,198 @@ mod tests {
             source: SupervisorEventSource::Admission,
             kind,
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One reducer fixture keeps provenance, idempotence, bounds, and legacy decoding visibly related.
+    fn handoff_context_is_exact_bounded_and_backward_compatible() {
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        run.state = SupervisorRunState::Running;
+        let task_id = TaskId::new("child").unwrap();
+        let mut child = task(run.supervisor_run_id, "child", &[]);
+        child.state = TaskState::Succeeded;
+        child.assigned_dispatch_run = Some(OperationId::new());
+        run.tasks.insert(task_id.clone(), child);
+        let supervisor_run_id = run.supervisor_run_id;
+        let make_provenance = |dispatch_run_id| RunProvenance {
+            supervisor_run_id,
+            task_id: task_id.clone(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id,
+            worker_session_id: Some(SessionId::new()),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        let first_run = OperationId::new();
+        run.tasks.get_mut(&task_id).unwrap().assigned_dispatch_run = Some(first_run);
+        run.provenance
+            .insert(task_id.clone(), make_provenance(first_run));
+        let first = HandoffContextEntry {
+            task_id: task_id.clone(),
+            generation: 1,
+            dispatch_run_id: first_run,
+            outcome: InboxKind::Completed,
+            summary: "entry 0".into(),
+            artifacts: Some("PR https://example.test/1".into()),
+            recorded_at: now(),
+        };
+        let mut missing_task = first.clone();
+        missing_task.task_id = TaskId::new("missing").unwrap();
+        assert_eq!(
+            record_handoff(&mut run, missing_task, now()),
+            Err(SupervisorError::MissingTask)
+        );
+        let provenance = run.provenance.remove(&task_id).unwrap();
+        assert_eq!(
+            record_handoff(&mut run, first.clone(), now()),
+            Err(SupervisorError::ProvenanceMismatch)
+        );
+        run.provenance.insert(task_id.clone(), provenance);
+        let mut mismatched = first.clone();
+        mismatched.generation += 1;
+        assert_eq!(
+            record_handoff(&mut run, mismatched, now()),
+            Err(SupervisorError::ProvenanceMismatch)
+        );
+        reduce(
+            &mut run,
+            &event(
+                1,
+                SupervisorEventKind::RecordHandoff {
+                    entry: first.clone(),
+                },
+            ),
+        )
+        .unwrap();
+        record_handoff(&mut run, first.clone(), now()).unwrap();
+        assert_eq!(run.handoff_context.as_slice(), std::slice::from_ref(&first));
+        let mut conflicting = first;
+        conflicting.summary = "different".into();
+        assert_eq!(
+            record_handoff(&mut run, conflicting, now()),
+            Err(SupervisorError::ProvenanceMismatch)
+        );
+
+        let failed_run = OperationId::new();
+        run.tasks.get_mut(&task_id).unwrap().state = TaskState::Failed;
+        run.tasks.get_mut(&task_id).unwrap().assigned_dispatch_run = Some(failed_run);
+        run.provenance
+            .insert(task_id.clone(), make_provenance(failed_run));
+        record_handoff(
+            &mut run,
+            HandoffContextEntry {
+                task_id: task_id.clone(),
+                generation: 1,
+                dispatch_run_id: failed_run,
+                outcome: InboxKind::Failed,
+                summary: "worker failed safely".into(),
+                artifacts: None,
+                recorded_at: now(),
+            },
+            now(),
+        )
+        .unwrap();
+
+        let no_report_run = OperationId::new();
+        run.tasks.get_mut(&task_id).unwrap().assigned_dispatch_run = Some(no_report_run);
+        run.provenance
+            .insert(task_id.clone(), make_provenance(no_report_run));
+        record_handoff(
+            &mut run,
+            HandoffContextEntry {
+                task_id: task_id.clone(),
+                generation: 1,
+                dispatch_run_id: no_report_run,
+                outcome: InboxKind::NoReport,
+                summary: "worker exited without a report".into(),
+                artifacts: None,
+                recorded_at: now(),
+            },
+            now(),
+        )
+        .unwrap();
+
+        let verifying_run = OperationId::new();
+        run.tasks.get_mut(&task_id).unwrap().state = TaskState::Verifying;
+        run.tasks.get_mut(&task_id).unwrap().assigned_dispatch_run = Some(verifying_run);
+        run.provenance
+            .insert(task_id.clone(), make_provenance(verifying_run));
+        record_handoff(
+            &mut run,
+            HandoffContextEntry {
+                task_id: task_id.clone(),
+                generation: 1,
+                dispatch_run_id: verifying_run,
+                outcome: InboxKind::Completed,
+                summary: "artifact verification pending".into(),
+                artifacts: None,
+                recorded_at: now(),
+            },
+            now(),
+        )
+        .unwrap();
+        run.tasks.get_mut(&task_id).unwrap().state = TaskState::Succeeded;
+
+        for index in 1..=MAX_HANDOFF_CONTEXT_ENTRIES {
+            let dispatch_run_id = OperationId::new();
+            run.tasks.get_mut(&task_id).unwrap().assigned_dispatch_run = Some(dispatch_run_id);
+            run.provenance
+                .insert(task_id.clone(), make_provenance(dispatch_run_id));
+            record_handoff(
+                &mut run,
+                HandoffContextEntry {
+                    task_id: task_id.clone(),
+                    generation: 1,
+                    dispatch_run_id,
+                    outcome: InboxKind::Completed,
+                    summary: format!("entry {index}"),
+                    artifacts: None,
+                    recorded_at: now(),
+                },
+                now(),
+            )
+            .unwrap();
+        }
+        assert_eq!(run.handoff_context.len(), MAX_HANDOFF_CONTEXT_ENTRIES);
+        assert_eq!(run.handoff_context[0].summary, "entry 1");
+
+        let unsafe_run = OperationId::new();
+        run.tasks.get_mut(&task_id).unwrap().assigned_dispatch_run = Some(unsafe_run);
+        run.provenance
+            .insert(task_id.clone(), make_provenance(unsafe_run));
+        assert_eq!(
+            record_handoff(
+                &mut run,
+                HandoffContextEntry {
+                    task_id,
+                    generation: 1,
+                    dispatch_run_id: unsafe_run,
+                    outcome: InboxKind::Completed,
+                    summary: "unsafe\nsummary".into(),
+                    artifacts: None,
+                    recorded_at: now(),
+                },
+                now(),
+            ),
+            Err(SupervisorError::InvalidTransition)
+        );
+
+        let mut legacy = serde_json::to_value(&run).unwrap();
+        legacy.as_object_mut().unwrap().remove("handoff_context");
+        assert!(
+            serde_json::from_value::<SupervisorRun>(legacy)
+                .unwrap()
+                .handoff_context
+                .is_empty()
+        );
     }
 
     #[test]
