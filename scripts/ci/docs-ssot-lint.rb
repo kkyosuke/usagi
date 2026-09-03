@@ -173,6 +173,45 @@ if work_run_client.include?("SupervisorSnapshot") && work_run_client.include?("S
   end
 end
 
+team_settings = read.call("crates/core/src/domain/settings/mod.rs")
+role_catalog = read.call("crates/core/src/infrastructure/role_catalog.rs")
+role_spec = read.call("document/10-session-roles.md")
+orchestration_guide = read.call("crates/cli/src/mcp/guides/orchestration.md")
+team_enum = team_settings[/pub enum TeamTemplate \{(.*?)^\}/m, 1].to_s
+team_variants = team_enum.scan(/^\s{4}([A-Z][A-Za-z0-9]*),$/).flatten
+failures << "could not extract TeamTemplate variants from settings source" if team_variants.empty?
+team_variants.each do |variant|
+  token = variant.gsub(/([a-z0-9])([A-Z])/, '\\1_\\2').downcase
+  unless role_spec.include?("| #{token} | `#{token}` |")
+    failures << "document/10-session-roles.md is missing implemented Team template #{token}"
+  end
+  unless root_readme.match?(/\| \[?Team.*`#{Regexp.escape(token)}`/)
+    failures << "README.md is missing implemented Team template #{token}"
+  end
+  next if token == "none"
+
+  catalog_body = role_catalog[/fn #{Regexp.escape(token)}_catalog\(\).*?^\}/m].to_s
+  built_in_roles = catalog_body.scan(/built_in_role\(\s*"([^"]+)".*?&\[(.*?)\],\s*(\d+),\s*\)/m)
+  row = role_spec.lines.find { |line| line.start_with?("| #{token} |") }.to_s
+  roles_and_depth_match = !built_in_roles.empty? && built_in_roles.all? do |role, _children, depth|
+    row.downcase.include?(role) && row.match?(/\| #{Regexp.escape(depth)} \|\s*$/)
+  end
+  unless roles_and_depth_match
+    failures << "document/10-session-roles.md does not reflect built-in #{token} roles and depth"
+  end
+end
+
+built_in_concurrency = role_catalog[/max_concurrency:\s*(\d+),/, 1]
+if built_in_concurrency && !role_spec.include?("`max_concurrency` は #{built_in_concurrency}")
+  failures << "document/10-session-roles.md does not reflect built-in Team concurrency"
+end
+
+if role_catalog.include?("fn hierarchical_catalog()")
+  unless orchestration_guide.include?("Director → Manager → Worker")
+    failures << "orchestration guide does not use the hierarchical Team role vocabulary"
+  end
+end
+
 rust_sources = [
   *Dir.glob(File.join(root, "src/**/*.rs")),
   *Dir.glob(File.join(root, "crates/**/*.rs"))
