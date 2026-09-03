@@ -4417,7 +4417,6 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
 /// no vocabulary for, so they return `None`.
 fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
     match action {
-        LiveTerminalAction::CommandHelp => Some(AppKey::Char('?')),
         LiveTerminalAction::Switch => Some(AppKey::CtrlO),
         LiveTerminalAction::OpenCloseupModal => Some(AppKey::OpenCloseupOverlay),
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
@@ -4434,7 +4433,8 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::RootTerminalFullHeight => Some(AppKey::ToggleRootTerminalFullHeight),
         LiveTerminalAction::NewRootTerminal => Some(AppKey::OpenRootTerminal),
         LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
-        LiveTerminalAction::OpenWorkspace
+        LiveTerminalAction::KeyboardHelp
+        | LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
         | LiveTerminalAction::ActivateWorkspace(_)
         | LiveTerminalAction::WorkRuns
@@ -6532,7 +6532,6 @@ fn home_frame_material_shared(
         .with_overlay_modals(
             runtime.overview_modal().cloned(),
             runtime.closeup_modal().cloned(),
-            runtime.command_help_modal().cloned(),
         )
         // Last, once every surface that reads the animation clock is known.
         .collapse_animation_clock();
@@ -7599,7 +7598,6 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
     }
     if let Some(overlay) = state.overlay {
         return match overlay {
-            Overlay::CommandHelp => KeyHelpContext::CommandList,
             Overlay::Overview => KeyHelpContext::Overview,
             Overlay::Daemon => KeyHelpContext::Daemon,
             Overlay::Closeup => KeyHelpContext::CloseupActions,
@@ -7643,7 +7641,7 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
 
 /// Resolve the frontmost visible surface before Help opens. The resulting
 /// value is held for the lifetime of that Help overlay, so background daemon
-/// updates cannot make the command list jump while it is being read.
+/// updates cannot make the shortcut list jump while it is being read.
 fn workspace_help_context(
     deck: &WorkspaceDeck,
     runtime: &WorkspaceRuntime,
@@ -7659,10 +7657,42 @@ fn workspace_help_context(
             .is_some(),
         work_run_mode: work_run_control.mode(),
         director_new_open: state.director_launching().is_some()
-            || !matches!(state.director_new(), DirectorNew::Idle),
+            || state.director_new() != DirectorNew::Idle,
         drawer_focus: state.workspace_drawer_focus(),
         base: WorkspaceBaseHelp::new(state.route(), runtime.wants_live_input()),
     })
+}
+
+/// Whether one workspace key opens the contextual keyboard-help overlay.
+///
+/// `Ctrl-?` remains global. Plain `?` is the discoverable shortcut on an
+/// unobscured management Home, while a focused live terminal preserves plain
+/// `?` for the PTY and uses the `Ctrl-O ?` action instead.
+fn opens_workspace_help(
+    key: &Key,
+    deck: &WorkspaceDeck,
+    runtime: &WorkspaceRuntime,
+    work_run_control: &WorkRunControl,
+) -> bool {
+    match key {
+        Key::Help | Key::Live(LiveTerminalAction::KeyboardHelp) => true,
+        Key::Char('?') => {
+            !deck.overlay_open()
+                && runtime.state().overlay().is_none()
+                && runtime.state().workspace_drawer_focus().is_none()
+                && work_run_control.mode() == WorkRunControlMode::Closed
+                && !runtime.wants_live_input()
+        }
+        _ => false,
+    }
+}
+
+fn closes_workspace_help(key: &Key, context: KeyHelpContext) -> bool {
+    matches!(
+        key,
+        Key::Help | Key::Escape | Key::Live(LiveTerminalAction::KeyboardHelp)
+    ) || matches!(key, Key::Char('?'))
+        && (context == KeyHelpContext::Switch || context == KeyHelpContext::Closeup)
 }
 
 /// Maximum number of completions one Home frame may apply from each queue.
@@ -8356,8 +8386,8 @@ fn drive_workspace_controller(
         // Contextual New is retargeted once here so PTY forwarding, pane
         // controls, and the reducer all see one normalized key.
         let raw_key = retarget_drawer_chords(&runtime, term.read_key()?);
-        if help_context.is_some() {
-            if matches!(raw_key, Key::Help | Key::Escape) {
+        if let Some(context) = help_context {
+            if closes_workspace_help(&raw_key, context) {
                 help_context = None;
                 drawn_material = None;
                 frame_source_key = None;
@@ -8368,7 +8398,7 @@ fn drive_workspace_controller(
             // being described.
             continue;
         }
-        if raw_key == Key::Help {
+        if opens_workspace_help(&raw_key, deck, &runtime, &work_run_control) {
             help_context = Some(workspace_help_context(deck, &runtime, &work_run_control));
             drawn_material = None;
             frame_source_key = None;
@@ -10727,8 +10757,8 @@ mod tests {
     #[test]
     fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
         assert_eq!(
-            app_event_from_key(Key::Live(LiveTerminalAction::CommandHelp)),
-            Some(AppEvent::Key(AppKey::Char('?')))
+            app_event_from_key(Key::Live(LiveTerminalAction::KeyboardHelp)),
+            None
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::Switch)),
@@ -29447,7 +29477,6 @@ mod tests {
         );
 
         for (overlay, expected) in [
-            (Overlay::CommandHelp, HelpContext::CommandList),
             (Overlay::Overview, HelpContext::Overview),
             (Overlay::Daemon, HelpContext::Daemon),
             (Overlay::Closeup, HelpContext::CloseupActions),
@@ -29551,12 +29580,23 @@ mod tests {
 
     #[test]
     fn workspace_help_describes_switch_and_swallows_background_commands() {
+        use super::{KeyHelpContext, closes_workspace_help};
+
+        assert!(closes_workspace_help(
+            &Key::Char('?'),
+            KeyHelpContext::Closeup
+        ));
+        assert!(!closes_workspace_help(
+            &Key::Char('?'),
+            KeyHelpContext::LiveTerminal
+        ));
+
         let mut term = FakeTerminal::with_keys(&[
             Key::Char('1'),
-            Key::Help,
+            Key::Char('?'),
             // Ctrl-X would remove the selected session outside Help.
             Key::CtrlX,
-            Key::Escape,
+            Key::Char('?'),
             Key::CtrlQ,
             Key::Char('y'),
         ]);
@@ -29577,6 +29617,7 @@ mod tests {
             .expect("workspace Help frame");
         assert!(help.contains("Ctrl-X"));
         assert!(help.contains("safe-remove session"));
+        assert!(!help.contains("Available"));
         assert!(
             term.frames
                 .iter()

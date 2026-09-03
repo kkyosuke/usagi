@@ -2766,6 +2766,12 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
     let baseline = capture_len(&captured);
     let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, baseline);
+    // Plain `?` is the discoverable shortcut on Switch, and the same key
+    // dismisses Help without leaking through to the workspace underneath it.
+    send(&mut master, b"?");
+    wait_for_screen_since(&captured, baseline, "Keyboard help · Workspace switch");
+    send(&mut master, b"?");
+    wait_for_screen_absent_since(&captured, baseline, "Keyboard help · Workspace switch");
     let intent = wait_for_agent_tabs(home.path(), 1);
     assert!(intent.dismissed.is_empty());
     send(&mut master, b"\r");
@@ -2778,14 +2784,13 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
     send(&mut master, b"before-agent-close\r");
     wait_for_screen_since(&captured, baseline, "claude-input:before-agent-close");
 
-    // Traditional terminals encode Ctrl-/ (the portable Ctrl-? alias) as the
-    // raw US byte. Help must open over a live Agent and exclusively own input;
-    // the text typed behind it never reaches the daemon PTY.
-    send(&mut master, b"\x1f");
+    // The documented Ctrl-O ? chord opens keyboard shortcuts over a live Agent
+    // and exclusively owns input; text typed behind it never reaches the PTY.
+    send(&mut master, b"\x0f?");
     wait_for_screen_since(&captured, baseline, "Keyboard help · Live terminal");
     wait_for_screen_since(&captured, baseline, "Ctrl-O [ / ]");
     send(&mut master, b"help-leak");
-    send(&mut master, b"\x1b");
+    send(&mut master, b"\x0f?");
     wait_for_screen_absent_since(&captured, baseline, "Keyboard help · Live terminal");
     send(&mut master, b"after-help\r");
     wait_for_screen_since(&captured, baseline, "claude-input:after-help");

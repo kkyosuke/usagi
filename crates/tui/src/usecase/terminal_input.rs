@@ -177,8 +177,8 @@ pub enum RuntimeEvent<B> {
 /// A TUI-local action reserved from the live terminal stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveTerminalAction {
-    /// Open the context-aware command list (`Ctrl-O ?`).
-    CommandHelp,
+    /// Open contextual keyboard help (`Ctrl-O ?`).
+    KeyboardHelp,
     /// Open the process-level workspace add overlay (`Ctrl-O +`).
     OpenWorkspace,
     /// Open the process-level project/session fuzzy finder (`Ctrl-O 0`).
@@ -493,7 +493,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
                     ..Modifiers::default()
                 })
     {
-        return Some(LiveTerminalAction::CommandHelp);
+        return Some(LiveTerminalAction::KeyboardHelp);
     }
     if let KeyCode::Char(character @ ('{' | '}')) = key.code
         && (key.modifiers == Modifiers::default()
@@ -1201,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn command_help_is_reserved_only_after_the_leader() {
+    fn keyboard_help_is_reserved_only_after_the_leader() {
         for modifiers in [
             Modifiers::default(),
             Modifiers {
@@ -1228,7 +1228,7 @@ mod tests {
             );
             assert_eq!(
                 classifier.classify(Duration::from_millis(1), question()),
-                LiveInputOutput::Action(LiveTerminalAction::CommandHelp)
+                LiveInputOutput::Action(LiveTerminalAction::KeyboardHelp)
             );
         }
     }
