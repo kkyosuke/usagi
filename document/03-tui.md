@@ -883,7 +883,7 @@ inline の `+ new session` フォームは、名前が既存の worktree と衝�
 
 | 面 | material |
 |---|---|
-| Home | 端末サイズ、`HomeProjection`（reducer state・session 行・metrics・git 差分・live terminal 出力・pane tab・overlay modal・create pending）、quit 確認、create 失敗 dialog、秒単位に丸めた現在時刻 |
+| Home | 端末サイズ、`HomeProjection`（reducer state・session 行・metrics・git 差分・live terminal 出力・pane tab・overlay modal・create pending）、quit 確認、create / terminal 起動失敗 dialog、秒単位に丸めた現在時刻 |
 | Welcome / Open / New / Config | 端末サイズと、その画面のフォーム |
 
 **時刻も material である**。sidebar の session 行が出す相対時刻（`now` / `3m ago`）は実時計に依存するので、時計を
@@ -1603,7 +1603,10 @@ session 作成と同じ interaction gate であり、受付時の interaction co
 （読んでいる画面から focus を奪わない）。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
-pending tab を安全な feedback に置き換える。`Ctrl-O [` / `Ctrl-O ]` は tab を巡回し、`Ctrl-O {` / `Ctrl-O }` は
+pending tab を取り除き、daemon が返した安全な理由を `Terminal failed to open` modal に表示する。
+modal は `Enter` / `Esc` / `Ctrl-C` で閉じ、同じ理由を空 pane の feedback にも保持する。
+別の modal がすでに入力を所有している場合はそれを奪わず、Home notice に理由を保持する。
+`Ctrl-O [` / `Ctrl-O ]` は tab を巡回し、`Ctrl-O {` / `Ctrl-O }` は
 選択 tab を前後へ並べ替える。`Ctrl-O x` / `Ctrl-O Ctrl-X` は generic Terminal / document / interrupted Agent tab と、
 daemon へ未送信の client-owned pending launch を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を
 閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は foreground command を

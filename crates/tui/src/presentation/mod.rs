@@ -6364,6 +6364,8 @@ struct HomeFrameMaterial {
     /// overlay is open. Keying off the message avoids an unreachable "error
     /// overlay without a message" branch.
     create_error: Option<String>,
+    /// The terminal-launch failure dialog's safe message.
+    terminal_launch_error: Option<String>,
     /// Failed-delete session label and focused Yes/No answer.
     force_remove_confirmation: Option<(String, bool)>,
     environment_editor: Option<crate::usecase::application::controller::EnvironmentEditor>,
@@ -6546,6 +6548,10 @@ fn home_frame_material_shared(
             .state()
             .create_session_error()
             .map(|error| error.message.clone()),
+        terminal_launch_error: runtime
+            .state()
+            .terminal_launch_error()
+            .map(|error| error.message.clone()),
         force_remove_confirmation,
         environment_editor: runtime.state().environment_editor().cloned(),
         role_editor: runtime.state().role_editor().cloned(),
@@ -6580,6 +6586,15 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
             material.height,
             material.width,
             &frame,
+            message,
+        );
+    }
+    if let Some(message) = &material.terminal_launch_error {
+        return create_session_error_modal::render_titled_over(
+            material.height,
+            material.width,
+            &frame,
+            "Terminal failed to open",
             message,
         );
     }
@@ -6841,6 +6856,18 @@ fn drain_controller_host_actions(
                             arguments: request.arguments,
                         },
                     );
+                } else {
+                    runtime.on_effect(&Effect::OpenTerminal {
+                        target: request.target,
+                        operation_id: request.operation_id,
+                        arguments: request.arguments,
+                    });
+                    fail_terminal_launch(
+                        runtime,
+                        request.target,
+                        request.operation_id,
+                        "terminal launch is unavailable".to_owned(),
+                    );
                 }
             }
             ControllerHostAction::OpenExternalTerminal(target) => {
@@ -6857,14 +6884,13 @@ fn drain_controller_host_actions(
                 match path {
                     Some(path) => {
                         if let Err(error) = ui.external_terminal.open(&path) {
-                            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
-                                Notice::new(error),
-                            )));
+                            let _ = runtime
+                                .apply_event(AppEvent::TerminalLaunchFailed(Notice::new(error)));
                         }
                     }
                     None => {
-                        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
-                            Notice::new("selected session is no longer available"),
+                        let _ = runtime.apply_event(AppEvent::TerminalLaunchFailed(Notice::new(
+                            "selected session is no longer available",
                         )));
                     }
                 }
@@ -7001,26 +7027,47 @@ fn drain_pane_completions_into_runtime(
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
                 };
-                match result {
-                    Ok(terminal) => {
-                        if ui.generic_terminal_is_closing(&terminal) {
-                            let _ = runtime.fail_pane(
-                                target,
-                                operation,
-                                "terminal is still closing; try again".to_owned(),
-                            );
-                            continue;
-                        }
-                        let _ = runtime
-                            .complete_pane_focus_if_uninterrupted(target, operation, terminal);
-                    }
-                    Err(message) => {
-                        let _ = runtime.fail_pane(target, operation, message);
-                    }
-                }
+                complete_terminal_launch(ui, runtime, target, operation, result);
             }
         }
     }
+}
+
+fn complete_terminal_launch(
+    ui: &WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    target: Target,
+    operation: OperationId,
+    result: Result<TerminalRef, String>,
+) {
+    match result {
+        Ok(terminal) => {
+            if ui.generic_terminal_is_closing(&terminal) {
+                fail_terminal_launch(
+                    runtime,
+                    target,
+                    operation,
+                    "terminal is still closing; try again".to_owned(),
+                );
+                return;
+            }
+            let _ = runtime.complete_pane_focus_if_uninterrupted(target, operation, terminal);
+        }
+        Err(message) => fail_terminal_launch(runtime, target, operation, message),
+    }
+}
+
+/// Finish a terminal placeholder and surface its display-safe reason in the
+/// frontmost error dialog. The pane keeps the same reason as fallback feedback,
+/// while the controller owns modal input and dismissal.
+fn fail_terminal_launch(
+    runtime: &mut WorkspaceRuntime,
+    target: Target,
+    operation: OperationId,
+    message: String,
+) {
+    let _ = runtime.fail_pane(target, operation, message.clone());
+    let _ = runtime.apply_event(AppEvent::TerminalLaunchFailed(Notice::new(message)));
 }
 
 /// Apply one explicit per-tab resume answer (#510).
@@ -7615,6 +7662,7 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
             Overlay::Prs => KeyHelpContext::PullRequests,
             Overlay::Preview => KeyHelpContext::Preview,
             Overlay::CreateSessionError => KeyHelpContext::CreateSessionError,
+            Overlay::TerminalLaunchError => KeyHelpContext::TerminalLaunchError,
             Overlay::Garden => KeyHelpContext::Garden,
         };
     }
@@ -12656,6 +12704,14 @@ mod tests {
             1,
             Geometry { cols: 20, rows: 5 },
         );
+        assert_eq!(
+            runtime
+                .state()
+                .terminal_launch_error()
+                .map(|notice| notice.message.as_str()),
+            Some("terminal launch is unavailable")
+        );
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
 
         ui.pane_completion_sender
             .send(super::PaneLaunchCompletion {
@@ -12724,6 +12780,41 @@ mod tests {
             &mut pending,
             Geometry { cols: 20, rows: 5 },
         );
+
+        let failed_terminal = OperationId::new();
+        runtime.on_effect(&Effect::OpenTerminal {
+            target,
+            operation_id: failed_terminal,
+            arguments: "open".into(),
+        });
+        pending.insert(failed_terminal, target);
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Terminal {
+                    operation: failed_terminal,
+                    result: Err("login shell could not be started".to_owned()),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            Geometry { cols: 20, rows: 5 },
+        );
+        assert_eq!(
+            runtime.state().overlay(),
+            Some(Overlay::TerminalLaunchError)
+        );
+        assert_eq!(
+            runtime
+                .state()
+                .terminal_launch_error()
+                .map(|notice| notice.message.as_str()),
+            Some("login shell could not be started")
+        );
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
 
         let cancel = OperationId::new();
         runtime.on_effect(&Effect::OpenTerminal {
@@ -14448,6 +14539,35 @@ mod tests {
         let failure = frame(&failing, &[]);
         assert!(failure.join("\n").contains("Session create failed"));
         assert!(failure.join("\n").contains("worktree path already exists"));
+    }
+
+    #[test]
+    fn render_controller_frame_composites_terminal_launch_failure() {
+        use crate::presentation::workspace_runtime::WorkspaceRuntime;
+        use crate::usecase::application::controller::{AppEvent, Notice};
+
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.apply_event(AppEvent::TerminalLaunchFailed(Notice::new(
+            "login shell could not be started",
+        )));
+
+        let failure = render_controller_frame(
+            20,
+            80,
+            &runtime,
+            "atlas",
+            std::path::Path::new("/work"),
+            &[],
+            None,
+            health(),
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+        )
+        .join("\n");
+        assert!(failure.contains("Terminal failed to open"));
+        assert!(failure.contains("login shell could not be started"));
     }
 
     #[test]
@@ -29465,6 +29585,10 @@ mod tests {
             (Overlay::Prs, HelpContext::PullRequests),
             (Overlay::Preview, HelpContext::Preview),
             (Overlay::CreateSessionError, HelpContext::CreateSessionError),
+            (
+                Overlay::TerminalLaunchError,
+                HelpContext::TerminalLaunchError,
+            ),
             (Overlay::Garden, HelpContext::Garden),
         ] {
             assert_eq!(

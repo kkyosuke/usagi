@@ -2493,7 +2493,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 action: TerminalAction::Launch,
                 payload,
             })
-            .map_err(|_| "daemon request failed; reconnect to continue".to_owned())?
+            .map_err(daemon_error_reason)?
         {
             DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body
                 .get("terminal")

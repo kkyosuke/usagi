@@ -23,6 +23,22 @@ const INNER_WIDTH: usize = 54;
 /// many rows as it needs, and the box grows to fit instead of clipping.
 #[must_use]
 pub fn render_over(height: usize, width: usize, base: &[String], message: &str) -> Vec<String> {
+    render_titled_over(height, width, base, "Session create failed", message)
+}
+
+/// Render the shared safe-error dialog with a caller-owned title.
+///
+/// Terminal launch failures use the same wrapping, padding, and dismissal
+/// contract as session-create failures, while keeping an operation-specific
+/// title.
+#[must_use]
+pub fn render_titled_over(
+    height: usize,
+    width: usize,
+    base: &[String],
+    title: &str,
+    message: &str,
+) -> Vec<String> {
     // Wrap against the width the modal will actually use, so even a narrow
     // terminal shows the whole safe message rather than a clipped first line.
     let (_, normalized_width) = widgets::normalize_size(height, width);
@@ -48,14 +64,7 @@ pub fn render_over(height: usize, width: usize, base: &[String], message: &str) 
     body.push(String::new());
     body.push(Style::new().dim().paint("  Enter / Esc: dismiss"));
 
-    modal::render_over(
-        height,
-        width,
-        base,
-        "Session create failed",
-        INNER_WIDTH,
-        &body,
-    )
+    modal::render_over(height, width, base, title, INNER_WIDTH, &body)
 }
 
 #[cfg(test)]
