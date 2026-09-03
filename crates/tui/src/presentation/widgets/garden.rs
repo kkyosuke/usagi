@@ -21,19 +21,22 @@ pub const MIN_WIDTH: usize = 64;
 pub const MIN_HEIGHT: usize = 13;
 
 const SIDE_PADDING: usize = 2;
-const HEADER_ROWS: usize = 3;
+const HEADER_ROWS: usize = 2;
 const FOOTER_ROWS: usize = 2;
 const PLOT_WIDTH: usize = 28;
 const AGENT_PANEL_MIN_WIDTH: usize = 24;
 const AGENT_PANEL_MAX_WIDTH: usize = 36;
 const AGENT_PANEL_SEPARATOR_WIDTH: usize = 2;
-const GROUND_ROWS: usize = 2;
-const PLOT_HEIGHT: usize = 8;
-/// plot のうち、うさぎと label が占める行数（残り 2 行が草地と土）。
+const GROUND_ROWS: usize = 1;
+const PLOT_HEIGHT: usize = 9;
+/// plot のうち、うさぎと label が占める行数（残り 1 行が草地と土）。
 const PLOT_CONTENT_ROWS: usize = PLOT_HEIGHT - GROUND_ROWS;
 /// うさぎ 1 羽分の pose 行数（plot の label / status / 地面を除く）。
-const SPRITE_ROWS: usize = 4;
-const COMPACT_RABBIT_WIDTH: usize = 8;
+pub(super) const RABBIT_SPRITE_HEIGHT: usize = 6;
+pub(super) const RABBIT_SPRITE_WIDTH: usize = 12;
+pub(super) type RabbitSprite = [&'static str; RABBIT_SPRITE_HEIGHT];
+const SPRITE_ROWS: usize = RABBIT_SPRITE_HEIGHT;
+const COMPACT_RABBIT_WIDTH: usize = RABBIT_SPRITE_WIDTH;
 /// plot の中で sprite が始まる行（nameplate と status 行の下）。うさぎの hitbox は
 /// この行から [`SPRITE_ROWS`] 行ぶんで、nameplate と status 行は区画のままにする。
 const SPRITE_TOP_ROW: usize = PLOT_CONTENT_ROWS - SPRITE_ROWS;
@@ -50,6 +53,121 @@ pub(crate) const ANIMATION_CYCLE_TICKS: u64 = 300;
 const AMBIENT_PHASE_TICKS: u64 = 2;
 const AMBIENT_PHASES: u64 = 6;
 const TWINKLE: [char; 6] = ['.', '*', '+', '*', '.', '·'];
+
+pub(super) const RABBIT_ACTIVE: RabbitSprite = [
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " (   o.o   )",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")",
+];
+pub(super) const RABBIT_WORKING: RabbitSprite = [
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " (   o.o   )",
+    " /   > <   \\",
+    " \\   /\\   /",
+    "  \\_/  \\_/",
+];
+pub(super) const RABBIT_READY: RabbitSprite = [
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " (   . .   )",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")v",
+];
+pub(super) const RABBIT_IDLE: RabbitSprite = [
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " (   . .   )",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")",
+];
+pub(super) const RABBIT_BLINKING: RabbitSprite = [
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " (   -.-   )",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")v",
+];
+pub(super) const RABBIT_WAITING: RabbitSprite = [
+    "?  /\\  /\\",
+    "  /  \\/  \\",
+    " (   o.o  )?",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")",
+];
+pub(super) const RABBIT_WAITING_EARS: RabbitSprite = [
+    "?  /\\  /\\",
+    "  /  /\\  \\",
+    " (   o.o  )?",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")",
+];
+pub(super) const RABBIT_INTERRUPTED: RabbitSprite = [
+    "!  /\\  /\\",
+    "  /  \\/  \\",
+    " (   -.-  )!",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")",
+];
+pub(super) const RABBIT_SLEEPING: RabbitSprite = [
+    "zZ /\\  /\\",
+    "  /  \\/  \\",
+    " (   -.-   )",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")",
+];
+pub(super) const RABBIT_DONE: RabbitSprite = [
+    " z /\\  /\\",
+    "  /  \\/  \\",
+    " (   -.-   )",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")",
+];
+pub(super) const RABBIT_FAILED: RabbitSprite = [
+    "!  /\\  /\\",
+    "  /  \\/  \\",
+    " (   x.x   )",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")/",
+];
+pub(super) const RABBIT_BURIED: RabbitSprite =
+    ["", "", "", "   /\\  /\\", "_(  _ _  )_", "___/______\\_"];
+pub(super) const RABBIT_EMERGING: RabbitSprite = [
+    "",
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " _(  . .  )_",
+    "__/    ^   \\_",
+    "___/______\\_",
+];
+pub(super) const RABBIT_CELEBRATING: RabbitSprite = [
+    " *  \\ /  *",
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " \\(  ^.^  )/",
+    "   /  ^  \\",
+    "  c(\")_(\")",
+];
+pub(super) const RABBIT_CELEBRATING_ALT: RabbitSprite = [
+    "* . \\ / . *",
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " \\(  ^o^  )/",
+    "   /  ^  \\",
+    "  c(\")_(\")",
+];
 
 /// Running のうさぎが繰り返す基本動作。各動作の長さを変え、runtime identity から
 /// 並び順を shuffle することで、同じ phase のうさぎも一斉に同じ動きをしない。
@@ -397,7 +515,6 @@ fn render_compact_scrolled(
     let mut rows = Vec::with_capacity(height);
     rows.push(header_line(width, workspace_name, sessions));
     rows.push(sky_line(width, workspace_name, tick, reduced_motion));
-    rows.push(" ".repeat(width));
 
     // 使う plot 行数だけを縦中央へ寄せ、庭の下側だけが大きく空くのを避ける。
     rows.resize_with(grid_top, || " ".repeat(layout.garden_width));
@@ -937,28 +1054,29 @@ fn footer_line(width: usize, scrollable: bool) -> String {
 
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     let label = signpost(&session.label);
-    let ([mut status, ears, head, body, feet], rabbits) = if session.agents_observed {
-        match session.lifecycle {
-            SessionLifecycle::Available if session.pr_merged => {
-                available_plot(session, tick, reduced_motion)
-            }
-            SessionLifecycle::Available => match session.agent_status {
-                Some(
-                    status @ (DispatchAgentStatus::Starting
-                    | DispatchAgentStatus::Idle
-                    | DispatchAgentStatus::Exited
-                    | DispatchAgentStatus::Failed),
-                ) => (dispatch_plot(session, status), Vec::new()),
-                Some(DispatchAgentStatus::Running) | None => {
+    let ([mut status, ears_top, ears, face, chest, body, feet], rabbits) =
+        if session.agents_observed {
+            match session.lifecycle {
+                SessionLifecycle::Available if session.pr_merged => {
                     available_plot(session, tick, reduced_motion)
                 }
-            },
-            // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
-            _ => (lifecycle_plot(session, tick, reduced_motion), Vec::new()),
-        }
-    } else {
-        (inactive_plot(session), Vec::new())
-    };
+                SessionLifecycle::Available => match session.agent_status {
+                    Some(
+                        status @ (DispatchAgentStatus::Starting
+                        | DispatchAgentStatus::Idle
+                        | DispatchAgentStatus::Exited
+                        | DispatchAgentStatus::Failed),
+                    ) => (dispatch_plot(session, status), Vec::new()),
+                    Some(DispatchAgentStatus::Running) | None => {
+                        available_plot(session, tick, reduced_motion)
+                    }
+                },
+                // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
+                _ => (lifecycle_plot(session, tick, reduced_motion), Vec::new()),
+            }
+        } else {
+            (inactive_plot(session), Vec::new())
+        };
     if session.pending_decisions > 0 {
         let noun = if session.pending_decisions == 1 {
             "decision"
@@ -974,7 +1092,7 @@ fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
         );
     }
     Plot {
-        rows: [label, status, ears, head, body, feet],
+        rows: [label, status, ears_top, ears, face, chest, body, feet],
         rabbits,
     }
 }
@@ -988,31 +1106,25 @@ fn dispatch_plot(
 ) -> [String; PLOT_CONTENT_ROWS - 1] {
     let feature = rabbit_style(&session.id.as_str()).bold();
     let (label, status_style, rabbit_style, rabbit) = match status {
-        DispatchAgentStatus::Starting => (
-            "",
-            Style::new(),
-            feature,
-            ["", " /)/)", "( . .)", "c(\")(\")v"],
-        ),
-        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => (
-            "",
-            Style::new().dim(),
-            feature.dim(),
-            [" z", " /)/)", "( -.-)", "c(\")(\")"],
-        ),
+        DispatchAgentStatus::Starting => ("", Style::new(), feature, RABBIT_READY),
+        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => {
+            ("", Style::new().dim(), feature.dim(), RABBIT_SLEEPING)
+        }
         DispatchAgentStatus::Failed => (
             "failed",
             Role::Danger.style().bold(),
             Role::Danger.style(),
-            ["", " /)/)", "( x.x)", "c(\")(\")/"],
+            RABBIT_FAILED,
         ),
         DispatchAgentStatus::Running => unreachable!("running uses per-runtime phase"),
     };
-    let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
+    let [ears_top, ears, face, chest, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
     [
         centered(PLOT_WIDTH, &status_style.paint(label)),
+        ears_top,
         ears,
-        head,
+        face,
+        chest,
         body,
         feet,
     ]
@@ -1047,6 +1159,8 @@ fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
         " ".repeat(PLOT_WIDTH),
         " ".repeat(PLOT_WIDTH),
         " ".repeat(PLOT_WIDTH),
+        " ".repeat(PLOT_WIDTH),
+        " ".repeat(PLOT_WIDTH),
     ]
 }
 
@@ -1059,7 +1173,7 @@ fn signpost(label: &str) -> String {
     centered(PLOT_WIDTH, &sign)
 }
 
-/// 庭の幅いっぱいに敷いた草地と土の 2 行。
+/// 庭の幅いっぱいに敷いた草地と土の 1 行。
 ///
 /// タイルを順に並べて `content_width` 桁ちょうどで切る。どちらも ASCII なので
 /// 1 文字 = 1 桁で、途中で切っても桁がずれない。
@@ -1089,7 +1203,18 @@ fn ground_rows(layout: GardenLayout, tick: u64, reduced_motion: bool) -> [String
         .flat_map(|tile| tile.chars())
         .take(layout.content_width)
         .collect::<String>();
-    [grass, soil].map(|layer| {
+    let ground = grass
+        .chars()
+        .zip(soil.chars())
+        .map(|(grass, soil)| {
+            if grass == '-' && soil == '.' {
+                '.'
+            } else {
+                grass
+            }
+        })
+        .collect::<String>();
+    [ground].map(|layer| {
         pad_to_width(
             &format!(
                 "{}{}",
@@ -1113,7 +1238,7 @@ const fn ambient_phase(tick: u64, reduced_motion: bool) -> u64 {
 ///
 /// 行ごとに中央寄せすると、行の表示桁数が違うぶんだけ耳と顔が横へずれる（例えば
 /// `Creating` の耳は頭より 2 桁右に出ていた）。うさぎが崩れないよう、pose 全体の
-/// 最大幅から左端を 1 度だけ決め、4 行に同じ padding を与える。
+/// 最大幅から左端を 1 度だけ決め、6 行に同じ padding を与える。
 fn sprite(
     rabbit: [&'static str; SPRITE_ROWS],
     style: Style,
@@ -1145,9 +1270,9 @@ fn lifecycle_plot(
     let (status, status_style, rabbit_style, rabbit) = match session.lifecycle {
         SessionLifecycle::Creating | SessionLifecycle::Initializing => {
             let rabbit = if phase < 3 {
-                ["", "", "  /)/)", "__(_ _)__"]
+                RABBIT_BURIED
             } else {
-                ["", "   /)/)", " _( . .)_", "__/   \\__"]
+                RABBIT_EMERGING
             };
             (String::new(), Role::Warning.style(), feature, rabbit)
         }
@@ -1159,12 +1284,7 @@ fn lifecycle_plot(
             } else {
                 Role::Feature.style()
             };
-            (
-                String::new(),
-                Style::new().dim(),
-                rabbit_style,
-                ["", " /)/)", "( . .)", "c(\")(\")"],
-            )
+            (String::new(), Style::new().dim(), rabbit_style, RABBIT_IDLE)
         }
         SessionLifecycle::Failed => {
             let status = session.failure_summary.as_deref().map_or_else(
@@ -1175,25 +1295,27 @@ fn lifecycle_plot(
                 status,
                 Role::Danger.style().bold(),
                 Role::Danger.style(),
-                ["", " /)/)", "( x.x)", "c(\")(\")/"],
+                RABBIT_FAILED,
             )
         }
         SessionLifecycle::Available => unreachable!("available sessions use agent projection"),
     };
-    let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
+    let [ears_top, ears, face, chest, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
     [
         centered(
             PLOT_WIDTH,
             &status_style.paint(&clip_to_width(&status, PLOT_WIDTH)),
         ),
+        ears_top,
         ears,
-        head,
+        face,
+        chest,
         body,
         feet,
     ]
 }
 
-/// `Available` な区画の status 行 + sprite 4 行と、その中のうさぎの横位置。
+/// `Available` な区画の status 行 + sprite 6 行と、その中のうさぎの横位置。
 fn available_plot(
     session: &GardenSession,
     tick: u64,
@@ -1201,11 +1323,12 @@ fn available_plot(
 ) -> ([String; PLOT_CONTENT_ROWS - 1], Vec<PlacedRabbit>) {
     if session.pr_merged {
         let rabbit = if reduced_motion || tick.is_multiple_of(2) {
-            ["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"]
+            RABBIT_CELEBRATING
         } else {
-            [" *  . *", "  /)/)", " \\(^o^)/", " c(\")(\")"]
+            RABBIT_CELEBRATING_ALT
         };
-        let [ears, head, body, feet] = sprite(rabbit, Role::Feature.style().bold(), PLOT_WIDTH);
+        let [ears_top, ears, face, chest, body, feet] =
+            sprite(rabbit, Role::Feature.style().bold(), PLOT_WIDTH);
         // celebration は session の祝いの姿で、特定の agent ではない。
         return (
             [
@@ -1213,8 +1336,10 @@ fn available_plot(
                     PLOT_WIDTH,
                     &Role::Success.style().bold().paint("PR merged! *"),
                 ),
+                ears_top,
                 ears,
-                head,
+                face,
+                chest,
                 body,
                 feet,
             ],
@@ -1223,16 +1348,7 @@ fn available_plot(
     }
     let agents = agent_status::ordered(&session.agents);
     if agents.is_empty() {
-        return (
-            [
-                centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
-                " ".repeat(PLOT_WIDTH),
-                " ".repeat(PLOT_WIDTH),
-                " ".repeat(PLOT_WIDTH),
-                " ".repeat(PLOT_WIDTH),
-            ],
-            Vec::new(),
-        );
+        return empty_available_plot();
     }
 
     if agents.len() == 1 {
@@ -1243,10 +1359,18 @@ fn available_plot(
             reduced_motion,
             &agent.runtime_id.as_str(),
         );
-        let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
+        let [ears_top, ears, face, chest, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
         // 1 羽だけの区画はうさぎを大きく描くので、その 1 体が sprite 行の全幅を持つ。
         return (
-            [" ".repeat(PLOT_WIDTH), ears, head, body, feet],
+            [
+                " ".repeat(PLOT_WIDTH),
+                ears_top,
+                ears,
+                face,
+                chest,
+                body,
+                feet,
+            ],
             vec![PlacedRabbit {
                 runtime_id: agent.runtime_id,
                 offset: 0,
@@ -1273,7 +1397,7 @@ fn available_plot(
             row.push_str(&part);
         }
     }
-    let [ears, head, body, feet] = rows.map(|row| centered(PLOT_WIDTH, &row));
+    let [ears_top, ears, face, chest, body, feet] = rows.map(|row| centered(PLOT_WIDTH, &row));
     // 各 compact sprite は必ず COMPACT_RABBIT_WIDTH 桁へ揃うので、`centered` が
     // 与える左端は羽数だけから決まる（同じ式で hitbox の offset を出せる）。
     let left = PLOT_WIDTH.saturating_sub(visible.len() * COMPACT_RABBIT_WIDTH) / 2;
@@ -1287,8 +1411,29 @@ fn available_plot(
         })
         .collect();
     (
-        [centered(PLOT_WIDTH, &status), ears, head, body, feet],
+        [
+            centered(PLOT_WIDTH, &status),
+            ears_top,
+            ears,
+            face,
+            chest,
+            body,
+            feet,
+        ],
         placed,
+    )
+}
+
+fn empty_available_plot() -> ([String; PLOT_CONTENT_ROWS - 1], Vec<PlacedRabbit>) {
+    (
+        std::array::from_fn(|index| {
+            if index == 0 {
+                centered(PLOT_WIDTH, &Style::new().dim().paint("no agents"))
+            } else {
+                " ".repeat(PLOT_WIDTH)
+            }
+        }),
+        Vec::new(),
     )
 }
 
@@ -1297,13 +1442,13 @@ fn agent_appearance(
     tick: u64,
     reduced_motion: bool,
     stable_id: &str,
-) -> (&'static str, Style, Style, [&'static str; 4]) {
+) -> (&'static str, Style, Style, [&'static str; SPRITE_ROWS]) {
     let feature = rabbit_style(stable_id).bold();
     let phase = animation_phase(tick, reduced_motion, stable_id);
     match agent_phase {
         AgentPhase::Running => {
             let rabbit = if reduced_motion {
-                ["", " /)/)", "( o.o)", "c(\")(\")"]
+                RABBIT_ACTIVE
             } else {
                 let (action, progress) = running_action(tick, stable_id);
                 running_pose(action, progress)
@@ -1311,40 +1456,30 @@ fn agent_appearance(
             ("running", Role::Success.style().bold(), feature, rabbit)
         }
         AgentPhase::Waiting => {
-            let ears = if phase == 5 { " /)(/" } else { " /)/)" };
-            (
-                "waiting",
-                Role::Warning.style().bold(),
-                feature,
-                ["", ears, "( o.o)?", "c(\")(\")"],
-            )
+            let rabbit = if phase == 5 {
+                RABBIT_WAITING_EARS
+            } else {
+                RABBIT_WAITING
+            };
+            ("waiting", Role::Warning.style().bold(), feature, rabbit)
         }
         AgentPhase::Interrupted => (
             "interrupted",
             Role::Warning.style(),
             feature,
-            ["", " /)/)", "( -.-)!", "c(\")(\")"],
+            RABBIT_INTERRUPTED,
         ),
-        AgentPhase::Sleeping => (
-            "sleeping",
-            Style::new().dim(),
-            feature,
-            [" zZ", " /)/)", "( -.-)", "c(\")(\")"],
-        ),
-        AgentPhase::Ended | AgentPhase::Exited => (
-            "done",
-            Style::new().dim(),
-            feature,
-            [" z", " /)/)", "( -.-)", "c(\")(\")"],
-        ),
+        AgentPhase::Sleeping => ("sleeping", Style::new().dim(), feature, RABBIT_SLEEPING),
+        AgentPhase::Ended | AgentPhase::Exited => {
+            ("done", Style::new().dim(), feature, RABBIT_DONE)
+        }
         AgentPhase::Absent | AgentPhase::Ready => {
-            let face = if phase == 4 { "( -.-)" } else { "( . .)" };
-            (
-                "available",
-                Style::new().dim(),
-                feature,
-                ["", " /)/)", face, "c(\")(\")v"],
-            )
+            let rabbit = if phase == 4 {
+                RABBIT_BLINKING
+            } else {
+                RABBIT_READY
+            };
+            ("available", Style::new().dim(), feature, rabbit)
         }
     }
 }
@@ -1396,35 +1531,106 @@ fn rabbit_style(stable_id: &str) -> Style {
     garden_rabbit_style(stable_hash(stable_id))
 }
 
-fn running_pose(action: RunningAction, progress: u64) -> [&'static str; SPRITE_ROWS] {
+const HOP_POSES: [RabbitSprite; 3] = [
+    RABBIT_WORKING,
+    [
+        "  /\\  /\\",
+        " /  \\/  \\",
+        "(   o.o   )",
+        "/   > <   \\",
+        "\\   /\\   /",
+        " \\_/  \\_/",
+    ],
+    [
+        "",
+        "   /\\  /\\",
+        "  /  \\/  \\",
+        " _(  o.o  )_",
+        "   / > < \\",
+        "  _/  ^ \\_",
+    ],
+];
+const BOUND_POSES: [RabbitSprite; 2] = [
+    [
+        "   /\\  /\\ >",
+        "  /  \\/  \\",
+        " (   o.o  )/",
+        " /    ^  / ",
+        " \\  / _/   ",
+        "  c(\")  \\__",
+    ],
+    [
+        "  /\\  /\\__",
+        " /  \\/  \\ ",
+        "(   o.o  )/ ",
+        "\\    ^   \\",
+        " \\  /   >  ",
+        "  \\_  \\__ ",
+    ],
+];
+const SNIFFING_POSE: RabbitSprite = [
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " (   o.o  )>",
+    " /    ^    \\",
+    " \\  /   \\  /",
+    "  c(\")_(\")",
+];
+const DIG_POSES: [RabbitSprite; 3] = [
+    [
+        "   /\\  /\\",
+        "  /  \\/  \\",
+        " _(  o.o  )_",
+        " /    ^    \\",
+        " \\   />  #/",
+        "  c(\")  ##",
+    ],
+    [
+        "   /\\  /\\",
+        "  /  \\/  \\",
+        " _(  o.o  )_",
+        " /    ^    \\",
+        "\\#  <\\   /",
+        " ##  (\")c ",
+    ],
+    [
+        "   /\\  /\\",
+        "  /  \\/  \\",
+        " _(  o.o  )_",
+        " /    ^    \\",
+        " \\  # #  /",
+        "  c(\")_(\")",
+    ],
+];
+const LOOK_POSES: [RabbitSprite; 2] = [
+    [
+        "   /\\  /\\",
+        "  /  \\/  \\",
+        " ( o.o     )",
+        " /    ^    \\",
+        " \\  /   \\  /",
+        "  c(\")_(\")",
+    ],
+    [
+        "   /\\  /\\",
+        "  /  \\/  \\",
+        " (     o.o )",
+        " /    ^    \\",
+        " \\  /   \\  /",
+        "  c(\")_(\")",
+    ],
+];
+
+fn running_pose(action: RunningAction, progress: u64) -> RabbitSprite {
     match action {
-        RunningAction::Hop => {
-            const POSES: [[&str; SPRITE_ROWS]; 3] = [
-                ["", " /)/)", "( o.o)", " / > <"],
-                [" /)/)", "( o.o)", " / > <", ""],
-                ["", "  /)/)", "_( o.o)_", "  > ^ <"],
-            ];
-            let index = usize::from(u8::try_from(progress % 3).unwrap_or_default());
-            POSES[index]
-        }
-        RunningAction::Bound => match progress % 4 {
-            0 | 3 => ["", " /)/) __", "( o.o)/", "  /  \\"],
-            _ => [" /)/)___", "( o.o)  ", " /   > ", ""],
-        },
-        RunningAction::Sniff => match progress {
-            1 | 3 => ["", " /)/)", "( o.o)>", "c(\")(\")"],
-            _ => ["", " /)/)", "( o.o)", "c(\")(\")"],
-        },
-        RunningAction::Dig => match progress % 3 {
-            0 => ["", "  /)/)", "_( o.o)_", "  / >#"],
-            1 => ["", "  /)/)", "_( o.o)_", " #< \\"],
-            _ => ["", "  /)/)", "_( o.o)_", "  # #"],
-        },
-        RunningAction::Look => match progress {
-            2 | 3 => ["", " /)/)", "(o.o )", "c(\")(\")"],
-            4 | 5 => ["", " (\\(\\", "( o.o)", "c(\")(\")"],
-            _ => ["", " /)/)", "( o.o)", "c(\")(\")"],
-        },
+        RunningAction::Hop => HOP_POSES[usize::try_from(progress % 3).unwrap_or_default()],
+        RunningAction::Bound if matches!(progress % 4, 0 | 3) => BOUND_POSES[0],
+        RunningAction::Bound => BOUND_POSES[1],
+        RunningAction::Sniff if matches!(progress, 1 | 3) => SNIFFING_POSE,
+        RunningAction::Dig => DIG_POSES[usize::try_from(progress % 3).unwrap_or_default()],
+        RunningAction::Look if matches!(progress, 2 | 3) => LOOK_POSES[0],
+        RunningAction::Look if matches!(progress, 4 | 5) => LOOK_POSES[1],
+        RunningAction::Sniff | RunningAction::Look => RABBIT_ACTIVE,
     }
 }
 
@@ -1552,6 +1758,28 @@ mod tests {
         assert!(text.contains('~'));
     }
 
+    #[test]
+    fn garden_rabbits_use_a_six_by_twelve_cell_canvas() {
+        assert_eq!(super::RABBIT_SPRITE_HEIGHT, 6);
+        assert_eq!(super::RABBIT_SPRITE_WIDTH, 12);
+        for phase in [
+            AgentPhase::Running,
+            AgentPhase::Waiting,
+            AgentPhase::Interrupted,
+            AgentPhase::Sleeping,
+            AgentPhase::Ended,
+            AgentPhase::Ready,
+        ] {
+            let sprite = super::agent_appearance(phase, 0, true, STEADY_ID).3;
+            assert_eq!(sprite.len(), super::RABBIT_SPRITE_HEIGHT);
+            assert_eq!(
+                sprite.iter().map(|row| display_width(row)).max(),
+                Some(super::RABBIT_SPRITE_WIDTH),
+                "{phase:?}"
+            );
+        }
+    }
+
     fn grass_row(rows: &[String]) -> &str {
         rows.iter()
             .find(|row| row.trim_start().starts_with("--"))
@@ -1560,13 +1788,13 @@ mod tests {
     }
 
     fn assert_rabbit_axis(name: &str, pose: &[&str]) {
-        let (ears_row, ears, ears_width) = pose
+        let (ears_row, ears_left, ears_right) = pose
             .iter()
             .enumerate()
             .find_map(|(row, line)| {
-                ["/)/)", "/)(/", "(\\(\\"]
-                    .into_iter()
-                    .find_map(|ears| line.find(ears).map(|column| (row, column, ears.len())))
+                let left = line.find("/\\")?;
+                let right = line.rfind("/\\")?;
+                (left != right).then_some((row, left, right + 1))
             })
             .expect("rabbit illustration has ears");
         let face = pose
@@ -1581,7 +1809,7 @@ mod tests {
         let face_left = face.find('(').expect("rabbit face has a left edge");
         let face_right = face.rfind(')').expect("rabbit face has a right edge");
         // Double the centres to avoid losing half-cell precision.
-        let ears_axis = ears * 2 + ears_width.saturating_sub(1);
+        let ears_axis = ears_left + ears_right;
         let face_axis = face_left + face_right;
         assert!(
             ears_axis.abs_diff(face_axis) <= 1,
@@ -1642,7 +1870,7 @@ mod tests {
         waiting.agent_status = Some(DispatchAgentStatus::Running);
         let frame = render(24, 100, "x", &[waiting], 0, true).expect("garden fits");
         let text = plain(&frame).join("\n");
-        assert!(text.contains("( o.o)?"));
+        assert!(text.contains("(   o.o  )?"));
         assert!(text.contains("waiting"));
         assert!(text.contains("1 need attention"));
     }
@@ -2122,7 +2350,7 @@ mod tests {
         // **全** agent の phase を注意順に並べる。
         assert!(text.contains("◆ ● ● ○ ◦"), "{text}");
         assert!(
-            text.contains("( o.o)?"),
+            text.contains("(   o.o  )?"),
             "the waiting agent must stay visible"
         );
         assert_eq!(text.matches("o.o").count(), super::MAX_VISIBLE_AGENTS);
@@ -2159,7 +2387,7 @@ mod tests {
                 .iter()
                 .map(|rabbit| rabbit.agent.expect("a rabbit names its runtime"))
                 .collect::<Vec<_>>(),
-            vec![waiting.runtime_id, running.runtime_id, ready.runtime_id],
+            vec![waiting.runtime_id, running.runtime_id],
         );
         let plot = plots(&frame)[0];
         let rows = plain(&frame);
@@ -2257,7 +2485,7 @@ mod tests {
         .expect("fits");
         let text = plain(&frame).join("\n");
         assert!(text.contains("no agents"));
-        assert!(!text.contains("/)/)"));
+        assert!(!text.contains("/\\"));
     }
 
     #[test]
@@ -2442,8 +2670,8 @@ mod tests {
         // idle は phase 4 でだけ瞬きする。
         let open = only(SessionLifecycle::Available, AgentPhase::Ready, 0).join("\n");
         let blink = only(SessionLifecycle::Available, AgentPhase::Ready, 4).join("\n");
-        assert!(open.contains("( . .)"));
-        assert!(blink.contains("( -.-)"));
+        assert!(open.contains("(   . .   )"));
+        assert!(blink.contains("(   -.-   )"));
 
         // 終了済みの agent は idle の瞬きへ戻さず、静止した done pose を保つ。
         let ended = session(
@@ -2502,14 +2730,14 @@ mod tests {
     fn calm_lifecycle_animation_uses_bounded_poses_and_reduced_motion_is_static() {
         let waiting = only(SessionLifecycle::Available, AgentPhase::Waiting, 0).join("\n");
         let waiting_flop = only(SessionLifecycle::Available, AgentPhase::Waiting, 5).join("\n");
-        assert!(waiting.contains("/)/)"));
-        assert!(waiting_flop.contains("/)(/"));
+        assert!(waiting.contains("  /  \\/  \\"));
+        assert!(waiting_flop.contains("  /  /\\  \\"));
 
         let growing = only(SessionLifecycle::Creating, AgentPhase::Absent, 0).join("\n");
         let emerged = only(SessionLifecycle::Creating, AgentPhase::Absent, 3).join("\n");
         assert_ne!(growing, emerged);
-        assert!(growing.contains("__(_ _)__"));
-        assert!(emerged.contains("_( . .)_"));
+        assert!(growing.contains("_(  _ _  )_"));
+        assert!(emerged.contains("_(  . .  )_"));
 
         let deleting = session(
             STEADY_ID,
@@ -2742,12 +2970,12 @@ mod tests {
         let all_waiting =
             render(24, 100, "x", &[make_session(waiting.clone())], 0, false).expect("fits");
         let all_waiting_text = plain(&all_waiting).join("\n");
-        // うさぎは 3 体までだが、plot の記号列と右 panel の1行ずつの状態は
+        // うさぎは 2 体までだが、plot の記号列と右 panel の1行ずつの状態は
         // 4 体すべてを示す。
         assert!(all_waiting_text.contains("◆ ◆ ◆ ◆"), "{all_waiting_text}");
         assert_eq!(all_waiting_text.matches("waiting").count(), 4);
         assert_eq!(
-            all_waiting_text.matches("( o.o)?").count(),
+            all_waiting_text.matches("(   o.o  )?").count(),
             super::MAX_VISIBLE_AGENTS
         );
 
@@ -2766,21 +2994,28 @@ mod tests {
     #[test]
     fn a_pose_keeps_its_ears_over_its_head() {
         // 行ごとの中央寄せは、行幅が違う pose の耳を頭から横へずらしてしまう。
-        // 最も差が出る `Creating`（耳 `/)/)` と頭 `__(_ _)__`）で崩れないことを固定する。
+        // 最も差が出る Creating（耳と土中の顔）で崩れないことを固定する。
         let rows = only(SessionLifecycle::Creating, AgentPhase::Absent, 0);
-        let ears = rows
+        let ears_left = rows
             .iter()
-            .find_map(|row| row.find("/)/)"))
+            .find_map(|row| row.find("/\\"))
             .expect("the growing pose shows ears");
+        let ears_right = rows
+            .iter()
+            .find_map(|row| row.rfind("/\\"))
+            .expect("the growing pose shows both ears")
+            + 1;
         let head = rows
             .iter()
-            .find_map(|row| row.find("__(_ _)__"))
+            .find(|row| row.contains("_ _"))
             .expect("the growing pose shows a head");
-        let ears_center = ears + display_width("/)/)") / 2;
-        let head_center = head + display_width("__(_ _)__") / 2;
+        let head_left = head.find('(').expect("the head has a left edge");
+        let head_right = head.rfind(')').expect("the head has a right edge");
+        let ears_center = ears_left + ears_right;
+        let head_center = head_left + head_right;
         assert!(
             ears_center.abs_diff(head_center) <= 1,
-            "ears at {ears_center} drifted off the head at {head_center}"
+            "ears at {ears_center}/2 drifted off the head at {head_center}/2"
         );
     }
 
@@ -2889,7 +3124,10 @@ mod tests {
             .iter()
             .position(|row| row.trim_start().starts_with("--"))
             .expect("grass layer");
-        assert!(rows[grass + 1].contains('.'), "soil follows the grass");
+        assert!(
+            rows[grass].contains('.'),
+            "soil texture shares the grass row"
+        );
 
         let moving_first = plain(&render(17, 100, "my-project", &sessions, 0, false).unwrap());
         let moving_second = plain(&render(17, 100, "my-project", &sessions, 2, false).unwrap());
@@ -2917,9 +3155,9 @@ mod tests {
         let ready = only(SessionLifecycle::Available, AgentPhase::Ready, 0).join("\n");
         let done = only(SessionLifecycle::Available, AgentPhase::Ended, 0).join("\n");
         let failed = only(SessionLifecycle::Failed, AgentPhase::Absent, 0).join("\n");
-        assert!(ready.contains("c(\")(\")v"));
+        assert!(ready.contains("c(\")_(\")v"));
         assert!(done.contains(" z"));
-        assert!(failed.contains("c(\")(\")/"));
+        assert!(failed.contains("c(\")_(\")/"));
     }
 
     #[test]

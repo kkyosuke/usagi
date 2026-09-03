@@ -1138,8 +1138,9 @@ phase は各うさぎの pose と巣穴の状態内訳へ投影する。利用�
 daemon が居ない・観測できる project 数の上限を超えた分）は `no agents` と断定せず `project inactive` と表示する。
 遷移中または失敗した cached lifecycle は `cached · creating` / `cached · deleting` / `cached · failed` と表示する。
 cached lifecycle は live の進行状況ではないため、Agent を観測できていてもうさぎを描かず、animation させない。
+うさぎの sprite は spacious world と compact fallback のどちらも 12 桁 × 6 行とし、姿を読み取りやすくする。
 spacious world は session ごとに注目順の最大 6 羽を描き、それより後ろの runtime も巣穴の状態内訳には残す。compact
-fallback は固定幅のため最大 3 羽を並べる。
+fallback は固定幅のため最大 2 羽を並べる。
 
 **どの runtime が居るかは最新の coherent Agent inventory が決める**。Closeup の tab strip と同じ observation を
 membership の権威にするので、庭のうさぎは常に「開ける tab を持つ Agent」と一致する。inventory が
@@ -1191,7 +1192,7 @@ composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を
 うさぎ・空・草の全 pose を静止姿勢に固定する。
 
 spacious world の背景は workspace 名と world 座標から決定的に配置した `.` / `*` / `v`、session の立札と巣穴、
-`~` の池、`Y` の餌場、`&` の木、小道で構成する。compact fallback は左の庭領域へ続く草地と薄い土の 2 層を使う。
+`~` の池、`Y` の餌場、`&` の木、小道で構成する。compact fallback は左の庭領域へ続く草地と薄い土を 1 行へ重ねる。
 星は同じ cell で明滅し、草は同じ根元で小さく向きを変えるため、Agent の稼働状態を偽らず背景だけに ambient motion を足す。
 うさぎの各行は pose 全体で耳と顔の中心軸を揃え、左向き・右向き・各 lifecycle を切り替えても耳だけ横へずれない。
 compact fallback は `Ready` に足元の草、`Done` に `z`、`Failed` に枯れ草を小さく添える。通常動作は action caption を

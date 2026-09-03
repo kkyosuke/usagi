@@ -18,6 +18,9 @@ use super::agent_status;
 use super::button::InlineButton;
 use super::garden::{
     ANIMATION_CYCLE_TICKS, GardenFrame, GardenHitbox, GardenScrollHitbox, GardenSession,
+    RABBIT_BURIED, RABBIT_CELEBRATING, RABBIT_CELEBRATING_ALT, RABBIT_EMERGING, RABBIT_FAILED,
+    RABBIT_IDLE, RABBIT_INTERRUPTED, RABBIT_READY, RABBIT_SLEEPING, RABBIT_SPRITE_HEIGHT,
+    RABBIT_SPRITE_WIDTH, RABBIT_WAITING, RABBIT_WAITING_EARS, RABBIT_WORKING, RabbitSprite,
 };
 use super::{clip_to_width, display_width, pad_to_width};
 
@@ -32,12 +35,62 @@ const REGION_CONTENT_WIDTH: usize = 92;
 const WORLD_MARGIN: usize = 4;
 const HOME_WIDTH: usize = 28;
 const HOME_HEIGHT: usize = 4;
-const RABBIT_HEIGHT: usize = 4;
+const RABBIT_HEIGHT: usize = RABBIT_SPRITE_HEIGHT;
 const MAX_WORLD_AGENTS_PER_SESSION: usize = 6;
 const LIFESTYLE_CYCLE_TICKS: u64 = 100;
 const AMBIENT_PHASE_TICKS: u64 = 4;
 const AMBIENT_PHASES: u64 = 6;
 const TWINKLE: [char; 6] = ['.', '*', '+', '*', '.', '·'];
+const WALKING_RABBITS: [RabbitSprite; 4] = [
+    [
+        "   /\\  /\\ >",
+        "  /  \\/  \\",
+        " (   o.o  )/",
+        " /    ^  / ",
+        " \\  / _/   ",
+        "  c(\")  \\__",
+    ],
+    [
+        "  /\\  /\\__",
+        " /  \\/  \\ ",
+        "(   o.o  )/ ",
+        "\\    ^   \\",
+        " \\  /   >  ",
+        "  \\_  \\__ ",
+    ],
+    [
+        "<  /\\  /\\",
+        " /  \\/  \\  ",
+        "\\(  o.o   ) ",
+        " \\  ^    \\ ",
+        "   \\_ \\  / ",
+        "__/   (\")c ",
+    ],
+    [
+        "__  /\\  /\\",
+        " /  \\/  \\ ",
+        " \\(  o.o   )",
+        "/   ^    / ",
+        "  <   \\  / ",
+        " __/  _/   ",
+    ],
+];
+const DRINKING_RABBIT: RabbitSprite = [
+    "   /\\  /\\",
+    "  /  \\/  \\",
+    " (   . .   )",
+    " /    ^   /_",
+    " \\  /   \\__~",
+    "  c(\")_(\")~~",
+];
+const EATING_RABBIT: RabbitSprite = [
+    "Y  /\\  /\\",
+    "| /  \\/  \\",
+    "|(   o.o   )",
+    "\\/    ^   /",
+    " \\  /   \\  /",
+    "  c(\")_(\")",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Point {
@@ -570,7 +623,8 @@ fn places(index: usize, world_height: usize) -> Places {
 fn offset_places(mut places: Places, agent_index: usize, agent_count: usize) -> Places {
     let index = i64::try_from(agent_index).expect("rabbit slot fits i64");
     let count = i64::try_from(agent_count).expect("rabbit count fits i64");
-    let horizontal = index * 8 - count.saturating_sub(1) * 4;
+    let spacing = i64::try_from(RABBIT_SPRITE_WIDTH).expect("rabbit width fits i64");
+    let horizontal = index * spacing - count.saturating_sub(1) * spacing / 2;
     for point in [
         &mut places.home,
         &mut places.water,
@@ -701,26 +755,29 @@ fn lerp(from: i64, to: i64, elapsed: u64, duration: u64) -> i64 {
     from + i64::try_from(delta * elapsed / duration).expect("Garden interpolation fits i64")
 }
 
-fn rabbit_sprite(motion: Motion, tick: u64) -> [&'static str; RABBIT_HEIGHT] {
+fn rabbit_sprite(motion: Motion, tick: u64) -> RabbitSprite {
     match motion.activity {
-        Activity::Walking => match (motion.facing, tick.is_multiple_of(2)) {
-            (Facing::Right, true) => ["", " /)/)  >", "( o.o)/", " /  \\"],
-            (Facing::Right, false) => [" /)/) __", "( o.o)/", "  /  >", ""],
-            (Facing::Left, true) => ["", "< (\\(\\", "\\(.o )", " /  \\"],
-            (Facing::Left, false) => ["__(\\(\\", " \\(.o )", " <  \\ ", ""],
-        },
-        Activity::Drinking => ["", " /)/)", "( . .)__", " /   \\~~"],
-        Activity::Eating => [" Y", " /)/)", "( o.o)<Y", "c(\")(\")"],
-        Activity::Sleeping => [" z", " /)/)", "( -.-)", "c(\")(\")"],
-        Activity::Waiting if tick % 6 == 5 => [" ?", " /)(/", "( o.o)?", "c(\")(\")"],
-        Activity::Waiting => [" ?", " /)/)", "( o.o)?", "c(\")(\")"],
-        Activity::Interrupted => [" !", " /)/)", "( -.-)!", "c(\")(\")"],
-        Activity::Working => ["", " /)/)", "( o.o)", " / > <"],
-        Activity::Celebrating if tick.is_multiple_of(2) => {
-            [" *  . *", "  /)/)", " \\(^o^)/", " c(\")(\")"]
-        }
-        Activity::Celebrating => ["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"],
+        Activity::Walking => walking_rabbit(motion.facing, tick),
+        Activity::Drinking => DRINKING_RABBIT,
+        Activity::Eating => EATING_RABBIT,
+        Activity::Sleeping => RABBIT_SLEEPING,
+        Activity::Waiting if tick % 6 == 5 => RABBIT_WAITING_EARS,
+        Activity::Waiting => RABBIT_WAITING,
+        Activity::Interrupted => RABBIT_INTERRUPTED,
+        Activity::Working => RABBIT_WORKING,
+        Activity::Celebrating if tick.is_multiple_of(2) => RABBIT_CELEBRATING_ALT,
+        Activity::Celebrating => RABBIT_CELEBRATING,
     }
+}
+
+fn walking_rabbit(facing: Facing, tick: u64) -> RabbitSprite {
+    let index = match (facing, tick.is_multiple_of(2)) {
+        (Facing::Right, true) => 0,
+        (Facing::Right, false) => 1,
+        (Facing::Left, true) => 2,
+        (Facing::Left, false) => 3,
+    };
+    WALKING_RABBITS[index]
 }
 
 fn draw_meadow(
@@ -932,12 +989,11 @@ fn draw_lifecycle_pose(
         (tick + stable_hash(&session.id.as_str())) % 6
     };
     let (sprite, style) = match session.lifecycle {
-        SessionLifecycle::Creating | SessionLifecycle::Initializing if phase >= 3 => (
-            ["", "   /)/)", " _( . .)_", "__/   \\__"],
-            Role::Warning.style(),
-        ),
+        SessionLifecycle::Creating | SessionLifecycle::Initializing if phase >= 3 => {
+            (RABBIT_EMERGING, Role::Warning.style())
+        }
         SessionLifecycle::Creating | SessionLifecycle::Initializing => {
-            (["", "", "  /)/)", "__(_ _)__"], Role::Warning.style())
+            (RABBIT_BURIED, Role::Warning.style())
         }
         SessionLifecycle::Deleting => {
             let style = if reduced_motion || phase >= 4 {
@@ -947,9 +1003,9 @@ fn draw_lifecycle_pose(
             } else {
                 Role::Feature.style()
             };
-            (["", " /)/)", "( . .)", "c(\")(\")"], style)
+            (RABBIT_IDLE, style)
         }
-        SessionLifecycle::Failed => (["", " /)/)", "( x.x)", "c(\")(\")/"], Role::Danger.style()),
+        SessionLifecycle::Failed => (RABBIT_FAILED, Role::Danger.style()),
         SessionLifecycle::Available => return,
     };
     let canvas_height = i64::try_from(canvas.height).expect("Garden canvas height fits i64");
@@ -982,13 +1038,9 @@ fn draw_dispatch_pose(
 ) {
     let feature = garden_rabbit_style(stable_hash(&session.id.as_str())).bold();
     let (sprite, style) = match status {
-        DispatchAgentStatus::Starting => (["", " /)/)", "( . .)", r#"c(")(")v"#], feature),
-        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => {
-            ([" z", " /)/)", "( -.-)", r#"c(")(")"#], feature.dim())
-        }
-        DispatchAgentStatus::Failed => {
-            (["", " /)/)", "( x.x)", r#"c(")(")/"#], Role::Danger.style())
-        }
+        DispatchAgentStatus::Starting => (RABBIT_READY, feature),
+        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => (RABBIT_SLEEPING, feature.dim()),
+        DispatchAgentStatus::Failed => (RABBIT_FAILED, Role::Danger.style()),
         DispatchAgentStatus::Running => unreachable!("running uses per-runtime motion"),
     };
     let canvas_height = i64::try_from(canvas.height).expect("Garden canvas height fits i64");
@@ -1213,13 +1265,13 @@ mod tests {
     }
 
     fn assert_rabbit_axis(name: &str, pose: &[&str]) {
-        let (ears_row, ears, ears_width) = pose
+        let (ears_row, ears_left, ears_right) = pose
             .iter()
             .enumerate()
             .find_map(|(row, line)| {
-                ["/)/)", "/)(/", "(\\(\\"]
-                    .into_iter()
-                    .find_map(|ears| line.find(ears).map(|column| (row, column, ears.len())))
+                let left = line.find("/\\")?;
+                let right = line.rfind("/\\")?;
+                (left != right).then_some((row, left, right + 1))
             })
             .expect("rabbit illustration has ears");
         let face = pose
@@ -1233,7 +1285,7 @@ mod tests {
             .expect("rabbit illustration has a face below its ears");
         let face_left = face.find('(').expect("rabbit face has a left edge");
         let face_right = face.rfind(')').expect("rabbit face has a right edge");
-        let ears_axis = ears * 2 + ears_width.saturating_sub(1);
+        let ears_axis = ears_left + ears_right;
         let face_axis = face_left + face_right;
         assert!(
             ears_axis.abs_diff(face_axis) <= 1,
@@ -1247,6 +1299,40 @@ mod tests {
         assert!(!fits(14, 64));
         assert!(!fits(17, 100));
         assert!(!fits(24, 79));
+    }
+
+    #[test]
+    fn every_world_rabbit_fits_the_shared_six_by_twelve_cell_canvas() {
+        for activity in [
+            Activity::Walking,
+            Activity::Drinking,
+            Activity::Eating,
+            Activity::Sleeping,
+            Activity::Waiting,
+            Activity::Interrupted,
+            Activity::Working,
+            Activity::Celebrating,
+        ] {
+            for facing in [Facing::Left, Facing::Right] {
+                for tick in 0..6 {
+                    let sprite = super::rabbit_sprite(
+                        super::Motion {
+                            point: Point { x: 0, y: 0 },
+                            facing,
+                            activity,
+                        },
+                        tick,
+                    );
+                    assert_eq!(sprite.len(), super::RABBIT_HEIGHT);
+                    assert!(
+                        sprite
+                            .iter()
+                            .all(|row| display_width(row) <= super::RABBIT_SPRITE_WIDTH),
+                        "{activity:?}/{facing:?}/{tick}: {sprite:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1790,7 +1876,7 @@ mod tests {
             Point { x: 0, y: 10 },
             DispatchAgentStatus::Idle,
         );
-        assert!(plain(&canvas.rows()).contains("/)/)"));
+        assert!(plain(&canvas.rows()).contains("/\\  /\\"));
     }
 
     #[test]
