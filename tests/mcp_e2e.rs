@@ -636,12 +636,6 @@ fn production_supervisor_tools_observe_one_durable_aggregate() {
         "supervisor_start",
         &json!({
             "root_task": "coordinate the production fixture",
-            "initial_task_dag": [{
-                "task_id": "inspect",
-                "dependencies": ["root"],
-                "instruction": "inspect without exposing this body",
-                "required_artifact_contract": "none"
-            }],
             "idempotency_key": "production-supervisor-e2e"
         }),
     );
@@ -649,13 +643,14 @@ fn production_supervisor_tools_observe_one_durable_aggregate() {
     let started: serde_json::Value =
         serde_json::from_str(started["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     let run_id = started["supervisor_run_id"].as_str().unwrap();
-    assert_eq!(started["state"], "escalated");
+    assert_eq!(started["state"], "running");
+    assert!(started["escalation"].is_null());
+    assert_eq!(started["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(started["tasks"][0]["state"], "dispatched");
     assert_eq!(
-        started["escalation"]["reason"],
-        "no worker dispatch reservation was produced for a ready task"
+        started["display_label"],
+        "coordinate the production fixture"
     );
-    assert_eq!(started["tasks"].as_array().unwrap().len(), 2);
-    assert!(!started.to_string().contains("inspect without exposing"));
 
     let fetched = mcp.tool("supervisor_get", &json!({"supervisor_run_id": run_id}));
     let fetched: serde_json::Value =
@@ -675,9 +670,9 @@ fn production_supervisor_tools_observe_one_durable_aggregate() {
     );
     let events: serde_json::Value =
         serde_json::from_str(events["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(events["events"].as_array().unwrap().len(), 4);
-    assert_eq!(events["next_sequence"], 5);
-    assert_eq!(events["events"][3]["source"], "dispatch_failure");
+    assert_eq!(events["events"].as_array().unwrap().len(), 3);
+    assert_eq!(events["next_sequence"], 4);
+    assert_eq!(events["events"][2]["source"], "admission");
 
     let durable_dir = mcp.data_dir().join("daemon/supervisor-runs");
     assert!(fs::read_dir(durable_dir).unwrap().count() >= 2);

@@ -4,7 +4,7 @@
 //! and asks the provider through a fixed argv boundary before producing the
 //! redaction-safe fact accepted by the supervisor reducer.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use usagi_core::domain::{
@@ -97,17 +97,35 @@ pub fn resolve_artifact_expectation<R: GhProcessPort>(
     workspace_root: &Path,
     repository: GitHubRepository,
 ) -> Result<ArtifactExpectation, ArtifactVerification> {
-    let Some(root) = workspace_root.to_str() else {
-        return Err(retryable("workspace Git identity is unavailable"));
-    };
-    let argv = ["-C", root, "rev-parse", "HEAD"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let head = runner
-        .run("git", &argv, GIT_FACT_TIMEOUT_MS)
-        .map_err(|_| retryable("workspace Git revision is unavailable"))?;
-    ArtifactExpectation::new(repository, head.trim())
+    resolve_artifact_expectation_for_worktrees(runner, &[workspace_root.to_path_buf()], repository)
+}
+
+/// Pins every exact supervised checkout which may have produced the reported
+/// pull request. A PR head must match at least one of these revisions.
+///
+/// # Errors
+/// Returns a retryable verification fact when any checkout revision cannot be
+/// obtained or the resulting bounded head set is invalid.
+pub fn resolve_artifact_expectation_for_worktrees<R: GhProcessPort>(
+    runner: &mut R,
+    workspace_roots: &[PathBuf],
+    repository: GitHubRepository,
+) -> Result<ArtifactExpectation, ArtifactVerification> {
+    let mut heads = Vec::with_capacity(workspace_roots.len());
+    for workspace_root in workspace_roots {
+        let Some(root) = workspace_root.to_str() else {
+            return Err(retryable("workspace Git identity is unavailable"));
+        };
+        let argv = ["-C", root, "rev-parse", "HEAD"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let head = runner
+            .run("git", &argv, GIT_FACT_TIMEOUT_MS)
+            .map_err(|_| retryable("workspace Git revision is unavailable"))?;
+        heads.push(head.trim().to_owned());
+    }
+    ArtifactExpectation::from_heads(repository, &heads)
         .ok_or_else(|| retryable("workspace Git revision is invalid"))
 }
 
@@ -117,6 +135,7 @@ impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
         contract: ArtifactContract,
         result: Option<&StructuredResult>,
         expectation: &ArtifactExpectation,
+        previous_verification_digest: Option<&str>,
     ) -> ArtifactVerification {
         if contract != GOAL_REVIEW_READY_ARTIFACT_CONTRACT {
             return rejected("unsupported artifact contract");
@@ -145,7 +164,7 @@ impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
         if view.draft {
             return rejected("pull request is still a draft");
         }
-        if !view.head_oid.eq_ignore_ascii_case(expectation.head_oid()) {
+        if !expectation.matches_head(&view.head_oid) {
             return rejected("pull request head does not match the completed workspace revision");
         }
         if view.checks == Some(PrChecksState::Failing) {
@@ -161,11 +180,15 @@ impl<R: GhProcessPort> ArtifactVerifier for GoalArtifactVerifier<R> {
                 "passing",
                 "open review-ready pull request verified with passing checks",
             )
-        } else {
+        } else if previous_verification_digest
+            == Some(evidence_digest("pull request checks have not appeared yet").as_str())
+        {
             (
                 "not_configured",
                 "open review-ready pull request verified with no configured checks",
             )
+        } else {
+            return retryable("pull request checks have not appeared yet");
         };
         ArtifactVerification {
             status: ArtifactVerificationStatus::Verified,
@@ -251,10 +274,6 @@ mod tests {
                 ArtifactVerificationStatus::Verified,
             ),
             (
-                view("OPEN", false, "[]"),
-                ArtifactVerificationStatus::Verified,
-            ),
-            (
                 view("OPEN", true, r#"[{"conclusion":"SUCCESS"}]"#),
                 ArtifactVerificationStatus::Rejected,
             ),
@@ -279,11 +298,39 @@ mod tests {
                         GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
                         Some(&result(Some("https://github.com/acme/repo/pull/42"))),
                         &expectation(),
+                        None,
                     )
                     .status,
                 expected
             );
         }
+
+        let mut first_empty =
+            GoalArtifactVerifier::new(Runner([Ok(view("OPEN", false, "[]"))].into()));
+        let deferred = first_empty.verify(
+            GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            Some(&result(Some("https://github.com/acme/repo/pull/42"))),
+            &expectation(),
+            None,
+        );
+        assert_eq!(deferred.status, ArtifactVerificationStatus::Retryable);
+        assert_eq!(
+            deferred.safe_summary,
+            "pull request checks have not appeared yet"
+        );
+        let mut second_empty =
+            GoalArtifactVerifier::new(Runner([Ok(view("OPEN", false, "[]"))].into()));
+        assert_eq!(
+            second_empty
+                .verify(
+                    GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+                    Some(&result(Some("https://github.com/acme/repo/pull/42"))),
+                    &expectation(),
+                    Some(&deferred.result_digest),
+                )
+                .status,
+            ArtifactVerificationStatus::Verified
+        );
     }
 
     #[test]
@@ -295,6 +342,7 @@ mod tests {
                     GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
                     Some(&result(Some("https://github.com/acme/repo/pull/42"))),
                     &expectation(),
+                    None,
                 )
                 .status,
             ArtifactVerificationStatus::Retryable
@@ -304,6 +352,7 @@ mod tests {
             GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
             Some(&result(Some("https://github.com/acme/repo/pull/42"))),
             &expectation(),
+            None,
         );
         assert_eq!(malformed.status, ArtifactVerificationStatus::Retryable);
         assert_eq!(
@@ -324,7 +373,7 @@ mod tests {
         ] {
             assert_eq!(
                 never_called
-                    .verify(contract, Some(&result), &expectation())
+                    .verify(contract, Some(&result), &expectation(), None)
                     .status,
                 ArtifactVerificationStatus::Rejected
             );
@@ -334,6 +383,7 @@ mod tests {
             GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
             Some(&result(Some("https://github.com/other/repo/pull/42"))),
             &expectation(),
+            None,
         );
         assert_eq!(
             wrong_repository.status,
@@ -357,6 +407,7 @@ mod tests {
             GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
             Some(&result(Some("https://github.com/acme/repo/pull/42"))),
             &wrong_head,
+            None,
         );
         assert_eq!(wrong_head.status, ArtifactVerificationStatus::Rejected);
         assert_eq!(
@@ -425,6 +476,30 @@ mod tests {
                 .status,
             ArtifactVerificationStatus::Retryable
         );
+    }
+
+    #[test]
+    fn artifact_expectation_accepts_each_exact_supervised_worktree_head() {
+        let repository = GitHubRepository::from_name_with_owner("acme/repo").unwrap();
+        let roots = [PathBuf::from("/tmp/root"), PathBuf::from("/tmp/delegated")];
+        let mut runner = GitRunner {
+            outputs: [
+                Ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n".into()),
+                Ok("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n".into()),
+            ]
+            .into(),
+            calls: Vec::new(),
+        };
+
+        let expectation =
+            resolve_artifact_expectation_for_worktrees(&mut runner, &roots, repository).unwrap();
+
+        assert!(expectation.matches_head("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(expectation.matches_head("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        assert_eq!(expectation.head_oids().count(), 2);
+        assert_eq!(runner.calls.len(), 2);
+        assert_eq!(runner.calls[0].1[1], "/tmp/root");
+        assert_eq!(runner.calls[1].1[1], "/tmp/delegated");
     }
 
     #[test]

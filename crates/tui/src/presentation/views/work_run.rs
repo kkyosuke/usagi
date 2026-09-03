@@ -80,7 +80,7 @@ impl WorkRunProjection {
 
     #[must_use]
     pub fn primary(&self) -> Option<&SupervisorRunQuery> {
-        self.runs.first()
+        self.runs.iter().find(|run| !run.state.is_finished())
     }
 
     #[must_use]
@@ -146,6 +146,7 @@ mod tests {
             state,
             terminal_at: None,
             terminal_reason: None,
+            display_label: Some("Test Goal".into()),
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: task_states
@@ -202,6 +203,13 @@ mod tests {
             WorkRunProjection::default().freshness(),
             WorkRunFreshness::Pending
         );
+
+        let finished = WorkRunProjection::fresh(vec![
+            run(SupervisorRunState::Succeeded, &[]),
+            run(SupervisorRunState::Failed, &[]),
+            run(SupervisorRunState::Cancelled, &[]),
+        ]);
+        assert!(finished.primary().is_none());
     }
 
     #[test]

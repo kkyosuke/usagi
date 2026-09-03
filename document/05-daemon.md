@@ -1693,7 +1693,9 @@ tick は dispatch run ID と supervisor provenance を照合して terminal fact
 child terminal 後に parent が `Running` なら `AwaitingDecision` に遷移し、parent provenance と child run、
 safe completion summary、DAG state、decision generation を含む wake reservation を durable に保存してから
 parent wake effect を実行する。reservation は child run と parent generation で一意なので、duplicate event、
-ACK loss、daemon restart は同じ wake を二重に作らない。parent runtime の再解決・restart は wake adapter が
+ACK loss、daemon restart は同じ wake を二重に作らない。wake 成功後は parent task を `Running` へ戻し、同じ child の
+terminal fact を次の tick が再観測しても配送済み reservation の確認後は parent を再び待機へ戻さない。複数 wake の一件が
+失敗しても後続を配送し、成功分を永続化してから最初の失敗を報告する。parent runtime の再解決・restart は wake adapter が
 保存済み provenance だけを使って行い、session 名から target を推測しない。
 
 同じ terminal fact の確定時に、scheduler は exact task generation と dispatch runへfenceしたhandoff contextも
@@ -1708,7 +1710,9 @@ tick 時点で `Ready` task に dispatch reservation が無い場合は、schedu
 `DispatchFailure` event と resume/cancel の durable escalation を保存する。operator は events/get から停止理由を
 観測でき、selector を修復するまで自動 retry は行わない。
 
-`supervisor-scheduler.json` は start reservation を最大256件、wake reservationを最大512件、human control
+`supervisor-scheduler.json` は16 MiBのserialized/read上限を持ち、start reservation の semantic material は固定長の
+SHA-256 digestだけを保存する。旧形式の可変長semantic keyはbounded read後にdigestへ一度だけ移行する。
+start reservation を最大256件、wake reservationを最大512件、human control
 reservationを最大512件に制限する。終了runのstart/controlと配送済みwakeは固定長tombstoneへ移してretryを
 `expired`としてeffect-zeroにし、live run / 未配送wakeだけで上限へ達した場合はそれらを捨てず、新規
 start / wake / controlをcapacity errorで拒否する。
@@ -1720,8 +1724,10 @@ parent provenanceから同じexact joinを行う。
 ここで終了 run は `Succeeded` / `Failed` / `Cancelled` だけを指す。`Escalated` は通常eventをfenceする休止状態だが、
 人間の判断で再開できるlive stateなので、run retentionとstart reservationのどちらからも回収しない。終了判定の正本は
 core domainの `SupervisorRunState::is_finished` であり、storeとschedulerが共用する。
-`supervisor_start` は初期 task 128件、依存128件、Task ID 128 UTF-8 bytes、instruction / root task 16 KiB、
-artifact contract 4 KiB、idempotency key / policy selector 256 bytes を上限とし、永続化前に検証する。
+Agent MCP の `supervisor_start` は root task だけを受け取り、authenticated caller の現在の dispatch と runtime fence を
+root provenanceへ束縛する。child taskは既存のsession delegation経路から動的に追加し、dispatch方法を持たない初期DAGは
+公開schemaで受け取らない。root task / instruction は16 KiB、idempotency key / policy selectorは256 bytesを上限とし、
+永続化前に検証する。Goal labelは空白を正規化した最大96 UTF-8 bytesのpresentation-safe文字列だけをsnapshotへ保存する。
 
 event journal は sequence→byte offset の derived index を持つ。`supervisor_events(after_sequence, limit)` は
 cursor の offset へ直接 seek し、最大100件の要求 page だけを read / parse する。index がない旧 journal は一度だけ
@@ -1734,6 +1740,8 @@ supervisor run list は owner / state / 作成順 / revision の derived index �
 から再構築する。page 全体が 512 KiB に達した場合は count limit より前でも cursor を返す。list / get / events の
 read-only response はすべて 512 KiB 以下とし、1 run の安全な projection だけで上限を超える場合は
 `resource_exhausted` として effect zero で拒否する。
+周期recoveryも同じvalidated indexから未完了run、またはworker停止が必要になり得るFailed/Cancelled runのIDだけを選び、
+成功済み履歴をhydrateしない。各tickはdispatch registryを一度だけ読み、runごとのreconcile失敗を分離して後続runとwakeを進める。
 
 ## supervisor policy and verification
 
@@ -1751,7 +1759,7 @@ Agent ownerへ渡し、全fenceが一致したruntimeだけをdaemon所有PTY経
 `Cancelled` / `Failed` runから同じexact obligationを再構成し、`OrphanRunning`も再度terminateする。既にExited、GC済み、
 または以前のretry generationに属するworkerは収束済みno-opとして扱う。
 
-artifact contract は core domain の閉じた列挙型を正本とし、wire と永続化では `none` / `goal_review_ready_pr_v1` の文字列として表す。未知の contract は admission で拒否される。no-verification 以外の worker completion は `Succeeded` ではなく `Verifying` へ遷移する。worker report の PR URL は候補にすぎない。daemon は Goal worker の spawn 前に run が所有する workspace の `origin` を固定 argv の Git 呼び出しで解決して run へ保存し、idempotent admission replay では保存値だけを使う。worker completion 後は `HEAD` を解決し、最初の provider 呼び出しより前に repository と head OID の immutable な artifact expectation を task へ保存する。その後、同じ repository の canonical GitHub PR identity に対して固定 argv の `gh pr view` を実行し、PR の head OID が保存済み expectation と一致し、state が open、draft が false、checks が passing または未設定の場合だけ、redaction-safe な SHA-256 evidence digest を伴う `VerificationResult` を passed として保存する。別 repository、別 head、closed/draft PR、failing checks は safe summary を持つ escalation になり、worker の summary や PR URL 単独では success gate を通らない。provider unavailable、invalid response、pending checks、または workspace が一時的に未保有の場合は rejection と区別した `VerificationDeferred` を保存し、5 秒から最大 5 分までの durable exponential backoff 後に再検証する。Resume 後は保存済み候補と expectation を再検証できるが、Escalated 中に自動で gate を解除しない。completion inbox の commit 後に daemon が停止しても、daemon-lifetime の recovery worker が `Running` run の contracted task、exact provenance generation、terminal dispatch outcome を照合して期限到来済みの検証だけを再実行する。この remote IO は supervisor mutex と client 接続経路の外で行い、通常の観測を待たせない。未完了の supervised run は workspace retirement の blocker である。
+artifact contract は core domain の閉じた列挙型を正本とし、wire と永続化では `none` / `goal_review_ready_pr_v1` の文字列として表す。未知の contract は admission で拒否される。no-verification 以外の worker completion は `Succeeded` ではなく `Verifying` へ遷移する。worker report の PR URL は候補にすぎない。daemon は Goal worker の spawn 前に run が所有する workspace の `origin` を固定 argv の Git 呼び出しで解決して run へ保存し、idempotent admission replay では保存値だけを使う。worker completion 後は、そのrunで完了済みのroot/delegated provenanceが指すexact worktreeごとに `HEAD` を解決し、最初のprovider呼び出しより前にrepositoryと重複除去済みhead OID集合のimmutableなartifact expectationをtaskへ保存する。その後、同じ repository の canonical GitHub PR identity に対して固定 argv の `gh pr view` を実行し、PR の head OID が保存済み集合のいずれかと一致し、state が open、draft が false、checks が passing の場合だけ、redaction-safe な SHA-256 evidence digest を伴う `VerificationResult` を passed として保存する。checkが空の場合は同じ「未出現」digestを持つ2回連続の観測後だけ未設定として受理する。別 repository、別 head、closed/draft PR、failing checks は safe summary を持つ escalation になり、worker の summary や PR URL 単独では success gate を通らない。provider unavailable、invalid response、pending checks、check未出現の初回、または worktree/workspace が一時的に未保有の場合は rejection と区別した `VerificationDeferred` を保存し、5 秒から最大 5 分までの durable exponential backoff 後に再検証する。artifact rejection の Resume は expectation とverification結果をclearしてtaskをAgent再報告待ちに置き、exact live Agentへ再作業promptを配送できた場合だけ解除する。新しいcompletion reportを受けるまで同じ候補を自動再検証しない。再報告されたcanonical PR候補は2 KiB以下のinternal Supervisor factとして初回dispatch inboxとは別に永続化し、PRを作り直した場合もrestart recoveryが新候補を使う。completion inbox の commit 後に daemon が停止しても、daemon-lifetime の recovery worker が `Running` run の contracted task、exact provenance generation、terminal dispatch outcome を照合して期限到来済みの検証だけを再実行する。この remote IO は supervisor mutex と client 接続経路の外で行い、通常の観測を待たせない。未完了の supervised run は workspace retirement の blocker である。
 
 supervised root Agent が `session_dispatch` または `delegate_brief` で child Agent を起動する場合、daemon は child operation から導出する安定した task ID、parent dispatch provenance、instruction、promotion reservation 時刻を Agent spawn より先に同じ `SupervisorRun` の DAG へ保存する。成功後は child の exact runtime fence を束縛し、確定的な pre-spawn failure は予約 task を cancel する。spawn outcome が不明、または post-spawn binding が失敗した場合は予約を残し、daemon-lifetime の recovery worker が Agent operation の durable outcome から束縛または終端化する。durable Agent outcome が 30 秒間存在しない予約も orphan として fail-closed に終端化するため、reservation と spawn の間で daemon が停止しても run は永久に待機しない。これにより Work Run の task/agent 集計は root だけでなく、実際に委譲された worker も同じ aggregate から導出する。
 

@@ -26,7 +26,7 @@ use usagi_core::domain::agent::{
 };
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{
-    ConnectionId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+    AgentRuntimeRef, ConnectionId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::DefaultModel;
@@ -151,10 +151,13 @@ use usagi_daemon::usecase::session_teardown::{
 use usagi_daemon::usecase::shutdown::{BackgroundWorker, ShutdownRequest};
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
-    DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime, bounded_supervisor_query,
+    ArtifactVerification, ArtifactVerificationRequest, ArtifactVerificationStatus,
+    ArtifactVerifier, DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
+    bounded_supervisor_query,
 };
 use usagi_daemon::usecase::tenant::{
-    DEFAULT_TENANT_LIMIT, OpenedTenant, TenantRegistry, TenantRuntimeOpener, WorkspaceFenceFactory,
+    DEFAULT_TENANT_LIMIT, OpenedTenant, Tenant, TenantRegistry, TenantRuntimeOpener,
+    WorkspaceFenceFactory,
 };
 use usagi_daemon::usecase::terminal::{
     Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure, output_pipeline_counters,
@@ -6043,6 +6046,7 @@ fn dispatch_agent_tool(
                     .map_or(input.summary.clone(), |error| {
                         format!("{}: {error}", input.summary)
                     });
+                let reported_result = input.result.clone();
                 let delivery = runtime.report_from_mcp(
                     &credential.credential,
                     input.run_id,
@@ -6051,19 +6055,25 @@ fn dispatch_agent_tool(
                     input.result,
                 )?;
                 drop(runtime);
-                let reported_pr = delivery
-                    .committed
-                    .as_ref()
-                    .filter(|message| message.kind == InboxKind::Completed)
-                    .and_then(|message| message.result.as_ref())
+                let completed = kind == InboxKind::Completed
+                    && delivery
+                        .committed
+                        .as_ref()
+                        .is_some_and(|message| message.kind == InboxKind::Completed);
+                let reported_pr = completed
+                    .then_some(reported_result.as_ref())
+                    .flatten()
                     .and_then(|result| result.pr.as_deref());
                 project_reported_pr(pr_inventory, delivery.worker.session_id, reported_pr)
                     .inspect_err(|_| ErrorLog::record("reported PR projection failed"))?;
-                verify_completed_goal_artifact(
-                    supervisor,
-                    &bound.workspaces,
-                    delivery.committed.as_ref().map(|message| message.run_id),
-                )?;
+                if completed {
+                    verify_completed_goal_artifact(
+                        supervisor,
+                        &bound.workspaces,
+                        delivery.committed.as_ref().map(|message| message.run_id),
+                        GoalArtifactReport::Fresh(reported_result),
+                    )?;
+                }
                 Ok((
                     ResponseOutcome::Ok,
                     serde_json::json!({"delivered_to": delivery.delivered_to}),
@@ -6149,72 +6159,58 @@ fn project_reported_pr(
     Ok(())
 }
 
+enum GoalArtifactReport {
+    Recovery,
+    Fresh(Option<usagi_core::domain::agent::StructuredResult>),
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=only_an_open_non_draft_pr_with_passing_checks_satisfies_the_contract
 fn verify_completed_goal_artifact(
     supervisor: &SharedSupervisorRuntime,
     workspaces: &Workspaces,
     dispatch_run_id: Option<usagi_core::domain::id::OperationId>,
+    report: GoalArtifactReport,
 ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
-    use usagi_daemon::usecase::{
-        goal_artifact::{GoalArtifactVerifier, resolve_artifact_expectation},
-        supervisor_runtime::{ArtifactVerification, ArtifactVerificationStatus, ArtifactVerifier},
-    };
+    use usagi_daemon::usecase::goal_artifact::GoalArtifactVerifier;
 
     let Some(dispatch_run_id) = dispatch_run_id else {
         return Ok(());
     };
-    let request = supervisor
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
-        .prepare_artifact_verification(dispatch_run_id, chrono::Utc::now())
-        .map_err(supervisor_error)?;
+    let request = {
+        let runtime = supervisor
+            .lock()
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?;
+        if let GoalArtifactReport::Fresh(result) = report {
+            runtime.prepare_artifact_verification_after_report(
+                dispatch_run_id,
+                result,
+                chrono::Utc::now(),
+            )
+        } else {
+            runtime.prepare_artifact_verification(dispatch_run_id, chrono::Utc::now())
+        }
+        .map_err(supervisor_error)?
+    };
     let Some(request) = request else {
         return Ok(());
     };
     // The provider process runs outside the supervisor mutex. A slow or broken
     // remote can delay only this report request, never task/run observation.
     let Some(tenant) = workspaces.workspace(request.workspace_id) else {
-        supervisor
-            .lock()
-            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
-            .record_artifact_verification(
-                &request,
-                ArtifactVerification {
-                    status: ArtifactVerificationStatus::Retryable,
-                    result_digest: "workspace-unavailable".into(),
-                    safe_summary: "Goal workspace is not currently held by this daemon".into(),
-                },
-                chrono::Utc::now(),
-            )
-            .map_err(supervisor_error)?;
+        record_goal_artifact_verification(
+            supervisor,
+            &request,
+            ArtifactVerification {
+                status: ArtifactVerificationStatus::Retryable,
+                result_digest: "workspace-unavailable".into(),
+                safe_summary: "Goal workspace is not currently held by this daemon".into(),
+            },
+        )?;
         return Ok(());
     };
-    let request = match request.expectation.clone() {
-        Some(_) => request,
-        None => match resolve_artifact_expectation(
-            &mut GhProcess,
-            tenant.root(),
-            request.repository.clone(),
-        ) {
-            Ok(expectation) => supervisor
-                .lock()
-                .map_err(|_| {
-                    ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable")
-                })?
-                .record_artifact_expectation(&request, &expectation, chrono::Utc::now())
-                .map_err(supervisor_error)?,
-            Err(verification) => {
-                supervisor
-                    .lock()
-                    .map_err(|_| {
-                        ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable")
-                    })?
-                    .record_artifact_verification(&request, verification, chrono::Utc::now())
-                    .map_err(supervisor_error)?;
-                return Ok(());
-            }
-        },
+    let Some(request) = prepare_goal_artifact_expectation(supervisor, &tenant, request)? else {
+        return Ok(());
     };
     let expectation = request.expectation.as_ref().ok_or_else(|| {
         ProtocolError::new(
@@ -6226,13 +6222,92 @@ fn verify_completed_goal_artifact(
         request.contract,
         request.result.as_ref(),
         expectation,
+        request.previous_verification_digest.as_deref(),
     );
+    record_goal_artifact_verification(supervisor, &request, verification)
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=workspace_git_facts_use_fixed_argv_and_are_normalized_once
+fn prepare_goal_artifact_expectation(
+    supervisor: &SharedSupervisorRuntime,
+    tenant: &Tenant<SharedSessionRuntime>,
+    request: ArtifactVerificationRequest,
+) -> Result<Option<ArtifactVerificationRequest>, usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    use usagi_daemon::usecase::goal_artifact::resolve_artifact_expectation_for_worktrees;
+
+    if request.expectation.is_some() {
+        return Ok(Some(request));
+    }
+    let Some(artifact_roots) = artifact_worktree_paths(tenant, &request) else {
+        record_goal_artifact_verification(
+            supervisor,
+            &request,
+            ArtifactVerification {
+                status: ArtifactVerificationStatus::Retryable,
+                result_digest: "artifact-worktree-unavailable".into(),
+                safe_summary: "Goal artifact worktree is not currently available".into(),
+            },
+        )?;
+        return Ok(None);
+    };
+    let expectation = match resolve_artifact_expectation_for_worktrees(
+        &mut GhProcess,
+        &artifact_roots,
+        request.repository.clone(),
+    ) {
+        Ok(expectation) => expectation,
+        Err(verification) => {
+            record_goal_artifact_verification(supervisor, &request, verification)?;
+            return Ok(None);
+        }
+    };
+    let request = supervisor
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
+        .record_artifact_expectation(&request, &expectation, chrono::Utc::now())
+        .map_err(supervisor_error)?;
+    Ok(Some(request))
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
+fn artifact_worktree_paths(
+    tenant: &Tenant<SharedSessionRuntime>,
+    request: &ArtifactVerificationRequest,
+) -> Option<Vec<PathBuf>> {
+    let sessions = tenant.runtime().lock().ok()?;
+    let mut roots = Vec::with_capacity(request.worktrees.len());
+    for source in &request.worktrees {
+        let path = if let Some(session_id) = source.session_id {
+            sessions
+                .resolve_scope(request.workspace_id, session_id, source.worktree_id)
+                .ok()?
+                .path
+        } else {
+            (sessions.root_worktree_id() == source.worktree_id)
+                .then(|| tenant.root().to_path_buf())?
+        };
+        roots.push(path);
+    }
+    roots.sort();
+    roots.dedup();
+    (!roots.is_empty()).then_some(roots)
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_transition_commit_failures_remain_retryable
+fn record_goal_artifact_verification(
+    supervisor: &SharedSupervisorRuntime,
+    request: &ArtifactVerificationRequest,
+    verification: ArtifactVerification,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
     supervisor
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "supervisor is unavailable"))?
-        .record_artifact_verification(&request, verification, chrono::Utc::now())
-        .map_err(supervisor_error)?;
-    Ok(())
+        .record_artifact_verification(request, verification, chrono::Utc::now())
+        .map(drop)
+        .map_err(supervisor_error)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
@@ -6397,9 +6472,12 @@ fn reconcile_pending_goal_artifacts(
     let mut reconciled = 0;
     let mut first_failure = None;
     for item in pending {
-        if let Err(error) =
-            verify_completed_goal_artifact(supervisor, workspaces, Some(item.dispatch_run_id))
-        {
+        if let Err(error) = verify_completed_goal_artifact(
+            supervisor,
+            workspaces,
+            Some(item.dispatch_run_id),
+            GoalArtifactReport::Recovery,
+        ) {
             first_failure.get_or_insert_with(|| {
                 anyhow::anyhow!(
                     "artifact verification {} remains pending: {}",
@@ -6428,11 +6506,19 @@ fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::i
     }
 }
 
+#[derive(Clone)]
+struct AuthenticatedSupervisorCaller {
+    descriptor: String,
+    workspace: WorkspaceId,
+    dispatch_run_id: usagi_core::domain::id::OperationId,
+    runtime: AgentRuntimeRef,
+}
+
 #[allow(clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn dispatch_supervisor_tool(
     runtime: &SharedSupervisorRuntime,
-    caller: Result<(String, WorkspaceId), usagi_core::infrastructure::ipc::ProtocolError>,
+    caller: Result<AuthenticatedSupervisorCaller, usagi_core::infrastructure::ipc::ProtocolError>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -6504,7 +6590,9 @@ fn dispatch_supervisor_tool(
             ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
         })
         .and_then(|runtime| {
-            let (caller, workspace) = caller?;
+            let authenticated = caller?;
+            let caller = authenticated.descriptor;
+            let workspace = authenticated.workspace;
             match action {
                 SupervisorToolAction::Start => {
                     let input: StartPayload = serde_json::from_value(payload).map_err(|_| {
@@ -6513,14 +6601,28 @@ fn dispatch_supervisor_tool(
                             "invalid supervisor_start payload",
                         )
                     })?;
-                    let started = runtime
+                    if !input.initial_task_dag.is_empty() {
+                        return Err(ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "supervisor_start accepts one live root; delegate child work through session tools",
+                        ));
+                    }
+                    runtime
                         .start_for_workspace(
                             &caller,
                             workspace,
                             &operation_id,
                             input.root_task,
-                            input.initial_task_dag,
+                            Vec::new(),
                             input.policy_selector,
+                            Utc::now(),
+                        )
+                        .map_err(supervisor_error)?;
+                    let started = runtime
+                        .bind_reserved_caller_dispatch(
+                            &operation_id,
+                            authenticated.dispatch_run_id,
+                            &authenticated.runtime,
                             Utc::now(),
                         )
                         .map_err(supervisor_error)?;
@@ -6836,6 +6938,8 @@ fn dispatch_supervisor_control(
             ));
         }
 
+        prompt_supervisor_retry(supervisor, agent, workspace, &command)?;
+
         let mut run = supervisor
             .lock()
             .map_err(|_| {
@@ -6897,13 +7001,54 @@ fn dispatch_supervisor_control(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=generic_escalation_resume_does_not_require_an_agent_prompt,workspace_control_is_durable_scoped_and_projects_exact_stop_obligations
+fn prompt_supervisor_retry(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+    workspace: WorkspaceId,
+    command: &usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::domain::supervisor::{EscalationDecision, SupervisorWorkspaceCommand};
+
+    let SupervisorWorkspaceCommand::ResolveEscalation {
+        supervisor_run_id,
+        escalation_id,
+        decision: EscalationDecision::Resume,
+    } = command
+    else {
+        return Ok(());
+    };
+    let Some(retry) = supervisor
+        .lock()
+        .map_err(|_| supervisor_control_unconfirmed("supervisor runtime is unavailable"))?
+        .retry_work_for_workspace(workspace, *supervisor_run_id, *escalation_id)
+        .map_err(supervisor_control_error)?
+    else {
+        return Ok(());
+    };
+    let prompt = format!(
+        "The user requested a Supervisor retry. Continue the blocked work, correct the problem, and report completion again before stopping. Reason: {}. Evidence: {}",
+        retry.reason, retry.safe_evidence
+    );
+    agent
+        .lock()
+        .map_err(|_| supervisor_control_unconfirmed("retry Agent owner is unavailable"))?
+        .prompt_run(retry.provenance.dispatch_run_id, &prompt)
+        .map_err(|_| {
+            supervisor_control_unconfirmed(
+                "retry Agent is no longer live; resume its conversation first",
+            )
+        })?;
+    Ok(())
+}
+
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn authenticated_supervisor_caller(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     client: &usagi_core::domain::id::ClientId,
     body: &serde_json::Value,
-) -> Result<(String, WorkspaceId), usagi_core::infrastructure::ipc::ProtocolError> {
+) -> Result<AuthenticatedSupervisorCaller, usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 
     let credential = serde_json::from_value::<DaemonRequest>(body.clone())
@@ -6949,10 +7094,12 @@ fn authenticated_supervisor_caller(
             "supervisor caller does not belong to this workspace",
         ));
     }
-    Ok((
-        supervisor_caller_descriptor(client, &authenticated.caller),
+    Ok(AuthenticatedSupervisorCaller {
+        descriptor: supervisor_caller_descriptor(client, &authenticated.caller),
         workspace,
-    ))
+        dispatch_run_id: authenticated.run_id,
+        runtime: authenticated.runtime,
+    })
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
@@ -14889,6 +15036,65 @@ mod tests {
                 code
             );
         }
+    }
+
+    #[test]
+    fn generic_escalation_resume_does_not_require_an_agent_prompt() {
+        use usagi_core::domain::{
+            id::OperationId,
+            supervisor::{EscalationDecision, SupervisorRunState, SupervisorWorkspaceCommand},
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temp.path());
+        let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
+        let agent = empty_supervisor_agent(dispatch);
+        let workspace = WorkspaceId::new();
+        let started = supervisor
+            .lock()
+            .unwrap()
+            .start_for_workspace(
+                "caller",
+                workspace,
+                &OperationId::new().to_string(),
+                "work requiring later dispatch".into(),
+                Vec::new(),
+                None,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        supervisor
+            .lock()
+            .unwrap()
+            .tick(
+                started.supervisor_run_id,
+                chrono::Utc::now(),
+                &mut AgentDecisionWaker { agent: &agent },
+            )
+            .unwrap();
+        let escalated = supervisor
+            .lock()
+            .unwrap()
+            .get_for_workspace(workspace, started.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(escalated.state, SupervisorRunState::Escalated);
+        let command = SupervisorWorkspaceCommand::ResolveEscalation {
+            supervisor_run_id: started.supervisor_run_id,
+            escalation_id: escalated.escalation.unwrap().escalation_id,
+            decision: EscalationDecision::Resume,
+        };
+
+        prompt_supervisor_retry(&supervisor, &agent, workspace, &command).unwrap();
+        assert_eq!(
+            supervisor
+                .lock()
+                .unwrap()
+                .control_for_workspace(workspace, OperationId::new(), &command, chrono::Utc::now(),)
+                .unwrap()
+                .state,
+            SupervisorRunState::Running
+        );
     }
 
     #[test]
@@ -23350,7 +23556,11 @@ instructions = "{instructions}"
         runtime: &SharedSupervisorRuntime,
         generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
         hello: &usagi_core::infrastructure::ipc::ClientHello,
-        authenticated: Option<&usagi_core::domain::agent::CallerRef>,
+        authenticated: Option<(
+            &usagi_core::domain::agent::CallerRef,
+            usagi_core::domain::id::OperationId,
+            &AgentRuntimeRef,
+        )>,
         workspace: WorkspaceId,
         body: serde_json::Value,
     ) -> (
@@ -23408,7 +23618,14 @@ instructions = "{instructions}"
                             "supervisor caller provenance is unknown",
                         ))
                     },
-                    |caller| Ok((supervisor_caller_descriptor(&client, caller), workspace)),
+                    |(caller, dispatch_run_id, agent_runtime)| {
+                        Ok(AuthenticatedSupervisorCaller {
+                            descriptor: supervisor_caller_descriptor(&client, caller),
+                            workspace,
+                            dispatch_run_id,
+                            runtime: agent_runtime.clone(),
+                        })
+                    },
                 );
                 dispatch_supervisor_tool(runtime, caller, request_id, &body, server)
             },
@@ -23445,7 +23662,14 @@ instructions = "{instructions}"
     #[test]
     #[allow(clippy::too_many_lines)] // One matrix keeps every authority transition on one durable run.
     fn supervisor_authority_survives_reconnect_and_rollover_but_not_forgery_or_restart() {
-        use usagi_core::domain::{agent::CallerRef, id::AgentId, supervisor::EscalationDecision};
+        use usagi_core::domain::{
+            agent::{CallerRef, DispatchRun, RunStatus},
+            id::AgentId,
+            supervisor::{
+                EscalationDecision, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
+                TaskState,
+            },
+        };
         use usagi_core::infrastructure::{
             ipc::{ErrorCode, ResponseOutcome},
             store::supervisor::SupervisorStore,
@@ -23453,11 +23677,35 @@ instructions = "{instructions}"
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
+        let caller_session = SessionId::new();
         let caller = CallerRef {
-            session_id: Some(SessionId::new()),
+            session_id: Some(caller_session),
             agent_id: AgentId::new(),
         };
         let workspace = WorkspaceId::new();
+        let caller_dispatch_run = usagi_core::domain::id::OperationId::new();
+        DispatchStore::new(temp.path())
+            .upsert_run(DispatchRun {
+                run_id: caller_dispatch_run,
+                agent_id: caller.agent_id,
+                prompt: "supervisor tool caller".into(),
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let caller_runtime = AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: Some(caller_session),
+                worktree_id: WorktreeId::new(),
+            },
+            Some(caller_session),
+        )
+        .unwrap();
         let hello = fence_client_hello(Vec::new());
         let first_generation = ipc_generation();
         let start = supervisor_request(
@@ -23472,7 +23720,7 @@ instructions = "{instructions}"
             &runtime,
             &first_generation,
             &hello,
-            Some(&caller),
+            Some((&caller, caller_dispatch_run, &caller_runtime)),
             workspace,
             start.clone(),
         );
@@ -23480,7 +23728,7 @@ instructions = "{instructions}"
             &runtime,
             &first_generation,
             &hello,
-            Some(&caller),
+            Some((&caller, caller_dispatch_run, &caller_runtime)),
             workspace,
             start,
         );
@@ -23505,24 +23753,51 @@ instructions = "{instructions}"
                 &runtime,
                 &rollover,
                 &hello,
-                Some(&caller),
+                Some((&caller, caller_dispatch_run, &caller_runtime)),
                 workspace,
                 supervisor_request(action, "observe", payload),
             );
             assert_eq!(outcome, ResponseOutcome::Ok);
         }
 
-        // Start's initial tick detects that no worker reservation was produced,
-        // so its durable escalation also exercises the authorized resolve path.
+        // Start binds the root to the exact authenticated Agent dispatch. Add an
+        // explicit operator decision so the authorized resolve path stays in
+        // this end-to-end authority matrix.
         let store = SupervisorStore::new(temp.path());
         let id = serde_json::from_value(retry_body["supervisor_run_id"].clone()).unwrap();
-        let escalated = store.load(id).unwrap().unwrap();
+        let active = store.load(id).unwrap().unwrap();
+        assert_eq!(
+            active.tasks[&usagi_core::domain::supervisor::TaskId::new("root").unwrap()].state,
+            TaskState::Dispatched
+        );
+        let escalation_event_id = usagi_core::domain::id::OperationId::new();
+        let escalated = store
+            .apply(
+                id,
+                active.state_revision,
+                &SupervisorEvent {
+                    sequence: active.state_revision + 1,
+                    event_id: escalation_event_id,
+                    causation_id: None,
+                    correlation_id: None,
+                    observed_at: chrono::Utc::now(),
+                    payload_digest: "authority-test-escalation".into(),
+                    source: SupervisorEventSource::Admission,
+                    kind: SupervisorEventKind::Escalate {
+                        task_id: None,
+                        reason: "operator decision required".into(),
+                        safe_evidence: "safe evidence".into(),
+                        choices: vec!["resume".into()],
+                    },
+                },
+            )
+            .unwrap();
         let actual_escalation = escalated.escalation.unwrap().escalation_id;
         let (resolved, _) = serve_supervisor_request(
             &runtime,
             &rollover,
             &hello,
-            Some(&caller),
+            Some((&caller, caller_dispatch_run, &caller_runtime)),
             workspace,
             supervisor_request(
                 SupervisorToolAction::ResolveEscalation,
@@ -23584,7 +23859,7 @@ instructions = "{instructions}"
                     &runtime,
                     &rollover,
                     candidate_hello,
-                    authenticated,
+                    authenticated.map(|caller| (caller, caller_dispatch_run, &caller_runtime)),
                     workspace,
                     supervisor_request(action, operation, payload),
                 );
@@ -23595,7 +23870,7 @@ instructions = "{instructions}"
                 &runtime,
                 &rollover,
                 candidate_hello,
-                authenticated,
+                authenticated.map(|caller| (caller, caller_dispatch_run, &caller_runtime)),
                 workspace,
                 supervisor_request(
                     SupervisorToolAction::List,
@@ -23645,7 +23920,7 @@ instructions = "{instructions}"
             &runtime,
             &rollover,
             &hello,
-            Some(&caller),
+            Some((&caller, caller_dispatch_run, &caller_runtime)),
             workspace,
             supervisor_request(
                 SupervisorToolAction::Cancel,

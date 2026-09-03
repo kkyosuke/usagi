@@ -3970,6 +3970,8 @@ fn classify_terminal_input(
             GlobalControlChord::CtrlC => terminal_copy_key(input).unwrap_or(Key::Quit),
             GlobalControlChord::CtrlQ => Key::CtrlQ,
             GlobalControlChord::CtrlD => Key::CtrlD,
+            GlobalControlChord::CtrlX => Key::CtrlX,
+            GlobalControlChord::Help => Key::Help,
         }),
         LiveInputOutput::Swallowed => None,
         LiveInputOutput::Passthrough(bytes) => match input {
@@ -4105,6 +4107,8 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     match key.code {
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
         KeyCode::Left => Key::Left,
         KeyCode::Right => Key::Right,
         KeyCode::Home => Key::Home,
@@ -5456,6 +5460,7 @@ mod tests {
             state: usagi_core::domain::supervisor::SupervisorRunState::Cancelled,
             terminal_at: None,
             terminal_reason: Some("cancelled by local operator".to_owned()),
+            display_label: Some("Controlled Goal".to_owned()),
             policy: usagi_core::domain::supervisor::ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),
@@ -8151,6 +8156,8 @@ mod tests {
         for (code, expected) in [
             (KeyCode::Up, Key::Up),
             (KeyCode::Down, Key::Down),
+            (KeyCode::PageUp, Key::PageUp),
+            (KeyCode::PageDown, Key::PageDown),
             (KeyCode::Left, Key::Left),
             (KeyCode::Right, Key::Right),
             (KeyCode::Home, Key::Home),
@@ -8204,7 +8211,7 @@ mod tests {
     }
 
     #[test]
-    fn shifted_lowercase_crossterm_x_reaches_forced_session_removal() {
+    fn shifted_x_is_inert_and_ctrl_x_requests_safe_session_removal() {
         use crossterm::event::{
             KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
         };
@@ -8226,13 +8233,24 @@ mod tests {
         let mut state = AppState::home(workspace, vec![session]);
         let event = usagi_tui::presentation::app_event_from_key(key)
             .expect("the shifted key reaches the Home reducer");
+        assert!(update(&mut state, event).is_empty());
+
+        let ctrl_x = classify_terminal_input(
+            &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
+            Duration::ZERO,
+            &live_key(KeyCode::Char('x'), control()),
+        )
+        .expect("Ctrl-X is a management key");
+        assert_eq!(ctrl_x, Key::CtrlX);
+        let event = usagi_tui::presentation::app_event_from_key(ctrl_x)
+            .expect("Ctrl-X reaches the Home reducer");
         assert_eq!(
             update(&mut state, event),
             vec![Effect::RemoveSession {
                 workspace,
                 session,
-                force: true,
-                force_delete_branch: true,
+                force: false,
+                force_delete_branch: false,
             }]
         );
     }
@@ -8246,6 +8264,10 @@ mod tests {
             (LiveInput::Raw(vec![17]), Key::CtrlQ),
             (live_key(KeyCode::Char('d'), control()), Key::CtrlD),
             (LiveInput::Raw(vec![4]), Key::CtrlD),
+            (live_key(KeyCode::Char('x'), control()), Key::CtrlX),
+            (LiveInput::Raw(vec![24]), Key::CtrlX),
+            (live_key(KeyCode::Char('/'), control()), Key::Help),
+            (LiveInput::Raw(vec![31]), Key::Help),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -8306,7 +8328,7 @@ mod tests {
             assert_eq!(
                 classify_terminal_input(&mut classifier, Duration::from_millis(1), &follow_up),
                 Some(Key::Live(
-                    usagi_tui::usecase::terminal_input::LiveTerminalAction::ScrollDown
+                    usagi_tui::usecase::terminal_input::LiveTerminalAction::OpenDecisions
                 ))
             );
         }
@@ -8386,15 +8408,15 @@ mod tests {
             ))
         );
         assert_eq!(
-            classify_follow_up(live_key(KeyCode::Char('f'), Modifiers::default())),
+            classify_follow_up(live_key(KeyCode::Char('p'), Modifiers::default())),
             Some(Key::Live(
-                usagi_tui::usecase::terminal_input::LiveTerminalAction::NextTab
+                usagi_tui::usecase::terminal_input::LiveTerminalAction::OpenPullRequests
             ))
         );
         assert_eq!(
-            classify_follow_up(live_key(KeyCode::Char('f'), control())),
+            classify_follow_up(live_key(KeyCode::Char('p'), control())),
             Some(Key::Live(
-                usagi_tui::usecase::terminal_input::LiveTerminalAction::NextTab
+                usagi_tui::usecase::terminal_input::LiveTerminalAction::OpenPullRequests
             ))
         );
         assert_eq!(

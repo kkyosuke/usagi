@@ -22,6 +22,8 @@ const MIN_BACKGROUND_HEIGHT: usize = 6;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RootTerminalDrawerProjection {
+    /// Whether this drawer currently owns workspace input.
+    pub focused: bool,
     pub terminal_view: Option<TerminalViewProjection>,
     pub tabs: Vec<RootTerminalTabProjection>,
     pub pending: bool,
@@ -308,7 +310,7 @@ pub fn render_over_for_mode(
         .feedback
         .as_deref()
         .unwrap_or(
-            "Ctrl-O z: drawer/full  ·  Ctrl-O Ctrl-T: close  ·  Ctrl-O u/d/b: scroll  ·  Ctrl-O x: close terminal",
+            "Click: focus/select  ·  Ctrl-O z: drawer/full  ·  Ctrl-O Ctrl-T: close  ·  Ctrl-O ↑/↓/End: scroll  ·  Ctrl-O x: close terminal",
         );
     let terminal_height = body_height.saturating_sub(1);
     let tab_strip = render_tab_strip(&projection.tabs, inner_width);
@@ -338,10 +340,17 @@ pub fn render_over_for_mode(
         }
         rows
     };
-    let title = Role::Accent
-        .style()
-        .bold()
-        .paint(&format!("{ROOT_TERMINAL_ICON} Workspace Terminal"));
+    let title = if projection.focused {
+        Role::Accent
+            .style()
+            .bold()
+            .reverse()
+            .paint(&format!("{ROOT_TERMINAL_ICON} Workspace Terminal · FOCUS"))
+    } else {
+        Style::new().dim().paint(&format!(
+            "{ROOT_TERMINAL_ICON} Workspace Terminal · click to focus"
+        ))
+    };
     let panel = modal::boxed(&title, inner_width, &body);
     for (offset, panel_line) in panel.iter().take(drawer.height).enumerate() {
         let row = drawer.top + offset;
@@ -464,6 +473,7 @@ mod tests {
             .map(|row| format!("background {row}"))
             .collect::<Vec<_>>();
         let projection = RootTerminalDrawerProjection {
+            focused: true,
             terminal_view: Some(TerminalViewProjection {
                 rows: vec!["root output".to_owned()],
                 row_offset: 0,
@@ -541,6 +551,7 @@ mod tests {
                 80,
                 &[],
                 &RootTerminalDrawerProjection {
+                    focused: true,
                     terminal_view: None,
                     tabs: Vec::new(),
                     pending,

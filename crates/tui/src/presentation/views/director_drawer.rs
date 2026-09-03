@@ -96,6 +96,15 @@ pub struct WorkRunControlProjection {
     pub feedback: Option<String>,
 }
 
+/// Unicode-safe one-line command composed before it is submitted to the
+/// selected Agent terminal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DirectorCommandProjection {
+    pub value: String,
+    pub cursor: usize,
+    pub selection: Option<(usize, usize)>,
+}
+
 impl Default for WorkRunControlProjection {
     fn default() -> Self {
         Self {
@@ -110,11 +119,15 @@ impl Default for WorkRunControlProjection {
 /// Pure material accepted by the drawer renderer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirectorDrawerProjection {
+    /// Whether this drawer currently owns workspace input.
+    pub focused: bool,
     /// Whether this drawer represents the opt-in objective-driven workflow.
     pub goal_driven: bool,
     pub conversations: Vec<DirectorConversation>,
     pub organization: Vec<DirectorOrganizationRow>,
     pub terminal_view: Option<TerminalViewProjection>,
+    /// Present only while a live Agent can accept a complete command line.
+    pub command: Option<DirectorCommandProjection>,
     /// Safe reason for a selected interrupted conversation, outside PTY output.
     pub interrupted_detail: Option<String>,
     /// Drawer feedback used when the selected conversation has no live terminal.
@@ -191,8 +204,8 @@ pub fn geometry(raw_height: usize, raw_width: usize) -> DirectorDrawerGeometry {
 pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> DirectorTerminalViewport {
     let drawer = geometry(raw_height, raw_width);
     DirectorTerminalViewport {
-        // top/bottom borders + vertical padding + selector + separator + footer
-        rows: drawer.height.saturating_sub(7),
+        // borders + padding + selector + separators + composer + footer
+        rows: drawer.height.saturating_sub(9),
         // left/right borders and one cell of padding on both sides
         cols: drawer.width.saturating_sub(4),
     }
@@ -292,10 +305,17 @@ pub fn render_over(
     // each border. Reserve all four rows so the bottom border stays on-screen.
     let body_height = drawer.height.saturating_sub(4);
     let body = drawer_body(inner_width, body_height, projection);
-    let title = Role::Accent
-        .style()
-        .bold()
-        .paint(&format!("{DIRECTOR_ICON} Director"));
+    let title = if projection.focused {
+        Role::Accent
+            .style()
+            .bold()
+            .reverse()
+            .paint(&format!("{DIRECTOR_ICON} Director · FOCUS"))
+    } else {
+        Style::new()
+            .dim()
+            .paint(&format!("{DIRECTOR_ICON} Director · click to focus"))
+    };
     let panel = modal::boxed(&title, inner_width, &body);
 
     // The panel is `drawer.height` rows and is anchored at `drawer.top`, so it
@@ -352,9 +372,9 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
     }
 
     let footer_hint = if projection.goal_driven {
-        "Ctrl-O w: Work Runs/actions · Esc: close"
+        "Enter: send command · Ctrl-O w: Work Runs · click: focus"
     } else {
-        "Ctrl-O n / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close"
+        "Enter: send command · Ctrl-O n: New · Ctrl-O Ctrl-G: close"
     };
     let content_capacity = height.saturating_sub(rows.len() + 1);
     if matches!(projection.new, DirectorNewProjection::Empty) {
@@ -374,14 +394,14 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
             rows.push(Style::new().dim().paint("Esc returns to conversations."));
         }
     } else if let Some(view) = &projection.terminal_view {
-        rows.extend(widgets::live_terminal::render(
-            view,
+        return terminal_conversation_body(
             width,
-            height.saturating_sub(rows.len()),
-            content_capacity,
+            height,
+            rows,
+            view,
+            projection.command.as_ref(),
             footer_hint,
-        ));
-        return rows;
+        );
     } else if let Some(detail) = &projection.interrupted_detail {
         rows.push(Style::new().dim().paint(detail));
     } else if !projection.organization.is_empty() {
@@ -411,6 +431,76 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
         .collect()
 }
 
+fn terminal_conversation_body(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    view: &TerminalViewProjection,
+    command: Option<&DirectorCommandProjection>,
+    footer_hint: &str,
+) -> Vec<String> {
+    let command_rows = usize::from(command.is_some()) * 2;
+    let terminal_rows = height
+        .saturating_sub(rows.len() + 1)
+        .saturating_sub(command_rows);
+    rows.extend(widgets::live_terminal::viewport_rows(
+        view,
+        width,
+        terminal_rows,
+    ));
+    rows.resize(height.saturating_sub(command_rows + 1), String::new());
+    if let Some(command) = command {
+        rows.push(Style::new().dim().paint(&"─".repeat(width)));
+        rows.push(command_line(width, command));
+    }
+    rows.truncate(height.saturating_sub(1));
+    rows.resize(height.saturating_sub(1), String::new());
+    rows.push(
+        Style::new()
+            .dim()
+            .paint(view.feedback.as_deref().unwrap_or(footer_hint)),
+    );
+    rows
+}
+
+fn command_line(width: usize, command: &DirectorCommandProjection) -> String {
+    const LABEL: &str = "Command › ";
+    let label = Role::Accent.style().bold().paint(LABEL);
+    let capacity = width.saturating_sub(widgets::display_width(LABEL));
+    let mut cursor = command.cursor.min(command.value.len());
+    while !command.value.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let mut start = cursor;
+    let mut used = 0usize;
+    for (index, character) in command.value[..cursor].char_indices().rev() {
+        let character_width = widgets::display_width(&character.to_string());
+        if used.saturating_add(character_width) >= capacity {
+            break;
+        }
+        used += character_width;
+        start = index;
+    }
+    let selection = command
+        .selection
+        .and_then(|(selection_start, selection_end)| {
+            let selection_start = selection_start.max(start);
+            let selection_end = selection_end.min(command.value.len());
+            (selection_start < selection_end)
+                .then_some((selection_start - start, selection_end - start))
+        });
+    let input = widgets::block_caret_with_selection(
+        &command.value[start..],
+        cursor.saturating_sub(start),
+        selection,
+        &Style::new(),
+    );
+    widgets::clip_to_width(
+        &format!("{label}{}", widgets::clip_to_width(&input, capacity)),
+        width,
+    )
+}
+
 fn work_run_control_body(
     width: usize,
     height: usize,
@@ -434,6 +524,13 @@ fn work_run_control_body(
         };
         rows.push(style.paint(feedback));
     }
+    let selected_run = control.selected.and_then(|id| {
+        projection
+            .work_runs
+            .runs()
+            .iter()
+            .find(|run| run.supervisor_run_id == id)
+    });
 
     match control.mode {
         WorkRunControlMode::Closed => unreachable!("closed control uses the normal drawer"),
@@ -454,8 +551,9 @@ fn work_run_control_body(
                 };
                 let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
                 let progress = WorkRunProgress::from_run(run);
+                let label = run.display_label.as_deref().unwrap_or("Untitled Work Run");
                 rows.push(format!(
-                    "{marker} #{short_id}  {:<15} {}/{}",
+                    "{marker} {label}  #{short_id}  {:<15} {}/{}",
                     run_state_label(run.state),
                     progress.succeeded_tasks,
                     progress.total_tasks
@@ -470,46 +568,30 @@ fn work_run_control_body(
         }
         WorkRunControlMode::ConfirmCancel => {
             rows.extend(control_prompt_rows(
-                control.selected,
+                selected_run,
                 "Cancel this Work Run and stop its active Agents?",
-                "Enter confirm · Esc back",
             ));
+            rows.push("Enter confirm · Esc back".into());
             finish_control_rows(&mut rows, height);
         }
         WorkRunControlMode::ResolveEscalation => {
-            rows.extend(control_prompt_rows(
-                control.selected,
-                "Resolve the current decision",
-                "↑↓ choose · Enter confirm · Esc back",
-            ));
-            for (decision, label) in [
-                (EscalationDecision::Resume, "Retry work"),
-                (EscalationDecision::Cancel, "Cancel run"),
-                (EscalationDecision::Fail, "Mark failed"),
-            ] {
-                let marker = if decision == control.decision {
-                    "›"
-                } else {
-                    " "
-                };
-                rows.push(format!("{marker} {label}"));
-            }
+            append_escalation_control_rows(&mut rows, selected_run, control.decision);
             finish_control_rows(&mut rows, height);
         }
         WorkRunControlMode::Submitting => {
             rows.extend(control_prompt_rows(
-                control.selected,
+                selected_run,
                 "Applying the durable action…",
-                "Waiting for the daemon · do not repeat",
             ));
+            rows.push("Waiting for the daemon · do not repeat".into());
             finish_control_rows(&mut rows, height);
         }
         WorkRunControlMode::Retry => {
             rows.extend(control_prompt_rows(
-                control.selected,
+                selected_run,
                 "The action outcome is not confirmed",
-                "Enter retry same operation · Esc close",
             ));
+            rows.push("Enter retry same operation · Esc close".into());
             finish_control_rows(&mut rows, height);
         }
     }
@@ -518,16 +600,43 @@ fn work_run_control_body(
         .collect()
 }
 
-fn control_prompt_rows(
-    selected: Option<SupervisorRunId>,
-    prompt: &str,
-    footer: &str,
-) -> Vec<String> {
+fn control_prompt_rows(selected: Option<&SupervisorRunQuery>, prompt: &str) -> Vec<String> {
     let id = selected.map_or_else(
         || "unknown".to_owned(),
-        |id| id.to_string().chars().take(8).collect(),
+        |run| run.supervisor_run_id.to_string().chars().take(8).collect(),
     );
-    vec![format!("#{id}"), prompt.to_owned(), footer.to_owned()]
+    let label = selected
+        .and_then(|run| run.display_label.as_deref())
+        .unwrap_or("Untitled Work Run");
+    vec![format!("{label}  #{id}"), prompt.to_owned()]
+}
+
+fn append_escalation_control_rows(
+    rows: &mut Vec<String>,
+    selected: Option<&SupervisorRunQuery>,
+    selected_decision: EscalationDecision,
+) {
+    rows.extend(control_prompt_rows(
+        selected,
+        "Resolve the current decision",
+    ));
+    if let Some(escalation) = selected.and_then(|run| run.escalation.as_ref()) {
+        rows.push(format!("Reason: {}", escalation.reason));
+        rows.push(format!("Evidence: {}", escalation.safe_evidence));
+    }
+    for (decision, label) in [
+        (EscalationDecision::Resume, "Resume work"),
+        (EscalationDecision::Cancel, "Cancel run"),
+        (EscalationDecision::Fail, "Mark failed"),
+    ] {
+        let marker = if decision == selected_decision {
+            "›"
+        } else {
+            " "
+        };
+        rows.push(format!("{marker} {label}"));
+    }
+    rows.push("↑↓ choose · Enter confirm · Esc back".into());
 }
 
 fn finish_control_rows(rows: &mut Vec<String>, height: usize) {
@@ -552,10 +661,10 @@ fn work_run_rows(
         bar_width,
     );
     let mut rows = vec![
-        Role::Accent
-            .style()
-            .bold()
-            .paint(&format!("Active work  #{short_id}  {state}")),
+        Role::Accent.style().bold().paint(&format!(
+            "Work Run  {}  #{short_id}  {state}",
+            run.display_label.as_deref().unwrap_or("Untitled")
+        )),
         format!(
             "Progress  {bar}  {}/{} tasks  Agents {}/{}",
             progress.succeeded_tasks,
@@ -819,6 +928,7 @@ mod tests {
             state: SupervisorRunState::Running,
             terminal_at: None,
             terminal_reason: None,
+            display_label: Some("Review supervisor stability".into()),
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: [TaskState::Succeeded, TaskState::Running, TaskState::Pending]
@@ -870,7 +980,7 @@ mod tests {
         assert_eq!(zero, geometry(24, 80));
         assert_eq!(
             terminal_viewport(0, 0),
-            DirectorTerminalViewport { rows: 16, cols: 52 }
+            DirectorTerminalViewport { rows: 14, cols: 52 }
         );
         assert_eq!(
             terminal_viewport(1, 1),
@@ -882,7 +992,7 @@ mod tests {
     fn terminal_viewport_is_independent_from_the_closeup_right_pane() {
         assert_eq!(
             terminal_viewport(24, 100),
-            DirectorTerminalViewport { rows: 16, cols: 56 }
+            DirectorTerminalViewport { rows: 14, cols: 56 }
         );
         assert_ne!(
             (
@@ -905,7 +1015,7 @@ mod tests {
                 u16::try_from(drawer.left + 2).unwrap(),
                 u16::try_from(drawer.top + 4).unwrap(),
             ),
-            Some(TerminalPoint { row: 14, column: 0 })
+            Some(TerminalPoint { row: 16, column: 0 })
         );
         assert_eq!(terminal_point_at(24, 100, 30, 0, 0, 0), None);
         assert_eq!(
@@ -949,11 +1059,63 @@ mod tests {
         assert!(text.contains("Conversation  [No conversations]"));
         assert!(text.contains("[ New ]"));
         assert!(text.contains("No conversations yet"));
-        assert!(text.contains("Ctrl-O n / New: choose CLI"));
+        assert!(text.contains("Ctrl-O n: New"));
         assert!(frame[1].contains("\u{1b}[2m"));
         assert!(!frame[0].contains("\u{1b}[2m"));
         assert!(strip_ansi(&frame[23]).contains('└'));
         assert!(strip_ansi(&frame[23]).ends_with('┘'));
+    }
+
+    #[test]
+    fn focus_badge_and_long_ime_command_keep_the_caret_visible() {
+        let projection = DirectorDrawerProjection {
+            focused: true,
+            conversations: vec![DirectorConversation {
+                label: "active".to_owned(),
+                selected: true,
+            }],
+            terminal_view: Some(TerminalViewProjection {
+                rows: vec!["agent output".to_owned()],
+                row_offset: 0,
+                total_rows: 1,
+                scroll: 0,
+                feedback: None,
+            }),
+            command: Some(DirectorCommandProjection {
+                value: "日本語で追加の指示を入力します".repeat(4),
+                cursor: "日本語で追加の指示を入力します".repeat(4).len(),
+                selection: None,
+            }),
+            ..DirectorDrawerProjection::default()
+        };
+        let frame = render_over(16, 80, &[], &projection);
+        let text = frame.join("\n");
+        assert!(strip_ansi(&text).contains("Director · FOCUS"));
+        assert!(text.contains(crate::presentation::frame::INPUT_CURSOR_MARKER));
+        assert!(frame.iter().all(|line| display_width(line) == 80));
+
+        let inactive = render_over(
+            16,
+            80,
+            &[],
+            &DirectorDrawerProjection {
+                focused: false,
+                ..projection
+            },
+        )
+        .join("\n");
+        assert!(strip_ansi(&inactive).contains("Director · click to focus"));
+
+        let repaired = command_line(
+            20,
+            &DirectorCommandProjection {
+                value: "日本".to_owned(),
+                cursor: 1,
+                selection: Some((0, usize::MAX)),
+            },
+        );
+        assert!(repaired.contains(crate::presentation::frame::INPUT_CURSOR_MARKER));
+        assert!(display_width(&repaired) <= 20);
     }
 
     #[test]
@@ -1037,12 +1199,12 @@ mod tests {
 
         assert!(body.contains("Work Run  [No conversations]"));
         assert!(body.contains("Work Run output and stop reasons appear here."));
-        assert!(body.contains("Ctrl-O w: Work Runs/actions"));
+        assert!(body.contains("Ctrl-O w: Work Runs"));
         assert!(!body.contains("Choose New to start a conversation."));
     }
 
     #[test]
-    fn director_drawer_renders_daemon_owned_task_progress_in_both_modes() {
+    fn director_drawer_renders_daemon_owned_work_run_progress_in_both_modes() {
         for goal_driven in [false, true] {
             let projection = DirectorDrawerProjection {
                 goal_driven,
@@ -1055,7 +1217,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            assert!(body.contains("Active work"));
+            assert!(body.contains("Work Run  Review supervisor stability"));
             assert!(body.contains("1/3 tasks"));
             assert!(body.contains("Agents 1/4"));
             assert!(body.contains("✓ task-0  done"));
@@ -1196,7 +1358,15 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // One rendering matrix keeps every Work Run control state visually comparable.
     fn work_run_control_renders_selection_confirmation_decision_and_retry() {
-        let run = work_run();
+        let mut run = work_run();
+        run.escalation = Some(EscalationRecord {
+            escalation_id: OperationId::new(),
+            reason: "choose a recovery".into(),
+            blocking_task_id: Some(TaskId::new("task-1").unwrap()),
+            safe_evidence: "the Agent needs a fresh result".into(),
+            choices: vec!["resume".into()],
+            created_at: Utc::now(),
+        });
         let selected = run.supervisor_run_id;
         let another = work_run();
         let base = DirectorDrawerProjection::default()
@@ -1212,8 +1382,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(list.contains("Work Runs"));
-        assert!(list.contains("› #"));
-        assert!(list.contains("  #"));
+        assert!(list.contains("› Review supervisor stability  #"));
+        assert!(list.contains("  Review supervisor stability  #"));
         assert!(list.contains("Enter actions"));
 
         let confirmation = DirectorDrawerProjection {
@@ -1248,7 +1418,10 @@ mod tests {
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(decision.contains("Resume work"));
         assert!(decision.contains("› Cancel run"));
+        assert!(decision.contains("Reason: choose a recovery"));
+        assert!(decision.contains("Evidence: the Agent needs a fresh result"));
 
         let submitting = DirectorDrawerProjection {
             work_run_control: WorkRunControlProjection {
@@ -1309,7 +1482,10 @@ mod tests {
 
     #[test]
     fn control_prompt_identifies_a_missing_selection_as_unknown() {
-        assert_eq!(control_prompt_rows(None, "prompt", "footer")[0], "#unknown");
+        assert_eq!(
+            control_prompt_rows(None, "prompt")[0],
+            "Untitled Work Run  #unknown"
+        );
     }
 
     #[test]
@@ -1375,6 +1551,7 @@ mod tests {
     #[test]
     fn populated_projection_renders_selected_conversation_and_terminal_rows() {
         let projection = DirectorDrawerProjection {
+            focused: true,
             goal_driven: false,
             conversations: vec![
                 DirectorConversation {
@@ -1398,6 +1575,7 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
+            command: None,
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::Ready,
@@ -1444,6 +1622,7 @@ mod tests {
     fn retained_selection_rows_render_the_live_bottom_and_scrolled_windows() {
         let retained = (0..10).map(|row| format!("row {row}")).collect::<Vec<_>>();
         let projection = DirectorDrawerProjection {
+            focused: true,
             goal_driven: false,
             conversations: vec![DirectorConversation {
                 label: "active".to_owned(),
@@ -1457,6 +1636,11 @@ mod tests {
                 scroll: 0,
                 feedback: Some("copied 2 lines".to_owned()),
             }),
+            command: Some(DirectorCommandProjection {
+                value: "追加指示".to_owned(),
+                cursor: "追加指示".len(),
+                selection: None,
+            }),
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::Ready,
@@ -1467,11 +1651,13 @@ mod tests {
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>();
-        assert_eq!(
-            &body[2..8],
-            ["row 4", "row 5", "row 6", "row 7", "row 8", "row 9"]
-        );
+        assert_eq!(&body[2..6], ["row 6", "row 7", "row 8", "row 9"]);
         assert!(!body.iter().any(|row| row == "row 0"));
+        assert_eq!(
+            body[6],
+            "────────────────────────────────────────────────────"
+        );
+        assert!(body[7].contains("Command › 追加指示"));
         assert_eq!(body[8], "copied 2 lines");
 
         let mut scrolled = projection;
@@ -1484,10 +1670,7 @@ mod tests {
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>();
-        assert_eq!(
-            &body[2..8],
-            ["row 2", "row 3", "row 4", "row 5", "row 6", "row 7"]
-        );
+        assert_eq!(&body[2..6], ["row 4", "row 5", "row 6", "row 7"]);
         assert!(!body.iter().any(|row| row == "row 9"));
 
         let drawer = geometry(12, 80);
@@ -1500,13 +1683,14 @@ mod tests {
                 u16::try_from(drawer.left + 2).unwrap(),
                 u16::try_from(drawer.top + 4).unwrap(),
             ),
-            Some(TerminalPoint { row: 6, column: 0 })
+            Some(TerminalPoint { row: 8, column: 0 })
         );
     }
 
     #[test]
     fn interrupted_detail_has_a_dedicated_body_row_and_feedback_owns_the_footer() {
         let projection = DirectorDrawerProjection {
+            focused: true,
             goal_driven: false,
             conversations: vec![DirectorConversation {
                 label: "interrupted".to_owned(),
@@ -1514,6 +1698,7 @@ mod tests {
             }],
             organization: Vec::new(),
             terminal_view: None,
+            command: None,
             interrupted_detail: Some("identity unavailable".to_owned()),
             feedback: Some("resume failed safely".to_owned()),
             new: DirectorNewProjection::Ready,
@@ -1725,6 +1910,7 @@ mod tests {
     #[test]
     fn renderer_handles_tiny_resize_and_cjk_choice_without_style_leak() {
         let projection = DirectorDrawerProjection {
+            focused: true,
             goal_driven: false,
             conversations: vec![DirectorConversation {
                 label: "会話の履歴".to_owned(),
@@ -1732,6 +1918,7 @@ mod tests {
             }],
             organization: Vec::new(),
             terminal_view: None,
+            command: None,
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::Ready,

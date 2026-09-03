@@ -301,8 +301,10 @@ durable journal にその由来が記録されており、dispatch store にそ�
 同じ operation id での retry は二重作成しない。create は lifecycle journal から、dispatch は記録済みの結末から
 replay される。
 
-`supervisor_start` は bounded な root task と初期 DAG を snapshot と compacting event journal に保存し、同じ
-`idempotency_key` の再送では同じ run を返す。get/list/events の応答は instruction body を含まない安全な
+`supervisor_start` は bounded な root task を snapshot と compacting event journal に保存し、その tool を呼んだ
+authenticated Agent の exact dispatch/runtime/worktree fence を root task へ直ちに束縛する。初期 DAG は受け取らず、child は
+root Agent が既存 session delegation tool で動的に作る。同じ `idempotency_key` の再送では同じ run を返す。
+get/list/events の応答は instruction body を含まない安全な
 projection である。caller provenance は daemon 発行の live MCP credential が解決する root/session と Agent、
 および handshake で検証済みの client incarnation の組である。socket の `ConnectionId` は含めないため、同じ MCP
 process の再接続と同一 daemon process 内の generation rollover は同じ operation/run と control authority へ収束する。

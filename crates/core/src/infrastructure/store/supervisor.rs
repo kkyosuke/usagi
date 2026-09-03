@@ -15,7 +15,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
 use crate::domain::supervisor::{
-    SupervisorEvent, SupervisorRun, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, reduce,
+    MAX_ARTIFACT_CANDIDATE_BYTES, MAX_SUPERVISOR_DISPLAY_LABEL_BYTES, SupervisorEvent,
+    SupervisorRun, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
+    presentation_text_is_safe, reduce,
 };
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
@@ -175,6 +177,7 @@ impl SupervisorStore {
     ///
     /// Returns an error when the state directory or snapshot cannot be written.
     pub fn initialize(&self, run: &SupervisorRun) -> Result<()> {
+        Self::validate_snapshot(run)?;
         json_file::write_atomic(&self.dir, &self.snapshot_path(run.supervisor_run_id), run)?;
         self.write_checkpoint(run.supervisor_run_id, run.state_revision, 0)?;
         self.refresh_run_list_index(run);
@@ -289,6 +292,27 @@ impl SupervisorStore {
     fn validate_snapshot(run: &SupervisorRun) -> Result<()> {
         if !run.compaction_state_is_valid() {
             bail!("supervisor snapshot has an invalid compaction tombstone");
+        }
+        if run.display_label.as_ref().is_some_and(|label| {
+            label.is_empty()
+                || label.len() > MAX_SUPERVISOR_DISPLAY_LABEL_BYTES
+                || !presentation_text_is_safe(label)
+        }) {
+            bail!("supervisor snapshot has an invalid display label");
+        }
+        if run
+            .verification_candidates
+            .iter()
+            .any(|(task_id, candidate)| {
+                !run.tasks.contains_key(task_id)
+                    || candidate.as_ref().is_some_and(|candidate| {
+                        candidate.len() > MAX_ARTIFACT_CANDIDATE_BYTES
+                            || crate::domain::pr_inventory::canonicalize(candidate)
+                                .is_none_or(|identity| identity.as_url() != candidate)
+                    })
+            })
+        {
+            bail!("supervisor snapshot has an invalid artifact candidate");
         }
         Ok(())
     }
@@ -424,6 +448,57 @@ impl SupervisorStore {
         }
         runs.sort_by_key(|run| (run.created_at, run.supervisor_run_id));
         Ok(runs)
+    }
+
+    /// Returns durable identities which can still change. The derived index is
+    /// validated without hydrating retained terminal snapshots.
+    ///
+    /// # Errors
+    /// Returns an error when the run index cannot be read or rebuilt.
+    pub fn unfinished_run_ids(&self) -> Result<Vec<SupervisorRunId>> {
+        Ok(self
+            .run_list_index()?
+            .entries
+            .into_iter()
+            .filter(|entry| !entry.state.is_finished())
+            .map(|entry| entry.supervisor_run_id)
+            .collect())
+    }
+
+    /// Returns only terminal runs that can still own worker-stop recovery.
+    /// Successful history is excluded without hydrating its snapshots.
+    ///
+    /// # Errors
+    /// Returns an error when the run index cannot be read or rebuilt.
+    pub fn aborted_run_ids(&self) -> Result<Vec<SupervisorRunId>> {
+        Ok(self
+            .run_list_index()?
+            .entries
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    SupervisorRunState::Cancelled | SupervisorRunState::Failed
+                )
+            })
+            .map(|entry| entry.supervisor_run_id)
+            .collect())
+    }
+
+    /// Reports unfinished ownership from the validated index without replaying
+    /// unrelated run history.
+    ///
+    /// # Errors
+    /// Returns an error when the run index cannot be read or rebuilt.
+    pub fn has_unfinished_workspace(
+        &self,
+        workspace: crate::domain::id::WorkspaceId,
+    ) -> Result<bool> {
+        Ok(self
+            .run_list_index()?
+            .entries
+            .into_iter()
+            .any(|entry| entry.workspace_id == Some(workspace) && !entry.state.is_finished()))
     }
 
     /// Lists one owner/state-filtered page without hydrating aggregates outside
@@ -983,7 +1058,7 @@ mod tests {
     use super::*;
     use crate::domain::id::{OperationId, WorkspaceId};
     use crate::domain::supervisor::{
-        SupervisorEventKind, SupervisorEventSource, SupervisorRunState,
+        SupervisorEventKind, SupervisorEventSource, SupervisorRunState, TaskId,
     };
     use chrono::{DateTime, TimeZone, Utc};
     fn now() -> DateTime<Utc> {
@@ -1281,6 +1356,51 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid compaction tombstone")
+        );
+    }
+
+    #[test]
+    fn unsafe_or_unbounded_display_labels_never_reach_a_projection() {
+        for label in [
+            "escape\u{1b}[2J".to_owned(),
+            "x".repeat(MAX_SUPERVISOR_DISPLAY_LABEL_BYTES + 1),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = SupervisorStore::new(tmp.path());
+            let mut run = SupervisorRun::new(
+                "caller".into(),
+                "task".into(),
+                "input".into(),
+                "policy".into(),
+                now(),
+            );
+            run.display_label = Some(label);
+            assert!(
+                store
+                    .initialize(&run)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid display label")
+            );
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        run.verification_candidates
+            .insert(TaskId::new("missing").unwrap(), None);
+        assert!(
+            store
+                .initialize(&run)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid artifact candidate")
         );
     }
 

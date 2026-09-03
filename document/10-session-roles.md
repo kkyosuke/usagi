@@ -1,6 +1,6 @@
 # 10. session role
 
-> [ドキュメント目次](README.md) ｜ ← 前へ [9. 環境変数設定](09-env.md)
+> [ドキュメント目次](README.md) ｜ ← 前へ [9. 環境変数設定](09-env.md) ｜ 次へ → [11. キーバインド](11-keybindings.md)
 
 session role の設定、割り当て、daemon 検証、Agent prompt 合成の仕様正本である。role は作業方針を表す prompt policy であり、
 filesystem sandbox、MCP authorization、session lifecycle の権限ではない。

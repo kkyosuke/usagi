@@ -36,7 +36,8 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 
 設計上の位置づけと現在の実装範囲は
 [プロジェクト概要](document/01-overview.md)、画面とキー操作の詳細は
-[TUI 仕様](document/03-tui.md)を参照する。
+[TUI 仕様](document/03-tui.md)、全キーボード操作は
+[キーバインド](document/11-keybindings.md)を参照する。
 
 ## 画面
 
@@ -73,33 +74,43 @@ session がない workspace を開いた直後は session 行を選択しない�
 
 | 操作 | 動作 |
 |---|---|
-| `↑` / `↓`、`j` / `k` | session を選ぶ |
+| `↑` / `↓` | session を選ぶ |
 | `←` / `→` | Switch で前 / 次の project tab へ移動する |
 | `Enter` / `t` | 選択した session の Closeup、または明示選択した `+ new session` の作成を開く |
 | `Ctrl-A` | Switch で新規 session の作成を直接開く |
-| `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
-| `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
+| `Ctrl-O o` | live pane から Switch へ戻る |
+| `Ctrl-O a` | 選択中 target の action を開く |
+| `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-X` で閉じる） |
 | `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
-| `Ctrl-O` → `0` | 全 project / session の fuzzy finder を開く（`Ctrl-D` は project tab の detach） |
+| `Ctrl-O` → `0` | 全 project / session の fuzzy finder を開く（`Ctrl-X` は project tab の detach） |
 | `Ctrl-O t` / `Ctrl-O Ctrl-T` | workspace root の Shell drawer を開閉する |
 | `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
 | `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
 | `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Director と Work Run 一覧・操作面を開く |
+| `Ctrl-O [` / `Ctrl-O ]` | 前 / 次の pane tab を選ぶ |
+| `Ctrl-O {` / `Ctrl-O }` | 選択中の pane tab を前 / 次へ並べ替える |
+| `Ctrl-O p` / `Ctrl-O Ctrl-P` | Pull Request 一覧を開く |
+| `Ctrl-O v` / `Ctrl-O Ctrl-V` | Preview を開く |
+| `Ctrl-O d` / `Ctrl-O Ctrl-D` | pending Decision 一覧を開く |
+| `Ctrl-O s` / `Ctrl-O Ctrl-S` | Scratchpad を開く |
 | `?` / live pane の `Ctrl-O ?` | コマンド一覧を開く（初期表示は現在実行できるコマンド） |
 | `:` | Overview のコマンドパレットを開く |
-| `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
+| `Ctrl-X` | Switch で選択中の session を安全に削除する |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
 
 leader 後の文字 shortcut は、2 打目の `Ctrl` の有無を同一視する。たとえば `Ctrl-O n` と
 `Ctrl-O Ctrl-N` は同じ操作になる。直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
-live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。TUI を離れる操作は
+live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。Director では通常文字と paste を
+IME 対応の `Command ›` 入力欄で編集し、`Enter` で 1 行の追加指示として root Agent へ送る。TUI を離れる操作は
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
 
 generic terminal の `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。
 `Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、再度開くと新しい terminal になる。Director は画面の
-右側を高さ一杯に使い、workspace Shell と同時に開ける。選択 session の Agent は両 drawer の背面でも
-通常の workspace geometry と attachment を変えずに出力を更新し続け、drawer はその完成済み画面へ重なるだけである。
+右側を高さ一杯に使う overlay で、workspace Shell と同時に開ける。両方が開いているときは panel のクリックでも focus が移り、
+左側に見えている Shell の選択・コピーを継続できる。title の `FOCUS` / `click to focus` が入力先を示す。選択 session の Agent は
+drawer の背面でも通常の workspace geometry と attachment のまま出力を更新し続ける。最後の実行中または起動中 root Agent が
+消えると Director は自動で閉じる。
 live Agent では同じ close chord が `Ctrl-D` と同じ終了入力になり、interrupted Agent では選択中の tab を
 永続的に閉じる。interrupted tab の close は Agent の resume や新規起動を行わない。
 
@@ -222,9 +233,9 @@ daemon 再起動などで Agent が中断した場合は、自動的に別の会
 
 ### 4. 状態と PR を確認する
 
-session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。Switch の `p`、
-Closeup の `Ctrl-O v`（または `Ctrl-O Ctrl-V`）、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開き、`d` で diff、
-`n` で session の scratchpad を開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
+session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。`Ctrl-O p`
+（または `Ctrl-O Ctrl-P`）、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開く。
+Preview は `Ctrl-O v`、scratchpad は `Ctrl-O s` で開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
 検知した PR を選択した一覧を自動で開く。PR 一覧は repository 見出しの下へ番号・状態・title をまとめ、
 上部の All / Open / Closed / Merged を `←→`、PR を `↑↓` で選ぶ。枠外のクリックで閉じ、PR を選んで
 Enter を押すと既定のブラウザで開く。
