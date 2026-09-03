@@ -255,10 +255,16 @@ const fn health_reason(reason: HealthReason) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentRuntimeRow, DaemonProjection, render_over, runtime_lines};
+    use super::{
+        AgentRuntimeRow, DaemonProjection, action_result_line, render_over, runtime_lines,
+    };
     use crate::presentation::widgets::display_width;
-    use crate::usecase::application::controller::DaemonControlState;
+    use crate::usecase::application::controller::{
+        AppEvent, AppKey, AppState, BackendEvent, DaemonAction, DaemonControlState, Effect, Notice,
+        SafeError, SafeMessage, update,
+    };
     use usagi_core::domain::agent::AgentRuntimeInventoryState;
+    use usagi_core::domain::id::WorkspaceId;
     use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
     use usagi_core::usecase::daemon_health::{DaemonHealth, HealthReason};
     use usagi_core::usecase::session_state::SessionStateCounts;
@@ -315,6 +321,51 @@ mod tests {
             out.push(ch);
         }
         out
+    }
+
+    #[test]
+    fn lifecycle_feedback_renders_pending_success_and_safe_failure() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("daemon".to_owned())),
+        );
+        let effects = update(&mut state, AppEvent::Key(AppKey::Char('r')));
+        let [Effect::DaemonControl { action, token, .. }] = effects.as_slice() else {
+            panic!("daemon restart did not produce its typed effect");
+        };
+        assert!(strip(&action_result_line(state.daemon_control())).contains("in progress"));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action: *action,
+                token: *token,
+                result: Ok(Notice::new("restart complete")),
+            }),
+        );
+        assert!(strip(&action_result_line(state.daemon_control())).contains("restart complete"));
+
+        let effects = update(&mut state, AppEvent::Key(AppKey::Char('x')));
+        let [Effect::DaemonControl { token, .. }] = effects.as_slice() else {
+            panic!("daemon stop did not produce its typed effect");
+        };
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action: DaemonAction::Stop,
+                token: *token,
+                result: Err(SafeError {
+                    message: SafeMessage::new("stop refused"),
+                    error_id: "daemon-stop-refused".to_owned(),
+                }),
+            }),
+        );
+        assert!(strip(&action_result_line(state.daemon_control())).contains("stop refused"));
     }
 
     #[test]

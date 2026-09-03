@@ -10142,6 +10142,35 @@ mod tests {
     }
 
     #[test]
+    fn daemon_modal_navigation_wraps_and_stop_shortcut_is_direct() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("daemon".into())),
+        );
+
+        for (key, expected) in [
+            (AppKey::Up, DaemonAction::Start),
+            (AppKey::Up, DaemonAction::Stop),
+            (AppKey::Down, DaemonAction::Start),
+            (AppKey::Left, DaemonAction::Stop),
+        ] {
+            let _ = update(&mut state, AppEvent::Key(key));
+            assert_eq!(state.daemon_control().selected(), expected);
+        }
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('x'))),
+            vec![Effect::DaemonControl {
+                workspace,
+                action: DaemonAction::Stop,
+                token: PendingToken(1),
+            }]
+        );
+    }
+
+    #[test]
     fn garden_shortcut_opens_without_replacing_a_front_surface() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
