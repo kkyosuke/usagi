@@ -252,7 +252,7 @@ impl WorkspaceRuntime {
     /// drawer. It remains attached for live output but read-only while a root
     /// surface owns foreground input.
     #[must_use]
-    pub fn director_background_terminal(&self) -> Option<TerminalRef> {
+    pub fn workspace_drawer_background_terminal(&self) -> Option<TerminalRef> {
         if !self.state.workspace_drawer_open() {
             return None;
         }
@@ -4026,7 +4026,10 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
-        assert_eq!(runtime.director_background_terminal(), Some(managed));
+        assert_eq!(
+            runtime.workspace_drawer_background_terminal(),
+            Some(managed)
+        );
         let frame = runtime.render(
             24,
             200,
