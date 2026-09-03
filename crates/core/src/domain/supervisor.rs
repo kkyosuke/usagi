@@ -121,20 +121,25 @@ impl ArtifactExpectation {
             .into_iter()
             .map(str::to_ascii_lowercase)
             .collect::<BTreeSet<_>>();
-        if heads.is_empty()
-            || heads.len() > MAX_ARTIFACT_EXPECTATION_HEADS
+        Self::from_normalized_heads(repository, heads)
+    }
+
+    fn from_normalized_heads(
+        repository: GitHubRepository,
+        mut heads: BTreeSet<String>,
+    ) -> Option<Self> {
+        if heads.len() > MAX_ARTIFACT_EXPECTATION_HEADS
             || heads.iter().any(|head| {
                 !matches!(head.len(), 40 | 64) || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
         {
             return None;
         }
-        let mut heads = heads.into_iter();
-        let head_oid = heads.next()?;
+        let head_oid = heads.pop_first()?;
         Some(Self {
             repository,
             head_oid,
-            alternate_head_oids: heads.collect(),
+            alternate_head_oids: heads.into_iter().collect(),
         })
     }
 
@@ -1710,6 +1715,10 @@ mod tests {
         assert!(alternate.matches_head("0123456789012345678901234567890123456789"));
         assert!(alternate.matches_head("ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"));
         assert_eq!(alternate.head_oids().count(), 2);
+        assert!(
+            ArtifactExpectation::from_heads(repository.clone(), std::iter::empty::<&str>())
+                .is_none()
+        );
 
         let too_many = (0..=MAX_ARTIFACT_EXPECTATION_HEADS)
             .map(|index| format!("{index:040x}"))
