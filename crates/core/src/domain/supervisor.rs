@@ -1559,9 +1559,10 @@ fn project_ready(tasks: &mut BTreeMap<TaskId, TaskNode>) {
         .map(|(id, _)| id.clone())
         .collect();
     for id in ready {
-        if let Some(task) = tasks.get_mut(&id) {
-            task.state = TaskState::Ready;
-        }
+        tasks
+            .get_mut(&id)
+            .expect("ready task was selected from the same task map")
+            .state = TaskState::Ready;
     }
 }
 
@@ -2503,11 +2504,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.verification_candidates[&id].as_deref(), Some(candidate));
+        reduce(
+            &mut run,
+            &event(
+                7,
+                SupervisorEventKind::VerificationCandidateRecorded {
+                    task_id: id.clone(),
+                    generation: 1,
+                    candidate_pr: Some(candidate.into()),
+                },
+            ),
+        )
+        .unwrap();
         assert!(matches!(
             reduce(
                 &mut run,
                 &event(
-                    7,
+                    8,
                     SupervisorEventKind::VerificationCandidateRecorded {
                         task_id: id.clone(),
                         generation: 1,
@@ -2528,7 +2541,7 @@ mod tests {
                 reduce(
                     &mut run,
                     &event(
-                        7,
+                        8,
                         SupervisorEventKind::VerificationCandidateRecorded {
                             task_id: id.clone(),
                             generation: 1,
@@ -2543,7 +2556,7 @@ mod tests {
         reduce(
             &mut run,
             &event(
-                7,
+                8,
                 SupervisorEventKind::VerificationDeferred {
                     task_id: id.clone(),
                     generation: 1,
@@ -2569,7 +2582,7 @@ mod tests {
             reduce(
                 &mut run,
                 &event(
-                    8,
+                    9,
                     SupervisorEventKind::VerificationExpectationRecorded {
                         task_id: id.clone(),
                         generation: 1,
@@ -2695,6 +2708,18 @@ mod tests {
             &mut run,
             &event(
                 2,
+                SupervisorEventKind::Cancel {
+                    task_id: Some(id.clone()),
+                    reason: "task cancellation replayed".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Cancelled);
+        reduce(
+            &mut run,
+            &event(
+                3,
                 SupervisorEventKind::Cancel {
                     task_id: None,
                     reason: "run cancelled".into(),
@@ -3092,6 +3117,20 @@ mod tests {
         .unwrap();
     }
 
+    fn assert_escalation_resume_reset(run: &SupervisorRun) {
+        assert_eq!(run.state, SupervisorRunState::Running);
+        assert!(run.escalation.is_none());
+        assert!(run.terminal_at.is_none());
+        let root_id = TaskId::new("root").unwrap();
+        let root = &run.tasks[&root_id];
+        assert_eq!(root.state, TaskState::AwaitingDecision);
+        assert_eq!(root.verification_digest, None);
+        assert_eq!(root.verification_attempt, 0);
+        assert_eq!(root.verification_retry_at, None);
+        assert_eq!(root.verification_expectation, None);
+        assert!(!run.verification_candidates.contains_key(&root_id));
+    }
+
     #[test]
     fn escalation_resolution_is_fenced_and_applies_each_authorized_decision() {
         fn escalated() -> SupervisorRun {
@@ -3102,14 +3141,27 @@ mod tests {
                 "policy".into(),
                 now(),
             );
-            let root = task(run.supervisor_run_id, "root", &[]);
-            run.tasks.insert(root.task_id.clone(), root);
+            let mut root = task(run.supervisor_run_id, "root", &[]);
+            root.state = TaskState::Verifying;
+            root.verification_digest = Some("rejected-digest".into());
+            root.verification_attempt = 2;
+            root.verification_retry_at = Some(now());
+            root.verification_expectation = ArtifactExpectation::new(
+                GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+                "0123456789012345678901234567890123456789",
+            );
+            let root_id = root.task_id.clone();
+            run.tasks.insert(root_id.clone(), root);
+            run.verification_candidates.insert(
+                root_id.clone(),
+                Some("https://github.com/acme/repo/pull/42".into()),
+            );
             reduce(
                 &mut run,
                 &event(
                     1,
                     SupervisorEventKind::Escalate {
-                        task_id: None,
+                        task_id: Some(root_id),
                         reason: "needs authority".into(),
                         safe_evidence: "safe".into(),
                         choices: vec!["resume".into(), "cancel".into(), "fail".into()],
@@ -3146,9 +3198,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(resumed.state, SupervisorRunState::Running);
-        assert!(resumed.escalation.is_none());
-        assert!(resumed.terminal_at.is_none());
+        assert_escalation_resume_reset(&resumed);
 
         let mut cancelled = escalated();
         let escalation_id = cancelled.escalation.as_ref().unwrap().escalation_id;

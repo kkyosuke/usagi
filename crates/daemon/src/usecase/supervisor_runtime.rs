@@ -3395,7 +3395,7 @@ mod tests {
         let stale_candidate = event(
             &candidate_run,
             SupervisorEventKind::VerificationCandidateRecorded {
-                task_id: candidate_id,
+                task_id: candidate_id.clone(),
                 generation: 2,
                 candidate_pr: None,
             },
@@ -3404,6 +3404,88 @@ mod tests {
             reduce(&mut candidate_run, &stale_candidate),
             Err(usagi_core::domain::supervisor::SupervisorError::StaleGeneration)
         ));
+        let recorded_candidate = event(
+            &candidate_run,
+            SupervisorEventKind::VerificationCandidateRecorded {
+                task_id: candidate_id.clone(),
+                generation: 1,
+                candidate_pr: None,
+            },
+        );
+        reduce(&mut candidate_run, &recorded_candidate).unwrap();
+        let replayed_candidate = event(
+            &candidate_run,
+            SupervisorEventKind::VerificationCandidateRecorded {
+                task_id: candidate_id.clone(),
+                generation: 1,
+                candidate_pr: None,
+            },
+        );
+        reduce(&mut candidate_run, &replayed_candidate).unwrap();
+        let conflicting_candidate = event(
+            &candidate_run,
+            SupervisorEventKind::VerificationCandidateRecorded {
+                task_id: candidate_id.clone(),
+                generation: 1,
+                candidate_pr: Some("https://github.com/acme/repo/pull/42".into()),
+            },
+        );
+        assert!(matches!(
+            reduce(&mut candidate_run, &conflicting_candidate),
+            Err(usagi_core::domain::supervisor::SupervisorError::ProvenanceMismatch)
+        ));
+        let invalid_candidate = event(
+            &candidate_run,
+            SupervisorEventKind::VerificationCandidateRecorded {
+                task_id: candidate_id,
+                generation: 1,
+                candidate_pr: Some("https://example.com/acme/repo/pull/42".into()),
+            },
+        );
+        assert!(matches!(
+            reduce(&mut candidate_run, &invalid_candidate),
+            Err(usagi_core::domain::supervisor::SupervisorError::InvalidTransition)
+        ));
+    }
+
+    #[test]
+    fn core_reducer_projects_dependents_and_keeps_terminal_cancellation_idempotent() {
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "reducer".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        run.state = SupervisorRunState::Running;
+        let root_id = TaskId::new("root").unwrap();
+        let mut root = task(run.supervisor_run_id, "root", None);
+        root.state = TaskState::Running;
+        let child_id = TaskId::new("child").unwrap();
+        let mut child = task(run.supervisor_run_id, "child", Some("root"));
+        child.dependencies.insert(root_id.clone());
+        run.tasks.insert(root_id.clone(), root);
+        run.tasks.insert(child_id.clone(), child);
+
+        let succeeded = event(
+            &run,
+            SupervisorEventKind::SetTaskState {
+                task_id: root_id.clone(),
+                generation: 1,
+                state: TaskState::Succeeded,
+            },
+        );
+        reduce(&mut run, &succeeded).unwrap();
+        assert_eq!(run.tasks[&child_id].state, TaskState::Ready);
+        let cancel_terminal = event(
+            &run,
+            SupervisorEventKind::Cancel {
+                task_id: Some(root_id.clone()),
+                reason: "late cancellation replay".into(),
+            },
+        );
+        reduce(&mut run, &cancel_terminal).unwrap();
+        assert_eq!(run.tasks[&root_id].state, TaskState::Succeeded);
     }
 
     #[test]
