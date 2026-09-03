@@ -1489,7 +1489,7 @@ fn production_agent_fixture_is_injected_without_cli_credentials() {
 #[allow(clippy::too_many_lines)] // One process-spanning round trip keeps every last-mile assertion visible.
 fn production_user_decision_round_trip_reaches_the_original_caller() {
     let mcp = McpHarness::start();
-    let executable = env!("CARGO_BIN_EXE_usagi");
+    let executable_placeholder = "$USAGI_E2E_USAGI";
     mcp.replace_fixture_agent(
         "codex",
         &format!(
@@ -1515,7 +1515,7 @@ fi
   printf '%s\n' '{{"jsonrpc":"2.0","method":"notifications/initialized"}}'
   printf '%s\n' '{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"user_decision_request","arguments":{{"title":"Deploy?","prompt":"Choose","options":[{{"id":"yes","label":"Yes"}}]}}}}}}'
   printf '%s\n' '{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"user_decision_list","arguments":{{}}}}}}'
-}} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_RUNTIME_MODE="$USAGI_RUNTIME_MODE" USAGI_WORKSPACE_ROOT="$USAGI_WORKSPACE_ROOT" "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG" 2>&1
+}} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_RUNTIME_MODE="$USAGI_RUNTIME_MODE" USAGI_WORKSPACE_ROOT="$USAGI_WORKSPACE_ROOT" "{executable_placeholder}" mcp >> "$USAGI_MCP_FIXTURE_LOG" 2>&1
 "#,
         ),
     );

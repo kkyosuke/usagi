@@ -28,6 +28,7 @@ use usagi_core::usecase::client::{
 use usagi_daemon::infrastructure::unix_transport::{
     connect_current, ensure_private_dir_all, read_locator,
 };
+use usagi_tui::presentation::widgets::display_width;
 use usagi_tui::usecase::application::agent_tab_intent::AgentTabIntent;
 use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
 
@@ -242,18 +243,49 @@ fn send(master: &mut File, input: &[u8]) {
     master.flush().unwrap();
 }
 
-/// 100-column Home header（project bar の次の行）の右端にある指示モード button を実 mouse event で押す。
+/// Click the center cell of one visible label using a real SGR mouse event.
 ///
-/// SGR mouse coordinates are one-based. The button is right-aligned and occupies
-/// the rightmost 14 cells, so column 91 is safely inside it even when the mode
-/// segment is also present.
-fn click_director_button(master: &mut File) {
-    send(master, b"\x1b[<0;91;2M\x1b[<0;91;2m");
+/// Deriving the coordinate from the rendered frame keeps this boundary test
+/// independent of drawer placement while still checking that rendering and the
+/// product's pointer hitbox agree. SGR coordinates are one-based.
+fn click_visible_label(
+    master: &mut File,
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    label: &str,
+) {
+    click_visible_label_at_size(master, output, baseline, 24, 100, label);
 }
 
-/// Click `[ New ]` in the 100-column drawer selector row below the top padding.
-fn click_director_new(master: &mut File) {
-    send(master, b"\x1b[<0;96;5M\x1b[<0;96;5m");
+fn click_visible_label_at_size(
+    master: &mut File,
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    rows: usize,
+    columns: usize,
+    label: &str,
+) {
+    let screen = screen_since_at_size(output, baseline, rows, columns)
+        .expect("a rendered frame before pointer input");
+    let (row, line, offset) = screen
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| line.find(label).map(|offset| (row, line, offset)))
+        .unwrap_or_else(|| panic!("visible pointer label {label:?} was not rendered: {screen:?}"));
+    let column = display_width(&line[..offset]) + display_width(label) / 2 + 1;
+    let row = row + 1;
+    send(
+        master,
+        format!("\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m").as_bytes(),
+    );
+}
+
+fn click_director_button(master: &mut File, output: &Arc<Mutex<Vec<u8>>>, baseline: usize) {
+    click_visible_label(master, output, baseline, "[ ♛ Director ]");
+}
+
+fn click_director_new(master: &mut File, output: &Arc<Mutex<Vec<u8>>>, baseline: usize) {
+    click_visible_label(master, output, baseline, "[ New ]");
 }
 
 fn toggle_director_with_key(master: &mut File) {
@@ -789,6 +821,15 @@ fn capture_len(output: &Arc<Mutex<Vec<u8>>>) -> usize {
 }
 
 fn screen_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize) -> Option<String> {
+    screen_since_at_size(output, baseline, 24, 100)
+}
+
+fn screen_since_at_size(
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    rows: usize,
+    columns: usize,
+) -> Option<String> {
     const ALT_SCREEN_START: &[u8] = b"\x1b[?1049h";
     let captured = output.lock().unwrap();
     let bytes = captured.get(baseline..)?;
@@ -798,9 +839,30 @@ fn screen_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize) -> Option<String>
     {
         return None;
     }
-    let mut screen = TerminalScreen::new(24, 100);
+    let mut screen = TerminalScreen::new(rows, columns);
     screen.advance(bytes);
     Some(screen.cells().join("\n"))
+}
+
+fn wait_for_screen_since_at_size(
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    rows: usize,
+    columns: usize,
+    needle: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let screen = screen_since_at_size(output, baseline, rows, columns).unwrap_or_default();
+        if screen.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {needle} at {columns}x{rows}; screen={screen:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn wait_for_screen_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, needle: &str) {
@@ -907,13 +969,25 @@ fn send_line_until_delivered(
 }
 
 fn wait_for_screen_absent_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, needle: &str) {
+    wait_for_screen_absent_since_at_size(output, baseline, 24, 100, needle);
+}
+
+fn wait_for_screen_absent_since_at_size(
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    rows: usize,
+    columns: usize,
+    needle: &str,
+) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if screen_since(output, baseline).is_some_and(|screen| !screen.contains(needle)) {
+        if screen_since_at_size(output, baseline, rows, columns)
+            .is_some_and(|screen| !screen.contains(needle))
+        {
             return;
         }
         if Instant::now() >= deadline {
-            let screen = screen_since(output, baseline).unwrap_or_default();
+            let screen = screen_since_at_size(output, baseline, rows, columns).unwrap_or_default();
             panic!("timed out waiting for {needle} to close; screen={screen:?}");
         }
         thread::sleep(Duration::from_millis(20));
@@ -1881,9 +1955,9 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
     );
 
     // 指示モードで root Agent（claude）を起動する。
-    click_director_button(&mut master);
+    click_director_button(&mut master, &captured, baseline);
     wait_for_screen_since(&captured, baseline, "Enter: send command · Ctrl-O n: New");
-    click_director_new(&mut master);
+    click_director_new(&mut master, &captured, baseline);
     wait_for_screen_since(&captured, baseline, "↑↓: select");
     send(&mut master, b"\x1b[A");
     send(&mut master, b"\r");
@@ -2257,13 +2331,13 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let first_baseline = capture_len(&captured);
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
-    click_director_button(&mut master);
+    click_director_button(&mut master, &captured, first_baseline);
     wait_for_screen_since(
         &captured,
         first_baseline,
         "Enter: send command · Ctrl-O n: New",
     );
-    click_director_new(&mut master);
+    click_director_new(&mut master, &captured, first_baseline);
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.
     // Confirm it through the picker. Replay/idempotency is asserted below from
@@ -3234,7 +3308,7 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
 
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, baseline, "No conversations yet");
-    click_director_new(&mut master);
+    click_director_new(&mut master, &captured, baseline);
     wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
     assert!(agent_processes(home.path(), 0).is_empty());
 
@@ -3242,21 +3316,21 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     // ownership of global input. Ctrl-Q therefore cannot leak through and open
     // the workspace-leave confirmation behind it.
     resize_pty(&master, 70, 16).unwrap();
+    // Replaying the captured stream into the resized grid makes the new header
+    // position observable and avoids racing the click against the resize frame.
+    wait_for_screen_since_at_size(&captured, baseline, 16, 70, "[ ♛ Director ]");
     send(&mut master, b"x");
-    wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
+    wait_for_screen_since_at_size(&captured, baseline, 16, 70, "No Agent CLI installed");
     send(&mut master, b"\x11");
     thread::sleep(Duration::from_millis(200));
-    let narrow = screen_since(&captured, baseline).unwrap_or_default();
+    let narrow = screen_since_at_size(&captured, baseline, 16, 70).unwrap_or_default();
     assert!(narrow.contains("♛ Director"), "{narrow}");
     assert!(!narrow.contains("Leave this workspace?"), "{narrow}");
 
     // The workspace header remains above the full-width drawer, and its
     // Director button closes even while the empty picker owns all other input.
-    // The PTY is 70 columns wide now; column 61 is inside the right-aligned
-    // 14-cell button on the row below the project bar (SGR mouse coordinates
-    // are one-based).
-    send(&mut master, b"\x1b[<0;61;2M\x1b[<0;61;2m");
-    wait_for_screen_absent_since(&captured, baseline, "No Agent CLI installed");
+    click_visible_label_at_size(&mut master, &captured, baseline, 16, 70, "[ ♛ Director ]");
+    wait_for_screen_absent_since_at_size(&captured, baseline, 16, 70, "No Agent CLI installed");
     send(&mut master, b"\x11");
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");
