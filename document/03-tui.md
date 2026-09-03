@@ -89,7 +89,7 @@ stale / duplicate completion が別の draft や workspace を開くことはな
 worker 内の `git clone` 自体は強制終了しないため、処理が完了するまで新しい作成は開始しない。失敗・cancel のどちらでも
 既存 directory は削除せず、clone が途中まで作った destination も自動削除しない。`Ctrl+C` / `Ctrl+Q` は TUI を終了する。
 
-Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・Garden size・PR auto-open・Environment、`Workspace init` 見出しに
+Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・PR auto-open・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Workflow・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
 実行した場合は、Home 上の overlay modal に Agent・Base branch・Workflow・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
 `↑↓` で行を、`←→` で値を切り替える。Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
@@ -232,18 +232,17 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
-| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・Garden size・PR auto-open・Environment はすべての workspace に適用する。Agent・Workflow・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
+| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・PR auto-open・Environment はすべての workspace に適用する。Agent・Workflow・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
 | Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Workflow・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field は Global を継承する。Workflow の未知 token は自律実行を暗黙に有効化せず `classic` へ縮退する |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
-merge して atomic write する。Global Config は Theme・Modal mode・Garden size・PR auto-open・Agent・Workflow・Team・Issue・Memory を所有し、Environment 行の
+merge して atomic write する。Global Config は Theme・Modal mode・PR auto-open・Agent・Workflow・Team・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
 Workspace Config は Agent・Base branch・Workflow・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
 Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Workflow は `work_mode`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
-Garden size は global の `garden_size` に `small` / `medium` / `large` を保存し、既定値と未知 token の縮退先を `medium` とする。workspace settings はこの値を所有せず、Global の値を使う。
 Workflow の `classic` は既定値で、従来どおり New が CLI picker を開き、選択した root Agent conversation を空の
 initial prompt で起動する。`goal-driven` は明示的な opt-in で、New を [Goal Composer](#goal-driven-workflow) に替える。
 Global / Workspace の field 欠落と Global の未知値は `classic`、Workspace の明示的な未知値も `classic` へ縮退するため、
@@ -265,7 +264,7 @@ settings 形式へ temp file、fsync、rename の順で atomic write する。�
 縮退し、設定ファイルの破損だけで workspace を開けなくしない。
 
 direct workspace、Welcome の Open / Recent、New の作成成功は、snapshot の workspace path を identity として
-settings port を毎回束縛し直す。次に Global とその workspace の Local を解決し、effective な Modal mode と Garden size を
+settings port を毎回束縛し直す。次に Global とその workspace の Local を解決し、effective な Modal mode を
 Overview / Closeup を生成する Home runtime へ渡す。この束縛は workspace entry ごとの lifecycle であり、直前に
 開いた workspace の port や modal state を次の workspace へ持ち越さない。Config へ入るたびにも現在の束縛から
 両 scope を読み直すため、保存後の再 entry とプロセス再起動で同じ値になる。
@@ -1107,8 +1106,8 @@ resident にせず、観測できていない membership を推測もしない�
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
 Garden 本体は左、`Agents` panel は右に分ける。panel は端末幅の 3 分の 1 を基準に 24〜36 桁を使い、
-左の Garden は残りの幅を使う。左領域が 80 桁 × 18 行以上（`large` だけは高さ 20 行以上、通常の panel 幅では端末全体が約 120 桁以上）なら、
-横方向に広い仮想世界を描く。session 順の地域幅は `small` / `medium` / `large` で 80 / 96 / 112 cell とし、立札と巣穴を home にして、その周囲へ池・餌場・
+左の Garden は残りの幅を使う。左領域が 80 桁 × 18 行以上（通常の panel 幅では端末全体が 120 桁 × 18 行以上）なら、
+横方向に広い仮想世界を描く。session 順に 96 cell の地域を割り当て、立札と巣穴を home にし、その周囲へ池・餌場・
 木陰と小道を置く。viewport より広い分は footer の `← Pan` / `Pan →` button または `←` / `→` key で 16 cell ずつ
 camera を動かす。footer は現在見えている world cell 範囲と全幅を示し、最後の project を含む全 session の home へ
 Garden 内から到達できる。pan button は左右 1 cell の padding を含む描画範囲全体を click target にし、左右端の
@@ -1166,9 +1165,8 @@ phase は各うさぎの pose と巣穴の状態内訳へ投影する。利用�
 daemon が居ない・観測できる project 数の上限を超えた分）は `no agents` と断定せず `project inactive` と表示する。
 遷移中または失敗した cached lifecycle は `cached · creating` / `cached · deleting` / `cached · failed` と表示する。
 cached lifecycle は live の進行状況ではないため、Agent を観測できていてもうさぎを描かず、animation させない。
-うさぎの sprite は spacious world と compact fallback のどちらも Garden size に従い、`small` は 8 桁 × 4 行、既定の `medium` は 12 桁 × 6 行、`large` は 16 桁 × 8 行とする。池と木もそれぞれの段階で縦横を広げ、うさぎだけが周囲から浮かない比率を保つ。
 spacious world は session ごとに注目順の最大 6 羽を描き、それより後ろの runtime も巣穴の状態内訳には残す。compact
-fallback は固定幅のため、1区画へ `small` は最大3羽、`medium` は最大2羽、`large` は最大1羽を並べる。
+fallback は固定幅のため最大 3 羽を並べる。
 
 **どの runtime が居るかは最新の coherent Agent inventory が決める**。Closeup の tab strip と同じ observation を
 membership の権威にするので、庭のうさぎは常に「開ける tab を持つ Agent」と一致する。inventory が
@@ -1220,7 +1218,7 @@ composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を
 うさぎ・空・草の全 pose を静止姿勢に固定する。
 
 spacious world の背景は workspace 名と world 座標から決定的に配置した `.` / `*` / `v`、session の立札と巣穴、
-Garden size と一緒に拡大する `~` の池と `&` の木、`Y` の餌場、小道で構成する。compact fallback は左の庭領域へ続く草地と薄い土を 1 行へ重ねる。
+`~` の池、`Y` の餌場、`&` の木、小道で構成する。compact fallback は左の庭領域へ続く草地と薄い土の 2 層を使う。
 星は同じ cell で明滅し、草は同じ根元で小さく向きを変えるため、Agent の稼働状態を偽らず背景だけに ambient motion を足す。
 うさぎの各行は pose 全体で耳と顔の中心軸を揃え、左向き・右向き・各 lifecycle を切り替えても耳だけ横へずれない。
 compact fallback は `Ready` に足元の草、`Done` に `z`、`Failed` に枯れ草を小さく添える。通常動作は action caption を
@@ -1267,8 +1265,8 @@ daemon / backend event、Agent や terminal の出力は操作ではないので
 | overlay の無い Switch | する |
 | overlay の無い Closeup（live terminal を含む） | する |
 
-端末が `small` / `medium` では 64 桁 × 14 行、`large` では 64 桁 × 16 行に満たない場合も開かない（操作できる一覧を screen saver で覆わない）。最上段は
-project tab bar、残る 13 行または15行を Garden 本体として使う。閾値の判定は
+端末が 64 桁 × 14 行に満たない場合も開かない（操作できる一覧を screen saver で覆わない）。14 行のうち最上段は
+project tab bar、残る 13 行を Garden 本体として使う。閾値の判定は
 frame loop が monotonic time と user input を観測して経過時間を controller へ注入する形で行い、controller
 自身は時計を持たない。Overview から手動で開いた直後にこの寸法を満たさない場合も、描画前に Garden を閉じて必要寸法を
 notice に表示するため、見えない overlay が入力だけを所有する状態にはしない。
