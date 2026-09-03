@@ -437,7 +437,9 @@ impl McpHarness {
 
     /// Replace one fixture runtime before dispatching it. Follow-up MCP suites
     /// use this seam to make a worker call `agent_complete` or `agent_fail`
-    /// without relying on a real provider login.
+    /// without relying on a real provider login. Scripts that invoke the shipping
+    /// binary use `"$USAGI_E2E_USAGI"`; materialization preserves metacharacters
+    /// such as a literal `$HOME` in Cargo's target path.
     pub fn replace_fixture_agent(&self, runtime: &str, script: &str) {
         assert!(matches!(runtime, "codex" | "claude"));
         let executable = self.fixture_bin.join(runtime);
