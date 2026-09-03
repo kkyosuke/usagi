@@ -836,7 +836,17 @@ struct ProductionWorkspaceCommands {
 struct ProductionDaemonControl {
     workspace: WorkspaceId,
     root: PathBuf,
+    run: DaemonCommandRunner,
 }
+
+#[derive(Debug)]
+struct DaemonCommandOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+type DaemonCommandRunner = fn(&Path, DaemonAction) -> std::io::Result<DaemonCommandOutput>;
 
 fn daemon_control_error(action: DaemonAction, bytes: &[u8]) -> SafeError {
     const MAX_CHARS: usize = 240;
@@ -856,7 +866,42 @@ fn daemon_control_error(action: DaemonAction, bytes: &[u8]) -> SafeError {
     }
 }
 
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
+fn daemon_control_result(
+    action: DaemonAction,
+    output: std::io::Result<DaemonCommandOutput>,
+) -> Result<Notice, SafeError> {
+    let output =
+        output.map_err(|error| daemon_control_error(action, error.to_string().as_bytes()))?;
+    if output.success {
+        return Ok(Notice::new(format!(
+            "Daemon {} completed",
+            action.argument()
+        )));
+    }
+    let detail = if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    Err(daemon_control_error(action, detail))
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_daemon_control_forwards_root_action_token_and_safe_result
+fn run_daemon_control_command(
+    root: &Path,
+    action: DaemonAction,
+) -> std::io::Result<DaemonCommandOutput> {
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .current_dir(root)
+        .args(["daemon", action.argument()])
+        .output()?;
+    Ok(DaemonCommandOutput {
+        success: output.status.success(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
 impl BackendDaemonControlPort for ProductionDaemonControl {
     fn execute(
         &mut self,
@@ -878,31 +923,9 @@ impl BackendDaemonControlPort for ProductionDaemonControl {
             return;
         }
         let root = self.root.clone();
+        let run = self.run;
         std::thread::spawn(move || {
-            let result = std::env::current_exe()
-                .map_err(|error| daemon_control_error(action, error.to_string().as_bytes()))
-                .and_then(|executable| {
-                    std::process::Command::new(executable)
-                        .current_dir(root)
-                        .args(["daemon", action.argument()])
-                        .output()
-                        .map_err(|error| daemon_control_error(action, error.to_string().as_bytes()))
-                })
-                .and_then(|output| {
-                    if output.status.success() {
-                        Ok(Notice::new(format!(
-                            "Daemon {} completed",
-                            action.argument()
-                        )))
-                    } else {
-                        let detail = if output.stderr.is_empty() {
-                            &output.stdout
-                        } else {
-                            &output.stderr
-                        };
-                        Err(daemon_control_error(action, detail))
-                    }
-                });
+            let result = daemon_control_result(action, run(&root, action));
             completions.emit(AppEvent::Backend(BackendEvent::DaemonControlFinished {
                 workspace,
                 action,
@@ -1095,6 +1118,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         .with_daemon_control(Box::new(ProductionDaemonControl {
             workspace: snapshot.workspace_id,
             root: snapshot.workspace.path.clone(),
+            run: run_daemon_control_command,
         }))
         .with_decisions(Box::new(ProductionDecisionPort {
             daemon: DaemonDecisionCommandPort,
@@ -5497,23 +5521,24 @@ mod tests {
 
     use super::{
         AGENT_LAUNCH_UNCORRELATED, AgentGoalIntent, AgentLaunchIntent, AppEvent, AppKey,
-        BackendTargetStorePort, Completions, DaemonAction, DaemonAgentCommandPort,
-        DaemonDecisionCommandPort, DaemonReply, DaemonRequest, DaemonRestoreConnectionPort,
-        DoctorDiagnosisError, EnvScope, EnvironmentStorePort, FsSessionWorktreeScanPort,
-        FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError,
-        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
-        RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget,
-        TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+        BackendDaemonControlPort, BackendTargetStorePort, Completions, DaemonAction,
+        DaemonAgentCommandPort, DaemonCommandOutput, DaemonDecisionCommandPort, DaemonReply,
+        DaemonRequest, DaemonRestoreConnectionPort, DoctorDiagnosisError, EnvScope,
+        EnvironmentStorePort, FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry,
+        LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
+        PersistentSettingsPort, ProductionBackendFactory, ProductionDaemonControl,
+        RepoEnvironmentStore, RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start,
+        StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
         TerminalSnapshotMode, TerminalSubscription, VersionProbeResult,
         WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, agent_goal_request,
         agent_inventory_request, agent_launch_request, child_directory_names,
         classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
         correlate_agent_launch, created_session_hook, current_agent_integrations,
-        daemon_control_error, daemon_error_reason, decision_cadence, decode_agent_admission,
-        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
-        decode_terminal_inventory, decode_terminal_poll, decode_work_run_control_reply,
-        decode_work_run_snapshot_reply, doctor_diagnosis_io_error, doctor_reply_body,
-        exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
+        daemon_control_error, daemon_control_result, daemon_error_reason, decision_cadence,
+        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
+        decode_work_run_control_reply, decode_work_run_snapshot_reply, doctor_diagnosis_io_error,
+        doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
         pr_snapshot_events, probe_path, provider_resume_projection,
         reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
@@ -5552,6 +5577,105 @@ mod tests {
             empty.message.as_str(),
             "Start failed: daemon lifecycle command failed"
         );
+
+        let stderr = daemon_control_result(
+            DaemonAction::Restart,
+            Ok(DaemonCommandOutput {
+                success: false,
+                stdout: b"ignored".to_vec(),
+                stderr: b"restart refused".to_vec(),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(stderr.message.as_str(), "Restart failed: restart refused");
+        let stdout = daemon_control_result(
+            DaemonAction::Start,
+            Ok(DaemonCommandOutput {
+                success: false,
+                stdout: b"start refused".to_vec(),
+                stderr: Vec::new(),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(stdout.message.as_str(), "Start failed: start refused");
+        let io = daemon_control_result(
+            DaemonAction::Stop,
+            Err(std::io::Error::other("process unavailable")),
+        )
+        .unwrap_err();
+        assert_eq!(io.message.as_str(), "Stop failed: process unavailable");
+    }
+
+    #[allow(clippy::unnecessary_wraps)] // Matches the injected fallible runner signature.
+    fn successful_daemon_control(
+        root: &std::path::Path,
+        action: DaemonAction,
+    ) -> std::io::Result<DaemonCommandOutput> {
+        assert!(root.ends_with("workspace"));
+        assert_eq!(action, DaemonAction::Restart);
+        Ok(DaemonCommandOutput {
+            success: true,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn production_daemon_control_forwards_root_action_token_and_safe_result() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("daemon".to_owned())),
+        );
+        let effects = update(&mut state, AppEvent::Key(AppKey::Char('r')));
+        let [
+            Effect::DaemonControl {
+                workspace: effect_workspace,
+                action,
+                token,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("daemon action did not produce its typed effect");
+        };
+        assert_eq!(*effect_workspace, workspace);
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let mut port = ProductionDaemonControl {
+            workspace,
+            root,
+            run: successful_daemon_control,
+        };
+        let (completions, receiver) = Completions::channel();
+        BackendDaemonControlPort::execute(&mut port, workspace, *action, *token, completions);
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace: completed_workspace,
+                action: DaemonAction::Restart,
+                token: completed_token,
+                result: Ok(notice),
+            }) if completed_workspace == workspace
+                && completed_token == *token
+                && notice.message == "Daemon restart completed"
+        ));
+
+        let stale_workspace = WorkspaceId::new();
+        let (completions, receiver) = Completions::channel();
+        BackendDaemonControlPort::execute(&mut port, stale_workspace, *action, *token, completions);
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace: completed_workspace,
+                result: Err(error),
+                ..
+            }) if completed_workspace == stale_workspace
+                && error.error_id == "daemon-target-stale"
+        ));
     }
 
     #[test]
