@@ -6505,7 +6505,6 @@ fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::i
     }
 }
 
-// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 #[derive(Clone)]
 struct AuthenticatedSupervisorCaller {
     descriptor: String,
@@ -6515,7 +6514,7 @@ struct AuthenticatedSupervisorCaller {
 }
 
 #[allow(clippy::too_many_lines)]
-#[coverage(off)]
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn dispatch_supervisor_tool(
     runtime: &SharedSupervisorRuntime,
     caller: Result<AuthenticatedSupervisorCaller, usagi_core::infrastructure::ipc::ProtocolError>,
