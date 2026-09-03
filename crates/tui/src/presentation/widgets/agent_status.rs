@@ -15,8 +15,9 @@ use super::{clip_to_width, display_width};
 
 /// 1 session に属する Agent 1 つの表示素材。
 ///
-/// [`runtime_id`](Self::runtime_id) は表示せず、安定した並び順と animation の
-/// 種にだけ使う identity である。
+/// [`runtime_id`](Self::runtime_id) は Garden の一覧で Agent を区別する短い表示と、
+/// click target、安定した並び順、animation の種に使う。provider-native identity は
+/// 含まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentStatus {
     pub runtime_id: AgentRuntimeId,
@@ -89,6 +90,23 @@ pub const fn short_label(phase: AgentPhase) -> &'static str {
         AgentPhase::Sleeping => "sleep",
         AgentPhase::Absent => "idle",
         AgentPhase::Ended | AgentPhase::Exited => "done",
+    }
+}
+
+/// Agent 1 体を 1 行で表示するときの状態ラベル。
+///
+/// 件数要約用の [`short_label`] より明示的な語彙を使い、単独の行を見ただけで現在
+/// 状態が分かるようにする。
+#[must_use]
+pub const fn label(phase: AgentPhase) -> &'static str {
+    match phase {
+        AgentPhase::Waiting => "waiting",
+        AgentPhase::Running => "running",
+        AgentPhase::Ready => "ready",
+        AgentPhase::Interrupted => "interrupted",
+        AgentPhase::Sleeping => "sleeping",
+        AgentPhase::Absent => "idle",
+        AgentPhase::Ended | AgentPhase::Exited => "completed",
     }
 }
 
