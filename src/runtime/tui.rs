@@ -5727,7 +5727,9 @@ mod tests {
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
-    use usagi_core::domain::settings::{LocalSettings, ModalSelectionMode, Settings, Theme};
+    use usagi_core::domain::settings::{
+        GardenSize, LocalSettings, ModalSelectionMode, Settings, Theme,
+    };
     use usagi_core::domain::terminal_launch::TerminalLaunchScope;
     use usagi_core::domain::workspace::Workspace;
     use usagi_core::domain::workspace_state::WorkspaceState;
@@ -9033,6 +9035,7 @@ mod tests {
         assert!(first.background_operations());
         let settings = Settings {
             modal_selection_mode: ModalSelectionMode::Prompt,
+            garden_size: GardenSize::Large,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             ..Settings::default()
         };
@@ -9047,6 +9050,10 @@ mod tests {
                 .unwrap()
                 .modal_selection_mode,
             ModalSelectionMode::Prompt
+        );
+        assert_eq!(
+            restarted.read(SettingsScope::Global).unwrap().garden_size,
+            GardenSize::Large
         );
     }
 
@@ -9131,6 +9138,7 @@ mod tests {
         let global = Settings {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Action,
+            garden_size: GardenSize::Large,
             ..Settings::default()
         };
         Storage::new(&global_dir).save_settings(&global).unwrap();
@@ -9144,6 +9152,7 @@ mod tests {
         let local_a = Settings {
             theme: Theme::Light,
             modal_selection_mode: ModalSelectionMode::Prompt,
+            garden_size: GardenSize::Small,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             ..global.clone()
@@ -9165,6 +9174,10 @@ mod tests {
         assert_eq!(
             reopened.read(SettingsScope::Workspace).unwrap(),
             effective_a
+        );
+        assert_eq!(
+            reopened.read(SettingsScope::Workspace).unwrap().garden_size,
+            GardenSize::Large
         );
         let changed_global = Settings {
             theme: Theme::Light,
@@ -9317,6 +9330,7 @@ mod tests {
         let initial = Settings {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Prompt,
+            garden_size: GardenSize::Large,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),

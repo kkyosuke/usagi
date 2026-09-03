@@ -6,6 +6,7 @@
 
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
+use usagi_core::domain::settings::GardenSize;
 
 use crate::presentation::theme::{Role, Style, garden_rabbit_style};
 
@@ -28,19 +29,60 @@ const AGENT_PANEL_MIN_WIDTH: usize = 24;
 const AGENT_PANEL_MAX_WIDTH: usize = 36;
 const AGENT_PANEL_SEPARATOR_WIDTH: usize = 2;
 const GROUND_ROWS: usize = 1;
-const PLOT_HEIGHT: usize = 9;
-/// plot のうち、うさぎと label が占める行数（残り 1 行が草地と土）。
-const PLOT_CONTENT_ROWS: usize = PLOT_HEIGHT - GROUND_ROWS;
-/// うさぎ 1 羽分の pose 行数（plot の label / status / 地面を除く）。
-pub(super) const RABBIT_SPRITE_HEIGHT: usize = 6;
-pub(super) const RABBIT_SPRITE_WIDTH: usize = 12;
-pub(super) type RabbitSprite = [&'static str; RABBIT_SPRITE_HEIGHT];
-const SPRITE_ROWS: usize = RABBIT_SPRITE_HEIGHT;
-const COMPACT_RABBIT_WIDTH: usize = RABBIT_SPRITE_WIDTH;
-/// plot の中で sprite が始まる行（nameplate と status 行の下）。うさぎの hitbox は
-/// この行から [`SPRITE_ROWS`] 行ぶんで、nameplate と status 行は区画のままにする。
-const SPRITE_TOP_ROW: usize = PLOT_CONTENT_ROWS - SPRITE_ROWS;
-const MAX_VISIBLE_AGENTS: usize = PLOT_WIDTH / COMPACT_RABBIT_WIDTH;
+/// A borrowed, size-specific rabbit pose.
+pub(super) type RabbitSprite = &'static [&'static str];
+
+/// Semantic rabbit poses shared by the compact and spacious renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RabbitPose {
+    Active,
+    Working,
+    Ready,
+    Idle,
+    Blinking,
+    Waiting,
+    WaitingEars,
+    Interrupted,
+    Sleeping,
+    Done,
+    Failed,
+    Buried,
+    Emerging,
+    Celebrating,
+    CelebratingAlt,
+}
+
+pub(super) const fn rabbit_width(size: GardenSize) -> usize {
+    match size {
+        GardenSize::Small => 8,
+        GardenSize::Medium => 12,
+        GardenSize::Large => 16,
+    }
+}
+
+pub(super) const fn rabbit_height(size: GardenSize) -> usize {
+    match size {
+        GardenSize::Small => 4,
+        GardenSize::Medium => 6,
+        GardenSize::Large => 8,
+    }
+}
+
+const fn plot_height(size: GardenSize) -> usize {
+    // nameplate + status + rabbit + the combined grass/soil row
+    rabbit_height(size) + 3
+}
+
+/// Minimum Garden body height for a configured visual scale.
+#[must_use]
+pub const fn min_height(size: GardenSize) -> usize {
+    let scaled = HEADER_ROWS + FOOTER_ROWS + plot_height(size);
+    if scaled > MIN_HEIGHT {
+        scaled
+    } else {
+        MIN_HEIGHT
+    }
+}
 /// The interactive shell advances its logical clock every 16 ms. Holding one
 /// Garden frame for eight of those ticks yields a brisk ~8 fps terminal
 /// animation without rebuilding at the 62.5 Hz input-pump cadence.
@@ -54,7 +96,7 @@ const AMBIENT_PHASE_TICKS: u64 = 2;
 const AMBIENT_PHASES: u64 = 6;
 const TWINKLE: [char; 6] = ['.', '*', '+', '*', '.', '·'];
 
-pub(super) const RABBIT_ACTIVE: RabbitSprite = [
+const RABBIT_ACTIVE: RabbitSprite = &[
     "   /\\  /\\",
     "  /  \\/  \\",
     " (   o.o   )",
@@ -62,7 +104,7 @@ pub(super) const RABBIT_ACTIVE: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")",
 ];
-pub(super) const RABBIT_WORKING: RabbitSprite = [
+const RABBIT_WORKING: RabbitSprite = &[
     "   /\\  /\\",
     "  /  \\/  \\",
     " (   o.o   )",
@@ -70,7 +112,7 @@ pub(super) const RABBIT_WORKING: RabbitSprite = [
     " \\   /\\   /",
     "  \\_/  \\_/",
 ];
-pub(super) const RABBIT_READY: RabbitSprite = [
+const RABBIT_READY: RabbitSprite = &[
     "   /\\  /\\",
     "  /  \\/  \\",
     " (   . .   )",
@@ -78,7 +120,7 @@ pub(super) const RABBIT_READY: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")v",
 ];
-pub(super) const RABBIT_IDLE: RabbitSprite = [
+const RABBIT_IDLE: RabbitSprite = &[
     "   /\\  /\\",
     "  /  \\/  \\",
     " (   . .   )",
@@ -86,7 +128,7 @@ pub(super) const RABBIT_IDLE: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")",
 ];
-pub(super) const RABBIT_BLINKING: RabbitSprite = [
+const RABBIT_BLINKING: RabbitSprite = &[
     "   /\\  /\\",
     "  /  \\/  \\",
     " (   -.-   )",
@@ -94,7 +136,7 @@ pub(super) const RABBIT_BLINKING: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")v",
 ];
-pub(super) const RABBIT_WAITING: RabbitSprite = [
+const RABBIT_WAITING: RabbitSprite = &[
     "?  /\\  /\\",
     "  /  \\/  \\",
     " (   o.o  )?",
@@ -102,7 +144,7 @@ pub(super) const RABBIT_WAITING: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")",
 ];
-pub(super) const RABBIT_WAITING_EARS: RabbitSprite = [
+const RABBIT_WAITING_EARS: RabbitSprite = &[
     "?  /\\  /\\",
     "  /  /\\  \\",
     " (   o.o  )?",
@@ -110,7 +152,7 @@ pub(super) const RABBIT_WAITING_EARS: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")",
 ];
-pub(super) const RABBIT_INTERRUPTED: RabbitSprite = [
+const RABBIT_INTERRUPTED: RabbitSprite = &[
     "!  /\\  /\\",
     "  /  \\/  \\",
     " (   -.-  )!",
@@ -118,7 +160,7 @@ pub(super) const RABBIT_INTERRUPTED: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")",
 ];
-pub(super) const RABBIT_SLEEPING: RabbitSprite = [
+const RABBIT_SLEEPING: RabbitSprite = &[
     "zZ /\\  /\\",
     "  /  \\/  \\",
     " (   -.-   )",
@@ -126,7 +168,7 @@ pub(super) const RABBIT_SLEEPING: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")",
 ];
-pub(super) const RABBIT_DONE: RabbitSprite = [
+const RABBIT_DONE: RabbitSprite = &[
     " z /\\  /\\",
     "  /  \\/  \\",
     " (   -.-   )",
@@ -134,7 +176,7 @@ pub(super) const RABBIT_DONE: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")",
 ];
-pub(super) const RABBIT_FAILED: RabbitSprite = [
+const RABBIT_FAILED: RabbitSprite = &[
     "!  /\\  /\\",
     "  /  \\/  \\",
     " (   x.x   )",
@@ -142,17 +184,16 @@ pub(super) const RABBIT_FAILED: RabbitSprite = [
     " \\  /   \\  /",
     "  c(\")_(\")/",
 ];
-pub(super) const RABBIT_BURIED: RabbitSprite =
-    ["", "", "", "   /\\  /\\", "_(  _ _  )_", "___/______\\_"];
-pub(super) const RABBIT_EMERGING: RabbitSprite = [
+const RABBIT_BURIED: RabbitSprite = &["", "", "", "   /\\  /\\", "_(  _ _  )_", "___/______\\_"];
+const RABBIT_EMERGING: RabbitSprite = &[
     "",
     "   /\\  /\\",
     "  /  \\/  \\",
     " _(  . .  )_",
-    "__/    ^   \\_",
+    "__/  ^   \\_",
     "___/______\\_",
 ];
-pub(super) const RABBIT_CELEBRATING: RabbitSprite = [
+const RABBIT_CELEBRATING: RabbitSprite = &[
     " *  \\ /  *",
     "   /\\  /\\",
     "  /  \\/  \\",
@@ -160,7 +201,7 @@ pub(super) const RABBIT_CELEBRATING: RabbitSprite = [
     "   /  ^  \\",
     "  c(\")_(\")",
 ];
-pub(super) const RABBIT_CELEBRATING_ALT: RabbitSprite = [
+const RABBIT_CELEBRATING_ALT: RabbitSprite = &[
     "* . \\ / . *",
     "   /\\  /\\",
     "  /  \\/  \\",
@@ -168,6 +209,223 @@ pub(super) const RABBIT_CELEBRATING_ALT: RabbitSprite = [
     "   /  ^  \\",
     "  c(\")_(\")",
 ];
+
+const SMALL_ACTIVE: RabbitSprite = &["", " /)/)", "( o.o)", "c(\")(\")"];
+const SMALL_WORKING: RabbitSprite = &["", " /)/)", "( o.o)", " / > <"];
+const SMALL_READY: RabbitSprite = &["", " /)/)", "( . .)", "c(\")(\")v"];
+const SMALL_IDLE: RabbitSprite = &["", " /)/)", "( . .)", "c(\")(\")"];
+const SMALL_BLINKING: RabbitSprite = &["", " /)/)", "( -.-)", "c(\")(\")v"];
+const SMALL_WAITING: RabbitSprite = &[" ?", " /)/)", "( o.o)?", "c(\")(\")"];
+const SMALL_WAITING_EARS: RabbitSprite = &[" ?", " /)(/", "( o.o)?", "c(\")(\")"];
+const SMALL_INTERRUPTED: RabbitSprite = &[" !", " /)/)", "( -.-)!", "c(\")(\")"];
+const SMALL_SLEEPING: RabbitSprite = &[" zZ", " /)/)", "( -.-)", "c(\")(\")"];
+const SMALL_DONE: RabbitSprite = &[" z", " /)/)", "( -.-)", "c(\")(\")"];
+const SMALL_FAILED: RabbitSprite = &[" !", " /)/)", "( x.x)", "c(\")(\")/"];
+const SMALL_BURIED: RabbitSprite = &["", "", "  /)/)", "__(_ _)_"];
+const SMALL_EMERGING: RabbitSprite = &["", " /)/)", "_( . .)_", "__/   \\_"];
+const SMALL_CELEBRATING: RabbitSprite = &["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"];
+const SMALL_CELEBRATING_ALT: RabbitSprite = &[" *  . *", "  /)/)", " \\(^o^)/", " c(\")(\")"];
+
+const LARGE_ACTIVE: RabbitSprite = &[
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    o  o    )",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
+];
+const LARGE_WORKING: RabbitSprite = &[
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    o  o    )",
+    " /     > <     \\",
+    " \\     /\\     /",
+    "  \\   /  \\   /",
+    "   \\_/    \\_/",
+];
+const LARGE_READY: RabbitSprite = &[
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    .  .    )",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")cv",
+];
+const LARGE_IDLE: RabbitSprite = &[
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    .  .    )",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
+];
+const LARGE_BLINKING: RabbitSprite = &[
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    -  -    )",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
+];
+const LARGE_WAITING: RabbitSprite = &[
+    "?   /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    o  o    )?",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
+];
+const LARGE_WAITING_EARS: RabbitSprite = &[
+    "?   /\\    /\\",
+    "   /  /\\\\  \\",
+    "  /          \\",
+    " (    o  o    )?",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
+];
+const LARGE_INTERRUPTED: RabbitSprite = &[
+    "!   /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    -  -    )!",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
+];
+const LARGE_SLEEPING: RabbitSprite = &[
+    "zZ  /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    -  -    )",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
+];
+const LARGE_DONE: RabbitSprite = &[
+    " z  /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    -  -    )",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
+];
+const LARGE_FAILED: RabbitSprite = &[
+    "!   /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    x  x    )",
+    " /      ^      \\",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
+];
+const LARGE_BURIED: RabbitSprite = &[
+    "",
+    "",
+    "",
+    "",
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "_(   _  _   )_",
+    "____/________\\__",
+];
+const LARGE_EMERGING: RabbitSprite = &[
+    "",
+    "",
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    "_(   .  .   )_",
+    "__/    ^    \\_",
+    "____/________\\__",
+];
+const LARGE_CELEBRATING: RabbitSprite = &[
+    "*    \\    /    *",
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    "\\(    ^  ^    )/",
+    "   \\    ^    /",
+    "    \\  / \\  /",
+    "    c(\")_(\")",
+];
+const LARGE_CELEBRATING_ALT: RabbitSprite = &[
+    ". *  \\    /  * .",
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    "\\(    ^  o    )/",
+    "   \\    ^    /",
+    "    \\  / \\  /",
+    "    c(\")_(\")",
+];
+
+pub(super) const fn rabbit_pose(size: GardenSize, pose: RabbitPose) -> RabbitSprite {
+    match (size, pose) {
+        (GardenSize::Small, RabbitPose::Active) => SMALL_ACTIVE,
+        (GardenSize::Small, RabbitPose::Working) => SMALL_WORKING,
+        (GardenSize::Small, RabbitPose::Ready) => SMALL_READY,
+        (GardenSize::Small, RabbitPose::Idle) => SMALL_IDLE,
+        (GardenSize::Small, RabbitPose::Blinking) => SMALL_BLINKING,
+        (GardenSize::Small, RabbitPose::Waiting) => SMALL_WAITING,
+        (GardenSize::Small, RabbitPose::WaitingEars) => SMALL_WAITING_EARS,
+        (GardenSize::Small, RabbitPose::Interrupted) => SMALL_INTERRUPTED,
+        (GardenSize::Small, RabbitPose::Sleeping) => SMALL_SLEEPING,
+        (GardenSize::Small, RabbitPose::Done) => SMALL_DONE,
+        (GardenSize::Small, RabbitPose::Failed) => SMALL_FAILED,
+        (GardenSize::Small, RabbitPose::Buried) => SMALL_BURIED,
+        (GardenSize::Small, RabbitPose::Emerging) => SMALL_EMERGING,
+        (GardenSize::Small, RabbitPose::Celebrating) => SMALL_CELEBRATING,
+        (GardenSize::Small, RabbitPose::CelebratingAlt) => SMALL_CELEBRATING_ALT,
+        (GardenSize::Medium, RabbitPose::Active) => RABBIT_ACTIVE,
+        (GardenSize::Medium, RabbitPose::Working) => RABBIT_WORKING,
+        (GardenSize::Medium, RabbitPose::Ready) => RABBIT_READY,
+        (GardenSize::Medium, RabbitPose::Idle) => RABBIT_IDLE,
+        (GardenSize::Medium, RabbitPose::Blinking) => RABBIT_BLINKING,
+        (GardenSize::Medium, RabbitPose::Waiting) => RABBIT_WAITING,
+        (GardenSize::Medium, RabbitPose::WaitingEars) => RABBIT_WAITING_EARS,
+        (GardenSize::Medium, RabbitPose::Interrupted) => RABBIT_INTERRUPTED,
+        (GardenSize::Medium, RabbitPose::Sleeping) => RABBIT_SLEEPING,
+        (GardenSize::Medium, RabbitPose::Done) => RABBIT_DONE,
+        (GardenSize::Medium, RabbitPose::Failed) => RABBIT_FAILED,
+        (GardenSize::Medium, RabbitPose::Buried) => RABBIT_BURIED,
+        (GardenSize::Medium, RabbitPose::Emerging) => RABBIT_EMERGING,
+        (GardenSize::Medium, RabbitPose::Celebrating) => RABBIT_CELEBRATING,
+        (GardenSize::Medium, RabbitPose::CelebratingAlt) => RABBIT_CELEBRATING_ALT,
+        (GardenSize::Large, RabbitPose::Active) => LARGE_ACTIVE,
+        (GardenSize::Large, RabbitPose::Working) => LARGE_WORKING,
+        (GardenSize::Large, RabbitPose::Ready) => LARGE_READY,
+        (GardenSize::Large, RabbitPose::Idle) => LARGE_IDLE,
+        (GardenSize::Large, RabbitPose::Blinking) => LARGE_BLINKING,
+        (GardenSize::Large, RabbitPose::Waiting) => LARGE_WAITING,
+        (GardenSize::Large, RabbitPose::WaitingEars) => LARGE_WAITING_EARS,
+        (GardenSize::Large, RabbitPose::Interrupted) => LARGE_INTERRUPTED,
+        (GardenSize::Large, RabbitPose::Sleeping) => LARGE_SLEEPING,
+        (GardenSize::Large, RabbitPose::Done) => LARGE_DONE,
+        (GardenSize::Large, RabbitPose::Failed) => LARGE_FAILED,
+        (GardenSize::Large, RabbitPose::Buried) => LARGE_BURIED,
+        (GardenSize::Large, RabbitPose::Emerging) => LARGE_EMERGING,
+        (GardenSize::Large, RabbitPose::Celebrating) => LARGE_CELEBRATING,
+        (GardenSize::Large, RabbitPose::CelebratingAlt) => LARGE_CELEBRATING_ALT,
+    }
+}
 
 /// Running のうさぎが繰り返す基本動作。各動作の長さを変え、runtime identity から
 /// 並び順を shuffle することで、同じ phase のうさぎも一斉に同じ動きをしない。
@@ -317,7 +575,7 @@ pub struct GardenFrame {
 /// 絵とずれない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Plot {
-    rows: [String; PLOT_CONTENT_ROWS],
+    rows: Vec<String>,
     rabbits: Vec<PlacedRabbit>,
 }
 
@@ -337,6 +595,9 @@ struct GardenLayout {
     columns: usize,
     plot_rows: usize,
     garden_height: usize,
+    plot_height: usize,
+    sprite_height: usize,
+    sprite_width: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,8 +612,8 @@ struct GardenViewport {
     row_left: usize,
 }
 
-fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
-    if height < MIN_HEIGHT || width < MIN_WIDTH {
+fn garden_layout(height: usize, width: usize, size: GardenSize) -> Option<GardenLayout> {
+    if height < min_height(size) || width < MIN_WIDTH {
         return None;
     }
     let agent_panel_width = (width / 3).clamp(AGENT_PANEL_MIN_WIDTH, AGENT_PANEL_MAX_WIDTH);
@@ -361,7 +622,8 @@ fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
     let content_width = garden_width.saturating_sub(SIDE_PADDING * 2);
     let columns = (content_width / PLOT_WIDTH).max(1);
     let garden_height = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
-    let plot_rows = (garden_height / PLOT_HEIGHT).max(1);
+    let plot_height = plot_height(size);
+    let plot_rows = (garden_height / plot_height).max(1);
     Some(GardenLayout {
         garden_width,
         content_width,
@@ -369,6 +631,9 @@ fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
         columns,
         plot_rows,
         garden_height,
+        plot_height,
+        sprite_height: rabbit_height(size),
+        sprite_width: rabbit_width(size),
     })
 }
 
@@ -394,7 +659,11 @@ fn garden_viewport(
         visible_end,
         used_rows,
         used_columns,
-        grid_top: HEADER_ROWS + layout.garden_height.saturating_sub(used_rows * PLOT_HEIGHT) / 2,
+        grid_top: HEADER_ROWS
+            + layout
+                .garden_height
+                .saturating_sub(used_rows * layout.plot_height)
+                / 2,
         // The Garden now owns the left side of the screen. Keep the first plot
         // anchored to that edge instead of centering a partly-filled row.
         row_left: SIDE_PADDING,
@@ -411,7 +680,7 @@ pub fn render(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    render_scrolled(
+    render_scrolled_sized(
         height,
         width,
         workspace_name,
@@ -419,6 +688,7 @@ pub fn render(
         0,
         tick,
         reduced_motion,
+        GardenSize::default(),
     )
 }
 
@@ -433,21 +703,7 @@ pub fn render_scrolled(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    let layout = garden_layout(height, width)?;
-    if let Some(mut frame) = garden_world::render(
-        height,
-        layout.garden_width,
-        workspace_name,
-        sessions,
-        requested_scroll,
-        tick,
-        reduced_motion,
-    ) {
-        frame.panel_hitboxes =
-            attach_world_agent_panel(&mut frame.rows, width, layout, workspace_name, sessions);
-        return Some(frame);
-    }
-    render_compact_scrolled(
+    render_scrolled_sized(
         height,
         width,
         workspace_name,
@@ -455,6 +711,47 @@ pub fn render_scrolled(
         requested_scroll,
         tick,
         reduced_motion,
+        GardenSize::default(),
+    )
+}
+
+/// Render the Garden using the configured global visual scale.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn render_scrolled_sized(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    requested_scroll: usize,
+    tick: u64,
+    reduced_motion: bool,
+    size: GardenSize,
+) -> Option<GardenFrame> {
+    let layout = garden_layout(height, width, size)?;
+    if let Some(mut frame) = garden_world::render_sized(
+        height,
+        layout.garden_width,
+        workspace_name,
+        sessions,
+        requested_scroll,
+        tick,
+        reduced_motion,
+        size,
+    ) {
+        frame.panel_hitboxes =
+            attach_world_agent_panel(&mut frame.rows, width, layout, workspace_name, sessions);
+        return Some(frame);
+    }
+    render_compact_scrolled_sized(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        requested_scroll,
+        tick,
+        reduced_motion,
+        size,
     )
 }
 
@@ -488,6 +785,7 @@ fn attach_world_agent_panel(
 ///
 /// The compact renderer remains separately testable because it is a real production
 /// fallback, not a historical implementation hidden behind test-only cfg.
+#[cfg(test)]
 fn render_compact_scrolled(
     height: usize,
     width: usize,
@@ -497,7 +795,30 @@ fn render_compact_scrolled(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    let layout = garden_layout(height, width)?;
+    render_compact_scrolled_sized(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        requested_scroll,
+        tick,
+        reduced_motion,
+        GardenSize::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_compact_scrolled_sized(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    requested_scroll: usize,
+    tick: u64,
+    reduced_motion: bool,
+    size: GardenSize,
+) -> Option<GardenFrame> {
+    let layout = garden_layout(height, width, size)?;
     let GardenViewport {
         scroll,
         max_scroll,
@@ -519,13 +840,14 @@ fn render_compact_scrolled(
     // 使う plot 行数だけを縦中央へ寄せ、庭の下側だけが大きく空くのを避ける。
     rows.resize_with(grid_top, || " ".repeat(layout.garden_width));
 
-    let mut hitboxes = Vec::with_capacity(visible * (1 + MAX_VISIBLE_AGENTS));
+    let max_visible_agents = PLOT_WIDTH / layout.sprite_width;
+    let mut hitboxes = Vec::with_capacity(visible * (1 + max_visible_agents));
     let plots = visible_sessions
         .iter()
-        .map(|session| plot(session, tick, reduced_motion))
+        .map(|session| plot_sized(session, tick, reduced_motion, size))
         .collect::<Vec<_>>();
     for plot_row in 0..used_rows {
-        for local_row in 0..PLOT_CONTENT_ROWS {
+        for local_row in 0..layout.plot_height - GROUND_ROWS {
             let mut line = " ".repeat(row_left);
             for column in 0..used_columns {
                 let index = column * layout.plot_rows + plot_row;
@@ -546,7 +868,7 @@ fn render_compact_scrolled(
                 continue;
             };
             let plot_column = row_left + column * PLOT_WIDTH;
-            let plot_row_top = grid_top + plot_row * PLOT_HEIGHT;
+            let plot_row_top = grid_top + plot_row * layout.plot_height;
             // うさぎは区画の内側にあるので、区画より先に積む（click 解決は最初に
             // 当たった rectangle を採る）。
             for rabbit in &plot.rabbits {
@@ -554,9 +876,9 @@ fn render_compact_scrolled(
                     session_id: session.id,
                     agent: Some(rabbit.runtime_id),
                     column: plot_column + rabbit.offset,
-                    row: plot_row_top + SPRITE_TOP_ROW,
+                    row: plot_row_top + 2,
                     width: rabbit.width,
-                    height: SPRITE_ROWS,
+                    height: layout.sprite_height,
                 });
             }
             hitboxes.push(GardenHitbox {
@@ -565,7 +887,7 @@ fn render_compact_scrolled(
                 column: plot_column,
                 row: plot_row_top,
                 width: PLOT_WIDTH,
-                height: PLOT_HEIGHT,
+                height: layout.plot_height,
             });
         }
     }
@@ -921,7 +1243,15 @@ pub fn canonical_tick(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<u64> {
-    canonical_tick_scrolled(height, width, sessions, 0, tick, reduced_motion)
+    canonical_tick_scrolled_sized(
+        height,
+        width,
+        sessions,
+        0,
+        tick,
+        reduced_motion,
+        GardenSize::default(),
+    )
 }
 
 /// [`canonical_tick`] for the horizontally scrolled Garden viewport.
@@ -934,14 +1264,38 @@ pub fn canonical_tick_scrolled(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<u64> {
-    let layout = garden_layout(height, width)?;
-    if let Some(canonical) = garden_world::canonical_tick(
+    canonical_tick_scrolled_sized(
+        height,
+        width,
+        sessions,
+        requested_scroll,
+        tick,
+        reduced_motion,
+        GardenSize::default(),
+    )
+}
+
+/// Canonicalize a Garden tick for a configured visual scale.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn canonical_tick_scrolled_sized(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    requested_scroll: usize,
+    tick: u64,
+    reduced_motion: bool,
+    size: GardenSize,
+) -> Option<u64> {
+    let layout = garden_layout(height, width, size)?;
+    if let Some(canonical) = garden_world::canonical_tick_sized(
         height,
         layout.garden_width,
         sessions,
         requested_scroll,
         tick,
         reduced_motion,
+        size,
     ) {
         return Some(canonical);
     }
@@ -954,7 +1308,7 @@ pub fn canonical_tick_scrolled(
     let expected_ambient = ambient_phase(tick, false);
     let expected = sessions
         .iter()
-        .map(|session| plot(session, tick, reduced_motion))
+        .map(|session| plot_sized(session, tick, reduced_motion, size))
         .collect::<Vec<_>>();
     let mut canonical = 0;
     for distance in 1..ANIMATION_CYCLE_TICKS {
@@ -962,7 +1316,7 @@ pub fn canonical_tick_scrolled(
         let same = ambient_phase(candidate, false) == expected_ambient
             && sessions
                 .iter()
-                .map(|session| plot(session, candidate, reduced_motion))
+                .map(|session| plot_sized(session, candidate, reduced_motion, size))
                 .eq(expected.iter().cloned());
         if !same {
             canonical = (candidate + 1) % ANIMATION_CYCLE_TICKS;
@@ -1052,38 +1406,40 @@ fn footer_line(width: usize, scrollable: bool) -> String {
     pad_to_width(&format!("{left}{}{right}", " ".repeat(gap)), width)
 }
 
-fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
+fn plot_sized(session: &GardenSession, tick: u64, reduced_motion: bool, size: GardenSize) -> Plot {
     let label = signpost(&session.label);
-    let ([mut status, ears_top, ears, face, chest, body, feet], rabbits) =
-        if session.agents_observed {
-            match session.lifecycle {
-                SessionLifecycle::Available if session.pr_merged => {
-                    available_plot(session, tick, reduced_motion)
-                }
-                SessionLifecycle::Available => match session.agent_status {
-                    Some(
-                        status @ (DispatchAgentStatus::Starting
-                        | DispatchAgentStatus::Idle
-                        | DispatchAgentStatus::Exited
-                        | DispatchAgentStatus::Failed),
-                    ) => (dispatch_plot(session, status), Vec::new()),
-                    Some(DispatchAgentStatus::Running) | None => {
-                        available_plot(session, tick, reduced_motion)
-                    }
-                },
-                // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
-                _ => (lifecycle_plot(session, tick, reduced_motion), Vec::new()),
+    let (mut body, rabbits) = if session.agents_observed {
+        match session.lifecycle {
+            SessionLifecycle::Available if session.pr_merged => {
+                available_plot(session, tick, reduced_motion, size)
             }
-        } else {
-            (inactive_plot(session), Vec::new())
-        };
+            SessionLifecycle::Available => match session.agent_status {
+                Some(
+                    status @ (DispatchAgentStatus::Starting
+                    | DispatchAgentStatus::Idle
+                    | DispatchAgentStatus::Exited
+                    | DispatchAgentStatus::Failed),
+                ) => (dispatch_plot_sized(session, status, size), Vec::new()),
+                Some(DispatchAgentStatus::Running) | None => {
+                    available_plot(session, tick, reduced_motion, size)
+                }
+            },
+            // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
+            _ => (
+                lifecycle_plot_sized(session, tick, reduced_motion, size),
+                Vec::new(),
+            ),
+        }
+    } else {
+        (inactive_plot(session, size), Vec::new())
+    };
     if session.pending_decisions > 0 {
         let noun = if session.pending_decisions == 1 {
             "decision"
         } else {
             "decisions"
         };
-        status = centered(
+        body[0] = centered(
             PLOT_WIDTH,
             &Role::Warning
                 .style()
@@ -1091,43 +1447,45 @@ fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
                 .paint(&format!("action · {} {noun}", session.pending_decisions)),
         );
     }
-    Plot {
-        rows: [label, status, ears_top, ears, face, chest, body, feet],
-        rabbits,
-    }
+    let mut rows = Vec::with_capacity(body.len() + 1);
+    rows.push(label);
+    rows.extend(body);
+    Plot { rows, rabbits }
 }
 
 /// A non-running dispatch state is session-level availability, not one
 /// runtime's phase. Render one static session pose rather than relabeling a
 /// coarse running rabbit and leaving its animation and hitbox live.
-fn dispatch_plot(
+fn dispatch_plot_sized(
     session: &GardenSession,
     status: DispatchAgentStatus,
-) -> [String; PLOT_CONTENT_ROWS - 1] {
+    size: GardenSize,
+) -> Vec<String> {
     let feature = rabbit_style(&session.id.as_str()).bold();
     let (label, status_style, rabbit_style, rabbit) = match status {
-        DispatchAgentStatus::Starting => ("", Style::new(), feature, RABBIT_READY),
-        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => {
-            ("", Style::new().dim(), feature.dim(), RABBIT_SLEEPING)
-        }
+        DispatchAgentStatus::Starting => (
+            "",
+            Style::new(),
+            feature,
+            rabbit_pose(size, RabbitPose::Ready),
+        ),
+        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => (
+            "",
+            Style::new().dim(),
+            feature.dim(),
+            rabbit_pose(size, RabbitPose::Sleeping),
+        ),
         DispatchAgentStatus::Failed => (
             "failed",
             Role::Danger.style().bold(),
             Role::Danger.style(),
-            RABBIT_FAILED,
+            rabbit_pose(size, RabbitPose::Failed),
         ),
         DispatchAgentStatus::Running => unreachable!("running uses per-runtime phase"),
     };
-    let [ears_top, ears, face, chest, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
-    [
-        centered(PLOT_WIDTH, &status_style.paint(label)),
-        ears_top,
-        ears,
-        face,
-        chest,
-        body,
-        feet,
-    ]
+    let mut rows = vec![centered(PLOT_WIDTH, &status_style.paint(label))];
+    rows.extend(sprite(rabbit, rabbit_style, PLOT_WIDTH));
+    rows
 }
 
 /// Whether one Garden plot currently needs a person's attention.
@@ -1146,22 +1504,16 @@ fn needs_attention(session: &GardenSession) -> bool {
             .any(|agent| matches!(agent.phase, AgentPhase::Waiting | AgentPhase::Interrupted))
 }
 
-fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
+fn inactive_plot(session: &GardenSession, size: GardenSize) -> Vec<String> {
     let status = match session.lifecycle {
         SessionLifecycle::Available => "project inactive",
         SessionLifecycle::Creating | SessionLifecycle::Initializing => "cached · creating",
         SessionLifecycle::Deleting => "cached · deleting",
         SessionLifecycle::Failed => "cached · failed",
     };
-    [
-        centered(PLOT_WIDTH, &Style::new().dim().paint(status)),
-        " ".repeat(PLOT_WIDTH),
-        " ".repeat(PLOT_WIDTH),
-        " ".repeat(PLOT_WIDTH),
-        " ".repeat(PLOT_WIDTH),
-        " ".repeat(PLOT_WIDTH),
-        " ".repeat(PLOT_WIDTH),
-    ]
+    let mut rows = vec![centered(PLOT_WIDTH, &Style::new().dim().paint(status))];
+    rows.resize_with(rabbit_height(size) + 1, || " ".repeat(PLOT_WIDTH));
+    rows
 }
 
 /// session 名を庭の立札として描く。左右の線も含めて固定幅で切り詰める。
@@ -1238,41 +1590,41 @@ const fn ambient_phase(tick: u64, reduced_motion: bool) -> u64 {
 ///
 /// 行ごとに中央寄せすると、行の表示桁数が違うぶんだけ耳と顔が横へずれる（例えば
 /// `Creating` の耳は頭より 2 桁右に出ていた）。うさぎが崩れないよう、pose 全体の
-/// 最大幅から左端を 1 度だけ決め、6 行に同じ padding を与える。
-fn sprite(
-    rabbit: [&'static str; SPRITE_ROWS],
-    style: Style,
-    width: usize,
-) -> [String; SPRITE_ROWS] {
+/// 最大幅から左端を 1 度だけ決め、全 sprite 行に同じ padding を与える。
+fn sprite(rabbit: RabbitSprite, style: Style, width: usize) -> Vec<String> {
     let sprite_width = rabbit
         .iter()
         .map(|row| display_width(row))
         .max()
         .unwrap_or(0);
     let left = " ".repeat(width.saturating_sub(sprite_width) / 2);
-    rabbit.map(|row| {
-        if row.is_empty() {
-            // 空行に色を塗らない（意味のない escape sequence を frame へ残さない）。
-            " ".repeat(width)
-        } else {
-            pad_to_width(&format!("{left}{}", style.paint(row)), width)
-        }
-    })
+    rabbit
+        .iter()
+        .map(|row| {
+            if row.is_empty() {
+                // 空行に色を塗らない（意味のない escape sequence を frame へ残さない）。
+                " ".repeat(width)
+            } else {
+                pad_to_width(&format!("{left}{}", style.paint(row)), width)
+            }
+        })
+        .collect()
 }
 
-fn lifecycle_plot(
+fn lifecycle_plot_sized(
     session: &GardenSession,
     tick: u64,
     reduced_motion: bool,
-) -> [String; PLOT_CONTENT_ROWS - 1] {
+    size: GardenSize,
+) -> Vec<String> {
     let feature = rabbit_style(&session.id.as_str()).bold();
     let phase = animation_phase(tick, reduced_motion, &session.id.as_str());
     let (status, status_style, rabbit_style, rabbit) = match session.lifecycle {
         SessionLifecycle::Creating | SessionLifecycle::Initializing => {
             let rabbit = if phase < 3 {
-                RABBIT_BURIED
+                rabbit_pose(size, RabbitPose::Buried)
             } else {
-                RABBIT_EMERGING
+                rabbit_pose(size, RabbitPose::Emerging)
             };
             (String::new(), Role::Warning.style(), feature, rabbit)
         }
@@ -1284,7 +1636,12 @@ fn lifecycle_plot(
             } else {
                 Role::Feature.style()
             };
-            (String::new(), Style::new().dim(), rabbit_style, RABBIT_IDLE)
+            (
+                String::new(),
+                Style::new().dim(),
+                rabbit_style,
+                rabbit_pose(size, RabbitPose::Idle),
+            )
         }
         SessionLifecycle::Failed => {
             let status = session.failure_summary.as_deref().map_or_else(
@@ -1295,82 +1652,59 @@ fn lifecycle_plot(
                 status,
                 Role::Danger.style().bold(),
                 Role::Danger.style(),
-                RABBIT_FAILED,
+                rabbit_pose(size, RabbitPose::Failed),
             )
         }
         SessionLifecycle::Available => unreachable!("available sessions use agent projection"),
     };
-    let [ears_top, ears, face, chest, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
-    [
-        centered(
-            PLOT_WIDTH,
-            &status_style.paint(&clip_to_width(&status, PLOT_WIDTH)),
-        ),
-        ears_top,
-        ears,
-        face,
-        chest,
-        body,
-        feet,
-    ]
+    let mut rows = vec![centered(
+        PLOT_WIDTH,
+        &status_style.paint(&clip_to_width(&status, PLOT_WIDTH)),
+    )];
+    rows.extend(sprite(rabbit, rabbit_style, PLOT_WIDTH));
+    rows
 }
 
-/// `Available` な区画の status 行 + sprite 6 行と、その中のうさぎの横位置。
+/// `Available` な区画の status 行 + size 別 sprite と、その中のうさぎの横位置。
 fn available_plot(
     session: &GardenSession,
     tick: u64,
     reduced_motion: bool,
-) -> ([String; PLOT_CONTENT_ROWS - 1], Vec<PlacedRabbit>) {
+    size: GardenSize,
+) -> (Vec<String>, Vec<PlacedRabbit>) {
     if session.pr_merged {
         let rabbit = if reduced_motion || tick.is_multiple_of(2) {
-            RABBIT_CELEBRATING
+            rabbit_pose(size, RabbitPose::Celebrating)
         } else {
-            RABBIT_CELEBRATING_ALT
+            rabbit_pose(size, RabbitPose::CelebratingAlt)
         };
-        let [ears_top, ears, face, chest, body, feet] =
-            sprite(rabbit, Role::Feature.style().bold(), PLOT_WIDTH);
+        let mut rows = vec![centered(
+            PLOT_WIDTH,
+            &Role::Success.style().bold().paint("PR merged! *"),
+        )];
+        rows.extend(sprite(rabbit, Role::Feature.style().bold(), PLOT_WIDTH));
         // celebration は session の祝いの姿で、特定の agent ではない。
-        return (
-            [
-                centered(
-                    PLOT_WIDTH,
-                    &Role::Success.style().bold().paint("PR merged! *"),
-                ),
-                ears_top,
-                ears,
-                face,
-                chest,
-                body,
-                feet,
-            ],
-            Vec::new(),
-        );
+        return (rows, Vec::new());
     }
     let agents = agent_status::ordered(&session.agents);
     if agents.is_empty() {
-        return empty_available_plot();
+        return empty_available_plot(size);
     }
 
     if agents.len() == 1 {
         let agent = agents[0];
-        let (_status, _status_style, rabbit_style, rabbit) = agent_appearance(
+        let (_status, _status_style, rabbit_style, rabbit) = agent_appearance_sized(
             agent.phase,
             tick,
             reduced_motion,
             &agent.runtime_id.as_str(),
+            size,
         );
-        let [ears_top, ears, face, chest, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
+        let mut rows = vec![" ".repeat(PLOT_WIDTH)];
+        rows.extend(sprite(rabbit, rabbit_style, PLOT_WIDTH));
         // 1 羽だけの区画はうさぎを大きく描くので、その 1 体が sprite 行の全幅を持つ。
         return (
-            [
-                " ".repeat(PLOT_WIDTH),
-                ears_top,
-                ears,
-                face,
-                chest,
-                body,
-                feet,
-            ],
+            rows,
             vec![PlacedRabbit {
                 runtime_id: agent.runtime_id,
                 offset: 0,
@@ -1379,87 +1713,73 @@ fn available_plot(
         );
     }
 
-    let visible = &agents[..agents.len().min(MAX_VISIBLE_AGENTS)];
+    let rabbit_width = rabbit_width(size);
+    let visible = &agents[..agents.len().min(PLOT_WIDTH / rabbit_width)];
     // うさぎは plot 幅の都合で先頭数体しか置けないので、status 行は **全** agent の
     // phase glyph だけを示す。pose で分かる action caption や件数の読み上げは重ねず、
     // 畳まれた Agent の存在だけを静かな記号列として残す。
     let status = agent_status::glyph_strip(&agents, PLOT_WIDTH);
-    let mut rows: [String; SPRITE_ROWS] = std::array::from_fn(|_| String::new());
+    let mut rows = vec![String::new(); rabbit_height(size)];
     for agent in visible {
-        let (_, _, style, rabbit) = agent_appearance(
+        let (_, _, style, rabbit) = agent_appearance_sized(
             agent.phase,
             tick,
             reduced_motion,
             &agent.runtime_id.as_str(),
+            size,
         );
-        let compact = sprite(rabbit, style, COMPACT_RABBIT_WIDTH);
+        let compact = sprite(rabbit, style, rabbit_width);
         for (row, part) in rows.iter_mut().zip(compact) {
             row.push_str(&part);
         }
     }
-    let [ears_top, ears, face, chest, body, feet] = rows.map(|row| centered(PLOT_WIDTH, &row));
-    // 各 compact sprite は必ず COMPACT_RABBIT_WIDTH 桁へ揃うので、`centered` が
+    let mut output = vec![centered(PLOT_WIDTH, &status)];
+    output.extend(rows.into_iter().map(|row| centered(PLOT_WIDTH, &row)));
+    // 各 compact sprite は必ず size 別の `rabbit_width` 桁へ揃うので、`centered` が
     // 与える左端は羽数だけから決まる（同じ式で hitbox の offset を出せる）。
-    let left = PLOT_WIDTH.saturating_sub(visible.len() * COMPACT_RABBIT_WIDTH) / 2;
+    let left = PLOT_WIDTH.saturating_sub(visible.len() * rabbit_width) / 2;
     let placed = visible
         .iter()
         .enumerate()
         .map(|(index, agent)| PlacedRabbit {
             runtime_id: agent.runtime_id,
-            offset: left + index * COMPACT_RABBIT_WIDTH,
-            width: COMPACT_RABBIT_WIDTH,
+            offset: left + index * rabbit_width,
+            width: rabbit_width,
         })
         .collect();
-    (
-        [
-            centered(PLOT_WIDTH, &status),
-            ears_top,
-            ears,
-            face,
-            chest,
-            body,
-            feet,
-        ],
-        placed,
-    )
+    (output, placed)
 }
 
-fn empty_available_plot() -> ([String; PLOT_CONTENT_ROWS - 1], Vec<PlacedRabbit>) {
-    (
-        std::array::from_fn(|index| {
-            if index == 0 {
-                centered(PLOT_WIDTH, &Style::new().dim().paint("no agents"))
-            } else {
-                " ".repeat(PLOT_WIDTH)
-            }
-        }),
-        Vec::new(),
-    )
+fn empty_available_plot(size: GardenSize) -> (Vec<String>, Vec<PlacedRabbit>) {
+    let mut rows = vec![centered(PLOT_WIDTH, &Style::new().dim().paint("no agents"))];
+    rows.resize_with(rabbit_height(size) + 1, || " ".repeat(PLOT_WIDTH));
+    (rows, Vec::new())
 }
 
-fn agent_appearance(
+fn agent_appearance_sized(
     agent_phase: AgentPhase,
     tick: u64,
     reduced_motion: bool,
     stable_id: &str,
-) -> (&'static str, Style, Style, [&'static str; SPRITE_ROWS]) {
+    size: GardenSize,
+) -> (&'static str, Style, Style, RabbitSprite) {
     let feature = rabbit_style(stable_id).bold();
     let phase = animation_phase(tick, reduced_motion, stable_id);
     match agent_phase {
         AgentPhase::Running => {
             let rabbit = if reduced_motion {
-                RABBIT_ACTIVE
+                rabbit_pose(size, RabbitPose::Active)
             } else {
                 let (action, progress) = running_action(tick, stable_id);
-                running_pose(action, progress)
+                running_pose_sized(action, progress, size)
             };
             ("running", Role::Success.style().bold(), feature, rabbit)
         }
         AgentPhase::Waiting => {
             let rabbit = if phase == 5 {
-                RABBIT_WAITING_EARS
+                rabbit_pose(size, RabbitPose::WaitingEars)
             } else {
-                RABBIT_WAITING
+                rabbit_pose(size, RabbitPose::Waiting)
             };
             ("waiting", Role::Warning.style().bold(), feature, rabbit)
         }
@@ -1467,17 +1787,25 @@ fn agent_appearance(
             "interrupted",
             Role::Warning.style(),
             feature,
-            RABBIT_INTERRUPTED,
+            rabbit_pose(size, RabbitPose::Interrupted),
         ),
-        AgentPhase::Sleeping => ("sleeping", Style::new().dim(), feature, RABBIT_SLEEPING),
-        AgentPhase::Ended | AgentPhase::Exited => {
-            ("done", Style::new().dim(), feature, RABBIT_DONE)
-        }
+        AgentPhase::Sleeping => (
+            "sleeping",
+            Style::new().dim(),
+            feature,
+            rabbit_pose(size, RabbitPose::Sleeping),
+        ),
+        AgentPhase::Ended | AgentPhase::Exited => (
+            "done",
+            Style::new().dim(),
+            feature,
+            rabbit_pose(size, RabbitPose::Done),
+        ),
         AgentPhase::Absent | AgentPhase::Ready => {
             let rabbit = if phase == 4 {
-                RABBIT_BLINKING
+                rabbit_pose(size, RabbitPose::Blinking)
             } else {
-                RABBIT_READY
+                rabbit_pose(size, RabbitPose::Ready)
             };
             ("available", Style::new().dim(), feature, rabbit)
         }
@@ -1533,7 +1861,7 @@ fn rabbit_style(stable_id: &str) -> Style {
 
 const HOP_POSES: [RabbitSprite; 3] = [
     RABBIT_WORKING,
-    [
+    &[
         "  /\\  /\\",
         " /  \\/  \\",
         "(   o.o   )",
@@ -1541,7 +1869,7 @@ const HOP_POSES: [RabbitSprite; 3] = [
         "\\   /\\   /",
         " \\_/  \\_/",
     ],
-    [
+    &[
         "",
         "   /\\  /\\",
         "  /  \\/  \\",
@@ -1551,7 +1879,7 @@ const HOP_POSES: [RabbitSprite; 3] = [
     ],
 ];
 const BOUND_POSES: [RabbitSprite; 2] = [
-    [
+    &[
         "   /\\  /\\ >",
         "  /  \\/  \\",
         " (   o.o  )/",
@@ -1559,7 +1887,7 @@ const BOUND_POSES: [RabbitSprite; 2] = [
         " \\  / _/   ",
         "  c(\")  \\__",
     ],
-    [
+    &[
         "  /\\  /\\__",
         " /  \\/  \\ ",
         "(   o.o  )/ ",
@@ -1568,7 +1896,7 @@ const BOUND_POSES: [RabbitSprite; 2] = [
         "  \\_  \\__ ",
     ],
 ];
-const SNIFFING_POSE: RabbitSprite = [
+const SNIFFING_POSE: RabbitSprite = &[
     "   /\\  /\\",
     "  /  \\/  \\",
     " (   o.o  )>",
@@ -1577,7 +1905,7 @@ const SNIFFING_POSE: RabbitSprite = [
     "  c(\")_(\")",
 ];
 const DIG_POSES: [RabbitSprite; 3] = [
-    [
+    &[
         "   /\\  /\\",
         "  /  \\/  \\",
         " _(  o.o  )_",
@@ -1585,7 +1913,7 @@ const DIG_POSES: [RabbitSprite; 3] = [
         " \\   />  #/",
         "  c(\")  ##",
     ],
-    [
+    &[
         "   /\\  /\\",
         "  /  \\/  \\",
         " _(  o.o  )_",
@@ -1593,7 +1921,7 @@ const DIG_POSES: [RabbitSprite; 3] = [
         "\\#  <\\   /",
         " ##  (\")c ",
     ],
-    [
+    &[
         "   /\\  /\\",
         "  /  \\/  \\",
         " _(  o.o  )_",
@@ -1603,7 +1931,7 @@ const DIG_POSES: [RabbitSprite; 3] = [
     ],
 ];
 const LOOK_POSES: [RabbitSprite; 2] = [
-    [
+    &[
         "   /\\  /\\",
         "  /  \\/  \\",
         " ( o.o     )",
@@ -1611,7 +1939,7 @@ const LOOK_POSES: [RabbitSprite; 2] = [
         " \\  /   \\  /",
         "  c(\")_(\")",
     ],
-    [
+    &[
         "   /\\  /\\",
         "  /  \\/  \\",
         " (     o.o )",
@@ -1621,7 +1949,17 @@ const LOOK_POSES: [RabbitSprite; 2] = [
     ],
 ];
 
-fn running_pose(action: RunningAction, progress: u64) -> RabbitSprite {
+fn running_pose_sized(action: RunningAction, progress: u64, size: GardenSize) -> RabbitSprite {
+    if size != GardenSize::Medium {
+        let pose = match (action, progress.is_multiple_of(2)) {
+            (RunningAction::Hop | RunningAction::Bound | RunningAction::Dig, true) => {
+                RabbitPose::Working
+            }
+            (RunningAction::Sniff | RunningAction::Look, true) => RabbitPose::Ready,
+            _ => RabbitPose::Active,
+        };
+        return rabbit_pose(size, pose);
+    }
     match action {
         RunningAction::Hop => HOP_POSES[usize::try_from(progress % 3).unwrap_or_default()],
         RunningAction::Bound if matches!(progress % 4, 0 | 3) => BOUND_POSES[0],
@@ -1642,6 +1980,51 @@ fn animation_phase(tick: u64, reduced_motion: bool, stable_id: &str) -> u64 {
     }
 }
 
+// Keep the focused renderer tests concise while production always supplies the
+// global scale explicitly.
+#[cfg(test)]
+const RABBIT_SPRITE_HEIGHT: usize = 6;
+#[cfg(test)]
+const RABBIT_SPRITE_WIDTH: usize = 12;
+#[cfg(test)]
+const SPRITE_ROWS: usize = RABBIT_SPRITE_HEIGHT;
+#[cfg(test)]
+const COMPACT_RABBIT_WIDTH: usize = RABBIT_SPRITE_WIDTH;
+#[cfg(test)]
+const SPRITE_TOP_ROW: usize = 2;
+#[cfg(test)]
+const MAX_VISIBLE_AGENTS: usize = PLOT_WIDTH / COMPACT_RABBIT_WIDTH;
+
+#[cfg(test)]
+fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
+    plot_sized(session, tick, reduced_motion, GardenSize::Medium)
+}
+
+#[cfg(test)]
+fn lifecycle_plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Vec<String> {
+    lifecycle_plot_sized(session, tick, reduced_motion, GardenSize::Medium)
+}
+
+#[cfg(test)]
+fn dispatch_plot(session: &GardenSession, status: DispatchAgentStatus) -> Vec<String> {
+    dispatch_plot_sized(session, status, GardenSize::Medium)
+}
+
+#[cfg(test)]
+fn agent_appearance(
+    phase: AgentPhase,
+    tick: u64,
+    reduced_motion: bool,
+    stable_id: &str,
+) -> (&'static str, Style, Style, RabbitSprite) {
+    agent_appearance_sized(phase, tick, reduced_motion, stable_id, GardenSize::Medium)
+}
+
+#[cfg(test)]
+fn running_pose(action: RunningAction, progress: u64) -> RabbitSprite {
+    running_pose_sized(action, progress, GardenSize::Medium)
+}
+
 fn centered(width: usize, value: &str) -> String {
     let value = clip_to_width(value, width);
     let padding = width.saturating_sub(display_width(&value)) / 2;
@@ -1655,6 +2038,7 @@ mod tests {
     use usagi_core::domain::agent::AgentStatus as DispatchAgentStatus;
     use usagi_core::domain::id::{AgentRuntimeId, SessionId};
     use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
+    use usagi_core::domain::settings::GardenSize;
 
     /// animation offset が 0 になる id（先頭 2 桁が `00`）。tick をそのまま phase として扱える。
     const STEADY_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -1777,6 +2161,43 @@ mod tests {
                 Some(super::RABBIT_SPRITE_WIDTH),
                 "{phase:?}"
             );
+        }
+    }
+
+    #[test]
+    fn configured_sizes_select_distinct_rabbit_canvases_and_minimum_heights() {
+        for (size, width, height, minimum) in [
+            (GardenSize::Small, 8, 4, 13),
+            (GardenSize::Medium, 12, 6, 13),
+            (GardenSize::Large, 16, 8, 15),
+        ] {
+            for pose in [
+                super::RabbitPose::Active,
+                super::RabbitPose::Working,
+                super::RabbitPose::Ready,
+                super::RabbitPose::Idle,
+                super::RabbitPose::Blinking,
+                super::RabbitPose::Waiting,
+                super::RabbitPose::WaitingEars,
+                super::RabbitPose::Interrupted,
+                super::RabbitPose::Sleeping,
+                super::RabbitPose::Done,
+                super::RabbitPose::Failed,
+                super::RabbitPose::Buried,
+                super::RabbitPose::Emerging,
+                super::RabbitPose::Celebrating,
+                super::RabbitPose::CelebratingAlt,
+            ] {
+                let sprite = super::rabbit_pose(size, pose);
+                assert_eq!(sprite.len(), height, "{size:?} {pose:?}");
+                assert!(
+                    sprite.iter().all(|row| display_width(row) <= width),
+                    "{size:?} {pose:?}: {sprite:?}"
+                );
+            }
+            assert_eq!(super::rabbit_width(size), width);
+            assert_eq!(super::rabbit_height(size), height);
+            assert_eq!(super::min_height(size), minimum);
         }
     }
 
@@ -3025,13 +3446,13 @@ mod tests {
             for progress in 0..action.duration() {
                 assert_rabbit_axis(
                     &format!("{action:?}/{progress}"),
-                    &super::running_pose(action, progress),
+                    super::running_pose(action, progress),
                 );
             }
         }
         for phase in AgentPhase::ALL {
             let (_, _, _, pose) = super::agent_appearance(phase, 5, false, STEADY_ID);
-            assert_rabbit_axis(&format!("{phase:?}"), &pose);
+            assert_rabbit_axis(&format!("{phase:?}"), pose);
         }
     }
 

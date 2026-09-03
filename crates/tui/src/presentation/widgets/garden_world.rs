@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthChar;
 use usagi_core::domain::agent::AgentStatus as DispatchAgentStatus;
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
+use usagi_core::domain::settings::GardenSize;
 
 use crate::presentation::theme::{Role, Style, garden_rabbit_style};
 
@@ -18,9 +19,7 @@ use super::agent_status;
 use super::button::InlineButton;
 use super::garden::{
     ANIMATION_CYCLE_TICKS, GardenFrame, GardenHitbox, GardenScrollHitbox, GardenSession,
-    RABBIT_BURIED, RABBIT_CELEBRATING, RABBIT_CELEBRATING_ALT, RABBIT_EMERGING, RABBIT_FAILED,
-    RABBIT_IDLE, RABBIT_INTERRUPTED, RABBIT_READY, RABBIT_SLEEPING, RABBIT_SPRITE_HEIGHT,
-    RABBIT_SPRITE_WIDTH, RABBIT_WAITING, RABBIT_WAITING_EARS, RABBIT_WORKING, RabbitSprite,
+    RabbitPose, RabbitSprite, rabbit_height, rabbit_pose, rabbit_width,
 };
 use super::{clip_to_width, display_width, pad_to_width};
 
@@ -30,19 +29,16 @@ const SIDE_PADDING: usize = 2;
 const HEADER_ROWS: usize = 1;
 const FOOTER_ROWS: usize = 2;
 const PAN_STEP: usize = 16;
-const REGION_WIDTH: usize = 96;
-const REGION_CONTENT_WIDTH: usize = 92;
 const WORLD_MARGIN: usize = 4;
 const HOME_WIDTH: usize = 28;
 const HOME_HEIGHT: usize = 4;
-const RABBIT_HEIGHT: usize = RABBIT_SPRITE_HEIGHT;
 const MAX_WORLD_AGENTS_PER_SESSION: usize = 6;
 const LIFESTYLE_CYCLE_TICKS: u64 = 100;
 const AMBIENT_PHASE_TICKS: u64 = 4;
 const AMBIENT_PHASES: u64 = 6;
 const TWINKLE: [char; 6] = ['.', '*', '+', '*', '.', '·'];
 const WALKING_RABBITS: [RabbitSprite; 4] = [
-    [
+    &[
         "   /\\  /\\ >",
         "  /  \\/  \\",
         " (   o.o  )/",
@@ -50,7 +46,7 @@ const WALKING_RABBITS: [RabbitSprite; 4] = [
         " \\  / _/   ",
         "  c(\")  \\__",
     ],
-    [
+    &[
         "  /\\  /\\__",
         " /  \\/  \\ ",
         "(   o.o  )/ ",
@@ -58,7 +54,7 @@ const WALKING_RABBITS: [RabbitSprite; 4] = [
         " \\  /   >  ",
         "  \\_  \\__ ",
     ],
-    [
+    &[
         "<  /\\  /\\",
         " /  \\/  \\  ",
         "\\(  o.o   ) ",
@@ -66,7 +62,7 @@ const WALKING_RABBITS: [RabbitSprite; 4] = [
         "   \\_ \\  / ",
         "__/   (\")c ",
     ],
-    [
+    &[
         "__  /\\  /\\",
         " /  \\/  \\ ",
         " \\(  o.o   )",
@@ -75,7 +71,7 @@ const WALKING_RABBITS: [RabbitSprite; 4] = [
         " __/  _/   ",
     ],
 ];
-const DRINKING_RABBIT: RabbitSprite = [
+const DRINKING_RABBIT: RabbitSprite = &[
     "   /\\  /\\",
     "  /  \\/  \\",
     " (   . .   )",
@@ -83,13 +79,41 @@ const DRINKING_RABBIT: RabbitSprite = [
     " \\  /   \\__~",
     "  c(\")_(\")~~",
 ];
-const EATING_RABBIT: RabbitSprite = [
+const EATING_RABBIT: RabbitSprite = &[
     "Y  /\\  /\\",
     "| /  \\/  \\",
     "|(   o.o   )",
     "\\/    ^   /",
     " \\  /   \\  /",
     "  c(\")_(\")",
+];
+const SMALL_WALKING_RABBITS: [RabbitSprite; 4] = [
+    &["", " /)/)  >", "( o.o)/", " /  \\"],
+    &[" /)/) __", "( o.o)/", "  /  >", ""],
+    &["", "< (\\(\\", "\\(.o )", " /  \\"],
+    &["__(\\(\\", " \\(.o )", " <  \\ ", ""],
+];
+const SMALL_DRINKING_RABBIT: RabbitSprite = &["", " /)/)", "( . .)__", " /   \\~~"];
+const SMALL_EATING_RABBIT: RabbitSprite = &[" Y", " /)/)", "( o.o)<Y", "c(\")(\")"];
+const LARGE_DRINKING_RABBIT: RabbitSprite = &[
+    "    /\\    /\\",
+    "   /  \\__/  \\",
+    "  /          \\",
+    " (    .  .    )",
+    " /      ^     /_",
+    " \\    / \\   /~",
+    "  \\  /   \\_/~~",
+    "   c(\")_(\")~~~~",
+];
+const LARGE_EATING_RABBIT: RabbitSprite = &[
+    "Y   /\\    /\\",
+    "|  /  \\__/  \\",
+    "| /          \\",
+    "|(    o  o    )",
+    "\\/      ^     /",
+    " \\    / \\    /",
+    "  \\  /   \\  /",
+    "   c(\")_(\")c",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +130,7 @@ struct WorldLayout {
     scroll: usize,
     max_scroll: usize,
     camera_x: usize,
+    region_width: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,8 +294,8 @@ impl Canvas {
         }
     }
 
-    fn lines<const N: usize>(&mut self, origin: Point, lines: [&str; N], style: Style) {
-        for (row, line) in lines.into_iter().enumerate() {
+    fn lines(&mut self, origin: Point, lines: &[&str], style: Style) {
+        for (row, line) in lines.iter().enumerate() {
             self.text(
                 origin.x,
                 origin.y + i64::try_from(row).expect("sprite row fits i64"),
@@ -311,27 +336,47 @@ impl Canvas {
     }
 }
 
+#[cfg(test)]
 pub(super) const fn fits(height: usize, width: usize) -> bool {
-    height >= WORLD_MIN_HEIGHT && width >= WORLD_MIN_WIDTH
+    fits_sized(height, width, GardenSize::Medium)
 }
 
-fn world_layout(
+const fn fits_sized(height: usize, width: usize, size: GardenSize) -> bool {
+    let minimum_height = match size {
+        GardenSize::Small | GardenSize::Medium => WORLD_MIN_HEIGHT,
+        GardenSize::Large => WORLD_MIN_HEIGHT + 2,
+    };
+    height >= minimum_height && width >= WORLD_MIN_WIDTH
+}
+
+const fn region_width(size: GardenSize) -> usize {
+    match size {
+        GardenSize::Small => 80,
+        GardenSize::Medium => 96,
+        GardenSize::Large => 112,
+    }
+}
+
+fn world_layout_sized(
     height: usize,
     width: usize,
     session_count: usize,
     requested_scroll: usize,
+    size: GardenSize,
 ) -> Option<WorldLayout> {
-    if !fits(height, width) {
+    if !fits_sized(height, width, size) {
         return None;
     }
+    let region_width = region_width(size);
+    let region_content_width = region_width - WORLD_MARGIN;
     let viewport_width = width.saturating_sub(SIDE_PADDING * 2);
     let world_height = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
     let content_width = if session_count == 0 {
         viewport_width
     } else {
         WORLD_MARGIN
-            .saturating_add(session_count.saturating_sub(1).saturating_mul(REGION_WIDTH))
-            .saturating_add(REGION_CONTENT_WIDTH)
+            .saturating_add(session_count.saturating_sub(1).saturating_mul(region_width))
+            .saturating_add(region_content_width)
     };
     let world_width = viewport_width.max(content_width);
     let max_camera = world_width.saturating_sub(viewport_width);
@@ -345,9 +390,11 @@ fn world_layout(
         scroll,
         max_scroll,
         camera_x,
+        region_width,
     })
 }
 
+#[cfg(test)]
 pub(super) fn render(
     height: usize,
     width: usize,
@@ -357,11 +404,34 @@ pub(super) fn render(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    let layout = world_layout(height, width, sessions.len(), requested_scroll)?;
+    render_sized(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        requested_scroll,
+        tick,
+        reduced_motion,
+        GardenSize::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_sized(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    requested_scroll: usize,
+    tick: u64,
+    reduced_motion: bool,
+    size: GardenSize,
+) -> Option<GardenFrame> {
+    let layout = world_layout_sized(height, width, sessions.len(), requested_scroll, size)?;
     let mut canvas = Canvas::new(layout.viewport_width, layout.world_height, layout.camera_x);
     draw_meadow(&mut canvas, layout, workspace_name, tick, reduced_motion);
 
-    let mut contents = draw_sessions(&mut canvas, layout, sessions, tick, reduced_motion);
+    let mut contents = draw_sessions(&mut canvas, layout, sessions, tick, reduced_motion, size);
     contents.rabbit_hitboxes.extend(contents.home_hitboxes);
 
     let mut rows = Vec::with_capacity(height);
@@ -398,15 +468,16 @@ fn draw_sessions(
     sessions: &[GardenSession],
     tick: u64,
     reduced_motion: bool,
+    size: GardenSize,
 ) -> WorldContents {
     let mut home_hitboxes = Vec::new();
     let mut rabbits = Vec::new();
     for (index, session) in sessions.iter().enumerate() {
-        let places = places(index, layout.world_height);
-        draw_paths(canvas, places);
-        draw_pond(canvas, places.pond);
+        let places = places(index, layout, size);
+        draw_paths(canvas, places, size);
+        draw_pond(canvas, places.pond, size);
         draw_food_bed(canvas, places.bed);
-        draw_tree(canvas, places.tree);
+        draw_tree(canvas, places.tree, size);
         draw_home(canvas, session, places.burrow);
 
         if let Some((column, row, hitbox_width, hitbox_height)) =
@@ -423,7 +494,7 @@ fn draw_sessions(
         }
 
         if !session.agents_observed || session.lifecycle != SessionLifecycle::Available {
-            draw_lifecycle_pose(canvas, session, places.burrow, tick, reduced_motion);
+            draw_lifecycle_pose_sized(canvas, session, places.burrow, tick, reduced_motion, size);
             continue;
         }
         if !session.pr_merged
@@ -434,7 +505,7 @@ fn draw_sessions(
                 | DispatchAgentStatus::Failed),
             ) = session.agent_status
         {
-            draw_dispatch_pose(canvas, session, places.burrow, status);
+            draw_dispatch_pose_sized(canvas, session, places.burrow, status, size);
             continue;
         }
 
@@ -442,7 +513,7 @@ fn draw_sessions(
         let visible_count = agents.len().min(MAX_WORLD_AGENTS_PER_SESSION);
         for (agent_index, agent) in agents.into_iter().take(visible_count).enumerate() {
             let seed = stable_hash(&agent.runtime_id.as_str());
-            let targets = offset_places(places, agent_index, visible_count);
+            let targets = offset_places(places, agent_index, visible_count, size);
             let motion = agent_motion(
                 agent.phase,
                 session.agent_status,
@@ -462,7 +533,7 @@ fn draw_sessions(
         }
     }
 
-    let rabbit_hitboxes = draw_rabbits(canvas, layout, &mut rabbits);
+    let rabbit_hitboxes = draw_rabbits(canvas, layout, &mut rabbits, size);
     // A rabbit can walk into the viewport while its burrow is just outside it.
     // Count the session as visible whenever either target was actually drawn.
     let visible_sessions = sessions
@@ -485,6 +556,7 @@ fn draw_rabbits(
     canvas: &mut Canvas,
     layout: WorldLayout,
     rabbits: &mut [Rabbit],
+    size: GardenSize,
 ) -> Vec<GardenHitbox> {
     rabbits.sort_by(|left, right| {
         left.motion
@@ -496,16 +568,19 @@ fn draw_rabbits(
     });
     let mut rabbit_hitboxes = Vec::new();
     for rabbit in rabbits {
-        let sprite = rabbit_sprite(rabbit.motion, rabbit.tick);
+        let sprite = rabbit_sprite_sized(rabbit.motion, rabbit.tick, size);
         let sprite_width = sprite
             .iter()
             .map(|row| display_width(row))
             .max()
             .unwrap_or(0);
         canvas.lines(rabbit.motion.point, sprite, rabbit.style);
-        if let Some((column, row, hitbox_width, hitbox_height)) =
-            clipped_rect(rabbit.motion.point, sprite_width, RABBIT_HEIGHT, layout)
-        {
+        if let Some((column, row, hitbox_width, hitbox_height)) = clipped_rect(
+            rabbit.motion.point,
+            sprite_width,
+            rabbit_height(size),
+            layout,
+        ) {
             rabbit_hitboxes.push(GardenHitbox {
                 session_id: rabbit.session_id,
                 agent: Some(rabbit.runtime_id),
@@ -521,6 +596,7 @@ fn draw_rabbits(
     rabbit_hitboxes
 }
 
+#[cfg(test)]
 pub(super) fn canonical_tick(
     height: usize,
     width: usize,
@@ -529,8 +605,29 @@ pub(super) fn canonical_tick(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<u64> {
+    canonical_tick_sized(
+        height,
+        width,
+        sessions,
+        requested_scroll,
+        tick,
+        reduced_motion,
+        GardenSize::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn canonical_tick_sized(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    requested_scroll: usize,
+    tick: u64,
+    reduced_motion: bool,
+    size: GardenSize,
+) -> Option<u64> {
     let tick = tick % ANIMATION_CYCLE_TICKS;
-    let expected = render(
+    let expected = render_sized(
         height,
         width,
         "canonical",
@@ -538,6 +635,7 @@ pub(super) fn canonical_tick(
         requested_scroll,
         tick,
         reduced_motion,
+        size,
     )?;
     if reduced_motion {
         return Some(0);
@@ -547,7 +645,7 @@ pub(super) fn canonical_tick(
     // further keeps canonicalization bounded while still folding every held pose.
     for distance in 1..=24 {
         let candidate = (tick + ANIMATION_CYCLE_TICKS - distance) % ANIMATION_CYCLE_TICKS;
-        let same = render(
+        let same = render_sized(
             height,
             width,
             "canonical",
@@ -555,6 +653,7 @@ pub(super) fn canonical_tick(
             requested_scroll,
             candidate,
             reduced_motion,
+            size,
         )? == expected;
         if !same {
             break;
@@ -564,29 +663,37 @@ pub(super) fn canonical_tick(
     Some(canonical)
 }
 
-fn places(index: usize, world_height: usize) -> Places {
-    let region = i64::try_from(WORLD_MARGIN + index.saturating_mul(REGION_WIDTH))
+fn places(index: usize, layout: WorldLayout, size: GardenSize) -> Places {
+    let region = i64::try_from(WORLD_MARGIN + index.saturating_mul(layout.region_width))
         .expect("Garden region fits i64");
+    let world_height = layout.world_height;
     let height = i64::try_from(world_height).expect("Garden height fits i64");
     let home_y = if world_height >= 20 && index % 2 == 1 {
         height - i64::try_from(HOME_HEIGHT).expect("home height fits i64")
     } else {
         1
     };
-    let pond_y = (height - 3).max(1);
+    let pond_y =
+        (height - i64::try_from(pond_art(size).len()).expect("pond height fits i64")).max(1);
     let food_y = if index.is_multiple_of(2) {
         2
     } else {
         (height / 2 - 1).max(2)
     };
-    let tree_y = (height / 2 - 3).max(1);
+    let tree_height = i64::try_from(tree_art(size).len()).expect("tree height fits i64");
+    let tree_y = ((height - tree_height) / 2).max(1);
+    let (home_x, water_x, food_x, shade_x, pond_x, bed_x, tree_x) = match size {
+        GardenSize::Small => (14, 14, 32, 52, 20, 40, 56),
+        GardenSize::Medium => (18, 17, 39, 60, 24, 48, 63),
+        GardenSize::Large => (22, 22, 52, 82, 28, 62, 88),
+    };
     Places {
         burrow: Point {
             x: region,
             y: home_y,
         },
         home: Point {
-            x: region + 18,
+            x: region + home_x,
             y: if home_y == 1 {
                 (home_y + 5).min((height - 4).max(1))
             } else {
@@ -594,36 +701,45 @@ fn places(index: usize, world_height: usize) -> Places {
             },
         },
         water: Point {
-            x: region + 17,
-            y: (pond_y - 3).max(1),
+            x: region + water_x,
+            y: (pond_y - i64::try_from(rabbit_height(size) / 2).expect("rabbit height fits i64"))
+                .max(1),
         },
         food: Point {
-            x: region + 39,
+            x: region + food_x,
             y: food_y,
         },
         shade: Point {
-            x: region + 60,
-            y: (tree_y + 3).min((height - 4).max(1)),
+            x: region + shade_x,
+            y: (tree_y + tree_height / 2).min(
+                (height - i64::try_from(rabbit_height(size)).expect("rabbit height fits i64"))
+                    .max(1),
+            ),
         },
         pond: Point {
-            x: region + 24,
+            x: region + pond_x,
             y: pond_y,
         },
         bed: Point {
-            x: region + 48,
+            x: region + bed_x,
             y: food_y,
         },
         tree: Point {
-            x: region + 63,
+            x: region + tree_x,
             y: tree_y,
         },
     }
 }
 
-fn offset_places(mut places: Places, agent_index: usize, agent_count: usize) -> Places {
+fn offset_places(
+    mut places: Places,
+    agent_index: usize,
+    agent_count: usize,
+    size: GardenSize,
+) -> Places {
     let index = i64::try_from(agent_index).expect("rabbit slot fits i64");
     let count = i64::try_from(agent_count).expect("rabbit count fits i64");
-    let spacing = i64::try_from(RABBIT_SPRITE_WIDTH).expect("rabbit width fits i64");
+    let spacing = i64::try_from(rabbit_width(size)).expect("rabbit width fits i64");
     let horizontal = index * spacing - count.saturating_sub(1) * spacing / 2;
     for point in [
         &mut places.home,
@@ -755,29 +871,52 @@ fn lerp(from: i64, to: i64, elapsed: u64, duration: u64) -> i64 {
     from + i64::try_from(delta * elapsed / duration).expect("Garden interpolation fits i64")
 }
 
-fn rabbit_sprite(motion: Motion, tick: u64) -> RabbitSprite {
+fn rabbit_sprite_sized(motion: Motion, tick: u64, size: GardenSize) -> RabbitSprite {
     match motion.activity {
-        Activity::Walking => walking_rabbit(motion.facing, tick),
-        Activity::Drinking => DRINKING_RABBIT,
-        Activity::Eating => EATING_RABBIT,
-        Activity::Sleeping => RABBIT_SLEEPING,
-        Activity::Waiting if tick % 6 == 5 => RABBIT_WAITING_EARS,
-        Activity::Waiting => RABBIT_WAITING,
-        Activity::Interrupted => RABBIT_INTERRUPTED,
-        Activity::Working => RABBIT_WORKING,
-        Activity::Celebrating if tick.is_multiple_of(2) => RABBIT_CELEBRATING_ALT,
-        Activity::Celebrating => RABBIT_CELEBRATING,
+        Activity::Walking => walking_rabbit(motion.facing, tick, size),
+        Activity::Drinking => drinking_rabbit(size),
+        Activity::Eating => eating_rabbit(size),
+        Activity::Sleeping => rabbit_pose(size, RabbitPose::Sleeping),
+        Activity::Waiting if tick % 6 == 5 => rabbit_pose(size, RabbitPose::WaitingEars),
+        Activity::Waiting => rabbit_pose(size, RabbitPose::Waiting),
+        Activity::Interrupted => rabbit_pose(size, RabbitPose::Interrupted),
+        Activity::Working => rabbit_pose(size, RabbitPose::Working),
+        Activity::Celebrating if tick.is_multiple_of(2) => {
+            rabbit_pose(size, RabbitPose::CelebratingAlt)
+        }
+        Activity::Celebrating => rabbit_pose(size, RabbitPose::Celebrating),
     }
 }
 
-fn walking_rabbit(facing: Facing, tick: u64) -> RabbitSprite {
+fn walking_rabbit(facing: Facing, tick: u64, size: GardenSize) -> RabbitSprite {
     let index = match (facing, tick.is_multiple_of(2)) {
         (Facing::Right, true) => 0,
         (Facing::Right, false) => 1,
         (Facing::Left, true) => 2,
         (Facing::Left, false) => 3,
     };
-    WALKING_RABBITS[index]
+    match size {
+        GardenSize::Small => SMALL_WALKING_RABBITS[index],
+        GardenSize::Medium => WALKING_RABBITS[index],
+        GardenSize::Large if index.is_multiple_of(2) => rabbit_pose(size, RabbitPose::Active),
+        GardenSize::Large => rabbit_pose(size, RabbitPose::Working),
+    }
+}
+
+const fn drinking_rabbit(size: GardenSize) -> RabbitSprite {
+    match size {
+        GardenSize::Small => SMALL_DRINKING_RABBIT,
+        GardenSize::Medium => DRINKING_RABBIT,
+        GardenSize::Large => LARGE_DRINKING_RABBIT,
+    }
+}
+
+const fn eating_rabbit(size: GardenSize) -> RabbitSprite {
+    match size {
+        GardenSize::Small => SMALL_EATING_RABBIT,
+        GardenSize::Medium => EATING_RABBIT,
+        GardenSize::Large => LARGE_EATING_RABBIT,
+    }
 }
 
 fn draw_meadow(
@@ -830,15 +969,16 @@ const fn ambient_phase(tick: u64, reduced_motion: bool) -> u64 {
     }
 }
 
-fn draw_paths(canvas: &mut Canvas, places: Places) {
-    draw_path(canvas, places.burrow, places.home);
-    draw_path(canvas, places.home, places.water);
-    draw_path(canvas, places.water, places.food);
-    draw_path(canvas, places.food, places.shade);
-    draw_path(canvas, places.shade, places.home);
+fn draw_paths(canvas: &mut Canvas, places: Places, size: GardenSize) {
+    let vertical_offset = i64::try_from(rabbit_height(size) / 2).expect("rabbit height fits i64");
+    draw_path(canvas, places.burrow, places.home, vertical_offset);
+    draw_path(canvas, places.home, places.water, vertical_offset);
+    draw_path(canvas, places.water, places.food, vertical_offset);
+    draw_path(canvas, places.food, places.shade, vertical_offset);
+    draw_path(canvas, places.shade, places.home, vertical_offset);
 }
 
-fn draw_path(canvas: &mut Canvas, from: Point, to: Point) {
+fn draw_path(canvas: &mut Canvas, from: Point, to: Point, vertical_offset: i64) {
     let dx = (to.x - from.x).abs();
     let sx = if from.x < to.x { 1 } else { -1 };
     let dy = -(to.y - from.y).abs();
@@ -847,7 +987,7 @@ fn draw_path(canvas: &mut Canvas, from: Point, to: Point) {
     let (mut x, mut y, mut step) = (from.x, from.y, 0usize);
     loop {
         if step.is_multiple_of(2) {
-            canvas.put_if_empty(x, y + 3, '.', Role::Warning.style().dim());
+            canvas.put_if_empty(x, y + vertical_offset, '.', Role::Warning.style().dim());
         }
         if x == to.x && y == to.y {
             break;
@@ -865,28 +1005,74 @@ fn draw_path(canvas: &mut Canvas, from: Point, to: Point) {
     }
 }
 
-fn draw_pond(canvas: &mut Canvas, origin: Point) {
-    canvas.lines(
-        origin,
-        ["  ~~~~~~~~~~~~~~", " ~  ~~~~~~~~  ~", "  ~~~~~~~~~~~~"],
-        Role::Info.style(),
-    );
+const POND_SMALL: &[&str] = &["  ~~~~~~~~~~~~~~", " ~  ~~~~~~~~  ~", "  ~~~~~~~~~~~~"];
+const POND_MEDIUM: &[&str] = &[
+    "    ~~~~~~~~~~~~~~~~~~",
+    "  ~~   ~~~~~~~~~~   ~~",
+    " ~~  ~~~~~~~~~~~~~~  ~",
+    "  ~~   ~~~~~~~~~~   ~~",
+    "    ~~~~~~~~~~~~~~~~",
+];
+const POND_LARGE: &[&str] = &[
+    "      ~~~~~~~~~~~~~~~~~~~~~~",
+    "   ~~~    ~~~~~~~~~~~~    ~~~",
+    " ~~   ~~~~~~~~~~~~~~~~~~    ~~",
+    "~   ~~~~~~~~~~~~~~~~~~~~~~   ~",
+    " ~~   ~~~~~~~~~~~~~~~~~~    ~~",
+    "   ~~~    ~~~~~~~~~~~~    ~~~",
+    "      ~~~~~~~~~~~~~~~~~~~~~~",
+];
+
+const fn pond_art(size: GardenSize) -> &'static [&'static str] {
+    match size {
+        GardenSize::Small => POND_SMALL,
+        GardenSize::Medium => POND_MEDIUM,
+        GardenSize::Large => POND_LARGE,
+    }
+}
+
+fn draw_pond(canvas: &mut Canvas, origin: Point, size: GardenSize) {
+    canvas.lines(origin, pond_art(size), Role::Info.style());
 }
 
 fn draw_food_bed(canvas: &mut Canvas, origin: Point) {
     canvas.lines(
         origin,
-        ["+--------------+", "| Y  v  Y  v   |", "+--------------+"],
+        &["+--------------+", "| Y  v  Y  v   |", "+--------------+"],
         Role::Success.style().dim(),
     );
 }
 
-fn draw_tree(canvas: &mut Canvas, origin: Point) {
-    canvas.lines(
-        origin,
-        ["  &&&", " &&&&&", "   ||", "   ||"],
-        Role::Success.style().dim(),
-    );
+const TREE_SMALL: &[&str] = &["  &&&", " &&&&&", "   ||", "   ||"];
+const TREE_MEDIUM: &[&str] = &[
+    "    &&&",
+    "  &&&&&&&",
+    " &&&&&&&&&",
+    "   &&&&&",
+    "    |||",
+    "    |||",
+];
+const TREE_LARGE: &[&str] = &[
+    "      &&&",
+    "   &&&&&&&&&",
+    "  &&&&&&&&&&&",
+    " &&&&&&&&&&&&&",
+    "  &&&&&&&&&&&",
+    "    &&&&&&&",
+    "      |||",
+    "      |||",
+];
+
+const fn tree_art(size: GardenSize) -> &'static [&'static str] {
+    match size {
+        GardenSize::Small => TREE_SMALL,
+        GardenSize::Medium => TREE_MEDIUM,
+        GardenSize::Large => TREE_LARGE,
+    }
+}
+
+fn draw_tree(canvas: &mut Canvas, origin: Point, size: GardenSize) {
+    canvas.lines(origin, tree_art(size), Role::Success.style().dim());
 }
 
 fn draw_home(canvas: &mut Canvas, session: &GardenSession, origin: Point) {
@@ -909,7 +1095,7 @@ fn draw_home(canvas: &mut Canvas, session: &GardenSession, origin: Point) {
             x: origin.x + 4,
             y: origin.y + 2,
         },
-        ["   ___", " /     \\"],
+        &["   ___", " /     \\"],
         Role::Warning.style().dim(),
     );
 }
@@ -973,12 +1159,13 @@ fn home_status(session: &GardenSession) -> (String, Style) {
     (String::new(), Style::new().dim())
 }
 
-fn draw_lifecycle_pose(
+fn draw_lifecycle_pose_sized(
     canvas: &mut Canvas,
     session: &GardenSession,
     home: Point,
     tick: u64,
     reduced_motion: bool,
+    size: GardenSize,
 ) {
     if !session.agents_observed {
         return;
@@ -989,11 +1176,12 @@ fn draw_lifecycle_pose(
         (tick + stable_hash(&session.id.as_str())) % 6
     };
     let (sprite, style) = match session.lifecycle {
-        SessionLifecycle::Creating | SessionLifecycle::Initializing if phase >= 3 => {
-            (RABBIT_EMERGING, Role::Warning.style())
-        }
+        SessionLifecycle::Creating | SessionLifecycle::Initializing if phase >= 3 => (
+            rabbit_pose(size, RabbitPose::Emerging),
+            Role::Warning.style(),
+        ),
         SessionLifecycle::Creating | SessionLifecycle::Initializing => {
-            (RABBIT_BURIED, Role::Warning.style())
+            (rabbit_pose(size, RabbitPose::Buried), Role::Warning.style())
         }
         SessionLifecycle::Deleting => {
             let style = if reduced_motion || phase >= 4 {
@@ -1003,19 +1191,19 @@ fn draw_lifecycle_pose(
             } else {
                 Role::Feature.style()
             };
-            (RABBIT_IDLE, style)
+            (rabbit_pose(size, RabbitPose::Idle), style)
         }
-        SessionLifecycle::Failed => (RABBIT_FAILED, Role::Danger.style()),
+        SessionLifecycle::Failed => (rabbit_pose(size, RabbitPose::Failed), Role::Danger.style()),
         SessionLifecycle::Available => return,
     };
     let canvas_height = i64::try_from(canvas.height).expect("Garden canvas height fits i64");
     let pose_y = if home.y
-        + i64::try_from(HOME_HEIGHT + RABBIT_HEIGHT).expect("Garden pose height fits i64")
+        + i64::try_from(HOME_HEIGHT + rabbit_height(size)).expect("Garden pose height fits i64")
         <= canvas_height
     {
         home.y + i64::try_from(HOME_HEIGHT).expect("home height fits i64")
     } else {
-        (home.y - i64::try_from(RABBIT_HEIGHT).expect("rabbit height fits i64")).max(0)
+        (home.y - i64::try_from(rabbit_height(size)).expect("rabbit height fits i64")).max(0)
     };
     canvas.lines(
         Point {
@@ -1030,27 +1218,32 @@ fn draw_lifecycle_pose(
 /// A non-running dispatch status belongs to the session as a whole. Draw one
 /// static pose beside its burrow instead of animating or targeting a stale
 /// runtime-local phase.
-fn draw_dispatch_pose(
+fn draw_dispatch_pose_sized(
     canvas: &mut Canvas,
     session: &GardenSession,
     home: Point,
     status: DispatchAgentStatus,
+    size: GardenSize,
 ) {
     let feature = garden_rabbit_style(stable_hash(&session.id.as_str())).bold();
     let (sprite, style) = match status {
-        DispatchAgentStatus::Starting => (RABBIT_READY, feature),
-        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => (RABBIT_SLEEPING, feature.dim()),
-        DispatchAgentStatus::Failed => (RABBIT_FAILED, Role::Danger.style()),
+        DispatchAgentStatus::Starting => (rabbit_pose(size, RabbitPose::Ready), feature),
+        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => {
+            (rabbit_pose(size, RabbitPose::Sleeping), feature.dim())
+        }
+        DispatchAgentStatus::Failed => {
+            (rabbit_pose(size, RabbitPose::Failed), Role::Danger.style())
+        }
         DispatchAgentStatus::Running => unreachable!("running uses per-runtime motion"),
     };
     let canvas_height = i64::try_from(canvas.height).expect("Garden canvas height fits i64");
     let pose_y = if home.y
-        + i64::try_from(HOME_HEIGHT + RABBIT_HEIGHT).expect("Garden pose height fits i64")
+        + i64::try_from(HOME_HEIGHT + rabbit_height(size)).expect("Garden pose height fits i64")
         <= canvas_height
     {
         home.y + i64::try_from(HOME_HEIGHT).expect("home height fits i64")
     } else {
-        (home.y - i64::try_from(RABBIT_HEIGHT).expect("rabbit height fits i64")).max(0)
+        (home.y - i64::try_from(rabbit_height(size)).expect("rabbit height fits i64")).max(0)
     };
     canvas.lines(
         Point {
@@ -1197,6 +1390,60 @@ fn stable_hash(value: &str) -> u64 {
 }
 
 #[cfg(test)]
+const RABBIT_HEIGHT: usize = 6;
+#[cfg(test)]
+const RABBIT_SPRITE_WIDTH: usize = 12;
+
+#[cfg(test)]
+fn rabbit_sprite(motion: Motion, tick: u64) -> RabbitSprite {
+    rabbit_sprite_sized(motion, tick, GardenSize::Medium)
+}
+
+#[cfg(test)]
+fn world_layout(
+    height: usize,
+    width: usize,
+    session_count: usize,
+    requested_scroll: usize,
+) -> Option<WorldLayout> {
+    world_layout_sized(
+        height,
+        width,
+        session_count,
+        requested_scroll,
+        GardenSize::Medium,
+    )
+}
+
+#[cfg(test)]
+fn draw_lifecycle_pose(
+    canvas: &mut Canvas,
+    session: &GardenSession,
+    home: Point,
+    tick: u64,
+    reduced_motion: bool,
+) {
+    draw_lifecycle_pose_sized(
+        canvas,
+        session,
+        home,
+        tick,
+        reduced_motion,
+        GardenSize::Medium,
+    );
+}
+
+#[cfg(test)]
+fn draw_dispatch_pose(
+    canvas: &mut Canvas,
+    session: &GardenSession,
+    home: Point,
+    status: DispatchAgentStatus,
+) {
+    draw_dispatch_pose_sized(canvas, session, home, status, GardenSize::Medium);
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         Activity, Facing, LIFESTYLE_CYCLE_TICKS, Places, Point, canonical_tick, fits,
@@ -1207,9 +1454,57 @@ mod tests {
     use usagi_core::domain::agent::AgentStatus as DispatchAgentStatus;
     use usagi_core::domain::id::{AgentRuntimeId, SessionId};
     use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
+    use usagi_core::domain::settings::GardenSize;
 
     const SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
     const AGENT_ID: &str = "10000000-0000-4000-8000-000000000001";
+
+    #[test]
+    fn configured_sizes_scale_the_pond_tree_and_world_spacing_together() {
+        let mut previous = (0, 0, 0);
+        for (size, pond_height, tree_height, region_width) in [
+            (GardenSize::Small, 3, 4, 80),
+            (GardenSize::Medium, 5, 6, 96),
+            (GardenSize::Large, 7, 8, 112),
+        ] {
+            let pond = super::pond_art(size);
+            let tree = super::tree_art(size);
+            let pond_width = pond.iter().map(|row| display_width(row)).max().unwrap();
+            let tree_width = tree.iter().map(|row| display_width(row)).max().unwrap();
+            assert_eq!(pond.len(), pond_height);
+            assert_eq!(tree.len(), tree_height);
+            assert_eq!(super::region_width(size), region_width);
+            assert!(pond_width > previous.0 || size == GardenSize::Small);
+            assert!(tree_width > previous.1 || size == GardenSize::Small);
+            assert!(region_width > previous.2 || size == GardenSize::Small);
+            previous = (pond_width, tree_width, region_width);
+        }
+    }
+
+    #[test]
+    fn world_activity_sprites_match_the_configured_rabbit_canvas() {
+        for (size, width, height) in [
+            (GardenSize::Small, 8, 4),
+            (GardenSize::Medium, 12, 6),
+            (GardenSize::Large, 16, 8),
+        ] {
+            let sprites = [
+                super::walking_rabbit(Facing::Left, 0, size),
+                super::walking_rabbit(Facing::Left, 1, size),
+                super::walking_rabbit(Facing::Right, 0, size),
+                super::walking_rabbit(Facing::Right, 1, size),
+                super::drinking_rabbit(size),
+                super::eating_rabbit(size),
+            ];
+            for sprite in sprites {
+                assert_eq!(sprite.len(), height, "{size:?}: {sprite:?}");
+                assert!(
+                    sprite.iter().all(|row| display_width(row) <= width),
+                    "{size:?}: {sprite:?}"
+                );
+            }
+        }
+    }
 
     fn places() -> Places {
         Places {
@@ -1406,7 +1701,7 @@ mod tests {
                     };
                     assert_rabbit_axis(
                         &format!("{activity:?}/{facing:?}/{tick}"),
-                        &super::rabbit_sprite(motion, tick),
+                        super::rabbit_sprite(motion, tick),
                     );
                 }
             }
