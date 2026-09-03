@@ -107,34 +107,29 @@ struct ArtifactExpectationWire {
 impl ArtifactExpectation {
     #[must_use]
     pub fn new(repository: GitHubRepository, head_oid: &str) -> Option<Self> {
-        Self::from_heads(repository, [head_oid])
+        if !valid_artifact_head(head_oid) {
+            return None;
+        }
+        Some(Self {
+            repository,
+            head_oid: head_oid.to_ascii_lowercase(),
+            alternate_head_oids: Vec::new(),
+        })
     }
 
     /// Builds one immutable expectation from every checkout which contributed
     /// to the supervised result. Duplicate spellings are normalized away.
     #[must_use]
-    pub fn from_heads<'a>(
-        repository: GitHubRepository,
-        head_oids: impl IntoIterator<Item = &'a str>,
-    ) -> Option<Self> {
-        let heads = head_oids
-            .into_iter()
-            .map(str::to_ascii_lowercase)
-            .collect::<BTreeSet<_>>();
-        Self::from_normalized_heads(repository, heads)
-    }
-
-    fn from_normalized_heads(
-        repository: GitHubRepository,
-        mut heads: BTreeSet<String>,
-    ) -> Option<Self> {
-        if heads.len() > MAX_ARTIFACT_EXPECTATION_HEADS
-            || heads.iter().any(|head| {
-                !matches!(head.len(), 40 | 64) || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
+    pub fn from_heads(repository: GitHubRepository, head_oids: &[String]) -> Option<Self> {
+        if head_oids.len() > MAX_ARTIFACT_EXPECTATION_HEADS
+            || head_oids.iter().any(|head| !valid_artifact_head(head))
         {
             return None;
         }
+        let mut heads = head_oids
+            .iter()
+            .map(|head| head.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>();
         let head_oid = heads.pop_first()?;
         Some(Self {
             repository,
@@ -172,12 +167,18 @@ impl TryFrom<ArtifactExpectationWire> for ArtifactExpectation {
     type Error = &'static str;
 
     fn try_from(wire: ArtifactExpectationWire) -> Result<Self, Self::Error> {
+        if wire.alternate_head_oids.len() >= MAX_ARTIFACT_EXPECTATION_HEADS {
+            return Err("invalid artifact expectation");
+        }
         let mut heads = Vec::with_capacity(1 + wire.alternate_head_oids.len());
         heads.push(wire.head_oid);
         heads.extend(wire.alternate_head_oids);
-        Self::from_heads(wire.repository, heads.iter().map(String::as_str))
-            .ok_or("invalid artifact expectation")
+        Self::from_heads(wire.repository, &heads).ok_or("invalid artifact expectation")
     }
+}
+
+fn valid_artifact_head(head: &str) -> bool {
+    matches!(head.len(), 40 | 64) && head.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Closed vocabulary for independently verified task outputs.
@@ -1703,29 +1704,33 @@ mod tests {
     #[test]
     fn artifact_expectation_accepts_a_bounded_set_of_normalized_heads() {
         let repository = GitHubRepository::from_name_with_owner("acme/repo").unwrap();
-        let alternate = ArtifactExpectation::from_heads(
-            repository.clone(),
-            [
-                "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
-                "0123456789012345678901234567890123456789",
-                "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
-            ],
-        )
-        .unwrap();
+        let heads = [
+            "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+            "0123456789012345678901234567890123456789",
+            "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        ]
+        .map(str::to_owned);
+        let alternate = ArtifactExpectation::from_heads(repository.clone(), &heads).unwrap();
         assert!(alternate.matches_head("0123456789012345678901234567890123456789"));
         assert!(alternate.matches_head("ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"));
         assert_eq!(alternate.head_oids().count(), 2);
-        assert!(
-            ArtifactExpectation::from_heads(repository.clone(), std::iter::empty::<&str>())
-                .is_none()
-        );
+        assert!(ArtifactExpectation::from_heads(repository.clone(), &[]).is_none());
+        assert!(ArtifactExpectation::from_heads(repository.clone(), &["invalid".into()]).is_none());
 
         let too_many = (0..=MAX_ARTIFACT_EXPECTATION_HEADS)
             .map(|index| format!("{index:040x}"))
             .collect::<Vec<_>>();
+        assert!(ArtifactExpectation::from_heads(repository, &too_many).is_none());
         assert!(
-            ArtifactExpectation::from_heads(repository, too_many.iter().map(String::as_str))
-                .is_none()
+            ArtifactExpectation::try_from(ArtifactExpectationWire {
+                repository: GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+                head_oid: "0123456789012345678901234567890123456789".into(),
+                alternate_head_oids: vec![
+                    "abcdefabcdefabcdefabcdefabcdefabcdefabcd".into();
+                    MAX_ARTIFACT_EXPECTATION_HEADS
+                ],
+            })
+            .is_err()
         );
     }
     fn event(seq: u64, kind: SupervisorEventKind) -> SupervisorEvent {

@@ -125,7 +125,7 @@ pub fn resolve_artifact_expectation_for_worktrees<R: GhProcessPort>(
             .map_err(|_| retryable("workspace Git revision is unavailable"))?;
         heads.push(head.trim().to_owned());
     }
-    ArtifactExpectation::from_heads(repository, heads.iter().map(String::as_str))
+    ArtifactExpectation::from_heads(repository, &heads)
         .ok_or_else(|| retryable("workspace Git revision is invalid"))
 }
 
