@@ -192,7 +192,9 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Pull Request | `Enter` / `Esc` | browserで開く / close |
 | Preview | `↑` / `↓` / `Esc` | scroll / close |
 | Scratchpad | paste / `Esc` | draftへ追記 / close |
-| Daemon status | `Esc` | close |
+| Daemon control | `↑` / `↓` / `←` / `→` / `Tab` | Start / Restart / Stopを選択 |
+| Daemon control | `s` / `r` / `x` | Start / Restart / Stopを直接実行 |
+| Daemon control | `Enter` / `Esc` | 選択actionを実行 / close |
 | Decision list | `↑` / `↓` | decision選択 |
 | Decision list | `Enter` / `Esc` | open / close |
 | Decision answer | `↑` / `↓` | option選択 |

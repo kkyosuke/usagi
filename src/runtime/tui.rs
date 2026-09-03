@@ -78,14 +78,14 @@ use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit,
 };
 use usagi_tui::usecase::application::controller::{
-    AppEvent, AppKey, BackendEvent, EnvironmentEntry, NewRequest, Notice, RoleChoice,
-    RoleEditorScope, SafeError, SafeMessage, SessionRoleCatalog, SessionRoleProjection, Target,
-    classify_management_input,
+    AppEvent, AppKey, BackendEvent, DaemonAction, EnvironmentEntry, NewRequest, Notice,
+    PendingToken, RoleChoice, RoleEditorScope, SafeError, SafeMessage, SessionRoleCatalog,
+    SessionRoleProjection, Target, classify_management_input,
 };
 use usagi_tui::usecase::application::daemon_backend::{
-    Completions, DaemonBackend, DecisionPort as BackendDecisionPort,
-    OverlayPort as BackendOverlayPort, TargetStorePort as BackendTargetStorePort,
-    WorkspaceCommandPort as BackendWorkspaceCommandPort,
+    Completions, DaemonBackend, DaemonControlPort as BackendDaemonControlPort,
+    DecisionPort as BackendDecisionPort, OverlayPort as BackendOverlayPort,
+    TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
@@ -833,6 +833,86 @@ struct ProductionWorkspaceCommands {
     root: PathBuf,
 }
 
+struct ProductionDaemonControl {
+    workspace: WorkspaceId,
+    root: PathBuf,
+}
+
+fn daemon_control_error(action: DaemonAction, bytes: &[u8]) -> SafeError {
+    const MAX_CHARS: usize = 240;
+    let raw = String::from_utf8_lossy(bytes);
+    let summary = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("daemon lifecycle command failed")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_CHARS)
+        .collect::<String>();
+    SafeError {
+        message: SafeMessage::new(format!("{} failed: {summary}", action.label())),
+        error_id: format!("daemon-{}-failed", action.argument()),
+    }
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
+impl BackendDaemonControlPort for ProductionDaemonControl {
+    fn execute(
+        &mut self,
+        workspace: WorkspaceId,
+        action: DaemonAction,
+        token: PendingToken,
+        completions: Completions,
+    ) {
+        if workspace != self.workspace {
+            completions.emit(AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action,
+                token,
+                result: Err(SafeError {
+                    message: SafeMessage::new("daemon target is no longer active"),
+                    error_id: "daemon-target-stale".to_owned(),
+                }),
+            }));
+            return;
+        }
+        let root = self.root.clone();
+        std::thread::spawn(move || {
+            let result = std::env::current_exe()
+                .map_err(|error| daemon_control_error(action, error.to_string().as_bytes()))
+                .and_then(|executable| {
+                    std::process::Command::new(executable)
+                        .current_dir(root)
+                        .args(["daemon", action.argument()])
+                        .output()
+                        .map_err(|error| daemon_control_error(action, error.to_string().as_bytes()))
+                })
+                .and_then(|output| {
+                    if output.status.success() {
+                        Ok(Notice::new(format!(
+                            "Daemon {} completed",
+                            action.argument()
+                        )))
+                    } else {
+                        let detail = if output.stderr.is_empty() {
+                            &output.stdout
+                        } else {
+                            &output.stderr
+                        };
+                        Err(daemon_control_error(action, detail))
+                    }
+                });
+            completions.emit(AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action,
+                token,
+                result,
+            }));
+        });
+    }
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
     fn execute(
@@ -1012,6 +1092,10 @@ impl ControllerBackendFactory for ProductionBackendFactory {
                 root: snapshot.workspace.path.clone(),
             }),
         )
+        .with_daemon_control(Box::new(ProductionDaemonControl {
+            workspace: snapshot.workspace_id,
+            root: snapshot.workspace.path.clone(),
+        }))
         .with_decisions(Box::new(ProductionDecisionPort {
             daemon: DaemonDecisionCommandPort,
             notifier: PlatformDesktopNotifier {
@@ -5413,28 +5497,29 @@ mod tests {
 
     use super::{
         AGENT_LAUNCH_UNCORRELATED, AgentGoalIntent, AgentLaunchIntent, AppEvent, AppKey,
-        BackendTargetStorePort, Completions, DaemonAgentCommandPort, DaemonDecisionCommandPort,
-        DaemonReply, DaemonRequest, DaemonRestoreConnectionPort, DoctorDiagnosisError, EnvScope,
-        EnvironmentStorePort, FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry,
-        LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
-        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, RoleEditorScope,
-        SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
-        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
-        TerminalSubscription, VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError,
-        agent_goal_request, agent_inventory_request, agent_launch_request, child_directory_names,
+        BackendTargetStorePort, Completions, DaemonAction, DaemonAgentCommandPort,
+        DaemonDecisionCommandPort, DaemonReply, DaemonRequest, DaemonRestoreConnectionPort,
+        DoctorDiagnosisError, EnvScope, EnvironmentStorePort, FsSessionWorktreeScanPort,
+        FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError,
+        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
+        RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget,
+        TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult,
+        WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, agent_goal_request,
+        agent_inventory_request, agent_launch_request, child_directory_names,
         classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
         correlate_agent_launch, created_session_hook, current_agent_integrations,
-        daemon_error_reason, decision_cadence, decode_agent_admission, decode_attach_screen,
-        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
-        decode_terminal_poll, decode_work_run_control_reply, decode_work_run_snapshot_reply,
-        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
-        provider_resume_projection, reduced_motion_from_environment, reply_geometry,
-        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
-        version_result_from_observation, work_run_control_client_error,
-        workspace_directory_missing, workspace_open_error,
+        daemon_control_error, daemon_error_reason, decision_cadence, decode_agent_admission,
+        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
+        decode_terminal_inventory, decode_terminal_poll, decode_work_run_control_reply,
+        decode_work_run_snapshot_reply, doctor_diagnosis_io_error, doctor_reply_body,
+        exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
+        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
+        pr_snapshot_events, probe_path, provider_resume_projection,
+        reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
+        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
+        validate_workspace_directory, version_detail, version_result_from_observation,
+        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -5450,6 +5535,23 @@ mod tests {
         for value in [None, Some(OsStr::new("0")), Some(OsStr::new("true"))] {
             assert!(!reduced_motion_from_environment(value));
         }
+    }
+
+    #[test]
+    fn daemon_control_errors_keep_one_bounded_display_safe_line() {
+        let long = format!("\nrefused\u{7}: {}\nsecret detail", "x".repeat(300));
+        let error = daemon_control_error(DaemonAction::Stop, long.as_bytes());
+        assert_eq!(error.error_id, "daemon-stop-failed");
+        assert!(error.message.as_str().starts_with("Stop failed: refused:"));
+        assert!(!error.message.as_str().contains('\u{7}'));
+        assert!(!error.message.as_str().contains("secret detail"));
+        assert!(error.message.as_str().chars().count() <= 253);
+
+        let empty = daemon_control_error(DaemonAction::Start, b"\n\n");
+        assert_eq!(
+            empty.message.as_str(),
+            "Start failed: daemon lifecycle command failed"
+        );
     }
 
     #[test]

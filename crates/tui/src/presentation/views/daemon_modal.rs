@@ -1,7 +1,8 @@
-//! Overview の `daemon` command が開く読み取り専用 status modal。
+//! Overview の `daemon` command が開く status / lifecycle control modal。
 //!
 //! daemon metrics、診断 health、daemon-authoritative session projection を一つの
-//! surface にまとめる。値は表示専用であり、launch admission や ownership の判断には使わない。
+//! surface にまとめる。診断値は表示専用であり、lifecycle 操作は controller の typed
+//! effect だけを通る。
 
 use usagi_core::domain::agent::AgentRuntimeInventoryState;
 use usagi_core::usecase::client::DaemonMetrics;
@@ -10,10 +11,11 @@ use usagi_core::usecase::session_state::SessionStateCounts;
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, modal};
+use crate::usecase::application::controller::{DaemonAction, DaemonControlState};
 
 const INNER_WIDTH: usize = 60;
 const MAX_BODY_HEIGHT: usize = 30;
-const FIXED_RUNTIME_BODY_ROWS: usize = 12;
+const FIXED_RUNTIME_BODY_ROWS: usize = 15;
 const MEBIBYTE: u64 = 1_048_576;
 
 /// Presentation-safe row derived from the daemon-authoritative Agent inventory.
@@ -31,6 +33,7 @@ pub(crate) struct DaemonProjection<'a> {
     pub(crate) sessions: SessionStateCounts,
     pub(crate) session_total: usize,
     pub(crate) runtimes: Option<&'a [AgentRuntimeRow]>,
+    pub(crate) control: &'a DaemonControlState,
 }
 
 /// Home frame の上へ daemon status を合成する。
@@ -58,6 +61,7 @@ pub(crate) fn render_over(
             projection.sessions,
             projection.session_total,
             projection.runtimes,
+            projection.control,
             body_height,
         ),
     )
@@ -69,12 +73,17 @@ fn body(
     sessions: SessionStateCounts,
     session_total: usize,
     runtimes: Option<&[AgentRuntimeRow]>,
+    control: &DaemonControlState,
     body_height: usize,
 ) -> Vec<String> {
     let mut lines = vec![modal::heading("Status")];
     lines.push(status_line(metrics, health));
     lines.push(metric_line(metrics));
     lines.push(session_line(sessions, session_total));
+    lines.push(String::new());
+    lines.push(modal::caption("Lifecycle actions (non-force)"));
+    lines.push(action_line(control));
+    lines.push(action_result_line(control));
     lines.push(String::new());
     lines.push(modal::caption("Agent capacity"));
     lines.push(agent_capacity_line(metrics));
@@ -85,12 +94,44 @@ fn body(
         body_height.saturating_sub(FIXED_RUNTIME_BODY_ROWS),
     ));
     lines.push(String::new());
-    lines.push(modal::content_line(
-        "Exit a live Agent with Ctrl-D to release its slot.",
-        INNER_WIDTH,
-    ));
-    lines.push(modal::footer("Esc: close"));
+    lines.push(modal::footer("↑/↓: select  Enter: run  Esc: close"));
     modal::fixed_body(lines, body_height)
+}
+
+fn action_line(control: &DaemonControlState) -> String {
+    let actions = DaemonAction::ALL.map(|action| {
+        let label = action.label();
+        if action == control.selected() {
+            Role::Accent
+                .style()
+                .bold()
+                .paint(&format!("{} {label}", modal::selection_marker(true)))
+        } else {
+            Style::new().dim().paint(&format!("  {label}"))
+        }
+    });
+    modal::content_line(&actions.join("   "), INNER_WIDTH)
+}
+
+fn action_result_line(control: &DaemonControlState) -> String {
+    if let Some(action) = control.pending() {
+        return modal::content_line(
+            &Role::Accent
+                .style()
+                .paint(&format!("… {} in progress", action.label())),
+            INNER_WIDTH,
+        );
+    }
+    match control.result() {
+        Some(Ok(notice)) => {
+            modal::content_line(&Role::Success.style().paint(&notice.message), INNER_WIDTH)
+        }
+        Some(Err(error)) => modal::error_line(error.message.as_str(), INNER_WIDTH),
+        None => modal::content_line(
+            &Style::new().dim().paint("force actions remain CLI-only"),
+            INNER_WIDTH,
+        ),
+    }
 }
 
 fn runtime_lines(runtimes: Option<&[AgentRuntimeRow]>, capacity: usize) -> Vec<String> {
@@ -216,6 +257,7 @@ const fn health_reason(reason: HealthReason) -> &'static str {
 mod tests {
     use super::{AgentRuntimeRow, DaemonProjection, render_over, runtime_lines};
     use crate::presentation::widgets::display_width;
+    use crate::usecase::application::controller::DaemonControlState;
     use usagi_core::domain::agent::AgentRuntimeInventoryState;
     use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
     use usagi_core::usecase::daemon_health::{DaemonHealth, HealthReason};
@@ -246,6 +288,7 @@ mod tests {
         sessions: SessionStateCounts,
         session_total: usize,
         runtimes: Option<&'a [AgentRuntimeRow]>,
+        control: &'a DaemonControlState,
     ) -> DaemonProjection<'a> {
         DaemonProjection {
             metrics,
@@ -253,6 +296,7 @@ mod tests {
             sessions,
             session_total,
             runtimes,
+            control,
         }
     }
 
@@ -302,11 +346,16 @@ mod tests {
                 },
                 8,
                 Some(&runtimes),
+                &DaemonControlState::default(),
             ),
         )
         .join("\n");
         let plain = strip(&frame);
         assert!(plain.contains("Daemon"));
+        assert!(plain.contains("Lifecycle actions (non-force)"));
+        assert!(plain.contains("Start"));
+        assert!(plain.contains("Restart"));
+        assert!(plain.contains("Stop"));
         assert!(plain.contains("16/16  saturated"));
         assert!(plain.contains("root  live  #12345678"));
         assert!(plain.contains("review-fix  interrupted  #abcdef01"));
@@ -327,6 +376,7 @@ mod tests {
                 SessionStateCounts::default(),
                 0,
                 None,
+                &DaemonControlState::default(),
             ),
         )
         .join("\n");
@@ -344,6 +394,7 @@ mod tests {
                 SessionStateCounts::default(),
                 0,
                 None,
+                &DaemonControlState::default(),
             ),
         );
         assert_eq!(tiny.len(), 4);
@@ -381,6 +432,7 @@ mod tests {
                         SessionStateCounts::default(),
                         0,
                         None,
+                        &DaemonControlState::default(),
                     ),
                 )
                 .join("\n"),
@@ -400,6 +452,7 @@ mod tests {
                     SessionStateCounts::default(),
                     0,
                     Some(&[]),
+                    &DaemonControlState::default(),
                 ),
             )
             .join("\n"),

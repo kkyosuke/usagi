@@ -55,7 +55,7 @@ pub enum Overlay {
     CommandHelp,
     /// workspace scope の command surface。
     Overview,
-    /// daemon health / Agent capacity の読み取り専用 status surface。
+    /// daemon health / Agent capacity と安全な lifecycle 操作の surface。
     Daemon,
     /// active target scope の action surface。
     Closeup,
@@ -1022,6 +1022,92 @@ pub struct SafeError {
     pub error_id: String,
 }
 
+/// Safe daemon process lifecycle operations exposed by the Home modal.
+///
+/// Destructive `--force` variants deliberately stay in the CLI. These actions
+/// either preserve live runtimes or are refused by the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonAction {
+    Start,
+    Restart,
+    Stop,
+}
+
+impl DaemonAction {
+    pub const ALL: [Self; 3] = [Self::Start, Self::Restart, Self::Stop];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start",
+            Self::Restart => "Restart",
+            Self::Stop => "Stop",
+        }
+    }
+
+    #[must_use]
+    pub const fn argument(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+        }
+    }
+
+    #[must_use]
+    const fn shifted(self, direction: i8) -> Self {
+        let current = match self {
+            Self::Start => 0,
+            Self::Restart => 1,
+            Self::Stop => 2,
+        };
+        let next = if direction > 0 {
+            (current + 1) % Self::ALL.len()
+        } else {
+            (current + Self::ALL.len() - 1) % Self::ALL.len()
+        };
+        Self::ALL[next]
+    }
+}
+
+/// Controller-owned interaction state for the daemon management modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonControlState {
+    selected: DaemonAction,
+    pending: Option<(DaemonAction, PendingToken)>,
+    result: Option<Result<Notice, SafeError>>,
+}
+
+impl Default for DaemonControlState {
+    fn default() -> Self {
+        Self {
+            selected: DaemonAction::Restart,
+            pending: None,
+            result: None,
+        }
+    }
+}
+
+impl DaemonControlState {
+    #[must_use]
+    pub const fn selected(&self) -> DaemonAction {
+        self.selected
+    }
+
+    #[must_use]
+    pub const fn pending(&self) -> Option<DaemonAction> {
+        match self.pending {
+            Some((action, _)) => Some(action),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn result(&self) -> Option<&Result<Notice, SafeError>> {
+        self.result.as_ref()
+    }
+}
+
 /// Feedback displayed in Home's fixed status area.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Feedback {
@@ -1083,6 +1169,7 @@ pub struct AppState {
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
     role_editor: Option<RoleEditor>,
+    daemon_control: DaemonControlState,
     decisions: Vec<UserDecision>,
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
     decision_overlay: Option<DecisionOverlayState>,
@@ -1252,6 +1339,7 @@ impl AppState {
             note_editor: None,
             environment_editor: None,
             role_editor: None,
+            daemon_control: DaemonControlState::default(),
             decisions: Vec::new(),
             unread_decisions: std::collections::BTreeSet::new(),
             decision_overlay: None,
@@ -1370,6 +1458,11 @@ impl AppState {
     #[must_use]
     pub fn role_editor(&self) -> Option<&RoleEditor> {
         self.role_editor.as_ref()
+    }
+    /// Current selection, pending action, and safe result in the daemon modal.
+    #[must_use]
+    pub const fn daemon_control(&self) -> &DaemonControlState {
+        &self.daemon_control
     }
     /// Pending decisions from the current workspace only.
     #[must_use]
@@ -2245,6 +2338,13 @@ pub enum BackendEvent {
     SessionBranchCatalog(SessionBranchCatalog),
     /// backend が safe と保証した notice。
     Notice(Notice),
+    /// Completion of one daemon lifecycle action from the management modal.
+    DaemonControlFinished {
+        workspace: WorkspaceId,
+        action: DaemonAction,
+        token: PendingToken,
+        result: Result<Notice, SafeError>,
+    },
     /// A phase event for exactly one Agent runtime pane.
     RuntimePhase {
         runtime: AgentRuntimeRef,
@@ -2358,6 +2458,13 @@ pub enum Effect {
     WorkspaceCommand {
         workspace: WorkspaceId,
         command: overview::Command,
+    },
+    /// Execute one non-force daemon lifecycle action outside the daemon-owned
+    /// connection being controlled.
+    DaemonControl {
+        workspace: WorkspaceId,
+        action: DaemonAction,
+        token: PendingToken,
     },
     /// Read an active target's scratchpad through the existing persistence owner.
     LoadNotes {
@@ -3435,6 +3542,24 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.branch_catalog = catalog;
             Vec::new()
         }
+        AppEvent::Backend(BackendEvent::DaemonControlFinished {
+            workspace,
+            action,
+            token,
+            result,
+        }) => {
+            if workspace != state.workspace || state.daemon_control.pending != Some((action, token))
+            {
+                return Vec::new();
+            }
+            state.daemon_control.pending = None;
+            state.notice = Some(match &result {
+                Ok(notice) => notice.clone(),
+                Err(error) => Notice::new(error.message.as_str()),
+            });
+            state.daemon_control.result = Some(result);
+            Vec::new()
+        }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
             if let Some(queue) = state.cleanup_queue.as_mut()
                 && let Some(failed) = queue.in_flight.take()
@@ -4408,10 +4533,11 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             state.overlay = None;
             Vec::new()
         }
-        Overlay::Daemon | Overlay::Overview if matches!(key, AppKey::Escape) => {
+        Overlay::Overview if matches!(key, AppKey::Escape) => {
             state.overlay = None;
             Vec::new()
         }
+        Overlay::Daemon => update_daemon_control(state, &key),
         // Scroll arrows are resolved against the drawn frame by presentation.
         // Every other first input remains a wake-up consumed before Home.
         Overlay::Garden => {
@@ -4421,9 +4547,54 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             Vec::new()
         }
-        Overlay::CreateSessionError | Overlay::Daemon | Overlay::CommandHelp => Vec::new(),
+        Overlay::CreateSessionError | Overlay::CommandHelp => Vec::new(),
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
     }
+}
+
+fn update_daemon_control(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    match key {
+        AppKey::Escape => {
+            state.overlay = None;
+            Vec::new()
+        }
+        AppKey::Up | AppKey::Left if state.daemon_control.pending.is_none() => {
+            state.daemon_control.selected = state.daemon_control.selected.shifted(-1);
+            state.daemon_control.result = None;
+            Vec::new()
+        }
+        AppKey::Down | AppKey::Right | AppKey::Tab if state.daemon_control.pending.is_none() => {
+            state.daemon_control.selected = state.daemon_control.selected.shifted(1);
+            state.daemon_control.result = None;
+            Vec::new()
+        }
+        AppKey::Char('s' | 'S') if state.daemon_control.pending.is_none() => {
+            submit_daemon_action(state, DaemonAction::Start)
+        }
+        AppKey::Char('r' | 'R') if state.daemon_control.pending.is_none() => {
+            submit_daemon_action(state, DaemonAction::Restart)
+        }
+        AppKey::Char('x' | 'X') if state.daemon_control.pending.is_none() => {
+            submit_daemon_action(state, DaemonAction::Stop)
+        }
+        AppKey::Enter if state.daemon_control.pending.is_none() => {
+            submit_daemon_action(state, state.daemon_control.selected)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn submit_daemon_action(state: &mut AppState, action: DaemonAction) -> Vec<Effect> {
+    let token = PendingToken(state.next_pending_token);
+    state.next_pending_token += 1;
+    state.daemon_control.selected = action;
+    state.daemon_control.pending = Some((action, token));
+    state.daemon_control.result = None;
+    vec![Effect::DaemonControl {
+        workspace: state.workspace,
+        action,
+        token,
+    }]
 }
 
 fn update_role_editor(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
@@ -5325,6 +5496,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         Ok(overview::Command::Daemon { arguments }) => {
             if arguments.trim().is_empty() {
                 state.overlay = Some(Overlay::Daemon);
+                state.daemon_control = DaemonControlState::default();
                 state.notice = None;
             } else {
                 state.notice = Some(Notice::new("daemon takes no arguments (usage: daemon)"));
@@ -9866,6 +10038,106 @@ mod tests {
             state
                 .notice()
                 .is_some_and(|notice| notice.message.as_str().contains("takes no arguments"))
+        );
+    }
+
+    #[test]
+    fn daemon_modal_runs_one_non_force_action_and_fences_its_completion() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.overlay = Some(Overlay::Overview);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("daemon".into())),
+        );
+
+        assert_eq!(state.daemon_control().selected(), DaemonAction::Restart);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.daemon_control().selected(), DaemonAction::Stop);
+        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(
+            effects,
+            vec![Effect::DaemonControl {
+                workspace,
+                action: DaemonAction::Stop,
+                token: PendingToken(1),
+            }]
+        );
+        assert_eq!(state.daemon_control().pending(), Some(DaemonAction::Stop));
+
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Up)).is_empty());
+        assert_eq!(state.daemon_control().selected(), DaemonAction::Stop);
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action: DaemonAction::Start,
+                token: PendingToken(99),
+                result: Ok(Notice::new("stale")),
+            }),
+        );
+        assert_eq!(state.daemon_control().pending(), Some(DaemonAction::Stop));
+
+        let refused = SafeError {
+            message: SafeMessage::new("Stop failed: live runtimes are active"),
+            error_id: "daemon-stop-failed".to_owned(),
+        };
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action: DaemonAction::Stop,
+                token: PendingToken(1),
+                result: Err(refused.clone()),
+            }),
+        );
+        assert_eq!(state.daemon_control().pending(), None);
+        assert_eq!(state.daemon_control().result(), Some(&Err(refused)));
+        assert_eq!(state.overlay(), Some(Overlay::Daemon));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        state.overlay = Some(Overlay::Overview);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("daemon".into())),
+        );
+        assert_eq!(state.daemon_control(), &DaemonControlState::default());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('s'))),
+            vec![Effect::DaemonControl {
+                workspace,
+                action: DaemonAction::Start,
+                token: PendingToken(2),
+            }]
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        state.overlay = Some(Overlay::Overview);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("daemon".into())),
+        );
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::Char('s'))).as_slice(),
+            [Effect::DaemonControl {
+                token: PendingToken(3),
+                ..
+            }]
+        ));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action: DaemonAction::Start,
+                token: PendingToken(2),
+                result: Ok(Notice::new("old completion")),
+            }),
+        );
+        assert_eq!(
+            state.daemon_control.pending,
+            Some((DaemonAction::Start, PendingToken(3)))
         );
     }
 
