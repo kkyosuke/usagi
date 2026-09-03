@@ -10,7 +10,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
-use usagi_core::domain::id::{SessionId, WorkspaceId};
+use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
 use usagi_core::domain::workspace::Workspace;
 
@@ -32,6 +32,10 @@ pub struct WorkspaceSlot {
     workspace_id: WorkspaceId,
     label: String,
     sessions: Vec<CachedGardenSession>,
+    /// Last session row focused while this project owned the resident
+    /// controller. The controller is intentionally torn down on every project
+    /// switch, so the process-level deck carries only this stable identity.
+    focused_session: Option<SessionId>,
     /// Whether the Garden's cross-project observation lane has seen this
     /// project's daemon Agent inventory since the cache was last rebuilt. An
     /// unobserved slot keeps drawing the read-only `project inactive` plot
@@ -121,6 +125,7 @@ impl WorkspaceSlot {
             workspace_id: snapshot.workspace_id,
             label: snapshot.workspace.name.clone(),
             sessions,
+            focused_session: None,
             agents_observed: false,
         }
     }
@@ -185,7 +190,15 @@ pub struct WorkspaceDeck {
     active: WorkspaceId,
     overlay: Option<DeckOverlay>,
     notice: Option<String>,
-    pending_garden_visit: Option<(PathBuf, SessionId)>,
+    pending_garden_visit: Option<(PathBuf, GardenVisit)>,
+}
+
+/// Stable Garden target carried while the process replaces one workspace
+/// controller with another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GardenVisit {
+    pub session: SessionId,
+    pub agent: Option<AgentRuntimeId>,
 }
 
 impl WorkspaceDeck {
@@ -301,9 +314,15 @@ impl WorkspaceDeck {
             .iter_mut()
             .find(|slot| slot.path == snapshot.workspace.path)
         {
+            let focused_session = slot.focused_session;
             slot.workspace_id = snapshot.workspace_id;
             slot.label.clone_from(&snapshot.workspace.name);
             slot.sessions = WorkspaceSlot::from_snapshot(snapshot).sessions;
+            slot.focused_session = focused_session.filter(|focused| {
+                slot.sessions
+                    .iter()
+                    .any(|session| session.projected.id == *focused)
+            });
             slot.agents_observed = false;
             self.active = snapshot.workspace_id;
         }
@@ -398,20 +417,50 @@ impl WorkspaceDeck {
 
     /// Carry one identity-only Garden visit across the workspace composition
     /// teardown. It is consumed only by the prepared target workspace.
-    pub fn schedule_garden_visit(&mut self, path: PathBuf, session: SessionId) {
-        self.pending_garden_visit = Some((path, session));
+    pub fn schedule_garden_visit(
+        &mut self,
+        path: PathBuf,
+        session: SessionId,
+        agent: Option<AgentRuntimeId>,
+    ) {
+        self.pending_garden_visit = Some((path, GardenVisit { session, agent }));
     }
 
     #[must_use]
-    pub fn take_garden_visit(&mut self, active_path: &Path) -> Option<SessionId> {
+    pub fn take_garden_visit(&mut self, active_path: &Path) -> Option<GardenVisit> {
         if self
             .pending_garden_visit
             .as_ref()
             .is_some_and(|(path, _)| path == active_path)
         {
-            return self.pending_garden_visit.take().map(|(_, session)| session);
+            return self.pending_garden_visit.take().map(|(_, visit)| visit);
         }
         None
+    }
+
+    /// Remember the last stable session row focused by one workspace
+    /// controller. Unknown workspaces and stale session identities are ignored.
+    pub fn remember_session_focus(&mut self, workspace: WorkspaceId, session: SessionId) {
+        let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.workspace_id == workspace)
+        else {
+            return;
+        };
+        if slot
+            .sessions
+            .iter()
+            .any(|cached| cached.projected.id == session)
+        {
+            slot.focused_session = Some(session);
+        }
+    }
+
+    /// Last session row focused in an already-open project.
+    #[must_use]
+    pub fn focused_session_for_path(&self, path: &Path) -> Option<SessionId> {
+        self.slot_for_path(path)?.focused_session
     }
 
     /// Keep the active tab's inactive-Garden fallback current without retaining
@@ -426,6 +475,11 @@ impl WorkspaceDeck {
                 .iter()
                 .map(CachedGardenSession::from_projected)
                 .collect();
+            slot.focused_session = slot.focused_session.filter(|focused| {
+                slot.sessions
+                    .iter()
+                    .any(|session| session.projected.id == *focused)
+            });
             // The active project draws from its controller, so this cache is
             // only what the plot falls back to once the tab goes inactive. It
             // describes no observation until the lane makes one.
@@ -1180,18 +1234,25 @@ mod tests {
     }
 
     fn snapshot_with_session(name: &str, path: &str, session: &str) -> WorkspaceSnapshot {
+        snapshot_with_sessions(name, path, &[session])
+    }
+
+    fn snapshot_with_sessions(name: &str, path: &str, sessions: &[&str]) -> WorkspaceSnapshot {
         let state = WorkspaceState {
-            sessions: vec![SessionRecord {
-                name: session.to_owned(),
-                display_name: None,
-                origin: SessionOrigin::Human,
-                started_from: None,
-                root: PathBuf::from(path).join(session),
-                created_at: Utc::now(),
-                last_active: None,
-                notes: Scratchpad::default(),
-                prs: Vec::new(),
-            }],
+            sessions: sessions
+                .iter()
+                .map(|session| SessionRecord {
+                    name: (*session).to_owned(),
+                    display_name: None,
+                    origin: SessionOrigin::Human,
+                    started_from: None,
+                    root: PathBuf::from(path).join(session),
+                    created_at: Utc::now(),
+                    last_active: None,
+                    notes: Scratchpad::default(),
+                    prs: Vec::new(),
+                })
+                .collect(),
             ..WorkspaceState::default()
         };
         WorkspaceSnapshot::new(
@@ -1246,6 +1307,49 @@ mod tests {
         let single = WorkspaceDeck::new(&alpha);
         assert_eq!(single.previous_path(), Path::new("/alpha"));
         assert_eq!(single.next_path(), Path::new("/alpha"));
+    }
+
+    #[test]
+    fn deck_keeps_each_projects_last_valid_session_focus() {
+        let alpha = snapshot_with_sessions("alpha", "/alpha", &["first", "second"]);
+        let beta = snapshot_with_session("beta", "/beta", "other");
+        let first = alpha.session_ids[0];
+        let second = alpha.session_ids[1];
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+
+        assert_eq!(deck.focused_session_for_path(&alpha.workspace.path), None);
+        deck.remember_session_focus(alpha.workspace_id, second);
+        deck.remember_session_focus(alpha.workspace_id, SessionId::new());
+        deck.remember_session_focus(WorkspaceId::new(), first);
+        assert_eq!(
+            deck.focused_session_for_path(&alpha.workspace.path),
+            Some(second)
+        );
+        assert_eq!(deck.focused_session_for_path(Path::new("/missing")), None);
+
+        deck.activate_snapshot(&beta);
+        deck.activate_snapshot(&alpha);
+        assert_eq!(
+            deck.focused_session_for_path(&alpha.workspace.path),
+            Some(second)
+        );
+
+        let first_only = vec![ProjectedSession::from_record(
+            first,
+            &alpha.state.sessions[0],
+        )];
+        deck.update_active_sessions(&first_only);
+        assert_eq!(deck.focused_session_for_path(&alpha.workspace.path), None);
+
+        deck.remember_session_focus(alpha.workspace_id, first);
+        let mut without_focused = alpha;
+        without_focused.state.sessions.clear();
+        without_focused.session_ids.clear();
+        deck.activate_snapshot(&without_focused);
+        assert_eq!(
+            deck.focused_session_for_path(&without_focused.workspace.path),
+            None
+        );
     }
 
     #[test]
@@ -1600,11 +1704,19 @@ mod tests {
         assert_eq!(sessions[1].0, beta.workspace_id);
         assert_eq!(sessions[1].1.label, "beta / review");
 
-        deck.schedule_garden_visit(beta.workspace.path.clone(), beta.session_ids[0]);
+        let agent = AgentRuntimeId::new();
+        deck.schedule_garden_visit(
+            beta.workspace.path.clone(),
+            beta.session_ids[0],
+            Some(agent),
+        );
         assert_eq!(deck.take_garden_visit(&alpha.workspace.path), None);
         assert_eq!(
             deck.take_garden_visit(&beta.workspace.path),
-            Some(beta.session_ids[0])
+            Some(GardenVisit {
+                session: beta.session_ids[0],
+                agent: Some(agent),
+            })
         );
         assert_eq!(deck.take_garden_visit(&beta.workspace.path), None);
     }
@@ -1838,7 +1950,7 @@ mod tests {
         let beta = snapshot("beta", "/beta");
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
         let session = SessionId::new();
-        deck.schedule_garden_visit(beta.workspace.path.clone(), session);
+        deck.schedule_garden_visit(beta.workspace.path.clone(), session, None);
         deck.close_path(&beta.workspace.path);
         assert_eq!(deck.take_garden_visit(&beta.workspace.path), None);
     }

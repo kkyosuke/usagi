@@ -211,7 +211,7 @@ filesystem path、provider-native ID、terminal output、raw error は renderer 
 
 | 場面 | 確認できること |
 |---|---|
-| 120×24 · spacious world 左右端 | notification panel と、巣穴・池・餌場・木陰、左右へ移動するうさぎ、16 cell 単位の camera pan |
+| 120×24 · spacious world 左右端 | session grouped Agent panel と、巣穴・池・餌場・木陰、左右へ移動するうさぎ、16 cell 単位の camera pan |
 | 120×24 · spacious world reduced motion | 全 pose と位置が静止姿勢に固定される |
 | 120×24 · session 0 件 | 空の庭と `No sessions in the garden` |
 | 120×24 · 2 open projects | project をまたぐ home と観測済み Agent |
@@ -283,13 +283,15 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 
 10. inactive project の Agent membership を Garden 表示中だけ daemon から観測し、cached lifecycle が
     `Available` の区画へうさぎを描く。
-11. うさぎの plot を左領域へ寄せ、右の notification panel に同じ safe projection から導出した現在状態を表示する。
+11. うさぎの plot を左領域へ寄せ、右の panel に同じ safe projection から導出した現在状態を表示する。
 12. 左の Garden 領域が 80×18 以上では session の固定 plot を home の巣穴へ変え、stable identity と tick で再現できる生活 cycle、
     池・餌場・木陰、16 cell 単位の camera pan、移動位置に追随する hitbox を追加する。小さい端末は compact plot を保つ。
 13. active / inactive project の dispatch status を同じ deterministic な順位で集約し、非 running status は
     animation と個別 Agent hitbox を持たない session-level の静止 pose にする。
+14. 右 panel を全 project の session group / Agent runtime 行へ置き換え、stable runtime ID を使う click target を
+    workspace 切替後の Agent tab 選択まで引き継ぐ。
 
-1〜13 はすべて実装済みで、うさぎは agent 単位、非 running の dispatch pose は session 単位である。
+1〜14 はすべて実装済みで、うさぎは agent 単位、非 running の dispatch pose は session 単位である。
 
 受け入れ条件は次のとおりである。
 
@@ -311,7 +313,8 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 - Garden から daemon command を直接発行しない。observation lane は read-only で、daemon を起動しない。
 - 開いているどの project の session も、その project の Agent を観測できていればうさぎになり、観測できて
   いなければ推測されない。
-- notification panel は表示中の plot と同じ viewport を説明し、完了、入力待ち、実行中、失敗を安全な文で区別する。
+- Agent panel は左の viewport と独立して全 project を session ごとにまとめ、Agent を 1 runtime 1 行の明示的な状態で
+  表示する。session 見出しは Closeup、Agent 行は stable runtime ID が一致する tab へ遷移する。
 - runtime record の順序を入れ替えても dispatch status の集約は変わらず、非 running status の区画は tick が進んでも
   静止し、個別 Agent hitbox を持たない。
 - selected session が snapshot 更新で消えた場合は、既存 reconciliation と同じ surviving session へ着地する。

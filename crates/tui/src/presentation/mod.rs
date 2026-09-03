@@ -30,7 +30,8 @@ use usagi_core::domain::agent::{
     AgentRuntimeInventoryState, AgentWorkspaceObservation, ProviderResumeProjection,
 };
 use usagi_core::domain::id::{
-    AgentContinuationRef, OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId,
+    AgentContinuationRef, AgentRuntimeId, OperationId, SessionId, TerminalRef, UserDecisionId,
+    WorkspaceId,
 };
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
@@ -52,7 +53,7 @@ use crate::presentation::views::director_drawer::{
     DirectorOrganizationRow, WorkRunControlProjection,
 };
 use crate::presentation::views::key_help::{self, Context as KeyHelpContext};
-use crate::presentation::views::new::{self, Field, New};
+use crate::presentation::views::new::{self, DirectoryCompletion, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::pr_modal;
 use crate::presentation::views::quit_modal;
@@ -1020,6 +1021,7 @@ fn dismiss_pr_modal_on_project_bar_click(runtime: &mut WorkspaceRuntime, key: &K
 struct GardenProjectVisit {
     workspace: WorkspaceId,
     session: SessionId,
+    agent: Option<AgentRuntimeId>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1109,13 +1111,16 @@ fn route_garden_input(
     };
     let effects = runtime.apply_event(AppEvent::GardenClick(pointer));
     if let GardenClick::Visit {
-        workspace, session, ..
+        workspace,
+        session,
+        agent,
     } = pointer
         && workspace != runtime.state().workspace()
     {
         return Some(GardenInputRoute::Project(GardenProjectVisit {
             workspace,
             session,
+            agent,
         }));
     }
     visit_garden_agent(ui, runtime, pointer);
@@ -1671,6 +1676,8 @@ enum NewStep {
     Quit,
     /// welcome へ戻る。
     Back,
+    /// Ask the composition root to enumerate one directory's immediate children.
+    CompleteDirectory(DirectoryCompletion),
     /// 検証済みの入力で workspace 作成を実行する。screen graph が backend を 1 回呼ぶ。
     Create(NewRequest),
 }
@@ -3632,10 +3639,9 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit | Key::CtrlQ => NewStep::Quit,
-        Key::Tab => {
-            form.complete_directory();
-            NewStep::Stay
-        }
+        Key::Tab => form
+            .begin_directory_completion()
+            .map_or(NewStep::Stay, NewStep::CompleteDirectory),
         // Enter は入力を検証して作成へ進む。必須項目が欠けていれば安全なメッセージを
         // notice に出し、同画面に留まって draft を保つ。
         Key::Enter => match form.to_request() {
@@ -4691,7 +4697,8 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
                 }
             }
             if let Some(prs) = state.session_prs(*id) {
-                projected.pr_summary = crate::presentation::views::workspace::pr_summary(prs);
+                projected.pr_summary =
+                    crate::presentation::views::workspace::pr_inventory_summary(prs);
             }
             projected
         })
@@ -4813,9 +4820,12 @@ pub trait SessionWorktreeScanPort {
     fn scan(&mut self, workspace: &Path) -> Vec<String>;
 }
 
-/// Production scan: one `read_dir` over `<workspace>/.usagi/sessions`.
+/// Test-only filesystem adapter. Production owns the equivalent adapter in the
+/// binary composition root, outside this IO-free crate.
+#[cfg(test)]
 pub struct FsSessionWorktreeScanPort;
 
+#[cfg(test)]
 impl SessionWorktreeScanPort for FsSessionWorktreeScanPort {
     fn scan(&mut self, workspace: &Path) -> Vec<String> {
         let sessions = workspace.join(".usagi").join("sessions");
@@ -4832,6 +4842,14 @@ impl SessionWorktreeScanPort for FsSessionWorktreeScanPort {
             })
             .filter_map(|entry| entry.file_name().into_string().ok())
             .collect()
+    }
+}
+
+struct UnavailableSessionWorktreeScanPort;
+
+impl SessionWorktreeScanPort for UnavailableSessionWorktreeScanPort {
+    fn scan(&mut self, _: &Path) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -5881,21 +5899,26 @@ fn select_root_terminal_tab(key: &Key, runtime: &mut WorkspaceRuntime) -> bool {
 /// reducer already performed ([`GardenClick`]); this only moves the selection
 /// inside the Closeup that activation opened, through the same stable-identity
 /// path a click on the tab strip uses.
-fn visit_garden_agent(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, click: GardenClick) {
+fn visit_garden_agent(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    click: GardenClick,
+) -> bool {
     let GardenClick::Visit {
         agent: Some(runtime_id),
         ..
     } = click
     else {
-        return;
+        return false;
     };
     if !runtime.wants_right_pane_tab_click() {
-        return;
+        return false;
     }
     let Some(index) = runtime.agent_tab_index(runtime_id, ui.agent_inventory()) else {
-        return;
+        return false;
     };
     select_right_pane_tab(ui, runtime, index);
+    true
 }
 
 fn select_right_pane_tab(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, index: usize) {
@@ -7029,6 +7052,27 @@ fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
         || state.role_editor().is_some()
 }
 
+/// Carry the active workspace's sidebar cursor across the composition teardown.
+/// Only stable session rows are remembered; transient action rows remain local
+/// to the controller that owns them.
+fn remember_workspace_session_focus(deck: &mut WorkspaceDeck, state: &AppState) {
+    if let crate::usecase::application::controller::Selection::Target(Target::Session(session)) =
+        state.selected()
+    {
+        deck.remember_session_focus(state.workspace(), session);
+    }
+}
+
+fn restore_workspace_session_focus(
+    deck: &WorkspaceDeck,
+    path: &Path,
+    runtime: &mut WorkspaceRuntime,
+) {
+    if let Some(session) = deck.focused_session_for_path(path) {
+        let _ = runtime.apply_event(AppEvent::FocusSession(session));
+    }
+}
+
 /// Run one blocking operation on a scoped worker while continuing to paint.
 /// For cancellable workspace opens, Escape discards a late result; the
 /// underlying call is allowed to settle safely before its borrowed port is
@@ -7131,10 +7175,16 @@ fn cached_workspace_switch_frame(
 ) -> Option<Vec<String>> {
     let slot = deck.slot_for_path(path)?;
     let sessions = slot.projected_sessions();
-    let state = AppState::home(
+    let mut state = AppState::home(
         slot.workspace_id(),
         sessions.iter().map(|session| session.id).collect(),
     );
+    if let Some(session) = deck.focused_session_for_path(path) {
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::FocusSession(session),
+        );
+    }
     let projection = HomeProjection::from_state(&state, slot.label(), slot.path(), &sessions);
     let projection = if show_progress {
         projection.with_content_loading(status, frame)
@@ -7535,7 +7585,9 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
+    let mut pending_garden_agent = None;
     runtime.set_pr_auto_open(pr_auto_open);
     let data_home = usagi_core::infrastructure::paths::data_dir().ok();
     let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
@@ -7721,8 +7773,9 @@ fn drive_workspace_controller(
             restore_clock.elapsed(),
         );
         sync_runtime_sessions(&mut runtime, &ui, worktree_names);
-        if let Some(session) = pending_garden_visit.take() {
-            let _ = runtime.apply_event(AppEvent::VisitSession(session));
+        if let Some(visit) = pending_garden_visit.take() {
+            let _ = runtime.apply_event(AppEvent::VisitSession(visit.session));
+            pending_garden_agent = visit.agent.map(|agent| (visit.session, agent));
         }
         let workspace_material_revision = ui.workspace.material_revision();
         if allowed_sessions_revision != workspace_material_revision {
@@ -7748,6 +7801,20 @@ fn drive_workspace_controller(
             }
             if let RestoreJobOutcome::IntentFailed(error) = outcome {
                 surface_agent_tab_intent_error(&mut runtime, error);
+            }
+        }
+        if let Some((session, agent)) = pending_garden_agent {
+            let selected = visit_garden_agent(
+                &mut ui,
+                &mut runtime,
+                GardenClick::Visit {
+                    workspace: workspace_id,
+                    session,
+                    agent: Some(agent),
+                },
+            );
+            if selected || ui.agent_inventory().is_some() {
+                pending_garden_agent = None;
             }
         }
         for completion in garden_completions.try_iter().take(FRAME_EVENT_BUDGET) {
@@ -8217,6 +8284,7 @@ fn drive_workspace_controller(
                     &prepared.workspace.path,
                 )
             {
+                remember_workspace_session_focus(deck, runtime.state());
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             drawn_material = None;
@@ -8243,6 +8311,7 @@ fn drive_workspace_controller(
                             &prepared.workspace.path,
                         )
                     {
+                        remember_workspace_session_focus(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -8268,7 +8337,8 @@ fn drive_workspace_controller(
                             &prepared.workspace.path,
                         )
                     {
-                        deck.schedule_garden_visit(prepared.workspace.path.clone(), session);
+                        deck.schedule_garden_visit(prepared.workspace.path.clone(), session, None);
+                        remember_workspace_session_focus(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -8348,6 +8418,7 @@ fn drive_workspace_controller(
                                 if let Some(loader) = loader.as_mut() {
                                     let _ = (**loader).record_unite(&deck.paths());
                                 }
+                                remember_workspace_session_focus(deck, runtime.state());
                                 return Ok(WorkspaceStep::Activate(Box::new(first)));
                             }
                         }
@@ -8378,6 +8449,7 @@ fn drive_workspace_controller(
                             &prepared.workspace.path,
                         ) {
                             deck.close_path(&path);
+                            remember_workspace_session_focus(deck, runtime.state());
                             return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                         }
                     } else {
@@ -8472,7 +8544,12 @@ fn drive_workspace_controller(
                     &prepared.workspace.path,
                 )
             {
-                deck.schedule_garden_visit(prepared.workspace.path.clone(), visit.session);
+                deck.schedule_garden_visit(
+                    prepared.workspace.path.clone(),
+                    visit.session,
+                    visit.agent,
+                );
+                remember_workspace_session_focus(deck, runtime.state());
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             let notice = deck.notice().map(str::to_owned);
@@ -9022,7 +9099,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
             session_worktrees: self
                 .session_worktrees
                 .take()
-                .unwrap_or_else(|| Box::new(FsSessionWorktreeScanPort)),
+                .unwrap_or_else(|| Box::new(UnavailableSessionWorktreeScanPort)),
         }
     }
 }
@@ -9118,38 +9195,6 @@ pub fn run_with_settings(
         session_commands,
         None,
         None,
-        AvailableAgentModels::all(),
-    )
-}
-
-/// Run the Welcome / Open / Recent graph with the daemon Agent launch factory.
-///
-/// # Errors
-///
-/// Returns workspace loading or terminal IO failures from the screen graph.
-#[allow(clippy::too_many_arguments)]
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
-pub fn run_with_settings_and_agent_port_factory(
-    term: &mut dyn Terminal,
-    workspaces: Vec<Workspace>,
-    recent: Vec<Recent>,
-    now: DateTime<Utc>,
-    start: Start,
-    loader: &mut dyn WorkspaceLoader,
-    settings: &mut dyn SettingsPort,
-    session_commands: &mut dyn SessionCommandPortFactory,
-    agent_commands: &mut dyn AgentCommandPortFactory,
-) -> io::Result<Exit> {
-    run_with_settings_and_agent_port_factory_and_model_availability(
-        term,
-        workspaces,
-        recent,
-        now,
-        start,
-        loader,
-        settings,
-        session_commands,
-        agent_commands,
         AvailableAgentModels::all(),
     )
 }
@@ -9414,7 +9459,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics,
             browser: Box::new(UnavailableBrowserOpener),
-            session_worktrees: Box::new(FsSessionWorktreeScanPort),
+            session_worktrees: Box::new(UnavailableSessionWorktreeScanPort),
         }
     }
 }
@@ -9930,6 +9975,12 @@ pub fn run_screen_graph_with_backend_and_notice(
                     }
                     screen = Screen::Welcome;
                 }
+                NewStep::CompleteDirectory(completion) => {
+                    let entries = loader
+                        .directory_names(completion.parent())
+                        .unwrap_or_default();
+                    new_form.finish_directory_completion(&completion, entries);
+                }
                 NewStep::Create(request) => {
                     if pending_create.is_some() {
                         new_form
@@ -10206,9 +10257,10 @@ mod tests {
         open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
         prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
         prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
-        remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
-        render_missing_workspace_prompt, reset_projection_build_counts, restore_open_panes,
-        restore_prepared_workspace, retarget_drawer_chords, route_garden_input,
+        remember_workspace_session_focus, remove_registry_paths, render_controller_frame,
+        render_home_material, render_home_snapshot, render_missing_workspace_prompt,
+        reset_projection_build_counts, restore_open_panes, restore_prepared_workspace,
+        restore_workspace_session_focus, retarget_drawer_chords, route_garden_input,
         route_pr_modal_click, route_workspace_input_before_reducer, run as run_from_start,
         run_screen_graph_with_backend, run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
@@ -10690,9 +10742,11 @@ mod tests {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
             target: Target::Session(session),
             revision: 1,
-            prs: vec![usagi_core::domain::pullrequest::PrLink::new(
-                1625,
-                "https://github.com/kkyosuke/usagi/pull/1625",
+            prs: vec![usagi_core::domain::pr_inventory::PrEntry::new(
+                usagi_core::domain::pr_inventory::canonicalize(
+                    "https://github.com/kkyosuke/usagi/pull/1625",
+                )
+                .unwrap(),
             )],
         }));
         let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
@@ -11089,7 +11143,7 @@ mod tests {
         assert!(observed.iter().any(|row| row.contains("2 plots")));
         assert!(observed.iter().any(|row| row.contains("1 usagi")));
         assert!(observed.iter().any(|row| row.contains("-.-")));
-        assert!(observed.iter().any(|row| row.contains("Agent completed")));
+        assert!(observed.iter().any(|row| row.contains("completed")));
         assert!(!observed.iter().any(|row| row.contains("1 run")));
     }
 
@@ -11159,10 +11213,11 @@ mod tests {
     }
 
     #[test]
-    fn garden_routes_an_inactive_projects_plot_to_the_deck_shell() {
+    fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
         let workspace = WorkspaceId::new();
         let foreign_workspace = WorkspaceId::new();
         let session = SessionId::new();
+        let agent = AgentRuntimeId::new();
         let root = PathBuf::from("/tmp/demo");
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
@@ -11190,9 +11245,12 @@ mod tests {
                     lifecycle: SessionLifecycle::Available,
                     selected: false,
                     failure_summary: None,
-                    agents_observed: false,
-                    agents: Vec::new(),
-                    agent_status: None,
+                    agents_observed: true,
+                    agents: vec![crate::presentation::widgets::garden::GardenAgent {
+                        runtime_id: agent,
+                        phase: AgentPhase::Waiting,
+                    }],
+                    agent_status: Some(usagi_core::domain::agent::AgentStatus::Running),
                     pending_decisions: 0,
                     pr_merged: false,
                 },
@@ -11210,10 +11268,14 @@ mod tests {
                         column,
                         row,
                     ),
-                    Some(GardenClick::Visit { workspace, .. }) if workspace == foreign_workspace
+                    Some(GardenClick::Visit {
+                        workspace,
+                        agent: Some(runtime),
+                        ..
+                    }) if workspace == foreign_workspace && runtime == agent
                 )
             })
-            .expect("the inactive project plot is clickable");
+            .expect("the inactive project's Agent row is clickable");
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
         let mut pointer_gesture = false;
@@ -11232,6 +11294,7 @@ mod tests {
             Some(GardenInputRoute::Project(super::GardenProjectVisit {
                 workspace: foreign_workspace,
                 session,
+                agent: Some(agent),
             })),
         );
         assert_eq!(runtime.state().overlay(), None);
@@ -11592,6 +11655,20 @@ mod tests {
 
     fn snapshot(name: &str) -> WorkspaceSnapshot {
         WorkspaceSnapshot::new(ws(name), state(name))
+    }
+
+    fn snapshot_with_sessions(name: &str, session_names: &[&str]) -> WorkspaceSnapshot {
+        let mut workspace_state = state(name);
+        let template = workspace_state.sessions[0].clone();
+        workspace_state.sessions = session_names
+            .iter()
+            .map(|session| SessionRecord {
+                name: (*session).to_owned(),
+                root: PathBuf::from(format!("/tmp/{name}/{session}")),
+                ..template.clone()
+            })
+            .collect();
+        WorkspaceSnapshot::new(ws(name), workspace_state)
     }
 
     #[test]
@@ -12064,9 +12141,11 @@ mod tests {
                 crate::usecase::application::controller::BackendEvent::PullRequestsLoaded {
                     target: Target::Session(session),
                     revision: 1,
-                    prs: vec![usagi_core::domain::pullrequest::PrLink::new(
-                        1545,
-                        "https://example.test/pull/1545",
+                    prs: vec![usagi_core::domain::pr_inventory::PrEntry::new(
+                        usagi_core::domain::pr_inventory::canonicalize(
+                            "https://github.com/example/repository/pull/1545",
+                        )
+                        .unwrap(),
                     )],
                 },
             ),
@@ -25846,6 +25925,9 @@ mod tests {
         open_delay: std::time::Duration,
         registry_refresh: Option<FakeRegistryRefresh>,
         registry_refresh_dispatches: usize,
+        directory_entries: Vec<String>,
+        directory_error: Option<io::ErrorKind>,
+        directory_requests: Vec<PathBuf>,
     }
 
     impl WorkspaceLoader for FakeLoader {
@@ -25892,6 +25974,15 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .unwrap_or("workspace");
             Ok(snapshot(name))
+        }
+
+        fn directory_names(&mut self, parent: &Path) -> io::Result<Vec<String>> {
+            self.directory_requests.push(parent.to_path_buf());
+            if let Some(kind) = self.directory_error {
+                Err(io::Error::new(kind, "directory is unavailable"))
+            } else {
+                Ok(self.directory_entries.clone())
+            }
         }
 
         fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
@@ -26187,6 +26278,49 @@ mod tests {
         assert!(frame.contains("Opening workspace…"));
         assert!(pending.contains("beta-session"));
         assert!(!pending.contains("Opening workspace…"));
+    }
+
+    #[test]
+    fn workspace_switch_restores_each_projects_last_session_cursor() {
+        let alpha = snapshot("alpha");
+        let beta = snapshot_with_sessions("beta", &["first", "remembered"]);
+        let remembered = beta.session_ids[1];
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
+        let mut previous = WorkspaceRuntime::new(beta.workspace_id, beta.session_ids.clone());
+        let _ = previous.handle_key(Key::Down);
+
+        remember_workspace_session_focus(&mut deck, previous.state());
+        let _ = previous.handle_key(Key::Down);
+        remember_workspace_session_focus(&mut deck, previous.state());
+        assert_eq!(
+            deck.focused_session_for_path(&beta.workspace.path),
+            Some(remembered),
+            "the transient new-session row does not replace the last session focus"
+        );
+
+        let mut restored = WorkspaceRuntime::new(beta.workspace_id, beta.session_ids.clone());
+        restore_workspace_session_focus(&deck, &beta.workspace.path, &mut restored);
+        assert_eq!(
+            restored.state().selected(),
+            crate::usecase::application::controller::Selection::Target(Target::Session(remembered))
+        );
+        assert_eq!(restored.state().route(), Route::Home(HomeMode::Switch));
+
+        let transition = strip_ansi(
+            &cached_workspace_switch_frame(
+                &deck,
+                &beta.workspace.path,
+                24,
+                80,
+                0,
+                "Opening workspace…",
+                false,
+            )
+            .unwrap()
+            .join("\n"),
+        );
+        assert!(transition.contains("\u{f0907} remembered"), "{transition}");
+        assert!(!transition.contains("\u{f0907} first"), "{transition}");
     }
 
     #[test]
@@ -27386,6 +27520,43 @@ mod tests {
                 .all(|frame| frame.join("\n").contains("New Project"))
         );
         assert!(term.frames[5].join("\n").contains("Menu"));
+    }
+
+    #[test]
+    fn new_form_directory_completion_uses_the_loader_and_tolerates_io_failure() {
+        let keys = [Key::Char('e'), Key::Right, Key::Down]
+            .into_iter()
+            .chain("/tmp/al".chars().map(Key::Char))
+            .chain([Key::Tab, Key::Quit])
+            .collect::<Vec<_>>();
+
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader {
+            directory_entries: vec!["alpine".to_owned(), "alpha".to_owned()],
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.directory_requests, [PathBuf::from("/tmp")]);
+        assert!(term.frames.iter().any(|frame| {
+            crate::presentation::widgets::strip_ansi(&frame.join("\n")).contains("/tmp/alpha/")
+        }));
+
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader {
+            directory_error: Some(io::ErrorKind::PermissionDenied),
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.directory_requests, [PathBuf::from("/tmp")]);
+        assert!(term.frames.iter().any(|frame| {
+            crate::presentation::widgets::strip_ansi(&frame.join("\n")).contains("/tmp/al")
+        }));
     }
 
     #[test]

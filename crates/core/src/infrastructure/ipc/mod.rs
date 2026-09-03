@@ -16,8 +16,6 @@ use sha2::{Digest, Sha256};
 
 /// Default and hard limit for one JSON frame (one MiB).
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
-/// The largest logical snapshot permitted by the protocol (sixteen MiB).
-pub const HARD_MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 
 /// The wire generation that carries terminal attach / resync snapshots.
 pub const TERMINAL_WIRE_GENERATION: u16 = 1;
@@ -593,15 +591,6 @@ pub enum Bootstrap {
 pub struct StreamRef {
     pub stream_id: StreamId,
     pub epoch: String,
-}
-
-/// Resume data keeps delivery order and resource cursors intentionally separate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResumeToken {
-    pub stream_ref: StreamRef,
-    pub after_sequence: Option<u64>,
-    pub resource_revision: Option<u64>,
-    pub terminal_output_offset: Option<u64>,
 }
 
 /// All ordinary traffic after a successful handshake.

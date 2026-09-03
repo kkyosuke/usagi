@@ -246,6 +246,13 @@ inbox の完了報告は維持して retryable error を返す。同じ report �
 保存された outcome から run / agent status を冪等に収束させ、`Completed` result だけを読み直して投影するため、失敗への反転や別 URL への差し替えを許さず回復できる。late report と
 `agent_fail` は inventory を変更しない。payload の caller 名や cwd から identity を補完しない。
 
+callerのcurrent runが`SupervisorRun`へ束縛されている`session_dispatch` / `session_delegate_brief`では、daemonが
+root goalと確定済みchild completionのbounded handoff contextを今回のtask instructionへ前置する。raw conversationや
+terminal transcriptは含めず、workerが明示したsummaryとstructured artifact参照だけを使う。snapshotはchild operationの
+reservationと同時にDAGへ保存されるため、同じoperationのretryは後から増えたcontextを混ぜず同じ初期promptへ収束する。
+Supervisor provenanceのないclassic callerのpromptは変更しない。永続化、上限、terminal factとのfenceは
+[5. daemonのsupervisor scheduler](05-daemon.md#supervisor-scheduler)を正本とする。
+
 session 作成系は optional role selector を受け取る。`session_create` / `session_delegate_issue` /
 `session_delegate_brief` は top-level `role`、`session_dispatch` は `session.role` を使う。daemon が current catalog と
 保存済み assignment を検証し、instruction 本文は MCP wire に載せない。catalog・default・conflict の正本は

@@ -63,7 +63,6 @@ use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::infrastructure::session_worktree::SystemGit;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
-use usagi_tui::presentation::views::pr_modal::PrModal;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
@@ -669,7 +668,7 @@ fn pr_snapshot_events(
                 Ok(snapshot) => BackendEvent::PullRequestsLoaded {
                     target,
                     revision: snapshot.revision,
-                    prs: PrModal::from_entries(&snapshot.entries).prs().to_vec(),
+                    prs: snapshot.entries,
                 },
                 Err(message) => BackendEvent::PullRequestsError {
                     target,
@@ -821,7 +820,7 @@ impl BackendOverlayPort for ProductionOverlayPort {
                         |snapshot| BackendEvent::PullRequestsLoaded {
                             target: Target::Session(session),
                             revision: snapshot.revision,
-                            prs: PrModal::from_entries(&snapshot.entries).prs().to_vec(),
+                            prs: snapshot.entries,
                         },
                     );
                 completions.emit(AppEvent::Backend(event));
@@ -920,6 +919,32 @@ impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
 struct ProductionBackendFactory {
     helper_reaper: PlatformChildReaper,
     garden_reduced_motion: bool,
+}
+
+/// Filesystem adapter for the inline session-create collision hint.
+struct FsSessionWorktreeScanPort;
+
+fn child_directory_names(parent: &Path) -> std::io::Result<Vec<String>> {
+    let mut names = std::fs::read_dir(parent)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(std::fs::FileType::is_dir)
+                .and_then(|_| entry.file_name().into_string().ok())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    Ok(names)
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
+impl presentation::SessionWorktreeScanPort for FsSessionWorktreeScanPort {
+    fn scan(&mut self, workspace: &Path) -> Vec<String> {
+        let sessions = workspace.join(".usagi").join("sessions");
+        child_directory_names(&sessions).unwrap_or_default()
+    }
 }
 
 impl Default for ProductionBackendFactory {
@@ -1050,7 +1075,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             }),
             // Off the frame budget: the inline create form is the only reader,
             // so the scan runs only while that form owns input (#554).
-            session_worktrees: Box::new(presentation::FsSessionWorktreeScanPort),
+            session_worktrees: Box::new(FsSessionWorktreeScanPort),
         }
     }
 }
@@ -4214,6 +4239,10 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         true
     }
 
+    fn directory_names(&mut self, parent: &Path) -> std::io::Result<Vec<String>> {
+        child_directory_names(parent)
+    }
+
     fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
         let path = resolve_workspace_path(path)?;
         let previous = crate::runtime::daemon::opened_workspace();
@@ -5386,30 +5415,32 @@ mod tests {
         AGENT_LAUNCH_UNCORRELATED, AgentGoalIntent, AgentLaunchIntent, AppEvent, AppKey,
         BackendTargetStorePort, Completions, DaemonAgentCommandPort, DaemonDecisionCommandPort,
         DaemonReply, DaemonRequest, DaemonRestoreConnectionPort, DoctorDiagnosisError, EnvScope,
-        EnvironmentStorePort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection,
-        LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
-        RepoEnvironmentStore, RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start,
-        StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
-        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult,
-        WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, agent_goal_request,
-        agent_inventory_request, agent_launch_request, classify_terminal_input,
-        classify_workspace_directory, correlate_agent_goal, correlate_agent_launch,
-        created_session_hook, current_agent_integrations, daemon_error_reason, decision_cadence,
-        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
-        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
-        decode_work_run_control_reply, decode_work_run_snapshot_reply, doctor_diagnosis_io_error,
-        doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
-        pr_snapshot_events, probe_path, provider_resume_projection,
-        reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
-        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
-        validate_workspace_directory, version_detail, version_result_from_observation,
-        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
+        EnvironmentStorePort, FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry,
+        LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
+        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, RoleEditorScope,
+        SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
+        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
+        TerminalSubscription, VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError,
+        agent_goal_request, agent_inventory_request, agent_launch_request, child_directory_names,
+        classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
+        correlate_agent_launch, created_session_hook, current_agent_integrations,
+        daemon_error_reason, decision_cadence, decode_agent_admission, decode_attach_screen,
+        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
+        decode_terminal_poll, decode_work_run_control_reply, decode_work_run_snapshot_reply,
+        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
+        provider_resume_projection, reduced_motion_from_environment, reply_geometry,
+        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
+        version_result_from_observation, work_run_control_client_error,
+        workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use usagi_core::infrastructure::bounded_process::ChildObservation;
+    use usagi_tui::presentation::SessionWorktreeScanPort;
 
     #[test]
     fn reduced_motion_environment_accepts_only_the_documented_opt_in() {
@@ -8686,6 +8717,28 @@ mod tests {
             std::thread::yield_now();
         };
         assert_eq!(second, vec![alpha, beta]);
+    }
+
+    #[test]
+    fn directory_adapters_list_only_sorted_child_directories() {
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temporary.path().join("zeta")).unwrap();
+        std::fs::create_dir(temporary.path().join("alpha")).unwrap();
+        std::fs::write(temporary.path().join("plain-file"), "not a directory").unwrap();
+
+        assert_eq!(
+            child_directory_names(temporary.path()).unwrap(),
+            vec!["alpha".to_owned(), "zeta".to_owned()]
+        );
+
+        let sessions = temporary.path().join(".usagi").join("sessions");
+        std::fs::create_dir_all(sessions.join("session-b")).unwrap();
+        std::fs::create_dir_all(sessions.join("session-a")).unwrap();
+        let mut scan = FsSessionWorktreeScanPort;
+        assert_eq!(
+            SessionWorktreeScanPort::scan(&mut scan, temporary.path()),
+            vec!["session-a".to_owned(), "session-b".to_owned()]
+        );
     }
 
     #[test]

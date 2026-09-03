@@ -18,9 +18,7 @@ use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use crate::domain::id::{AgentId, OperationId, SessionId, TerminalRef, WorkspaceId};
 use crate::domain::pr_inventory::{PrEntry, PrInventory};
 use crate::domain::session_lifecycle::AgentPhase;
-use crate::domain::terminal_launch::{
-    TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
-};
+use crate::domain::terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope};
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, Capability, ClientHello, ClientId, ClientWorkspace, DaemonGeneration,
     Envelope, EnvelopeKind, ErrorCode, GenerationRole, ProtocolError, ProtocolRange,
@@ -271,14 +269,6 @@ impl From<(SessionId, PrInventory)> for PrSnapshot {
             entries: inventory.entries.into_values().collect(),
         }
     }
-}
-
-/// A lossy subscription hint. A duplicate, gap, or reorder is resolved by a
-/// `PrAction::Snapshot` request using the revision in this payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PrUpdated {
-    pub session_id: SessionId,
-    pub revision: u64,
 }
 
 /// Decodes the source-of-truth PR projection received after a hint or reconnect.
@@ -771,10 +761,6 @@ pub enum TerminalRequest {
         expected_revision: u64,
     },
 }
-
-/// Re-exported selection type makes callers name the only accepted launch
-/// selector, rather than constructing an untyped JSON payload.
-pub type TerminalProfileSelection = TerminalProfileId;
 
 /// The result exposed to CLI and MCP adapters.
 #[derive(Debug, Clone, PartialEq)]
