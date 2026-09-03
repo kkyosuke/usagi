@@ -165,8 +165,9 @@ impl Frame {
             }
             if character == ESC {
                 let (sequence, consumed_bytes) = ansi_sequence(&line[byte_index..]);
-                pending_ansi.push_str(sequence);
-                update_active_style(&mut active_style, sequence);
+                if update_active_style(&mut active_style, sequence) {
+                    pending_ansi.push_str(sequence);
+                }
                 let sequence_end = byte_index + consumed_bytes;
                 while chars
                     .peek()
@@ -533,12 +534,21 @@ fn ansi_sequence(text: &str) -> (&str, usize) {
     (text, text.len())
 }
 
-/// Reflect an ANSI SGR sequence in the state used for frame diffing. The
-/// renderer only needs this state for equality: output still preserves the
-/// original escape placement in each glyph's `text`.
-fn update_active_style(active_style: &mut String, sequence: &str) {
-    if !sequence.starts_with("\u{1b}[") || !sequence.ends_with('m') {
-        return;
+/// Returns whether an escape sequence is safe for the frame renderer to emit.
+///
+/// Screen control belongs to usagi's terminal adapter. View text may only
+/// carry SGR styling through this single rendering boundary.
+fn is_renderable_escape(sequence: &str) -> bool {
+    sequence.starts_with("\u{1b}[") && sequence.ends_with('m')
+}
+
+/// Reflect an ANSI SGR sequence in the state used for frame diffing and report
+/// whether the sequence may be emitted. The renderer only needs this state for
+/// equality; output still preserves the original SGR placement in each glyph's
+/// `text`.
+fn update_active_style(active_style: &mut String, sequence: &str) -> bool {
+    if !is_renderable_escape(sequence) {
+        return false;
     }
     let params = &sequence[2..sequence.len() - 1];
     if params.is_empty() || params.split(';').any(|param| param == "0") {
@@ -546,6 +556,7 @@ fn update_active_style(active_style: &mut String, sequence: &str) {
     } else {
         active_style.push_str(sequence);
     }
+    true
 }
 
 #[cfg(test)]
@@ -741,10 +752,32 @@ mod tests {
             malformed.cell(0, 0),
             Some(Cell::Glyph { width: 1, .. })
         ));
-        assert_eq!(cell_text(&malformed, 0, 0), "\u{1b}X");
+        assert_eq!(cell_text(&malformed, 0, 0), "X");
         assert_eq!(malformed.glyph_text(0, &Cell::Empty), "");
         assert_eq!(frame(2, 1, &["\u{1b}"]).cell(0, 0), Some(&Cell::Empty));
         assert_eq!(frame(2, 1, &["\u{1b}[31"]).cell(0, 0), Some(&Cell::Empty));
+    }
+
+    #[test]
+    fn set_line_drops_non_sgr_escapes_so_the_alternate_screen_survives() {
+        let frame = Frame::from_lines(10, 1, ["\u{1b}[?1049lok\u{1b}[31mred"]);
+        let visible = (0..frame.width())
+            .filter_map(|column| match frame.cell(0, column) {
+                Some(Cell::Glyph { scalar, .. }) => Some(*scalar),
+                Some(Cell::Empty | Cell::Continuation) | None => None,
+            })
+            .collect::<String>();
+        assert_eq!(visible, "okred");
+
+        let rendered = FrameRenderer::new().render(frame);
+        let text = rendered
+            .spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+
+        assert!(!text.contains("\u{1b}[?1049l"));
+        assert!(text.contains("\u{1b}[31m"));
     }
 
     #[test]
@@ -837,16 +870,16 @@ mod tests {
     #[test]
     fn sgr_style_state_ignores_non_sgr_sequences_accumulates_and_resets() {
         let mut style = String::new();
-        update_active_style(&mut style, "\u{1b}[2J");
+        assert!(!update_active_style(&mut style, "\u{1b}[2J"));
         assert!(style.is_empty());
 
-        update_active_style(&mut style, "\u{1b}[1;36m");
-        update_active_style(&mut style, "\u{1b}[4m");
+        assert!(update_active_style(&mut style, "\u{1b}[1;36m"));
+        assert!(update_active_style(&mut style, "\u{1b}[4m"));
         assert_eq!(style, "\u{1b}[1;36m\u{1b}[4m");
 
-        update_active_style(&mut style, "\u{1b}[0m");
+        assert!(update_active_style(&mut style, "\u{1b}[0m"));
         assert!(style.is_empty());
-        update_active_style(&mut style, "\u{1b}[m");
+        assert!(update_active_style(&mut style, "\u{1b}[m"));
         assert!(style.is_empty());
     }
 
