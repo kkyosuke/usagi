@@ -256,6 +256,7 @@ pub struct AuthenticatedDispatchCaller {
     pub workspace_id: WorkspaceId,
     pub run_id: OperationId,
     pub caller: CallerRef,
+    pub runtime: AgentRuntimeRef,
     /// Exact terminal scope owned by the authenticated Agent runtime.
     ///
     /// Read-only tools use this daemon-derived fence instead of accepting a
@@ -1134,6 +1135,7 @@ impl AgentRuntime {
                 workspace_id,
                 run_id,
                 caller,
+                runtime: mcp.runtime.clone(),
                 terminal_scope,
             },
         )

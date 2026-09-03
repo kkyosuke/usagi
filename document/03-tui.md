@@ -694,8 +694,9 @@ daemon は利用者の Goal を次の固定 operating contract と結合し、`L
 - 停止時は安全な理由と回復 action を root conversation に出し、PR は自動 merge しない。
 
 Work Run の前面は既存 Director drawer である。daemon が workspace に属する durable `SupervisorRun` を保持すると、
-Home の notice band は最優先 run の状態、成功 task 数、実行中 task 数と concurrency 上限を `Active work` として表示する。
-Director drawer は同じ redaction-safe snapshot から progress bar、最大5件の task state、停止理由を描き、2秒 cadence の
+Home の notice band は最優先の未完了 run だけを対象に、bounded な Goal label、状態、成功 task 数、実行中 task 数と
+concurrency 上限を表示する。通常は `Active work`、判断待ちは `Action needed` とし、終了済み run を active banner に戻さない。
+Director drawer は同じ redaction-safe snapshot から Goal label、progress bar、最大5件の task state、停止理由を描き、2秒 cadence の
 専用 background lane で更新する。実行中 Agent 数は supervisor admission と同じ `Dispatched | Running` task の数を正本とし、
 Home と Director は共通 projection から同じ並び順・集計を読む。観測失敗時は既存 snapshot を維持して `Stale` と明示し、
 初回から取得不能なら `Work Run progress unavailable` と authoritative `Failed` を描き分けて5秒 backoffする。frame thread から
@@ -706,7 +707,10 @@ Goal-driven Director では `Ctrl-O w` が同じ projection の最大16件を st
 Director が閉じていれば同時に drawer を開き、操作面の一覧では `↑` / `↓`（`←` / `→` も同じ）で Run を選び、
 `Enter` で状態に応じた action へ進み、`Esc` または一覧上の `Ctrl-O w` で閉じる。終了済みと Escalated 以外の run の
 cancel は再度 `Enter` を押す確認を必須とする。Escalated run は観測した exact escalation ID に対する
-Retry work / Cancel run / Mark failed だけを提示し、`↑` / `↓` / `←` / `→` で選択して `Enter` で確定する。
+Resume work / Cancel run / Mark failed だけを提示し、停止理由と safe evidence を同じ画面に表示する。
+artifact rejection の `Resume work` は保存済み provenance の exact Agent run へ修正と再報告を指示できた場合だけ escalation を解除し、
+Agent が既に停止している場合は結果未確認として run を停止状態のまま保つ。Agent 再作業を伴わない escalation は durable decision を直接適用する。
+`↑` / `↓` / `←` / `→` で選択して `Enter` で確定する。
 完了済み run は read-only である。観測が失敗した cached snapshot と初回 pending は操作を拒否し、
 fresh snapshot を取得してからだけ typed command を送る。送信中の連打は消費し、応答が未確認なら `Enter` は新しい操作を作らず
 同じ operation ID を再送する。副作用なしの確定拒否は再試行画面にせず理由を表示して一覧へ戻る。`Esc` は確認・判断画面から一覧へ戻り、cancel 自体を暗黙に実行しない。結果不明の再試行画面では operation ID を破棄せず操作面だけを閉じ、再度開いたときに同じ operation の再試行へ戻す。

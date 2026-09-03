@@ -2367,12 +2367,18 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
     let observation = if home.work_runs.freshness() == WorkRunFreshness::Unavailable {
         "⚠ Stale work"
+    } else if matches!(
+        run.state,
+        SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated
+    ) {
+        "⚠ Action needed"
     } else {
         "● Active work"
     };
+    let label = run.display_label.as_deref().unwrap_or("Untitled Work Run");
     widgets::clip_to_width(
         &format!(
-            "  {observation} #{short_id} · {} · {}/{} tasks · {}/{} agents · Director for details",
+            "  {observation} {label} #{short_id} · {} · {}/{} tasks · {}/{} agents · Director for details",
             work_run_state_label(run.state),
             progress.succeeded_tasks,
             progress.total_tasks,
@@ -3261,6 +3267,7 @@ mod tests {
     use usagi_core::usecase::session_state::SessionStateCounts;
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One banner matrix keeps every Work Run priority and availability state comparable.
     fn home_banner_surfaces_the_highest_priority_work_run() {
         let state = AppState::home(WorkspaceId::new(), Vec::new());
         let mut run = SupervisorRunQuery {
@@ -3269,6 +3276,7 @@ mod tests {
             state: SupervisorRunState::Running,
             terminal_at: None,
             terminal_reason: None,
+            display_label: Some("Ship Work Run".into()),
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),
@@ -3303,6 +3311,14 @@ mod tests {
         assert!(banner.contains("1/3 tasks"));
         assert!(banner.contains("2/4 agents"));
         assert!(banner.contains("Director for details"));
+
+        let mut action_run = run.clone();
+        action_run.state = SupervisorRunState::WaitingForDecision;
+        let action_home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
+            .with_work_runs(WorkRunProjection::fresh(vec![action_run]));
+        assert!(
+            widgets::strip_ansi(&home_notice_banner(100, &action_home)).contains("Action needed")
+        );
 
         let states = [
             SupervisorRunState::Planning,

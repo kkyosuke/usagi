@@ -10531,6 +10531,7 @@ mod tests {
             state,
             terminal_at: None,
             terminal_reason: None,
+            display_label: Some("Observed Goal".into()),
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),

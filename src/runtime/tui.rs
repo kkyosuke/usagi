@@ -5460,6 +5460,7 @@ mod tests {
             state: usagi_core::domain::supervisor::SupervisorRunState::Cancelled,
             terminal_at: None,
             terminal_reason: Some("cancelled by local operator".to_owned()),
+            display_label: Some("Controlled Goal".to_owned()),
             policy: usagi_core::domain::supervisor::ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),

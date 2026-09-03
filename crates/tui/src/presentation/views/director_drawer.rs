@@ -524,6 +524,13 @@ fn work_run_control_body(
         };
         rows.push(style.paint(feedback));
     }
+    let selected_run = control.selected.and_then(|id| {
+        projection
+            .work_runs
+            .runs()
+            .iter()
+            .find(|run| run.supervisor_run_id == id)
+    });
 
     match control.mode {
         WorkRunControlMode::Closed => unreachable!("closed control uses the normal drawer"),
@@ -544,8 +551,9 @@ fn work_run_control_body(
                 };
                 let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
                 let progress = WorkRunProgress::from_run(run);
+                let label = run.display_label.as_deref().unwrap_or("Untitled Work Run");
                 rows.push(format!(
-                    "{marker} #{short_id}  {:<15} {}/{}",
+                    "{marker} {label}  #{short_id}  {:<15} {}/{}",
                     run_state_label(run.state),
                     progress.succeeded_tasks,
                     progress.total_tasks
@@ -560,46 +568,30 @@ fn work_run_control_body(
         }
         WorkRunControlMode::ConfirmCancel => {
             rows.extend(control_prompt_rows(
-                control.selected,
+                selected_run,
                 "Cancel this Work Run and stop its active Agents?",
-                "Enter confirm · Esc back",
             ));
+            rows.push("Enter confirm · Esc back".into());
             finish_control_rows(&mut rows, height);
         }
         WorkRunControlMode::ResolveEscalation => {
-            rows.extend(control_prompt_rows(
-                control.selected,
-                "Resolve the current decision",
-                "↑↓ choose · Enter confirm · Esc back",
-            ));
-            for (decision, label) in [
-                (EscalationDecision::Resume, "Retry work"),
-                (EscalationDecision::Cancel, "Cancel run"),
-                (EscalationDecision::Fail, "Mark failed"),
-            ] {
-                let marker = if decision == control.decision {
-                    "›"
-                } else {
-                    " "
-                };
-                rows.push(format!("{marker} {label}"));
-            }
+            append_escalation_control_rows(&mut rows, selected_run, control.decision);
             finish_control_rows(&mut rows, height);
         }
         WorkRunControlMode::Submitting => {
             rows.extend(control_prompt_rows(
-                control.selected,
+                selected_run,
                 "Applying the durable action…",
-                "Waiting for the daemon · do not repeat",
             ));
+            rows.push("Waiting for the daemon · do not repeat".into());
             finish_control_rows(&mut rows, height);
         }
         WorkRunControlMode::Retry => {
             rows.extend(control_prompt_rows(
-                control.selected,
+                selected_run,
                 "The action outcome is not confirmed",
-                "Enter retry same operation · Esc close",
             ));
+            rows.push("Enter retry same operation · Esc close".into());
             finish_control_rows(&mut rows, height);
         }
     }
@@ -608,16 +600,43 @@ fn work_run_control_body(
         .collect()
 }
 
-fn control_prompt_rows(
-    selected: Option<SupervisorRunId>,
-    prompt: &str,
-    footer: &str,
-) -> Vec<String> {
+fn control_prompt_rows(selected: Option<&SupervisorRunQuery>, prompt: &str) -> Vec<String> {
     let id = selected.map_or_else(
         || "unknown".to_owned(),
-        |id| id.to_string().chars().take(8).collect(),
+        |run| run.supervisor_run_id.to_string().chars().take(8).collect(),
     );
-    vec![format!("#{id}"), prompt.to_owned(), footer.to_owned()]
+    let label = selected
+        .and_then(|run| run.display_label.as_deref())
+        .unwrap_or("Untitled Work Run");
+    vec![format!("{label}  #{id}"), prompt.to_owned()]
+}
+
+fn append_escalation_control_rows(
+    rows: &mut Vec<String>,
+    selected: Option<&SupervisorRunQuery>,
+    selected_decision: EscalationDecision,
+) {
+    rows.extend(control_prompt_rows(
+        selected,
+        "Resolve the current decision",
+    ));
+    if let Some(escalation) = selected.and_then(|run| run.escalation.as_ref()) {
+        rows.push(format!("Reason: {}", escalation.reason));
+        rows.push(format!("Evidence: {}", escalation.safe_evidence));
+    }
+    for (decision, label) in [
+        (EscalationDecision::Resume, "Resume work"),
+        (EscalationDecision::Cancel, "Cancel run"),
+        (EscalationDecision::Fail, "Mark failed"),
+    ] {
+        let marker = if decision == selected_decision {
+            "›"
+        } else {
+            " "
+        };
+        rows.push(format!("{marker} {label}"));
+    }
+    rows.push("↑↓ choose · Enter confirm · Esc back".into());
 }
 
 fn finish_control_rows(rows: &mut Vec<String>, height: usize) {
@@ -642,10 +661,10 @@ fn work_run_rows(
         bar_width,
     );
     let mut rows = vec![
-        Role::Accent
-            .style()
-            .bold()
-            .paint(&format!("Active work  #{short_id}  {state}")),
+        Role::Accent.style().bold().paint(&format!(
+            "Work Run  {}  #{short_id}  {state}",
+            run.display_label.as_deref().unwrap_or("Untitled")
+        )),
         format!(
             "Progress  {bar}  {}/{} tasks  Agents {}/{}",
             progress.succeeded_tasks,
@@ -909,6 +928,7 @@ mod tests {
             state: SupervisorRunState::Running,
             terminal_at: None,
             terminal_reason: None,
+            display_label: Some("Review supervisor stability".into()),
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: [TaskState::Succeeded, TaskState::Running, TaskState::Pending]
@@ -1184,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn director_drawer_renders_daemon_owned_task_progress_in_both_modes() {
+    fn director_drawer_renders_daemon_owned_work_run_progress_in_both_modes() {
         for goal_driven in [false, true] {
             let projection = DirectorDrawerProjection {
                 goal_driven,
@@ -1197,7 +1217,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            assert!(body.contains("Active work"));
+            assert!(body.contains("Work Run  Review supervisor stability"));
             assert!(body.contains("1/3 tasks"));
             assert!(body.contains("Agents 1/4"));
             assert!(body.contains("✓ task-0  done"));
@@ -1338,7 +1358,15 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // One rendering matrix keeps every Work Run control state visually comparable.
     fn work_run_control_renders_selection_confirmation_decision_and_retry() {
-        let run = work_run();
+        let mut run = work_run();
+        run.escalation = Some(EscalationRecord {
+            escalation_id: OperationId::new(),
+            reason: "choose a recovery".into(),
+            blocking_task_id: Some(TaskId::new("task-1").unwrap()),
+            safe_evidence: "the Agent needs a fresh result".into(),
+            choices: vec!["resume".into()],
+            created_at: Utc::now(),
+        });
         let selected = run.supervisor_run_id;
         let another = work_run();
         let base = DirectorDrawerProjection::default()
@@ -1354,8 +1382,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(list.contains("Work Runs"));
-        assert!(list.contains("› #"));
-        assert!(list.contains("  #"));
+        assert!(list.contains("› Review supervisor stability  #"));
+        assert!(list.contains("  Review supervisor stability  #"));
         assert!(list.contains("Enter actions"));
 
         let confirmation = DirectorDrawerProjection {
@@ -1390,7 +1418,10 @@ mod tests {
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(decision.contains("Resume work"));
         assert!(decision.contains("› Cancel run"));
+        assert!(decision.contains("Reason: choose a recovery"));
+        assert!(decision.contains("Evidence: the Agent needs a fresh result"));
 
         let submitting = DirectorDrawerProjection {
             work_run_control: WorkRunControlProjection {
@@ -1451,7 +1482,10 @@ mod tests {
 
     #[test]
     fn control_prompt_identifies_a_missing_selection_as_unknown() {
-        assert_eq!(control_prompt_rows(None, "prompt", "footer")[0], "#unknown");
+        assert_eq!(
+            control_prompt_rows(None, "prompt")[0],
+            "Untitled Work Run  #unknown"
+        );
     }
 
     #[test]
