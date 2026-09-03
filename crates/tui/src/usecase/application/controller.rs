@@ -51,6 +51,8 @@ pub enum Route {
 /// Home の一時的な重ね表示。常駐 mode には数えない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
+    /// Read-only, context-aware command list opened with `?`.
+    CommandHelp,
     /// workspace scope の command surface。
     Overview,
     /// daemon health / Agent capacity の読み取り専用 status surface。
@@ -1413,6 +1415,18 @@ impl AppState {
     #[must_use]
     pub const fn workspace(&self) -> WorkspaceId {
         self.workspace
+    }
+    /// Whether the current terminal dimensions can host the Garden command.
+    #[must_use]
+    pub const fn garden_available(&self) -> bool {
+        self.garden_available
+    }
+    /// Whether the active managed session is a currently usable command scope.
+    #[must_use]
+    pub fn active_session_is_usable(&self) -> bool {
+        self.active.is_some_and(|session| {
+            self.sessions.contains(&session) && self.session_can_use(session)
+        })
     }
     /// snapshot の stable session identity。
     #[must_use]
@@ -4380,6 +4394,10 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         // other key is inert while the create-failure dialog owns input.
         Overlay::Prs => update_prs_overlay(state, &key),
         Overlay::Preview => update_preview_overlay(state, &key),
+        Overlay::CommandHelp if matches!(key, AppKey::Escape | AppKey::Char('?')) => {
+            state.overlay = None;
+            Vec::new()
+        }
         Overlay::Daemon | Overlay::Overview if matches!(key, AppKey::Escape) => {
             state.overlay = None;
             Vec::new()
@@ -4393,7 +4411,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             Vec::new()
         }
-        Overlay::CreateSessionError | Overlay::Daemon => Vec::new(),
+        Overlay::CreateSessionError | Overlay::Daemon | Overlay::CommandHelp => Vec::new(),
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
     }
 }
@@ -4660,6 +4678,10 @@ fn open_decisions(state: &mut AppState) -> Vec<Effect> {
 #[allow(clippy::too_many_lines)] // Exhaustive Home command ownership remains visible in one reducer table.
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
+        AppKey::Char('?') => {
+            state.overlay = Some(Overlay::CommandHelp);
+            Vec::new()
+        }
         AppKey::OpenDecisions | AppKey::Char('d') => open_decisions(state),
         AppKey::Up => {
             state.move_selection(-1);
@@ -7687,6 +7709,7 @@ mod tests {
     fn every_existing_modal_blocks_director_drawer_entry() {
         let (workspace, first, _) = ids();
         for overlay in [
+            Overlay::CommandHelp,
             Overlay::Overview,
             Overlay::Daemon,
             Overlay::Closeup,
@@ -7735,7 +7758,8 @@ mod tests {
                 Overlay::CleanupQueue => {
                     state.cleanup_queue = Some(CleanupQueueState::new(Vec::new()));
                 }
-                Overlay::Overview
+                Overlay::CommandHelp
+                | Overlay::Overview
                 | Overlay::Daemon
                 | Overlay::Closeup
                 | Overlay::QuitConfirmation
@@ -7946,6 +7970,7 @@ mod tests {
         // `true` means the overlay remains open after the chord. Every overlay
         // owns both keys; only the documented Ctrl-C close contracts dismiss.
         for (overlay, ctrl_c_stays_open, ctrl_q_stays_open) in [
+            (Overlay::CommandHelp, true, true),
             (Overlay::Overview, true, true),
             (Overlay::Daemon, true, true),
             (Overlay::Closeup, false, true),
@@ -9992,6 +10017,7 @@ mod tests {
     fn a_front_surface_keeps_the_idle_garden_away() {
         let (workspace, session, _) = ids();
         for overlay in [
+            Overlay::CommandHelp,
             Overlay::Overview,
             Overlay::Daemon,
             Overlay::Closeup,
