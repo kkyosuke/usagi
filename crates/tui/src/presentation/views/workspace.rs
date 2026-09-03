@@ -3259,6 +3259,7 @@ mod tests {
     use usagi_core::usecase::session_state::SessionStateCounts;
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One banner matrix keeps every Work Run priority and availability state comparable.
     fn home_banner_surfaces_the_highest_priority_work_run() {
         let state = AppState::home(WorkspaceId::new(), Vec::new());
         let mut run = SupervisorRunQuery {
@@ -3302,6 +3303,14 @@ mod tests {
         assert!(banner.contains("1/3 tasks"));
         assert!(banner.contains("2/4 agents"));
         assert!(banner.contains("Director for details"));
+
+        let mut action_run = run.clone();
+        action_run.state = SupervisorRunState::WaitingForDecision;
+        let action_home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
+            .with_work_runs(WorkRunProjection::fresh(vec![action_run]));
+        assert!(
+            widgets::strip_ansi(&home_notice_banner(100, &action_home)).contains("Action needed")
+        );
 
         let states = [
             SupervisorRunState::Planning,

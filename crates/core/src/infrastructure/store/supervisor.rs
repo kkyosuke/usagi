@@ -1058,7 +1058,7 @@ mod tests {
     use super::*;
     use crate::domain::id::{OperationId, WorkspaceId};
     use crate::domain::supervisor::{
-        SupervisorEventKind, SupervisorEventSource, SupervisorRunState,
+        SupervisorEventKind, SupervisorEventSource, SupervisorRunState, TaskId,
     };
     use chrono::{DateTime, TimeZone, Utc};
     fn now() -> DateTime<Utc> {
@@ -1383,6 +1383,25 @@ mod tests {
                     .contains("invalid display label")
             );
         }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        run.verification_candidates
+            .insert(TaskId::new("missing").unwrap(), None);
+        assert!(
+            store
+                .initialize(&run)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid artifact candidate")
+        );
     }
 
     #[test]

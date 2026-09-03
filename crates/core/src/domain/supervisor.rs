@@ -2448,6 +2448,20 @@ mod tests {
             Some(&expectation)
         );
         let candidate = "https://github.com/acme/repo/pull/42";
+        assert!(matches!(
+            reduce(
+                &mut run,
+                &event(
+                    6,
+                    SupervisorEventKind::VerificationCandidateRecorded {
+                        task_id: id.clone(),
+                        generation: 2,
+                        candidate_pr: Some(candidate.into()),
+                    },
+                ),
+            ),
+            Err(SupervisorError::StaleGeneration)
+        ));
         reduce(
             &mut run,
             &event(

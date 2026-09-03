@@ -1216,7 +1216,15 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // One rendering matrix keeps every Work Run control state visually comparable.
     fn work_run_control_renders_selection_confirmation_decision_and_retry() {
-        let run = work_run();
+        let mut run = work_run();
+        run.escalation = Some(EscalationRecord {
+            escalation_id: OperationId::new(),
+            reason: "choose a recovery".into(),
+            blocking_task_id: Some(TaskId::new("task-1").unwrap()),
+            safe_evidence: "the Agent needs a fresh result".into(),
+            choices: vec!["resume".into()],
+            created_at: Utc::now(),
+        });
         let selected = run.supervisor_run_id;
         let another = work_run();
         let base = DirectorDrawerProjection::default()
@@ -1269,6 +1277,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(decision.contains("› Cancel run"));
+        assert!(decision.contains("Reason: choose a recovery"));
+        assert!(decision.contains("Evidence: the Agent needs a fresh result"));
 
         let submitting = DirectorDrawerProjection {
             work_run_control: WorkRunControlProjection {

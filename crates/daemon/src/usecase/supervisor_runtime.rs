@@ -1383,10 +1383,7 @@ impl SupervisorRuntime {
             .filter(|dispatch| dispatch.status == RunStatus::Completed)
             .map(|dispatch| dispatch.run_id)
             .collect::<BTreeSet<_>>();
-        for id in self.supervisor.unfinished_run_ids()? {
-            let Some(run) = self.supervisor.load(id)? else {
-                continue;
-            };
+        for run in self.unfinished_runs()? {
             if run.state != SupervisorRunState::Running {
                 continue;
             }
@@ -3154,7 +3151,10 @@ mod tests {
             TerminalRef, WorktreeId,
         },
         pr_inventory::GitHubRepository,
-        supervisor::{ArtifactExpectation, MAX_HANDOFF_CONTEXT_ENTRIES, SupervisorRun, TaskNode},
+        supervisor::{
+            ArtifactExpectation, EscalationRecord, MAX_HANDOFF_CONTEXT_ENTRIES, SupervisorRun,
+            TaskNode,
+        },
     };
 
     fn now() -> DateTime<Utc> {
@@ -3307,6 +3307,242 @@ mod tests {
         }
     }
 
+    fn escalated_retry_run(
+        workspace: WorkspaceId,
+    ) -> (SupervisorRun, TaskId, OperationId, OperationId) {
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "retry-root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        run.workspace_id = Some(workspace);
+        run.state = SupervisorRunState::Escalated;
+        let task_id = TaskId::new("root").unwrap();
+        let dispatch_run_id = OperationId::new();
+        let mut root = task(run.supervisor_run_id, "root", None);
+        root.state = TaskState::AwaitingDecision;
+        root.assigned_dispatch_run = Some(dispatch_run_id);
+        run.tasks.insert(task_id.clone(), root);
+        run.provenance.insert(
+            task_id.clone(),
+            provenance(run.supervisor_run_id, &task_id, None, dispatch_run_id),
+        );
+        let escalation_id = OperationId::new();
+        run.escalation = Some(EscalationRecord {
+            escalation_id,
+            reason: "fresh Agent result required".into(),
+            blocking_task_id: Some(task_id.clone()),
+            safe_evidence: "artifact verification rejected the previous result".into(),
+            choices: vec!["resume".into(), "cancel".into()],
+            created_at: now(),
+        });
+        (run, task_id, dispatch_run_id, escalation_id)
+    }
+
+    #[test]
+    fn display_labels_and_verification_candidates_are_bounded() {
+        assert_eq!(work_run_display_label(" \n\t"), None);
+        assert_eq!(work_run_display_label("unsafe\u{1b}[2J"), None);
+        let expected = "x".repeat(95);
+        assert_eq!(
+            work_run_display_label(&format!("{}é", "x".repeat(95))).as_deref(),
+            Some(expected.as_str())
+        );
+
+        let mut candidate_run = SupervisorRun::new(
+            "caller".into(),
+            "candidate".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        candidate_run.state = SupervisorRunState::Running;
+        let candidate_id = TaskId::new("candidate").unwrap();
+        let mut candidate_task = task(candidate_run.supervisor_run_id, "candidate", None);
+        candidate_task.state = TaskState::Verifying;
+        candidate_run
+            .tasks
+            .insert(candidate_id.clone(), candidate_task);
+        let stale_candidate = event(
+            &candidate_run,
+            SupervisorEventKind::VerificationCandidateRecorded {
+                task_id: candidate_id,
+                generation: 2,
+                candidate_pr: None,
+            },
+        );
+        assert!(matches!(
+            reduce(&mut candidate_run, &stale_candidate),
+            Err(usagi_core::domain::supervisor::SupervisorError::StaleGeneration)
+        ));
+    }
+
+    #[test]
+    fn indexed_recovery_edges_are_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        assert!(
+            scheduler
+                .load_indexed_runs([SupervisorRunId::new()])
+                .unwrap_err()
+                .to_string()
+                .contains("indexed supervisor run disappeared")
+        );
+
+        let workspace = WorkspaceId::new();
+        let mut live = SupervisorRun::new(
+            "caller".into(),
+            "live".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        live.workspace_id = Some(workspace);
+        live.state = SupervisorRunState::Running;
+        scheduler.supervisor.initialize(&live).unwrap();
+        let mut stale_finished = live;
+        stale_finished.state = SupervisorRunState::Succeeded;
+        stale_finished.terminal_at = Some(now());
+        json_file::write_atomic(
+            scheduler
+                .supervisor
+                .snapshot_path(stale_finished.supervisor_run_id)
+                .parent()
+                .unwrap(),
+            &scheduler
+                .supervisor
+                .snapshot_path(stale_finished.supervisor_run_id),
+            &stale_finished,
+        )
+        .unwrap();
+        assert!(scheduler.pending_delegated_promotions().unwrap().is_empty());
+        assert!(
+            scheduler
+                .pending_artifact_verifications(now())
+                .unwrap()
+                .is_empty()
+        );
+
+        let aborted_temp = tempfile::tempdir().unwrap();
+        let aborted_scheduler = SupervisorRuntime::new(aborted_temp.path());
+        let aborted = aborted_run(Some(workspace));
+        aborted_scheduler.supervisor.initialize(&aborted).unwrap();
+        let mut stale_running = aborted;
+        stale_running.state = SupervisorRunState::Running;
+        stale_running.terminal_at = None;
+        json_file::write_atomic(
+            aborted_scheduler
+                .supervisor
+                .snapshot_path(stale_running.supervisor_run_id)
+                .parent()
+                .unwrap(),
+            &aborted_scheduler
+                .supervisor
+                .snapshot_path(stale_running.supervisor_run_id),
+            &stale_running,
+        )
+        .unwrap();
+        assert!(aborted_scheduler.pending_worker_stops().unwrap().is_empty());
+        assert!(
+            aborted_scheduler
+                .worker_stop_obligations()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retry_resolution_checks_every_run_escalation_and_agent_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        assert!(
+            scheduler
+                .retry_work_for_workspace(workspace, SupervisorRunId::new(), OperationId::new(),)
+                .unwrap()
+                .is_none()
+        );
+
+        let (run, task_id, dispatch_run_id, escalation_id) = escalated_retry_run(workspace);
+        scheduler.supervisor.initialize(&run).unwrap();
+        assert!(
+            scheduler
+                .retry_work_for_workspace(WorkspaceId::new(), run.supervisor_run_id, escalation_id,)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scheduler
+                .retry_work_for_workspace(workspace, run.supervisor_run_id, OperationId::new(),)
+                .unwrap_err()
+                .to_string()
+                .contains("escalation fence is stale")
+        );
+
+        let mut without_blocker = run.clone();
+        without_blocker
+            .escalation
+            .as_mut()
+            .unwrap()
+            .blocking_task_id = None;
+        scheduler.supervisor.initialize(&without_blocker).unwrap();
+        assert!(
+            scheduler
+                .retry_work_for_workspace(workspace, run.supervisor_run_id, escalation_id)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut without_provenance = run.clone();
+        without_provenance.provenance.clear();
+        scheduler
+            .supervisor
+            .initialize(&without_provenance)
+            .unwrap();
+        assert!(
+            scheduler
+                .retry_work_for_workspace(workspace, run.supervisor_run_id, escalation_id)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut without_task = run.clone();
+        without_task.tasks.clear();
+        scheduler.supervisor.initialize(&without_task).unwrap();
+        assert!(
+            scheduler
+                .retry_work_for_workspace(workspace, run.supervisor_run_id, escalation_id)
+                .unwrap_err()
+                .to_string()
+                .contains("retry task is missing")
+        );
+
+        let mut stale = run.clone();
+        stale.tasks.get_mut(&task_id).unwrap().generation += 1;
+        scheduler.supervisor.initialize(&stale).unwrap();
+        assert!(
+            scheduler
+                .retry_work_for_workspace(workspace, run.supervisor_run_id, escalation_id)
+                .unwrap_err()
+                .to_string()
+                .contains("retry provenance fence is stale")
+        );
+
+        scheduler.supervisor.initialize(&run).unwrap();
+        let retry = scheduler
+            .retry_work_for_workspace(workspace, run.supervisor_run_id, escalation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry.provenance.dispatch_run_id, dispatch_run_id);
+        assert_eq!(retry.reason, "fresh Agent result required");
+        assert_eq!(
+            retry.safe_evidence,
+            "artifact verification rejected the previous result"
+        );
+    }
+
     #[test]
     fn wake_delivery_isolates_failures_and_persists_later_successes() {
         struct SelectiveWaker {
@@ -3408,6 +3644,156 @@ mod tests {
                 .values()
                 .all(|wake| wake.delivered)
         );
+    }
+
+    #[test]
+    fn tick_all_reports_tick_failure_after_attempting_wake_delivery() {
+        struct RejectingWaker {
+            attempted: bool,
+        }
+        impl DecisionWaker for RejectingWaker {
+            fn wake(&mut self, _wake: &DecisionWake) -> Result<()> {
+                self.attempted = true;
+                anyhow::bail!("injected wake failure")
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let mut retrying = SupervisorRun::new(
+            "caller".into(),
+            "root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let retrying_id = TaskId::new("retrying").unwrap();
+        let mut due = task(retrying.supervisor_run_id, "retrying", None);
+        due.state = TaskState::Retrying;
+        due.retry_at = Some(now());
+        retrying.tasks.insert(retrying_id, due);
+        scheduler.supervisor.initialize(&retrying).unwrap();
+        let mut state = RuntimeState::default();
+        state
+            .wakes
+            .insert("reject".into(), wake_reservation(0, false));
+        scheduler.save_state(&state).unwrap();
+        scheduler.fail_apply_at(0);
+        let mut waker = RejectingWaker { attempted: false };
+        assert!(
+            scheduler
+                .tick_all(now(), &mut waker)
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        assert!(waker.attempted);
+    }
+
+    #[test]
+    fn parent_wake_failures_remain_observable_and_replay_is_idempotent() {
+        let wake_temp = tempfile::tempdir().unwrap();
+        let wake_scheduler = SupervisorRuntime::new(wake_temp.path());
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        run.state = SupervisorRunState::Running;
+        let parent_id = TaskId::new("parent").unwrap();
+        let parent_dispatch = OperationId::new();
+        let mut parent = task(run.supervisor_run_id, "parent", None);
+        parent.state = TaskState::AwaitingDecision;
+        parent.assigned_dispatch_run = Some(parent_dispatch);
+        let parent_provenance =
+            provenance(run.supervisor_run_id, &parent_id, None, parent_dispatch);
+        run.tasks.insert(parent_id.clone(), parent);
+        run.provenance
+            .insert(parent_id.clone(), parent_provenance.clone());
+        wake_scheduler.supervisor.initialize(&run).unwrap();
+        let wake = DecisionWake {
+            supervisor_run_id: run.supervisor_run_id,
+            parent_task_id: parent_id.clone(),
+            parent_generation: 1,
+            parent: parent_provenance,
+            child_run_id: OperationId::new(),
+            outcome: WakeOutcome {
+                kind: InboxKind::Completed,
+                summary: "done".into(),
+            },
+            dag: Vec::new(),
+            remaining_budget_summary: "none".into(),
+        };
+
+        let mut missing_run = wake.clone();
+        missing_run.supervisor_run_id = SupervisorRunId::new();
+        assert!(
+            wake_scheduler
+                .resume_parent_after_wake(&missing_run, now())
+                .unwrap_err()
+                .to_string()
+                .contains("run is unavailable")
+        );
+        let mut missing_task = wake.clone();
+        missing_task.parent_task_id = TaskId::new("missing").unwrap();
+        assert!(
+            wake_scheduler
+                .resume_parent_after_wake(&missing_task, now())
+                .unwrap_err()
+                .to_string()
+                .contains("task is unavailable")
+        );
+        let mut stale_wake = wake.clone();
+        stale_wake.parent_generation += 1;
+        assert!(
+            wake_scheduler
+                .resume_parent_after_wake(&stale_wake, now())
+                .unwrap_err()
+                .to_string()
+                .contains("fence is stale")
+        );
+
+        let mut not_resumable = run.clone();
+        not_resumable.tasks.get_mut(&parent_id).unwrap().state = TaskState::Pending;
+        wake_scheduler
+            .supervisor
+            .initialize(&not_resumable)
+            .unwrap();
+        assert!(
+            wake_scheduler
+                .resume_parent_after_wake(&wake, now())
+                .unwrap_err()
+                .to_string()
+                .contains("not resumable")
+        );
+
+        wake_scheduler.supervisor.initialize(&run).unwrap();
+        wake_scheduler.fail_apply_at(wake_scheduler.apply_calls.get());
+        assert!(
+            wake_scheduler
+                .resume_parent_after_wake(&wake, now())
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
+        wake_scheduler
+            .resume_parent_after_wake(&wake, now())
+            .unwrap();
+        assert_eq!(
+            wake_scheduler
+                .supervisor
+                .load(run.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .tasks[&parent_id]
+                .state,
+            TaskState::Running
+        );
+        wake_scheduler
+            .resume_parent_after_wake(&wake, now())
+            .unwrap();
     }
 
     #[test]
@@ -4358,6 +4744,20 @@ mod tests {
                 now(),
             )
             .unwrap();
+        assert!(
+            scheduler
+                .bind_reserved_root_task(
+                    &operation.to_string(),
+                    operation,
+                    &worker,
+                    NO_ARTIFACT_CONTRACT,
+                    false,
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("another artifact contract")
+        );
         assert!(
             scheduler
                 .start_for_workspace_root_dispatch(
@@ -5827,6 +6227,21 @@ mod tests {
             .prepare_artifact_verification(operation, now())
             .unwrap()
             .unwrap();
+        scheduler.fail_apply_at(scheduler.apply_calls.get());
+        assert!(
+            scheduler
+                .prepare_artifact_verification_after_report(
+                    operation,
+                    Some(StructuredResult {
+                        pr: Some("https://github.com/acme/repo/pull/2".into()),
+                        ..StructuredResult::default()
+                    }),
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("injected supervisor apply failure")
+        );
         let request = scheduler
             .record_artifact_expectation(&request, &artifact_expectation(), now())
             .unwrap();
