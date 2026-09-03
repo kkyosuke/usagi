@@ -405,7 +405,7 @@ active を変えないのは [Home と target](#home-と-target) のとおりで
 追従するため、通常は同時に attach する live terminal は 1 つである。workspace drawer が開いている間は、
 背景の右ペインが Switch の cursor に追従したまま、最後に開いた drawer の root surface が foreground input を
 所有する。このとき可視の managed terminal は read-only attachment として残り、root shell だけを開いた場合はその上、
-Director も開いた場合は Director の左側かつ root shell の上の可視 geometry へ resize して出力を取得し続ける。
+Director も開いた場合は通常の right pane geometry を変えず、overlay の左側に見えている範囲でも出力を取得し続ける。
 Director と root shell が同時に開いていれば、入力を持たない root surface も read-only で attach する。したがって
 最大 3 本の terminal が同時に更新され、drawer を開いたことでは選択 session の Agent content を閉じたり静止させたりしない。
 
@@ -563,14 +563,18 @@ header の直下から下端までを使う。terminal viewport は border、tit
 `Ctrl-O z`（または `Ctrl-O Ctrl-Z`）は同じ border、title、tab、footer を保ったまま高さだけを画面いっぱいへ切り替える。
 再入力で通常高へ戻り、選択 tab、scrollback、入力 sequence、terminal process は変更しない。
 背景 Home は header を除いて dim にする。`[ ⌂ Shell ]` と `[ ♛ Director ]` は同じ header layout で描画・hit-test し、
-2 つの drawer は同時に開ける。Director も開いている場合、workspace terminal drawer は Director の左側の band だけを使い、
-選択 session の Agent pane をその上に残す。Director が全幅へ縮退する狭幅では root shell が下側へ重なり、Director の上側を残す。
-最後に開いた drawer が入力を所有し、もう一方を再度選ぶと閉じずに入力を移す。
+2 つの drawer は同時に開ける。workspace terminal drawer は通常の全幅 geometry を保ち、Director をその右側へ最後に合成する。
+したがって Director は root shell や選択 session の Agent pane を resize / reflow しない真の overlay であり、閉じると元の折返しと
+scrollback がそのまま現れる。最後に開いた drawer が入力を所有し、もう一方の見えている panel をクリックするか再度選ぶと、
+drawer を閉じずに入力を移す。Director が全幅へ縮退する狭幅では、header button から背面の Shell へ focus を移せる。
 入力を所有している drawer の toggle を実行したときだけその drawer を閉じ、残った drawer へ入力を戻す。
 managed Closeup と root Agent/Terminal の各選択状態はこの切替で保持する。
 
 workspace terminal drawer が入力を所有している間は selected root generic Terminal が keyboard、paste、scroll、selection、copy、link、pointer を所有する。
 Director が後から入力を取得した場合も root terminal は描画と出力購読を継続するが、入力は受け取らない。
+Director が重なっている間も、左側に見えている Shell の terminal viewport をクリックすれば同じ press で Shell へ focus が移り、
+drag selection と OS 標準 copy shortcut を利用できる。各 drawer の title は入力所有側を `FOCUS` の reverse 表示、非所有側を
+`click to focus` の dim 表示にして、keyboard と pointer の送信先を明示する。
 `Esc` は shell へ送るため drawer を閉じない。drawer を閉じる操作は `Ctrl-O Ctrl-T` / `Ctrl-O t` または header button に限定する。
 workspace open / daemon reconnect では live root generic Terminal を inventory から復元するが、drawer は自動で開かず、
 明示的に開くまで背景で detached のまま保持する。root Diff は引き続き admission しない。
@@ -592,9 +596,9 @@ Home header へ重複する breadcrumb は置かない。mode toggle、pending d
 header layout が表示幅と click range を同時に計算する。そのため notice の有無や狭幅での clip があっても、
 描画された button / badge と hit-test は同じ terminal cell を指す。
 
-button の強調は mode toggle と同じ「前面にある面がアクセント」の対比に従う。drawer が閉じているときは
+button の強調は mode toggle と同じ「入力 focus を持つ面がアクセント」の対比に従う。drawer が閉じているときは
 選択されていない mode chip と同じ dim で描き、Switch / Closeup のどちらでも accent を持たない。drawer を開いた
-frame だけ accent + reverse になり、前面の面が一意に読める。狭幅で mode toggle を落として button だけを
+うち Director が focus を持つ frame だけ accent + reverse になり、入力先が一意に読める。狭幅で mode toggle を落として button だけを
 clip する場合も、この対比は変わらない。
 
 button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
@@ -603,7 +607,7 @@ button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live p
 同時に保てない幅では全幅へ縮退し、完全に隠れる managed terminal は detach する。背景 Home は header を残して ANSI span ごと dim にする。
 drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
 managed-session Closeup の right pane viewport とは別の pure geometry とする。背景に見えている managed Agent は
-その right pane viewport の attachment と出力 poll を維持し、dim 表示中も live output を描く。
+その通常の right pane viewport の幅と attachment、出力 poll を維持し、dim 表示中も live output を描く。
 
 drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
 conversation selector に表示する。generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
@@ -617,6 +621,19 @@ terminal view も conversation も無い場合だけ empty state を描く。dra
 `Enter` は選択した CLI の explicit profile を確定する。`Esc` は conversation order / selection と drawer open
 状態を変えず picker だけを閉じる。候補が 0 件なら picker を開かず、installation と Config の確認を促す
 safe empty state を表示し、daemon request を発行しない。
+
+live Agent を選択している通常の Director は terminal の下に 1 行の `Command ›` composer を表示する。通常文字、
+Backspace / Delete、Home / End、左右移動と Shift 選択、paste を Unicode の文字境界で編集し、`Enter` で draft 全文と
+末尾の `CR` を一度に selected root Agent の PTY へ送って実行する。IME の確定文字列として届く printable UTF-8 block も
+直接 PTY protocol に解釈させず同じ composer へ挿入するため、日本語の確定文字列と caret が入力欄に留まる。
+paste 内の改行・tab は可視 space に正規化し、control byte は command に混ぜない。draft は 16 KiB の完全な UTF-8 境界まで保持し、
+terminal が入力を書き込むか順序 queue へ受理したときに clear する。確実な未送信時は draft を残して再送できるが、部分書き込みや
+acknowledgement loss で効果が不明な場合は二重実行を避けるため clear して警告する。`Esc` と opaque control sequence、
+terminal selection / copy、`Ctrl-O` control は composer が奪わず、従来どおり Agent PTY または TUI control が所有する。
+
+Director を開いた状態で最後の live / starting root Agent が exit、close、launch failure、または authoritative restore により
+消えた場合、Director は自動で閉じる。root Shell も開いていれば focus を Shell へ戻す。利用者が空の Director を明示的に
+開いた場合は New を開始できるよう自動では閉じず、interrupted history も再度開けば選択・resume できる。
 
 picker の viewport は selection に追従し、候補が picker の行数を超える端末でも highlight 中の候補を必ず描く。
 窓の外に残る候補は `↑ N more` / `↓ N more` へ畳むが、この indicator は候補と同じ行数を分け合うため、
@@ -720,10 +737,10 @@ tab の `Ctrl-O r` だけが既存の exact resume contract を実行し、opera
 new exact `TerminalRef` がすべて一致した成功だけを同 slot の live Agent tab へ置換する。drawer を閉じている間に
 応答した置換は root background entry だけを更新し、managed foreground を奪わない。
 
-drawer open 中は drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
+drawer open 中は focus 中の drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
 それらへ key / click / pointer を伝播しない。root Agent tab の terminal input と `Ctrl-O` tab controls、および
 New picker の `↑↓` / `Enter` / `Esc`、`Ctrl-O n` の New、`Ctrl-O g` の close だけを受理する。picker が閉じている
-間の通常文字・`Enter`・`Esc` は root Agent terminal へ送る。`[ New ]` の mouse-down は
+間の通常文字と編集キーは command composer、`Enter` は composer の一括送信、`Esc` と opaque control sequence は root Agent terminal へ送る。`[ New ]` の mouse-down は
 drawer が先に消費して picker を開き、同じ pointer gesture を背景 Closeup の click / focus / attach 選択へ
 fallthrough させない。picker Choosing 中の `[ New ]` 再クリックは inert とし、mouse-up も背景へ渡さないため、
 launch は明示的な `Enter` だけが発行する。開閉は Home mode、selected cursor、active managed session、
@@ -1870,8 +1887,9 @@ burst も1件ずつ収束する。入力は1 MiB、stdout/stderr は各8 KiBを�
 Linux `xdg-open` / Windows `cmd /C start "" <url>`）を使い、未対応 platform・起動失敗は TUI を乱さず safe feedback にする。
 pointer の release は PTY へ入力として転送しない。
 
-live terminal に focus がある間、leader が無い `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` を除くすべての非 prefix キー入力（文字・修飾キー・paste・
-raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。端末では bracketed paste（DECSET 2004）を有効にし、複数行の貼り付けを 1 つの paste イベントとして受け取る。PTY 側の program が DECSET 2004 を要求している間だけ bracketed paste マーカー（`ESC[200~` … `ESC[201~`）で包んで転送し、agent が埋め込まれた改行ごとに 1 行ずつ実行せず 1 ブロックとして挿入できるようにする（貼り付け内に含まれる終了マーカーは注入対策として除去する）。要求していない間は元の text をそのまま転送し、マーカーを文字として混入させない。tab 巡回、PR modal、Closeup/Switch の遷移は
+live terminal に focus がある間、Director の command composer が所有する通常文字・paste・編集キー・`Enter` を除き、leader が無い
+`Ctrl-C` / `Ctrl-Q` / `Ctrl-D` 以外の非 prefix キー入力（修飾キー・raw bytes・Tab・矢印など）は management ではなく PTY へ送られる。
+矢印は対応する CSI 列、Enter は `CR` に符号化する。端末では bracketed paste（DECSET 2004）を有効にし、複数行の貼り付けを 1 つの paste イベントとして受け取る。PTY 側の program が DECSET 2004 を要求している間だけ bracketed paste マーカー（`ESC[200~` … `ESC[201~`）で包んで転送し、agent が埋め込まれた改行ごとに 1 行ずつ実行せず 1 ブロックとして挿入できるようにする（貼り付け内に含まれる終了マーカーは注入対策として除去する）。要求していない間は元の text をそのまま転送し、マーカーを文字として混入させない。tab 巡回、PR modal、Closeup/Switch の遷移は
 `Ctrl-O` prefix（`Ctrl-O f` / `Ctrl-O p` / `Ctrl-O v` / `Ctrl-O o`）だけが所有する。前面 modal や forced action modal がある間は
 その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。
 daemon の input ACK は `Written` だけを通常成功とする。`Failed` は 0 byte 適用を表示し、`Ambiguous` は
