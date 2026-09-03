@@ -991,13 +991,15 @@ impl SupervisorRuntime {
     ) -> Result<Vec<SupervisorRun>> {
         let mut runs = Vec::new();
         for id in ids {
-            runs.push(
-                self.supervisor
-                    .load(id)?
-                    .ok_or_else(|| anyhow::anyhow!("indexed supervisor run disappeared"))?,
-            );
+            runs.push(self.load_indexed_run(id)?);
         }
         Ok(runs)
+    }
+
+    fn load_indexed_run(&self, id: SupervisorRunId) -> Result<SupervisorRun> {
+        self.supervisor
+            .load(id)?
+            .ok_or_else(|| anyhow::anyhow!("indexed supervisor run disappeared"))
     }
 
     fn unfinished_runs(&self) -> Result<Vec<SupervisorRun>> {
@@ -1383,7 +1385,11 @@ impl SupervisorRuntime {
             .filter(|dispatch| dispatch.status == RunStatus::Completed)
             .map(|dispatch| dispatch.run_id)
             .collect::<BTreeSet<_>>();
-        for run in self.unfinished_runs()? {
+        // This recovery lane is periodic. Hydrate one active aggregate at a
+        // time so the 256-run admission bound cannot become a snapshot-sized
+        // peak-memory multiplier.
+        for id in self.supervisor.unfinished_run_ids()? {
+            let run = self.load_indexed_run(id)?;
             if run.state != SupervisorRunState::Running {
                 continue;
             }
