@@ -1062,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn director_drawer_renders_daemon_owned_task_progress_in_both_modes() {
+    fn director_drawer_renders_daemon_owned_work_run_progress_in_both_modes() {
         for goal_driven in [false, true] {
             let projection = DirectorDrawerProjection {
                 goal_driven,
