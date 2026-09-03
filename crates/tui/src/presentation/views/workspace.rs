@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use usagi_core::domain::agent::{
     AgentInventory, AgentRuntimeInventoryState, ProviderResumeProjection, ProviderResumeReason,
 };
+use usagi_core::domain::pr_inventory::PrEntry;
 use usagi_core::domain::pullrequest::{PrLink, PrState};
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::session_lifecycle::{
@@ -243,7 +244,14 @@ fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, 
 }
 
 pub(crate) fn pr_summary(prs: &[PrLink]) -> Option<String> {
-    let visible = prs.iter().filter(|pr| pr.is_visible()).count();
+    summary_for_visible(prs.iter().filter(|pr| pr.is_visible()).count())
+}
+
+pub(crate) fn pr_inventory_summary(prs: &[PrEntry]) -> Option<String> {
+    summary_for_visible(prs.iter().filter(|pr| pr.is_visible()).count())
+}
+
+fn summary_for_visible(visible: usize) -> Option<String> {
     (visible > 0).then(|| format!("{PR_ICON} {visible}"))
 }
 
@@ -517,7 +525,7 @@ impl HomeProjection {
             .filter_map(|id| {
                 let mut session = (*snapshot_by_id.get(id)?).clone();
                 if let Some(prs) = state.session_prs(*id) {
-                    session.pr_summary = pr_summary(prs);
+                    session.pr_summary = pr_inventory_summary(prs);
                 }
                 session.role_id = state
                     .session_roles()
@@ -3234,6 +3242,7 @@ mod tests {
         SessionId, TerminalId, TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::pr_inventory::PrEntry;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::role::RoleId;
     use usagi_core::domain::session_lifecycle::{AgentPhase, FailureStage, SessionLifecycle};
@@ -3406,7 +3415,11 @@ mod tests {
         let omitted = SessionId::new();
         let mut state = AppState::home(workspace, vec![ready, omitted]);
         for (session, number) in [(ready, 1), (omitted, 2)] {
-            let mut pr = PrLink::new(number, format!("https://github.com/o/r/pull/{number}"));
+            let identity = usagi_core::domain::pr_inventory::canonicalize(&format!(
+                "https://github.com/o/r/pull/{number}"
+            ))
+            .unwrap();
+            let mut pr = PrEntry::new(identity);
             pr.state = PrState::Merged;
             let _ = update(
                 &mut state,
@@ -5973,9 +5986,15 @@ mod tests {
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
-        let mut first = PrLink::new(7, "https://github.com/o/r/pull/7");
+        let mut first = PrEntry::new(
+            usagi_core::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/7")
+                .unwrap(),
+        );
         first.title = Some("add feature".into());
-        let mut second = PrLink::new(8, "https://github.com/o/r/pull/8");
+        let mut second = PrEntry::new(
+            usagi_core::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/8")
+                .unwrap(),
+        );
         second.title = Some("fix bug".into());
         second.state = PrState::Merged;
         let _ = update(

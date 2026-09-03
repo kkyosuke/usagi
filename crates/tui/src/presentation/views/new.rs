@@ -87,6 +87,24 @@ pub enum Field {
     Name,
 }
 
+/// Pure request for the composition root to enumerate child directories.
+/// The view retains the user's spelling and applies returned names itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectoryCompletion {
+    parent: std::path::PathBuf,
+    prefix: String,
+    value: String,
+    field: Field,
+}
+
+impl DirectoryCompletion {
+    /// Directory whose immediate children should be enumerated.
+    #[must_use]
+    pub(crate) fn parent(&self) -> &std::path::Path {
+        &self.parent
+    }
+}
+
 /// New 画面の編集状態。端末 IO を持たず、[`render`] に渡して描画する。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct New {
@@ -293,43 +311,51 @@ impl New {
         self.after_edit(field);
     }
 
-    /// Clone の Location または Existing の Directory を、ファイルシステム上の子
-    /// ディレクトリで補完する。候補は常に入力欄へ反映し、複数あるときは繰り返し Tab を押すと
-    /// 次の候補へ切り替わる。
-    pub fn complete_directory(&mut self) {
+    /// Start directory completion without performing IO. A repeated Tab cycles
+    /// the already loaded candidates and therefore returns `None`.
+    #[must_use]
+    pub(crate) fn begin_directory_completion(&mut self) -> Option<DirectoryCompletion> {
         let field = self.focus();
         if !matches!(field, Field::Location | Field::Path) {
             self.focus_next();
-            return;
+            return None;
         }
 
         if !self.directory_matches.is_empty() {
             self.directory_match_index =
                 (self.directory_match_index + 1) % self.directory_matches.len();
             self.apply_directory_match(field);
-            return;
+            return None;
         }
 
         let value = self.focused_input().map_or("", TextInput::value);
         let (parent, prefix) = directory_completion_base(value);
-        let Ok(entries) = std::fs::read_dir(&parent) else {
-            self.directory_matches.clear();
-            self.directory_match_index = 0;
-            return;
-        };
+        Some(DirectoryCompletion {
+            parent,
+            prefix,
+            value: value.to_owned(),
+            field,
+        })
+    }
 
+    /// Apply directory names supplied by the IO owner. Filtering, sorting and
+    /// preservation of relative/absolute input spelling remain pure view-state
+    /// behavior.
+    pub(crate) fn finish_directory_completion(
+        &mut self,
+        completion: &DirectoryCompletion,
+        entries: impl IntoIterator<Item = String>,
+    ) {
         let mut matches = entries
-            .flatten()
-            .filter_map(|entry| entry.file_type().ok()?.is_dir().then(|| entry.file_name()))
-            .filter_map(|name| name.into_string().ok())
-            .filter(|name| name.starts_with(&prefix))
-            .map(|name| format_directory_candidate(value, &parent, &name))
+            .into_iter()
+            .filter(|name| name.starts_with(&completion.prefix))
+            .map(|name| format_directory_candidate(&completion.value, &completion.parent, &name))
             .collect::<Vec<_>>();
         matches.sort();
 
         self.directory_matches = matches;
         self.directory_match_index = 0;
-        self.apply_directory_match(field);
+        self.apply_directory_match(completion.field);
     }
 
     /// 選択中の補完候補を入力欄へ反映する。これはユーザーが入力した文字ではないので、候補列は
@@ -1091,86 +1117,67 @@ mod tests {
         );
     }
 
+    fn complete_with(state: &mut New, entries: &[&str]) {
+        if let Some(completion) = state.begin_directory_completion() {
+            state.finish_directory_completion(
+                &completion,
+                entries.iter().map(|entry| (*entry).to_owned()),
+            );
+        }
+    }
+
     #[test]
     fn tab_completion_inserts_one_directory_and_cycles_multiple_matches() {
-        let temporary = tempfile::tempdir().unwrap();
-        std::fs::create_dir(temporary.path().join("alpha")).unwrap();
-
         let mut state = New::default();
         state.toggle_mode();
         state.focus_next(); // Path
-        type_str(&mut state, &temporary.path().join("al").to_string_lossy());
-        state.complete_directory();
-        assert_eq!(
-            state.path(),
-            format!("{}/", temporary.path().join("alpha").display())
-        );
+        type_str(&mut state, "/tmp/al");
+        complete_with(&mut state, &["alpha"]);
+        assert_eq!(state.path(), "/tmp/alpha/");
 
-        std::fs::create_dir(temporary.path().join("alpine")).unwrap();
         state = New::default();
         state.toggle_mode();
         state.focus_next(); // Path
-        type_str(&mut state, &temporary.path().join("al").to_string_lossy());
-        state.complete_directory();
-        assert_eq!(
-            state.path(),
-            format!("{}/", temporary.path().join("alpha").display())
-        );
-        state.complete_directory();
-        assert_eq!(
-            state.path(),
-            format!("{}/", temporary.path().join("alpine").display())
-        );
-        state.complete_directory();
-        assert_eq!(
-            state.path(),
-            format!("{}/", temporary.path().join("alpha").display())
-        );
+        type_str(&mut state, "/tmp/al");
+        complete_with(&mut state, &["alpine", "alpha"]);
+        assert_eq!(state.path(), "/tmp/alpha/");
+        complete_with(&mut state, &[]);
+        assert_eq!(state.path(), "/tmp/alpine/");
+        complete_with(&mut state, &[]);
+        assert_eq!(state.path(), "/tmp/alpha/");
     }
 
     #[test]
     fn tab_completion_moves_non_directory_fields_and_handles_missing_or_empty_matches() {
         let mut state = New::default();
         // Tab on a non-directory field retains the form's ordinary field navigation.
-        state.complete_directory();
+        complete_with(&mut state, &[]);
         assert_eq!(state.focus(), Field::Url);
 
         state.toggle_mode();
         state.focus_next(); // Path
-        let temporary = tempfile::tempdir().unwrap();
-        std::fs::write(temporary.path().join("alpha-file"), "not a directory").unwrap();
-        type_str(
-            &mut state,
-            &temporary.path().join("alpha").to_string_lossy(),
-        );
-        state.complete_directory();
-        assert_eq!(
-            state.path(),
-            temporary.path().join("alpha").display().to_string()
-        );
+        type_str(&mut state, "/tmp/alpha");
+        // The adapter excludes non-directory entries, so an ordinary file is
+        // represented by an empty child-directory list.
+        complete_with(&mut state, &[]);
+        assert_eq!(state.path(), "/tmp/alpha");
 
         state = New::default();
         state.toggle_mode();
         state.focus_next(); // Path
         type_str(&mut state, "/path/that/does/not/exist/");
-        state.complete_directory();
+        complete_with(&mut state, &[]);
         assert_eq!(state.path(), "/path/that/does/not/exist/");
     }
 
     #[test]
     fn tab_completion_handles_a_trailing_separator() {
-        let temporary = tempfile::tempdir().unwrap();
-        std::fs::create_dir(temporary.path().join("child")).unwrap();
-
         let mut state = New::default();
         state.toggle_mode();
         state.focus_next(); // Path
-        type_str(&mut state, &format!("{}/", temporary.path().display()));
-        state.complete_directory();
-        assert_eq!(
-            state.path(),
-            format!("{}/", temporary.path().join("child").display())
-        );
+        type_str(&mut state, "/tmp/");
+        complete_with(&mut state, &["child"]);
+        assert_eq!(state.path(), "/tmp/child/");
     }
 
     #[test]

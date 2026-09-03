@@ -1,15 +1,16 @@
-//! The `PrLink` entity: a pull request discovered for a session, with the
-//! bookkeeping the background `gh` enrichment needs.
+//! Legacy session-record projection for pull requests discovered before the
+//! daemon-owned inventory became authoritative.
 //!
 //! A session's terminal output is scanned for pull-request URLs; each becomes a
-//! [`PrLink`] rendered as a `#<number>` badge. The link carries its lifecycle
-//! [`PrState`] (open / merged / dismissed) plus retry/backoff bookkeeping for the
-//! out-of-band `gh pr view` enrichment that fills in the title and auto-detected
-//! state. A session usually shows several, rolled up by
+//! [`PrLink`] rendered as a `#<number>` badge. Lifecycle state is re-exported
+//! from the canonical inventory module so persisted compatibility records and
+//! daemon snapshots cannot disagree on its vocabulary. A session usually shows
+//! several, rolled up by
 //! [`PrLink::aggregate`] and de-duplicated by [`PrLink::pr_key`].
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::domain::pr_inventory::PrState;
 use crate::domain::pr_inventory::{PrChecksState, PrRefreshState, PrReviewDecision};
 
 /// `true` when a boolean is its `false` default, so an unpinned PR omits the
@@ -35,7 +36,7 @@ pub struct PrLink {
     /// The PR's lifecycle state. Defaults to [`PrState::Open`]; an unrecognised
     /// stored value degrades to it, and an older file without the field loads as
     /// `Open`. Omitted from persisted files when `Open`.
-    #[serde(default, skip_serializing_if = "PrState::is_open")]
+    #[serde(default, skip_serializing_if = "is_open")]
     pub state: PrState,
     /// Whether [`state`](Self::state) was set by the user rather than derived. A
     /// pinned state is authoritative: `gh` auto-detection never overrides it.
@@ -141,34 +142,11 @@ impl PrLink {
     }
 }
 
-/// The lifecycle state of a discovered pull request, controlling how the PR popup
-/// renders and lists it (see [`PrLink::state`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PrState {
-    /// Merged — set automatically when `gh` reports the PR merged, or manually.
-    Merged,
-    /// Closed without merge.
-    Closed,
-    /// Dismissed (hidden) — kept as a tombstone so a re-detected URL is not
-    /// re-surfaced, but excluded from the badge count and the popup's default view.
-    Dismissed,
-    /// Open — the default for a freshly detected PR. Also the state an
-    /// unrecognised stored token degrades to. `#[serde(other)]` makes it the
-    /// catch-all, so it must stay the last variant.
-    #[default]
-    #[serde(other)]
-    Open,
-}
-
-impl PrState {
-    /// Whether this is the default [`Open`](Self::Open) state — the
-    /// `skip_serializing_if` predicate that keeps `open` out of persisted files.
-    /// Takes `&self` because serde's `skip_serializing_if` requires it.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    fn is_open(&self) -> bool {
-        matches!(self, PrState::Open)
-    }
+/// Whether the canonical state is its default `open` value. This compatibility
+/// entity keeps omitting that value from legacy session records.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_open(state: &PrState) -> bool {
+    matches!(state, PrState::Open)
 }
 
 /// The byte offset just past the pull-request number in a `/pull/<N>` URL, or

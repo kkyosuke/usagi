@@ -62,6 +62,8 @@ New は Clone（リポジトリを新しいディレクトリへ clone）と Exi
 2 モードを持ち、`←→` でモードを切り替え、`↑↓`/Tab でフィールドを移動する。必須項目が揃った状態で
 `Enter` を押すと作成を実行する。必須項目が欠けているときの `Enter` は、最初に不足しているフィールドの
 安全なメッセージを notice に出して同画面に留まり、入力は保持する。
+Location / Path 上の Tab は `WorkspaceLoader` port が列挙した直下の directory 名だけを受け取り、view の純粋な
+状態操作で prefix filtering・sort・候補巡回を行う。filesystem 列挙は合成ルートが所有する。
 
 `Enter` は作成の副作用（ディレクトリ作成・`git clone`・registry への登録）に進む前に事前検証し、
 弾いた場合は何も作らないまま同画面に留まって draft を保持する。したがって入力を直してそのまま再実行できる。
@@ -945,7 +947,7 @@ Overview palette の Tab は選択中のトップレベル command を補完す�
 Config の `Modal mode` は Overview と Closeup の command surface に共通して適用される。`Action` は
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
 command の subcommand picker を開き、`←` は閉じる。`Prompt` は入力した command line を Enter で解釈・実行する。
-`config` は引数を取らず、現在開いている workspace の Config を Agent / Team / Issue / Memory だけの overlay modal で開く。
+`config` は引数を取らず、現在開いている workspace の Config を Agent / Base branch / Workflow / Team / Issue / Memory の overlay modal で開く。
 `garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
