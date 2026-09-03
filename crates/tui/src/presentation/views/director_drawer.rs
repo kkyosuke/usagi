@@ -1075,7 +1075,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            assert!(body.contains("Active work"));
+            assert!(body.contains("Work Run  Review supervisor stability"));
             assert!(body.contains("1/3 tasks"));
             assert!(body.contains("Agents 1/4"));
             assert!(body.contains("✓ task-0  done"));
