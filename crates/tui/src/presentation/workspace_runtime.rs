@@ -4635,6 +4635,11 @@ mod tests {
         }
         let continuation = history.continuation;
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        // The drawer can open before its asynchronous inventory observation
+        // arrives. Restoring interrupted-only history must establish the real
+        // pane selection without relying on another open transition.
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(runtime.state().director_drawer_open());
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
@@ -4657,7 +4662,6 @@ mod tests {
             "root history must not need a live Agent to establish selection"
         );
 
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(
             runtime.active_pane().selected(),
             &PaneSelection::Tab(TabSelection::Interrupted(continuation))
@@ -5270,15 +5274,10 @@ mod tests {
             runtime.wants_pane_control_input(),
             "the launcher must step aside for a target that owns tabs"
         );
-        // Tab cycling is a tab-strip concern, not a live-PTY one.
-        for effect in runtime.handle_key(Key::Live(
-            crate::usecase::terminal_input::LiveTerminalAction::NextTab,
-        )) {
-            runtime.on_effect(&effect);
-        }
         assert_eq!(
             runtime.focused_interrupted().map(|tab| tab.continuation),
-            Some(history.continuation)
+            Some(history.continuation),
+            "cold restore must focus history without a tab-cycle workaround"
         );
     }
 

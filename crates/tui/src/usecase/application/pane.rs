@@ -671,13 +671,13 @@ fn restore_interrupted(state: &mut PaneState, tabs: Vec<InterruptedTab>) -> Vec<
             resuming: None,
         }));
     }
-    repair_interrupted_selection(state, fallback);
+    repair_selection_after_interrupted_restore(state, fallback);
     Vec::new()
 }
 
-/// Keep a restored tab selected, and move the selection off interrupted history
-/// that the projection removed.
-fn repair_interrupted_selection(state: &mut PaneState, fallback: Option<Target>) {
+/// Keep selection on an owned tab after interrupted projection. If no tab
+/// remains, only a removed interrupted selection needs its target fallback.
+fn repair_selection_after_interrupted_restore(state: &mut PaneState, fallback: Option<Target>) {
     if state
         .tabs
         .iter()
@@ -2313,8 +2313,15 @@ mod tests {
             &PaneSelection::Tab(TabSelection::Interrupted(first.continuation)),
             "the first restored history tab must own selection without a live sibling"
         );
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Interrupted(
+                second.continuation,
+            ))),
+        );
 
-        // A refresh replaces display material in place, keeping both slots.
+        // A refresh replaces display material in place, keeping both slots and
+        // the user's valid selection.
         let mut refreshed = first.clone();
         refreshed.reason = usagi_core::domain::agent::ProviderResumeReason::SourceAlreadySuperseded;
         refreshed.target = None;
@@ -2332,6 +2339,10 @@ mod tests {
             &state.tabs()[0],
             PaneTab::Interrupted(pane) if !pane.tab.resumable()
         ));
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Interrupted(second.continuation))
+        );
     }
 
     #[test]
@@ -2381,9 +2392,18 @@ mod tests {
         );
         let _ = reduce(
             &mut state,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(live.clone()))),
+        );
+        let _ = reduce(
+            &mut state,
             PaneEvent::RestoreInterrupted {
                 tabs: vec![history.clone()],
             },
+        );
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Live(live.clone())),
+            "history refresh must not steal a valid live selection"
         );
         let _ = reduce(
             &mut state,
