@@ -177,6 +177,8 @@ pub enum RuntimeEvent<B> {
 /// A TUI-local action reserved from the live terminal stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveTerminalAction {
+    /// Open the context-aware command list (`Ctrl-O ?`).
+    CommandHelp,
     /// Open the process-level workspace add overlay (`Ctrl-O +`).
     OpenWorkspace,
     /// Open the process-level project/session fuzzy finder (`Ctrl-O 0`).
@@ -480,6 +482,18 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
                 })
     {
         return Some(LiveTerminalAction::OpenWorkspace);
+    }
+    // `?` is physically Shift+/ on common layouts. As with `+`, crossterm may
+    // retain Shift even though the semantic character already identifies it.
+    if key.code == KeyCode::Char('?')
+        && (key.modifiers == Modifiers::default()
+            || key.modifiers
+                == Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                })
+    {
+        return Some(LiveTerminalAction::CommandHelp);
     }
     if let KeyCode::Char(character @ ('{' | '}')) = key.code
         && (key.modifiers == Modifiers::default()
@@ -1177,6 +1191,39 @@ mod tests {
     }
 
     #[test]
+    fn command_help_is_reserved_only_after_the_leader() {
+        for modifiers in [
+            Modifiers::default(),
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        ] {
+            let question = || {
+                LiveInput::Key(KeyEvent::new(
+                    KeyCode::Char('?'),
+                    modifiers,
+                    KeyEventKind::Press,
+                ))
+            };
+            assert_eq!(
+                LiveInputClassifier::default().classify(T0, question()),
+                LiveInputOutput::Passthrough(b"?".to_vec())
+            );
+
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), question()),
+                LiveInputOutput::Action(LiveTerminalAction::CommandHelp)
+            );
+        }
+    }
+
+    #[test]
     fn director_chord_accepts_ctrl_g_and_plain_g() {
         for follow_up in [
             ctrl('g'),
@@ -1209,7 +1256,7 @@ mod tests {
     fn plain_view_control_keys_reach_the_pty_without_a_leader() {
         // The restored follow-ups are reserved only after a Ctrl-O leader; a bare
         // press still types into the terminal.
-        for character in [',', 'c', 'x', 'u', 'd', 'w'] {
+        for character in ['?', ',', 'c', 'x', 'u', 'd', 'w'] {
             assert_eq!(
                 LiveInputClassifier::default().classify(T0, key(KeyCode::Char(character))),
                 LiveInputOutput::Passthrough(character.to_string().into_bytes())

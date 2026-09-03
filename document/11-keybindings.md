@@ -56,6 +56,7 @@ TUI 仕様を正本とする。
 | `Ctrl-O +` | OpenWorkspace | workspace 追加 |
 | `Ctrl-O 0` | OpenWorkspaceSwitcher | project / session finder |
 | `Ctrl-O 1` … `9` | ActivateWorkspace | project tab を番号で選択 |
+| `Ctrl-O ?` | CommandHelp | live pane から現在の session command 一覧を開く |
 | `Ctrl-O o` | Switch | Switchへ戻る |
 | `Ctrl-O a` | OpenCloseupModal | 選択中targetのAction |
 | `Ctrl-O [` | PreviousTab | 前のpane tab |
@@ -138,6 +139,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Switch | `Enter` / `t` | session Closeup、または選択したnew session |
 | Switch | `Ctrl-A` / `Home` | new session form |
 | Switch | `:` | Overview palette |
+| Switch / tab のない Closeup | `?` | 現在の workspace / session command 一覧 |
 | Switch | `Ctrl-X` | 選択sessionのsafe remove |
 | Switch | `Ctrl-Q` | workspace離脱／TUI終了確認 |
 | Switch | `Ctrl-C` | no-op |
@@ -155,6 +157,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | project / session finder | `Enter` / `Esc` | open / cancel |
 | tabのないCloseup | `a` / `t` | Agent / Terminal |
 | tabのないCloseup | `Enter` | Action modal |
+| tabのあるCloseup | `Ctrl-O ?` | 現在の session command 一覧 |
 | Overview palette | `↑` / `↓` | candidate / history |
 | Overview palette | `←` / `→` | caret移動 |
 | Overview palette | `Tab` / `Enter` / `Esc` | complete / run / close |
@@ -213,6 +216,9 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Root Shell | `Ctrl-O ↑` / `Ctrl-O ↓` / `Ctrl-O End` | scroll |
 | Garden | `←` / `→` | 横pan |
 | Garden | その他のキー / paste | wakeして閉じる |
+
+`?` / `Ctrl-O ?` の command 一覧は Overview / Closeup command registry の実行可否を表示する。
+`Ctrl-?` / `Ctrl-/` の Keyboard help は、command だけでなく現在の最前面 surface が受理する全キーボード操作を表示する。
 
 ## テキスト編集
 
