@@ -551,7 +551,8 @@ Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択�
 root scope（`session_id: None`）の generic Terminal は、managed session の Closeup や Agent-only の
 [指示モード](#指示モードdirector-mode)には混ぜず、Home 全幅の下端から重なる workspace terminal drawer に表示する。
 Home header の `[ ⌂ Shell ]` button、`Ctrl-O Ctrl-T`、または互換操作の `Ctrl-O t` で toggle し、閉じた状態から開く操作は root scope の
-`OpenTerminal` を発行する。daemon に live Terminal があれば同じ runtime を再利用し、無ければ新規に起動する。
+選択済み live Terminal tab が復元されていればその terminal へ再びフォーカスする。既知の live tab が無い場合だけ
+`OpenTerminal` を発行し、daemon に live Terminal があれば同じ runtime を再利用し、無ければ新規に起動する。
 
 drawer は root generic Terminal ごとに `Terminal 1`、`Terminal 2` …のタブを表示する。drawer 内の `Ctrl-O n`（または `Ctrl-O Ctrl-N`）は
 `OpenTerminal(new)` で新しいタブを追加し、`Ctrl-O f` / `Ctrl-O p` は root Agent を混ぜず terminal タブだけを
@@ -572,7 +573,8 @@ header の直下から下端までを使う。terminal viewport は border、tit
 選択 session の Agent pane をその上に残す。Director が全幅へ縮退する狭幅では root shell が下側へ重なり、Director の上側を残す。
 最後に開いた drawer が入力を所有し、もう一方を再度選ぶと閉じずに入力を移す。
 入力を所有している drawer の toggle を実行したときだけその drawer を閉じ、残った drawer へ入力を戻す。
-managed Closeup と root Agent/Terminal の各選択状態はこの切替で保持する。
+managed Closeup と root Agent/Terminal の各選択状態はこの切替で保持し、workspace terminal へ再びフォーカスしたときは
+最後に選択していた terminal tab を開く。
 
 workspace terminal drawer が入力を所有している間は selected root generic Terminal が keyboard、paste、scroll、selection、copy、link、pointer を所有する。
 Director が後から入力を取得した場合も root terminal は描画と出力購読を継続するが、入力は受け取らない。
