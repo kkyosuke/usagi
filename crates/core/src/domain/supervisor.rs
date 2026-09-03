@@ -2454,6 +2454,20 @@ mod tests {
                 &event(
                     6,
                     SupervisorEventKind::VerificationCandidateRecorded {
+                        task_id: TaskId::new("missing").unwrap(),
+                        generation: 1,
+                        candidate_pr: Some(candidate.into()),
+                    },
+                ),
+            ),
+            Err(SupervisorError::MissingTask)
+        ));
+        assert!(matches!(
+            reduce(
+                &mut run,
+                &event(
+                    6,
+                    SupervisorEventKind::VerificationCandidateRecorded {
                         task_id: id.clone(),
                         generation: 2,
                         candidate_pr: Some(candidate.into()),

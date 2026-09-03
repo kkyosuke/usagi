@@ -3380,6 +3380,18 @@ mod tests {
         candidate_run
             .tasks
             .insert(candidate_id.clone(), candidate_task);
+        let missing_candidate = event(
+            &candidate_run,
+            SupervisorEventKind::VerificationCandidateRecorded {
+                task_id: TaskId::new("missing").unwrap(),
+                generation: 1,
+                candidate_pr: None,
+            },
+        );
+        assert!(matches!(
+            reduce(&mut candidate_run, &missing_candidate),
+            Err(usagi_core::domain::supervisor::SupervisorError::MissingTask)
+        ));
         let stale_candidate = event(
             &candidate_run,
             SupervisorEventKind::VerificationCandidateRecorded {
