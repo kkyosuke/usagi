@@ -182,6 +182,12 @@ jobs:
     - name: Test RustSec exception checker
       run: bash scripts/tests/security-audit-exceptions.sh
 
+    # audit-check installs the newest cargo-audit dependency graph without
+    # `--locked`. Preinstall the reviewed release from its lockfile so a broken
+    # transitive crate release cannot take the repository policy gate down.
+    - name: Install locked cargo-audit
+      run: cargo install cargo-audit --version 0.22.2 --locked
+
     - name: Audit Cargo.lock against RustSec
       uses: rustsec/audit-check@v2.0.0
       with:
