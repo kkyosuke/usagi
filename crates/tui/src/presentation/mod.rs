@@ -26971,6 +26971,7 @@ mod tests {
     #[test]
     fn entry_help_resolves_every_entry_surface_and_config_submode() {
         use super::Screen;
+        use crate::presentation::views::config::Field as ConfigField;
         use crate::presentation::views::key_help::Context as HelpContext;
 
         let mut settings = DefaultSettingsPort;
@@ -27006,14 +27007,14 @@ mod tests {
         );
 
         let mut team = Config::load(&mut settings);
-        for _ in 0..5 {
+        while team.field() != ConfigField::TeamTemplate {
             let _ = step_config(&mut team, Key::Down, &mut settings);
         }
         let _ = step_config(&mut team, Key::Enter, &mut settings);
         assert_eq!(super::config_help_context(&team), HelpContext::TeamPicker);
 
         let mut environment = Config::load(&mut settings);
-        for _ in 0..2 {
+        while environment.field() != ConfigField::Environment {
             let _ = step_config(&mut environment, Key::Down, &mut settings);
         }
         let _ = step_config(&mut environment, Key::Enter, &mut settings);
