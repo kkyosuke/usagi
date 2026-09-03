@@ -331,6 +331,7 @@ pub(super) fn render(
     Some(GardenFrame {
         rows,
         hitboxes: contents.rabbit_hitboxes,
+        panel_hitboxes: Vec::new(),
         scroll_hitboxes,
         scroll: layout.scroll,
         max_scroll: layout.max_scroll,

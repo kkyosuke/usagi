@@ -2099,8 +2099,9 @@ pub fn garden_click_at(
     }
     Some(
         frame
-            .hitboxes
+            .panel_hitboxes
             .iter()
+            .chain(&frame.hitboxes)
             .find(|hitbox| hitbox.contains(column, row))
             .and_then(|hitbox| {
                 home.garden_workspaces
@@ -5300,9 +5301,9 @@ mod tests {
         assert!(text.contains("Garden Action Center"));
         assert!(text.contains("click"));
         assert!(text.contains("any key · wake"));
-        assert!(text.contains("Notifications"));
-        assert!(!text.contains("running"));
-        assert!(!text.contains("waiting"));
+        assert!(text.contains("Agents"));
+        assert!(text.contains("running"));
+        assert!(text.contains("waiting"));
         assert!(!text.contains("1 run · 1 done"));
         assert!(!text.contains("> s0"));
         assert!(text.contains("failed · worktree missing"));
@@ -5600,6 +5601,54 @@ mod tests {
                 "the centre of a plot is its own usagi"
             );
         }
+
+        // 右 panel は左の viewport に関係なく inactive project の Agent を持ち、
+        // runtime identity を失わず click target にする。
+        let foreign_workspace = WorkspaceId::new();
+        let foreign_session = SessionId::new();
+        let foreign_agent = AgentRuntimeId::new();
+        let deck_home = home.clone().with_deck_garden(
+            "2 open projects".to_owned(),
+            vec![(
+                foreign_workspace,
+                widgets::garden::GardenSession {
+                    id: foreign_session,
+                    label: "other / review".to_owned(),
+                    lifecycle: SessionLifecycle::Available,
+                    selected: false,
+                    failure_summary: None,
+                    agents_observed: true,
+                    agents: vec![widgets::garden::GardenAgent {
+                        runtime_id: foreign_agent,
+                        phase: AgentPhase::Waiting,
+                    }],
+                    agent_status: Some(DispatchAgentStatus::Running),
+                    pending_decisions: 0,
+                    pr_merged: false,
+                },
+            )],
+        );
+        let frame = garden_frame(24, 100, &deck_home, now()).expect("Garden frame");
+        let agent_row = frame
+            .panel_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.agent == Some(foreign_agent))
+            .expect("the inactive project's Agent is listed in the right panel");
+        assert_eq!(
+            garden_click_at(
+                24,
+                100,
+                &deck_home,
+                now(),
+                u16::try_from(agent_row.column).expect("fits a u16"),
+                u16::try_from(agent_row.row).expect("fits a u16"),
+            ),
+            Some(GardenClick::Visit {
+                workspace: foreign_workspace,
+                session: foreign_session,
+                agent: Some(foreign_agent),
+            })
+        );
 
         // 庭の余白（footer 行）はうさぎではないので wake-up になる。
         assert_eq!(

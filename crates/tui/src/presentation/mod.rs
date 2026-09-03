@@ -30,7 +30,8 @@ use usagi_core::domain::agent::{
     AgentRuntimeInventoryState, AgentWorkspaceObservation, ProviderResumeProjection,
 };
 use usagi_core::domain::id::{
-    AgentContinuationRef, OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId,
+    AgentContinuationRef, AgentRuntimeId, OperationId, SessionId, TerminalRef, UserDecisionId,
+    WorkspaceId,
 };
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
@@ -1014,6 +1015,7 @@ fn dismiss_pr_modal_on_project_bar_click(runtime: &mut WorkspaceRuntime, key: &K
 struct GardenProjectVisit {
     workspace: WorkspaceId,
     session: SessionId,
+    agent: Option<AgentRuntimeId>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1103,13 +1105,16 @@ fn route_garden_input(
     };
     let effects = runtime.apply_event(AppEvent::GardenClick(pointer));
     if let GardenClick::Visit {
-        workspace, session, ..
+        workspace,
+        session,
+        agent,
     } = pointer
         && workspace != runtime.state().workspace()
     {
         return Some(GardenInputRoute::Project(GardenProjectVisit {
             workspace,
             session,
+            agent,
         }));
     }
     visit_garden_agent(ui, runtime, pointer);
@@ -5795,21 +5800,26 @@ fn select_root_terminal_tab(key: &Key, runtime: &mut WorkspaceRuntime) -> bool {
 /// reducer already performed ([`GardenClick`]); this only moves the selection
 /// inside the Closeup that activation opened, through the same stable-identity
 /// path a click on the tab strip uses.
-fn visit_garden_agent(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, click: GardenClick) {
+fn visit_garden_agent(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    click: GardenClick,
+) -> bool {
     let GardenClick::Visit {
         agent: Some(runtime_id),
         ..
     } = click
     else {
-        return;
+        return false;
     };
     if !runtime.wants_right_pane_tab_click() {
-        return;
+        return false;
     }
     let Some(index) = runtime.agent_tab_index(runtime_id, ui.agent_inventory()) else {
-        return;
+        return false;
     };
     select_right_pane_tab(ui, runtime, index);
+    true
 }
 
 fn select_right_pane_tab(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, index: usize) {
@@ -7412,6 +7422,7 @@ fn drive_workspace_controller(
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
     restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
+    let mut pending_garden_agent = None;
     runtime.set_pr_auto_open(pr_auto_open);
     let data_home = usagi_core::infrastructure::paths::data_dir().ok();
     let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
@@ -7596,8 +7607,9 @@ fn drive_workspace_controller(
             restore_clock.elapsed(),
         );
         sync_runtime_sessions(&mut runtime, &ui, worktree_names);
-        if let Some(session) = pending_garden_visit.take() {
-            let _ = runtime.apply_event(AppEvent::VisitSession(session));
+        if let Some(visit) = pending_garden_visit.take() {
+            let _ = runtime.apply_event(AppEvent::VisitSession(visit.session));
+            pending_garden_agent = visit.agent.map(|agent| (visit.session, agent));
         }
         let workspace_material_revision = ui.workspace.material_revision();
         if allowed_sessions_revision != workspace_material_revision {
@@ -7623,6 +7635,20 @@ fn drive_workspace_controller(
             }
             if let RestoreJobOutcome::IntentFailed(error) = outcome {
                 surface_agent_tab_intent_error(&mut runtime, error);
+            }
+        }
+        if let Some((session, agent)) = pending_garden_agent {
+            let selected = visit_garden_agent(
+                &mut ui,
+                &mut runtime,
+                GardenClick::Visit {
+                    workspace: workspace_id,
+                    session,
+                    agent: Some(agent),
+                },
+            );
+            if selected || ui.agent_inventory().is_some() {
+                pending_garden_agent = None;
             }
         }
         for completion in garden_completions.try_iter().take(FRAME_EVENT_BUDGET) {
@@ -8114,7 +8140,7 @@ fn drive_workspace_controller(
                             &prepared.workspace.path,
                         )
                     {
-                        deck.schedule_garden_visit(prepared.workspace.path.clone(), session);
+                        deck.schedule_garden_visit(prepared.workspace.path.clone(), session, None);
                         remember_workspace_session_focus(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
@@ -8321,7 +8347,11 @@ fn drive_workspace_controller(
                     &prepared.workspace.path,
                 )
             {
-                deck.schedule_garden_visit(prepared.workspace.path.clone(), visit.session);
+                deck.schedule_garden_visit(
+                    prepared.workspace.path.clone(),
+                    visit.session,
+                    visit.agent,
+                );
                 remember_workspace_session_focus(deck, runtime.state());
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
@@ -10848,7 +10878,7 @@ mod tests {
         assert!(observed.iter().any(|row| row.contains("2 plots")));
         assert!(observed.iter().any(|row| row.contains("1 usagi")));
         assert!(observed.iter().any(|row| row.contains("-.-")));
-        assert!(observed.iter().any(|row| row.contains("Agent completed")));
+        assert!(observed.iter().any(|row| row.contains("completed")));
         assert!(!observed.iter().any(|row| row.contains("1 run")));
     }
 
@@ -10918,10 +10948,11 @@ mod tests {
     }
 
     #[test]
-    fn garden_routes_an_inactive_projects_plot_to_the_deck_shell() {
+    fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
         let workspace = WorkspaceId::new();
         let foreign_workspace = WorkspaceId::new();
         let session = SessionId::new();
+        let agent = AgentRuntimeId::new();
         let root = PathBuf::from("/tmp/demo");
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
@@ -10949,9 +10980,12 @@ mod tests {
                     lifecycle: SessionLifecycle::Available,
                     selected: false,
                     failure_summary: None,
-                    agents_observed: false,
-                    agents: Vec::new(),
-                    agent_status: None,
+                    agents_observed: true,
+                    agents: vec![crate::presentation::widgets::garden::GardenAgent {
+                        runtime_id: agent,
+                        phase: AgentPhase::Waiting,
+                    }],
+                    agent_status: Some(usagi_core::domain::agent::AgentStatus::Running),
                     pending_decisions: 0,
                     pr_merged: false,
                 },
@@ -10969,10 +11003,14 @@ mod tests {
                         column,
                         row,
                     ),
-                    Some(GardenClick::Visit { workspace, .. }) if workspace == foreign_workspace
+                    Some(GardenClick::Visit {
+                        workspace,
+                        agent: Some(runtime),
+                        ..
+                    }) if workspace == foreign_workspace && runtime == agent
                 )
             })
-            .expect("the inactive project plot is clickable");
+            .expect("the inactive project's Agent row is clickable");
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
         let mut pointer_gesture = false;
@@ -10991,6 +11029,7 @@ mod tests {
             Some(GardenInputRoute::Project(super::GardenProjectVisit {
                 workspace: foreign_workspace,
                 session,
+                agent: Some(agent),
             })),
         );
         assert_eq!(runtime.state().overlay(), None);

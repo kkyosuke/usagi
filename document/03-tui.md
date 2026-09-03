@@ -26,6 +26,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [session garden](#session-garden)
   - [Garden Action Center](#garden-action-center)
+  - [Agent panel](#agent-panel)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
   - [daemon health indicator](#daemon-health-indicator)
@@ -1068,7 +1069,7 @@ resident にせず、観測できていない membership を推測もしない�
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
-Garden 本体は左、`Notifications` panel は右に分ける。panel は端末幅の 3 分の 1 を基準に 24〜36 桁を使い、
+Garden 本体は左、`Agents` panel は右に分ける。panel は端末幅の 3 分の 1 を基準に 24〜36 桁を使い、
 左の Garden は残りの幅を使う。左領域が 80 桁 × 18 行以上（通常の panel 幅では端末全体が 120 桁 × 18 行以上）なら、
 横方向に広い仮想世界を描く。session 順に 96 cell の地域を割り当て、立札と巣穴を home にし、その周囲へ池・餌場・
 木陰と小道を置く。viewport より広い分は footer の `← Pan` / `Pan →` button または `←` / `→` key で 16 cell ずつ
@@ -1096,29 +1097,27 @@ Garden は独立した通知画面を開かず、区画そのものを Action Ce
 | session lifecycle または dispatch の failure | failure pose / `failed` status を保ち、header の attention 件数へ加える |
 | `waiting` / `interrupted` Agent | 既存のうさぎの pose と status を保ち、header の attention 件数へ加える |
 
-区画またはうさぎの click は従来どおり該当 project / session の Closeup へ移動する。Action Center は
+区画、うさぎ、`Agents` panel の session 見出しまたは Agent 行の click は該当 project / session の Closeup へ移動する。
+Agent 行からは対応する Agent tab まで選択する。Action Center は
 別の route、modal、永続 unread store を持たず、daemon / controller の現在の projection から毎 frame 導出する。
 inactive project の pending decision は resident controller がなく観測していないため 0 件と断定せず、attention
 件数にも加えない。inactive project で観測できる Agent membership と cached lifecycle だけを従来どおり使う。
 
-### notification panel
+### Agent panel
 
-右 panel は event 履歴を別に保持せず、現在の viewport に見えている session と同じ safe projection を短い説明文へ写す。
-各項目は session label と説明の 2 行で、縦幅に収まらない項目は `+N more in this view` に畳む。Garden を横スクロールすると
-panel も同じ viewport へ切り替わるため、見えていないうさぎの古い通知が残ることはない。
+右 panel は左の Garden viewport と独立して、開いている全 project の全 session を project tab / session 順で投影する。
+session label を group 見出しとして 1 行置き、観測済みの Agent runtime をその下へ 1 runtime 1 行で並べる。Agent 行は
+短縮した stable runtime ID、phase glyph、`waiting` / `running` / `ready` / `interrupted` / `sleeping` / `idle` /
+`completed` の明示的な状態を持つ。1 Agent の session では daemon の terminal dispatch status を優先し、`starting` /
+`completed` / `stopped` / `failed` と stale な coarse phase を上書きする。縦幅に収まらない行は末尾の `+N more rows` に畳む。
 
-| 現在状態 | 1 Agent の説明例 |
-|---|---|
-| `Waiting` | `Agent needs your input.` |
-| `Running` | `Agent is working.` |
-| dispatch `Idle`、または phase `Ended` / `Exited` | `Agent completed.` |
-| `Interrupted` | `Agent was interrupted.` |
-| session lifecycle `Failed` | `Session failed.` |
-| PR merge celebration | `PR merged.` |
+session 見出しの click はその session の Closeup、Agent 行の click は stable `AgentRuntimeId` が一致する Agent tab へ移動する。
+inactive project の行も同じ target を持ち、project を activate / restore してから runtime ID を照合する。restore 中に Agent が
+閉じた場合は session の Closeup へ安全に留まり、並び位置が同じ別 Agent を選ばない。
 
-複数 Agent が属する session は、注目度の高い現在状態と該当数を `1/3 agents need input.` のように示す。
-通知は lifecycle、dispatch status、Agent phase の順に強い事実を採用し、raw error、prompt、terminal output、provider-native ID は
-panel へ渡さない。inactive project をまだ観測していない場合は `Status is unavailable.` とし、状態を推測しない。
+Agent がいない session は group を消さず、lifecycle、pending decision、PR merge、dispatch status から導く従来の安全な
+session summary を 1 行置く。inactive project をまだ観測していない場合は `Status is unavailable.` とし、状態を推測しない。
+panel は Garden と同じ safe projection のみを使い、raw error、prompt、terminal output、provider-native ID を受け取らない。
 
 ### 区画とうさぎ
 
@@ -1159,7 +1158,7 @@ running pose で潰さない。
 tie-break を stable `AgentRuntimeId` 順にする。この順序と状態内訳の語彙は
 [Session sidebar rows](#session-sidebar-rows) の agent 行と共有する（同じ session の Agent が
 2 つの surface で違う数・違う順に見えることが無いよう、投影も 1 つに束ねる）。描画上限以降は末尾から畳む。
-compact fallback は畳んだ runtime も phase glyph に残し、spacious world は右の notification panel で全 Agent の件数を示す。
+compact fallback は畳んだ runtime も phase glyph に残し、右の Agent panel は描画できる高さまで runtime を 1 行ずつ示す。
 うさぎの上や巣穴には pose と重複する `walking` / `4 wait · 1 run` のような action caption を表示しない。
 controller が runtime の `Ended` / `Exited` を観測した runtime（tab は残っており、inventory も保持している）は
 瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さないため描かない。
