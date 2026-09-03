@@ -28,6 +28,9 @@ const AGENT_CAPACITY_EXHAUSTED: &str = "daemon agent runtime capacity is exhaust
 const AGENT_CAPACITY_RECOVERY: &str = "Agent slots full; exit one with Ctrl-D, retry";
 
 use crate::presentation::views::closeup_modal::CloseupModal;
+use crate::presentation::views::command_help_modal::{
+    CommandHelpContext, CommandHelpModal, CommandScope,
+};
 use crate::presentation::views::director_drawer::DirectorDrawerProjection;
 use crate::presentation::views::overview_modal::OverviewModal;
 use crate::presentation::views::root_terminal_drawer::{
@@ -90,6 +93,8 @@ pub struct WorkspaceRuntime {
     /// Persisted input state for the Closeup action modal. Present only while the
     /// controller's [`Overlay::Closeup`] is open.
     closeup_modal: Option<CloseupModal>,
+    /// Context-aware command list opened with `?`.
+    command_help_modal: Option<CommandHelpModal>,
     modal_selection_mode: ModalSelectionMode,
     /// User-interaction count captured when each pane launch was requested. A
     /// completion may focus its tab only while the count is unchanged, mirroring
@@ -128,6 +133,7 @@ impl WorkspaceRuntime {
             panes,
             overview_modal: None,
             closeup_modal: None,
+            command_help_modal: None,
             modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
             director_projection: DirectorDrawerProjection::default(),
@@ -149,6 +155,12 @@ impl WorkspaceRuntime {
     #[must_use]
     pub const fn closeup_modal(&self) -> Option<&CloseupModal> {
         self.closeup_modal.as_ref()
+    }
+
+    /// The context-aware command list, when `?` owns Home input.
+    #[must_use]
+    pub const fn command_help_modal(&self) -> Option<&CommandHelpModal> {
+        self.command_help_modal.as_ref()
     }
 
     /// The controller state driving Home rows, overlays, and markers.
@@ -321,6 +333,10 @@ impl WorkspaceRuntime {
         if let Some(modal) = self.closeup_modal.take() {
             self.closeup_modal = Some(modal.with_agent_models(available, default));
         }
+        let context = self.command_help_context();
+        if let Some(modal) = self.command_help_modal.as_mut() {
+            modal.set_context(context);
+        }
     }
 
     /// Capture both fences carried by an off-thread restore dispatch.
@@ -466,6 +482,9 @@ impl WorkspaceRuntime {
     /// calling this.
     #[must_use]
     pub fn handle_key(&mut self, key: Key) -> Vec<Effect> {
+        if self.state.overlay() == Some(Overlay::CommandHelp) && self.command_help_modal.is_some() {
+            return self.handle_command_help_key(key);
+        }
         // The Overview / Closeup overlays own keyboard input while open: their
         // persisted modal edits its own caret and selection, and the sidebar
         // reducer never sees the key. This is the symmetry the other overlays
@@ -542,6 +561,43 @@ impl WorkspaceRuntime {
         match app_event_from_key(key) {
             Some(event) => self.apply_event(event),
             None => Vec::new(),
+        }
+    }
+
+    /// Drive the read-only command list. Its navigation never reaches the Home
+    /// reducer; only close/global controls are adapted back into controller
+    /// events so the usual overlay ownership rules stay authoritative.
+    fn handle_command_help_key(&mut self, key: Key) -> Vec<Effect> {
+        if !matches!(key, Key::Other | Key::Resize) {
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
+        let modal = self
+            .command_help_modal
+            .as_mut()
+            .expect("command help present when its overlay is open");
+        match key {
+            Key::Tab | Key::Right => {
+                modal.next_tab();
+                Vec::new()
+            }
+            Key::Left => {
+                modal.previous_tab();
+                Vec::new()
+            }
+            Key::Up => {
+                modal.select_previous();
+                Vec::new()
+            }
+            Key::Down => {
+                modal.select_next();
+                Vec::new()
+            }
+            Key::Escape => self.apply_event(AppEvent::Key(AppKey::Escape)),
+            Key::Char('?') => self.apply_event(AppEvent::Key(AppKey::Char('?'))),
+            other => match app_event_from_key(other) {
+                Some(event) => self.apply_event(event),
+                None => Vec::new(),
+            },
         }
     }
 
@@ -921,6 +977,16 @@ impl WorkspaceRuntime {
     fn sync_overlay_modals(&mut self) {
         let (available_models, default_model) =
             (self.state.available_models(), self.state.default_model());
+        let command_help_context = self.command_help_context();
+        if self.state.overlay() == Some(Overlay::CommandHelp) {
+            if let Some(modal) = self.command_help_modal.as_mut() {
+                modal.set_context(command_help_context);
+            } else {
+                self.command_help_modal = Some(CommandHelpModal::new(command_help_context));
+            }
+        } else {
+            self.command_help_modal = None;
+        }
         if self.state.overlay() == Some(Overlay::Overview) {
             self.overview_modal.get_or_insert_with(|| {
                 OverviewModal::with_selection_mode(self.modal_selection_mode)
@@ -935,6 +1001,19 @@ impl WorkspaceRuntime {
             });
         } else {
             self.closeup_modal = None;
+        }
+    }
+
+    fn command_help_context(&self) -> CommandHelpContext {
+        CommandHelpContext {
+            scope: if matches!(self.state.route(), Route::Home(HomeMode::Closeup)) {
+                CommandScope::Session
+            } else {
+                CommandScope::Workspace
+            },
+            garden_available: self.state.garden_available(),
+            agent_available: !self.state.available_models().is_empty(),
+            session_available: self.state.active_session_is_usable(),
         }
     }
 
@@ -1935,7 +2014,11 @@ impl WorkspaceRuntime {
                 .with_terminal_view(home_terminal_view)
                 .with_director_drawer(self.director_projection.clone())
                 .with_root_terminal_drawer(root_terminal_projection)
-                .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
+                .with_overlay_modals(
+                    self.overview_modal.clone(),
+                    self.closeup_modal.clone(),
+                    self.command_help_modal.clone(),
+                );
         render_home(height, width, &projection)
     }
 
@@ -2011,6 +2094,9 @@ mod tests {
         PaneRestoreTarget, PaneTab, ResumeRejection, RootTerminalDrawerProjection,
         RootTerminalTabProjection, TabSelection, WorkspaceRuntime, root_tab_is_terminal,
         tab_selection,
+    };
+    use crate::presentation::views::command_help_modal::{
+        CommandHelpEntry, CommandHelpTab, CommandScope,
     };
     use crate::presentation::views::workspace::TerminalViewProjection;
     use crate::usecase::application::Key;
@@ -2093,6 +2179,72 @@ mod tests {
         assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
         assert!(runtime.overview_modal().is_some());
         runtime
+    }
+
+    #[test]
+    fn question_mark_opens_available_commands_then_tabs_to_all() {
+        let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), Vec::new());
+
+        assert!(runtime.handle_key(Key::Char('?')).is_empty());
+        assert_eq!(runtime.state().overlay(), Some(Overlay::CommandHelp));
+        let help = runtime.command_help_modal().unwrap();
+        assert_eq!(help.tab(), CommandHelpTab::Available);
+        assert_eq!(help.context().scope, CommandScope::Workspace);
+        assert_eq!(help.entries().len(), 8);
+
+        assert!(runtime.handle_key(Key::Tab).is_empty());
+        assert_eq!(
+            runtime.command_help_modal().unwrap().tab(),
+            CommandHelpTab::All
+        );
+        assert_eq!(runtime.command_help_modal().unwrap().entries().len(), 13);
+
+        assert!(runtime.handle_key(Key::Escape).is_empty());
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.command_help_modal().is_none());
+    }
+
+    #[test]
+    fn closeup_help_lists_only_commands_runnable_in_that_session() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Enter);
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(runtime.state().overlay(), None);
+
+        let _ = runtime.handle_key(Key::Char('?'));
+        let names = runtime
+            .command_help_modal()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(CommandHelpEntry::name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["agent", "close", "env", "terminal"]);
+        assert_eq!(
+            runtime.command_help_modal().unwrap().context().scope,
+            CommandScope::Session
+        );
+
+        runtime.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
+        let names = runtime
+            .command_help_modal()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(CommandHelpEntry::name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["close", "env", "terminal"]);
+    }
+
+    #[test]
+    fn question_mark_remains_text_inside_an_existing_command_palette() {
+        let mut runtime = overview_on(WorkspaceId::new());
+        let _ = runtime.handle_key(Key::Char('?'));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
+        assert_eq!(runtime.overview_modal().unwrap().input(), "?");
+        assert!(runtime.command_help_modal().is_none());
     }
 
     fn type_str(runtime: &mut WorkspaceRuntime, text: &str) {

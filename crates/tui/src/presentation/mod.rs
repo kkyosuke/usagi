@@ -4256,6 +4256,7 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
 /// no vocabulary for, so they return `None`.
 fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
     match action {
+        LiveTerminalAction::CommandHelp => Some(AppKey::Char('?')),
         LiveTerminalAction::Switch => Some(AppKey::CtrlO),
         LiveTerminalAction::OpenCloseupModal => Some(AppKey::OpenCloseupOverlay),
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
@@ -6360,6 +6361,7 @@ fn home_frame_material_shared(
         .with_overlay_modals(
             runtime.overview_modal().cloned(),
             runtime.closeup_modal().cloned(),
+            runtime.command_help_modal().cloned(),
         )
         // Last, once every surface that reads the animation clock is known.
         .collapse_animation_clock();
@@ -10315,6 +10317,10 @@ mod tests {
 
     #[test]
     fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::CommandHelp)),
+            Some(AppEvent::Key(AppKey::Char('?')))
+        );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::Switch)),
             Some(AppEvent::Key(AppKey::CtrlO))

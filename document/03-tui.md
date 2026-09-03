@@ -512,6 +512,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 
 | prefix | アクション | 効果 |
 |---|---|---|
+| `Ctrl-O` `?` | CommandHelp | 現在の Home scope に応じたコマンド一覧を開く |
 | `Ctrl-O` `+` | OpenWorkspace | Add workspace overlay を開く |
 | `Ctrl-O` `1` … `9` | ActivateWorkspace | 対応する project tab へ切り替える |
 | `Ctrl-O` `0` | OpenWorkspaceSwitcher | 全 project / session の fuzzy finder を開く |
@@ -538,7 +539,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 follow-up の letter は `a` / `b` / `d` / `f` / `g` / `n` / `o` / `p` / `r` / `t` / `u` / `v` / `w` / `x` / `z` である。
 leader 後は 2 打目の `Ctrl` の有無を同一視し、semantic key と raw control byte のどちらでも同じ action に正規化する。
 たとえば `Ctrl-O n` と `Ctrl-O Ctrl-N` はどちらも New、`Ctrl-O f` と `Ctrl-O Ctrl-F` はどちらも NextTab になる。
-`Ctrl-O` leader がない単体 letter は PTY へ送る。`,` / `[` / `]` / `↑` / `↓` / `End` も leader が生きている間だけ予約する。
+`Ctrl-O` leader がない単体 letter は PTY へ送る。`?` / `,` / `[` / `]` / `↑` / `↓` / `End` も leader が生きている間だけ予約する。
 leader は 1 秒で失効し、その他の未知の
 follow-up、key release、raw byte を含む次の入力を 1 件だけ握って捨て、その時点で必ず reset する。
 auto-repeat は press と同じ follow-up として 1 件だけ解決する。ちょうど 1 秒の timeout 境界では leader は失効済みであり、単一 raw
@@ -941,6 +942,14 @@ clip する。viewport は session ごとの 3 行 footprint を使い、mascot 
 skeleton は session 行ではなく作成中の 2 行として、選択できる row の予算の外に確保する。
 
 ## Overview と modal
+
+前面に入力 modal / drawer がない Home では `?` で context-aware な Commands modal を開く。live pane は通常の
+`?` を PTY へ渡し、`Ctrl-O ?` で同じ modal を開く。初期 tab の `Available` は Switch なら Overview、Closeup なら
+active session に対して、その時点で実行できる command だけを既存 command registry から表示する。`All` は両 registry の
+全 command を表示し、現在実行できない行を `○`、実行できる行を `●` で区別する。Garden の端末寸法、Agent CLI の有無、
+active session の利用可否を availability に反映し、実行経路が未実装の `diff` は実行可能に見せない。`Tab` / `←` / `→` で
+tab を切り替え、`↑` / `↓` で行を選び、`?` / `Esc` で閉じる。Overview / Closeup palette が既に開いている場合の `?` は
+filter / command line の文字入力として扱う。
 
 Overview palette の Tab は選択中のトップレベル command を補完する。`session` の第 1 引数は
 登録済み subcommand の一意な prefix を補完する。`cleanup` の追加により `session c` は曖昧なので入力を変えず、
