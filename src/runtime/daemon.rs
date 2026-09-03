@@ -7001,7 +7001,7 @@ fn dispatch_supervisor_control(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=workspace_control_is_durable_scoped_and_projects_exact_stop_obligations
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=generic_escalation_resume_does_not_require_an_agent_prompt,workspace_control_is_durable_scoped_and_projects_exact_stop_obligations
 fn prompt_supervisor_retry(
     supervisor: &SharedSupervisorRuntime,
     agent: &SharedAgentRuntime,
@@ -7009,7 +7009,6 @@ fn prompt_supervisor_retry(
     command: &usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
 ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::domain::supervisor::{EscalationDecision, SupervisorWorkspaceCommand};
-    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 
     let SupervisorWorkspaceCommand::ResolveEscalation {
         supervisor_run_id,
@@ -7019,17 +7018,14 @@ fn prompt_supervisor_retry(
     else {
         return Ok(());
     };
-    let retry = supervisor
+    let Some(retry) = supervisor
         .lock()
         .map_err(|_| supervisor_control_unconfirmed("supervisor runtime is unavailable"))?
         .retry_work_for_workspace(workspace, *supervisor_run_id, *escalation_id)
         .map_err(supervisor_control_error)?
-        .ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "this escalation has no Agent work that can be retried",
-            )
-        })?;
+    else {
+        return Ok(());
+    };
     let prompt = format!(
         "The user requested a Supervisor retry. Continue the blocked work, correct the problem, and report completion again before stopping. Reason: {}. Evidence: {}",
         retry.reason, retry.safe_evidence
@@ -15040,6 +15036,65 @@ mod tests {
                 code
             );
         }
+    }
+
+    #[test]
+    fn generic_escalation_resume_does_not_require_an_agent_prompt() {
+        use usagi_core::domain::{
+            id::OperationId,
+            supervisor::{EscalationDecision, SupervisorRunState, SupervisorWorkspaceCommand},
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temp.path());
+        let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
+        let agent = empty_supervisor_agent(dispatch);
+        let workspace = WorkspaceId::new();
+        let started = supervisor
+            .lock()
+            .unwrap()
+            .start_for_workspace(
+                "caller",
+                workspace,
+                &OperationId::new().to_string(),
+                "work requiring later dispatch".into(),
+                Vec::new(),
+                None,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        supervisor
+            .lock()
+            .unwrap()
+            .tick(
+                started.supervisor_run_id,
+                chrono::Utc::now(),
+                &mut AgentDecisionWaker { agent: &agent },
+            )
+            .unwrap();
+        let escalated = supervisor
+            .lock()
+            .unwrap()
+            .get_for_workspace(workspace, started.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(escalated.state, SupervisorRunState::Escalated);
+        let command = SupervisorWorkspaceCommand::ResolveEscalation {
+            supervisor_run_id: started.supervisor_run_id,
+            escalation_id: escalated.escalation.unwrap().escalation_id,
+            decision: EscalationDecision::Resume,
+        };
+
+        prompt_supervisor_retry(&supervisor, &agent, workspace, &command).unwrap();
+        assert_eq!(
+            supervisor
+                .lock()
+                .unwrap()
+                .control_for_workspace(workspace, OperationId::new(), &command, chrono::Utc::now(),)
+                .unwrap()
+                .state,
+            SupervisorRunState::Running
+        );
     }
 
     #[test]

@@ -2131,11 +2131,13 @@ impl SupervisorRuntime {
         Ok(Some(run.query()))
     }
 
-    /// Resolves a Retry action to the exact blocking Agent before the control
-    /// event clears its escalation fence.
+    /// Resolves artifact rework to the exact blocking Agent before the control
+    /// event clears its escalation fence. Other escalation kinds return none
+    /// and can resume without an Agent prompt.
     ///
     /// # Errors
-    /// Returns an error when the aggregate is corrupt or cannot be read.
+    /// Returns an error when required artifact provenance is stale, missing,
+    /// corrupt, or cannot be read.
     pub fn retry_work_for_workspace(
         &self,
         workspace: WorkspaceId,
@@ -2156,13 +2158,19 @@ impl SupervisorRuntime {
         let Some(task_id) = escalation.blocking_task_id.as_ref() else {
             return Ok(None);
         };
-        let Some(provenance) = run.provenance.get(task_id) else {
-            return Ok(None);
-        };
         let task = run
             .tasks
             .get(task_id)
             .ok_or_else(|| anyhow::anyhow!("supervisor retry task is missing"))?;
+        if task.state != TaskState::Verifying
+            || task.required_artifact_contract != GOAL_REVIEW_READY_ARTIFACT_CONTRACT
+        {
+            return Ok(None);
+        }
+        let provenance = run
+            .provenance
+            .get(task_id)
+            .ok_or_else(|| anyhow::anyhow!("supervisor retry provenance is missing"))?;
         if provenance.generation != task.generation
             || task.assigned_dispatch_run != Some(provenance.dispatch_run_id)
         {
@@ -3322,7 +3330,8 @@ mod tests {
         let task_id = TaskId::new("root").unwrap();
         let dispatch_run_id = OperationId::new();
         let mut root = task(run.supervisor_run_id, "root", None);
-        root.state = TaskState::AwaitingDecision;
+        root.state = TaskState::Verifying;
+        root.required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT;
         root.assigned_dispatch_run = Some(dispatch_run_id);
         run.tasks.insert(task_id.clone(), root);
         run.provenance.insert(
@@ -3495,6 +3504,16 @@ mod tests {
                 .is_none()
         );
 
+        let mut ordinary = run.clone();
+        ordinary.tasks.get_mut(&task_id).unwrap().state = TaskState::Ready;
+        scheduler.supervisor.initialize(&ordinary).unwrap();
+        assert!(
+            scheduler
+                .retry_work_for_workspace(workspace, run.supervisor_run_id, escalation_id)
+                .unwrap()
+                .is_none()
+        );
+
         let mut without_provenance = run.clone();
         without_provenance.provenance.clear();
         scheduler
@@ -3504,8 +3523,9 @@ mod tests {
         assert!(
             scheduler
                 .retry_work_for_workspace(workspace, run.supervisor_run_id, escalation_id)
-                .unwrap()
-                .is_none()
+                .unwrap_err()
+                .to_string()
+                .contains("retry provenance is missing")
         );
 
         let mut without_task = run.clone();

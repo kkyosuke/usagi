@@ -625,7 +625,7 @@ fn append_escalation_control_rows(
         rows.push(format!("Evidence: {}", escalation.safe_evidence));
     }
     for (decision, label) in [
-        (EscalationDecision::Resume, "Resume Agent work"),
+        (EscalationDecision::Resume, "Resume work"),
         (EscalationDecision::Cancel, "Cancel run"),
         (EscalationDecision::Fail, "Mark failed"),
     ] {
@@ -1418,6 +1418,7 @@ mod tests {
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(decision.contains("Resume work"));
         assert!(decision.contains("› Cancel run"));
         assert!(decision.contains("Reason: choose a recovery"));
         assert!(decision.contains("Evidence: the Agent needs a fresh result"));
