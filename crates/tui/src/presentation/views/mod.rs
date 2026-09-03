@@ -6,6 +6,7 @@
 
 pub mod cleanup_modal;
 pub mod closeup_modal;
+pub mod command_help_modal;
 pub mod config;
 pub mod create_session_error_modal;
 pub mod daemon_modal;

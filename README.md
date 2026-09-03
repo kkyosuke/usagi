@@ -50,8 +50,9 @@ workspace を開くと Home へ移る。最上段の project tab bar には同�
 含めてクリックでき、登録済み workspace の複数選択に加えて `Tab` から既存ディレクトリを直接追加できる。overlay を
 開いている間は別の usagi が追加した workspace も自動で一覧へ反映される。Session Garden では開いている全 project の
 session を巣穴として、Agent のうさぎが池・餌場・木陰を行き来する共有の庭を見渡せる。Garden は pending decision、
-失敗、waiting / interrupted Agent のある区画を Action Center として集約する。右の `Notifications` は
-`Agent completed.` や入力待ちなど、現在の viewport の状態を短い文で表示する。workspace root の shell は header の
+失敗、waiting / interrupted Agent のある区画を Action Center として集約する。右の `Agents` は Garden の
+viewport と独立して全 project の Agent を session ごとにまとめ、1 runtime 1 行で状態を表示する。session 見出しや
+Agent 行をクリックすると、その project の Closeup または該当 Agent tab へ移動する。workspace root の shell は header の
 `[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。
 
 ```text
@@ -84,20 +85,24 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
 | `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
 | `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Director と Work Run 一覧・操作面を開く |
+| `?` / live pane の `Ctrl-O ?` | コマンド一覧を開く（初期表示は現在実行できるコマンド） |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
 
 leader 後の文字 shortcut は、2 打目の `Ctrl` の有無を同一視する。たとえば `Ctrl-O n` と
 `Ctrl-O Ctrl-N` は同じ操作になる。直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
-live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。TUI を離れる操作は
+live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。Director では通常文字と paste を
+IME 対応の `Command ›` 入力欄で編集し、`Enter` で 1 行の追加指示として root Agent へ送る。TUI を離れる操作は
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
 
 generic terminal の `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。
 `Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、再度開くと新しい terminal になる。Director は画面の
-右側を高さ一杯に使い、workspace Shell と同時に開ける。選択 session の Agent は両 drawer の背面でも
-可視領域へ resize して出力を更新し続ける。
+右側を高さ一杯に使う overlay で、workspace Shell と同時に開ける。両方が開いているときは panel のクリックでも focus が移り、
+左側に見えている Shell の選択・コピーを継続できる。title の `FOCUS` / `click to focus` が入力先を示す。選択 session の Agent は
+drawer の背面でも通常の workspace geometry と attachment のまま出力を更新し続ける。最後の実行中または起動中 root Agent が
+消えると Director は自動で閉じる。
 live Agent では同じ close chord が `Ctrl-D` と同じ終了入力になり、interrupted Agent では選択中の tab を
 永続的に閉じる。interrupted tab の close は Agent の resume や新規起動を行わない。
 

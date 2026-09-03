@@ -10,7 +10,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
-use usagi_core::domain::id::{SessionId, WorkspaceId};
+use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
 use usagi_core::domain::workspace::Workspace;
 
@@ -190,7 +190,15 @@ pub struct WorkspaceDeck {
     active: WorkspaceId,
     overlay: Option<DeckOverlay>,
     notice: Option<String>,
-    pending_garden_visit: Option<(PathBuf, SessionId)>,
+    pending_garden_visit: Option<(PathBuf, GardenVisit)>,
+}
+
+/// Stable Garden target carried while the process replaces one workspace
+/// controller with another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GardenVisit {
+    pub session: SessionId,
+    pub agent: Option<AgentRuntimeId>,
 }
 
 impl WorkspaceDeck {
@@ -409,18 +417,23 @@ impl WorkspaceDeck {
 
     /// Carry one identity-only Garden visit across the workspace composition
     /// teardown. It is consumed only by the prepared target workspace.
-    pub fn schedule_garden_visit(&mut self, path: PathBuf, session: SessionId) {
-        self.pending_garden_visit = Some((path, session));
+    pub fn schedule_garden_visit(
+        &mut self,
+        path: PathBuf,
+        session: SessionId,
+        agent: Option<AgentRuntimeId>,
+    ) {
+        self.pending_garden_visit = Some((path, GardenVisit { session, agent }));
     }
 
     #[must_use]
-    pub fn take_garden_visit(&mut self, active_path: &Path) -> Option<SessionId> {
+    pub fn take_garden_visit(&mut self, active_path: &Path) -> Option<GardenVisit> {
         if self
             .pending_garden_visit
             .as_ref()
             .is_some_and(|(path, _)| path == active_path)
         {
-            return self.pending_garden_visit.take().map(|(_, session)| session);
+            return self.pending_garden_visit.take().map(|(_, visit)| visit);
         }
         None
     }
@@ -1691,11 +1704,19 @@ mod tests {
         assert_eq!(sessions[1].0, beta.workspace_id);
         assert_eq!(sessions[1].1.label, "beta / review");
 
-        deck.schedule_garden_visit(beta.workspace.path.clone(), beta.session_ids[0]);
+        let agent = AgentRuntimeId::new();
+        deck.schedule_garden_visit(
+            beta.workspace.path.clone(),
+            beta.session_ids[0],
+            Some(agent),
+        );
         assert_eq!(deck.take_garden_visit(&alpha.workspace.path), None);
         assert_eq!(
             deck.take_garden_visit(&beta.workspace.path),
-            Some(beta.session_ids[0])
+            Some(GardenVisit {
+                session: beta.session_ids[0],
+                agent: Some(agent),
+            })
         );
         assert_eq!(deck.take_garden_visit(&beta.workspace.path), None);
     }
@@ -1929,7 +1950,7 @@ mod tests {
         let beta = snapshot("beta", "/beta");
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
         let session = SessionId::new();
-        deck.schedule_garden_visit(beta.workspace.path.clone(), session);
+        deck.schedule_garden_visit(beta.workspace.path.clone(), session, None);
         deck.close_path(&beta.workspace.path);
         assert_eq!(deck.take_garden_visit(&beta.workspace.path), None);
     }
