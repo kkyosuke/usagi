@@ -315,7 +315,7 @@ fn body(state: &PrModal, body_height: usize) -> Vec<String> {
     }
     if footer_height > 1 {
         lines.push(modal::footer(
-            "c: copy  d: dismiss  Enter: open  Esc: close",
+            "c: copy  Ctrl-X: dismiss  Enter: open  Esc: close",
         ));
     }
     lines

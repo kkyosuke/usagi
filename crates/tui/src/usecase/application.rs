@@ -425,8 +425,11 @@ pub enum Key {
     Quit,
     /// Ctrl-Q ends the workspace, including its live sessions.
     CtrlQ,
-    /// Ctrl-D requests an unregister confirmation only on Open Workspace.
+    /// Ctrl-D is terminal end-of-input; management surfaces leave it inert.
     CtrlD,
+    /// Ctrl-X removes or dismisses the selected management object. A focused
+    /// live terminal receives the original control byte instead.
+    CtrlX,
     /// 文字キー。メニューのショートカット文字や recent の番号キーに使う。
     Char(char),
     /// 左ボタンのクリック位置（0-based terminal cell）。画面ごとの hit test は
@@ -675,6 +678,7 @@ mod tests {
             Key::Escape,
             Key::Quit,
             Key::CtrlD,
+            Key::CtrlX,
             Key::Char('o'),
             Key::Click { column: 3, row: 4 },
             Key::Live(LiveTerminalAction::Switch),

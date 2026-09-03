@@ -2474,7 +2474,7 @@ fn home_left_pane(
         lines.push(String::new());
     }
     let footer = match home.mode {
-        HomeMode::Switch => "[switch] ←→ project / ↑↓ select / Enter closeup",
+        HomeMode::Switch => "[switch] ←→ project / ↑↓ select / Enter closeup / Ctrl-X remove",
         HomeMode::Closeup => "[closeup] a agent / t terminal / Enter actions / Ctrl-O controls",
     };
     lines.push(
@@ -5965,7 +5965,7 @@ mod tests {
         let session = SessionId::new();
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
         let mut first = PrLink::new(7, "https://github.com/o/r/pull/7");
         first.title = Some("add feature".into());
         let mut second = PrLink::new(8, "https://github.com/o/r/pull/8");
@@ -6039,7 +6039,7 @@ mod tests {
         let session = SessionId::new();
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Char('v')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {

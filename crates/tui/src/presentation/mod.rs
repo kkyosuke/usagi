@@ -737,6 +737,7 @@ fn key_to_terminal_bytes_for_mode(key: Key, bracketed_paste: bool) -> Option<Vec
         Key::Quit => vec![3],
         Key::CtrlQ => vec![17],
         Key::CtrlD => vec![4],
+        Key::CtrlX => vec![24],
         Key::Live(_)
         | Key::TerminalCopy { .. }
         | Key::Click { .. }
@@ -3501,6 +3502,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Backspace
         | Key::Tab
         | Key::CtrlD
+        | Key::CtrlX
         | Key::Live(_)
         | Key::Click { .. }
         | Key::Pointer(_)
@@ -3608,6 +3610,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
             }
         },
         Key::CtrlD
+        | Key::CtrlX
         | Key::Live(_)
         | Key::Click { .. }
         | Key::Pointer(_)
@@ -3758,7 +3761,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.request_cleanup();
             OpenStep::Stay
         }
-        Key::CtrlD => {
+        Key::CtrlX => {
             open.request_unregister();
             OpenStep::Stay
         }
@@ -3779,6 +3782,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         | Key::Passthrough(_)
         | Key::Management { .. }
         | Key::TerminalCopy { .. }
+        | Key::CtrlD
         | Key::Resize
         | Key::Other => OpenStep::Stay,
     }
@@ -4215,6 +4219,7 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Char(character) => AppKey::Char(character),
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
+        Key::CtrlX => AppKey::CtrlX,
         Key::TerminalCopy { fallback } => {
             return {
                 #[cfg(target_os = "windows")]
@@ -4230,9 +4235,10 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
             };
         }
         // Input the Home reducer never consumes: raw PTY passthrough, terminal
-        // pointer drags and clicks (a shell + `TerminalSession` concern), Ctrl-D
-        // (Open Workspace only), and the caret/selection keys that have meaning
-        // only inside a focused text field (End/Ctrl-E, Delete, Shift+arrows).
+        // pointer drags and clicks (a shell + `TerminalSession` concern), and the
+        // caret/selection keys that have meaning only inside a focused text field
+        // (End/Ctrl-E, Delete, Shift+arrows). Ctrl-D is terminal EOT and remains
+        // inert on management surfaces.
         Key::Passthrough(_)
         | Key::Pointer(_)
         | Key::Click { .. }
@@ -4260,6 +4266,9 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
         LiveTerminalAction::OpenPullRequests => Some(AppKey::OpenPrs),
+        LiveTerminalAction::OpenPreview => Some(AppKey::OpenPreview),
+        LiveTerminalAction::OpenDecisions => Some(AppKey::OpenDecisions),
+        LiveTerminalAction::OpenNotes => Some(AppKey::OpenNotes),
         LiveTerminalAction::OpenGarden => Some(AppKey::OpenGarden),
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
@@ -10283,6 +10292,10 @@ mod tests {
             Some(AppEvent::Key(AppKey::CtrlQ))
         );
         assert_eq!(
+            app_event_from_key(Key::CtrlX),
+            Some(AppEvent::Key(AppKey::CtrlX))
+        );
+        assert_eq!(
             app_event_from_key(Key::Management {
                 action: AppKey::SaveRoles,
                 passthrough: vec![0x13],
@@ -10312,6 +10325,18 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::OpenPullRequests)),
             Some(AppEvent::Key(AppKey::OpenPrs))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenPreview)),
+            Some(AppEvent::Key(AppKey::OpenPreview))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenDecisions)),
+            Some(AppEvent::Key(AppKey::OpenDecisions))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenNotes)),
+            Some(AppEvent::Key(AppKey::OpenNotes))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::OpenGarden)),
@@ -10524,6 +10549,7 @@ mod tests {
             Key::Quit,
             Key::CtrlQ,
             Key::CtrlD,
+            Key::CtrlX,
             Key::Char('g'),
             Key::Paste("pasted".to_owned()),
             Key::Click { column: 4, row: 9 },
@@ -18291,7 +18317,7 @@ mod tests {
         }
     }
 
-    /// `Ctrl-O b` is the way back to live output. A scrolled viewport holds its
+    /// `Ctrl-O End` is the way back to live output. A scrolled viewport holds its
     /// rows against everything the Agent appends, so the distance to the newest
     /// output grows with the conversation and one-line `ScrollDown` alone cannot
     /// be the only way back.
@@ -18493,6 +18519,7 @@ mod tests {
             Key::Quit,
             Key::CtrlQ,
             Key::CtrlD,
+            Key::CtrlX,
             Key::Char('x'),
             Key::Click { column: 41, row: 5 },
             Key::Other,
@@ -28205,7 +28232,7 @@ mod tests {
         let mut cancel = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Down,
-            Key::CtrlD,
+            Key::CtrlX,
             Key::Char('c'),
             Key::Quit,
         ]);
@@ -28230,7 +28257,7 @@ mod tests {
         let mut confirm = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Down,
-            Key::CtrlD,
+            Key::CtrlX,
             Key::Enter,
             Key::Enter,
             Key::Live(LiveTerminalAction::OpenWorkspace),
@@ -28435,10 +28462,10 @@ mod tests {
             OpenStep::ConfirmCleanup
         ));
 
-        let _ = step_open(&mut open, Key::CtrlD);
+        let _ = step_open(&mut open, Key::CtrlX);
         let _ = step_open(&mut open, Key::Left);
         assert!(matches!(step_open(&mut open, Key::Escape), OpenStep::Stay));
-        let _ = step_open(&mut open, Key::CtrlD);
+        let _ = step_open(&mut open, Key::CtrlX);
         assert!(matches!(
             step_open(&mut open, Key::Char('y')),
             OpenStep::ConfirmUnregister(_)
@@ -28446,7 +28473,7 @@ mod tests {
 
         for key in [Key::Right, Key::Tab, Key::Char('n'), Key::CtrlQ] {
             let mut open = Open::new(vec![ws("fresh")]);
-            let _ = step_open(&mut open, Key::CtrlD);
+            let _ = step_open(&mut open, Key::CtrlX);
             let result = step_open(&mut open, key.clone());
             assert!(matches!(result, OpenStep::Stay | OpenStep::Quit));
         }
@@ -28703,6 +28730,7 @@ mod tests {
         assert_eq!(key_to_terminal_bytes(Key::Quit), Some(vec![3]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlQ), Some(vec![17]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlD), Some(vec![4]));
+        assert_eq!(key_to_terminal_bytes(Key::CtrlX), Some(vec![24]));
         assert_eq!(key_to_terminal_bytes(Key::Other), None);
         assert_eq!(
             key_to_terminal_bytes(Key::Live(
@@ -30344,7 +30372,7 @@ mod tests {
             Key::Char('o'),
             Key::Enter,
             Key::Live(LiveTerminalAction::OpenWorkspace),
-            Key::CtrlD,
+            Key::CtrlX,
             Key::Char('q'),
         ]);
         let mut loader = FakeLoader::default();

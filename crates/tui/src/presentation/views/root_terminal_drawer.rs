@@ -308,7 +308,7 @@ pub fn render_over_for_mode(
         .feedback
         .as_deref()
         .unwrap_or(
-            "Ctrl-O z: drawer/full  ·  Ctrl-O Ctrl-T: close  ·  Ctrl-O u/d/b: scroll  ·  Ctrl-O x: close terminal",
+            "Ctrl-O z: drawer/full  ·  Ctrl-O Ctrl-T: close  ·  Ctrl-O ↑/↓/End: scroll  ·  Ctrl-O x: close terminal",
         );
     let terminal_height = body_height.saturating_sub(1);
     let tab_strip = render_tab_strip(&projection.tabs, inner_width);
