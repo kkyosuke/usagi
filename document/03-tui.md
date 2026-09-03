@@ -612,7 +612,7 @@ button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live p
 同時に保てない幅では全幅へ縮退する。PR modal と同じ合成 overlay であり、背景 Home は header を残して ANSI span ごと dim にするが、
 完全に隠れる managed terminal も通常の Home geometry と attachment を維持する。
 drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
-managed-session Closeup の right pane viewport とは別の pure geometry とする。背景に見えている managed Agent は
+managed-session Closeup の right pane viewport とは別の pure geometry とする。背景にある managed Agent は
 その right pane viewport の attachment と出力 poll を維持し、dim 表示中も live output を描く。
 
 drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
