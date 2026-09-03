@@ -344,5 +344,5 @@ terminal projection 更新、各一時面からの明示 back を一組として
   navigation intent を失う。
 - **Goal と Session を同じ階層に並べる**: 目的と worktree の一対多関係が見えず、Work Run の完了と Session の終了を混同する。
 - **Agent Launcher を既存 Agent selector と兼用する**: 新規作成と既存対象への移動で `Enter` の副作用が変わる。既存 Agent の
-  選択は Overview tree に限定する。
+  選択は goal-driven の Overview tree または classic の conversation rail に限定する。
 - **live Agent の `Esc` で Overview へ戻る**: Agent CLI の中断操作を TUI navigation が奪う。
