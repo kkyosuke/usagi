@@ -4,12 +4,13 @@
 //! title・remote status を見る中央モーダル。←→ で status tab、↑↓ で PR を選ぶ。中央に浮かぶ
 //! 枠付きダイアログとして描く（枠・配置は共通の [`modal`] widget に委譲）。
 //!
-//! 一覧する PR は core domain の [`PrLink`] を持つ。状態 [`PrModal`] は端末 IO を持たない
+//! 一覧する PR は daemon inventory の canonical [`PrEntry`] を持つ。状態 [`PrModal`] は端末 IO を持たない
 //! 純粋な値で、[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。キー入力の
 //! 解釈は入力層が整うときに載せ、ここではカーソル移動の純粋操作だけを公開する。
 
-use usagi_core::domain::pr_inventory::{PrChecksState, PrEntry, PrRefreshState, PrReviewDecision};
-use usagi_core::domain::pullrequest::{PrLink, PrState};
+use usagi_core::domain::pr_inventory::{
+    PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState, canonicalize,
+};
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::modal;
@@ -27,14 +28,14 @@ const MAX_GAP_HEIGHT: usize = 2;
 /// PR ポップアップの状態。workspace で見つかった PR 一覧と、その上のカーソルを持つ。
 #[derive(Debug, Clone)]
 pub struct PrModal {
-    prs: Vec<PrLink>,
+    prs: Vec<PrEntry>,
     selected: usize,
     filter: PrFilter,
 }
 
-/// ダミーの [`PrLink`] を 1 件組む。
-fn dummy_pr(number: u32, url: &str, title: &str, state: PrState) -> PrLink {
-    let mut pr = PrLink::new(number, url);
+/// ダミーの [`PrEntry`] を 1 件組む。
+fn dummy_pr(url: &str, title: &str, state: PrState) -> PrEntry {
+    let mut pr = PrEntry::new(canonicalize(url).expect("dummy PR URL is canonical"));
     pr.title = Some(title.to_string());
     pr.state = state;
     pr
@@ -46,19 +47,16 @@ impl PrModal {
     pub fn dummy() -> Self {
         Self::new(vec![
             dummy_pr(
-                812,
                 "https://github.com/kkyosuke/usagi/pull/812",
                 "feat(tui): workspace 画面を実装する",
                 PrState::Open,
             ),
             dummy_pr(
-                809,
                 "https://github.com/kkyosuke/usagi/pull/809",
                 "feat(tui): new 画面を実装する",
                 PrState::Open,
             ),
             dummy_pr(
-                801,
                 "https://github.com/kkyosuke/usagi/pull/801",
                 "feat(tui): config 画面を実装する",
                 PrState::Merged,
@@ -68,7 +66,7 @@ impl PrModal {
 
     /// 与えた PR 一覧で開く。先頭を選択する。
     #[must_use]
-    pub fn new(prs: Vec<PrLink>) -> Self {
+    pub fn new(prs: Vec<PrEntry>) -> Self {
         Self {
             prs,
             selected: 0,
@@ -82,7 +80,7 @@ impl PrModal {
     ///
     /// [`Overlay::Prs`]: crate::usecase::application::controller::Overlay::Prs
     #[must_use]
-    pub fn with_selection(prs: Vec<PrLink>, selected: usize) -> Self {
+    pub fn with_selection(prs: Vec<PrEntry>, selected: usize) -> Self {
         let selected = selected.min(prs.len().saturating_sub(1));
         Self {
             prs,
@@ -97,42 +95,9 @@ impl PrModal {
         self
     }
 
-    /// Builds the modal from the daemon-owned PR snapshot projection.
-    #[must_use]
-    pub fn from_entries(entries: &[PrEntry]) -> Self {
-        Self::new(
-            entries
-                .iter()
-                .map(|entry| {
-                    let number = entry
-                        .identity
-                        .as_url()
-                        .rsplit('/')
-                        .next()
-                        .and_then(|part| part.parse().ok())
-                        .unwrap_or(0);
-                    let mut pr = PrLink::new(number, entry.identity.as_url());
-                    pr.title.clone_from(&entry.title);
-                    pr.state = match entry.state {
-                        usagi_core::domain::pr_inventory::PrState::Open => PrState::Open,
-                        usagi_core::domain::pr_inventory::PrState::Closed => PrState::Closed,
-                        usagi_core::domain::pr_inventory::PrState::Merged => PrState::Merged,
-                        usagi_core::domain::pr_inventory::PrState::Dismissed => PrState::Dismissed,
-                    };
-                    pr.refresh = entry.refresh;
-                    pr.draft = entry.draft;
-                    pr.checks = entry.checks;
-                    pr.review = entry.review;
-                    pr.auto_open = entry.auto_open;
-                    pr
-                })
-                .collect(),
-        )
-    }
-
     /// PR 一覧。
     #[must_use]
-    pub fn prs(&self) -> &[PrLink] {
+    pub fn prs(&self) -> &[PrEntry] {
         &self.prs
     }
 
@@ -144,7 +109,7 @@ impl PrModal {
 
     /// 選択中の PR。一覧が空なら `None`。
     #[must_use]
-    pub fn selected_pr(&self) -> Option<&PrLink> {
+    pub fn selected_pr(&self) -> Option<&PrEntry> {
         self.prs.get(self.selected)
     }
 
@@ -164,7 +129,7 @@ impl PrModal {
 }
 
 /// PR の状態のラベルと色（open=success / merged=feature / dismissed=dim）。
-fn state_label(pr: &PrLink) -> (&'static str, Style) {
+fn state_label(pr: &PrEntry) -> (&'static str, Style) {
     match pr.state {
         PrState::Open => ("open", Role::Success.style()),
         PrState::Merged => ("merged", Role::Feature.style()),
@@ -179,7 +144,7 @@ fn repository(url: &str) -> &str {
         .map_or("unknown/unknown", |(repository, _)| repository)
 }
 
-fn remote_summary(pr: &PrLink) -> String {
+fn remote_summary(pr: &PrEntry) -> String {
     let mut parts = Vec::new();
     if pr.draft {
         parts.push("draft");
@@ -201,12 +166,12 @@ fn remote_summary(pr: &PrLink) -> String {
 }
 
 /// 1 PR 行: 選択中は `›` マーカー、`#番号`（warning）、状態バッジ、タイトル。幅に切り詰める。
-fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
+fn pr_row(pr: &PrEntry, selected: bool, inner: usize) -> String {
     let marker = modal::selection_marker(selected);
     let number = Role::Warning
         .style()
         .bold()
-        .paint(&format!("#{:<5}", pr.number));
+        .paint(&format!("#{:<5}", pr.number()));
     let (label, style) = state_label(pr);
     let badge = style.paint(&format!("{label:<10}"));
     let title = pr.title.as_deref().unwrap_or("(no title)");
@@ -229,11 +194,11 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
 
 /// Preserve the controller-owned PR order while adding one repository heading
 /// before each consecutive group visible in the viewport.
-fn grouped_pr_rows(prs: &[PrLink], start: usize, end: usize, selected: usize) -> Vec<String> {
+fn grouped_pr_rows(prs: &[PrEntry], start: usize, end: usize, selected: usize) -> Vec<String> {
     let mut rows = Vec::new();
     let mut previous_repository = None;
     for (index, pr) in prs[start..end].iter().enumerate() {
-        let repository = repository(&pr.url);
+        let repository = repository(pr.url());
         if previous_repository != Some(repository) {
             rows.push(modal::caption(repository));
             previous_repository = Some(repository);
@@ -373,7 +338,16 @@ mod tests {
     use usagi_core::domain::pr_inventory::{
         PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState, canonicalize,
     };
-    use usagi_core::domain::pullrequest::PrLink;
+
+    fn pr_entry(number: u64, url: &str) -> PrEntry {
+        let identity = canonicalize(url).unwrap_or_else(|| {
+            canonicalize(&format!(
+                "https://github.com/example/repository/pull/{number}"
+            ))
+            .unwrap()
+        });
+        PrEntry::new(identity)
+    }
 
     #[test]
     fn empty_and_populated_lists_keep_the_pr_box_height_stable() {
@@ -401,7 +375,7 @@ mod tests {
         let modal = PrModal::dummy();
         assert_eq!(modal.prs().len(), 3);
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.selected_pr().map(|p| p.number), Some(812));
+        assert_eq!(modal.selected_pr().map(PrEntry::number), Some(812));
         // derive された Clone / Debug も触れる。
         assert!(format!("{:?}", modal.clone()).contains("812"));
     }
@@ -435,7 +409,7 @@ mod tests {
                 auto_open: true,
             })
             .collect::<Vec<_>>();
-        let modal = PrModal::from_entries(&entries);
+        let modal = PrModal::new(entries);
         assert_eq!(modal.prs().len(), 4);
         assert_eq!(modal.prs()[0].refresh, PrRefreshState::Pending);
         let rendered = joined(&modal);
@@ -482,7 +456,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let rendered = joined(&PrModal::from_entries(&entries));
+        let rendered = joined(&PrModal::new(entries));
         for label in [
             "draft",
             "ci✓",
@@ -499,12 +473,12 @@ mod tests {
     #[test]
     fn with_selection_clamps_the_cursor_to_the_list() {
         let prs = vec![
-            PrLink::new(1, "https://example.com/pull/1"),
-            PrLink::new(2, "https://example.com/pull/2"),
+            pr_entry(1, "https://example.com/pull/1"),
+            pr_entry(2, "https://example.com/pull/2"),
         ];
         let at_second = PrModal::with_selection(prs.clone(), 1);
         assert_eq!(at_second.selected(), 1);
-        assert_eq!(at_second.selected_pr().map(|pr| pr.number), Some(2));
+        assert_eq!(at_second.selected_pr().map(PrEntry::number), Some(2));
         // An out-of-range index clamps to the last entry.
         assert_eq!(PrModal::with_selection(prs, 9).selected(), 1);
         // An empty list stays at zero with no selection.
@@ -518,7 +492,7 @@ mod tests {
         let mut modal = PrModal::dummy();
         modal.select_prev(); // wrap to last (index 2 = #801)
         assert_eq!(modal.selected(), 2);
-        assert_eq!(modal.selected_pr().map(|p| p.number), Some(801));
+        assert_eq!(modal.selected_pr().map(PrEntry::number), Some(801));
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
     }
@@ -535,7 +509,7 @@ mod tests {
     #[test]
     fn long_lists_scroll_to_keep_the_selection_and_footer_visible() {
         let prs = (1..=10)
-            .map(|number| PrLink::new(number, format!("https://example.com/pull/{number}")))
+            .map(|number| pr_entry(number, &format!("https://example.com/pull/{number}")))
             .collect();
         let mut modal = PrModal::new(prs);
         for _ in 0..8 {
@@ -591,9 +565,9 @@ mod tests {
     #[test]
     fn repository_headings_group_prs_without_changing_selection_order() {
         let prs = vec![
-            PrLink::new(11, "https://github.com/acme/api/pull/11"),
-            PrLink::new(12, "https://github.com/acme/api/pull/12"),
-            PrLink::new(21, "https://github.com/acme/web/pull/21"),
+            pr_entry(11, "https://github.com/acme/api/pull/11"),
+            pr_entry(12, "https://github.com/acme/api/pull/12"),
+            pr_entry(21, "https://github.com/acme/web/pull/21"),
         ];
         let text = joined(&PrModal::with_selection(prs, 2));
 
@@ -628,7 +602,7 @@ mod tests {
     #[test]
     fn render_handles_a_missing_title() {
         // タイトル無しの PR は "(no title)" を出す。
-        let modal = PrModal::new(vec![PrLink::new(7, "https://example.com/pull/7")]);
+        let modal = PrModal::new(vec![pr_entry(7, "https://example.com/pull/7")]);
         let text = joined(&modal);
         assert!(text.contains("#7"));
         assert!(text.contains("(no title)"));
@@ -642,11 +616,11 @@ mod tests {
         let mut inventory = PrInventory::default();
         inventory.discover([identity.clone()]);
         let entries = inventory.entries.values().cloned().collect::<Vec<_>>();
-        assert!(joined(&PrModal::from_entries(&entries)).contains("refresh pending"));
+        assert!(joined(&PrModal::new(entries)).contains("refresh pending"));
 
         inventory.entries.get_mut(&identity).unwrap().refresh = PrRefreshState::BackingOff;
         let entries = inventory.entries.values().cloned().collect::<Vec<_>>();
-        assert!(joined(&PrModal::from_entries(&entries)).contains("refresh retrying"));
+        assert!(joined(&PrModal::new(entries)).contains("refresh retrying"));
     }
 
     #[test]
@@ -657,8 +631,7 @@ mod tests {
 
     #[test]
     fn render_labels_a_dismissed_pr() {
-        use usagi_core::domain::pullrequest::PrState;
-        let mut pr = PrLink::new(3, "https://example.com/pull/3");
+        let mut pr = pr_entry(3, "https://example.com/pull/3");
         pr.state = PrState::Dismissed;
         let text = joined(&PrModal::new(vec![pr]));
         assert!(text.contains("dismissed"));
@@ -706,7 +679,7 @@ mod tests {
     #[test]
     fn short_terminal_keeps_the_selected_pr_tabs_and_footer_visible() {
         let prs = (1..=10)
-            .map(|number| PrLink::new(number, format!("https://example.com/pull/{number}")))
+            .map(|number| pr_entry(number, &format!("https://example.com/pull/{number}")))
             .collect();
         let mut modal = PrModal::new(prs);
         for _ in 0..8 {

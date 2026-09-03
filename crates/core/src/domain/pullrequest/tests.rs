@@ -110,6 +110,10 @@ fn state_degrades_an_unrecognised_token_to_open() {
         serde_json::from_str::<PrState>("\"merged\"").unwrap(),
         PrState::Merged
     );
+    assert_eq!(
+        serde_json::from_str::<PrState>("\"future_state\"").unwrap(),
+        PrState::Open
+    );
 }
 
 #[test]
