@@ -267,11 +267,15 @@ fn valid_path_part(value: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrState {
-    #[default]
-    Open,
     Closed,
     Merged,
     Dismissed,
+    /// Open is both the default and the forward-compatible fallback for an
+    /// unknown persisted state. Keep it last because serde requires the
+    /// catch-all variant to be last.
+    #[default]
+    #[serde(other)]
+    Open,
 }
 
 /// Refresh lifecycle exposed as safe, credential-free snapshot metadata.
@@ -342,6 +346,50 @@ pub struct PrEntry {
     pub auto_open: bool,
 }
 
+impl PrEntry {
+    /// Builds an inventory entry with the canonical defaults used for a newly
+    /// discovered pull request.
+    #[must_use]
+    pub fn new(identity: PrIdentity) -> Self {
+        Self {
+            identity,
+            title: None,
+            state: PrState::Open,
+            head_oid: None,
+            pinned: false,
+            refresh: PrRefreshState::Idle,
+            draft: false,
+            checks: None,
+            review: None,
+            auto_open: false,
+        }
+    }
+
+    /// Canonical browser URL for this pull request.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        self.identity.as_url()
+    }
+
+    /// Pull-request number embedded in the canonical identity.
+    #[must_use]
+    pub fn number(&self) -> u64 {
+        self.identity.number()
+    }
+
+    /// Whether this entry is a user-owned dismissal tombstone.
+    #[must_use]
+    pub fn is_dismissed(&self) -> bool {
+        self.state == PrState::Dismissed
+    }
+
+    /// Whether this entry belongs in the default user-facing projection.
+    #[must_use]
+    pub fn is_visible(&self) -> bool {
+        !self.is_dismissed()
+    }
+}
+
 /// Revisioned inventory for one stable session identity.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PrInventory {
@@ -374,21 +422,10 @@ impl PrInventory {
                 {
                     continue;
                 }
-                self.entries.insert(
-                    identity.clone(),
-                    PrEntry {
-                        identity,
-                        title: None,
-                        state: PrState::Open,
-                        head_oid: None,
-                        pinned: false,
-                        refresh: PrRefreshState::Pending,
-                        draft: false,
-                        checks: None,
-                        review: None,
-                        auto_open,
-                    },
-                );
+                let mut entry = PrEntry::new(identity.clone());
+                entry.refresh = PrRefreshState::Pending;
+                entry.auto_open = auto_open;
+                self.entries.insert(identity, entry);
                 changed = true;
             }
         }
@@ -519,6 +556,20 @@ mod tests {
                 .as_url(),
             "https://github.com/o/r/pull/1"
         );
+    }
+
+    #[test]
+    fn entry_defaults_and_display_accessors_share_the_canonical_identity() {
+        let identity = canonicalize("https://github.com/o/r/pull/42/files").unwrap();
+        let mut entry = PrEntry::new(identity);
+        assert_eq!(entry.url(), "https://github.com/o/r/pull/42");
+        assert_eq!(entry.number(), 42);
+        assert!(entry.is_visible());
+        assert!(!entry.is_dismissed());
+
+        entry.state = PrState::Dismissed;
+        assert!(!entry.is_visible());
+        assert!(entry.is_dismissed());
     }
 
     #[test]

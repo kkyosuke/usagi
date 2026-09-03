@@ -62,6 +62,8 @@ New は Clone（リポジトリを新しいディレクトリへ clone）と Exi
 2 モードを持ち、`←→` でモードを切り替え、`↑↓`/Tab でフィールドを移動する。必須項目が揃った状態で
 `Enter` を押すと作成を実行する。必須項目が欠けているときの `Enter` は、最初に不足しているフィールドの
 安全なメッセージを notice に出して同画面に留まり、入力は保持する。
+Location / Path 上の Tab は `WorkspaceLoader` port が列挙した直下の directory 名だけを受け取り、view の純粋な
+状態操作で prefix filtering・sort・候補巡回を行う。filesystem 列挙は合成ルートが所有する。
 
 `Enter` は作成の副作用（ディレクトリ作成・`git clone`・registry への登録）に進む前に事前検証し、
 弾いた場合は何も作らないまま同画面に留まって draft を保持する。したがって入力を直してそのまま再実行できる。

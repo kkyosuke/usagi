@@ -4313,9 +4313,9 @@ mod tests {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
             target: Target::Session(session),
             revision: 1,
-            prs: vec![usagi_core::domain::pullrequest::PrLink::new(
-                41,
-                "https://github.com/o/r/pull/41",
+            prs: vec![usagi_core::domain::pr_inventory::PrEntry::new(
+                usagi_core::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/41")
+                    .unwrap(),
             )],
         }));
         assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));

@@ -2,10 +2,12 @@
 //!
 //! [`update`] は TUI-local の [`AppEvent`] を受け、状態を更新して外部へ依頼する
 //! [`Effect`] を返す。daemon の wire 型はここへ持ち込まない。実行側は
-//! [`BackendPort`] で effect を backend 固有の command に変換し、テストでは
-//! [`FakeBackend`] の command log と event queue を使う。
+//! effect は backend adapter が固有の command に変換し、テストでは test-only
+//! backend の command log と event queue を使う。
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
+use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
@@ -14,7 +16,7 @@ use usagi_core::domain::id::{
     WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
-use usagi_core::domain::pullrequest::{PrLink, PrState};
+use usagi_core::domain::pr_inventory::{PrEntry, PrState};
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
@@ -571,13 +573,13 @@ impl DecisionOverlayState {
 
 /// active target の Pull Request 一覧 overlay state。
 ///
-/// 一覧 [`PrLink`] は domain データで、素材は port（[`Effect::LoadPullRequests`]）から
+/// 一覧 [`PrEntry`] は domain データで、素材は port（[`Effect::LoadPullRequests`]）から
 /// [`BackendEvent::PullRequestsLoaded`] として還流する。reducer が所有するのは選択位置と
 /// 表示可能なエラーだけで、URL の妥当性検証や browser 起動は executor 側に残す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrOverlay {
     target: Target,
-    prs: Vec<PrLink>,
+    prs: Vec<PrEntry>,
     selected: usize,
     error: Option<SafeError>,
     filter: PrFilter,
@@ -686,7 +688,7 @@ impl PrFilter {
     }
 }
 
-fn filtered_prs(prs: &[PrLink], filter: PrFilter) -> Vec<PrLink> {
+fn filtered_prs(prs: &[PrEntry], filter: PrFilter) -> Vec<PrEntry> {
     prs.iter()
         .filter(|pr| {
             pr.state != PrState::Dismissed
@@ -719,7 +721,7 @@ impl PrOverlay {
     }
     /// 表示中の PR 一覧。素材未着なら空。
     #[must_use]
-    pub fn prs(&self) -> &[PrLink] {
+    pub fn prs(&self) -> &[PrEntry] {
         &self.prs
     }
     /// 選択中の添字。
@@ -729,7 +731,7 @@ impl PrOverlay {
     }
     /// 選択中の PR。一覧が空なら `None`。
     #[must_use]
-    pub fn selected_pr(&self) -> Option<&PrLink> {
+    pub fn selected_pr(&self) -> Option<&PrEntry> {
         self.prs.get(self.selected)
     }
     /// port が分類した安全なエラー。
@@ -1100,7 +1102,7 @@ pub struct AppState {
     session_roles: BTreeMap<SessionId, SessionRoleProjection>,
     /// Daemon-authoritative PR rows by stable session identity. The sidebar and
     /// modal deliberately read this same projection.
-    session_prs: BTreeMap<SessionId, (u64, Vec<PrLink>)>,
+    session_prs: BTreeMap<SessionId, (u64, Vec<PrEntry>)>,
     session_pr_revision: u64,
     pr_auto_open: PrAutoOpen,
     pr_merge_celebrations: BTreeMap<SessionId, u64>,
@@ -1433,7 +1435,7 @@ impl AppState {
     }
     /// Latest daemon PR rows for one stable session identity.
     #[must_use]
-    pub fn session_prs(&self, session: SessionId) -> Option<&[PrLink]> {
+    pub fn session_prs(&self, session: SessionId) -> Option<&[PrEntry]> {
         self.session_prs
             .get(&session)
             .map(|(_, prs)| prs.as_slice())
@@ -2267,7 +2269,7 @@ pub enum BackendEvent {
         /// Monotonic daemon inventory revision. Late completions cannot replace
         /// a newer sidebar/modal projection.
         revision: u64,
-        prs: Vec<PrLink>,
+        prs: Vec<PrEntry>,
     },
     /// A safe Pull Request read failure.
     PullRequestsError { target: Target, error: SafeError },
@@ -2687,26 +2689,29 @@ pub fn update_entry(state: &mut EntryState, event: EntryEvent) -> Vec<Effect> {
 /// Fake entry backend for Welcome / Open attach scenarios. It has no IO: tests
 /// inspect dispatched effects and enqueue typed completions in deterministic order.
 #[derive(Debug, Default)]
-pub struct FakeEntryBackend {
+#[cfg(test)]
+struct FakeEntryBackend {
     effects: Vec<Effect>,
     events: VecDeque<EntryEvent>,
 }
 
+#[cfg(test)]
 impl FakeEntryBackend {
     /// Queue one attach completion (including a deliberately stale one).
-    pub fn push_event(&mut self, event: EntryEvent) {
+    fn push_event(&mut self, event: EntryEvent) {
         self.events.push_back(event);
     }
 
     /// Effects dispatched by the entry reducer.
     #[must_use]
-    pub fn effects(&self) -> &[Effect] {
+    fn effects(&self) -> &[Effect] {
         &self.effects
     }
 }
 
 /// Dispatch entry effects and replay queued fake-backend completions.
-pub fn run_entry_fake_cycle(
+#[cfg(test)]
+fn run_entry_fake_cycle(
     state: &mut EntryState,
     backend: &mut FakeEntryBackend,
     effects: Vec<Effect>,
@@ -2976,7 +2981,8 @@ pub fn update_new(state: &mut NewState, event: NewEvent) -> Vec<Effect> {
 
 /// Backend seam for New. Implementations route clone through git then project
 /// registration, and Existing directly through project/registry registration.
-pub trait NewProjectPort {
+#[cfg(test)]
+trait NewProjectPort {
     /// Dispatch one New operation.
     fn dispatch(&mut self, effect: Effect);
     /// Return the next completion, if any.
@@ -2985,21 +2991,24 @@ pub trait NewProjectPort {
 
 /// IO-free backend used by New reducer scenarios.
 #[derive(Debug, Default)]
-pub struct FakeNewBackend {
+#[cfg(test)]
+struct FakeNewBackend {
     effects: Vec<Effect>,
     events: VecDeque<NewEvent>,
 }
 
+#[cfg(test)]
 impl FakeNewBackend {
-    pub fn push_event(&mut self, event: NewEvent) {
+    fn push_event(&mut self, event: NewEvent) {
         self.events.push_back(event);
     }
     #[must_use]
-    pub fn effects(&self) -> &[Effect] {
+    fn effects(&self) -> &[Effect] {
         &self.effects
     }
 }
 
+#[cfg(test)]
 impl NewProjectPort for FakeNewBackend {
     fn dispatch(&mut self, effect: Effect) {
         self.effects.push(effect);
@@ -3010,7 +3019,8 @@ impl NewProjectPort for FakeNewBackend {
 }
 
 /// Dispatch New effects and replay queued fake-backend completions.
-pub fn run_new_fake_cycle(
+#[cfg(test)]
+fn run_new_fake_cycle(
     state: &mut NewState,
     backend: &mut impl NewProjectPort,
     effects: Vec<Effect>,
@@ -3024,7 +3034,8 @@ pub fn run_new_fake_cycle(
 }
 
 /// effect を実行し、backend event を取り出す TUI-local port。
-pub trait BackendPort {
+#[cfg(test)]
+trait BackendPort {
     /// reducer が返した effect を 1 件 dispatch する。
     fn dispatch(&mut self, effect: Effect);
     /// 次の projection event。無ければ `None`。
@@ -3033,28 +3044,31 @@ pub trait BackendPort {
 
 /// reducer scenario 用の backend。request log と event queue のみを持ち、IO はしない。
 #[derive(Debug, Default)]
-pub struct FakeBackend {
+#[cfg(test)]
+struct FakeBackend {
     effects: Vec<Effect>,
     events: VecDeque<BackendEvent>,
 }
 
+#[cfg(test)]
 impl FakeBackend {
     /// backend から届く event を末尾に積む。
-    pub fn push_event(&mut self, event: BackendEvent) {
+    fn push_event(&mut self, event: BackendEvent) {
         self.events.push_back(event);
     }
     /// dispatch された effect を確認する。
     #[must_use]
-    pub fn effects(&self) -> &[Effect] {
+    fn effects(&self) -> &[Effect] {
         &self.effects
     }
     /// effect log を取り出し、空にする。
     #[must_use]
-    pub fn take_effects(&mut self) -> Vec<Effect> {
+    fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }
 }
 
+#[cfg(test)]
 impl BackendPort for FakeBackend {
     fn dispatch(&mut self, effect: Effect) {
         self.effects.push(effect);
@@ -3602,14 +3616,15 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                             prs.iter().position(|pr| {
                                 pr.state != PrState::Dismissed
                                     && pr.auto_open
-                                    && current.iter().all(|known| known.url != pr.url)
+                                    && current.iter().all(|known| known.identity != pr.identity)
                             })
                         });
                         let newly_merged = current.is_some_and(|(_, current)| {
                             prs.iter().any(|pr| {
                                 pr.state == PrState::Merged
                                     && current.iter().any(|known| {
-                                        known.url == pr.url && known.state != PrState::Merged
+                                        known.identity == pr.identity
+                                            && known.state != PrState::Merged
                                     })
                             })
                         });
@@ -3632,7 +3647,10 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 overlay.prs = filtered_prs(prs, overlay.filter);
                 let detected_selection = newly_detected.and_then(|index| {
                     prs.get(index).and_then(|detected| {
-                        overlay.prs.iter().position(|pr| pr.url == detected.url)
+                        overlay
+                            .prs
+                            .iter()
+                            .position(|pr| pr.identity == detected.identity)
                     })
                 });
                 overlay.selected = detected_selection
@@ -3685,10 +3703,10 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 && state.overlay.is_none()
                 && !state.workspace_drawer_open()
             {
-                let detected_url = prs.get(selected).map(|pr| pr.url.as_str());
+                let detected_identity = prs.get(selected).map(|pr| &pr.identity);
                 let visible = filtered_prs(prs, PrFilter::All);
-                let visible_selected = detected_url
-                    .and_then(|url| visible.iter().position(|pr| pr.url == url))
+                let visible_selected = detected_identity
+                    .and_then(|identity| visible.iter().position(|pr| &pr.identity == identity))
                     .unwrap_or(0);
                 state.overlay = Some(Overlay::Prs);
                 state.pr_overlay = Some(PrOverlay {
@@ -3704,7 +3722,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 && state.pr_auto_open == PrAutoOpen::NotifyOnly
                 && let Some(pr) = prs.get(selected)
             {
-                state.notice = Some(Notice::new(format!("PR detected: {}", pr.url)));
+                state.notice = Some(Notice::new(format!("PR detected: {}", pr.url())));
             }
             reconcile_cleanup_queue(state);
         }
@@ -5135,14 +5153,14 @@ fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
         AppKey::Enter => overlay
             .selected_pr()
             .map(|pr| Effect::OpenPullRequest {
-                url: pr.url.clone(),
+                url: pr.url().to_owned(),
             })
             .into_iter()
             .collect(),
         AppKey::Char('c') => overlay
             .selected_pr()
             .map(|pr| Effect::CopyPullRequest {
-                url: pr.url.clone(),
+                url: pr.url().to_owned(),
             })
             .into_iter()
             .collect(),
@@ -5154,7 +5172,7 @@ fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
                     .session_id()
                     .map(|session| Effect::DismissPullRequest {
                         session,
-                        url: pr.url.clone(),
+                        url: pr.url().to_owned(),
                     })
             })
             .into_iter()
@@ -5789,7 +5807,8 @@ fn request_create_session(state: &mut AppState, intent: SessionCreateIntent) -> 
 }
 
 /// effect を dispatch し、queue 済みの backend event を reducer へ戻すテスト helper。
-pub fn run_fake_cycle(state: &mut AppState, backend: &mut impl BackendPort, effects: Vec<Effect>) {
+#[cfg(test)]
+fn run_fake_cycle(state: &mut AppState, backend: &mut impl BackendPort, effects: Vec<Effect>) {
     for effect in effects {
         backend.dispatch(effect);
     }
@@ -10628,19 +10647,23 @@ mod tests {
         assert!(state.decisions().is_empty());
     }
 
-    fn pr_link(number: u32) -> PrLink {
-        let mut pr = PrLink::new(number, format!("https://github.com/o/r/pull/{number}"));
+    fn pr_link(number: u32) -> PrEntry {
+        let identity = usagi_core::domain::pr_inventory::canonicalize(&format!(
+            "https://github.com/o/r/pull/{number}"
+        ))
+        .unwrap();
+        let mut pr = PrEntry::new(identity);
         pr.auto_open = true;
         pr
     }
 
-    fn merged_pr_link(number: u32) -> PrLink {
+    fn merged_pr_link(number: u32) -> PrEntry {
         let mut pr = pr_link(number);
         pr.state = PrState::Merged;
         pr
     }
 
-    fn observe_prs(state: &mut AppState, session: SessionId, revision: u64, prs: Vec<PrLink>) {
+    fn observe_prs(state: &mut AppState, session: SessionId, revision: u64, prs: Vec<PrEntry>) {
         let _ = update(
             state,
             AppEvent::Backend(BackendEvent::PullRequestsLoaded {
@@ -10922,7 +10945,7 @@ mod tests {
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Enter)),
             vec![Effect::OpenPullRequest {
-                url: prs[1].url.clone(),
+                url: prs[1].url().to_owned(),
             }]
         );
 
@@ -11187,7 +11210,7 @@ mod tests {
                 .unwrap()
                 .prs()
                 .iter()
-                .any(|pr| pr.url == second.url)
+                .any(|pr| pr.identity == second.identity)
         );
     }
 
