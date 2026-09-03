@@ -30288,8 +30288,7 @@ mod tests {
         }
     }
 
-    /// A shell driven into Closeup on `session` whose pane holds `history` as its
-    /// selected interrupted tab.
+    /// A shell driven into Closeup on `session` whose pane restores `history`.
     fn closeup_with_history(
         workspace: WorkspaceId,
         session: SessionId,
@@ -30326,7 +30325,6 @@ mod tests {
                 interrupted: history,
             }],
         ));
-        let _ = runtime.select_tab(TabDirection::Next);
         (ui, runtime)
     }
 
@@ -30539,9 +30537,29 @@ mod tests {
             })),
         );
         let mut pending = std::collections::HashMap::new();
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
         assert!(ui.agent_slot_order().is_empty());
+        assert_eq!(
+            runtime.focused_interrupted().map(|tab| tab.continuation),
+            Some(history.continuation),
+            "an interrupted-only pane must be selectable without opening another Agent"
+        );
 
-        super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending);
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CloseTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            0,
+            0,
+        ));
 
         assert!(!runtime.active_pane().has_tabs());
         assert_eq!(ui.agent_slot_order(), vec![history.continuation]);

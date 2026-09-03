@@ -675,27 +675,26 @@ fn restore_interrupted(state: &mut PaneState, tabs: Vec<InterruptedTab>) -> Vec<
     Vec::new()
 }
 
-/// Move the selection off an interrupted tab the projection removed. Every other
-/// selection kind is left untouched.
+/// Keep a restored tab selected, and move the selection off interrupted history
+/// that the projection removed.
 fn repair_interrupted_selection(state: &mut PaneState, fallback: Option<Target>) {
-    if !matches!(
-        state.selected,
-        PaneSelection::Tab(TabSelection::Interrupted(_))
-    ) || state
+    if state
         .tabs
         .iter()
         .any(|tab| selection_for(tab) == state.selected)
     {
         return;
     }
-    state.selected = state.tabs.first().map_or_else(
-        || {
-            PaneSelection::Target(
-                fallback.expect("a removed interrupted selection had an interrupted tab"),
-            )
-        },
-        selection_for,
-    );
+    if let Some(tab) = state.tabs.first() {
+        state.selected = selection_for(tab);
+    } else if matches!(
+        state.selected,
+        PaneSelection::Tab(TabSelection::Interrupted(_))
+    ) {
+        state.selected = PaneSelection::Target(
+            fallback.expect("a removed interrupted selection had an interrupted tab"),
+        );
+    }
 }
 
 fn interrupted_mut(
@@ -2308,6 +2307,11 @@ mod tests {
         assert_eq!(
             interrupted_tabs(&state),
             vec![first.continuation, second.continuation]
+        );
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Interrupted(first.continuation)),
+            "the first restored history tab must own selection without a live sibling"
         );
 
         // A refresh replaces display material in place, keeping both slots.

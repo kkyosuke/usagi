@@ -4643,10 +4643,19 @@ mod tests {
                 target: Target::Root(workspace),
                 panes: Vec::new(),
                 selected: None,
-                selected_interrupted: Some(continuation),
+                selected_interrupted: None,
                 interrupted: vec![history],
             }],
         ));
+        assert_eq!(
+            runtime
+                .panes()
+                .pane(Target::Root(workspace))
+                .expect("the restored root pane exists")
+                .selected(),
+            &PaneSelection::Tab(TabSelection::Interrupted(continuation)),
+            "root history must not need a live Agent to establish selection"
+        );
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(
@@ -5204,8 +5213,8 @@ mod tests {
         )
     }
 
-    /// Seed one target's interrupted history through the restore fence and select
-    /// the first tab, as the shell does after a coherent observation.
+    /// Seed one target's interrupted history through the restore fence. A
+    /// coherent observation selects the first restored tab.
     fn with_history(
         runtime: &mut WorkspaceRuntime,
         target: Target,
@@ -5332,7 +5341,6 @@ mod tests {
         );
         // A history tab is not a live pane: nothing to attach, poll, or resize.
         assert!(!runtime.state().has_live_pane());
-        let _ = runtime.select_tab(TabDirection::Next);
         assert_eq!(
             runtime.focused_interrupted().map(|tab| tab.continuation),
             Some(history.continuation)
@@ -5365,7 +5373,6 @@ mod tests {
             Target::Session(session),
             vec![resumed.clone(), other.clone()],
         );
-        let _ = runtime.select_tab(TabDirection::Next);
 
         let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
         assert_eq!(command.target, *resumed.target.as_ref().unwrap());
@@ -5416,7 +5423,6 @@ mod tests {
             Target::Session(session),
             vec![unresumable.clone(), resumable.clone()],
         );
-        let _ = runtime.select_tab(TabDirection::Next);
         assert_eq!(
             runtime.resume_selected_tab(OperationId::new()),
             Err(ResumeRejection::NotResumable)
