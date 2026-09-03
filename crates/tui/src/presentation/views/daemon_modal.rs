@@ -260,8 +260,8 @@ mod tests {
     };
     use crate::presentation::widgets::display_width;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, DaemonAction, DaemonControlState, Effect, Notice,
-        SafeError, SafeMessage, update,
+        AppEvent, AppKey, AppState, BackendEvent, DaemonAction, DaemonControlState, Notice,
+        PendingToken, SafeError, SafeMessage, update,
     };
     use usagi_core::domain::agent::AgentRuntimeInventoryState;
     use usagi_core::domain::id::WorkspaceId;
@@ -332,33 +332,27 @@ mod tests {
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("daemon".to_owned())),
         );
-        let effects = update(&mut state, AppEvent::Key(AppKey::Char('r')));
-        let [Effect::DaemonControl { action, token, .. }] = effects.as_slice() else {
-            panic!("daemon restart did not produce its typed effect");
-        };
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('r')));
         assert!(strip(&action_result_line(state.daemon_control())).contains("in progress"));
 
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::DaemonControlFinished {
                 workspace,
-                action: *action,
-                token: *token,
+                action: DaemonAction::Restart,
+                token: PendingToken::from_raw(1),
                 result: Ok(Notice::new("restart complete")),
             }),
         );
         assert!(strip(&action_result_line(state.daemon_control())).contains("restart complete"));
 
-        let effects = update(&mut state, AppEvent::Key(AppKey::Char('x')));
-        let [Effect::DaemonControl { token, .. }] = effects.as_slice() else {
-            panic!("daemon stop did not produce its typed effect");
-        };
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::DaemonControlFinished {
                 workspace,
                 action: DaemonAction::Stop,
-                token: *token,
+                token: PendingToken::from_raw(2),
                 result: Err(SafeError {
                     message: SafeMessage::new("stop refused"),
                     error_id: "daemon-stop-refused".to_owned(),
