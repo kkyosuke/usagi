@@ -23,8 +23,9 @@ use usagi_core::{
         supervisor::{
             ARTIFACT_RETRY_BASE_SECONDS, ARTIFACT_RETRY_MAX_SECONDS, ArtifactContract,
             ArtifactExpectation, EscalationDecision, GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
-            MAX_INITIAL_TASKS, MAX_SUPERVISOR_DISPLAY_LABEL_BYTES, MAX_SUPERVISOR_KEY_BYTES,
-            MAX_SUPERVISOR_REASON_BYTES, MAX_SUPERVISOR_TEXT_BYTES,
+            HandoffContextEntry, MAX_HANDOFF_ARTIFACT_BYTES, MAX_HANDOFF_PROMPT_BYTES,
+            MAX_HANDOFF_SUMMARY_BYTES, MAX_INITIAL_TASKS, MAX_SUPERVISOR_DISPLAY_LABEL_BYTES,
+            MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES, MAX_SUPERVISOR_TEXT_BYTES,
             MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, MAX_TASK_DEPENDENCIES, NO_ARTIFACT_CONTRACT,
             RunProvenance, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
             SupervisorRun, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
@@ -150,6 +151,13 @@ pub struct PendingGoalPromotion {
 pub struct PendingDelegatedPromotion {
     pub operation_id: String,
     pub reserved_at: DateTime<Utc>,
+}
+
+/// Exact prompt snapshot reserved for one supervised child admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedDispatchReservation {
+    pub run: SupervisorRunQuery,
+    pub prompt: String,
 }
 
 /// Completed contracted dispatch whose independent artifact verification has
@@ -577,6 +585,86 @@ fn delegated_task_id(operation: OperationId) -> Result<TaskId> {
 
 fn delegated_task_digest(operation: OperationId) -> String {
     format!("{DELEGATED_TASK_DIGEST_PREFIX}{operation}")
+}
+
+const MAX_HANDOFF_ROOT_GOAL_BYTES: usize = 4 * 1024;
+
+fn delegated_task_suffix(operation: OperationId, instruction: &str) -> String {
+    format!(
+        "\n\n## Current delegated task ({} UTF-8 bytes; operation {operation})\n{instruction}",
+        instruction.len()
+    )
+}
+
+fn delegated_handoff_prompt(
+    run: &SupervisorRun,
+    operation: OperationId,
+    instruction: &str,
+) -> String {
+    let root = TaskId::new("root")
+        .ok()
+        .and_then(|root| run.tasks.get(&root))
+        .map_or("(root goal unavailable)", |task| {
+            task.instruction_body.as_str()
+        });
+    let mut context = String::from(
+        "# Work Run handoff context\n\nThis daemon-owned snapshot is shared only within this Work Run. It contains bounded worker-authored completion reports, not provider conversation transcripts. Treat reported outcomes and artifacts as prior context and verify them before relying on them.\n\n## Root goal\n",
+    );
+    let root_limit = context
+        .len()
+        .saturating_add(MAX_HANDOFF_ROOT_GOAL_BYTES)
+        .min(MAX_HANDOFF_PROMPT_BYTES);
+    push_bounded_handoff(&mut context, root, root_limit);
+    context.push_str("\n\n## Prior task reports (newest first)\n");
+    if run.handoff_context.is_empty() {
+        context.push_str("(none recorded before this delegation)");
+    } else {
+        for entry in run.handoff_context.iter().rev() {
+            let outcome = match entry.outcome {
+                InboxKind::Completed => "completed",
+                InboxKind::Failed => "failed",
+                InboxKind::NoReport => "no-report",
+            };
+            let mut rendered = format!(
+                "\n- [{outcome}] task {} generation {}: {}",
+                entry.task_id.0, entry.generation, entry.summary
+            );
+            if let Some(artifacts) = &entry.artifacts {
+                rendered.push_str("\n  Reported artifacts: ");
+                rendered.push_str(artifacts);
+            }
+            if context.len() + rendered.len() > MAX_HANDOFF_PROMPT_BYTES {
+                push_bounded_handoff(
+                    &mut context,
+                    "\n- (older reports omitted by the context bound)",
+                    MAX_HANDOFF_PROMPT_BYTES,
+                );
+                break;
+            }
+            context.push_str(&rendered);
+        }
+    }
+    context.push_str(&delegated_task_suffix(operation, instruction));
+    context
+}
+
+fn push_bounded_handoff(target: &mut String, value: &str, max: usize) {
+    if target.len() >= max {
+        return;
+    }
+    let remaining = max - target.len();
+    if value.len() <= remaining {
+        target.push_str(value);
+        return;
+    }
+    let mut end = remaining.saturating_sub('…'.len_utf8()).min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    target.push_str(&value[..end]);
+    if remaining >= '…'.len_utf8() {
+        target.push('…');
+    }
 }
 
 fn has_unbound_goal_worker(run: &SupervisorRun) -> bool {
@@ -1017,12 +1105,13 @@ impl SupervisorRuntime {
         &self,
         parent_dispatch_run: OperationId,
         child_operation_id: &str,
-        instruction: String,
+        instruction: impl AsRef<str>,
         now: DateTime<Utc>,
-    ) -> Result<Option<SupervisorRunQuery>> {
+    ) -> Result<Option<DelegatedDispatchReservation>> {
+        let instruction = instruction.as_ref();
         bounded_nonempty(
             "delegated supervisor instruction",
-            &instruction,
+            instruction,
             MAX_SUPERVISOR_TEXT_BYTES,
         )?;
         let child_dispatch_run = OperationId::parse(child_operation_id)
@@ -1043,21 +1132,27 @@ impl SupervisorRuntime {
         }
         let task_id = delegated_task_id(child_dispatch_run)?;
         if let Some(existing) = run.tasks.get(&task_id) {
+            let suffix = delegated_task_suffix(child_dispatch_run, instruction);
             if !is_delegated_reservation(existing, child_dispatch_run)
                 || existing.parent_task_id.as_ref() != Some(&parent_task_id)
-                || existing.instruction_body != instruction
+                || (existing.instruction_body != instruction
+                    && !existing.instruction_body.ends_with(&suffix))
                 || existing.required_artifact_contract != NO_ARTIFACT_CONTRACT
             {
                 anyhow::bail!("delegated task conflicts with its existing supervisor task");
             }
-            return Ok(Some(run.query()));
+            return Ok(Some(DelegatedDispatchReservation {
+                run: run.query(),
+                prompt: existing.instruction_body.clone(),
+            }));
         }
+        let prompt = delegated_handoff_prompt(&run, child_dispatch_run, instruction);
         let mut task = task_node(
             &run,
             task_id,
             Some(parent_task_id),
             BTreeSet::new(),
-            instruction,
+            prompt.clone(),
             NO_ARTIFACT_CONTRACT,
         );
         task.instruction_digest = delegated_task_digest(child_dispatch_run);
@@ -1068,7 +1163,10 @@ impl SupervisorRuntime {
             SupervisorEventSource::Admission,
             SupervisorEventKind::AddTask { task },
         )?;
-        Ok(Some(run.query()))
+        Ok(Some(DelegatedDispatchReservation {
+            run: run.query(),
+            prompt,
+        }))
     }
 
     /// Pending delegated task reservations recoverable from their stable task
@@ -2459,9 +2557,10 @@ impl SupervisorRuntime {
                     state: terminal,
                 };
                 run = self.apply(&run, now, source(kind), event)?;
-            } else if !current.state.terminal() {
+            } else if !current.state.terminal() && current.state != TaskState::Verifying {
                 continue;
             }
+            run = self.record_terminal_handoff(run, &task_id, &provenance, kind, now)?;
             if let Some(parent_id) = task.parent_task_id {
                 let child_run = provenance.dispatch_run_id;
                 self.reserve_parent_wake(&mut run, &parent_id, child_run, kind, now)?;
@@ -2646,12 +2745,14 @@ impl SupervisorRuntime {
         self.save_state(&state)
     }
     fn outcome(&self, child: OperationId, fallback: InboxKind) -> Result<WakeOutcome> {
-        let message = self.dispatch.binding(child)?.and_then(|binding| {
-            self.dispatch
+        let message = match self.dispatch.binding(child)? {
+            Some(binding) => self
+                .dispatch
                 .inbox(&binding.caller)
                 .ok()
-                .and_then(|messages| messages.into_iter().find(|message| message.run_id == child))
-        });
+                .and_then(|messages| messages.into_iter().find(|message| message.run_id == child)),
+            None => None,
+        };
         Ok(message.map_or(
             WakeOutcome {
                 kind: fallback,
@@ -2662,6 +2763,81 @@ impl SupervisorRuntime {
                 summary: message.summary,
             },
         ))
+    }
+    fn handoff_entry(
+        &self,
+        task_id: &TaskId,
+        generation: u64,
+        dispatch_run_id: OperationId,
+        fallback: InboxKind,
+        recorded_at: DateTime<Utc>,
+    ) -> Result<HandoffContextEntry> {
+        let message = self.dispatch.binding(dispatch_run_id)?.and_then(|binding| {
+            self.dispatch
+                .inbox(&binding.caller)
+                .ok()
+                .and_then(|messages| {
+                    messages
+                        .into_iter()
+                        .find(|message| message.run_id == dispatch_run_id)
+                })
+        });
+        let message = message.filter(|message| message.kind == fallback);
+        let summary = message.as_ref().map_or_else(
+            || "worker terminal state committed without an inbox report".to_owned(),
+            |message| compact_handoff_text(&message.summary, MAX_HANDOFF_SUMMARY_BYTES),
+        );
+        let artifacts = message
+            .as_ref()
+            .and_then(|message| message.result.as_ref())
+            .and_then(structured_artifact_summary);
+        Ok(HandoffContextEntry {
+            task_id: task_id.clone(),
+            generation,
+            dispatch_run_id,
+            outcome: fallback,
+            summary,
+            artifacts,
+            recorded_at,
+        })
+    }
+    fn record_terminal_handoff(
+        &self,
+        run: SupervisorRun,
+        task_id: &TaskId,
+        provenance: &RunProvenance,
+        kind: InboxKind,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRun> {
+        let current = run.tasks.get(task_id).expect("task retained");
+        let captures_handoff = current.state == TaskState::Succeeded
+            || current.state == TaskState::Failed
+            || current.state == TaskState::Verifying;
+        if !captures_handoff
+            || current.generation != provenance.generation
+            || current.assigned_dispatch_run != Some(provenance.dispatch_run_id)
+            || run
+                .handoff_context
+                .iter()
+                .any(|entry| entry.dispatch_run_id == provenance.dispatch_run_id)
+        {
+            return Ok(run);
+        }
+        self.handoff_entry(
+            task_id,
+            current.generation,
+            provenance.dispatch_run_id,
+            kind,
+            now,
+        )
+        .and_then(|entry| {
+            self.apply(
+                &run,
+                now,
+                source(kind),
+                SupervisorEventKind::RecordHandoff { entry },
+            )
+        })
     }
     fn deliver_reserved(&self, now: DateTime<Utc>, waker: &mut dyn DecisionWaker) -> Result<()> {
         let mut state = self.load_state()?;
@@ -2854,6 +3030,102 @@ fn artifact_worktrees(run: &SupervisorRun) -> Vec<ArtifactWorktreeRef> {
     worktrees
 }
 
+fn compact_handoff_text(value: &str, max: usize) -> String {
+    let mut compact = String::new();
+    let mut pending_space = false;
+    let mut truncated = false;
+    for character in value.chars() {
+        if character.is_whitespace() {
+            pending_space = !compact.is_empty();
+            continue;
+        }
+        if !presentation_text_is_safe(&character.to_string()) {
+            continue;
+        }
+        if pending_space {
+            if compact.len() + 1 > max {
+                truncated = true;
+                break;
+            }
+            compact.push(' ');
+            pending_space = false;
+        }
+        if compact.len() + character.len_utf8() > max {
+            truncated = true;
+            break;
+        }
+        compact.push(character);
+    }
+    if truncated {
+        let mut end = max.saturating_sub('…'.len_utf8()).min(compact.len());
+        while end > 0 && !compact.is_char_boundary(end) {
+            end -= 1;
+        }
+        compact.truncate(end);
+        if max >= '…'.len_utf8() {
+            compact.push('…');
+        }
+    }
+    if compact.is_empty() {
+        "worker supplied no safe summary text".into()
+    } else {
+        compact
+    }
+}
+
+fn structured_artifact_summary(result: &StructuredResult) -> Option<String> {
+    const MAX_ITEMS: usize = 8;
+    const MAX_ITEM_BYTES: usize = 256;
+
+    let mut facts = Vec::new();
+    if let Some(pr) = result.pr.as_deref() {
+        facts.push(format!("PR {}", compact_handoff_text(pr, MAX_ITEM_BYTES)));
+    }
+    if !result.commits.is_empty() {
+        let commits = result
+            .commits
+            .iter()
+            .take(MAX_ITEMS)
+            .map(|commit| compact_handoff_text(commit, MAX_ITEM_BYTES))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let omitted = result.commits.len().saturating_sub(MAX_ITEMS);
+        facts.push(if omitted == 0 {
+            format!("commits {commits}")
+        } else {
+            format!("commits {commits} (+{omitted} omitted)")
+        });
+    }
+    if !result.changed_files.is_empty() {
+        let files = result
+            .changed_files
+            .iter()
+            .take(MAX_ITEMS)
+            .map(|file| compact_handoff_text(file, MAX_ITEM_BYTES))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let omitted = result.changed_files.len().saturating_sub(MAX_ITEMS);
+        facts.push(if omitted == 0 {
+            format!("files {files}")
+        } else {
+            format!("files {files} (+{omitted} omitted)")
+        });
+    }
+    if let Some(verification) = result.verification.as_deref() {
+        facts.push(format!(
+            "verification {}",
+            compact_handoff_text(verification, MAX_ITEM_BYTES)
+        ));
+    }
+    if facts.is_empty() {
+        return None;
+    }
+    Some(compact_handoff_text(
+        &facts.join("; "),
+        MAX_HANDOFF_ARTIFACT_BYTES,
+    ))
+}
+
 fn terminal(status: RunStatus) -> Option<(TaskState, InboxKind)> {
     match status {
         RunStatus::Preparing | RunStatus::Running => None,
@@ -2882,7 +3154,7 @@ mod tests {
             TerminalRef, WorktreeId,
         },
         pr_inventory::GitHubRepository,
-        supervisor::{ArtifactExpectation, SupervisorRun, TaskNode},
+        supervisor::{ArtifactExpectation, MAX_HANDOFF_CONTEXT_ENTRIES, SupervisorRun, TaskNode},
     };
 
     fn now() -> DateTime<Utc> {
@@ -4486,19 +4758,19 @@ mod tests {
             .reserve_delegated_dispatch(
                 root_operation,
                 &child_operation.to_string(),
-                "child work".into(),
+                "child work",
                 now(),
             )
             .unwrap()
             .unwrap();
-        assert_eq!(reserved.tasks.len(), 2);
-        assert_eq!(reserved.provenance.len(), 1);
+        assert_eq!(reserved.run.tasks.len(), 2);
+        assert_eq!(reserved.run.provenance.len(), 1);
         assert_eq!(
             scheduler
                 .reserve_delegated_dispatch(
                     root_operation,
                     &child_operation.to_string(),
-                    "child work".into(),
+                    "child work",
                     now(),
                 )
                 .unwrap()
@@ -4510,7 +4782,7 @@ mod tests {
                 .reserve_delegated_dispatch(
                     root_operation,
                     &child_operation.to_string(),
-                    "different child work".into(),
+                    "different child work",
                     now(),
                 )
                 .unwrap_err()
@@ -4632,6 +4904,361 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One durable fixture proves report capture, prompt inheritance, restart replay, and classic isolation together.
+    fn completed_child_handoff_is_durable_and_inherited_by_later_delegations() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let root_operation = OperationId::new();
+        scheduler
+            .dispatch
+            .upsert_run(DispatchRun {
+                run_id: root_operation,
+                agent_id: AgentId::new(),
+                prompt: "root".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let root = scheduler
+            .start_for_workspace_root_dispatch(
+                "goal-composer",
+                workspace,
+                &root_operation.to_string(),
+                goal("ship the authentication change"),
+                None,
+                &root_worker(workspace),
+                now(),
+            )
+            .unwrap();
+
+        let first_operation = OperationId::new();
+        let first = scheduler
+            .reserve_delegated_dispatch(
+                root_operation,
+                &first_operation.to_string(),
+                "inspect the authentication flow",
+                now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(first.prompt.contains("ship the authentication change"));
+        assert!(first.prompt.contains("inspect the authentication flow"));
+        assert!(
+            first
+                .prompt
+                .contains("none recorded before this delegation")
+        );
+
+        let caller = CallerRef {
+            session_id: None,
+            agent_id: AgentId::new(),
+        };
+        scheduler
+            .dispatch
+            .upsert_run(DispatchRun {
+                run_id: first_operation,
+                agent_id: AgentId::new(),
+                prompt: first.prompt,
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            })
+            .unwrap();
+        scheduler
+            .dispatch
+            .upsert_binding(DispatchBinding {
+                run_id: first_operation,
+                caller: caller.clone(),
+                worker: WorkerRef {
+                    session_id: Some(SessionId::new()),
+                    agent_id: AgentId::new(),
+                },
+            })
+            .unwrap();
+        scheduler
+            .dispatch
+            .append_inbox(
+                &caller,
+                InboxMessage {
+                    run_id: first_operation,
+                    from: WorkerRef {
+                        session_id: Some(SessionId::new()),
+                        agent_id: AgentId::new(),
+                    },
+                    kind: InboxKind::Completed,
+                    summary: "Mapped OAuth callbacks\nwithout copying a transcript\u{202e}".into(),
+                    result: Some(StructuredResult {
+                        pr: Some("https://github.com/acme/repo/pull/42".into()),
+                        commits: vec!["abc123".into()],
+                        changed_files: vec!["src/auth.rs".into()],
+                        verification: Some("targeted tests pass".into()),
+                    }),
+                    created_at: now(),
+                    read: false,
+                },
+            )
+            .unwrap();
+        scheduler
+            .attach_delegated_dispatch(
+                root_operation,
+                &first_operation.to_string(),
+                "inspect the authentication flow".into(),
+                &delegated_worker(workspace),
+                now(),
+            )
+            .unwrap();
+        scheduler
+            .tick(root.supervisor_run_id, now(), &mut Waker::default())
+            .unwrap();
+
+        let stored = scheduler
+            .supervisor
+            .load(root.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.handoff_context.len(), 1);
+        assert_eq!(
+            stored.handoff_context[0].summary,
+            "Mapped OAuth callbacks without copying a transcript"
+        );
+        assert!(
+            stored.handoff_context[0]
+                .artifacts
+                .as_deref()
+                .unwrap()
+                .contains("src/auth.rs")
+        );
+
+        let second_operation = OperationId::new();
+        let second = scheduler
+            .reserve_delegated_dispatch(
+                root_operation,
+                &second_operation.to_string(),
+                "implement the callback handler",
+                now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(second.prompt.contains("ship the authentication change"));
+        assert!(
+            second
+                .prompt
+                .contains("Mapped OAuth callbacks without copying a transcript")
+        );
+        assert!(
+            second
+                .prompt
+                .contains("https://github.com/acme/repo/pull/42")
+        );
+        assert!(second.prompt.contains("abc123"));
+        assert!(second.prompt.contains("src/auth.rs"));
+        assert!(second.prompt.contains("implement the callback handler"));
+        assert!(!second.prompt.contains('\u{202e}'));
+        let suffix = delegated_task_suffix(second_operation, "implement the callback handler");
+        assert!(second.prompt.len() <= MAX_HANDOFF_PROMPT_BYTES + suffix.len());
+
+        let restarted = SupervisorRuntime::new(temp.path());
+        let replay = restarted
+            .reserve_delegated_dispatch(
+                root_operation,
+                &second_operation.to_string(),
+                "implement the callback handler",
+                now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.prompt, second.prompt);
+        assert!(
+            restarted
+                .reserve_delegated_dispatch(
+                    OperationId::new(),
+                    &OperationId::new().to_string(),
+                    "classic delegation",
+                    now(),
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn handoff_rendering_bounds_and_sanitizes_every_report_shape() {
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let mut root = task(run.supervisor_run_id, "root", None);
+        root.instruction_body = "é".repeat(MAX_HANDOFF_ROOT_GOAL_BYTES);
+        run.tasks.insert(root.task_id.clone(), root);
+        for index in 0..MAX_HANDOFF_CONTEXT_ENTRIES {
+            let outcome = match index {
+                63 => InboxKind::NoReport,
+                62 => InboxKind::Failed,
+                _ => InboxKind::Completed,
+            };
+            run.handoff_context.push(HandoffContextEntry {
+                task_id: TaskId::new(format!("child-{index}")).unwrap(),
+                generation: 1,
+                dispatch_run_id: OperationId::new(),
+                outcome,
+                summary: "s".repeat(MAX_HANDOFF_SUMMARY_BYTES),
+                artifacts: (index != 63).then_some("a".repeat(MAX_HANDOFF_ARTIFACT_BYTES)),
+                recorded_at: now(),
+            });
+        }
+        let operation = OperationId::new();
+        let instruction = "continue with the bounded context";
+        let prompt = delegated_handoff_prompt(&run, operation, instruction);
+        let suffix = delegated_task_suffix(operation, instruction);
+        assert!(prompt.contains("[failed]"));
+        assert!(prompt.contains("[no-report]"));
+        assert!(prompt.contains("older reports omitted"));
+        assert!(prompt.ends_with(&suffix));
+        assert!(prompt.len() - suffix.len() <= MAX_HANDOFF_PROMPT_BYTES);
+
+        let mut full = "full".to_owned();
+        let full_len = full.len();
+        push_bounded_handoff(&mut full, "ignored", full_len);
+        assert_eq!(full, "full");
+        let mut multibyte = String::new();
+        push_bounded_handoff(&mut multibyte, "aébcdef", 5);
+        assert_eq!(multibyte, "a…");
+        let mut tiny = "xx".to_owned();
+        push_bounded_handoff(&mut tiny, "yy", 3);
+        assert_eq!(tiny, "xx");
+
+        assert_eq!(
+            compact_handoff_text("\n\u{202e}", 16),
+            "worker supplied no safe summary text"
+        );
+        assert_eq!(compact_handoff_text("abc d", 3), "…");
+        assert_eq!(compact_handoff_text("aébcd", 5), "a…");
+        assert_eq!(
+            compact_handoff_text("abcd", 2),
+            "worker supplied no safe summary text"
+        );
+        let many = StructuredResult {
+            pr: None,
+            commits: vec!["commit".into(); 9],
+            changed_files: vec!["file".into(); 10],
+            verification: None,
+        };
+        let artifacts = structured_artifact_summary(&many).unwrap();
+        assert!(artifacts.contains("+1 omitted"));
+        assert!(artifacts.contains("+2 omitted"));
+        assert!(structured_artifact_summary(&StructuredResult::default()).is_none());
+    }
+
+    #[test]
+    fn handoff_capture_propagates_a_corrupt_dispatch_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let task_id = TaskId::new("child").unwrap();
+        let dispatch_run_id = OperationId::new();
+        let mut child = task(run.supervisor_run_id, "child", None);
+        child.state = TaskState::Succeeded;
+        child.assigned_dispatch_run = Some(dispatch_run_id);
+        run.tasks.insert(task_id.clone(), child);
+        let provenance = provenance(run.supervisor_run_id, &task_id, None, dispatch_run_id);
+        run.provenance.insert(task_id.clone(), provenance.clone());
+
+        let mut ignored = run.clone();
+        ignored.tasks.get_mut(&task_id).unwrap().state = TaskState::Running;
+        assert!(
+            scheduler
+                .record_terminal_handoff(
+                    ignored,
+                    &task_id,
+                    &provenance,
+                    InboxKind::Completed,
+                    now(),
+                )
+                .unwrap()
+                .handoff_context
+                .is_empty()
+        );
+        let mut stale_generation = provenance.clone();
+        stale_generation.generation += 1;
+        assert!(
+            scheduler
+                .record_terminal_handoff(
+                    run.clone(),
+                    &task_id,
+                    &stale_generation,
+                    InboxKind::Completed,
+                    now(),
+                )
+                .unwrap()
+                .handoff_context
+                .is_empty()
+        );
+        let mut stale_assignment = run.clone();
+        stale_assignment
+            .tasks
+            .get_mut(&task_id)
+            .unwrap()
+            .assigned_dispatch_run = Some(OperationId::new());
+        assert!(
+            scheduler
+                .record_terminal_handoff(
+                    stale_assignment,
+                    &task_id,
+                    &provenance,
+                    InboxKind::Completed,
+                    now(),
+                )
+                .unwrap()
+                .handoff_context
+                .is_empty()
+        );
+        let mut already_recorded = run.clone();
+        already_recorded.handoff_context.push(HandoffContextEntry {
+            task_id: task_id.clone(),
+            generation: provenance.generation,
+            dispatch_run_id,
+            outcome: InboxKind::Completed,
+            summary: "already captured".into(),
+            artifacts: None,
+            recorded_at: now(),
+        });
+        assert_eq!(
+            scheduler
+                .record_terminal_handoff(
+                    already_recorded,
+                    &task_id,
+                    &provenance,
+                    InboxKind::Completed,
+                    now(),
+                )
+                .unwrap()
+                .handoff_context
+                .len(),
+            1
+        );
+
+        run.tasks.get_mut(&task_id).unwrap().state = TaskState::Verifying;
+        std::fs::write(scheduler.dispatch.registry_path(), "broken").unwrap();
+
+        assert!(
+            scheduler
+                .record_terminal_handoff(run, &task_id, &provenance, InboxKind::Completed, now(),)
+                .is_err()
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One fail-closed matrix exercises the durable child join boundary.
     fn delegated_dispatch_refuses_missing_malformed_and_ambiguous_reservations() {
         let temp = tempfile::tempdir().unwrap();
@@ -4663,18 +5290,37 @@ mod tests {
 
         assert!(
             scheduler
-                .reserve_delegated_dispatch(root_operation, "invalid", "child".into(), now())
+                .reserve_delegated_dispatch(root_operation, "invalid", "child", now())
+                .unwrap_err()
+                .to_string()
+                .contains("operation is invalid")
+        );
+        assert!(
+            scheduler
+                .reserve_delegated_dispatch(
+                    root_operation,
+                    "invalid",
+                    String::from("child"),
+                    now(),
+                )
                 .unwrap_err()
                 .to_string()
                 .contains("operation is invalid")
         );
         let outside = OperationId::new();
+        assert!(
+            scheduler
+                .reserve_delegated_dispatch(root_operation, &outside.to_string(), "", now(),)
+                .unwrap_err()
+                .to_string()
+                .contains("expected 1..=")
+        );
         assert_eq!(
             scheduler
                 .reserve_delegated_dispatch(
                     OperationId::new(),
                     &outside.to_string(),
-                    "child".into(),
+                    "child",
                     now(),
                 )
                 .unwrap(),
@@ -4781,7 +5427,7 @@ mod tests {
             .reserve_delegated_dispatch(
                 root_operation,
                 &child_operation.to_string(),
-                "child".into(),
+                "child",
                 now(),
             )
             .unwrap()
@@ -4878,7 +5524,7 @@ mod tests {
             .reserve_delegated_dispatch(
                 root_operation,
                 &child_operation.to_string(),
-                "child".into(),
+                "child",
                 now(),
             )
             .unwrap();
@@ -4902,7 +5548,7 @@ mod tests {
                 .reserve_delegated_dispatch(
                     root_operation,
                     &OperationId::new().to_string(),
-                    "another child".into(),
+                    "another child",
                     now(),
                 )
                 .unwrap_err()
@@ -4972,7 +5618,7 @@ mod tests {
             .reserve_delegated_dispatch(
                 root_operation,
                 &child_operation.to_string(),
-                "child work".into(),
+                "child work",
                 now(),
             )
             .unwrap()
@@ -5070,7 +5716,7 @@ mod tests {
                 .reserve_delegated_dispatch(
                     root_operation,
                     &child_operation.to_string(),
-                    "child".into(),
+                    "child",
                     now(),
                 )
                 .unwrap_err()
@@ -5081,7 +5727,7 @@ mod tests {
             .reserve_delegated_dispatch(
                 root_operation,
                 &child_operation.to_string(),
-                "child".into(),
+                "child",
                 now(),
             )
             .unwrap();
@@ -6801,7 +7447,7 @@ mod tests {
             .reserve_delegated_dispatch(
                 parent_operation,
                 &child_operation.to_string(),
-                "delegated child".into(),
+                "delegated child",
                 now(),
             )
             .unwrap()

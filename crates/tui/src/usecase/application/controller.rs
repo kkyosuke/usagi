@@ -2138,6 +2138,10 @@ pub enum AppEvent {
     /// cell or terminal capacity, so CJK labels, resize, and scrolling cannot
     /// move a rabbit away from the session it draws.
     GardenClick(GardenClick),
+    /// Focus one stable session row without activating its Closeup. The process
+    /// deck uses this when returning to a workspace whose controller was torn
+    /// down during a project switch.
+    FocusSession(SessionId),
     /// Open one stable session without relying on list position. The process
     /// deck uses this after a Garden visit switched to another workspace.
     VisitSession(SessionId),
@@ -3288,6 +3292,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
         AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
         AppEvent::GardenClick(click) => update_garden_click(state, click),
+        AppEvent::FocusSession(session) => focus_session(state, session),
         AppEvent::VisitSession(session) => visit_session(state, session),
         AppEvent::GardenUnavailable => {
             if state.overlay == Some(Overlay::Garden) {
@@ -5676,14 +5681,19 @@ fn update_garden_click(state: &mut AppState, click: GardenClick) -> Vec<Effect> 
 }
 
 fn visit_session(state: &mut AppState, session: SessionId) -> Vec<Effect> {
+    focus_session(state, session);
     let selection = Selection::Target(Target::Session(session));
-    state.select_row(selection);
     if state.selected != selection {
         return Vec::new();
     }
     // The same activation the sidebar performs, including its refusal to attach
     // an unusable checkout. The garden adds no target semantics of its own.
     activate_selected(state)
+}
+
+fn focus_session(state: &mut AppState, session: SessionId) -> Vec<Effect> {
+    state.select_row(Selection::Target(Target::Session(session)));
+    Vec::new()
 }
 
 fn activate_selected(state: &mut AppState) -> Vec<Effect> {
@@ -10034,6 +10044,20 @@ mod tests {
         assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
         assert_eq!(state.active(), Some(second));
         assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+    }
+
+    #[test]
+    fn a_project_return_focuses_the_stable_session_without_opening_closeup() {
+        let (workspace, first, second) = ids();
+        let mut state = sized_home(workspace, vec![first, second], 100, 30);
+
+        assert!(update(&mut state, AppEvent::FocusSession(second)).is_empty());
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+        assert_eq!(state.active(), Some(first));
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+
+        assert!(update(&mut state, AppEvent::FocusSession(SessionId::new())).is_empty());
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
     }
 
     #[test]

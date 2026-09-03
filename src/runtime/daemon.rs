@@ -5846,14 +5846,7 @@ fn dispatch_agent_tool(
                     })?;
                 let scope = bound.scope_resolver();
                 let task_instruction = input.prompt.clone();
-                let dispatch_intent = DispatchIntent {
-                    workspace,
-                    session_name: session_name.clone(),
-                    caller,
-                    agent: selected,
-                    prompt: input.prompt,
-                };
-                let supervised = supervisor
+                let reservation = supervisor
                     .lock()
                     .map_err(|_| {
                         ProtocolError::new(
@@ -5864,11 +5857,19 @@ fn dispatch_agent_tool(
                     .reserve_delegated_dispatch(
                         parent_dispatch_run,
                         &operation_id,
-                        task_instruction.clone(),
+                        task_instruction,
                         chrono::Utc::now(),
                     )
-                    .map_err(supervisor_error)?
-                    .is_some();
+                    .map_err(supervisor_error)?;
+                let supervised = reservation.is_some();
+                let prompt = reservation.map_or(input.prompt, |reservation| reservation.prompt);
+                let dispatch_intent = DispatchIntent {
+                    workspace,
+                    session_name: session_name.clone(),
+                    caller,
+                    agent: selected,
+                    prompt,
+                };
                 let admission = dispatch_agent_after_preflight(
                     agent,
                     &operation_id,
@@ -9126,14 +9127,7 @@ fn delegate_brief(
     )?;
     let id = record_session_lineage(agent, workspace, &created.body, &name)?;
     let scope = bound.scope_resolver();
-    let dispatch_intent = DispatchIntent {
-        workspace,
-        session_name: name.clone(),
-        caller,
-        agent: DispatchAgentIntent::New { runtime, model },
-        prompt: prompt.clone(),
-    };
-    let supervised = supervisor
+    let reservation = supervisor
         .lock()
         .map_err(|_| SessionRuntimeError::Storage)?
         .reserve_delegated_dispatch(
@@ -9142,8 +9136,16 @@ fn delegate_brief(
             prompt.clone(),
             chrono::Utc::now(),
         )
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .is_some();
+        .map_err(|_| SessionRuntimeError::Storage)?;
+    let supervised = reservation.is_some();
+    let prompt = reservation.map_or(prompt, |reservation| reservation.prompt);
+    let dispatch_intent = DispatchIntent {
+        workspace,
+        session_name: name.clone(),
+        caller,
+        agent: DispatchAgentIntent::New { runtime, model },
+        prompt,
+    };
     let admission =
         dispatch_agent_after_preflight(agent, operation_id, &dispatch_intent, id, &scope);
     let admission = match admission {
