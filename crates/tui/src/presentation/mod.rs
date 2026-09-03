@@ -52,6 +52,7 @@ use crate::presentation::views::director_drawer::{
     self, DirectorCommandProjection, DirectorConversation, DirectorDrawerProjection,
     DirectorNewProjection, DirectorOrganizationRow, WorkRunControlProjection,
 };
+use crate::presentation::views::key_help::{self, Context as KeyHelpContext};
 use crate::presentation::views::new::{self, DirectoryCompletion, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::pr_modal;
@@ -78,10 +79,10 @@ use crate::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit, AgentTabProjection,
 };
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DirectorNew, Effect, EnvironmentEntry,
-    ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay,
-    PendingToken, RoleChoice, Route, SessionBranchCatalog, SessionRoleCatalog,
-    SessionRoleProjection, Target, WorkspaceDrawerFocus,
+    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState, DirectorNew,
+    Effect, EnvironmentEntry, ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice,
+    OperationResult, Overlay, PendingToken, RoleChoice, Route, SessionBranchCatalog,
+    SessionRoleCatalog, SessionRoleProjection, Target, WorkspaceDrawerFocus,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -730,6 +731,8 @@ fn key_to_terminal_bytes_for_mode(key: Key, bracketed_paste: bool) -> Option<Vec
         Key::Escape => b"\x1b".to_vec(),
         Key::Up => b"\x1b[A".to_vec(),
         Key::Down => b"\x1b[B".to_vec(),
+        Key::PageUp => b"\x1b[5~".to_vec(),
+        Key::PageDown => b"\x1b[6~".to_vec(),
         Key::Right | Key::SelectRight => b"\x1b[C".to_vec(),
         Key::Left | Key::SelectLeft => b"\x1b[D".to_vec(),
         // The focused shell owns its own line editing: forward Home/Ctrl-A and
@@ -741,6 +744,9 @@ fn key_to_terminal_bytes_for_mode(key: Key, bracketed_paste: bool) -> Option<Vec
         Key::Quit => vec![3],
         Key::CtrlQ => vec![17],
         Key::CtrlD => vec![4],
+        Key::CtrlX => vec![24],
+        // Contextual help is presentation-owned and must never reach a PTY.
+        Key::Help => return None,
         Key::Live(_)
         | Key::TerminalCopy { .. }
         | Key::Click { .. }
@@ -3558,10 +3564,28 @@ fn run_workspace_config(
         available_models,
         branches,
     );
+    let mut help_open = false;
     loop {
         let (height, width) = term.size()?;
-        term.draw(&config::render_over(height, width, base, &form))?;
-        match step_workspace_config(&mut form, term.read_key()?, settings) {
+        let frame = config::render_over(height, width, base, &form);
+        let frame = if help_open {
+            key_help::render_over(height, width, &frame, config_help_context(&form))
+        } else {
+            frame
+        };
+        term.draw(&frame)?;
+        let key = term.read_key()?;
+        if help_open {
+            if matches!(key, Key::Help | Key::Escape) {
+                help_open = false;
+            }
+            continue;
+        }
+        if key == Key::Help {
+            help_open = true;
+            continue;
+        }
+        match step_workspace_config(&mut form, key, settings) {
             WorkspaceConfigStep::Stay => {}
             WorkspaceConfigStep::Back => return Ok(()),
             WorkspaceConfigStep::Save => {
@@ -3577,6 +3601,16 @@ fn run_workspace_config(
                 let _ = save_environment_responsive(term, &mut form, settings);
             }
         }
+    }
+}
+
+fn config_help_context(config: &Config) -> KeyHelpContext {
+    if config.is_selecting_team() {
+        KeyHelpContext::TeamPicker
+    } else if config.is_editing_environment() {
+        KeyHelpContext::EnvironmentEditor
+    } else {
+        KeyHelpContext::Config
     }
 }
 
@@ -3599,6 +3633,8 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
             .map_or(WelcomeStep::Stay, welcome_action),
         Key::Left
         | Key::Right
+        | Key::PageUp
+        | Key::PageDown
         | Key::Home
         | Key::End
         | Key::Delete
@@ -3611,6 +3647,8 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Backspace
         | Key::Tab
         | Key::CtrlD
+        | Key::CtrlX
+        | Key::Help
         | Key::Live(_)
         | Key::Click { .. }
         | Key::Pointer(_)
@@ -3717,6 +3755,10 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
             }
         },
         Key::CtrlD
+        | Key::CtrlX
+        | Key::Help
+        | Key::PageUp
+        | Key::PageDown
         | Key::Live(_)
         | Key::Click { .. }
         | Key::Pointer(_)
@@ -3867,7 +3909,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.request_cleanup();
             OpenStep::Stay
         }
-        Key::CtrlD => {
+        Key::CtrlX => {
             open.request_unregister();
             OpenStep::Stay
         }
@@ -3888,6 +3930,10 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         | Key::Passthrough(_)
         | Key::Management { .. }
         | Key::TerminalCopy { .. }
+        | Key::CtrlD
+        | Key::Help
+        | Key::PageUp
+        | Key::PageDown
         | Key::Resize
         | Key::Other => OpenStep::Stay,
     }
@@ -4304,6 +4350,8 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Resize | Key::Other => return Some(AppEvent::Tick),
         Key::Up => AppKey::Up,
         Key::Down => AppKey::Down,
+        Key::PageUp => AppKey::PageUp,
+        Key::PageDown => AppKey::PageDown,
         // Switch-mode Left/Right is consumed by the process-level project deck
         // before this mapping. When the keys reach the reducer they move a
         // horizontal choice such as the quit confirmation. Tab motion between
@@ -4324,6 +4372,8 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Char(character) => AppKey::Char(character),
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
+        Key::CtrlX => AppKey::CtrlX,
+        Key::Help => return None,
         Key::TerminalCopy { fallback } => {
             return {
                 #[cfg(target_os = "windows")]
@@ -4339,9 +4389,10 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
             };
         }
         // Input the Home reducer never consumes: raw PTY passthrough, terminal
-        // pointer drags and clicks (a shell + `TerminalSession` concern), Ctrl-D
-        // (Open Workspace only), and the caret/selection keys that have meaning
-        // only inside a focused text field (End/Ctrl-E, Delete, Shift+arrows).
+        // pointer drags and clicks (a shell + `TerminalSession` concern), and the
+        // caret/selection keys that have meaning only inside a focused text field
+        // (End/Ctrl-E, Delete, Shift+arrows). Ctrl-D is terminal EOT and remains
+        // inert on management surfaces.
         Key::Passthrough(_)
         | Key::Pointer(_)
         | Key::Click { .. }
@@ -4370,6 +4421,9 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
         LiveTerminalAction::OpenPullRequests => Some(AppKey::OpenPrs),
+        LiveTerminalAction::OpenPreview => Some(AppKey::OpenPreview),
+        LiveTerminalAction::OpenDecisions => Some(AppKey::OpenDecisions),
+        LiveTerminalAction::OpenNotes => Some(AppKey::OpenNotes),
         LiveTerminalAction::OpenGarden => Some(AppKey::OpenGarden),
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
@@ -7481,6 +7535,127 @@ fn switch_arrow_target(deck: &WorkspaceDeck, state: &AppState, key: &Key) -> Opt
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceDeckHelp {
+    None,
+    AddWorkspace,
+    WorkspaceFinder,
+}
+
+impl WorkspaceDeckHelp {
+    const fn new(add_open: bool, any_overlay_open: bool) -> Self {
+        if add_open {
+            Self::AddWorkspace
+        } else if any_overlay_open {
+            Self::WorkspaceFinder
+        } else {
+            Self::None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceBaseHelp {
+    Switch,
+    Closeup,
+    LiveTerminal,
+}
+
+impl WorkspaceBaseHelp {
+    const fn new(route: Route, live_input: bool) -> Self {
+        match route {
+            Route::Home(HomeMode::Switch) => Self::Switch,
+            Route::Home(HomeMode::Closeup) if live_input => Self::LiveTerminal,
+            Route::Home(HomeMode::Closeup) => Self::Closeup,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkspaceHelpState {
+    deck: WorkspaceDeckHelp,
+    overlay: Option<Overlay>,
+    decision_answer_open: bool,
+    work_run_mode: WorkRunControlMode,
+    director_new_open: bool,
+    drawer_focus: Option<WorkspaceDrawerFocus>,
+    base: WorkspaceBaseHelp,
+}
+
+fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
+    match state.deck {
+        WorkspaceDeckHelp::AddWorkspace => return KeyHelpContext::AddWorkspace,
+        WorkspaceDeckHelp::WorkspaceFinder => return KeyHelpContext::WorkspaceFinder,
+        WorkspaceDeckHelp::None => {}
+    }
+    if let Some(overlay) = state.overlay {
+        return match overlay {
+            Overlay::CommandHelp => KeyHelpContext::CommandList,
+            Overlay::Overview => KeyHelpContext::Overview,
+            Overlay::Daemon => KeyHelpContext::Daemon,
+            Overlay::Closeup => KeyHelpContext::CloseupActions,
+            Overlay::QuitConfirmation => KeyHelpContext::ExitConfirmation,
+            Overlay::ForceRemoveConfirmation => KeyHelpContext::ForceRemove,
+            Overlay::Notes => KeyHelpContext::Scratchpad,
+            Overlay::Environment => KeyHelpContext::WorkspaceEnvironmentEditor,
+            Overlay::Roles => KeyHelpContext::RolesEditor,
+            Overlay::CreateSession => KeyHelpContext::CreateSession,
+            Overlay::Decisions if state.decision_answer_open => KeyHelpContext::DecisionAnswer,
+            Overlay::Decisions => KeyHelpContext::DecisionList,
+            Overlay::CleanupQueue => KeyHelpContext::CleanupQueue,
+            Overlay::Prs => KeyHelpContext::PullRequests,
+            Overlay::Preview => KeyHelpContext::Preview,
+            Overlay::CreateSessionError => KeyHelpContext::CreateSessionError,
+            Overlay::Garden => KeyHelpContext::Garden,
+        };
+    }
+    match state.work_run_mode {
+        WorkRunControlMode::List => return KeyHelpContext::WorkRuns,
+        WorkRunControlMode::ResolveEscalation => return KeyHelpContext::WorkRunEscalation,
+        WorkRunControlMode::ConfirmCancel
+        | WorkRunControlMode::Submitting
+        | WorkRunControlMode::Retry => return KeyHelpContext::WorkRunConfirmation,
+        WorkRunControlMode::Closed => {}
+    }
+    if state.director_new_open {
+        return KeyHelpContext::DirectorNew;
+    }
+    match state.drawer_focus {
+        Some(WorkspaceDrawerFocus::Director) => return KeyHelpContext::Director,
+        Some(WorkspaceDrawerFocus::Terminal) => return KeyHelpContext::RootShell,
+        None => {}
+    }
+    match state.base {
+        WorkspaceBaseHelp::Switch => KeyHelpContext::Switch,
+        WorkspaceBaseHelp::Closeup => KeyHelpContext::Closeup,
+        WorkspaceBaseHelp::LiveTerminal => KeyHelpContext::LiveTerminal,
+    }
+}
+
+/// Resolve the frontmost visible surface before Help opens. The resulting
+/// value is held for the lifetime of that Help overlay, so background daemon
+/// updates cannot make the command list jump while it is being read.
+fn workspace_help_context(
+    deck: &WorkspaceDeck,
+    runtime: &WorkspaceRuntime,
+    work_run_control: &WorkRunControl,
+) -> KeyHelpContext {
+    let state = runtime.state();
+    resolve_workspace_help_context(WorkspaceHelpState {
+        deck: WorkspaceDeckHelp::new(deck.add_overlay_open(), deck.overlay_open()),
+        overlay: state.overlay(),
+        decision_answer_open: state
+            .decision_overlay()
+            .and_then(DecisionOverlayState::editor)
+            .is_some(),
+        work_run_mode: work_run_control.mode(),
+        director_new_open: state.director_launching().is_some()
+            || !matches!(state.director_new(), DirectorNew::Idle),
+        drawer_focus: state.workspace_drawer_focus(),
+        base: WorkspaceBaseHelp::new(state.route(), runtime.wants_live_input()),
+    })
+}
+
 /// Maximum number of completions one Home frame may apply from each queue.
 const FRAME_EVENT_BUDGET: usize = 128;
 
@@ -7633,6 +7808,7 @@ fn drive_workspace_controller(
     let mut work_run_observation = WorkRunObservation::new();
     let mut work_runs = WorkRunProjection::default();
     let mut work_run_control = WorkRunControl::default();
+    let mut help_context: Option<KeyHelpContext> = None;
     let mut pending_work_run_control = None;
     let mut work_run_revision = 0_u64;
     // Filesystem hint for the inline create form. It is off the frame budget:
@@ -8110,6 +8286,10 @@ fn drive_workspace_controller(
             {
                 let home = render_home_material(&material);
                 let frame = compose_workspace_shell_frame(deck, height, width, &home);
+                let frame = match help_context {
+                    Some(context) => key_help::render_over(terminal_height, width, &frame, context),
+                    None => frame,
+                };
                 term.draw(&frame)?;
                 drawn_material = Some(material);
             }
@@ -8166,6 +8346,25 @@ fn drive_workspace_controller(
         // Contextual New is retargeted once here so PTY forwarding, pane
         // controls, and the reducer all see one normalized key.
         let raw_key = retarget_drawer_chords(&runtime, term.read_key()?);
+        if help_context.is_some() {
+            if matches!(raw_key, Key::Help | Key::Escape) {
+                help_context = None;
+                drawn_material = None;
+                frame_source_key = None;
+                frame_material_key = None;
+            }
+            // Help is the exclusive frontmost input owner. Background drains
+            // keep running on the next loop, but no command reaches the surface
+            // being described.
+            continue;
+        }
+        if raw_key == Key::Help {
+            help_context = Some(workspace_help_context(deck, &runtime, &work_run_control));
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
         if dismiss_pr_modal_on_project_bar_click(&mut runtime, &raw_key) {
             continue;
         }
@@ -9535,6 +9734,25 @@ impl EntryFrameMaterial {
     }
 }
 
+fn entry_help_context(
+    screen: Screen,
+    open: &Open,
+    config: &Config,
+    missing_workspace: bool,
+) -> KeyHelpContext {
+    if missing_workspace {
+        return KeyHelpContext::MissingWorkspace;
+    }
+    match screen {
+        Screen::Welcome => KeyHelpContext::Welcome,
+        Screen::Open if open.unregistering_path().is_some() => KeyHelpContext::OpenUnregister,
+        Screen::Open if open.cleanup_confirming() => KeyHelpContext::OpenCleanup,
+        Screen::Open => KeyHelpContext::Open,
+        Screen::New => KeyHelpContext::New,
+        Screen::Config => config_help_context(config),
+    }
+}
+
 fn render_missing_workspace_prompt(
     height: usize,
     width: usize,
@@ -9634,6 +9852,7 @@ pub fn run_screen_graph_with_backend_and_notice(
     // background lane here — so a tick that leaves both unchanged draws
     // nothing (#554).
     let mut drawn_material: Option<EntryFrameMaterial> = None;
+    let mut help_context: Option<KeyHelpContext> = None;
     let mut next_create_token = 1_u64;
     let mut pending_create: Option<PendingWorkspaceCreate> = None;
     let mut missing_workspace_prompt: Option<MissingWorkspacePrompt> = None;
@@ -9695,10 +9914,32 @@ pub fn run_screen_graph_with_backend_and_notice(
         )
         .with_missing_workspace(missing_workspace_prompt.as_ref());
         if drawn_material.as_ref() != Some(&material) {
-            term.draw(&material.render(now))?;
+            let frame = material.render(now);
+            let frame = match help_context {
+                Some(context) => key_help::render_over(height, width, &frame, context),
+                None => frame,
+            };
+            term.draw(&frame)?;
             drawn_material = Some(material);
         }
         let key = term.read_key()?;
+        if help_context.is_some() {
+            if matches!(key, Key::Help | Key::Escape) {
+                help_context = None;
+                drawn_material = None;
+            }
+            continue;
+        }
+        if key == Key::Help {
+            help_context = Some(entry_help_context(
+                screen,
+                &open,
+                &config_form,
+                missing_workspace_prompt.is_some(),
+            ));
+            drawn_material = None;
+            continue;
+        }
         let explicit_remove = matches!(&key, Key::Char('y' | 'Y'));
         if let Some(prompt) = missing_workspace_prompt.as_mut() {
             match key {
@@ -10412,6 +10653,14 @@ mod tests {
             Some(AppEvent::Key(AppKey::Down))
         );
         assert_eq!(
+            app_event_from_key(Key::PageUp),
+            Some(AppEvent::Key(AppKey::PageUp))
+        );
+        assert_eq!(
+            app_event_from_key(Key::PageDown),
+            Some(AppEvent::Key(AppKey::PageDown))
+        );
+        assert_eq!(
             app_event_from_key(Key::Enter),
             Some(AppEvent::Key(AppKey::Enter))
         );
@@ -10448,6 +10697,10 @@ mod tests {
             Some(AppEvent::Key(AppKey::CtrlQ))
         );
         assert_eq!(
+            app_event_from_key(Key::CtrlX),
+            Some(AppEvent::Key(AppKey::CtrlX))
+        );
+        assert_eq!(
             app_event_from_key(Key::Management {
                 action: AppKey::SaveRoles,
                 passthrough: vec![0x13],
@@ -10481,6 +10734,18 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::OpenPullRequests)),
             Some(AppEvent::Key(AppKey::OpenPrs))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenPreview)),
+            Some(AppEvent::Key(AppKey::OpenPreview))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenDecisions)),
+            Some(AppEvent::Key(AppKey::OpenDecisions))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenNotes)),
+            Some(AppEvent::Key(AppKey::OpenNotes))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::OpenGarden)),
@@ -10566,6 +10831,7 @@ mod tests {
             Some(AppEvent::Key(AppKey::Right))
         );
         assert_eq!(app_event_from_key(Key::CtrlD), None);
+        assert_eq!(app_event_from_key(Key::Help), None);
         // Tab close and terminal scroll/copy stay pane- and shell-level concerns.
         for action in [
             LiveTerminalAction::CloseTab,
@@ -10695,6 +10961,7 @@ mod tests {
             Key::Quit,
             Key::CtrlQ,
             Key::CtrlD,
+            Key::CtrlX,
             Key::Char('g'),
             Key::Paste("pasted".to_owned()),
             Key::Click { column: 4, row: 9 },
@@ -18487,7 +18754,7 @@ mod tests {
         }
     }
 
-    /// `Ctrl-O b` is the way back to live output. A scrolled viewport holds its
+    /// `Ctrl-O End` is the way back to live output. A scrolled viewport holds its
     /// rows against everything the Agent appends, so the distance to the newest
     /// output grows with the conversation and one-line `ScrollDown` alone cannot
     /// be the only way back.
@@ -18689,6 +18956,7 @@ mod tests {
             Key::Quit,
             Key::CtrlQ,
             Key::CtrlD,
+            Key::CtrlX,
             Key::Char('x'),
             Key::Click { column: 41, row: 5 },
             Key::Other,
@@ -26653,6 +26921,94 @@ mod tests {
     }
 
     #[test]
+    fn entry_help_is_contextual_and_exclusively_owns_input_until_closed() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Help,
+            // This would open the workspace list if Help did not own input.
+            Key::Char('o'),
+            Key::Escape,
+            Key::Char('q'),
+        ]);
+        run(
+            &mut term,
+            Vec::new(),
+            Vec::new(),
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+
+        assert_eq!(term.frames.len(), 3);
+        assert!(
+            term.frames[1]
+                .join("\n")
+                .contains("Keyboard help · Welcome")
+        );
+        assert!(term.frames[1].join("\n").contains("open Recent card"));
+        assert!(term.frames[2].join("\n").contains("Menu"));
+        assert!(
+            term.frames
+                .iter()
+                .all(|frame| !frame.join("\n").contains("Open Workspace"))
+        );
+    }
+
+    #[test]
+    fn entry_help_resolves_every_entry_surface_and_config_submode() {
+        use super::Screen;
+        use crate::presentation::views::key_help::Context as HelpContext;
+
+        let mut settings = DefaultSettingsPort;
+        let config = Config::load(&mut settings);
+        let mut open = Open::new(vec![ws("atlas")]);
+
+        for (screen, expected) in [
+            (Screen::Welcome, HelpContext::Welcome),
+            (Screen::Open, HelpContext::Open),
+            (Screen::New, HelpContext::New),
+            (Screen::Config, HelpContext::Config),
+        ] {
+            assert_eq!(
+                super::entry_help_context(screen, &open, &config, false),
+                expected
+            );
+        }
+        assert_eq!(
+            super::entry_help_context(Screen::Welcome, &open, &config, true),
+            HelpContext::MissingWorkspace
+        );
+
+        open.request_unregister();
+        assert_eq!(
+            super::entry_help_context(Screen::Open, &open, &config, false),
+            HelpContext::OpenUnregister
+        );
+        open.cancel_unregister();
+        open.request_cleanup();
+        assert_eq!(
+            super::entry_help_context(Screen::Open, &open, &config, false),
+            HelpContext::OpenCleanup
+        );
+
+        let mut team = Config::load(&mut settings);
+        for _ in 0..5 {
+            let _ = step_config(&mut team, Key::Down, &mut settings);
+        }
+        let _ = step_config(&mut team, Key::Enter, &mut settings);
+        assert_eq!(super::config_help_context(&team), HelpContext::TeamPicker);
+
+        let mut environment = Config::load(&mut settings);
+        for _ in 0..2 {
+            let _ = step_config(&mut environment, Key::Down, &mut settings);
+        }
+        let _ = step_config(&mut environment, Key::Enter, &mut settings);
+        assert_eq!(
+            super::config_help_context(&environment),
+            HelpContext::EnvironmentEditor
+        );
+    }
+
+    #[test]
     fn welcome_action_maps_every_destination() {
         assert!(matches!(
             welcome_action(MenuAction::Quit),
@@ -27396,6 +27752,44 @@ mod tests {
                 .iter()
                 .all(|frame| frame.join("\n").contains("Config"))
         );
+    }
+
+    #[test]
+    fn workspace_config_help_toggles_and_exclusively_owns_input() {
+        let base = vec!["home".to_owned(); 24];
+        let mut settings = RecordingSettingsPort::default();
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Help,
+            Key::Quit,
+            Key::Help,
+            Key::Help,
+            Key::Escape,
+            Key::Escape,
+        ]);
+
+        run_workspace_config(
+            &mut term,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
+
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 6);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame.contains("Keyboard help · Config"))
+                .count(),
+            3
+        );
+        assert!(!frames.last().unwrap().contains("Keyboard help"));
     }
 
     #[test]
@@ -28625,7 +29019,7 @@ mod tests {
         let mut cancel = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Down,
-            Key::CtrlD,
+            Key::CtrlX,
             Key::Char('c'),
             Key::Quit,
         ]);
@@ -28650,7 +29044,7 @@ mod tests {
         let mut confirm = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Down,
-            Key::CtrlD,
+            Key::CtrlX,
             Key::Enter,
             Key::Enter,
             Key::Live(LiveTerminalAction::OpenWorkspace),
@@ -28855,10 +29249,10 @@ mod tests {
             OpenStep::ConfirmCleanup
         ));
 
-        let _ = step_open(&mut open, Key::CtrlD);
+        let _ = step_open(&mut open, Key::CtrlX);
         let _ = step_open(&mut open, Key::Left);
         assert!(matches!(step_open(&mut open, Key::Escape), OpenStep::Stay));
-        let _ = step_open(&mut open, Key::CtrlD);
+        let _ = step_open(&mut open, Key::CtrlX);
         assert!(matches!(
             step_open(&mut open, Key::Char('y')),
             OpenStep::ConfirmUnregister(_)
@@ -28866,7 +29260,7 @@ mod tests {
 
         for key in [Key::Right, Key::Tab, Key::Char('n'), Key::CtrlQ] {
             let mut open = Open::new(vec![ws("fresh")]);
-            let _ = step_open(&mut open, Key::CtrlD);
+            let _ = step_open(&mut open, Key::CtrlX);
             let result = step_open(&mut open, key.clone());
             assert!(matches!(result, OpenStep::Stay | OpenStep::Quit));
         }
@@ -28970,6 +29364,203 @@ mod tests {
         .unwrap();
         assert_eq!(term.frames.len(), 3);
         assert!(term.frames[1].join("\n").contains("recent-session"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One exhaustive surface-to-help table is easiest to audit intact.
+    fn workspace_help_resolver_covers_every_frontmost_surface() {
+        use super::{
+            WorkspaceBaseHelp, WorkspaceDeckHelp, WorkspaceHelpState,
+            resolve_workspace_help_context,
+        };
+        use crate::presentation::views::key_help::Context as HelpContext;
+
+        let base = WorkspaceHelpState {
+            deck: WorkspaceDeckHelp::None,
+            overlay: None,
+            decision_answer_open: false,
+            work_run_mode: super::WorkRunControlMode::Closed,
+            director_new_open: false,
+            drawer_focus: None,
+            base: WorkspaceBaseHelp::Switch,
+        };
+        assert_eq!(
+            WorkspaceDeckHelp::new(false, false),
+            WorkspaceDeckHelp::None
+        );
+        assert_eq!(
+            WorkspaceDeckHelp::new(true, true),
+            WorkspaceDeckHelp::AddWorkspace
+        );
+        assert_eq!(
+            WorkspaceDeckHelp::new(false, true),
+            WorkspaceDeckHelp::WorkspaceFinder
+        );
+        assert_eq!(
+            WorkspaceBaseHelp::new(Route::Home(HomeMode::Switch), false),
+            WorkspaceBaseHelp::Switch
+        );
+        assert_eq!(
+            WorkspaceBaseHelp::new(Route::Home(HomeMode::Closeup), false),
+            WorkspaceBaseHelp::Closeup
+        );
+        assert_eq!(
+            WorkspaceBaseHelp::new(Route::Home(HomeMode::Closeup), true),
+            WorkspaceBaseHelp::LiveTerminal
+        );
+        assert_eq!(resolve_workspace_help_context(base), HelpContext::Switch);
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                deck: WorkspaceDeckHelp::AddWorkspace,
+                ..base
+            }),
+            HelpContext::AddWorkspace
+        );
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                deck: WorkspaceDeckHelp::WorkspaceFinder,
+                ..base
+            }),
+            HelpContext::WorkspaceFinder
+        );
+
+        for (overlay, expected) in [
+            (Overlay::CommandHelp, HelpContext::CommandList),
+            (Overlay::Overview, HelpContext::Overview),
+            (Overlay::Daemon, HelpContext::Daemon),
+            (Overlay::Closeup, HelpContext::CloseupActions),
+            (Overlay::QuitConfirmation, HelpContext::ExitConfirmation),
+            (Overlay::ForceRemoveConfirmation, HelpContext::ForceRemove),
+            (Overlay::Notes, HelpContext::Scratchpad),
+            (
+                Overlay::Environment,
+                HelpContext::WorkspaceEnvironmentEditor,
+            ),
+            (Overlay::Roles, HelpContext::RolesEditor),
+            (Overlay::CreateSession, HelpContext::CreateSession),
+            (Overlay::Decisions, HelpContext::DecisionList),
+            (Overlay::CleanupQueue, HelpContext::CleanupQueue),
+            (Overlay::Prs, HelpContext::PullRequests),
+            (Overlay::Preview, HelpContext::Preview),
+            (Overlay::CreateSessionError, HelpContext::CreateSessionError),
+            (Overlay::Garden, HelpContext::Garden),
+        ] {
+            assert_eq!(
+                resolve_workspace_help_context(WorkspaceHelpState {
+                    overlay: Some(overlay),
+                    ..base
+                }),
+                expected,
+                "{overlay:?}"
+            );
+        }
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                overlay: Some(Overlay::Decisions),
+                decision_answer_open: true,
+                ..base
+            }),
+            HelpContext::DecisionAnswer
+        );
+
+        for (mode, expected) in [
+            (super::WorkRunControlMode::List, HelpContext::WorkRuns),
+            (
+                super::WorkRunControlMode::ResolveEscalation,
+                HelpContext::WorkRunEscalation,
+            ),
+            (
+                super::WorkRunControlMode::ConfirmCancel,
+                HelpContext::WorkRunConfirmation,
+            ),
+            (
+                super::WorkRunControlMode::Submitting,
+                HelpContext::WorkRunConfirmation,
+            ),
+            (
+                super::WorkRunControlMode::Retry,
+                HelpContext::WorkRunConfirmation,
+            ),
+        ] {
+            assert_eq!(
+                resolve_workspace_help_context(WorkspaceHelpState {
+                    work_run_mode: mode,
+                    ..base
+                }),
+                expected,
+                "{mode:?}"
+            );
+        }
+
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                director_new_open: true,
+                ..base
+            }),
+            HelpContext::DirectorNew
+        );
+        for (drawer_focus, expected) in [
+            (WorkspaceDrawerFocus::Director, HelpContext::Director),
+            (WorkspaceDrawerFocus::Terminal, HelpContext::RootShell),
+        ] {
+            assert_eq!(
+                resolve_workspace_help_context(WorkspaceHelpState {
+                    drawer_focus: Some(drawer_focus),
+                    ..base
+                }),
+                expected
+            );
+        }
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                base: WorkspaceBaseHelp::Closeup,
+                ..base
+            }),
+            HelpContext::Closeup
+        );
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                base: WorkspaceBaseHelp::LiveTerminal,
+                ..base
+            }),
+            HelpContext::LiveTerminal
+        );
+    }
+
+    #[test]
+    fn workspace_help_describes_switch_and_swallows_background_commands() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('1'),
+            Key::Help,
+            // Ctrl-X would remove the selected session outside Help.
+            Key::CtrlX,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        run(
+            &mut term,
+            Vec::new(),
+            vec![recent("recent")],
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+
+        let help = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .find(|frame| frame.contains("Keyboard help · Workspace switch"))
+            .expect("workspace Help frame");
+        assert!(help.contains("Ctrl-X"));
+        assert!(help.contains("safe-remove session"));
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("recent-session")),
+            "the command pressed behind Help must not remove the session"
+        );
     }
 
     #[test]
@@ -29077,6 +29668,14 @@ mod tests {
         assert_eq!(key_to_terminal_bytes(Key::Escape), Some(b"\x1b".to_vec()));
         assert_eq!(key_to_terminal_bytes(Key::Up), Some(b"\x1b[A".to_vec()));
         assert_eq!(key_to_terminal_bytes(Key::Down), Some(b"\x1b[B".to_vec()));
+        assert_eq!(
+            key_to_terminal_bytes(Key::PageUp),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            key_to_terminal_bytes(Key::PageDown),
+            Some(b"\x1b[6~".to_vec())
+        );
         assert_eq!(key_to_terminal_bytes(Key::Right), Some(b"\x1b[C".to_vec()));
         assert_eq!(
             key_to_terminal_bytes(Key::SelectRight),
@@ -29123,6 +29722,8 @@ mod tests {
         assert_eq!(key_to_terminal_bytes(Key::Quit), Some(vec![3]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlQ), Some(vec![17]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlD), Some(vec![4]));
+        assert_eq!(key_to_terminal_bytes(Key::CtrlX), Some(vec![24]));
+        assert_eq!(key_to_terminal_bytes(Key::Help), None);
         assert_eq!(key_to_terminal_bytes(Key::Other), None);
         assert_eq!(
             key_to_terminal_bytes(Key::Live(
@@ -30844,7 +31445,7 @@ mod tests {
             Key::Char('o'),
             Key::Enter,
             Key::Live(LiveTerminalAction::OpenWorkspace),
-            Key::CtrlD,
+            Key::CtrlX,
             Key::Char('q'),
         ]);
         let mut loader = FakeLoader::default();

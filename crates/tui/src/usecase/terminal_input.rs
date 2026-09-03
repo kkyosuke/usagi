@@ -189,17 +189,23 @@ pub enum LiveTerminalAction {
     Switch,
     /// Open the active target's Closeup modal.
     OpenCloseupModal,
-    /// Select the next tab.
+    /// Select the next tab (`Ctrl-O ]`).
     NextTab,
-    /// Select the previous tab.
+    /// Select the previous tab (`Ctrl-O [`).
     PreviousTab,
-    /// Open the active Closeup target's Pull Request modal.
+    /// Open the active Closeup target's Pull Request modal (`Ctrl-O p`).
     OpenPullRequests,
+    /// Open the active target's Markdown preview (`Ctrl-O v`).
+    OpenPreview,
+    /// Open the workspace's pending decisions (`Ctrl-O d`).
+    OpenDecisions,
+    /// Open the active target's scratchpad (`Ctrl-O s`).
+    OpenNotes,
     /// Open the workspace Garden (`Ctrl-O ,`).
     OpenGarden,
-    /// Move the selected tab one slot toward the next tab.
+    /// Move the selected tab one slot toward the next tab (`Ctrl-O }`).
     MoveTabNext,
-    /// Move the selected tab one slot toward the previous tab.
+    /// Move the selected tab one slot toward the previous tab (`Ctrl-O {`).
     MoveTabPrevious,
     /// Open or reattach the agent pane.
     Agent,
@@ -208,8 +214,7 @@ pub enum LiveTerminalAction {
     /// active managed session, and re-issuing it closes the drawer.
     Director,
     /// Open the Home Director mode drawer and its explicit New CLI picker
-    /// (`Ctrl-O n`). Plain `n` is intentionally distinct from `Ctrl-N`, which
-    /// remains [`LiveTerminalAction::NextTab`].
+    /// (`Ctrl-O n`). Plain `n` remains terminal input without the leader.
     DirectorNew,
     /// Open the Goal-driven Director's Work Run control surface (`Ctrl-O w`).
     /// It is reserved behind the leader so plain `w` and `Ctrl-W` still reach
@@ -257,8 +262,12 @@ pub enum GlobalControlChord {
     CtrlC,
     /// Open workspace quit confirmation (`Ctrl-Q`).
     CtrlQ,
-    /// Unregister the selected workspace (`Ctrl-D`).
+    /// Send terminal end-of-input (`Ctrl-D`) when a live pane owns input.
     CtrlD,
+    /// Remove or dismiss the selected management object (`Ctrl-X`).
+    CtrlX,
+    /// Open contextual keyboard help (`Ctrl-?` / `Ctrl-/`).
+    Help,
 }
 
 /// A classifier result that an adapter can dispatch without daemon wire types.
@@ -390,9 +399,22 @@ fn global_control_key(key: &KeyEvent) -> Option<GlobalControlChord> {
         KeyCode::Char('\u{3}') => Some(GlobalControlChord::CtrlC),
         KeyCode::Char('\u{11}') => Some(GlobalControlChord::CtrlQ),
         KeyCode::Char('\u{4}') => Some(GlobalControlChord::CtrlD),
+        KeyCode::Char('\u{18}') => Some(GlobalControlChord::CtrlX),
+        // Traditional terminals encode Ctrl-/ (and often Ctrl-Shift-/) as US
+        // (`0x1f`). Modern keyboard protocols can retain the semantic `/` or
+        // `?`, so accept all distinguishable forms without claiming DEL, which
+        // many terminals use for Backspace.
+        KeyCode::Char('\u{1f}') => Some(GlobalControlChord::Help),
         KeyCode::Char('c') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlC),
         KeyCode::Char('q') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlQ),
         KeyCode::Char('d') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlD),
+        KeyCode::Char('x') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlX),
+        KeyCode::Char('/' | '7') if is_only_control(key.modifiers) => {
+            Some(GlobalControlChord::Help)
+        }
+        KeyCode::Char('?' | '_') if is_control_without_alt_or_meta(key.modifiers) => {
+            Some(GlobalControlChord::Help)
+        }
         _ => None,
     }
 }
@@ -402,8 +424,14 @@ fn global_control_bytes(bytes: &[u8]) -> Option<GlobalControlChord> {
         [3] => Some(GlobalControlChord::CtrlC),
         [17] => Some(GlobalControlChord::CtrlQ),
         [4] => Some(GlobalControlChord::CtrlD),
+        [24] => Some(GlobalControlChord::CtrlX),
+        [31] => Some(GlobalControlChord::Help),
         _ => None,
     }
+}
+
+fn is_control_without_alt_or_meta(modifiers: Modifiers) -> bool {
+    modifiers.control && !modifiers.alt && !modifiers.super_ && !modifiers.hyper && !modifiers.meta
 }
 
 fn is_only_control(modifiers: Modifiers) -> bool {
@@ -420,41 +448,28 @@ fn is_ctrl_o(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('o')) && is_only_control(key.modifiers))
 }
 
+const LETTER_PREFIX_ACTIONS: &[(char, char, LiveTerminalAction)] = &[
+    ('a', '\u{1}', LiveTerminalAction::OpenCloseupModal),
+    ('d', '\u{4}', LiveTerminalAction::OpenDecisions),
+    ('g', '\u{7}', LiveTerminalAction::Director),
+    ('n', '\u{e}', LiveTerminalAction::DirectorNew),
+    ('o', '\u{f}', LiveTerminalAction::Switch),
+    ('p', '\u{10}', LiveTerminalAction::OpenPullRequests),
+    ('r', '\u{12}', LiveTerminalAction::ResumeTab),
+    ('s', '\u{13}', LiveTerminalAction::OpenNotes),
+    ('t', '\u{14}', LiveTerminalAction::RootTerminal),
+    ('v', '\u{16}', LiveTerminalAction::OpenPreview),
+    ('w', '\u{17}', LiveTerminalAction::WorkRuns),
+    ('x', '\u{18}', LiveTerminalAction::CloseTab),
+    ('z', '\u{1a}', LiveTerminalAction::RootTerminalFullHeight),
+];
+
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
-    if letter_with_optional_control(key, 'o', '\u{0f}') {
-        return Some(LiveTerminalAction::Switch);
-    }
-    if letter_with_optional_control(key, 'a', '\u{1}') {
-        return Some(LiveTerminalAction::OpenCloseupModal);
-    }
-    if letter_with_optional_control(key, 'f', '\u{6}') {
-        return Some(LiveTerminalAction::NextTab);
-    }
-    if letter_with_optional_control(key, 'v', '\u{16}') {
-        return Some(LiveTerminalAction::OpenPullRequests);
-    }
-    if letter_with_optional_control(key, 'x', '\u{18}') {
-        return Some(LiveTerminalAction::CloseTab);
-    }
-    if letter_with_optional_control(key, 'g', '\u{7}') {
-        return Some(LiveTerminalAction::Director);
-    }
-    if letter_with_optional_control(key, 't', '\u{14}') {
-        return Some(LiveTerminalAction::RootTerminal);
-    }
-    for (letter, control, action) in [
-        ('n', '\u{e}', LiveTerminalAction::DirectorNew),
-        ('p', '\u{10}', LiveTerminalAction::PreviousTab),
-        ('r', '\u{12}', LiveTerminalAction::ResumeTab),
-        ('w', '\u{17}', LiveTerminalAction::WorkRuns),
-        ('u', '\u{15}', LiveTerminalAction::ScrollUp),
-        ('d', '\u{4}', LiveTerminalAction::ScrollDown),
-        ('b', '\u{2}', LiveTerminalAction::ScrollBottom),
-        ('z', '\u{1a}', LiveTerminalAction::RootTerminalFullHeight),
-    ] {
-        if letter_with_optional_control(key, letter, control) {
-            return Some(action);
-        }
+    if let Some((_, _, action)) = LETTER_PREFIX_ACTIONS
+        .iter()
+        .find(|(letter, control, _)| letter_with_optional_control(key, *letter, *control))
+    {
+        return Some(*action);
     }
     // `+` is physically Shift+= on common layouts. Crossterm may retain that
     // Shift bit even though the semantic character is already `+`.
@@ -480,6 +495,20 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     {
         return Some(LiveTerminalAction::CommandHelp);
     }
+    if let KeyCode::Char(character @ ('{' | '}')) = key.code
+        && (key.modifiers == Modifiers::default()
+            || key.modifiers
+                == Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                })
+    {
+        return Some(if character == '}' {
+            LiveTerminalAction::MoveTabNext
+        } else {
+            LiveTerminalAction::MoveTabPrevious
+        });
+    }
     // Plain follow-ups for the live-terminal view controls the Home reducer does
     // not own: scroll the PTY output and close the focused tab. A
     // modified variant (other than the control chords above) is not a prefix
@@ -493,8 +522,8 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
             u8::try_from(digit.to_digit(10).unwrap_or(1)).unwrap_or(1),
         )),
         KeyCode::Char(',') => Some(LiveTerminalAction::OpenGarden),
-        KeyCode::Char(']') => Some(LiveTerminalAction::MoveTabNext),
-        KeyCode::Char('[') => Some(LiveTerminalAction::MoveTabPrevious),
+        KeyCode::Char(']') => Some(LiveTerminalAction::NextTab),
+        KeyCode::Char('[') => Some(LiveTerminalAction::PreviousTab),
         KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
         KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
         KeyCode::End => Some(LiveTerminalAction::ScrollBottom),
@@ -509,24 +538,13 @@ fn letter_with_optional_control(key: &KeyEvent, letter: char, control: char) -> 
 }
 
 fn control_byte_prefix_action(bytes: &[u8]) -> Option<LiveTerminalAction> {
-    match bytes {
-        [1] => Some(LiveTerminalAction::OpenCloseupModal),
-        [2] => Some(LiveTerminalAction::ScrollBottom),
-        [4] => Some(LiveTerminalAction::ScrollDown),
-        [6] => Some(LiveTerminalAction::NextTab),
-        [7] => Some(LiveTerminalAction::Director),
-        [14] => Some(LiveTerminalAction::DirectorNew),
-        [15] => Some(LiveTerminalAction::Switch),
-        [16] => Some(LiveTerminalAction::PreviousTab),
-        [18] => Some(LiveTerminalAction::ResumeTab),
-        [20] => Some(LiveTerminalAction::RootTerminal),
-        [21] => Some(LiveTerminalAction::ScrollUp),
-        [22] => Some(LiveTerminalAction::OpenPullRequests),
-        [23] => Some(LiveTerminalAction::WorkRuns),
-        [24] => Some(LiveTerminalAction::CloseTab),
-        [26] => Some(LiveTerminalAction::RootTerminalFullHeight),
-        _ => None,
-    }
+    let [byte] = bytes else {
+        return None;
+    };
+    LETTER_PREFIX_ACTIONS
+        .iter()
+        .find(|(_, control, _)| u32::from(*control) == u32::from(*byte))
+        .map(|(_, _, action)| *action)
 }
 
 /// Encodes a press or repeat in the portable terminal form.
@@ -898,11 +916,35 @@ mod tests {
             },
             Case {
                 follow_up: ctrl('p'),
-                action: LiveTerminalAction::PreviousTab,
+                action: LiveTerminalAction::OpenPullRequests,
             },
             Case {
                 follow_up: key(KeyCode::Char('p')),
-                action: LiveTerminalAction::PreviousTab,
+                action: LiveTerminalAction::OpenPullRequests,
+            },
+            Case {
+                follow_up: ctrl('v'),
+                action: LiveTerminalAction::OpenPreview,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('v')),
+                action: LiveTerminalAction::OpenPreview,
+            },
+            Case {
+                follow_up: ctrl('d'),
+                action: LiveTerminalAction::OpenDecisions,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('d')),
+                action: LiveTerminalAction::OpenDecisions,
+            },
+            Case {
+                follow_up: ctrl('s'),
+                action: LiveTerminalAction::OpenNotes,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('s')),
+                action: LiveTerminalAction::OpenNotes,
             },
             Case {
                 follow_up: ctrl('g'),
@@ -940,43 +982,27 @@ mod tests {
             },
             Case {
                 follow_up: key(KeyCode::Char(']')),
-                action: LiveTerminalAction::MoveTabNext,
+                action: LiveTerminalAction::NextTab,
             },
             Case {
                 follow_up: key(KeyCode::Char('[')),
+                action: LiveTerminalAction::PreviousTab,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('}')),
+                action: LiveTerminalAction::MoveTabNext,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('{')),
                 action: LiveTerminalAction::MoveTabPrevious,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('u')),
-                action: LiveTerminalAction::ScrollUp,
-            },
-            Case {
-                follow_up: ctrl('u'),
-                action: LiveTerminalAction::ScrollUp,
             },
             Case {
                 follow_up: key(KeyCode::Up),
                 action: LiveTerminalAction::ScrollUp,
             },
             Case {
-                follow_up: key(KeyCode::Char('d')),
-                action: LiveTerminalAction::ScrollDown,
-            },
-            Case {
-                follow_up: ctrl('d'),
-                action: LiveTerminalAction::ScrollDown,
-            },
-            Case {
                 follow_up: key(KeyCode::Down),
                 action: LiveTerminalAction::ScrollDown,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('b')),
-                action: LiveTerminalAction::ScrollBottom,
-            },
-            Case {
-                follow_up: ctrl('b'),
-                action: LiveTerminalAction::ScrollBottom,
             },
             Case {
                 follow_up: key(KeyCode::Char('z')),
@@ -985,22 +1011,6 @@ mod tests {
             Case {
                 follow_up: ctrl('z'),
                 action: LiveTerminalAction::RootTerminalFullHeight,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('f')),
-                action: LiveTerminalAction::NextTab,
-            },
-            Case {
-                follow_up: ctrl('f'),
-                action: LiveTerminalAction::NextTab,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('v')),
-                action: LiveTerminalAction::OpenPullRequests,
-            },
-            Case {
-                follow_up: ctrl('v'),
-                action: LiveTerminalAction::OpenPullRequests,
             },
             Case {
                 follow_up: key(KeyCode::Char('w')),
@@ -1029,20 +1039,78 @@ mod tests {
     }
 
     #[test]
+    fn letter_prefix_table_has_unique_keys_and_actions() {
+        let mut letters = std::collections::BTreeSet::new();
+        let mut controls = std::collections::BTreeSet::new();
+        let mut actions = std::collections::BTreeSet::new();
+        for (letter, control, action) in LETTER_PREFIX_ACTIONS {
+            assert!(letters.insert(*letter), "duplicate letter prefix: {letter}");
+            assert!(
+                controls.insert(u32::from(*control)),
+                "duplicate control-byte prefix: {control:?}"
+            );
+            assert!(
+                actions.insert(format!("{action:?}")),
+                "duplicate action alias: {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directional_tab_punctuation_accepts_shifted_braces_without_aliases() {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        for (character, action) in [
+            ('{', LiveTerminalAction::MoveTabPrevious),
+            ('}', LiveTerminalAction::MoveTabNext),
+        ] {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(
+                    Duration::from_millis(1),
+                    LiveInput::Key(KeyEvent::new(
+                        KeyCode::Char(character),
+                        shift,
+                        KeyEventKind::Press,
+                    )),
+                ),
+                LiveInputOutput::Action(action)
+            );
+        }
+
+        for obsolete in ['f', 'u', 'b'] {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), key(KeyCode::Char(obsolete)),),
+                LiveInputOutput::Swallowed,
+                "obsolete prefix must not remain as an alias: {obsolete}"
+            );
+        }
+    }
+
+    #[test]
     fn raw_control_bytes_after_leader_match_their_letter_actions() {
         for (byte, action) in [
             (1, LiveTerminalAction::OpenCloseupModal),
-            (2, LiveTerminalAction::ScrollBottom),
-            (4, LiveTerminalAction::ScrollDown),
-            (6, LiveTerminalAction::NextTab),
+            (4, LiveTerminalAction::OpenDecisions),
             (7, LiveTerminalAction::Director),
             (14, LiveTerminalAction::DirectorNew),
             (15, LiveTerminalAction::Switch),
-            (16, LiveTerminalAction::PreviousTab),
+            (16, LiveTerminalAction::OpenPullRequests),
             (18, LiveTerminalAction::ResumeTab),
+            (19, LiveTerminalAction::OpenNotes),
             (20, LiveTerminalAction::RootTerminal),
-            (21, LiveTerminalAction::ScrollUp),
-            (22, LiveTerminalAction::OpenPullRequests),
+            (22, LiveTerminalAction::OpenPreview),
             (23, LiveTerminalAction::WorkRuns),
             (24, LiveTerminalAction::CloseTab),
             (26, LiveTerminalAction::RootTerminalFullHeight),
@@ -1057,6 +1125,16 @@ mod tests {
                 LiveInputOutput::Action(action)
             );
         }
+
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), LiveInput::Raw(vec![b'x', b'y']),),
+            LiveInputOutput::Swallowed
+        );
     }
 
     #[test]
@@ -1194,12 +1272,12 @@ mod tests {
                 LiveInputOutput::Passthrough(character.to_string().into_bytes())
             );
         }
-        // Ctrl-X is reserved only as a leader follow-up. Both common decoder
-        // forms remain a single PTY control byte when there is no Ctrl-O leader.
+        // Ctrl-X has one management meaning, while a focused live pane still
+        // receives the same byte through the Key adapter.
         for input in [ctrl('x'), key(KeyCode::Char('\u{18}'))] {
             assert_eq!(
                 LiveInputClassifier::default().classify(T0, input),
-                LiveInputOutput::Passthrough(vec![0x18])
+                LiveInputOutput::GlobalControl(GlobalControlChord::CtrlX)
             );
         }
     }
@@ -1216,6 +1294,39 @@ mod tests {
             (ctrl('d'), GlobalControlChord::CtrlD),
             (key(KeyCode::Char('\u{4}')), GlobalControlChord::CtrlD),
             (LiveInput::Raw(vec![4]), GlobalControlChord::CtrlD),
+            (ctrl('x'), GlobalControlChord::CtrlX),
+            (key(KeyCode::Char('\u{18}')), GlobalControlChord::CtrlX),
+            (LiveInput::Raw(vec![24]), GlobalControlChord::CtrlX),
+            (ctrl('/'), GlobalControlChord::Help),
+            // Crossterm's legacy control-byte decoder may expose US (`0x1f`)
+            // through the equivalent Ctrl-7 chord.
+            (ctrl('7'), GlobalControlChord::Help),
+            (key(KeyCode::Char('\u{1f}')), GlobalControlChord::Help),
+            (LiveInput::Raw(vec![31]), GlobalControlChord::Help),
+            (
+                LiveInput::Key(KeyEvent::new(
+                    KeyCode::Char('_'),
+                    Modifiers {
+                        control: true,
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                    KeyEventKind::Press,
+                )),
+                GlobalControlChord::Help,
+            ),
+            (
+                LiveInput::Key(KeyEvent::new(
+                    KeyCode::Char('?'),
+                    Modifiers {
+                        control: true,
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                    KeyEventKind::Press,
+                )),
+                GlobalControlChord::Help,
+            ),
         ];
         for (input, expected) in cases {
             assert_eq!(

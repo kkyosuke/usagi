@@ -463,7 +463,7 @@ fn wait_for_agent_intent(
         }
         assert!(
             Instant::now() < deadline,
-            "Agent tab intent did not reach the expected state"
+            "Agent tab intent did not reach the expected state: {intent:?}"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -951,7 +951,10 @@ fn quit_from_switch(
     output: &Arc<Mutex<Vec<u8>>>,
     baseline: usize,
 ) -> ExitStatus {
-    wait_for_screen_since(output, baseline, "[Switch] preview pane");
+    // The left footer is the route authority. The right pane may still show a
+    // terminal-exit notice while its asynchronous cleanup settles, so requiring
+    // its ordinary preview footer makes an otherwise completed teardown flaky.
+    wait_for_screen_since(output, baseline, "[switch]");
     send(master, b"\x11");
     wait_for_screen_since(output, baseline, "Leave this workspace?");
     send(master, b"\r");
@@ -1050,7 +1053,7 @@ fn kill_process(pid: u64) {
     assert_eq!(result, 0, "failed to kill the background terminal process");
 }
 
-/// `Ctrl-O Ctrl-F` の実キー入力で tab を巡回し、`label` の tab が選択されるまで待つ。
+/// `Ctrl-O ]` の実キー入力で tab を巡回し、`label` の tab が選択されるまで待つ。
 ///
 /// selection は描画された marker から読むので、durable な復元順に依存しない。
 fn select_tab_by_label(
@@ -1069,7 +1072,7 @@ fn select_tab_by_label(
             Instant::now() < deadline,
             "tab {label} was never selected; screen={screen:?}"
         );
-        send(master, b"\x0f\x06");
+        send(master, b"\x0f]");
         thread::sleep(Duration::from_millis(150));
     }
 }
@@ -1077,7 +1080,7 @@ fn select_tab_by_label(
 /// Director mode drawer の conversation selector を実キーで巡回する。
 ///
 /// Drawer でも New は `Ctrl-O n` / `Ctrl-O Ctrl-N`、巡回は
-/// `Ctrl-O f` / `Ctrl-O Ctrl-F` で行う（`document/03-tui.md` の prefix 表）。
+/// `Ctrl-O ]` で行う（`document/03-tui.md` の prefix 表）。
 ///
 /// Drawer は Closeup の tab strip ではなく、選択中 conversation だけを
 /// `Conversation  [label]` として描くため、marker ではなく selector の closed
@@ -1099,7 +1102,7 @@ fn select_drawer_conversation_by_label(
             Instant::now() < deadline,
             "drawer conversation {label} was never selected; screen={screen:?}"
         );
-        send(master, b"\x0ff");
+        send(master, b"\x0f]");
         thread::sleep(Duration::from_millis(150));
     }
 }
@@ -2443,10 +2446,10 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     send(&mut master, b"codex-one\r");
     wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-one");
 
-    // Ctrl-O ] moves the selected Codex after root Claude; Ctrl-O Ctrl-P then
+    // Ctrl-O } moves the selected Codex after root Claude; Ctrl-O [ then
     // selects root Claude. The new foreground alone attaches and receives input.
-    send(&mut master, b"\x0f]");
-    send(&mut master, b"\x0f\x10");
+    send(&mut master, b"\x0f}");
+    send(&mut master, b"\x0f[");
     wait_for_screen_since(&captured, reopened_baseline, &root_claude_ready);
     send(&mut master, b"claude-root-one\r");
     wait_for_screen_since(&captured, reopened_baseline, "claude-input:claude-root-one");
@@ -2455,12 +2458,12 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     // paste, and pane-control chords cannot reach or mutate the root Agent behind
     // it. Escape cancels only the picker; the next ordinary input reaches the PTY.
     // Director mode gives New both `Ctrl-O n` and `Ctrl-O Ctrl-N`; conversation
-    // cycling uses `Ctrl-O f` / `Ctrl-O Ctrl-F`.
+    // cycling uses `Ctrl-O [` / `Ctrl-O ]`.
     send(&mut master, b"\x0f\x0e");
     wait_for_screen_since(&captured, reopened_baseline, "↑↓: select");
     send(&mut master, b"picker-leak");
     send(&mut master, b"\x1b[200~paste-leak\nsecond-line\x1b[201~");
-    send(&mut master, b"\x0fx\x0f]\x0fn\x0fu");
+    send(&mut master, b"\x0fx\x0f]\x0fn\x0fv");
     send(&mut master, b"\x1b");
     wait_for_screen_absent_since(&captured, reopened_baseline, "↑↓: select");
     send(&mut master, b"after-picker\r");
@@ -2483,7 +2486,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     assert!(ordered.dismissed.is_empty());
     // Leave Codex selected in the second slot. A fresh UI must therefore
     // restore durable selection rather than falling back to the first slot.
-    send(&mut master, b"\x0ff");
+    send(&mut master, b"\x0f]");
     wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-one");
     let _ = wait_for_agent_intent(home.path(), |intent| {
         intent.targets.iter().any(|target| {
@@ -2547,7 +2550,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     // Reorder the restored selected tab once in each direction. The first
     // persisted result is possible only if the fresh UI projected the saved
     // [root Claude, Codex] order; the second restores that durable order.
-    send(&mut master, b"\x0f[");
+    send(&mut master, b"\x0f{");
     let _ = wait_for_agent_intent(home.path(), |intent| {
         intent.targets.iter().any(|target| {
             target.session_id.is_none()
@@ -2560,7 +2563,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
                 && target.selected == Some(codex)
         })
     });
-    send(&mut master, b"\x0f]");
+    send(&mut master, b"\x0f}");
     let _ = wait_for_agent_intent(home.path(), |intent| {
         intent.targets.iter().any(|target| {
             target.session_id.is_none()
@@ -2774,6 +2777,20 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
     );
     send(&mut master, b"before-agent-close\r");
     wait_for_screen_since(&captured, baseline, "claude-input:before-agent-close");
+
+    // Traditional terminals encode Ctrl-/ (the portable Ctrl-? alias) as the
+    // raw US byte. Help must open over a live Agent and exclusively own input;
+    // the text typed behind it never reaches the daemon PTY.
+    send(&mut master, b"\x1f");
+    wait_for_screen_since(&captured, baseline, "Keyboard help · Live terminal");
+    wait_for_screen_since(&captured, baseline, "Ctrl-O [ / ]");
+    send(&mut master, b"help-leak");
+    send(&mut master, b"\x1b");
+    wait_for_screen_absent_since(&captured, baseline, "Keyboard help · Live terminal");
+    send(&mut master, b"after-help\r");
+    wait_for_screen_since(&captured, baseline, "claude-input:after-help");
+    let help_screen = screen_since(&captured, baseline).unwrap_or_default();
+    assert!(!help_screen.contains("help-leak"), "{help_screen}");
 
     // Ctrl-O followed by the raw Ctrl-X byte is the exact chord users press.
     send(&mut master, b"\x0f\x18");
@@ -3287,7 +3304,7 @@ fn durable_records(data_dir: &Path) -> Vec<serde_json::Value> {
 /// scroll offset は live bottom からの行数で保持するため、遡っている間に Agent が
 /// 出力すると窓が前へ滑り、読んでいた行が消えていた（live Agent は常に出力するので
 /// 「指示モードでスクロールできない」ように見える）。scroll 中は追記行を offset へ
-/// 足し戻して同じ行を保持し、`Ctrl-O b` で live bottom へ戻すと追従を再開することを
+/// 足し戻して同じ行を保持し、`Ctrl-O End` で live bottom へ戻すと追従を再開することを
 /// 実 PTY で固定する。
 #[test]
 fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
@@ -3351,8 +3368,8 @@ fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
         send(&mut master, b"\x1b[<64;70;13M");
         thread::sleep(Duration::from_millis(60));
     }
-    send(&mut master, b"\x0fu");
-    send(&mut master, b"\x0fu");
+    send(&mut master, b"\x0f\x1b[A");
+    send(&mut master, b"\x0f\x1b[A");
     wait_for_screen_absent_since(&captured, baseline, "claude-input:mark-30");
     let scrolled = screen_since(&captured, baseline).unwrap_or_default();
     // The topmost echoed mark now on screen is the row the appended output below
@@ -3378,8 +3395,8 @@ fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
     assert!(held.contains(&format!("claude-input:{top_mark}")), "{held}");
     assert!(!held.contains("claude-input:mark-34"), "{held}");
 
-    // `Ctrl-O b` returns to the live bottom in one step and follows again.
-    send(&mut master, b"\x0fb");
+    // `Ctrl-O End` returns to the live bottom in one step and follows again.
+    send(&mut master, b"\x0f\x1b[F");
     wait_for_screen_since(&captured, baseline, "claude-input:mark-34");
 
     send(&mut master, b"\x0f\x07");
