@@ -1462,10 +1462,10 @@ mod tests {
     #[test]
     fn configured_sizes_scale_the_pond_tree_and_world_spacing_together() {
         let mut previous = (0, 0, 0);
-        for (size, pond_height, tree_height, region_width) in [
-            (GardenSize::Small, 3, 4, 80),
-            (GardenSize::Medium, 5, 6, 96),
-            (GardenSize::Large, 7, 8, 112),
+        for (size, pond_height, tree_height, region_width, home_offset) in [
+            (GardenSize::Small, 3, 4, 80, 14),
+            (GardenSize::Medium, 5, 6, 96, 18),
+            (GardenSize::Large, 7, 8, 112, 22),
         ] {
             let pond = super::pond_art(size);
             let tree = super::tree_art(size);
@@ -1477,8 +1477,13 @@ mod tests {
             assert!(pond_width > previous.0 || size == GardenSize::Small);
             assert!(tree_width > previous.1 || size == GardenSize::Small);
             assert!(region_width > previous.2 || size == GardenSize::Small);
+            let layout = super::world_layout_sized(24, 80, 1, 0, size).unwrap();
+            let places = super::places(0, layout, size);
+            assert_eq!(places.home.x - places.burrow.x, home_offset);
             previous = (pond_width, tree_width, region_width);
         }
+        assert!(!super::fits_sized(18, 80, GardenSize::Large));
+        assert!(super::fits_sized(20, 80, GardenSize::Large));
     }
 
     #[test]

@@ -1452,6 +1452,8 @@ mod tests {
         }
         assert!(config.commit_save(&mut port));
         assert_eq!(port.global.garden_size, GardenSize::Large);
+        config.cycle_garden_size(true);
+        assert!(render(24, 80, &config).join("\n").contains("small"));
 
         let workspace =
             Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());

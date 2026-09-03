@@ -2198,7 +2198,25 @@ mod tests {
             assert_eq!(super::rabbit_width(size), width);
             assert_eq!(super::rabbit_height(size), height);
             assert_eq!(super::min_height(size), minimum);
+
+            if size != GardenSize::Medium {
+                for action in super::RunningAction::ALL {
+                    for progress in 0..action.duration() {
+                        let sprite = super::running_pose_sized(action, progress, size);
+                        assert_eq!(sprite.len(), height, "{size:?} {action:?}/{progress}");
+                        assert!(
+                            sprite.iter().all(|row| display_width(row) <= width),
+                            "{size:?} {action:?}/{progress}: {sprite:?}"
+                        );
+                    }
+                }
+            }
         }
+
+        assert_eq!(
+            super::render_scrolled(13, 64, "x", &[], 0, 0, true),
+            super::render_scrolled_sized(13, 64, "x", &[], 0, 0, true, GardenSize::Medium,)
+        );
     }
 
     fn grass_row(rows: &[String]) -> &str {
