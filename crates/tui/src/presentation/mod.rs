@@ -2823,13 +2823,13 @@ impl WorkspaceUi {
         self.sync_visible_terminals(&visible);
     }
 
-    /// Keep the bounded set of terminals visible in this frame attached, each
-    /// at the geometry of the surface that draws it.
+    /// Keep the bounded set of terminals participating in this Home composition
+    /// attached, each at the geometry of the surface that owns it.
     ///
-    /// Ordinary Home supplies one entry. An open Director drawer supplies its
-    /// root conversation plus the managed-session terminal that remains visible
-    /// and dimmed behind it. Input ownership is independent: only the runtime's
-    /// focused terminal receives bytes.
+    /// Ordinary Home supplies one entry. An open workspace drawer supplies its
+    /// root surface plus the managed-session terminal underneath it, even when
+    /// the overlay covers every background cell. Input ownership is independent:
+    /// only the runtime's focused terminal receives bytes.
     fn sync_visible_terminals(&mut self, visible: &[(TerminalRef, Geometry)]) {
         let stale = self
             .terminals
@@ -4294,38 +4294,13 @@ fn terminal_geometry(height: usize, width: usize) -> Geometry {
     }
 }
 
-/// Geometry of the managed terminal that remains visible to Director's left.
+/// Geometry of the managed terminal underneath workspace drawers.
 ///
-/// The Director overlays the right side of Home. Resizing the background PTY
-/// to that visible band keeps wrapping and cursor placement aligned with what
-/// the operator can actually see instead of continuing underneath the drawer.
-fn managed_background_terminal_geometry(
-    height: usize,
-    width: usize,
-    director_open: bool,
-    root_terminal_open: bool,
-) -> Geometry {
-    let (height, _) = widgets::normalize_size(height, width);
-    let cols = if director_open {
-        director_drawer::geometry(height, width).left
-    } else {
-        workspace::terminal_viewport(height, width).1
-    };
-    let rows = if root_terminal_open {
-        let available_width = root_terminal_available_width(height, width, director_open);
-        root_terminal_drawer::geometry_for(height, width, available_width)
-            .top
-            .saturating_sub(2 + 5)
-            .max(1)
-    } else {
-        height.saturating_sub(2 + 5).max(1)
-    };
-    Geometry {
-        cols: u16::try_from(cols.min(usize::from(u16::MAX)))
-            .expect("clamped Director background width fits u16"),
-        rows: u16::try_from(rows.min(usize::from(u16::MAX)))
-            .expect("clamped Director background height fits u16"),
-    }
+/// Director and workspace-terminal drawers are presentation overlays, like the
+/// PR modal. Their open state must not resize or reflow the Home terminal they
+/// cover, even when a drawer occupies its whole visible area.
+fn managed_background_terminal_geometry(height: usize, width: usize) -> Geometry {
+    terminal_geometry(height, width)
 }
 
 fn foreground_terminal_geometry(
@@ -4380,35 +4355,19 @@ fn root_terminal_available_width(height: usize, width: usize, director_open: boo
     }
 }
 
-/// Return the managed terminal that is genuinely visible beside Director.
-/// A full-width drawer occludes Home completely, so keeping that terminal
-/// attached would spend a stream slot on an invisible surface.
-fn visible_managed_background_terminal(
-    runtime: &WorkspaceRuntime,
-    height: usize,
-    width: usize,
-) -> Option<TerminalRef> {
-    let terminal = runtime.director_background_terminal()?;
-    let director_open = runtime.state().director_drawer_open();
-    let root_open = runtime.state().root_terminal_drawer_open();
-    if root_open && runtime.state().root_terminal_full_height() {
-        return None;
-    }
-    if director_open && director_drawer::geometry(height, width).full_width {
-        return None;
-    }
-    if root_open {
-        let available_width = root_terminal_available_width(height, width, director_open);
-        if root_terminal_drawer::geometry_for(height, width, available_width).full_height {
-            return None;
-        }
-    }
-    Some(terminal)
+/// Return the managed terminal underneath either workspace drawer.
+///
+/// A modal-like overlay never changes the background attachment merely because
+/// it occludes every cell. Keeping the stream attached also preserves the
+/// background screen exactly across drawer open/close transitions.
+fn managed_background_terminal(runtime: &WorkspaceRuntime) -> Option<TerminalRef> {
+    runtime.workspace_drawer_background_terminal()
 }
 
-/// Stable terminal/viewport set visible across Home and both workspace drawers.
-/// The focused root surface comes first; retained surfaces are read-only.
-fn visible_workspace_terminals(
+/// Stable attachment set for Home and both workspace drawers.
+/// The focused root surface comes first; retained background surfaces are
+/// read-only and keep their non-overlay geometry.
+fn workspace_terminal_attachments(
     runtime: &WorkspaceRuntime,
     height: usize,
     width: usize,
@@ -4435,13 +4394,8 @@ fn visible_workspace_terminals(
         ),
     );
     push(
-        visible_managed_background_terminal(runtime, height, width),
-        managed_background_terminal_geometry(
-            height,
-            width,
-            runtime.state().director_drawer_open(),
-            runtime.state().root_terminal_drawer_open(),
-        ),
+        managed_background_terminal(runtime),
+        managed_background_terminal_geometry(height, width),
     );
     push(
         runtime.director_terminal(),
@@ -7738,13 +7692,13 @@ fn drive_workspace_controller(
             runtime.state().workspace_drawer_focus(),
         );
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
-        // Keep every genuinely visible terminal attached. Concurrent Director
-        // and root-terminal drawers add two root surfaces beside the dimmed
-        // managed-session Agent instead of replacing or detaching it.
+        // Keep every terminal in the Home composition attached. Concurrent
+        // Director and root-terminal drawers add two root surfaces above the
+        // managed-session Agent instead of replacing, resizing, or detaching it.
         let director_terminal = runtime.director_terminal();
         let root_terminal = runtime.root_terminal();
-        let visible_terminals = visible_workspace_terminals(&runtime, height, width);
-        ui.sync_visible_terminals(&visible_terminals);
+        let terminal_attachments = workspace_terminal_attachments(&runtime, height, width);
+        ui.sync_visible_terminals(&terminal_attachments);
         // Polling still runs every tick so output/admission progresses, but row
         // String creation and URL scanning run only behind the projection key.
         close_exited_panes(&mut ui, &mut runtime);
@@ -7777,20 +7731,12 @@ fn drive_workspace_controller(
             terminal_material_key = Some(next_terminal_key);
             terminal_generation = terminal_generation.saturating_add(1);
         }
-        let background_terminal = visible_managed_background_terminal(&runtime, height, width);
+        let background_terminal = managed_background_terminal(&runtime);
         let background_revision = background_terminal
             .as_ref()
             .and_then(|terminal| ui.terminal_projection_key(terminal))
             .unwrap_or(0);
-        let background_rows = usize::from(
-            managed_background_terminal_geometry(
-                height,
-                width,
-                runtime.state().director_drawer_open(),
-                runtime.state().root_terminal_drawer_open(),
-            )
-            .rows,
-        );
+        let background_rows = usize::from(managed_background_terminal_geometry(height, width).rows);
         let next_background_key = (
             background_terminal.clone(),
             background_revision,
@@ -22136,12 +22082,13 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // One stream fixture proves simultaneous attach, resize, poll, and detach ownership.
-    fn director_keeps_the_dimmed_managed_terminal_attached_and_moving() {
+    #[allow(clippy::too_many_lines)] // One stream fixture proves simultaneous attachment, polling, and stable geometry.
+    fn drawers_keep_the_managed_terminal_at_home_geometry_and_moving() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let managed = scoped_terminal_ref(workspace, Some(session));
-        let root = scoped_terminal_ref(workspace, None);
+        let root_agent = scoped_terminal_ref(workspace, None);
+        let root_shell = scoped_terminal_ref(workspace, None);
         let initial = b"one\r\ntwo\r\nthree";
         let moved = b"\r\ndim-managed-moved";
         let calls = Arc::new(Mutex::new(StreamCalls {
@@ -22171,11 +22118,17 @@ mod tests {
             vec![
                 super::PaneRestoreTarget {
                     target: Target::Root(workspace),
-                    panes: vec![LivePane {
-                        terminal: root.clone(),
-                        kind: PaneKind::Agent,
-                    }],
-                    selected: Some(root.clone()),
+                    panes: vec![
+                        LivePane {
+                            terminal: root_agent.clone(),
+                            kind: PaneKind::Agent,
+                        },
+                        LivePane {
+                            terminal: root_shell.clone(),
+                            kind: PaneKind::Terminal,
+                        },
+                    ],
+                    selected: Some(root_agent.clone()),
                     selected_interrupted: None,
                     interrupted: Vec::new(),
                 },
@@ -22192,9 +22145,9 @@ mod tests {
             ],
         ));
         let managed_geometry = terminal_geometry(24, 100);
-        let managed_director_geometry =
-            super::managed_background_terminal_geometry(24, 100, true, false);
-        let drawer_geometry = foreground_terminal_geometry(
+        let managed_background_geometry = super::managed_background_terminal_geometry(24, 100);
+        assert_eq!(managed_background_geometry, managed_geometry);
+        let director_geometry = foreground_terminal_geometry(
             24,
             100,
             true,
@@ -22205,11 +22158,34 @@ mod tests {
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        assert_director_background_visibility(&runtime, &managed);
+        assert_drawer_background_attachment(&runtime, &managed);
         ui.sync_visible_terminals(&[
-            (root.clone(), drawer_geometry),
-            (managed.clone(), managed_director_geometry),
+            (root_agent.clone(), director_geometry),
+            (managed.clone(), managed_background_geometry),
         ]);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        assert_eq!(runtime.focused_terminal(), Some(root_shell.clone()));
+        let attachments = super::workspace_terminal_attachments(&runtime, 24, 100);
+        assert!(attachments.iter().any(|(terminal, geometry)| {
+            terminal.fences(&managed) && *geometry == managed_geometry
+        }));
+        let root_shell_geometry = attachments
+            .iter()
+            .find_map(|(terminal, geometry)| terminal.fences(&root_shell).then_some(*geometry))
+            .expect("the root shell owns the terminal drawer");
+        ui.sync_visible_terminals(&attachments);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminalFullHeight));
+        assert!(runtime.state().root_terminal_full_height());
+        let full_height_attachments = super::workspace_terminal_attachments(&runtime, 24, 100);
+        assert!(full_height_attachments.iter().any(|(terminal, geometry)| {
+            terminal.fences(&managed) && *geometry == managed_geometry
+        }));
+        let full_height_root_geometry = full_height_attachments
+            .iter()
+            .find_map(|(terminal, geometry)| terminal.fences(&root_shell).then_some(*geometry))
+            .expect("the full-height drawer keeps the root shell attached");
+        assert_ne!(full_height_root_geometry, root_shell_geometry);
+        ui.sync_visible_terminals(&full_height_attachments);
         close_exited_panes(&mut ui, &mut runtime);
 
         let dimmed_view = ui
@@ -22224,19 +22200,26 @@ mod tests {
             calls.attach_geometries,
             [
                 (managed.clone(), managed_geometry),
-                (root.clone(), drawer_geometry),
+                (root_agent.clone(), director_geometry),
+                (root_shell.clone(), root_shell_geometry),
             ]
         );
-        assert!(
-            calls
-                .resize_geometries
-                .contains(&(managed.clone(), managed_director_geometry))
+        assert_eq!(
+            calls.resize_geometries,
+            [(root_shell.clone(), full_height_root_geometry)],
+            "only the terminal inside a resized drawer may change geometry"
         );
         assert!(
             calls
                 .poll_terminals
                 .iter()
-                .any(|terminal| terminal == &root)
+                .any(|terminal| terminal == &root_agent)
+        );
+        assert!(
+            calls
+                .poll_terminals
+                .iter()
+                .any(|terminal| terminal == &root_shell)
         );
         assert!(
             calls
@@ -22250,26 +22233,18 @@ mod tests {
             "the attached dimmed terminal must not also enter inventory polling"
         );
         assert_eq!(calls.detaches, 0);
-
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminalFullHeight));
-        assert_eq!(
-            super::visible_managed_background_terminal(&runtime, 24, 100),
-            None,
-            "a full-height terminal drawer must occlude the managed background"
-        );
     }
 
-    fn assert_director_background_visibility(runtime: &WorkspaceRuntime, managed: &TerminalRef) {
-        assert_eq!(
-            super::visible_managed_background_terminal(runtime, 24, 80).as_ref(),
-            Some(managed)
-        );
-        assert_eq!(
-            super::visible_managed_background_terminal(runtime, 24, 79),
-            None,
-            "a full-width drawer must not keep an occluded terminal attached"
-        );
+    fn assert_drawer_background_attachment(runtime: &WorkspaceRuntime, managed: &TerminalRef) {
+        for width in [80, 79] {
+            let attached = super::workspace_terminal_attachments(runtime, 24, width);
+            assert!(
+                attached.iter().any(|(terminal, geometry)| {
+                    terminal.fences(managed) && *geometry == terminal_geometry(24, width)
+                }),
+                "a drawer, including its full-width form, must retain the background at Home geometry"
+            );
+        }
     }
 
     #[test]
@@ -22320,24 +22295,31 @@ mod tests {
         assert!(runtime.state().director_drawer_open());
         assert!(runtime.state().root_terminal_drawer_open());
         assert_eq!(runtime.focused_terminal(), Some(root_terminal.clone()));
-        let visible = super::visible_workspace_terminals(&runtime, 30, 160)
-            .into_iter()
-            .map(|(terminal, _)| terminal)
-            .collect::<Vec<_>>();
+        let visible = super::workspace_terminal_attachments(&runtime, 30, 160);
         assert_eq!(
-            visible,
-            [root_terminal.clone(), managed.clone(), root_agent.clone()]
+            visible
+                .iter()
+                .map(|(terminal, _)| terminal)
+                .collect::<Vec<_>>(),
+            [&root_terminal, &managed, &root_agent]
         );
         assert_eq!(
-            super::visible_managed_background_terminal(&runtime, 8, 160),
-            None,
-            "a full-height root drawer must not retain an occluded managed Agent"
+            visible[1].1,
+            terminal_geometry(30, 160),
+            "drawers must not shrink the background workspace geometry"
+        );
+        let fully_occluded = super::workspace_terminal_attachments(&runtime, 8, 160);
+        assert!(
+            fully_occluded
+                .iter()
+                .any(|(terminal, _)| terminal.fences(&managed)),
+            "a full-height root overlay must retain its background Agent"
         );
         assert_eq!(super::root_terminal_available_width(30, 79, true), 79);
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
-        let visible = super::visible_workspace_terminals(&runtime, 30, 160)
+        let visible = super::workspace_terminal_attachments(&runtime, 30, 160)
             .into_iter()
             .map(|(terminal, _)| terminal)
             .collect::<Vec<_>>();
@@ -22365,7 +22347,7 @@ mod tests {
             ),
             (
                 managed.clone(),
-                super::managed_background_terminal_geometry(height, width, true, false),
+                super::managed_background_terminal_geometry(height, width),
             ),
         ]);
     }
@@ -22489,19 +22471,9 @@ mod tests {
                 (root, drawer_geometry),
             ]
         );
-        assert_eq!(
-            calls.resize_geometries,
-            [
-                (
-                    managed.clone(),
-                    super::managed_background_terminal_geometry(24, 100, true, false),
-                ),
-                (managed.clone(), managed_geometry),
-                (
-                    managed,
-                    super::managed_background_terminal_geometry(24, 100, true, false),
-                ),
-            ]
+        assert!(
+            calls.resize_geometries.is_empty(),
+            "drawer round trips must leave the managed terminal geometry untouched"
         );
         assert_eq!(calls.attaches, 3);
         assert_eq!(calls.detaches, 1);
