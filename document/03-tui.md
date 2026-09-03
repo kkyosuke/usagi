@@ -161,6 +161,9 @@ project close を実行し、未追加 row では何もしない。filter 入力
 deck に保持する session 一覧を通信なしで即時に描く。snapshot を短い猶予内に準備できれば spinner は出さず、時間がかかった場合だけ
 右 content pane に表示する。待機中の `Esc` 以外の入力は次の workspace frame へ順序を保って繰り越す。cancel / open error 後に current
 workspace の authority を再申告する間も同じ部分描画を使う。準備完了後は fresh snapshot で session 一覧と content を置き換える。
+project ごとに最後にフォーカスしていた stable `SessionId` を deck が保持し、再選択時はその session row へ Switch のカーソルを戻す。
+session が fresh snapshot から消えていた場合は復元せず、session があれば一覧先頭、なければ neutral という既定選択を使う。
+カーソルの復元だけでは Closeup を開かない。
 未保存の create / notes / environment / roles editor がある間は切替・active close を拒否する。
 
 TUI が resident に持つ `ControllerBackendComposition` は active workspace の 1 件だけである。切替 return が旧 workspace の port、pump、worker、

@@ -6988,6 +6988,27 @@ fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
         || state.role_editor().is_some()
 }
 
+/// Carry the active workspace's sidebar cursor across the composition teardown.
+/// Only stable session rows are remembered; transient action rows remain local
+/// to the controller that owns them.
+fn remember_workspace_session_focus(deck: &mut WorkspaceDeck, state: &AppState) {
+    if let crate::usecase::application::controller::Selection::Target(Target::Session(session)) =
+        state.selected()
+    {
+        deck.remember_session_focus(state.workspace(), session);
+    }
+}
+
+fn restore_workspace_session_focus(
+    deck: &WorkspaceDeck,
+    path: &Path,
+    runtime: &mut WorkspaceRuntime,
+) {
+    if let Some(session) = deck.focused_session_for_path(path) {
+        let _ = runtime.apply_event(AppEvent::FocusSession(session));
+    }
+}
+
 /// Run one blocking operation on a scoped worker while continuing to paint.
 /// For cancellable workspace opens, Escape discards a late result; the
 /// underlying call is allowed to settle safely before its borrowed port is
@@ -7090,10 +7111,16 @@ fn cached_workspace_switch_frame(
 ) -> Option<Vec<String>> {
     let slot = deck.slot_for_path(path)?;
     let sessions = slot.projected_sessions();
-    let state = AppState::home(
+    let mut state = AppState::home(
         slot.workspace_id(),
         sessions.iter().map(|session| session.id).collect(),
     );
+    if let Some(session) = deck.focused_session_for_path(path) {
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::FocusSession(session),
+        );
+    }
     let projection = HomeProjection::from_state(&state, slot.label(), slot.path(), &sessions);
     let projection = if show_progress {
         projection.with_content_loading(status, frame)
@@ -7428,6 +7455,7 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     runtime.set_pr_auto_open(pr_auto_open);
     let data_home = usagi_core::infrastructure::paths::data_dir().ok();
@@ -8086,6 +8114,7 @@ fn drive_workspace_controller(
                     &prepared.workspace.path,
                 )
             {
+                remember_workspace_session_focus(deck, runtime.state());
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             drawn_material = None;
@@ -8112,6 +8141,7 @@ fn drive_workspace_controller(
                             &prepared.workspace.path,
                         )
                     {
+                        remember_workspace_session_focus(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -8138,6 +8168,7 @@ fn drive_workspace_controller(
                         )
                     {
                         deck.schedule_garden_visit(prepared.workspace.path.clone(), session);
+                        remember_workspace_session_focus(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -8217,6 +8248,7 @@ fn drive_workspace_controller(
                                 if let Some(loader) = loader.as_mut() {
                                     let _ = (**loader).record_unite(&deck.paths());
                                 }
+                                remember_workspace_session_focus(deck, runtime.state());
                                 return Ok(WorkspaceStep::Activate(Box::new(first)));
                             }
                         }
@@ -8247,6 +8279,7 @@ fn drive_workspace_controller(
                             &prepared.workspace.path,
                         ) {
                             deck.close_path(&path);
+                            remember_workspace_session_focus(deck, runtime.state());
                             return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                         }
                     } else {
@@ -8342,6 +8375,7 @@ fn drive_workspace_controller(
                 )
             {
                 deck.schedule_garden_visit(prepared.workspace.path.clone(), visit.session);
+                remember_workspace_session_focus(deck, runtime.state());
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             let notice = deck.notice().map(str::to_owned);
@@ -10007,9 +10041,10 @@ mod tests {
         open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
         prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
         prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
-        remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
-        render_missing_workspace_prompt, reset_projection_build_counts, restore_open_panes,
-        restore_prepared_workspace, retarget_drawer_chords, route_garden_input,
+        remember_workspace_session_focus, remove_registry_paths, render_controller_frame,
+        render_home_material, render_home_snapshot, render_missing_workspace_prompt,
+        reset_projection_build_counts, restore_open_panes, restore_prepared_workspace,
+        restore_workspace_session_focus, retarget_drawer_chords, route_garden_input,
         route_pr_modal_click, route_workspace_input_before_reducer, run as run_from_start,
         run_screen_graph_with_backend, run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
@@ -11369,6 +11404,20 @@ mod tests {
 
     fn snapshot(name: &str) -> WorkspaceSnapshot {
         WorkspaceSnapshot::new(ws(name), state(name))
+    }
+
+    fn snapshot_with_sessions(name: &str, session_names: &[&str]) -> WorkspaceSnapshot {
+        let mut workspace_state = state(name);
+        let template = workspace_state.sessions[0].clone();
+        workspace_state.sessions = session_names
+            .iter()
+            .map(|session| SessionRecord {
+                name: (*session).to_owned(),
+                root: PathBuf::from(format!("/tmp/{name}/{session}")),
+                ..template.clone()
+            })
+            .collect();
+        WorkspaceSnapshot::new(ws(name), workspace_state)
     }
 
     #[test]
@@ -25977,6 +26026,49 @@ mod tests {
         assert!(frame.contains("Opening workspace…"));
         assert!(pending.contains("beta-session"));
         assert!(!pending.contains("Opening workspace…"));
+    }
+
+    #[test]
+    fn workspace_switch_restores_each_projects_last_session_cursor() {
+        let alpha = snapshot("alpha");
+        let beta = snapshot_with_sessions("beta", &["first", "remembered"]);
+        let remembered = beta.session_ids[1];
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
+        let mut previous = WorkspaceRuntime::new(beta.workspace_id, beta.session_ids.clone());
+        let _ = previous.handle_key(Key::Down);
+
+        remember_workspace_session_focus(&mut deck, previous.state());
+        let _ = previous.handle_key(Key::Down);
+        remember_workspace_session_focus(&mut deck, previous.state());
+        assert_eq!(
+            deck.focused_session_for_path(&beta.workspace.path),
+            Some(remembered),
+            "the transient new-session row does not replace the last session focus"
+        );
+
+        let mut restored = WorkspaceRuntime::new(beta.workspace_id, beta.session_ids.clone());
+        restore_workspace_session_focus(&deck, &beta.workspace.path, &mut restored);
+        assert_eq!(
+            restored.state().selected(),
+            crate::usecase::application::controller::Selection::Target(Target::Session(remembered))
+        );
+        assert_eq!(restored.state().route(), Route::Home(HomeMode::Switch));
+
+        let transition = strip_ansi(
+            &cached_workspace_switch_frame(
+                &deck,
+                &beta.workspace.path,
+                24,
+                80,
+                0,
+                "Opening workspace…",
+                false,
+            )
+            .unwrap()
+            .join("\n"),
+        );
+        assert!(transition.contains("\u{f0907} remembered"), "{transition}");
+        assert!(!transition.contains("\u{f0907} first"), "{transition}");
     }
 
     #[test]
