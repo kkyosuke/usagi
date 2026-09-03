@@ -85,6 +85,7 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
 | `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
 | `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Director と Work Run 一覧・操作面を開く |
+| `?` / live pane の `Ctrl-O ?` | コマンド一覧を開く（初期表示は現在実行できるコマンド） |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
