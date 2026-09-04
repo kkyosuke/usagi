@@ -19878,10 +19878,11 @@ mod tests {
             })
             .expect("the interrupted Director row is visible");
         assert!(super::select_director_conversation_from_pointer(
-            &Key::Click {
+            &Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
                 column: director_column,
                 row: interrupted_row,
-            },
+            }),
             &mut ui,
             &mut runtime,
             &projected,
@@ -19901,6 +19902,41 @@ mod tests {
                 continuation: Some(actual),
             } if *actual == interrupted_continuation
         )));
+        assert!(!super::select_director_conversation_from_pointer(
+            &Key::Click {
+                column: 0,
+                row: interrupted_row,
+            },
+            &mut ui,
+            &mut runtime,
+            &projected,
+            20,
+            80,
+        ));
+
+        // A row remains consumed if its frame identity went stale, but the
+        // durable intent and current pane selection must not be retargeted.
+        let mutation_count = mutations.lock().unwrap().len();
+        let mut stale_projection = projected.clone();
+        stale_projection.conversations[1].identity = TabSelection::Pending(OperationId::new());
+        assert!(super::select_director_conversation_from_pointer(
+            &Key::Click {
+                column: director_column,
+                row: interrupted_row,
+            },
+            &mut ui,
+            &mut runtime,
+            &stale_projection,
+            20,
+            80,
+        ));
+        assert_eq!(mutations.lock().unwrap().len(), mutation_count);
+        assert_eq!(
+            runtime.active_pane().selected(),
+            &crate::usecase::application::pane::PaneSelection::Tab(TabSelection::Interrupted(
+                interrupted_continuation
+            ))
+        );
         // Restore the original live selection so the remainder of this seam
         // continues to exercise live terminal projection and close behavior.
         let _ = super::commit_director_tab_selection(

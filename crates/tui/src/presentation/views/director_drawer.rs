@@ -1236,6 +1236,15 @@ mod tests {
             None
         );
         assert_eq!(
+            organization_conversation_at(24, 3, &projection, 0, first_row),
+            None
+        );
+        let footer_row = u16::try_from(drawer.top + drawer.height.saturating_sub(3)).unwrap();
+        assert_eq!(
+            organization_conversation_at(24, 100, &projection, column, footer_row),
+            None
+        );
+        assert_eq!(
             organization_conversation_at(
                 24,
                 100,
