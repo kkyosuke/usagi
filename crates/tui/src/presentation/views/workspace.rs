@@ -967,6 +967,14 @@ impl HomeProjection {
         self.terminal_view.as_deref()
     }
 
+    /// Borrow the exact Director material used for the last frame's pointer
+    /// hit-test. Conversation clicks must resolve through these stable IDs,
+    /// rather than rebuilding an index after asynchronous inventory changes.
+    #[must_use]
+    pub(crate) const fn director_drawer(&self) -> Option<&DirectorDrawerProjection> {
+        self.director_drawer.as_ref()
+    }
+
     /// Replace the open drawer's presentation material without changing its
     /// controller-owned open/closed state. A closed drawer ignores supplied
     /// material, keeping runtime inventory from opening UI implicitly.
@@ -4454,6 +4462,7 @@ mod tests {
             conversations: vec![DirectorConversation {
                 label: "root conversation".to_owned(),
                 selected: true,
+                identity: TabSelection::Pending(OperationId::new()),
             }],
             organization: Vec::new(),
             terminal_view: Some(TerminalViewProjection {

@@ -5063,8 +5063,8 @@ fn controller_terminal_view(
 
 /// Project the root pane entry into the frontmost Agent-only drawer.
 ///
-/// Stable identity and selection remain in the pane/intent reducers. This
-/// adapter exposes only safe labels and the already-rendered VT rows.
+/// Identity stays opaque to the view: this adapter copies the exact pane key
+/// beside each safe label so a frame hitbox can return it to the reducers.
 fn director_drawer_projection(
     ui: &WorkspaceUi,
     runtime: &WorkspaceRuntime,
@@ -5086,6 +5086,7 @@ fn director_drawer_projection(
                     selected.as_ref(),
                     Some(TabSelection::Live(terminal)) if terminal.fences(&live.terminal)
                 ),
+                identity: TabSelection::Live(live.terminal.clone()),
             }),
             PaneTab::Interrupted(interrupted) => Some(DirectorConversation {
                 label: interrupted.tab.safe_label(),
@@ -5094,6 +5095,7 @@ fn director_drawer_projection(
                     Some(TabSelection::Interrupted(continuation))
                         if *continuation == interrupted.tab.continuation
                 ),
+                identity: TabSelection::Interrupted(interrupted.tab.continuation),
             }),
             PaneTab::Pending(pending) if pending.kind == PaneKind::Agent => {
                 Some(DirectorConversation {
@@ -5102,6 +5104,7 @@ fn director_drawer_projection(
                         selected.as_ref(),
                         Some(TabSelection::Pending(operation)) if *operation == pending.operation
                     ),
+                    identity: TabSelection::Pending(pending.operation),
                 })
             }
             PaneTab::Live(_) | PaneTab::Pending(_) | PaneTab::Ready(_) => None,
@@ -6002,6 +6005,17 @@ fn select_director_tab_outcome(
     let Some(selection) = runtime.agent_selection_after_select(direction) else {
         return DirectorTabSelection::Handled;
     };
+    commit_director_tab_selection(ui, runtime, selection)
+}
+
+fn commit_director_tab_selection(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    selection: TabSelection,
+) -> DirectorTabSelection {
+    if !runtime.has_director_selection(&selection) {
+        return DirectorTabSelection::Handled;
+    }
     let continuation = match &selection {
         TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
         TabSelection::Interrupted(continuation) => Some(*continuation),
@@ -6020,6 +6034,32 @@ fn select_director_tab_outcome(
             DirectorTabSelection::Handled
         }
     }
+}
+
+fn select_director_conversation_from_pointer(
+    key: &Key,
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    projection: &DirectorDrawerProjection,
+    height: usize,
+    width: usize,
+) -> bool {
+    let (column, row) = match key {
+        Key::Click { column, row }
+        | Key::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            column,
+            row,
+        }) => (*column, *row),
+        _ => return false,
+    };
+    let Some(selection) =
+        director_drawer::organization_conversation_at(height, width, projection, column, row)
+    else {
+        return false;
+    };
+    let _ = commit_director_tab_selection(ui, runtime, selection);
+    true
 }
 
 #[cfg(test)]
@@ -9125,6 +9165,27 @@ fn drive_workspace_controller(
             pending_work_run_control = Some(request.clone());
         }
         let work_run_effects = work_run_input.map(|input| input.effects);
+        let director_conversation_selected = garden_route.is_none()
+            && director_header_effects.is_none()
+            && work_run_effects.is_none()
+            && drawn_material.as_ref().is_some_and(|material| {
+                material
+                    .projection
+                    .director_drawer()
+                    .is_some_and(|projection| {
+                        select_director_conversation_from_pointer(
+                            &key,
+                            &mut ui,
+                            &mut runtime,
+                            projection,
+                            material.height,
+                            material.width,
+                        )
+                    })
+            });
+        if director_conversation_selected {
+            continue;
+        }
         let input_route = match garden_route {
             Some(GardenInputRoute::Local(effects)) => WorkspaceInputRoute::Garden(effects),
             Some(GardenInputRoute::Agent(effects)) => {
@@ -19744,7 +19805,8 @@ mod tests {
         });
         let durable = Arc::new(Mutex::new(intent));
         let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view =
+            WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![SessionId::new()]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
             .with_agent_tab_intent(
@@ -19794,9 +19856,58 @@ mod tests {
         };
         let projected = super::director_drawer_projection(&ui, &runtime, Some(&terminal_view));
         assert_eq!(projected.conversations.len(), 2);
+        assert!(!projected.organization.is_empty());
         assert!(projected.conversations[0].selected);
         assert_eq!(projected.terminal_view, Some(terminal_view));
         assert_eq!(projected.interrupted_detail, None);
+
+        // Organization's visible Director rows resolve the exact lineage drawn
+        // in the frame, persist that selection, and move the pane without a
+        // label/index guess or an implicit interrupted-Agent resume.
+        let drawer = director_drawer::geometry(20, 80);
+        let director_column = u16::try_from(drawer.left.saturating_add(2)).unwrap();
+        let interrupted_row = (0_u16..20)
+            .find(|row| {
+                director_drawer::organization_conversation_at(
+                    20,
+                    80,
+                    &projected,
+                    director_column,
+                    *row,
+                ) == Some(TabSelection::Interrupted(interrupted_continuation))
+            })
+            .expect("the interrupted Director row is visible");
+        assert!(super::select_director_conversation_from_pointer(
+            &Key::Click {
+                column: director_column,
+                row: interrupted_row,
+            },
+            &mut ui,
+            &mut runtime,
+            &projected,
+            20,
+            80,
+        ));
+        assert_eq!(
+            runtime.active_pane().selected(),
+            &crate::usecase::application::pane::PaneSelection::Tab(TabSelection::Interrupted(
+                interrupted_continuation
+            ))
+        );
+        assert!(mutations.lock().unwrap().iter().any(|mutation| matches!(
+            mutation,
+            AgentTabIntentMutation::Select {
+                session_id: None,
+                continuation: Some(actual),
+            } if *actual == interrupted_continuation
+        )));
+        // Restore the original live selection so the remainder of this seam
+        // continues to exercise live terminal projection and close behavior.
+        let _ = super::commit_director_tab_selection(
+            &mut ui,
+            &mut runtime,
+            TabSelection::Live(live.clone()),
+        );
 
         // A live projection without control feedback still crosses the seam as
         // a projection; the adapter never converts its rows into drawer lines.

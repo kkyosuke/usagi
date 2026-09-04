@@ -369,6 +369,15 @@ impl WorkspaceRuntime {
             .flatten()
     }
 
+    /// Whether an exact identity from a drawn Director frame still belongs to
+    /// a root Agent conversation.
+    #[must_use]
+    pub fn has_director_selection(&self, selection: &TabSelection) -> bool {
+        self.state.overlay().is_none()
+            && self.state.director_drawer_open()
+            && self.selection_has_kind(selection, PaneKind::Agent)
+    }
+
     /// Selected live root generic terminal shown by the bottom drawer, whether
     /// or not that drawer currently owns input.
     #[must_use]
@@ -4132,6 +4141,45 @@ mod tests {
             }),
         );
         assert_eq!(rendered.join("\n").matches("shell-only output").count(), 0);
+    }
+
+    #[test]
+    fn director_exact_selection_accepts_only_current_root_agents() {
+        let workspace = WorkspaceId::new();
+        let first_agent = root_terminal_ref(workspace);
+        let shell = root_terminal_ref(workspace);
+        let second_agent = root_terminal_ref(workspace);
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![PaneRestoreTarget {
+                target: Target::Root(workspace),
+                panes: vec![
+                    LivePane {
+                        terminal: first_agent.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                    LivePane {
+                        terminal: shell.clone(),
+                        kind: PaneKind::Terminal,
+                    },
+                    LivePane {
+                        terminal: second_agent.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                ],
+                selected: Some(first_agent),
+                selected_interrupted: None,
+                interrupted: Vec::new(),
+            }],
+        ));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+
+        assert!(runtime.has_director_selection(&TabSelection::Live(second_agent)));
+        assert!(!runtime.has_director_selection(&TabSelection::Live(shell)));
+        assert!(!runtime.has_director_selection(&TabSelection::Live(root_terminal_ref(workspace))));
     }
 
     #[test]

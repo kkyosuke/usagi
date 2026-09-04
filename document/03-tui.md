@@ -636,8 +636,9 @@ managed-session Closeup の right pane viewport とは別の pure geometry と�
 
 Organization は root scope（`session_id: None`）の live / pending / interrupted Agent conversation と、managed Session / Agent の
 Organization tree を表示する。generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
-Diff と Terminal pending/action は Director の restore projection と pane admission で拒否する。`↑` / `↓` は root Director を
-stable tab identity で選び、`Enter` は選択した root Agent の Console を開く。Console だけが terminal view を描き、
+Diff と Terminal pending/action は Director の restore projection と pane admission で拒否する。`↑` / `↓` または表示中の
+Directors 行の click は root Director を frame が保持する stable tab identity で選び、`Enter` は選択した root Agent の
+Console を開く。Console だけが terminal view を描き、
 Organization、Work Run progress、追加の command editor は混ぜない。
 
 drawer の開閉状態にかかわらず `Ctrl-O n`（または `Ctrl-O Ctrl-N`）、または `[ New ]` / `[ Start ]` の mouse-down hit で

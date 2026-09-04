@@ -10,6 +10,7 @@ use crate::presentation::views::work_run::{WorkRunFreshness, WorkRunProgress, Wo
 use crate::presentation::views::workspace::TerminalViewProjection;
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::{DirectorConsoleParent, DirectorRoute};
+use crate::usecase::application::pane::TabSelection;
 use crate::usecase::application::terminal_selection::TerminalPoint;
 use crate::usecase::application::work_run_control::WorkRunControlMode;
 use usagi_core::domain::supervisor::{
@@ -47,15 +48,16 @@ const PICKER_HINT: &str = "↑↓: select  ·  Enter: launch  ·  Esc: cancel";
 /// gates Enter on the same capacity, so this states the only way forward.
 const PICKER_TOO_SHORT_HINT: &str = "Terminal too short to choose  ·  Esc: cancel";
 
-/// One presentation-safe conversation choice.
+/// One presentation-safe conversation choice and its opaque stable identity.
 ///
-/// Inventory identity remains outside the view. A later controller/runtime may
-/// associate this display value with its own stable key and feed the selected
-/// projection into this shell.
+/// The renderer never interprets the identity. Organization hit-testing
+/// returns the exact value drawn in that row so refresh or duplicate labels
+/// cannot retarget a click.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectorConversation {
     pub label: String,
     pub selected: bool,
+    pub identity: TabSelection,
 }
 
 /// One safe row in the Director's organization overview.
@@ -267,6 +269,54 @@ pub fn new_button_at(
     let label = if goal_driven { "[ Start ]" } else { "[ New ]" };
     let left = right.saturating_sub(widgets::display_width(label));
     (left..right).contains(&usize::from(column))
+}
+
+/// Resolve a visible Director row on the Organization screen to the exact root
+/// Agent identity drawn in that row. The whole content row is a hit target;
+/// clipped or duplicate labels are never used as an action key.
+#[must_use]
+pub fn organization_conversation_at(
+    raw_height: usize,
+    raw_width: usize,
+    projection: &DirectorDrawerProjection,
+    column: u16,
+    row: u16,
+) -> Option<TabSelection> {
+    if projection.route != DirectorRoute::Organization
+        || !matches!(projection.new, DirectorNewProjection::Ready)
+        || matches!(
+            projection.work_run_control.mode,
+            WorkRunControlMode::ConfirmCancel
+                | WorkRunControlMode::ConfirmDelete
+                | WorkRunControlMode::ResolveEscalation
+                | WorkRunControlMode::Submitting
+                | WorkRunControlMode::Retry
+        )
+    {
+        return None;
+    }
+    let drawer = geometry(raw_height, raw_width);
+    if drawer.width < 4 {
+        return None;
+    }
+    let column = usize::from(column);
+    let content_columns =
+        drawer.left.saturating_add(2)..drawer.left.saturating_add(drawer.width).saturating_sub(2);
+    if !content_columns.contains(&column) {
+        return None;
+    }
+    // Body rows 0/1 are the breadcrumb and separator; row 2 is the
+    // `Directors` heading. The final body row is always the fixed footer.
+    let body_row = usize::from(row).checked_sub(drawer.top.saturating_add(2))?;
+    let conversation_index = body_row.checked_sub(3)?;
+    let body_height = drawer.height.saturating_sub(4);
+    if body_row >= body_height.saturating_sub(1) {
+        return None;
+    }
+    projection
+        .conversations
+        .get(conversation_index)
+        .map(|conversation| conversation.identity.clone())
 }
 
 /// Render the drawer over a dimmed Home frame.
@@ -1143,6 +1193,64 @@ mod tests {
     }
 
     #[test]
+    fn organization_director_rows_return_the_stable_identity_drawn_in_each_row() {
+        let first = TabSelection::Pending(OperationId::new());
+        let second = TabSelection::Pending(OperationId::new());
+        let projection = DirectorDrawerProjection {
+            conversations: vec![
+                DirectorConversation {
+                    label: "same label".into(),
+                    selected: true,
+                    identity: first.clone(),
+                },
+                DirectorConversation {
+                    label: "same label".into(),
+                    selected: false,
+                    identity: second.clone(),
+                },
+            ],
+            organization: vec![DirectorOrganizationRow {
+                depth: 0,
+                label: "Director".into(),
+                status: "active".into(),
+            }],
+            ..DirectorDrawerProjection::default()
+        };
+        let drawer = geometry(24, 100);
+        let column = u16::try_from(drawer.left + 2).unwrap();
+        let first_row = u16::try_from(drawer.top + 5).unwrap();
+        assert_eq!(
+            organization_conversation_at(24, 100, &projection, column, first_row),
+            Some(first)
+        );
+        assert_eq!(
+            organization_conversation_at(24, 100, &projection, column, first_row + 1),
+            Some(second)
+        );
+        assert_eq!(
+            organization_conversation_at(24, 100, &projection, 0, first_row),
+            None
+        );
+        assert_eq!(
+            organization_conversation_at(24, 100, &projection, column, first_row - 1),
+            None
+        );
+        assert_eq!(
+            organization_conversation_at(
+                24,
+                100,
+                &DirectorDrawerProjection {
+                    new: DirectorNewProjection::Empty,
+                    ..projection
+                },
+                column,
+                first_row,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn empty_drawer_dims_background_and_renders_new_affordance() {
         let base = (0..24)
             .map(|row| format!("background {row}"))
@@ -1173,6 +1281,7 @@ mod tests {
             conversations: vec![DirectorConversation {
                 label: "active".to_owned(),
                 selected: true,
+                identity: TabSelection::Pending(OperationId::new()),
             }],
             terminal_view: Some(TerminalViewProjection {
                 rows: vec!["agent output".to_owned()],
@@ -1773,10 +1882,12 @@ mod tests {
                 DirectorConversation {
                     label: "older".to_owned(),
                     selected: false,
+                    identity: TabSelection::Pending(OperationId::new()),
                 },
                 DirectorConversation {
                     label: "active conversation".to_owned(),
                     selected: true,
+                    identity: TabSelection::Pending(OperationId::new()),
                 },
             ],
             organization: Vec::new(),
@@ -1844,6 +1955,7 @@ mod tests {
             conversations: vec![DirectorConversation {
                 label: "active".to_owned(),
                 selected: true,
+                identity: TabSelection::Pending(OperationId::new()),
             }],
             organization: Vec::new(),
             terminal_view: Some(TerminalViewProjection {
@@ -1909,6 +2021,7 @@ mod tests {
             conversations: vec![DirectorConversation {
                 label: "interrupted".to_owned(),
                 selected: true,
+                identity: TabSelection::Pending(OperationId::new()),
             }],
             organization: Vec::new(),
             terminal_view: None,
@@ -2129,6 +2242,7 @@ mod tests {
             conversations: vec![DirectorConversation {
                 label: "会話の履歴".to_owned(),
                 selected: true,
+                identity: TabSelection::Pending(OperationId::new()),
             }],
             organization: Vec::new(),
             terminal_view: None,
