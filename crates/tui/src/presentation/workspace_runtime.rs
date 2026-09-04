@@ -3586,6 +3586,10 @@ mod tests {
         let second = terminal_ref(workspace, session);
         let _ = runtime.complete_pane(target, pending, second.clone());
         let _ = runtime.focus_terminal(target, second);
+        assert_eq!(
+            runtime.terminal_after_select(TabDirection::Previous),
+            Some(Some(first.clone()))
+        );
         assert_eq!(runtime.terminal_after_close(), Some(Some(first)));
     }
 
@@ -5474,6 +5478,43 @@ mod tests {
 
         assert_eq!(runtime.close_focused_pane(), CloseOutcome::default());
         assert!(!runtime.active_pane().has_tabs());
+    }
+
+    #[test]
+    fn unresumable_removal_prompt_reconciles_empty_resumable_and_refreshed_history() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut empty = WorkspaceRuntime::new(workspace, Vec::new());
+        assert!(!empty.open_interrupted_removal_confirmation());
+        empty.toggle_interrupted_removal_choice();
+        assert!(empty.interrupted_removal_confirmation().is_none());
+
+        let mut runtime = closeup_on(workspace, session);
+        let resumable = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![resumable.clone()],
+        );
+        assert!(!runtime.open_interrupted_removal_confirmation());
+
+        let mut unresumable = resumable.clone();
+        unresumable.target = None;
+        unresumable.reason =
+            usagi_core::domain::agent::ProviderResumeReason::ProviderMetadataUnavailable;
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![unresumable.clone()],
+        );
+        assert!(runtime.open_interrupted_removal_confirmation());
+
+        // An unchanged observation keeps the frozen prompt; learning an exact
+        // resume target closes it instead of offering stale deletion.
+        with_history(&mut runtime, Target::Session(session), vec![unresumable]);
+        assert!(runtime.interrupted_removal_confirmation().is_some());
+        with_history(&mut runtime, Target::Session(session), vec![resumable]);
+        assert!(runtime.interrupted_removal_confirmation().is_none());
     }
 
     #[test]

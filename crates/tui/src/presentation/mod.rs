@@ -10699,7 +10699,9 @@ mod tests {
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
     };
-    use crate::usecase::application::pane::{LivePane, PaneKind, PaneTab, TabSelection};
+    use crate::usecase::application::pane::{
+        LivePane, PaneKind, PaneSelection, PaneTab, TabSelection,
+    };
     use crate::usecase::application::pr::PrSnapshotPort;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -19622,6 +19624,18 @@ mod tests {
         let selected_interrupted = super::director_drawer_projection(&ui, &runtime, None);
         assert!(selected_interrupted.conversations[1].selected);
         assert!(selected_interrupted.interrupted_detail.is_some());
+        assert!(super::select_director_tab_and_activate(
+            &Key::Live(LiveTerminalAction::PreviousTab),
+            &mut ui,
+            &mut runtime,
+            &mut pending_targets,
+        ));
+        assert_eq!(runtime.focused_terminal(), Some(live.clone()));
+        assert!(super::select_director_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut ui,
+            &mut runtime,
+        ));
         let pending = OperationId::new();
         let _ = runtime.request_pane(Target::Root(workspace), pending, PaneKind::Agent);
         runtime.inject_pane_event_for_test(
@@ -30762,6 +30776,61 @@ mod tests {
     }
 
     #[test]
+    fn managed_host_tab_cycle_selects_pending_and_activates_interrupted_history() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let history = interrupted_history(workspace, Some(session), false);
+        let continuation = history.continuation;
+        let last_terminal = history.last_terminal.clone();
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![history],
+            Box::new(UnavailablePaneLaunchPort),
+        );
+        ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
+            session_id: Some(session),
+            continuation,
+            terminal: last_terminal,
+            select: true,
+        })
+        .unwrap();
+        let operation = OperationId::new();
+        runtime.on_effect(&Effect::LaunchAgent {
+            workspace,
+            session: Some(session),
+            operation_id: operation,
+            profile: None,
+        });
+        let mut pending_targets = std::collections::HashMap::new();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(ControllerHostAction::SelectTab(TabDirection::Next))
+            .unwrap();
+        drain_host_actions(&receiver, &mut ui, &mut runtime, &mut pending_targets);
+        assert_eq!(
+            runtime.active_pane().selected(),
+            &PaneSelection::Tab(TabSelection::Pending(operation))
+        );
+
+        sender
+            .send(ControllerHostAction::SelectTab(TabDirection::Previous))
+            .unwrap();
+        drain_host_actions(&receiver, &mut ui, &mut runtime, &mut pending_targets);
+        assert_eq!(
+            runtime.focused_interrupted().map(|tab| tab.continuation),
+            Some(continuation)
+        );
+        assert_eq!(
+            runtime
+                .interrupted_removal_confirmation()
+                .map(|prompt| prompt.tab().continuation),
+            Some(continuation)
+        );
+    }
+
+    #[test]
     fn selecting_an_unresumable_tab_prompts_then_keeps_or_removes_exact_history() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -30823,6 +30892,17 @@ mod tests {
         assert!(runtime.active_pane().has_tabs());
         assert!(ui.agent_dismissed().is_empty());
 
+        // Escape is the explicit Keep shortcut and also leaves history intact.
+        assert!(select_right_pane_tab(&mut ui, &mut runtime, 0));
+        activate_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending_targets);
+        assert!(handle_interrupted_removal_confirmation(
+            &Key::Escape,
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(runtime.interrupted_removal_confirmation().is_none());
+        assert!(runtime.active_pane().has_tabs());
+
         // Selecting the same tab again reopens a fresh safe-default prompt.
         assert!(select_right_pane_tab(&mut ui, &mut runtime, 0));
         activate_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending_targets);
@@ -30840,6 +30920,35 @@ mod tests {
         assert_eq!(ui.agent_dismissed(), BTreeSet::from([continuation]));
         assert!(requests.lock().unwrap().is_empty());
         assert!(ui.pane_launches.is_empty());
+        super::confirm_interrupted_removal(&mut ui, &mut runtime);
+    }
+
+    #[test]
+    fn unresumable_prompt_y_shortcut_removes_the_exact_history() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        // `y` remains a direct, explicit Remove shortcut independent of focus.
+        let y_history = interrupted_history(workspace, Some(session), false);
+        let y_continuation = y_history.continuation;
+        let (mut y_ui, mut y_runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![y_history],
+            Box::new(UnavailablePaneLaunchPort),
+        );
+        assert!(select_right_pane_tab(&mut y_ui, &mut y_runtime, 0));
+        activate_focused_interrupted_tab(
+            &mut y_ui,
+            &mut y_runtime,
+            &mut std::collections::HashMap::new(),
+        );
+        assert!(handle_interrupted_removal_confirmation(
+            &Key::Char('y'),
+            &mut y_ui,
+            &mut y_runtime,
+        ));
+        assert!(!y_runtime.active_pane().has_tabs());
+        assert_eq!(y_ui.agent_dismissed(), BTreeSet::from([y_continuation]));
     }
 
     #[test]

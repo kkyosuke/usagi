@@ -826,21 +826,17 @@ fn dismiss_interrupted(
     state: &mut PaneState,
     continuation: AgentContinuationRef,
 ) -> Vec<PaneEffect> {
-    let Some(index) = state.tabs.iter().position(|tab| {
-        matches!(
-            tab,
-            PaneTab::Interrupted(pane) if pane.tab.continuation == continuation
-        )
+    let Some((index, target)) = state.tabs.iter().enumerate().find_map(|(index, tab)| {
+        let PaneTab::Interrupted(pane) = tab else {
+            return None;
+        };
+        (pane.tab.continuation == continuation)
+            .then_some((index, target_for_interrupted(&pane.tab)))
     }) else {
         return Vec::new();
     };
     let selected = state.selected == PaneSelection::Tab(TabSelection::Interrupted(continuation));
-    let target = match state.tabs.remove(index) {
-        PaneTab::Interrupted(pane) => target_for_interrupted(&pane.tab),
-        PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => {
-            unreachable!("the interrupted lineage lookup fixes the removed variant")
-        }
-    };
+    state.tabs.remove(index);
     if !selected {
         return Vec::new();
     }
@@ -2726,6 +2722,16 @@ mod tests {
             reduce(
                 &mut state,
                 PaneEvent::DismissInterrupted {
+                    continuation: AgentContinuationRef::new(),
+                },
+            )
+            .is_empty(),
+            "an unknown lineage is inert"
+        );
+        assert!(
+            reduce(
+                &mut state,
+                PaneEvent::DismissInterrupted {
                     continuation: second.continuation,
                 },
             )
@@ -2747,6 +2753,50 @@ mod tests {
             vec![PaneEffect::ReturnToCloseup]
         );
         assert_eq!(state.selected(), &PaneSelection::Target(target));
+
+        let mut with_successor = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut with_successor,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![first.clone(), second.clone()],
+            },
+        );
+        assert!(
+            reduce(
+                &mut with_successor,
+                PaneEvent::DismissInterrupted {
+                    continuation: first.continuation,
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(interrupted_tabs(&with_successor), vec![second.continuation]);
+        assert_eq!(
+            with_successor.selected(),
+            &PaneSelection::Tab(TabSelection::Interrupted(second.continuation)),
+            "removing the selected history focuses its stable successor"
+        );
+
+        let pending = OperationId::new();
+        let mut mixed = PaneState::new(PaneSelection::Target(target));
+        mixed.tabs.push(PaneTab::Pending(PendingPane {
+            operation: pending,
+            target,
+            kind: PaneKind::Agent,
+        }));
+        let _ = reduce(
+            &mut mixed,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![first.clone()],
+            },
+        );
+        let _ = reduce(
+            &mut mixed,
+            PaneEvent::DismissInterrupted {
+                continuation: first.continuation,
+            },
+        );
+        assert!(matches!(mixed.tabs(), [PaneTab::Pending(tab)] if tab.operation == pending));
     }
 
     #[test]
