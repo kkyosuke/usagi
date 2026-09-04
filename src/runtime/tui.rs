@@ -5676,8 +5676,7 @@ mod tests {
         reduced_motion_from_environment, remove_session_payload, reply_geometry,
         resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
         terminal_inventory_matches_scope, tui_error_entry, validate_workspace_directory,
-        version_detail,
-        version_result_from_observation, work_run_control_client_error,
+        version_detail, version_result_from_observation, work_run_control_client_error,
         workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
