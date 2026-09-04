@@ -3942,7 +3942,8 @@ fn foreground_terminal_geometry(
                 .expect("clamped drawer terminal height fits u16"),
         }
     } else if root_terminal_open {
-        let available_width = width;
+        let available_width =
+            workspace::root_terminal_available_width(height, width, director_open);
         let viewport = root_terminal_drawer::terminal_viewport_for_mode(
             height,
             width,
@@ -3958,10 +3959,6 @@ fn foreground_terminal_geometry(
     } else {
         terminal_geometry(height, width)
     }
-}
-
-fn root_terminal_available_width(_height: usize, width: usize, _director_open: bool) -> usize {
-    width
 }
 
 /// Return the managed terminal underneath either workspace drawer.
@@ -5273,7 +5270,7 @@ fn handle_terminal_pointer(
             root_terminal_drawer::terminal_point_at_for_mode(
                 height,
                 width,
-                root_terminal_available_width(
+                workspace::root_terminal_available_width(
                     height,
                     width,
                     runtime.state().director_drawer_open(),
@@ -5630,7 +5627,11 @@ fn focus_workspace_drawer_from_pointer(
         let geometry = root_terminal_drawer::geometry_for_mode(
             height,
             width,
-            width,
+            workspace::root_terminal_available_width(
+                height,
+                width,
+                runtime.state().director_drawer_open(),
+            ),
             runtime.state().root_terminal_full_height(),
         );
         ((geometry.left..geometry.left.saturating_add(geometry.width)).contains(&column)
@@ -5668,7 +5669,11 @@ fn intercept_live_terminal_control(
         if let Some(index) = root_terminal_drawer::tab_at_for_mode(
             height,
             width,
-            root_terminal_available_width(height, width, runtime.state().director_drawer_open()),
+            workspace::root_terminal_available_width(
+                height,
+                width,
+                runtime.state().director_drawer_open(),
+            ),
             &projection.tabs,
             runtime.state().root_terminal_full_height(),
             *column,
@@ -5736,7 +5741,7 @@ fn intercept_live_terminal_control(
                     root_terminal_drawer::terminal_point_at_for_mode(
                         height,
                         width,
-                        root_terminal_available_width(
+                        workspace::root_terminal_available_width(
                             height,
                             width,
                             runtime.state().director_drawer_open(),
@@ -7889,7 +7894,11 @@ fn drive_workspace_controller(
         let root_rows = root_terminal_drawer::terminal_viewport_for(
             height,
             width,
-            root_terminal_available_width(height, width, runtime.state().director_drawer_open()),
+            workspace::root_terminal_available_width(
+                height,
+                width,
+                runtime.state().director_drawer_open(),
+            ),
         )
         .rows;
         let root_revision = root_terminal
@@ -10234,7 +10243,7 @@ mod tests {
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::open::Open;
     use crate::presentation::views::welcome::MenuAction;
-    use crate::presentation::views::workspace::HomeProjection;
+    use crate::presentation::views::workspace::{self, HomeProjection};
     use crate::presentation::views::{director_drawer, root_terminal_drawer};
     use crate::presentation::widgets::strip_ansi;
     use crate::presentation::workspace_runtime::PaneRestoreTarget;
@@ -22720,6 +22729,11 @@ mod tests {
             terminal_geometry(30, 160),
             "drawers must not shrink the background workspace geometry"
         );
+        assert_eq!(
+            visible[0].1,
+            Geometry { cols: 60, rows: 10 },
+            "the root Shell PTY must fit the band left of Director"
+        );
         let fully_occluded = super::workspace_terminal_attachments(&runtime, 8, 160);
         assert!(
             fully_occluded
@@ -22727,7 +22741,8 @@ mod tests {
                 .any(|(terminal, _)| terminal.fences(&managed)),
             "a full-height root overlay must retain its background Agent"
         );
-        assert_eq!(super::root_terminal_available_width(30, 79, true), 79);
+        assert_eq!(workspace::root_terminal_available_width(30, 160, true), 64);
+        assert_eq!(workspace::root_terminal_available_width(30, 79, true), 79);
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
@@ -30050,6 +30065,17 @@ mod tests {
                 Some(WorkspaceDrawerFocus::Terminal),
             ),
             Geometry { cols: 96, rows: 7 }
+        );
+        assert_eq!(
+            foreground_terminal_geometry(
+                24,
+                100,
+                true,
+                true,
+                false,
+                Some(WorkspaceDrawerFocus::Terminal),
+            ),
+            Geometry { cols: 36, rows: 7 }
         );
         assert_eq!(
             foreground_terminal_geometry(24, 100, false, false, false, None),
