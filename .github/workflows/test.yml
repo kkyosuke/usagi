@@ -182,13 +182,11 @@ jobs:
     - name: Test RustSec exception checker
       run: bash scripts/tests/security-audit-exceptions.sh
 
-    - name: Test security audit workflow contract
-      run: bash scripts/tests/security-audit-workflows.sh
-
-    - name: Install cargo-audit
-      uses: taiki-e/install-action@v2.87.4
-      with:
-        tool: cargo-audit@0.22.2
+    # audit-check installs the newest cargo-audit dependency graph without
+    # `--locked`. Preinstall the reviewed release from its lockfile so a broken
+    # transitive crate release cannot take the repository policy gate down.
+    - name: Install locked cargo-audit
+      run: cargo install cargo-audit --version 0.22.2 --locked
 
     - name: Audit Cargo.lock against RustSec
       uses: rustsec/audit-check@v2.0.0

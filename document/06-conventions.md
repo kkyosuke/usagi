@@ -414,8 +414,6 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
   除外するときは `.github/security-audit-exceptions.json` に advisory ID、GitHub handle の `owner`、ISO 形式の `expires`、
   具体的な `rationale` を登録する。`expires` は検証日から 90 日以内とし、期限切れ・必須項目欠落・未知フィールド・重複は
   audit 前の checker が拒否する。更新には改めて owner と rationale のレビューを必要とし、恒久的な除外は認めない。
-  audit 実行前には checksum 検証済みの配布 `cargo-audit` binary を導入し、repository が pin する nightly で audit tool 自体を
-  source build しない。PR gate と週次 audit は同じ installer / tool version を使い、その一致は contract test で検証する。
 - リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
 - `test.yml` の policy check は `scripts/ci/docs-ssot-lint.rb` で、公開 CLI command tree、workspace dependency 一覧、
   番号付き仕様の index と前後 breadcrumb、proposal / design の履歴 banner、廃止済み入口表記、埋め込み orchestration

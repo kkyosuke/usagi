@@ -62,11 +62,9 @@ use crate::presentation::views::scratchpad_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::work_run::WorkRunProjection;
-#[cfg(test)]
-use crate::presentation::views::workspace::garden_fits;
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, garden_click_at, garden_fits_sized, garden_scroll_action,
+    Workspace as WorkspaceView, garden_click_at, garden_fits, garden_scroll_action,
     home_header_action_at, render_home, render_home_at, right_pane_tab_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
@@ -6364,6 +6362,8 @@ struct HomeFrameMaterial {
     /// overlay is open. Keying off the message avoids an unreachable "error
     /// overlay without a message" branch.
     create_error: Option<String>,
+    /// The terminal-launch failure dialog's safe message.
+    terminal_launch_error: Option<String>,
     /// Failed-delete session label and focused Yes/No answer.
     force_remove_confirmation: Option<(String, bool)>,
     environment_editor: Option<crate::usecase::application::controller::EnvironmentEditor>,
@@ -6426,14 +6426,8 @@ impl HomeFrameMaterial {
         self
     }
 
-    fn with_garden_animation(
-        mut self,
-        tick: u64,
-        reduced_motion: bool,
-        size: usagi_core::domain::settings::GardenSize,
-    ) -> Self {
+    fn with_garden_animation(mut self, tick: u64, reduced_motion: bool) -> Self {
         self.projection = self.projection.with_garden_reduced_motion(reduced_motion);
-        self.projection = self.projection.with_garden_size(size);
         self.projection = self
             .projection
             .with_garden_tick(self.height, self.width, tick);
@@ -6488,7 +6482,6 @@ fn home_frame_material(
     .with_garden_animation(
         widgets::garden::runtime_tick(runtime.state().mascot_tick()),
         false,
-        usagi_core::domain::settings::GardenSize::default(),
     )
 }
 
@@ -6546,6 +6539,10 @@ fn home_frame_material_shared(
             .state()
             .create_session_error()
             .map(|error| error.message.clone()),
+        terminal_launch_error: runtime
+            .state()
+            .terminal_launch_error()
+            .map(|error| error.message.clone()),
         force_remove_confirmation,
         environment_editor: runtime.state().environment_editor().cloned(),
         role_editor: runtime.state().role_editor().cloned(),
@@ -6580,6 +6577,15 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
             material.height,
             material.width,
             &frame,
+            message,
+        );
+    }
+    if let Some(message) = &material.terminal_launch_error {
+        return create_session_error_modal::render_titled_over(
+            material.height,
+            material.width,
+            &frame,
+            "Terminal failed to open",
             message,
         );
     }
@@ -6841,6 +6847,18 @@ fn drain_controller_host_actions(
                             arguments: request.arguments,
                         },
                     );
+                } else {
+                    runtime.on_effect(&Effect::OpenTerminal {
+                        target: request.target,
+                        operation_id: request.operation_id,
+                        arguments: request.arguments,
+                    });
+                    fail_terminal_launch(
+                        runtime,
+                        request.target,
+                        request.operation_id,
+                        "terminal launch is unavailable".to_owned(),
+                    );
                 }
             }
             ControllerHostAction::OpenExternalTerminal(target) => {
@@ -6857,14 +6875,13 @@ fn drain_controller_host_actions(
                 match path {
                     Some(path) => {
                         if let Err(error) = ui.external_terminal.open(&path) {
-                            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
-                                Notice::new(error),
-                            )));
+                            let _ = runtime
+                                .apply_event(AppEvent::TerminalLaunchFailed(Notice::new(error)));
                         }
                     }
                     None => {
-                        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
-                            Notice::new("selected session is no longer available"),
+                        let _ = runtime.apply_event(AppEvent::TerminalLaunchFailed(Notice::new(
+                            "selected session is no longer available",
                         )));
                     }
                 }
@@ -7001,26 +7018,47 @@ fn drain_pane_completions_into_runtime(
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
                 };
-                match result {
-                    Ok(terminal) => {
-                        if ui.generic_terminal_is_closing(&terminal) {
-                            let _ = runtime.fail_pane(
-                                target,
-                                operation,
-                                "terminal is still closing; try again".to_owned(),
-                            );
-                            continue;
-                        }
-                        let _ = runtime
-                            .complete_pane_focus_if_uninterrupted(target, operation, terminal);
-                    }
-                    Err(message) => {
-                        let _ = runtime.fail_pane(target, operation, message);
-                    }
-                }
+                complete_terminal_launch(ui, runtime, target, operation, result);
             }
         }
     }
+}
+
+fn complete_terminal_launch(
+    ui: &WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    target: Target,
+    operation: OperationId,
+    result: Result<TerminalRef, String>,
+) {
+    match result {
+        Ok(terminal) => {
+            if ui.generic_terminal_is_closing(&terminal) {
+                fail_terminal_launch(
+                    runtime,
+                    target,
+                    operation,
+                    "terminal is still closing; try again".to_owned(),
+                );
+                return;
+            }
+            let _ = runtime.complete_pane_focus_if_uninterrupted(target, operation, terminal);
+        }
+        Err(message) => fail_terminal_launch(runtime, target, operation, message),
+    }
+}
+
+/// Finish a terminal placeholder and surface its display-safe reason in the
+/// frontmost error dialog. The pane keeps the same reason as fallback feedback,
+/// while the controller owns modal input and dismissal.
+fn fail_terminal_launch(
+    runtime: &mut WorkspaceRuntime,
+    target: Target,
+    operation: OperationId,
+    message: String,
+) {
+    let _ = runtime.fail_pane(target, operation, message.clone());
+    let _ = runtime.apply_event(AppEvent::TerminalLaunchFailed(Notice::new(message)));
 }
 
 /// Apply one explicit per-tab resume answer (#510).
@@ -7615,6 +7653,7 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
             Overlay::Prs => KeyHelpContext::PullRequests,
             Overlay::Preview => KeyHelpContext::Preview,
             Overlay::CreateSessionError => KeyHelpContext::CreateSessionError,
+            Overlay::TerminalLaunchError => KeyHelpContext::TerminalLaunchError,
             Overlay::Garden => KeyHelpContext::Garden,
         };
     }
@@ -7691,7 +7730,6 @@ fn drive_workspace_controller(
     backend_factory: &mut dyn ControllerBackendFactory,
     modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode,
     pr_auto_open: usagi_core::domain::settings::PrAutoOpen,
-    garden_size: usagi_core::domain::settings::GardenSize,
     entry_policy: WorkspaceEntryPolicy,
     mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
@@ -8036,7 +8074,7 @@ fn drive_workspace_controller(
             width: u16::try_from(width).unwrap_or(u16::MAX),
             height: u16::try_from(height).unwrap_or(u16::MAX),
         });
-        let garden_available = garden_fits_sized(height, width, garden_size);
+        let garden_available = garden_fits(height, width);
         if runtime.state().overlay() == Some(Overlay::Garden) && !garden_available {
             let _ = runtime.apply_event(AppEvent::GardenUnavailable);
         }
@@ -8276,7 +8314,7 @@ fn drive_workspace_controller(
             .with_agent_inventory(ui.agent_inventory())
             .with_work_runs(work_runs.clone())
             .with_workspace_deck_garden(deck)
-            .with_garden_animation(animation, garden_reduced_motion, garden_size);
+            .with_garden_animation(animation, garden_reduced_motion);
             let mut next_frame_key = next_source_key.clone();
             if garden_open {
                 next_frame_key.animation = material
@@ -8642,7 +8680,7 @@ fn drive_workspace_controller(
         // never re-open the garden it just closed. A terminal too small to draw
         // a garden emits no idle event at all, leaving its usable Home alone.
         let idle = idle_watch.observe(&key, pointer_clock.elapsed());
-        if garden_fits_sized(height, width, garden_size) {
+        if garden_fits(height, width) {
             let _ = runtime.apply_event(AppEvent::IdleElapsed(idle));
         }
         // Wheel, drag and raw terminal input are normally owned before the Home
@@ -9098,7 +9136,6 @@ pub fn run_workspace_controller_with_backend(
         backend_factory,
         usagi_core::domain::settings::ModalSelectionMode::Action,
         usagi_core::domain::settings::PrAutoOpen::default(),
-        usagi_core::domain::settings::GardenSize::default(),
         WorkspaceEntryPolicy::default(),
         None,
     )
@@ -9127,7 +9164,6 @@ pub fn run_workspace_controller_with_backend_and_settings(
         backend_factory,
         settings.modal_selection_mode,
         settings.pr_auto_open,
-        settings.garden_size,
         WorkspaceEntryPolicy {
             default_model: settings.default_model,
             default_branch: settings.default_branch.clone(),
@@ -9164,7 +9200,6 @@ pub fn run_workspace_controller_with_backend_and_config(
         backend_factory,
         effective.modal_selection_mode,
         effective.pr_auto_open,
-        effective.garden_size,
         WorkspaceEntryPolicy {
             available_models,
             default_model: effective.default_model,
@@ -9472,7 +9507,6 @@ fn open_snapshot_via_controller(
         backend_factory,
         effective.modal_selection_mode,
         effective.pr_auto_open,
-        effective.garden_size,
         WorkspaceEntryPolicy {
             available_models,
             default_model: effective.default_model,
@@ -12656,6 +12690,14 @@ mod tests {
             1,
             Geometry { cols: 20, rows: 5 },
         );
+        assert_eq!(
+            runtime
+                .state()
+                .terminal_launch_error()
+                .map(|notice| notice.message.as_str()),
+            Some("terminal launch is unavailable")
+        );
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
 
         ui.pane_completion_sender
             .send(super::PaneLaunchCompletion {
@@ -12724,6 +12766,41 @@ mod tests {
             &mut pending,
             Geometry { cols: 20, rows: 5 },
         );
+
+        let failed_terminal = OperationId::new();
+        runtime.on_effect(&Effect::OpenTerminal {
+            target,
+            operation_id: failed_terminal,
+            arguments: "open".into(),
+        });
+        pending.insert(failed_terminal, target);
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Terminal {
+                    operation: failed_terminal,
+                    result: Err("login shell could not be started".to_owned()),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            Geometry { cols: 20, rows: 5 },
+        );
+        assert_eq!(
+            runtime.state().overlay(),
+            Some(Overlay::TerminalLaunchError)
+        );
+        assert_eq!(
+            runtime
+                .state()
+                .terminal_launch_error()
+                .map(|notice| notice.message.as_str()),
+            Some("login shell could not be started")
+        );
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
 
         let cancel = OperationId::new();
         runtime.on_effect(&Effect::OpenTerminal {
@@ -14448,6 +14525,35 @@ mod tests {
         let failure = frame(&failing, &[]);
         assert!(failure.join("\n").contains("Session create failed"));
         assert!(failure.join("\n").contains("worktree path already exists"));
+    }
+
+    #[test]
+    fn render_controller_frame_composites_terminal_launch_failure() {
+        use crate::presentation::workspace_runtime::WorkspaceRuntime;
+        use crate::usecase::application::controller::{AppEvent, Notice};
+
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.apply_event(AppEvent::TerminalLaunchFailed(Notice::new(
+            "login shell could not be started",
+        )));
+
+        let failure = render_controller_frame(
+            20,
+            80,
+            &runtime,
+            "atlas",
+            std::path::Path::new("/work"),
+            &[],
+            None,
+            health(),
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+        )
+        .join("\n");
+        assert!(failure.contains("Terminal failed to open"));
+        assert!(failure.contains("login shell could not be started"));
     }
 
     #[test]
@@ -26971,7 +27077,6 @@ mod tests {
     #[test]
     fn entry_help_resolves_every_entry_surface_and_config_submode() {
         use super::Screen;
-        use crate::presentation::views::config::Field as ConfigField;
         use crate::presentation::views::key_help::Context as HelpContext;
 
         let mut settings = DefaultSettingsPort;
@@ -27007,14 +27112,14 @@ mod tests {
         );
 
         let mut team = Config::load(&mut settings);
-        while team.field() != ConfigField::TeamTemplate {
+        for _ in 0..5 {
             let _ = step_config(&mut team, Key::Down, &mut settings);
         }
         let _ = step_config(&mut team, Key::Enter, &mut settings);
         assert_eq!(super::config_help_context(&team), HelpContext::TeamPicker);
 
         let mut environment = Config::load(&mut settings);
-        while environment.field() != ConfigField::Environment {
+        for _ in 0..2 {
             let _ = step_config(&mut environment, Key::Down, &mut settings);
         }
         let _ = step_config(&mut environment, Key::Enter, &mut settings);
@@ -27123,7 +27228,7 @@ mod tests {
 
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
-        for _ in 0..6 {
+        for _ in 0..5 {
             step_config(&mut config, Key::Down, &mut settings);
         }
         assert_eq!(config.field(), ConfigField::TeamTemplate);
@@ -27157,7 +27262,6 @@ mod tests {
 
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
-        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         assert_eq!(config.field(), ConfigField::Environment);
@@ -27231,7 +27335,6 @@ mod tests {
             ConfigStep::Stay
         ));
         step_config(&mut config, Key::Right, &mut settings);
-        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
@@ -27462,7 +27565,7 @@ mod tests {
         };
         let mut config = Config::load(&mut settings);
         let _ = step_config(&mut config, Key::Right, &mut settings);
-        for _ in 0..10 {
+        for _ in 0..9 {
             let _ = step_config(&mut config, Key::Down, &mut settings);
         }
         assert!(matches!(
@@ -27524,7 +27627,6 @@ mod tests {
         let mut environment = Config::load(&mut inline);
         let _ = step_config(&mut environment, Key::Down, &mut inline);
         let _ = step_config(&mut environment, Key::Down, &mut inline);
-        let _ = step_config(&mut environment, Key::Down, &mut inline);
         let _ = step_config(&mut environment, Key::Enter, &mut inline);
         let _ = step_config(
             &mut environment,
@@ -27547,7 +27649,6 @@ mod tests {
             ..RecordingSettingsPort::default()
         };
         let mut config = Config::load(&mut settings);
-        let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Enter, &mut settings);
@@ -27604,7 +27705,6 @@ mod tests {
         let mut term = FakeTerminal::with_keys(&[
             Key::Down,
             Key::Down,
-            Key::Down,
             Key::Enter,
             Key::Paste("GLOBAL=1".to_owned()),
             Key::Management {
@@ -27633,11 +27733,10 @@ mod tests {
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Garden size → Environment → Agent model →
-    // Workflow → Team → Issue → Memory → PR → Save).
-    const CONFIG_SAVE_KEYS: [Key; 12] = [
+    // Save (Theme → Modal mode → Environment → Agent model → Workflow → Team →
+    // Issue → Memory → PR → Save).
+    const CONFIG_SAVE_KEYS: [Key; 11] = [
         Key::Right,
-        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
@@ -29465,6 +29564,10 @@ mod tests {
             (Overlay::Prs, HelpContext::PullRequests),
             (Overlay::Preview, HelpContext::Preview),
             (Overlay::CreateSessionError, HelpContext::CreateSessionError),
+            (
+                Overlay::TerminalLaunchError,
+                HelpContext::TerminalLaunchError,
+            ),
             (Overlay::Garden, HelpContext::Garden),
         ] {
             assert_eq!(

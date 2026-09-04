@@ -18,10 +18,10 @@ jobs:
       - id: security-exceptions
         name: Validate RustSec exceptions
         run: ruby scripts/ci/security-audit-exceptions.rb >> "$GITHUB_OUTPUT"
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.87.4
-        with:
-          tool: cargo-audit@0.22.2
+      # Keep the action's cargo-audit install independent of crates.io's latest
+      # transitive resolution. The action reuses this binary when it is present.
+      - name: Install locked cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit Cargo.lock against RustSec
         uses: rustsec/audit-check@v2.0.0
         with:

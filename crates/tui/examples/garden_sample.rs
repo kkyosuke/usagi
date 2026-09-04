@@ -1,13 +1,9 @@
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
-use usagi_core::domain::settings::GardenSize;
-use usagi_tui::presentation::widgets::garden::{
-    GardenAgent, GardenSession, min_height, render_scrolled_sized,
-};
+use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render_scrolled};
 
 fn main() {
     let sessions = sample_sessions();
-    let compact_height = min_height(selected_size());
     scene(
         "120x24 · spacious world left edge + Agent panel",
         24,
@@ -55,14 +51,11 @@ fn main() {
         0,
         (1, false),
     );
-    // 先頭 1 行は project bar。残りは選択した size の最小 Garden 高さにする。
+    // 64x14 terminal の先頭 1 行は project bar、残る 13 行では 1 plot が見える。
     // 左右端を出し、1 列ずつ横スクロールして全 session へ到達できることを眺める。
     scene_scrolled(
-        &format!(
-            "64x{} terminal · compact Garden left edge",
-            compact_height + 1
-        ),
-        compact_height,
+        "64x14 terminal · compact Garden left edge",
+        13,
         64,
         &sessions,
         0,
@@ -70,11 +63,8 @@ fn main() {
         false,
     );
     scene_scrolled(
-        &format!(
-            "64x{} terminal · compact Garden right edge",
-            compact_height + 1
-        ),
-        compact_height,
+        "64x14 terminal · compact Garden right edge",
+        13,
         64,
         &sessions,
         usize::MAX,
@@ -169,28 +159,10 @@ fn scene_in_scope(
     animation: (u64, bool),
 ) {
     let (tick, reduced_motion) = animation;
-    let frame = render_scrolled_sized(
-        height,
-        width,
-        scope,
-        sessions,
-        scroll,
-        tick,
-        reduced_motion,
-        selected_size(),
-    )
-    .expect("the sample uses Garden-compatible terminal sizes");
+    let frame = render_scrolled(height, width, scope, sessions, scroll, tick, reduced_motion)
+        .expect("the sample uses Garden-compatible terminal sizes");
     println!("--- {caption} ---");
     println!("{}\n", frame.rows.join("\n"));
-}
-
-fn selected_size() -> GardenSize {
-    match std::env::args().nth(1).as_deref() {
-        Some("small") => GardenSize::Small,
-        Some("large") => GardenSize::Large,
-        Some("medium") | None => GardenSize::Medium,
-        Some(value) => panic!("unknown Garden size {value:?}; use small, medium, or large"),
-    }
 }
 
 fn sample(

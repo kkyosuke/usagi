@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use usagi_core::domain::settings::{
-    DefaultModel, EnvBindings, GardenSize, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate,
-    Theme, WorkMode, format_env_bindings,
+    DefaultModel, EnvBindings, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
+    WorkMode, format_env_bindings,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -124,7 +124,6 @@ pub enum Field {
     #[default]
     Theme,
     ModalSelectionMode,
-    GardenSize,
     PrAutoOpen,
     Environment,
     DefaultModel,
@@ -267,8 +266,7 @@ impl Config {
         self.field = match self.scope {
             SettingsScope::Global => match self.field {
                 Field::Theme => Field::ModalSelectionMode,
-                Field::ModalSelectionMode => Field::GardenSize,
-                Field::GardenSize => Field::Environment,
+                Field::ModalSelectionMode => Field::Environment,
                 Field::Environment => Field::DefaultModel,
                 Field::DefaultModel | Field::DefaultBranch => Field::WorkMode,
                 Field::WorkMode => Field::TeamTemplate,
@@ -286,11 +284,9 @@ impl Config {
                 Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::Save,
-                Field::Save
-                | Field::Theme
-                | Field::ModalSelectionMode
-                | Field::GardenSize
-                | Field::PrAutoOpen => Field::DefaultModel,
+                Field::Save | Field::Theme | Field::ModalSelectionMode | Field::PrAutoOpen => {
+                    Field::DefaultModel
+                }
             },
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
@@ -308,8 +304,7 @@ impl Config {
             SettingsScope::Global => match self.field {
                 Field::Theme => Field::Save,
                 Field::ModalSelectionMode => Field::Theme,
-                Field::GardenSize => Field::ModalSelectionMode,
-                Field::Environment => Field::GardenSize,
+                Field::Environment => Field::ModalSelectionMode,
                 Field::DefaultModel | Field::DefaultBranch => Field::Environment,
                 Field::Issue => Field::TeamTemplate,
                 Field::TeamTemplate => Field::WorkMode,
@@ -329,7 +324,6 @@ impl Config {
                 Field::DefaultModel
                 | Field::Theme
                 | Field::ModalSelectionMode
-                | Field::GardenSize
                 | Field::PrAutoOpen => Field::Save,
             },
         };
@@ -379,13 +373,6 @@ impl Config {
             ModalSelectionMode::Action => ModalSelectionMode::Prompt,
             ModalSelectionMode::Prompt => ModalSelectionMode::Action,
         };
-        self.notice = None;
-    }
-
-    /// Cycle the global Session Garden scale.
-    pub fn cycle_garden_size(&mut self, forward: bool) {
-        let size = &mut self.current_mut().draft.garden_size;
-        *size = size.cycle(forward);
         self.notice = None;
     }
 
@@ -508,7 +495,6 @@ impl Config {
         match self.field {
             Field::Theme => self.cycle_theme(forward),
             Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
-            Field::GardenSize => self.cycle_garden_size(forward),
             Field::PrAutoOpen => self.cycle_pr_auto_open(forward),
             Field::DefaultModel => self.cycle_default_model(),
             Field::DefaultBranch => self.cycle_default_branch(forward),
@@ -974,12 +960,6 @@ fn global_rows(config: &Config) -> Vec<String> {
             config.field() == Field::ModalSelectionMode,
             config.settings().modal_selection_mode != config.current().saved.modal_selection_mode,
         ),
-        select::render(
-            "Garden size",
-            garden_size_name(config.settings().garden_size),
-            config.field() == Field::GardenSize,
-            config.settings().garden_size != config.current().saved.garden_size,
-        ),
     ];
     lines.push(environment_row(config));
     lines.push(String::new());
@@ -1255,14 +1235,6 @@ fn theme_name(theme: Theme) -> &'static str {
     }
 }
 
-fn garden_size_name(size: GardenSize) -> &'static str {
-    match size {
-        GardenSize::Small => "small",
-        GardenSize::Medium => "medium",
-        GardenSize::Large => "large",
-    }
-}
-
 fn modal_selection_mode_name(mode: ModalSelectionMode) -> &'static str {
     match mode {
         ModalSelectionMode::Action => "action",
@@ -1305,8 +1277,7 @@ mod tests {
     };
     use std::io;
     use usagi_core::domain::settings::{
-        DefaultModel, GardenSize, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
-        WorkMode,
+        DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme, WorkMode,
     };
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -1436,39 +1407,9 @@ mod tests {
     }
 
     #[test]
-    fn garden_size_cycles_in_global_config_and_is_not_workspace_owned() {
-        let mut port = FakeSettingsPort::default();
-        let mut config = Config::load(&mut port);
-        while config.field() != Field::GardenSize {
-            config.next_field();
-        }
-        assert_eq!(config.settings().garden_size, GardenSize::Medium);
-        assert!(config.cycle_selected(true));
-        assert_eq!(config.settings().garden_size, GardenSize::Large);
-        assert!(render(24, 80, &config).join("\n").contains("Garden size"));
-        assert!(render(24, 80, &config).join("\n").contains("large"));
-        while config.field() != Field::Save {
-            config.next_field();
-        }
-        assert!(config.commit_save(&mut port));
-        assert_eq!(port.global.garden_size, GardenSize::Large);
-        config.cycle_garden_size(true);
-        assert!(render(24, 80, &config).join("\n").contains("small"));
-
-        let workspace =
-            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
-        assert!(
-            !render(24, 80, &workspace)
-                .join("\n")
-                .contains("Garden size")
-        );
-    }
-
-    #[test]
     fn global_environment_is_edited_and_saved_from_config() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
         config.next_field();
         config.next_field();
         assert_eq!(config.field(), Field::Environment);
@@ -1575,7 +1516,6 @@ mod tests {
         let mut config = Config::load(&mut port);
         config.next_field();
         config.next_field();
-        config.next_field();
         assert!(config.open_environment(&mut port));
         config.type_environment("A=1");
         assert!(!config.save_environment(&mut port));
@@ -1598,7 +1538,6 @@ mod tests {
     fn global_environment_validation_error_does_not_shift_the_modal() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
@@ -1624,7 +1563,6 @@ mod tests {
         let mut config = Config::load(&mut port);
         config.next_field();
         config.next_field();
-        config.next_field();
         port.global.env = [("FRESH".to_owned(), "value".to_owned())]
             .into_iter()
             .collect();
@@ -1643,7 +1581,6 @@ mod tests {
     fn multiline_environment_text_keeps_invalid_input_for_retry() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
@@ -1693,7 +1630,6 @@ mod tests {
             ..FakeSettingsPort::default()
         };
         let mut config = Config::load(&mut port);
-        config.next_field();
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
@@ -1798,7 +1734,7 @@ mod tests {
             .unwrap();
         assert_eq!(column_of(&dirty, "●"), changed_column);
 
-        for _ in 0..10 {
+        for _ in 0..9 {
             config.next_field();
         }
         let save_frame = render(24, 80, &config)
@@ -1962,7 +1898,7 @@ mod tests {
     fn pr_auto_open_cycles_all_safe_modes_from_global_config() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        for _ in 0..9 {
+        for _ in 0..8 {
             config.next_field();
         }
         assert_eq!(config.field(), Field::PrAutoOpen);
@@ -1997,11 +1933,9 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
-        config.next_field();
         assert_eq!(config.field(), Field::Save);
         assert!(!config.can_save());
 
-        config.previous_field();
         config.previous_field();
         config.previous_field();
         config.previous_field();
@@ -2017,7 +1951,6 @@ mod tests {
             config.settings().modal_selection_mode,
             ModalSelectionMode::Prompt
         );
-        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -2058,12 +1991,9 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Environment);
         config.previous_field();
-        assert_eq!(config.field(), Field::GardenSize);
-        config.previous_field();
         assert_eq!(config.field(), Field::ModalSelectionMode);
         config.previous_field();
         assert_eq!(config.field(), Field::Theme);
-        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -2081,7 +2011,6 @@ mod tests {
     fn default_model_cycles_and_is_saved_with_the_global_settings() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -2165,7 +2094,6 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
-        config.next_field();
         assert_eq!(config.field(), Field::WorkMode);
         config.next_field();
         assert_eq!(config.field(), Field::TeamTemplate);
@@ -2236,7 +2164,6 @@ mod tests {
     fn issue_and_memory_availability_toggle_independently() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -2376,7 +2303,6 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
-        config.next_field();
         assert_eq!(config.field(), Field::Save);
         assert!(config.can_save());
         config
@@ -2428,7 +2354,6 @@ mod tests {
         let mut config = {
             let mut base = Config::load(&mut port);
             base.cycle_theme(true);
-            base.next_field();
             base.next_field();
             base.next_field();
             base.next_field();

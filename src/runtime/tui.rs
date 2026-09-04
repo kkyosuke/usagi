@@ -2601,7 +2601,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 action: TerminalAction::Launch,
                 payload,
             })
-            .map_err(|_| "daemon request failed; reconnect to continue".to_owned())?
+            .map_err(daemon_error_reason)?
         {
             DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body
                 .get("terminal")
@@ -4064,9 +4064,10 @@ impl Terminal for CrosstermTerminal {
     }
 }
 
-/// Apply the live-input ordering policy before projecting terminal input into the
-/// management [`Key`] vocabulary. `LiveInputClassifier` is the sole owner of
-/// leader precedence; this adapter only translates its resolved output.
+/// Apply the process-wide input ordering policy before projecting terminal input
+/// into the management [`Key`] vocabulary. `LiveInputClassifier` is the sole
+/// owner of leader precedence for every workspace surface; this adapter only
+/// translates its resolved output.
 fn classify_terminal_input(
     classifier: &mut LiveInputClassifier,
     now: Duration,
@@ -4127,9 +4128,9 @@ fn terminal_copy_key(input: &LiveInput) -> Option<Key> {
     matches_copy.then_some(Key::TerminalCopy { fallback })
 }
 
-/// Map a non-prefix live input to the management `Key` vocabulary. The classifier
-/// has already reserved the `Ctrl-O` prefix, so this preserves the prior mapping
-/// for every other key and text/paste payload.
+/// Map a non-prefix terminal input to the management `Key` vocabulary. The
+/// process-wide classifier has already reserved the `Ctrl-O` prefix, so this
+/// preserves the prior mapping for every other key and text/paste payload.
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=production_input_classifier_contract
 fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     let key = match input {
@@ -5958,9 +5959,7 @@ mod tests {
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
-    use usagi_core::domain::settings::{
-        GardenSize, LocalSettings, ModalSelectionMode, Settings, Theme,
-    };
+    use usagi_core::domain::settings::{LocalSettings, ModalSelectionMode, Settings, Theme};
     use usagi_core::domain::terminal_launch::TerminalLaunchScope;
     use usagi_core::domain::workspace::Workspace;
     use usagi_core::domain::workspace_state::WorkspaceState;
@@ -8656,6 +8655,80 @@ mod tests {
     }
 
     #[test]
+    fn process_wide_control_brackets_reach_closeup_tab_selection() {
+        use usagi_tui::usecase::application::controller::TabDirection;
+        use usagi_tui::usecase::terminal_input::LiveTerminalAction;
+
+        for (follow_up, action, direction) in [
+            (
+                live_key(KeyCode::Char('['), Modifiers::default()),
+                LiveTerminalAction::PreviousTab,
+                TabDirection::Previous,
+            ),
+            (
+                live_key(KeyCode::Char('['), control()),
+                LiveTerminalAction::PreviousTab,
+                TabDirection::Previous,
+            ),
+            (
+                LiveInput::Raw(vec![27]),
+                LiveTerminalAction::PreviousTab,
+                TabDirection::Previous,
+            ),
+            (
+                live_key(KeyCode::Char(']'), Modifiers::default()),
+                LiveTerminalAction::NextTab,
+                TabDirection::Next,
+            ),
+            (
+                live_key(KeyCode::Char(']'), control()),
+                LiveTerminalAction::NextTab,
+                TabDirection::Next,
+            ),
+            (
+                LiveInput::Raw(vec![29]),
+                LiveTerminalAction::NextTab,
+                TabDirection::Next,
+            ),
+        ] {
+            let mut classifier = usagi_tui::usecase::terminal_input::LiveInputClassifier::default();
+            assert_eq!(
+                classify_terminal_input(
+                    &mut classifier,
+                    Duration::ZERO,
+                    &live_key(KeyCode::Char('o'), control()),
+                ),
+                None,
+            );
+            let key =
+                classify_terminal_input(&mut classifier, Duration::from_millis(1), &follow_up)
+                    .expect("the process-wide leader resolves the follow-up");
+            assert_eq!(key, Key::Live(action));
+
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let mut state = AppState::home(workspace, vec![session]);
+            assert!(
+                update(
+                    &mut state,
+                    AppEvent::PaneTabAvailability {
+                        available: true,
+                        error: None,
+                    },
+                )
+                .is_empty()
+            );
+            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            let event = usagi_tui::presentation::app_event_from_key(key)
+                .expect("the resolved tab action reaches the Home reducer");
+            assert_eq!(
+                update(&mut state, event),
+                vec![Effect::SelectTab { direction }]
+            );
+        }
+    }
+
+    #[test]
     fn native_terminal_copy_shortcut_is_selection_aware() {
         let modifiers = {
             #[cfg(target_os = "macos")]
@@ -9283,7 +9356,6 @@ mod tests {
         assert!(first.background_operations());
         let settings = Settings {
             modal_selection_mode: ModalSelectionMode::Prompt,
-            garden_size: GardenSize::Large,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             ..Settings::default()
         };
@@ -9298,10 +9370,6 @@ mod tests {
                 .unwrap()
                 .modal_selection_mode,
             ModalSelectionMode::Prompt
-        );
-        assert_eq!(
-            restarted.read(SettingsScope::Global).unwrap().garden_size,
-            GardenSize::Large
         );
     }
 
@@ -9386,7 +9454,6 @@ mod tests {
         let global = Settings {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Action,
-            garden_size: GardenSize::Large,
             ..Settings::default()
         };
         Storage::new(&global_dir).save_settings(&global).unwrap();
@@ -9400,7 +9467,6 @@ mod tests {
         let local_a = Settings {
             theme: Theme::Light,
             modal_selection_mode: ModalSelectionMode::Prompt,
-            garden_size: GardenSize::Small,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             ..global.clone()
@@ -9422,10 +9488,6 @@ mod tests {
         assert_eq!(
             reopened.read(SettingsScope::Workspace).unwrap(),
             effective_a
-        );
-        assert_eq!(
-            reopened.read(SettingsScope::Workspace).unwrap().garden_size,
-            GardenSize::Large
         );
         let changed_global = Settings {
             theme: Theme::Light,
@@ -9578,7 +9640,6 @@ mod tests {
         let initial = Settings {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Prompt,
-            garden_size: GardenSize::Large,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),
