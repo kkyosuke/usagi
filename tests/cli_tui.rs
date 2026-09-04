@@ -40,6 +40,7 @@ use daemon_fixture::{Channel, DaemonHome};
 
 #[test]
 fn shipping_issue_adapters_cover_defensive_parsing_and_missing_projection() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     for tool in [
         &IssueCreate as &dyn Tool,
         &IssueGet,
@@ -401,6 +402,7 @@ fn welcome_entry_renders_the_welcome_screen() {
 
 #[test]
 fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     // `usagi daemon status` を実バイナリで走らせ、合成ルートが束ねる実ストア
     // （`FsRecordFile` を backing にした `DaemonRecordStore`）を通す。データディレクトリを
     // 空の一時パスへ向けるので、レコードは無く「daemon not running」を報告する。
@@ -412,6 +414,7 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
 
 #[test]
 fn daemon_stop_clears_a_stale_production_record() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.path().join("daemon");
     std::fs::create_dir(&daemon_dir).unwrap();
@@ -1651,6 +1654,7 @@ fn cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code() {
         stderr: &'static str,
     }
 
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let cases = [
         Case {
             name: "daemon absent",
@@ -2235,6 +2239,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
 
 #[test]
 fn config_entry_renders_the_config_screen() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     // `usagi config` は Config 画面を選ぶ。stdout が tty でないため、合成ルートは対話ループの
     // 代わりに Config の 1 フレームを描いて返す。Config 自体は workspace registry を使わない
     // ため、registry が壊れていても起動できる。
@@ -2308,6 +2313,7 @@ fn config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap(
 
 #[test]
 fn doctor_reports_real_diagnostics() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let output = run_with_home(&[OsStr::new("doctor")], &home);
     assert!(output.status.success());
@@ -2326,6 +2332,7 @@ fn doctor_reports_real_diagnostics() {
 
 #[test]
 fn open_registers_and_renders_an_explicit_or_current_workspace() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let roots = tempfile::tempdir().unwrap();
     let explicit = roots.path().join("explicit-workspace");
@@ -2393,6 +2400,7 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
 
 #[test]
 fn open_rejects_a_missing_or_non_directory_workspace_path() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let missing = home.path().join("missing-workspace");
     let file = home.path().join("not-a-directory");
@@ -2407,6 +2415,7 @@ fn open_rejects_a_missing_or_non_directory_workspace_path() {
 
 #[test]
 fn clap_errors_do_not_launch_a_tui() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     for args in [
         &[OsStr::new("hop"), OsStr::new("extra")][..],
@@ -2494,6 +2503,7 @@ fn special_entry_argv_errors_are_rejected_before_runtime_side_effects() {
 fn open_refuses_a_non_utf8_workspace_path_it_cannot_serve() {
     use std::os::unix::ffi::OsStringExt;
 
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let roots = tempfile::tempdir().unwrap();
     let name = std::ffi::OsString::from_vec(b"usagi-\xff".to_vec());
@@ -2535,6 +2545,7 @@ fn open_refuses_a_non_utf8_workspace_path_it_cannot_serve() {
 fn open_validates_non_utf8_workspace_paths() {
     use std::os::unix::ffi::OsStringExt;
 
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let roots = tempfile::tempdir().unwrap();
 

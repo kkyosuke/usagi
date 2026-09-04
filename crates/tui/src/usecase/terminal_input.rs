@@ -1209,6 +1209,30 @@ mod tests {
     }
 
     #[test]
+    fn help_metadata_builder_enriches_the_executable_shortcut() {
+        let shortcut = with_help(
+            std::hint::black_box(prefix_shortcut!(
+                KeyCode::Char('q') => LiveTerminalAction::CloseTab
+            )),
+            PrefixHelpScope::WorkspaceBase,
+            true,
+            "Ctrl-O q",
+            "example action",
+        );
+
+        assert_eq!(shortcut.action, LiveTerminalAction::CloseTab);
+        assert_eq!(
+            shortcut.help,
+            Some(PrefixHelpEntry {
+                keys: "Ctrl-O q",
+                action: "example action",
+                scope: PrefixHelpScope::WorkspaceBase,
+                goal_driven_only: true,
+            })
+        );
+    }
+
+    #[test]
     fn every_semantic_prefix_shortcut_accepts_control_on_the_follow_up() {
         for shortcut in PREFIX_SHORTCUTS {
             let mut classifier = LiveInputClassifier::default();

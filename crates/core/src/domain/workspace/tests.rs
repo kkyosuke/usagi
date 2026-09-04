@@ -49,6 +49,18 @@ fn workspace_names_reject_empty_terminal_and_direction_controls() {
 }
 
 #[test]
+fn workspace_name_errors_have_stable_user_facing_messages() {
+    assert_eq!(
+        WorkspaceNameError::Empty.to_string(),
+        "workspace name must not be empty"
+    );
+    assert_eq!(
+        WorkspaceNameError::UnsafePresentation.to_string(),
+        "workspace name contains unsafe presentation characters"
+    );
+}
+
+#[test]
 #[should_panic(expected = "workspace display name must be non-empty and presentation-safe")]
 fn workspace_constructor_enforces_the_name_invariant() {
     let _ = Workspace::new("unsafe\nname", "/tmp/name");

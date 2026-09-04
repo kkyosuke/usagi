@@ -415,6 +415,11 @@ mod tests {
         assert_eq!(input.value(), "safetext");
 
         input.select_home();
+        let selection = input.selection();
+        input.insert_str("\n\t\u{1b}\u{202e}");
+        assert_eq!(input.value(), "safetext");
+        assert_eq!(input.selection(), selection);
+
         input.insert('\u{7}');
         assert!(
             input.selection().is_some(),

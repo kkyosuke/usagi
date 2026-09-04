@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use syn::visit::{self, Visit};
-use syn::{Attribute, File, Item, Path as RustPath, UseTree};
+use syn::{Attribute, Expr, File, Item, Path as RustPath, Stmt, UseTree};
 use usagi_core::infrastructure::store::issue::IssueStore;
 
 const FACES: [(&str, &[&str]); 4] = [
@@ -345,6 +345,61 @@ fn source_layers_follow_the_documented_dependency_matrix() {
     assert!(
         violations.is_empty(),
         "source dependency matrix violations:\n{violations:#?}"
+    );
+}
+
+fn calls_heavy_e2e_lock(statement: &Stmt) -> bool {
+    let Stmt::Local(local) = statement else {
+        return false;
+    };
+    let Some(initializer) = &local.init else {
+        return false;
+    };
+    let Expr::Call(call) = initializer.expr.as_ref() else {
+        return false;
+    };
+    let Expr::Path(path) = call.func.as_ref() else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "heavy_e2e_lock")
+}
+
+#[test]
+fn shipping_cli_integration_tests_enter_the_shared_e2e_lane_first() {
+    let source = fs::read_to_string(workspace_root().join("tests/cli_tui.rs"))
+        .expect("shipping CLI integration source is readable");
+    let syntax: File = syn::parse_file(&source).expect("shipping CLI integration source parses");
+    let unlocked = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(function)
+                if function
+                    .attrs
+                    .iter()
+                    .any(|attribute| attribute.path().is_ident("test")) =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .filter(|function| {
+            !function
+                .block
+                .stmts
+                .iter()
+                .find(|statement| !matches!(statement, Stmt::Item(_)))
+                .is_some_and(calls_heavy_e2e_lock)
+        })
+        .map(|function| function.sig.ident.to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        unlocked.is_empty(),
+        "every tests/cli_tui.rs test must acquire heavy_e2e_lock first: {unlocked:?}"
     );
 }
 

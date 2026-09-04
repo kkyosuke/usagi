@@ -204,6 +204,9 @@ PR は Draft で開き、上表の CI 必須チェックが green になって�
 coverage_enforce
 ```
 
+ソースを変更していない連続実行だけは `coverage_enforce --no-clean` で計測成果物を再利用できる。
+変更後に古い raw profile を混ぜると LLVM の非互換エラーになるため、既定は常に clean 計測とする。
+
 docs-only（Rust 差分なし）は Rust gate（`cargo check` / `cargo clippy` / `cargo test` / coverage）を省略できる。ただし
 documentation SSoT lint と Markdown link check は必須である。
 
@@ -318,7 +321,9 @@ daemon から分離して常駐する bootstrap broker も同じ teardown の対
 shipping binary・daemon・fixture provider・実 PTY を同時に走らせる E2E は CPU を占有する。並行させると frame 待ちや
 readiness 待ちが product の失敗ではなく CPU 競合による timeout になり、無関係な変更の PR を落とす偽陽性を生む。
 そこで重い E2E は、**チェックアウト単位の 1 本の直列列**に載せる。列は `tests/support/daemon.rs` の
-`heavy_e2e_lock()` が持つ。新しい実 PTY / 実 daemon E2E を追加するときは、同じ関数を test の先頭で呼ぶ。
+`heavy_e2e_lock()` が持つ。`tests/cli_tui.rs` は同じ libtest process 内で daemon を自動起動する test と
+軽量な CLI test が並行しないよう、全 test が同じ関数を先頭で呼ぶ。この契約は architecture test で固定する。
+新しい実 PTY / 実 daemon E2E も同じ関数を test の先頭で呼ぶ。
 
 | 競合の出どころ | この列が覆うか |
 |---|---|

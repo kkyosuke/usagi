@@ -27120,6 +27120,7 @@ mod tests {
     fn entry_help_is_contextual_and_exclusively_owns_input_until_closed() {
         let mut term = FakeTerminal::with_keys(&[
             Key::Help,
+            Key::Down,
             // This would open the workspace list if Help did not own input.
             Key::Char('o'),
             Key::Escape,
@@ -27134,14 +27135,19 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(term.frames.len(), 3);
+        assert_eq!(term.frames.len(), 4);
         assert!(
             term.frames[1]
                 .join("\n")
                 .contains("Keyboard help · Welcome")
         );
         assert!(term.frames[1].join("\n").contains("open Recent card"));
-        assert!(term.frames[2].join("\n").contains("Menu"));
+        assert!(
+            term.frames[2]
+                .join("\n")
+                .contains("Keyboard help · Welcome")
+        );
+        assert!(term.frames[3].join("\n").contains("Menu"));
         assert!(
             term.frames
                 .iter()
@@ -29810,6 +29816,35 @@ mod tests {
                 .any(|frame| frame.join("\n").contains("recent-session")),
             "the command pressed behind Help must not remove the session"
         );
+    }
+
+    #[test]
+    fn key_help_scroll_keys_drive_the_bounded_viewport() {
+        use crate::presentation::views::key_help::{Context, State};
+
+        let initial = State::new(
+            Context::Switch,
+            usagi_core::domain::settings::WorkMode::GoalDriven,
+        );
+        let mut state = initial;
+
+        assert!(super::scroll_key_help(&mut state, &Key::Up, 5));
+        assert_eq!(state, initial);
+        assert!(super::scroll_key_help(&mut state, &Key::Down, 5));
+        assert_ne!(state, initial);
+        assert!(super::scroll_key_help(&mut state, &Key::Home, 5));
+        assert_eq!(state, initial);
+        assert!(super::scroll_key_help(&mut state, &Key::PageDown, 20));
+        assert_ne!(state, initial);
+        assert!(super::scroll_key_help(&mut state, &Key::PageUp, 20));
+        assert_eq!(state, initial);
+        assert!(super::scroll_key_help(&mut state, &Key::End, 20));
+        assert_ne!(state, initial);
+        assert!(super::scroll_key_help(&mut state, &Key::LineStart, 20));
+        assert_eq!(state, initial);
+        assert!(super::scroll_key_help(&mut state, &Key::LineEnd, 20));
+        assert_ne!(state, initial);
+        assert!(!super::scroll_key_help(&mut state, &Key::Other, 20));
     }
 
     #[test]

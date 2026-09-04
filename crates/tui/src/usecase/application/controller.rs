@@ -933,8 +933,7 @@ const MAX_PRESENTATION_MESSAGE_CHARS: usize = 240;
 /// become a visible replacement character. This preserves useful wording
 /// without allowing terminal control flow or visual reordering. The frame is a
 /// second, fail-closed boundary for values which do not use these message types.
-fn sanitize_presentation_message(message: impl Into<String>) -> String {
-    let message = message.into();
+fn sanitize_presentation_message(message: &str) -> String {
     let mut sanitized = String::with_capacity(message.len().min(256));
     let mut character_count = 0;
     let mut previous_was_space = true;
@@ -979,8 +978,9 @@ impl Notice {
     /// 表示用に検証済みの文言を作る。
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
-            message: sanitize_presentation_message(message),
+            message: sanitize_presentation_message(&message),
         }
     }
 }
@@ -1055,7 +1055,8 @@ pub struct SafeMessage(String);
 impl SafeMessage {
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
-        Self(sanitize_presentation_message(message))
+        let message = message.into();
+        Self(sanitize_presentation_message(&message))
     }
 
     #[must_use]
@@ -6326,6 +6327,9 @@ mod tests {
             assert!(message.contains('\u{fffd}'));
             assert!(message.ends_with('…'));
         }
+
+        assert_eq!(SafeMessage::new("  ready\n\t ").as_str(), "ready");
+        assert_eq!(Notice::new("\n\t ").message, "");
     }
 
     #[test]
@@ -7399,6 +7403,31 @@ mod tests {
             validate_new_form(NewMode::Existing, &unsafe_name),
             Err(NewValidationError::NameInvalid)
         );
+
+        for (error, message) in [
+            (
+                NewValidationError::RepositoryInvalid,
+                "repository URL must be a single safe line",
+            ),
+            (
+                NewValidationError::LocationInvalid,
+                "clone location must be a single safe line",
+            ),
+            (
+                NewValidationError::BranchInvalid,
+                "branch name must be a single safe line",
+            ),
+            (
+                NewValidationError::PathInvalid,
+                "directory path must be a single safe line",
+            ),
+            (
+                NewValidationError::NameInvalid,
+                "workspace name must be a single safe line",
+            ),
+        ] {
+            assert_eq!(error.message(), message);
+        }
     }
 
     #[test]

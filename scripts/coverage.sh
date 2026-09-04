@@ -8,7 +8,8 @@
 # 使い方:
 #   . scripts/coverage.sh     # COVERAGE_MIN を読み込む
 #   coverage_enforce          # ローカルで lint・計測・100% を強制する
-#                             # --no-clean で前回のビルド成果物を再利用する
+#   coverage_enforce --no-clean
+#                             # ソース不変時だけ前回の計測成果物を再利用する
 
 # 計測対象は v2 workspace（ルートの bin パッケージ + crates/ 配下の 3 クレート）。
 #
@@ -41,14 +42,28 @@ coverage_report() {
 # ローカルで exclusion lint、計測、100% 強制までを一括実行する。
 # CI は計測（lcov 生成）と report を分けて実行するため、こちらは使わない。
 coverage_enforce() {
+  local reuse_profiles=false
+  if [[ ${1:-} == "--no-clean" ]]; then
+    reuse_profiles=true
+    shift
+  fi
+  if [[ $# -ne 0 ]]; then
+    echo "usage: coverage_enforce [--no-clean]" >&2
+    return 2
+  fi
   if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
     echo "✗ cargo-llvm-cov が見つかりません" >&2
     echo "  インストール: cargo install cargo-llvm-cov" >&2
     return 1
   fi
   coverage_off_lint || return 1
+  if $reuse_profiles; then
+    set -- --no-clean
+  else
+    set --
+  fi
   # runner はインストール済みツールに左右されず、CI と同じ cargo test に固定する。
-  cargo llvm-cov --workspace --no-clean \
+  cargo llvm-cov --workspace "$@" \
     --ignore-filename-regex '(^|/)build\.rs$' \
     --fail-under-lines "$COVERAGE_MIN" \
     --fail-under-functions "$COVERAGE_MIN"
