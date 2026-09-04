@@ -12,6 +12,8 @@ use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::{DirectorConsoleParent, DirectorRoute};
 use crate::usecase::application::terminal_selection::TerminalPoint;
 use crate::usecase::application::work_run_control::WorkRunControlMode;
+use std::collections::{BTreeMap, BTreeSet};
+use usagi_core::domain::id::SessionId;
 use usagi_core::domain::supervisor::{
     EscalationDecision, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskState,
 };
@@ -61,6 +63,12 @@ pub struct DirectorConversation {
 /// One safe row in the Director's organization overview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectorOrganizationRow {
+    /// Stable workspace Session identity used to join this row with Work Run
+    /// provenance. The synthetic workspace Director root has no Session.
+    pub session_id: Option<SessionId>,
+    /// Stable parent identity, kept separately from presentation depth so a
+    /// run-scoped subtree can be re-rooted without guessing from indentation.
+    pub parent_session_id: Option<SessionId>,
     pub depth: usize,
     pub label: String,
     pub status: String,
@@ -427,16 +435,14 @@ fn organization_body(
             rows.push(String::new());
         }
         if !projection.organization.is_empty() {
-            rows.push(Role::Accent.style().bold().paint("Organization"));
+            rows.push(
+                Role::Accent
+                    .style()
+                    .bold()
+                    .paint("Organization · Workspace"),
+            );
             for member in &projection.organization {
-                let branch = if member.depth == 0 { "" } else { "└─ " };
-                rows.push(format!(
-                    "{}{}{}  {}",
-                    "  ".repeat(member.depth),
-                    branch,
-                    member.label,
-                    Style::new().dim().paint(&member.status)
-                ));
+                rows.push(organization_row(member));
             }
         } else if projection.conversations.is_empty() {
             empty_conversation_rows(&mut rows, projection, content_capacity);
@@ -638,7 +644,12 @@ fn run_overview_body(
         );
     };
     rows.extend(work_run_rows(width, run, projection.work_runs.freshness()));
-    rows.push(Role::Accent.style().bold().paint("Organization"));
+    rows.push(
+        Role::Accent
+            .style()
+            .bold()
+            .paint("Organization · This Work Run"),
+    );
     let director_status = if run.root_agent_id.is_some() {
         "available"
     } else if run.state.is_finished() {
@@ -650,6 +661,12 @@ fn run_overview_body(
         "› {DIRECTOR_ICON} Director  {}",
         Style::new().dim().paint(director_status)
     ));
+    let scoped_organization = run_organization_rows(projection, run);
+    if scoped_organization.is_empty() {
+        rows.push(Style::new().dim().paint("  No managed Sessions assigned"));
+    } else {
+        rows.extend(scoped_organization.iter().map(organization_row));
+    }
     let footer =
         projection
             .work_run_control
@@ -661,6 +678,63 @@ fn run_overview_body(
                 "Esc: Work Runs · Ctrl-C cancel · Ctrl-X delete"
             });
     finish_overview_rows(width, height, rows, footer)
+}
+
+fn organization_row(member: &DirectorOrganizationRow) -> String {
+    let branch = if member.depth == 0 { "" } else { "└─ " };
+    format!(
+        "{}{}{}  {}",
+        "  ".repeat(member.depth),
+        branch,
+        member.label,
+        Style::new().dim().paint(&member.status)
+    )
+}
+
+/// Re-root the workspace Organization under one Work Run's Director using
+/// exact provenance identities. Missing parents become direct children and
+/// corrupt cycles remain bounded; indentation is never inferred from labels or
+/// the workspace-wide display order.
+fn run_organization_rows(
+    projection: &DirectorDrawerProjection,
+    run: &SupervisorRunQuery,
+) -> Vec<DirectorOrganizationRow> {
+    let assigned = run
+        .provenance
+        .iter()
+        .filter_map(|item| item.worker_session_id)
+        .collect::<BTreeSet<_>>();
+    let by_id = projection
+        .organization
+        .iter()
+        .filter_map(|row| row.session_id.map(|id| (id, row)))
+        .collect::<BTreeMap<_, _>>();
+
+    projection
+        .organization
+        .iter()
+        .filter_map(|row| {
+            let session_id = row.session_id.filter(|id| assigned.contains(id))?;
+            let mut scoped = row.clone();
+            scoped.depth = 1;
+            let mut visited = BTreeSet::from([session_id]);
+            let mut parent = row.parent_session_id;
+            while let Some(parent_row) = parent
+                .filter(|id| assigned.contains(id))
+                .and_then(|id| by_id.get(&id))
+            {
+                let parent_id = parent_row
+                    .session_id
+                    .expect("organization index contains only Session rows");
+                if !visited.insert(parent_id) {
+                    break;
+                }
+                scoped.depth = scoped.depth.saturating_add(1);
+                parent = parent_row.parent_session_id;
+            }
+            Some(scoped)
+        })
+        .collect()
 }
 
 fn finish_overview_rows(
@@ -1014,9 +1088,10 @@ mod tests {
     use crate::presentation::widgets::{display_width, strip_ansi};
     use chrono::Utc;
     use std::collections::BTreeSet;
-    use usagi_core::domain::id::OperationId;
+    use usagi_core::domain::id::{AgentRuntimeId, OperationId, SessionId, WorktreeId};
     use usagi_core::domain::supervisor::{
-        ArtifactContract, EscalationRecord, ExecutionPolicy, SupervisorRunId, TaskId, TaskQuery,
+        ArtifactContract, EscalationRecord, ExecutionPolicy, RunProvenance, SupervisorRunId,
+        TaskId, TaskQuery,
     };
 
     fn work_run() -> SupervisorRunQuery {
@@ -1218,16 +1293,22 @@ mod tests {
         let projection = DirectorDrawerProjection {
             organization: vec![
                 DirectorOrganizationRow {
+                    session_id: None,
+                    parent_session_id: None,
                     depth: 0,
                     label: "Director".into(),
                     status: "active".into(),
                 },
                 DirectorOrganizationRow {
+                    session_id: None,
+                    parent_session_id: None,
                     depth: 1,
                     label: "triage (manager)".into(),
                     status: "waiting".into(),
                 },
                 DirectorOrganizationRow {
+                    session_id: None,
+                    parent_session_id: None,
                     depth: 2,
                     label: "implement (executor)".into(),
                     status: "stopped".into(),
@@ -1653,6 +1734,120 @@ mod tests {
             ..console
         };
         assert!(render(&unavailable_console).contains("Director / Unavailable Run / Console"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture covers filtering, hierarchy, missing parents, and cycles together.
+    fn run_overview_joins_only_provenance_sessions_and_re_roots_their_hierarchy() {
+        let parent = SessionId::new();
+        let child = SessionId::new();
+        let detached = SessionId::new();
+        let missing_parent = SessionId::new();
+        let cycle = SessionId::new();
+        let unrelated = SessionId::new();
+        let mut run = work_run();
+        run.root_agent_id = Some(AgentRuntimeId::new());
+        for (index, session_id) in [parent, child, detached, missing_parent, cycle]
+            .into_iter()
+            .enumerate()
+        {
+            run.provenance.push(RunProvenance {
+                supervisor_run_id: run.supervisor_run_id,
+                task_id: run.tasks[index.min(run.tasks.len() - 1)].task_id.clone(),
+                parent_task_id: None,
+                parent_dispatch_run: None,
+                dispatch_run_id: OperationId::new(),
+                worker_session_id: Some(session_id),
+                worker_agent_id: AgentRuntimeId::new(),
+                worker_worktree_id: WorktreeId::new(),
+                generation: 1,
+            });
+        }
+        let organization = vec![
+            DirectorOrganizationRow {
+                session_id: None,
+                parent_session_id: None,
+                depth: 0,
+                label: "Director".into(),
+                status: "active".into(),
+            },
+            DirectorOrganizationRow {
+                session_id: Some(parent),
+                parent_session_id: None,
+                depth: 1,
+                label: "planner".into(),
+                status: "waiting".into(),
+            },
+            DirectorOrganizationRow {
+                session_id: Some(child),
+                parent_session_id: Some(parent),
+                depth: 2,
+                label: "implementer".into(),
+                status: "running".into(),
+            },
+            DirectorOrganizationRow {
+                session_id: Some(detached),
+                parent_session_id: Some(missing_parent),
+                depth: 4,
+                label: "detached worker".into(),
+                status: "running".into(),
+            },
+            DirectorOrganizationRow {
+                session_id: Some(cycle),
+                parent_session_id: Some(cycle),
+                depth: usize::MAX,
+                label: "cycle-safe worker".into(),
+                status: "waiting".into(),
+            },
+            DirectorOrganizationRow {
+                session_id: Some(unrelated),
+                parent_session_id: None,
+                depth: 1,
+                label: "other goal".into(),
+                status: "ready".into(),
+            },
+        ];
+        let scoped = run_organization_rows(
+            &DirectorDrawerProjection {
+                organization: organization.clone(),
+                ..DirectorDrawerProjection::default()
+            },
+            &run,
+        );
+        assert_eq!(
+            scoped
+                .iter()
+                .map(|row| (row.session_id, row.depth))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some(parent), 1),
+                (Some(child), 2),
+                (Some(detached), 1),
+                (Some(cycle), 1),
+            ]
+        );
+
+        let text = drawer_body(
+            120,
+            24,
+            &DirectorDrawerProjection {
+                goal_driven: true,
+                route: DirectorRoute::RunOverview(run.supervisor_run_id),
+                work_runs: WorkRunProjection::fresh(vec![run]),
+                organization,
+                ..DirectorDrawerProjection::default()
+            },
+        )
+        .into_iter()
+        .map(|row| strip_ansi(&row))
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(text.contains("Organization · This Work Run"));
+        assert!(text.contains("planner"));
+        assert!(text.contains("implementer"));
+        assert!(text.contains("detached worker"));
+        assert!(text.contains("cycle-safe worker"));
+        assert!(!text.contains("other goal"));
     }
 
     #[test]

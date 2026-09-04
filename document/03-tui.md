@@ -710,7 +710,9 @@ workspace 所有情報を持たない旧 run は別 workspace へ推測せず表
 Goal-driven Director では `Ctrl-O w` が同じ projection の最大16件を stable run ID で選べる Work Runs を直接開く。
 Director が閉じていれば同時に drawer を開き、`↑` / `↓` で Run を選ぶ。`Enter` は mutation を起こさず、選択した
 `SupervisorRunId` の Run Overview を開く。Run Overview は Goal、state、task progress、停止理由と redaction-safe な root
-Director identity を表示し、root Director の `Enter` だけが Console を開く。identity が無い場合は時刻、label、tab 順から推測せず
+Director identity に加え、provenance の stable Session ID に属する managed Session を `Organization · This Work Run` に表示する。
+workspace-wide の `Organization · Workspace` から表示順や label で所属を推測せず、同じ Session が複数 Task を受け持っても
+1 node に畳む。root Director の `Enter` だけが Console を開く。identity が無い場合は時刻、label、tab 順から推測せず
 固定 footer に unavailable feedback を出す。
 
 Work Runs と Run Overview の plain `Ctrl-C` は active Run の cancel 確認、plain `Ctrl-X` は

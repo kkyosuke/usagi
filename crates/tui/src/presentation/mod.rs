@@ -5221,23 +5221,24 @@ fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
             Some(usagi_core::domain::agent::AgentStatus::Failed) => "failed",
             None => "ready",
         };
+        let parent_session_id = roles
+            .get(session_id)
+            .and_then(|role| role.parent_session_id);
         let row = DirectorOrganizationRow {
+            session_id: Some(*session_id),
+            parent_session_id,
             depth: 0,
             label: format!("{role_identity} · {}", session.name),
             status: status.to_owned(),
         };
-        members.push((
-            *session_id,
-            roles
-                .get(session_id)
-                .and_then(|role| role.parent_session_id),
-            row,
-        ));
+        members.push((*session_id, parent_session_id, row));
     }
     if members.is_empty() {
         return Vec::new();
     }
     let mut rows = vec![DirectorOrganizationRow {
+        session_id: None,
+        parent_session_id: None,
         depth: 0,
         label: format!("{} Director", director_drawer::DIRECTOR_ICON),
         status: "active".into(),

@@ -292,6 +292,8 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 provider を確定して Work Run を開始する。`Ctrl-O w` は最大16件の Work Runs を直接開き、`Enter` で選択 Run の
 Run Overview へ進む。Work Runs / Run Overview の `Ctrl-C` は active Run の cancel 確認、`Ctrl-X` は終了済み Run の
 履歴削除確認で、確認中の `Ctrl-C` / `Esc` は取り消しになる。一般の blocking choice は既存 Decision、成果 PR は既存 PR 一覧に表示する。
+Organization は workspace 全体、Work Runs は目的の一覧、Run Overview は選択した目的に属する Task と Session、
+Director Console はその Work Run を担当する root Agent 1 件の詳細である。Work Run と Session は一対一ではない。
 詳細な操作と現行契約は [goal-driven workflow](document/03-tui.md#goal-driven-workflow)を参照する。
 
 環境変数は Config の `Env  [ N variables ]`、Overview の `env [workspace|global]`、Closeup の `env` で編集する。
