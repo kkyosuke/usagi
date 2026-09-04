@@ -90,6 +90,8 @@ pub enum Overlay {
     CreateSessionError,
     /// terminal の起動要求が失敗したことを伝える dialog。表示は safe message だけ。
     TerminalLaunchError,
+    /// Agent の起動要求が失敗したことを伝える dialog。表示は safe message だけ。
+    AgentLaunchError,
     /// session を庭のうさぎとして眺める screen saver。読み取り専用で、最初の入力を
     /// wake-up として消費して Home へ戻る。
     Garden,
@@ -1298,6 +1300,7 @@ pub struct AppState {
     create_session: Option<CreateSessionForm>,
     create_session_error: Option<Notice>,
     terminal_launch_error: Option<Notice>,
+    agent_launch_error: Option<Notice>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
@@ -1525,6 +1528,7 @@ impl AppState {
             create_session: None,
             create_session_error: None,
             terminal_launch_error: None,
+            agent_launch_error: None,
             workspace,
             sessions,
             session_names: Vec::new(),
@@ -1637,6 +1641,12 @@ impl AppState {
     #[must_use]
     pub fn terminal_launch_error(&self) -> Option<&Notice> {
         self.terminal_launch_error.as_ref()
+    }
+    /// Safe message for the Agent-launch failure dialog, present exactly while
+    /// [`Overlay::AgentLaunchError`] is open.
+    #[must_use]
+    pub fn agent_launch_error(&self) -> Option<&Notice> {
+        self.agent_launch_error.as_ref()
     }
     /// Open environment editor, including unsaved values after a save failure.
     #[must_use]
@@ -2434,6 +2444,10 @@ pub enum AppEvent {
     /// is presentation-safe and becomes a dismissible dialog when no other
     /// modal owns input; otherwise it remains available through the Home notice.
     TerminalLaunchFailed(Notice),
+    /// One Agent launch request failed after it left the reducer. The message
+    /// is presentation-safe and becomes a dismissible dialog when no other
+    /// modal owns input; otherwise it remains available through the Home notice.
+    AgentLaunchFailed(Notice),
     /// The runtime observed that the workspace-root Shell drawer owns no tabs.
     /// This is an explicit close rather than the user-facing toggle: both
     /// workspace drawers may be open while Director owns focus, and replaying a
@@ -3656,6 +3670,14 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             if state.overlay.is_none() {
                 state.terminal_launch_error = Some(error);
                 state.overlay = Some(Overlay::TerminalLaunchError);
+            }
+            Vec::new()
+        }
+        AppEvent::AgentLaunchFailed(error) => {
+            state.notice = Some(error.clone());
+            if state.overlay.is_none() {
+                state.agent_launch_error = Some(error);
+                state.overlay = Some(Overlay::AgentLaunchError);
             }
             Vec::new()
         }
@@ -4997,6 +5019,11 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         state.overlay = None;
         return Vec::new();
     }
+    if overlay == Overlay::AgentLaunchError && matches!(key, AppKey::Escape | AppKey::Enter) {
+        state.agent_launch_error = None;
+        state.overlay = None;
+        return Vec::new();
+    }
     match overlay {
         Overlay::Decisions => update_decisions_overlay(state, key),
         Overlay::CleanupQueue => update_cleanup_queue(state, &key),
@@ -5068,7 +5095,9 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             Vec::new()
         }
-        Overlay::CreateSessionError | Overlay::TerminalLaunchError => Vec::new(),
+        Overlay::CreateSessionError | Overlay::TerminalLaunchError | Overlay::AgentLaunchError => {
+            Vec::new()
+        }
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
     }
 }
@@ -5213,6 +5242,10 @@ fn update_overlay_control_chord(
                 }
                 Overlay::TerminalLaunchError => {
                     state.terminal_launch_error = None;
+                    state.overlay = None;
+                }
+                Overlay::AgentLaunchError => {
+                    state.agent_launch_error = None;
                     state.overlay = None;
                 }
                 _ => {}
@@ -8965,6 +8998,7 @@ mod tests {
             Overlay::Preview,
             Overlay::CreateSessionError,
             Overlay::TerminalLaunchError,
+            Overlay::AgentLaunchError,
         ] {
             let mut state = AppState::home(workspace, vec![first]);
             state.overlay = Some(overlay);
@@ -9010,6 +9044,7 @@ mod tests {
                 | Overlay::ForceRemoveConfirmation
                 | Overlay::CreateSessionError
                 | Overlay::TerminalLaunchError
+                | Overlay::AgentLaunchError
                 | Overlay::Garden => {}
             }
             for key in [AppKey::ToggleDirectorDrawer, AppKey::OpenDirectorNew] {
@@ -9227,6 +9262,7 @@ mod tests {
             (Overlay::Preview, true, true),
             (Overlay::CreateSessionError, false, true),
             (Overlay::TerminalLaunchError, false, true),
+            (Overlay::AgentLaunchError, false, true),
         ] {
             for (key, stays_open) in [
                 (AppKey::CtrlC, ctrl_c_stays_open),
@@ -9609,6 +9645,54 @@ mod tests {
         assert_eq!(
             state.notice().map(|notice| notice.message.as_str()),
             Some("daemon rejected the terminal")
+        );
+    }
+
+    #[test]
+    fn agent_launch_failure_opens_a_dismissible_error_dialog() {
+        let (workspace, session, _) = ids();
+        for dismiss in [AppKey::Escape, AppKey::Enter, AppKey::CtrlC] {
+            let mut state = AppState::home(workspace, vec![session]);
+            let effects = update(
+                &mut state,
+                AppEvent::AgentLaunchFailed(Notice::new("agent process could not be started")),
+            );
+
+            assert!(effects.is_empty());
+            assert_eq!(state.overlay(), Some(Overlay::AgentLaunchError));
+            assert_eq!(
+                state
+                    .agent_launch_error()
+                    .map(|notice| notice.message.as_str()),
+                Some("agent process could not be started")
+            );
+            assert_eq!(
+                state.notice().map(|notice| notice.message.as_str()),
+                Some("agent process could not be started")
+            );
+
+            assert!(update(&mut state, AppEvent::Key(dismiss)).is_empty());
+            assert_eq!(state.overlay(), None);
+            assert!(state.agent_launch_error().is_none());
+        }
+    }
+
+    #[test]
+    fn agent_launch_failure_does_not_replace_an_existing_modal() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.overlay = Some(Overlay::Overview);
+
+        let _ = update(
+            &mut state,
+            AppEvent::AgentLaunchFailed(Notice::new("daemon rejected the Agent")),
+        );
+
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.agent_launch_error().is_none());
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("daemon rejected the Agent")
         );
     }
 

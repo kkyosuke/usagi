@@ -886,7 +886,7 @@ inline の `+ new session` フォームは、名前が既存の worktree と衝�
 
 | 面 | material |
 |---|---|
-| Home | 端末サイズ、`HomeProjection`（reducer state・session 行・metrics・git 差分・live terminal 出力・pane tab・overlay modal・create pending）、quit 確認、create / terminal 起動失敗 dialog、秒単位に丸めた現在時刻 |
+| Home | 端末サイズ、`HomeProjection`（reducer state・session 行・metrics・git 差分・live terminal 出力・pane tab・overlay modal・create pending）、quit 確認、create / Agent / terminal 起動失敗 dialog、秒単位に丸めた現在時刻 |
 | Welcome / Open / New / Config | 端末サイズと、その画面のフォーム |
 
 **時刻も material である**。sidebar の session 行が出す相対時刻（`now` / `3m ago`）は実時計に依存するので、時計を
@@ -1991,9 +1991,13 @@ Closeup agent ─► LaunchAgent(operation, profile?) ─► daemon Agent reques
 ```
 
 transport failure、unknown / duplicate final、別 workspace または別 session の terminal final は local spawn、
-request retry、attach を行わない。failure は pending tab を除去し、daemon が安全と保証した文言を error modal
-として表示するとともに `<data dir>/logs/error-YYYY-MM-DD.log` に記録する。確認して閉じると、tab-less
-Closeup の action modal に戻る。
+request retry、attach を行わない。failure は pending tab を除去し、daemon が安全と保証した文言を
+`Agent failed to start` modal と空 pane の feedback に表示するとともに
+`<data dir>/logs/error-YYYY-MM-DD.log` に記録する。modal は `Enter` / `Esc` / `Ctrl-C` で閉じる。
+別の modal が入力を所有している場合はそれを奪わず、Home notice に理由を保持する。確認して閉じると、
+tab-less Closeup の action modal に戻る。TUI の Agent / terminal daemon 接続、request、response correlation / decode
+の異常と、画面全体へ返る未処理の IO error も同じログへ action と safe reason を記録する。request body、argv、
+環境変数、provider 出力は記録しない。
 
 ## Closeup の agent CLI 選択
 

@@ -39,8 +39,9 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::env_resolver::OpCli;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::{
-    BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, ClientWorkspace, OperationId,
-    build_artifact_decision, build_rollover_trigger,
+    BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, ClientWorkspace, Envelope,
+    EnvelopeKind, ErrorCode, OperationId, ResponseOutcome, build_artifact_decision,
+    build_rollover_trigger,
 };
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
@@ -2645,6 +2646,25 @@ struct OwnedPty {
     pty: Arc<Mutex<PtyTerminal>>,
 }
 
+fn daemon_pty_failure_entry(
+    owner: &str,
+    action: &str,
+    terminal: &TerminalRef,
+    error: &str,
+) -> String {
+    let session = match terminal.session_id.as_ref() {
+        Some(session) => session.as_str(),
+        None => "workspace-root".to_owned(),
+    };
+    format!(
+        "daemon {owner} PTY failed: action={action} generation={} workspace={} session={session} worktree={} terminal={} error={error}",
+        terminal.daemon_generation,
+        terminal.workspace_id.as_str(),
+        terminal.worktree_id.as_str(),
+        terminal.terminal_id.as_str(),
+    )
+}
+
 fn release_owned_pty(
     terminals: &mut BTreeMap<String, OwnedPty>,
     selected: &mut Option<String>,
@@ -2700,16 +2720,45 @@ impl PtySpawner for AgentPty {
         // confined; the durable snapshot still records the bare product program.
         let (program, argv) = provisioned_agent_command(&plan.program, &plan.argv, provision);
         let environment = provision.compose_environment(&self.environment);
-        let pty = PtyTerminal::spawn_with(
+        let pty = match PtyTerminal::spawn_with(
             &program,
             &argv,
             &environment.into_iter().collect::<Vec<_>>(),
             &plan.working_directory,
             Geometry { cols: 80, rows: 24 },
-        )
-        .map_err(|_| SpawnFailure::Definite)?;
-        let pid = pty.process_id().ok_or(SpawnFailure::Ambiguous)?;
-        let reader = pty.reader().map_err(|_| SpawnFailure::Ambiguous)?;
+        ) {
+            Ok(pty) => pty,
+            Err(error) => {
+                ErrorLog::record(&daemon_pty_failure_entry(
+                    "Agent",
+                    "spawn",
+                    terminal,
+                    &error.to_string(),
+                ));
+                return Err(SpawnFailure::Definite);
+            }
+        };
+        let Some(pid) = pty.process_id() else {
+            ErrorLog::record(&daemon_pty_failure_entry(
+                "Agent",
+                "observe-child",
+                terminal,
+                "spawned child did not expose a process id",
+            ));
+            return Err(SpawnFailure::Ambiguous);
+        };
+        let reader = match pty.reader() {
+            Ok(reader) => reader,
+            Err(error) => {
+                ErrorLog::record(&daemon_pty_failure_entry(
+                    "Agent",
+                    "open-reader",
+                    terminal,
+                    &error.to_string(),
+                ));
+                return Err(SpawnFailure::Ambiguous);
+            }
+        };
         let pty = Arc::new(Mutex::new(pty));
         self.terminals.insert(
             terminal.terminal_id.as_str().clone(),
@@ -2897,16 +2946,45 @@ impl GenericPtySpawner for DaemonPty {
             .iter()
             .map(|(name, value)| (name.as_str().to_owned(), value.clone()))
             .collect::<Vec<_>>();
-        let pty = PtyTerminal::spawn_with(
+        let pty = match PtyTerminal::spawn_with(
             &launch.snapshot.program,
             &launch.snapshot.arguments,
             &environment,
             &launch.snapshot.working_directory,
             geometry,
-        )
-        .map_err(|_| SpawnFailure::Definite)?;
-        let pid = pty.process_id().ok_or(SpawnFailure::Ambiguous)?;
-        let reader = pty.reader().map_err(|_| SpawnFailure::Ambiguous)?;
+        ) {
+            Ok(pty) => pty,
+            Err(error) => {
+                ErrorLog::record(&daemon_pty_failure_entry(
+                    "terminal",
+                    "spawn",
+                    terminal,
+                    &error.to_string(),
+                ));
+                return Err(SpawnFailure::Definite);
+            }
+        };
+        let Some(pid) = pty.process_id() else {
+            ErrorLog::record(&daemon_pty_failure_entry(
+                "terminal",
+                "observe-child",
+                terminal,
+                "spawned child did not expose a process id",
+            ));
+            return Err(SpawnFailure::Ambiguous);
+        };
+        let reader = match pty.reader() {
+            Ok(reader) => reader,
+            Err(error) => {
+                ErrorLog::record(&daemon_pty_failure_entry(
+                    "terminal",
+                    "open-reader",
+                    terminal,
+                    &error.to_string(),
+                ));
+                return Err(SpawnFailure::Ambiguous);
+            }
+        };
         let pty = Arc::new(Mutex::new(pty));
         self.terminals.insert(
             terminal.terminal_id.as_str().clone(),
@@ -5141,11 +5219,20 @@ fn start_ipc_accept_loop(
                                 // to join the finished thread exactly once.
                                 let _completion =
                                     ShutdownAcceptedStreamOnDrop(worker_completion);
-                                if stream.set_nonblocking(false).is_err() {
+                                if let Err(error) = stream.set_nonblocking(false) {
+                                    ErrorLog::record(&format!(
+                                        "daemon client worker failed: blocking mode could not be restored: {error}"
+                                    ));
                                     return;
                                 }
-                                let Ok(writer) = stream.try_clone() else {
-                                    return;
+                                let writer = match stream.try_clone() {
+                                    Ok(writer) => writer,
+                                    Err(error) => {
+                                        ErrorLog::record(&format!(
+                                            "daemon client worker failed: response stream could not be duplicated: {error}"
+                                        ));
+                                        return;
+                                    }
                                 };
                                 let deadline = Instant::now() + PRE_HANDSHAKE_DEADLINE;
                                 let mut reader = PreHandshakeDeadlineStream::new(stream, deadline);
@@ -5164,7 +5251,12 @@ fn start_ipc_accept_loop(
                                 drop(pre_handshake_permit);
                                 let admitted = match admitted {
                                     Ok(Some(admitted)) => admitted,
-                                    Ok(None) => return,
+                                    Ok(None) => {
+                                        ErrorLog::record(
+                                            "daemon pre-handshake connection refused by protocol policy",
+                                        );
+                                        return;
+                                    }
                                     Err(error) => {
                                         let reason = if matches!(
                                             error.kind(),
@@ -5176,7 +5268,7 @@ fn start_ipc_accept_loop(
                                             "invalid or incomplete hello"
                                         };
                                         ErrorLog::record(&format!(
-                                            "daemon pre-handshake connection refused: {reason}"
+                                            "daemon pre-handshake connection refused: {reason}: {error}"
                                         ));
                                         return;
                                     }
@@ -5198,12 +5290,16 @@ fn start_ipc_accept_loop(
                                 // A pre-handshake timeout must not become an idle
                                 // policy for an admitted subscription. Failure to
                                 // remove it fails this socket closed.
-                                if reader.clear_deadlines().is_err()
-                                    || writer.clear_deadlines().is_err()
-                                {
-                                    ErrorLog::record(
-                                        "daemon admitted connection closed: pre-handshake deadline could not be cleared",
-                                    );
+                                if let Err(error) = reader.clear_deadlines() {
+                                    ErrorLog::record(&format!(
+                                        "daemon admitted connection closed: reader pre-handshake deadline could not be cleared: {error}"
+                                    ));
+                                    return;
+                                }
+                                if let Err(error) = writer.clear_deadlines() {
+                                    ErrorLog::record(&format!(
+                                        "daemon admitted connection closed: writer pre-handshake deadline could not be cleared: {error}"
+                                    ));
                                     return;
                                 }
                                 // Established policy: no deadline, but every read
@@ -5230,7 +5326,7 @@ fn start_ipc_accept_loop(
                                         retention,
                                     );
                                 let mut metrics_observer = None;
-                                let result = usagi_daemon::presentation::ipc::handle_admitted_connection_with_terminal_and(
+                                let result = usagi_daemon::presentation::ipc::handle_admitted_connection_with_terminal_and_observe(
                                     &mut reader,
                                     &mut writer,
                                     admitted,
@@ -5245,9 +5341,9 @@ fn start_ipc_accept_loop(
                                             return envelope(
                                                 hello,
                                                 request_id,
-                                                usagi_core::infrastructure::ipc::ResponseOutcome::Error(
+                                                ResponseOutcome::Error(
                                                     usagi_core::infrastructure::ipc::ProtocolError::new(
-                                                        usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown,
+                                                        ErrorCode::OwnershipUnknown,
                                                         "MCP caller is not the claimed child process",
                                                     ),
                                                 ),
@@ -5255,25 +5351,33 @@ fn start_ipc_accept_loop(
                                             );
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
-                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, peer_process, request_id, &body, hello),
-                                        Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
-                                        Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
-                                        Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
-                                        Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
-                                        Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
-                                        Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
-                                        Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
-                                        Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
-                                        Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, supervisor: &supervisor }, request_id, &body, hello),
-                                        Some("supervisor_tool") => {
-                                            let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
-                                            dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
-                                        },
-                                        Some("supervisor_snapshot") => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
-                                        Some("supervisor_control") => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
-                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
-                                        _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
+                                            Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, peer_process, request_id, &body, hello),
+                                            Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
+                                            Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
+                                            Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
+                                            Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
+                                            Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
+                                            Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
+                                            Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
+                                            Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
+                                            Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
+                                            Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, supervisor: &supervisor }, request_id, &body, hello),
+                                            Some("supervisor_tool") => {
+                                                let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
+                                                dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
+                                            },
+                                            Some("supervisor_snapshot") => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
+                                            Some("supervisor_control") => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
+                                            Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
+                                            _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
+                                        }
+                                    },
+                                    &mut |body, response| {
+                                        let surface = daemon_request_surface(body);
+                                        if let Some(entry) =
+                                            unexpected_daemon_response_entry(surface, response)
+                                        {
+                                            ErrorLog::record(&entry);
                                         }
                                     },
                                 );
@@ -5285,7 +5389,13 @@ fn start_ipc_accept_loop(
                                 if let Ok(mut agent) = agent_launch.lock() {
                                     agent.release_mcp_child(peer_process.0);
                                 }
-                                let _ = result;
+                                if let Err(error) = result
+                                    && !expected_client_disconnect(error.kind())
+                                {
+                                    ErrorLog::record(&format!(
+                                        "daemon admitted connection failed: {error}"
+                                    ));
+                                }
                             });
                         match spawned {
                             Ok(handle) => retain_client_worker(&workers, Ok(unblock), handle),
@@ -5301,7 +5411,10 @@ fn start_ipc_accept_loop(
                     // connection queued (descriptor exhaustion) would otherwise
                     // spin, so that path — and only that path, never the idle one —
                     // backs off before trying again.
-                    Err(_) => std::thread::sleep(ACCEPT_ERROR_BACKOFF),
+                    Err(error) => {
+                        ErrorLog::record(&format!("daemon accept failed: {error}"));
+                        std::thread::sleep(ACCEPT_ERROR_BACKOFF);
+                    }
                 }
                 }
             }
@@ -10076,6 +10189,108 @@ fn envelope(
             body,
         },
     }
+}
+
+const fn unexpected_daemon_error(code: ErrorCode) -> bool {
+    match code {
+        ErrorCode::ProtocolMismatch
+        | ErrorCode::CapabilityMissing
+        | ErrorCode::GenerationMismatch
+        | ErrorCode::Unauthenticated
+        | ErrorCode::PermissionDenied
+        | ErrorCode::ResourceExhausted
+        | ErrorCode::Backpressure
+        | ErrorCode::DeadlineExceeded
+        | ErrorCode::OwnershipUnknown
+        | ErrorCode::Unavailable
+        | ErrorCode::Internal => true,
+        ErrorCode::InvalidArgument
+        | ErrorCode::NotFound
+        | ErrorCode::StaleTarget
+        | ErrorCode::GenerationRolledOver
+        | ErrorCode::RevisionConflict
+        | ErrorCode::IdempotencyConflict
+        | ErrorCode::IdempotencyExpired
+        | ErrorCode::SequenceGap
+        | ErrorCode::Busy
+        | ErrorCode::Cancelled
+        | ErrorCode::ResyncRequired => false,
+    }
+}
+
+const fn expected_client_disconnect(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn daemon_request_surface(body: &serde_json::Value) -> &'static str {
+    match body.get("kind").and_then(serde_json::Value::as_str) {
+        Some("mcp_child_claim") => "mcp_child_claim",
+        Some("rollover") => "rollover",
+        Some("tenant") => "tenant",
+        Some("session") => "session",
+        Some(
+            "agent"
+            | "agent_goal"
+            | "agent_inventory"
+            | "agent_workspace_observation"
+            | "diagnose_agents"
+            | "restart_agents"
+            | "resume_agent"
+            | "resume_agent_with_current_integration",
+        ) => "agent",
+        Some("codex_session_capture") => "codex_session_capture",
+        Some("agent_phase_report") => "agent_phase_report",
+        Some("dispatch") => "dispatch",
+        Some("metrics") => "metrics",
+        Some("pr" | "pr_batch" | "pr_dismiss") => "pr",
+        Some("dispatch_tool") => "dispatch_tool",
+        Some("supervisor_tool") => "supervisor_tool",
+        Some("supervisor_snapshot") => "supervisor_snapshot",
+        Some("supervisor_control") => "supervisor_control",
+        Some("user_decision") => "user_decision",
+        Some("terminal") => "terminal",
+        Some(_) => "generic",
+        None => "unknown",
+    }
+}
+
+fn safe_log_token(value: &str) -> String {
+    value
+        .bytes()
+        .take(128)
+        .map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b':' => char::from(byte),
+            _ => '_',
+        })
+        .collect()
+}
+
+fn unexpected_daemon_response_entry(surface: &str, response: &Envelope) -> Option<String> {
+    let EnvelopeKind::Response {
+        request_id,
+        outcome: ResponseOutcome::Error(error),
+        ..
+    } = &response.kind
+    else {
+        return None;
+    };
+    if !unexpected_daemon_error(error.code) {
+        return None;
+    }
+    let request_id = safe_log_token(&request_id.0);
+    let error_id = safe_log_token(&error.error_id);
+    Some(format!(
+        "daemon request failed: surface={surface} request={} code={:?} retry={:?} side_effect={:?} error_id={} message={}",
+        request_id, error.code, error.retry_mode, error.side_effect, error_id, error.message,
+    ))
 }
 
 struct FsRecordFile {
@@ -14956,6 +15171,170 @@ mod tests {
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
     use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
+
+    fn protocol_response(code: ErrorCode) -> Envelope {
+        Envelope {
+            protocol: usagi_core::infrastructure::ipc::ProtocolVersion {
+                generation: 1,
+                revision: 0,
+            },
+            daemon_generation: usagi_core::infrastructure::ipc::DaemonGeneration(
+                "generation".to_owned(),
+            ),
+            kind: EnvelopeKind::Response {
+                request_id: usagi_core::infrastructure::ipc::RequestId("request".to_owned()),
+                outcome: ResponseOutcome::Error(
+                    usagi_core::infrastructure::ipc::ProtocolError::new(code, "safe reason"),
+                ),
+                body: serde_json::Value::Null,
+            },
+        }
+    }
+
+    #[test]
+    fn daemon_error_log_policy_records_abnormal_responses_only() {
+        for (code, expected) in [
+            (ErrorCode::ProtocolMismatch, true),
+            (ErrorCode::CapabilityMissing, true),
+            (ErrorCode::GenerationMismatch, true),
+            (ErrorCode::Unauthenticated, true),
+            (ErrorCode::PermissionDenied, true),
+            (ErrorCode::InvalidArgument, false),
+            (ErrorCode::NotFound, false),
+            (ErrorCode::StaleTarget, false),
+            (ErrorCode::GenerationRolledOver, false),
+            (ErrorCode::RevisionConflict, false),
+            (ErrorCode::IdempotencyConflict, false),
+            (ErrorCode::IdempotencyExpired, false),
+            (ErrorCode::SequenceGap, false),
+            (ErrorCode::ResourceExhausted, true),
+            (ErrorCode::Backpressure, true),
+            (ErrorCode::Busy, false),
+            (ErrorCode::DeadlineExceeded, true),
+            (ErrorCode::Cancelled, false),
+            (ErrorCode::OwnershipUnknown, true),
+            (ErrorCode::Unavailable, true),
+            (ErrorCode::Internal, true),
+            (ErrorCode::ResyncRequired, false),
+        ] {
+            assert_eq!(
+                unexpected_daemon_response_entry("agent", &protocol_response(code)).is_some(),
+                expected,
+                "{code:?}"
+            );
+        }
+
+        let entry =
+            unexpected_daemon_response_entry("agent", &protocol_response(ErrorCode::Unavailable))
+                .unwrap();
+        assert!(entry.contains("surface=agent request=request code=Unavailable"));
+        assert!(entry.contains("error_id=protocol"));
+        assert!(entry.contains("message=safe reason"));
+
+        let mut ok = protocol_response(ErrorCode::Unavailable);
+        let EnvelopeKind::Response { outcome, .. } = &mut ok.kind else {
+            unreachable!();
+        };
+        *outcome = ResponseOutcome::Ok;
+        assert!(unexpected_daemon_response_entry("agent", &ok).is_none());
+        ok.kind = EnvelopeKind::Request {
+            request_id: usagi_core::infrastructure::ipc::RequestId("request".to_owned()),
+            timeout_ms: None,
+            body: serde_json::Value::Null,
+        };
+        assert!(unexpected_daemon_response_entry("agent", &ok).is_none());
+    }
+
+    #[test]
+    fn daemon_request_surface_never_copies_untrusted_kind_text() {
+        for (kind, expected) in [
+            ("mcp_child_claim", "mcp_child_claim"),
+            ("rollover", "rollover"),
+            ("tenant", "tenant"),
+            ("session", "session"),
+            ("agent", "agent"),
+            ("agent_goal", "agent"),
+            ("agent_inventory", "agent"),
+            ("agent_workspace_observation", "agent"),
+            ("diagnose_agents", "agent"),
+            ("restart_agents", "agent"),
+            ("resume_agent", "agent"),
+            ("resume_agent_with_current_integration", "agent"),
+            ("codex_session_capture", "codex_session_capture"),
+            ("agent_phase_report", "agent_phase_report"),
+            ("dispatch", "dispatch"),
+            ("metrics", "metrics"),
+            ("pr", "pr"),
+            ("pr_batch", "pr"),
+            ("pr_dismiss", "pr"),
+            ("dispatch_tool", "dispatch_tool"),
+            ("supervisor_tool", "supervisor_tool"),
+            ("supervisor_snapshot", "supervisor_snapshot"),
+            ("supervisor_control", "supervisor_control"),
+            ("user_decision", "user_decision"),
+            ("terminal", "terminal"),
+            ("attacker\nforged log", "generic"),
+        ] {
+            assert_eq!(
+                daemon_request_surface(&serde_json::json!({"kind": kind})),
+                expected
+            );
+        }
+        assert_eq!(daemon_request_surface(&serde_json::Value::Null), "unknown");
+        assert_eq!(safe_log_token("request\nforged/値"), "request_forged____");
+        assert_eq!(safe_log_token(&"x".repeat(129)).len(), 128);
+    }
+
+    #[test]
+    fn daemon_connection_logging_ignores_only_normal_peer_disconnects() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(expected_client_disconnect(kind), "{kind:?}");
+        }
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::OutOfMemory,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert!(!expected_client_disconnect(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn daemon_pty_failure_entry_contains_identity_and_reason_without_launch_data() {
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let entry = daemon_pty_failure_entry(
+            "Agent",
+            "spawn",
+            &terminal,
+            "PTY child spawn failed: executable not found",
+        );
+        assert!(entry.contains("daemon Agent PTY failed: action=spawn"));
+        assert!(entry.contains(&format!("session={}", terminal.session_id.unwrap())));
+        assert!(entry.contains("error=PTY child spawn failed: executable not found"));
+
+        let root = TerminalRef {
+            session_id: None,
+            ..terminal
+        };
+        assert!(
+            daemon_pty_failure_entry("terminal", "observe-child", &root, "missing pid")
+                .contains("session=workspace-root")
+        );
+    }
 
     #[derive(Default)]
     struct SupervisorAgentStore;
