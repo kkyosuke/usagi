@@ -6653,6 +6653,7 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
         let mut view = ConfirmationView::confirmation(&title, 60, heading, message);
         view.confirm_label = "remove";
         view.cancel_label = "keep";
+        view.hints = "Enter: select   y: remove   Esc/n: keep   ←→/Tab: move";
         return modal::render_confirmation_over(
             material.height,
             material.width,
@@ -30912,6 +30913,9 @@ mod tests {
         ))
         .join("\n");
         assert!(frame.contains("Remove interrupted Agent"));
+        assert!(frame.contains("Enter: select"));
+        assert!(frame.contains("y: remove"));
+        assert!(frame.contains("Esc/n: keep"));
         assert!(frame.contains("[ remove"));
         assert!(frame.contains("[ keep   ]"));
         assert!(frame.contains("kept no resume metadata"));
