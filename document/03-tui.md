@@ -535,7 +535,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `,` | OpenGarden | 前面 modal が無い workspace の session garden を開く |
 | `Ctrl-O` `g` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
 | `Ctrl-O` `b` | DirectorBack | Director 内で一階層戻る。Console では PTY に送らず parent の Organization / Run Overview へ戻る |
-| `Ctrl-O` `w` | WorkRuns | goal-driven workspace の Work Runs を直接開く。Director が閉じていれば同じ操作で drawer も開く。classic、overlay 表示中、Start Work Run / launch 中は遷移せず、leader のない `w` / `Ctrl-W` は PTY が所有する |
+| `Ctrl-O` `w` | WorkRuns | daemon-owned Work Runs を直接開く。Director が閉じていれば同じ操作で drawer も開く。classic では既存 Run の観測・制御だけに使い、新規 Run は開始しない。overlay 表示中、New / Start / launch 中は遷移せず、leader のない `w` / `Ctrl-W` は PTY が所有する |
 | `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する |
 | `Ctrl-O` `z` | WorkspaceTerminalFullHeight | workspace terminal の高さを通常 drawer / 画面いっぱいで切り替える |
 | `Ctrl-O` `n` | DirectorNew | Director を開き、classic では New Conversation、goal-driven では Start Work Run を表示する。workspace terminal では新しい terminal tab を開く |
@@ -607,8 +607,11 @@ root scope（`session_id: None`）の Agent へ指示を出し、session を作�
 `director`）と呼ぶ。この節が指示モードの名称と仕様の正本である。managed session の実作業を見る面
 （[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home header の下から右端へ重なる drawer として現れる。
 
-Director shell は明示 route を持ち、初回 open は `Organization`、再 open は直前 route へ戻る。階層は
-`Organization`、`Work Runs` → `Run Overview` → `Director Console`、および一時的な `Start Work Run` である。
+Director shell は明示 route を持ち、初回 open は実効 Workflow が `goal-driven` なら `Work Runs`、`classic` なら
+`Organization` へ着地する。同じ Workflow のまま drawer を閉じて再 open した場合は直前 route へ戻り、実効 Workflow が
+実際に切り替わった場合は新しい Workflow の初回着地点へ route を正規化する。Workflow が決めるのはこの着地点と新規開始操作の
+意味であり、daemon に残る既存 Work Run の存在や所有権は変更しない。階層は `Organization`、`Work Runs` →
+`Run Overview` → `Director Console`、および一時的な `New Conversation` / `Start Work Run` である。
 各画面は `Director / …` breadcrumb を表示する。Organization は root Director conversation と role projection の
 workspace-wide tree、Work Runs は Run の集合、Run Overview は daemon projection の 1 Run、Console は 1 root Agent の
 PTY だけを所有する。provider 固有 ID、prompt、inbox 本文は表示しない。
@@ -626,7 +629,7 @@ button の強調は mode toggle と同じ「入力 focus を持つ面がアク�
 clip する場合も、この対比は変わらない。
 
 button または `Ctrl-O g`（`Ctrl-O Ctrl-G`）は、Switch、managed-session Closeup、live pane のいずれからも同じ
-指示モードの open/closed state を toggle し、close 中も Director route を保持する。drawer の通常幅は端末幅の 60% とし、
+指示モードの open/closed state を toggle し、同じ Workflow の close 中も Director route を保持する。drawer の通常幅は端末幅の 60% とし、
 56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
 同時に保てない幅では全幅へ縮退する。PR modal と同じ合成 overlay であり、背景 Home は header を残して ANSI span ごと dim にするが、
 完全に隠れる managed terminal も通常の Home geometry と attachment を維持する。
@@ -647,6 +650,8 @@ classic の `New Conversation` または goal-driven の `Start Work Run` を開
 `Enter` は選択した CLI の explicit profile を確定する。`Esc` は保存済み Director route / selection と drawer open
 状態を変えず picker だけを閉じる。候補が 0 件なら installation と Config の確認を促す
 safe empty state を表示し、daemon request を発行しない。
+Work Run の cancel / delete が送信中の場合は New / Start を fence し、表示上も busy として、応答が返るまで
+別の composer を開かない。
 
 live Agent の Director Console は managed session の Agent pane と同じ入力経路を使う。通常文字、IME の
 確定文字列、paste、`Enter`、`Esc`、編集キーは追加の入力欄へ保持せず selected root Agent の PTY へ直接送る。
@@ -707,11 +712,14 @@ Home と Director は共通 projection から同じ並び順・集計を読む�
 IPCは行わない。
 workspace 所有情報を持たない旧 run は別 workspace へ推測せず表示しない。
 
-Goal-driven Director では `Ctrl-O w` が同じ projection の最大16件を stable run ID で選べる Work Runs を直接開く。
-Director が閉じていれば同時に drawer を開き、`↑` / `↓` で Run を選ぶ。`Enter` は mutation を起こさず、選択した
+Goal-driven Director の初回着地点は Work Runs である。`Ctrl-O w` は両 Workflow から同じ projection の最大16件を stable run ID で
+選べる Work Runs を直接開く。Director が閉じていれば同時に drawer を開き、`↑` / `↓` で Run を選ぶ。`Enter` は mutation を起こさず、選択した
 `SupervisorRunId` の Run Overview を開く。Run Overview は Goal、state、task progress、停止理由と redaction-safe な root
 Director identity を表示し、root Director の `Enter` だけが Console を開く。identity が無い場合は時刻、label、tab 順から推測せず
-固定 footer に unavailable feedback を出す。
+固定 footer に unavailable feedback を出す。workspace-wide な Organization は副経路として残り、Work Runs の `Esc` または
+`Ctrl-O b` で移動する。classic の初回着地点は Organization だが、daemon 上で存続する Run の監視、cancel、終了済み履歴の削除、
+結果不明 operation の retry のため Work Runs / Run Overview を利用できる。classic の New は Conversation だけを開始し、Work Run は
+新規作成しない。
 
 Work Runs と Run Overview の plain `Ctrl-C` は active Run の cancel 確認、plain `Ctrl-X` は
 `Succeeded` / `Failed` / `Cancelled` の終了済み Run の delete 確認を開く。active Run の `Ctrl-X` と finished Run の
@@ -769,7 +777,7 @@ next / previous・Garden のうさぎで明示選択したとき、resume 可能
 root background entry だけを更新し、managed foreground を奪わない。resume 不可の明示選択は削除確認を前面に出す。
 
 drawer open 中は focus 中の Director route が sidebar、managed pane、Home header の別 action、通常の global action の入力を
-所有し、それらへ key / click / pointer を伝播しない。Organization、Work Runs、Run Overview、Start Work Run は management
+所有し、それらへ key / click / pointer を伝播しない。Organization、Work Runs、Run Overview、New Conversation / Start Work Run は management
 surface であり、通常文字や `Enter` を背面の PTY へ送らない。Director Console だけが root Agent terminal input と
 `Ctrl-O` tab controls を受理し、追加の入力 bar や command composer は持たない。`[ New ]` / `[ Start ]` の mouse-down は
 drawer が先に消費し、同じ pointer gesture を背景 Closeup の click / focus / attach 選択へ fallthrough させない。picker 中の
@@ -786,7 +794,10 @@ New Conversation / Start Work Run の `Choosing` / `Empty` と launch pending (`
 である。この owner は picker / composer の予約操作以外の keyboard / paste / terminal copy / pointer と、tab の選択・移動・
 close・resume、terminal scroll を inert に消費する。したがって背後の root Agent PTY bytes、pane/tab state、scroll、text
 selection、attach/detach は変化しない。terminal resize と backend/timer tick だけは owner を越えて通常の frame 処理へ進む。
-`Esc` は draft を破棄して開始前の exact Director route へ戻り、PTY へは届かない。
+Choosing / Empty の `Esc` は draft を破棄して開始前の exact Director route へ戻り、PTY へは届かない。launch pending の
+`Esc` / `Ctrl-O b` / `Ctrl-O w` は route を変えず消費する。開始前 route の操作 hint を残さず mode-neutral な breadcrumb / waiting
+body を表示し、matching completion の `SupervisorRunId` 有無で Run Overview / Organization 配下の Console へ進む。完了をその時点の
+Workflow として再解釈しない。
 
 入力 context の優先順位と遷移は次のとおりである。
 

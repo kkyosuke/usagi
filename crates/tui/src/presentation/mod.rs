@@ -845,6 +845,7 @@ enum WorkspaceForegroundInputOwner {
 fn workspace_foreground_input_owner(runtime: &WorkspaceRuntime) -> WorkspaceForegroundInputOwner {
     if runtime.state().overlay().is_none()
         && runtime.state().director_drawer_open()
+        && runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director)
         && (runtime.state().director_launching().is_some()
             || !matches!(runtime.state().director_new(), DirectorNew::Idle)
             || !matches!(runtime.state().director_route(), DirectorRoute::Console(_)))
@@ -918,17 +919,28 @@ fn handle_work_run_control_input_with_ui(
     runs: &WorkRunProjection,
     key: &Key,
 ) -> Option<WorkRunControlInput> {
-    let can_host = runtime.state().overlay().is_none()
-        && runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven
+    let can_activate = runtime.state().overlay().is_none()
         && runtime.state().director_launching().is_none()
         && matches!(runtime.state().director_new(), DirectorNew::Idle);
     let direct_work_runs = matches!(key, Key::Live(LiveTerminalAction::WorkRuns));
-    let effects = if can_host && direct_work_runs {
+    let effects = if can_activate && direct_work_runs {
         runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorWorkRuns))
     } else {
         Vec::new()
     };
-    let eligible = can_host && runtime.state().director_drawer_open();
+    if runtime.state().overlay().is_none()
+        && runtime.state().workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Terminal)
+        && control.mode() == WorkRunControlMode::Submitting
+        && matches!(key, Key::Live(LiveTerminalAction::DirectorNew))
+    {
+        return Some(WorkRunControlInput {
+            outcome: WorkRunControlOutcome::Consumed,
+            effects,
+        });
+    }
+    let eligible = can_activate
+        && runtime.state().director_drawer_open()
+        && runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director);
     if !eligible {
         if control.mode() != WorkRunControlMode::Submitting {
             control.suspend();
@@ -962,7 +974,10 @@ fn handle_work_run_control_input_with_ui(
     if matches!(key, Key::Resize | Key::Other) {
         return None;
     }
-    if matches!(key, Key::Live(LiveTerminalAction::Director)) {
+    if matches!(
+        key,
+        Key::Live(LiveTerminalAction::Director | LiveTerminalAction::DirectorNew)
+    ) {
         control.suspend();
         return None;
     }
@@ -5123,11 +5138,10 @@ fn director_drawer_projection(
     } else {
         None
     };
-    let feedback = if terminal_view.is_none() {
-        pane.error().map(str::to_owned)
-    } else {
-        None
-    };
+    // Management routes do not draw `terminal_view`, but a root launch can
+    // fail while an older live Director remains selected. Keep the pane-safe
+    // reason at the route level as well as in the Console terminal projection.
+    let feedback = pane.error().map(str::to_owned);
     DirectorDrawerProjection {
         focused: runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director),
         route: runtime.state().director_route(),
@@ -6142,7 +6156,9 @@ fn is_director_new_click(
         }) => (*column, *row),
         _ => return false,
     };
-    runtime.state().director_drawer_open()
+    runtime.state().overlay().is_none()
+        && runtime.state().director_drawer_open()
+        && runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director)
         && matches!(runtime.state().director_new(), DirectorNew::Idle)
         && runtime.state().director_launching().is_none()
         && director_drawer::new_button_at(
@@ -6153,6 +6169,22 @@ fn is_director_new_click(
             runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven,
             false,
         )
+}
+
+/// Resolve the Director's visible New / Start button before route-local input.
+///
+/// Work Runs deliberately owns otherwise-unrecognized clicks, so deferring
+/// this chrome action would make the primary Goal-driven CTA inert.
+fn open_director_from_new_button(
+    runtime: &mut WorkspaceRuntime,
+    key: &Key,
+    height: usize,
+    width: usize,
+    work_run_mode: WorkRunControlMode,
+) -> Option<Vec<Effect>> {
+    (work_run_mode != WorkRunControlMode::Submitting
+        && is_director_new_click(key, runtime, height, width))
+    .then(|| runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew)))
 }
 
 /// Whether this press lands on the persistent Director button in the Home
@@ -7911,23 +7943,31 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
             Overlay::Garden => KeyHelpContext::Garden,
         };
     }
-    match state.work_run_mode {
-        WorkRunControlMode::List if state.director_route == DirectorRoute::WorkRuns => {
-            return KeyHelpContext::WorkRuns;
-        }
-        WorkRunControlMode::List
-            if matches!(state.director_route, DirectorRoute::RunOverview(_)) =>
-        {
-            return KeyHelpContext::RunOverview;
-        }
-        WorkRunControlMode::ResolveEscalation => return KeyHelpContext::WorkRunEscalation,
-        WorkRunControlMode::ConfirmCancel
-        | WorkRunControlMode::ConfirmDelete
-        | WorkRunControlMode::Submitting
-        | WorkRunControlMode::Retry => return KeyHelpContext::WorkRunConfirmation,
-        WorkRunControlMode::List | WorkRunControlMode::Closed => {}
+    if state.drawer_focus == Some(WorkspaceDrawerFocus::Director)
+        && state.work_run_mode == WorkRunControlMode::Submitting
+    {
+        return KeyHelpContext::WorkRunSubmitting;
     }
-    if state.director_new_open {
+    if state.drawer_focus == Some(WorkspaceDrawerFocus::Director)
+        && matches!(
+            state.director_route,
+            DirectorRoute::WorkRuns | DirectorRoute::RunOverview(_)
+        )
+    {
+        match state.work_run_mode {
+            WorkRunControlMode::List if state.director_route == DirectorRoute::WorkRuns => {
+                return KeyHelpContext::WorkRuns;
+            }
+            WorkRunControlMode::List => return KeyHelpContext::RunOverview,
+            WorkRunControlMode::ResolveEscalation => return KeyHelpContext::WorkRunEscalation,
+            WorkRunControlMode::ConfirmCancel
+            | WorkRunControlMode::ConfirmDelete
+            | WorkRunControlMode::Retry => return KeyHelpContext::WorkRunConfirmation,
+            WorkRunControlMode::Submitting => return KeyHelpContext::WorkRunSubmitting,
+            WorkRunControlMode::Closed => {}
+        }
+    }
+    if state.director_new_open && state.drawer_focus == Some(WorkspaceDrawerFocus::Director) {
         return KeyHelpContext::DirectorNew;
     }
     match state.drawer_focus {
@@ -9094,29 +9134,44 @@ fn drive_workspace_controller(
         let director_header_effects = drawn_material.as_ref().and_then(|material| {
             close_director_from_header(&mut runtime, &key, material.width, &material.projection)
         });
-        if director_header_effects.is_some() {
+        let director_new_effects = director_header_effects
+            .is_none()
+            .then(|| {
+                open_director_from_new_button(
+                    &mut runtime,
+                    &key,
+                    height,
+                    width,
+                    work_run_control.mode(),
+                )
+            })
+            .flatten();
+        let director_new_clicked = director_new_effects.is_some();
+        if director_header_effects.is_some() || director_new_clicked {
             let previous = work_run_control.clone();
             work_run_control.suspend();
             if work_run_control != previous {
                 work_run_revision = work_run_revision.wrapping_add(1);
             }
         }
-        let work_run_input = if garden_route.is_none() && director_header_effects.is_none() {
-            let previous = work_run_control.clone();
-            let input = handle_work_run_control_input_with_ui(
-                Some(&mut ui),
-                &mut runtime,
-                &mut work_run_control,
-                &work_runs,
-                &key,
-            );
-            if work_run_control != previous {
-                work_run_revision = work_run_revision.wrapping_add(1);
-            }
-            input
-        } else {
-            None
-        };
+        let work_run_input =
+            if garden_route.is_none() && director_header_effects.is_none() && !director_new_clicked
+            {
+                let previous = work_run_control.clone();
+                let input = handle_work_run_control_input_with_ui(
+                    Some(&mut ui),
+                    &mut runtime,
+                    &mut work_run_control,
+                    &work_runs,
+                    &key,
+                );
+                if work_run_control != previous {
+                    work_run_revision = work_run_revision.wrapping_add(1);
+                }
+                input
+            } else {
+                None
+            };
         if let Some(WorkRunControlInput {
             outcome: WorkRunControlOutcome::Submit(request),
             ..
@@ -9135,6 +9190,9 @@ fn drive_workspace_controller(
             None if director_header_effects.is_some() => {
                 WorkspaceInputRoute::Drawer(director_header_effects.expect("matched above"))
             }
+            None if director_new_clicked => WorkspaceInputRoute::Drawer(
+                director_new_effects.expect("matched Director New button"),
+            ),
             None if work_run_effects.is_some() => WorkspaceInputRoute::Drawer(
                 work_run_effects.expect("matched Work Run control input"),
             ),
@@ -9171,7 +9229,7 @@ fn drive_workspace_controller(
         }
         if pointer_drawer_focus.is_some()
             && matches!(key, Key::Click { .. })
-            && !is_director_new_click(&key, &runtime, height, width)
+            && !director_new_clicked
         {
             // Drawer chrome owns its whole rectangle. A click outside the PTY
             // viewport must not activate the Home sidebar hidden underneath.
@@ -9182,8 +9240,6 @@ fn drive_workspace_controller(
         | WorkspaceInputRoute::Garden(effects) = input_route
         {
             effects
-        } else if is_director_new_click(&key, &runtime, height, width) {
-            runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
         } else if let Key::Click { column, row } = key {
             if let Some(route) =
                 route_pr_modal_click(runtime.state().overlay(), height, width, column, row)
@@ -19527,8 +19583,10 @@ mod tests {
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert!(runtime.state().director_drawer_open());
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
         let tabs_before = runtime.active_pane().tabs().to_vec();
         let mut controls = LiveTerminalControls::default();
         let rows = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
@@ -19569,7 +19627,14 @@ mod tests {
             .unwrap()
             .tabs()
             .to_vec();
-        let launch_effects = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew));
+        let launch_effects = super::open_director_from_new_button(
+            &mut runtime,
+            &new_pointer,
+            20,
+            80,
+            super::WorkRunControlMode::Closed,
+        )
+        .expect("the Work Runs Start button owns its pointer press");
         assert!(launch_effects.is_empty());
         assert!(matches!(
             runtime.state().director_new(),
@@ -19832,6 +19897,20 @@ mod tests {
         assert_eq!(
             failed_projection.feedback.as_deref(),
             Some("safe retry feedback")
+        );
+        let live_failure_view = TerminalViewProjection {
+            rows: vec!["older live Director".to_owned()],
+            row_offset: 0,
+            total_rows: 1,
+            scroll: 0,
+            feedback: None,
+        };
+        let live_failure_projection =
+            super::director_drawer_projection(&ui, &runtime, Some(&live_failure_view));
+        assert_eq!(
+            live_failure_projection.feedback.as_deref(),
+            Some("safe retry feedback"),
+            "management routes keep launch failure feedback beside an older live Director"
         );
         assert!(super::select_director_tab(
             &Key::Live(LiveTerminalAction::NextTab),
@@ -24877,7 +24956,7 @@ mod tests {
     }
 
     #[test]
-    fn work_run_chord_opens_only_the_goal_driven_director_control() {
+    fn work_run_chord_opens_the_existing_run_control_in_both_workflows() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
@@ -24891,7 +24970,7 @@ mod tests {
             &runs,
             &Key::Live(LiveTerminalAction::WorkRuns),
         )
-        .expect("the Goal-driven chord owns the input");
+        .expect("the Work Runs chord owns the input");
         assert!(input.effects.is_empty());
         assert_eq!(input.outcome, super::WorkRunControlOutcome::Consumed);
         assert!(runtime.state().director_drawer_open());
@@ -24945,17 +25024,168 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
+        let classic = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut control,
+            &runs,
+            &Key::Live(LiveTerminalAction::WorkRuns),
+        )
+        .expect("classic keeps existing Work Runs reachable");
+        assert_eq!(classic.outcome, super::WorkRunControlOutcome::Consumed);
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
+        assert_eq!(control.mode(), super::WorkRunControlMode::List);
+    }
+
+    #[test]
+    fn work_run_surface_yields_new_and_fences_submitting_actions() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude]),
+            DefaultModel::Claude,
+        );
+        let runs =
+            super::WorkRunProjection::fresh(vec![observed_work_run(SupervisorRunState::Running)]);
+        let mut control = super::WorkRunControl::default();
+        let _ = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut control,
+            &runs,
+            &Key::Live(LiveTerminalAction::WorkRuns),
+        );
+
         assert!(
             super::handle_work_run_control_input(
                 &mut runtime,
                 &mut control,
                 &runs,
-                &Key::Live(LiveTerminalAction::WorkRuns),
+                &Key::Live(LiveTerminalAction::DirectorNew),
             )
-            .is_none()
+            .is_none(),
+            "Director New must reach the drawer reducer"
+        );
+        assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
+        assert!(
+            super::handle_director_picker_input(
+                &mut runtime,
+                &Key::Live(LiveTerminalAction::DirectorNew),
+            )
+            .is_some()
+        );
+        assert!(matches!(
+            runtime.state().director_new(),
+            DirectorNew::Choosing(_)
+        ));
+
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+        control.open(runs.runs());
+        let _ = control.handle(super::WorkRunControlAction::Cancel, runs.runs(), true);
+        let submitted = control.handle(super::WorkRunControlAction::Enter, runs.runs(), true);
+        assert!(submitted.into_request().is_some());
+        assert_eq!(control.mode(), super::WorkRunControlMode::Submitting);
+        let blocked = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut control,
+            &runs,
+            &Key::Live(LiveTerminalAction::DirectorNew),
+        )
+        .expect("a durable action in flight owns Director New");
+        assert_eq!(blocked.outcome, super::WorkRunControlOutcome::Consumed);
+        assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorOrganization));
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Live(LiveTerminalAction::DirectorNew),
+            )
+            .is_some(),
+            "the fence remains active after a Workflow route normalization"
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(!runtime.state().director_drawer_open());
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Live(LiveTerminalAction::DirectorNew),
+            )
+            .is_some(),
+            "a closed Director must not bypass the pending action fence"
         );
         assert!(!runtime.state().director_drawer_open());
-        assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let drawer = super::director_drawer::geometry(20, 80);
+        let start = Key::Click {
+            column: u16::try_from(drawer.left + drawer.width - 3).unwrap(),
+            row: u16::try_from(drawer.top + 2).unwrap(),
+        };
+        assert!(
+            super::open_director_from_new_button(&mut runtime, &start, 20, 80, control.mode(),)
+                .is_none(),
+            "the Start button is inert while a durable action is in flight"
+        );
+    }
+
+    #[test]
+    fn focused_shell_outweighs_background_work_run_control() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        let runs =
+            super::WorkRunProjection::fresh(vec![observed_work_run(SupervisorRunState::Running)]);
+        let mut control = super::WorkRunControl::default();
+        let _ = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut control,
+            &runs,
+            &Key::Live(LiveTerminalAction::WorkRuns),
+        );
+        let _ = control.handle(super::WorkRunControlAction::Cancel, runs.runs(), true);
+        let submitted = control.handle(super::WorkRunControlAction::Enter, runs.runs(), true);
+        assert!(submitted.into_request().is_some());
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        assert_eq!(
+            runtime.state().workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Live(LiveTerminalAction::DirectorNew),
+            )
+            .is_none(),
+            "a background Work Run submission must not consume Shell New"
+        );
+        assert_eq!(control.mode(), super::WorkRunControlMode::Submitting);
+        let mut shell_control = super::WorkRunControl::default();
+        shell_control.open(runs.runs());
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut shell_control,
+                &runs,
+                &Key::Char('x'),
+            )
+            .is_none(),
+            "an unfocused Director must not consume Shell input"
+        );
+        assert_eq!(shell_control.mode(), super::WorkRunControlMode::Closed);
+        assert_eq!(
+            super::workspace_foreground_input_owner(&runtime),
+            super::WorkspaceForegroundInputOwner::Downstream
+        );
     }
 
     #[test]
@@ -30258,7 +30488,7 @@ mod tests {
             ),
             (
                 super::WorkRunControlMode::Submitting,
-                HelpContext::WorkRunConfirmation,
+                HelpContext::WorkRunSubmitting,
             ),
             (
                 super::WorkRunControlMode::Retry,
@@ -30269,6 +30499,7 @@ mod tests {
                 resolve_workspace_help_context(WorkspaceHelpState {
                     work_run_mode: mode,
                     director_route: DirectorRoute::WorkRuns,
+                    drawer_focus: Some(WorkspaceDrawerFocus::Director),
                     ..base
                 }),
                 expected,
@@ -30279,6 +30510,7 @@ mod tests {
             resolve_workspace_help_context(WorkspaceHelpState {
                 work_run_mode: super::WorkRunControlMode::List,
                 director_route: DirectorRoute::RunOverview(SupervisorRunId::new()),
+                drawer_focus: Some(WorkspaceDrawerFocus::Director),
                 ..base
             }),
             HelpContext::RunOverview
@@ -30287,17 +30519,40 @@ mod tests {
             resolve_workspace_help_context(WorkspaceHelpState {
                 work_run_mode: super::WorkRunControlMode::ConfirmDelete,
                 director_route: DirectorRoute::WorkRuns,
+                drawer_focus: Some(WorkspaceDrawerFocus::Director),
                 ..base
             }),
             HelpContext::WorkRunConfirmation
+        );
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                work_run_mode: super::WorkRunControlMode::Submitting,
+                director_route: DirectorRoute::Organization,
+                drawer_focus: Some(WorkspaceDrawerFocus::Director),
+                ..base
+            }),
+            HelpContext::WorkRunSubmitting,
+            "an in-flight action outranks the normalized Organization route"
         );
 
         assert_eq!(
             resolve_workspace_help_context(WorkspaceHelpState {
                 director_new_open: true,
+                drawer_focus: Some(WorkspaceDrawerFocus::Director),
                 ..base
             }),
             HelpContext::DirectorNew
+        );
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                work_run_mode: super::WorkRunControlMode::Submitting,
+                director_new_open: true,
+                director_route: DirectorRoute::WorkRuns,
+                drawer_focus: Some(WorkspaceDrawerFocus::Terminal),
+                ..base
+            }),
+            HelpContext::RootShell,
+            "the focused Shell outranks a background Director operation"
         );
         for (drawer_focus, expected) in [
             (WorkspaceDrawerFocus::Director, HelpContext::Organization),

@@ -87,7 +87,7 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
 | `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
 | `Ctrl-O b` / `Ctrl-O Ctrl-B` | Director 内で一階層戻る |
-| `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Work Runs を直接開く |
+| `Ctrl-O w` / `Ctrl-O Ctrl-W` | Work Runs を直接開く（classic は既存 Run の観測・制御のみ） |
 | `Ctrl-O n` / `Ctrl-O Ctrl-N` | Director の New Conversation / Start Work Run を開く。Shell では新しい terminal tab を追加する |
 | `Ctrl-O [` / `Ctrl-O ]` | 前 / 次の pane tab を選ぶ |
 | `Ctrl-O {` / `Ctrl-O }` | 選択中の pane tab を前 / 次へ並べ替える |
@@ -289,9 +289,11 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | [Roles](document/10-session-roles.md#rolestoml-の設定例) | `roles [workspace|global]` で編集する session / root ごとの追加 instruction、既定 role、委譲制限 |
 
 `goal-driven` を選んだ workspace では `Ctrl-O n` または Director の `[ Start ]` から Goal Composer を開き、目的と
-provider を確定して Work Run を開始する。`Ctrl-O w` は最大16件の Work Runs を直接開き、`Enter` で選択 Run の
+provider を確定して Work Run を開始する。Director の初回表示は `goal-driven` では Work Runs、`classic` では
+Organization になり、同じ Workflow で閉じて開き直した場合は直前の画面へ戻る。`Ctrl-O w` は最大16件の Work Runs を直接開き、`Enter` で選択 Run の
 Run Overview へ進む。Work Runs / Run Overview の `Ctrl-C` は active Run の cancel 確認、`Ctrl-X` は終了済み Run の
-履歴削除確認で、確認中の `Ctrl-C` / `Esc` は取り消しになる。一般の blocking choice は既存 Decision、成果 PR は既存 PR 一覧に表示する。
+履歴削除確認で、確認中の `Ctrl-C` / `Esc` は取り消しになる。Workflow を `classic` へ切り替えても daemon 上の既存 Run は継続するため、
+`Ctrl-O w` から監視・停止できる（classic の New は Conversation のみで、新しい Work Run は開始しない）。一般の blocking choice は既存 Decision、成果 PR は既存 PR 一覧に表示する。
 詳細な操作と現行契約は [goal-driven workflow](document/03-tui.md#goal-driven-workflow)を参照する。
 
 環境変数は Config の `Env  [ N variables ]`、Overview の `env [workspace|global]`、Closeup の `env` で編集する。
