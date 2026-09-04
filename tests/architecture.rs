@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use syn::visit::{self, Visit};
-use syn::{Attribute, Expr, File, Item, Path as RustPath, Stmt, UseTree};
+use syn::{Attribute, Expr, File, Item, Pat, Path as RustPath, Stmt, UseTree};
 use usagi_core::infrastructure::store::issue::IssueStore;
 
 const FACES: [(&str, &[&str]); 4] = [
@@ -352,6 +352,12 @@ fn calls_heavy_e2e_lock(statement: &Stmt) -> bool {
     let Stmt::Local(local) = statement else {
         return false;
     };
+    // A wildcard (`let _ = ...`) drops the guard at this statement and does not
+    // serialize the test body. Require a real binding so the RAII lock remains
+    // alive until the function scope ends.
+    if !matches!(local.pat, Pat::Ident(_)) {
+        return false;
+    }
     let Some(initializer) = &local.init else {
         return false;
     };
@@ -365,6 +371,17 @@ fn calls_heavy_e2e_lock(statement: &Stmt) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == "heavy_e2e_lock")
+}
+
+#[test]
+fn heavy_e2e_guard_must_be_retained_by_a_local_binding() {
+    let retained: Stmt = syn::parse_str("let _guard = daemon_fixture::heavy_e2e_lock();")
+        .expect("retained guard statement parses");
+    let discarded: Stmt = syn::parse_str("let _ = daemon_fixture::heavy_e2e_lock();")
+        .expect("discarded guard statement parses");
+
+    assert!(calls_heavy_e2e_lock(&retained));
+    assert!(!calls_heavy_e2e_lock(&discarded));
 }
 
 #[test]
