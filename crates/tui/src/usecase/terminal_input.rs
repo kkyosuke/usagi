@@ -174,7 +174,7 @@ pub enum RuntimeEvent<B> {
     Backend(B),
 }
 
-/// A TUI-local action reserved from the live terminal stream.
+/// A TUI-local action reserved by the process-wide terminal leader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveTerminalAction {
     /// Open the context-aware command list (`Ctrl-O ?`).
@@ -283,7 +283,7 @@ pub enum LiveInputOutput {
     Swallowed,
 }
 
-/// Pure state machine for the default `Ctrl-O` live-terminal prefix scheme.
+/// Pure state machine for the process-wide `Ctrl-O` prefix scheme.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LiveInputClassifier {
     leader_at: Option<Duration>,
@@ -360,7 +360,7 @@ impl LiveInputClassifier {
     fn classify_bytes(&mut self, leader_alive: bool, bytes: Vec<u8>) -> LiveInputOutput {
         self.leader_at = None;
         if leader_alive {
-            return control_byte_prefix_action(&bytes)
+            return prefix_bytes_action(&bytes)
                 .map_or(LiveInputOutput::Swallowed, LiveInputOutput::Action);
         }
         global_control_bytes(&bytes).map_or(
@@ -448,103 +448,142 @@ fn is_ctrl_o(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('o')) && is_only_control(key.modifiers))
 }
 
-const LETTER_PREFIX_ACTIONS: &[(char, char, LiveTerminalAction)] = &[
-    ('a', '\u{1}', LiveTerminalAction::OpenCloseupModal),
-    ('d', '\u{4}', LiveTerminalAction::OpenDecisions),
-    ('g', '\u{7}', LiveTerminalAction::Director),
-    ('n', '\u{e}', LiveTerminalAction::DirectorNew),
-    ('o', '\u{f}', LiveTerminalAction::Switch),
-    ('p', '\u{10}', LiveTerminalAction::OpenPullRequests),
-    ('r', '\u{12}', LiveTerminalAction::ResumeTab),
-    ('s', '\u{13}', LiveTerminalAction::OpenNotes),
-    ('t', '\u{14}', LiveTerminalAction::RootTerminal),
-    ('v', '\u{16}', LiveTerminalAction::OpenPreview),
-    ('w', '\u{17}', LiveTerminalAction::WorkRuns),
-    ('x', '\u{18}', LiveTerminalAction::CloseTab),
-    ('z', '\u{1a}', LiveTerminalAction::RootTerminalFullHeight),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrefixShortcut {
+    code: KeyCode,
+    control_byte: Option<u8>,
+    allow_shift: bool,
+    action: LiveTerminalAction,
+}
+
+macro_rules! prefix_shortcut {
+    ($code:expr => $action:expr) => {
+        PrefixShortcut {
+            code: $code,
+            control_byte: None,
+            allow_shift: false,
+            action: $action,
+        }
+    };
+    ($code:expr, shifted => $action:expr) => {
+        PrefixShortcut {
+            code: $code,
+            control_byte: None,
+            allow_shift: true,
+            action: $action,
+        }
+    };
+    ($code:expr, legacy = $control:expr => $action:expr) => {
+        PrefixShortcut {
+            code: $code,
+            control_byte: Some($control),
+            allow_shift: false,
+            action: $action,
+        }
+    };
+    ($code:expr, shifted, legacy = $control:expr => $action:expr) => {
+        PrefixShortcut {
+            code: $code,
+            control_byte: Some($control),
+            allow_shift: true,
+            action: $action,
+        }
+    };
+}
+
+/// Every action reserved by the process-wide terminal leader.
+///
+/// `control_byte` records the legacy terminal encoding of a control-modified
+/// follow-up. Printable and semantic key events use `code`; their Control bit
+/// is optional for every entry so users may keep holding Control after
+/// pressing the leader on any workspace surface.
+const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
+    prefix_shortcut!(KeyCode::Char('?'), shifted, legacy = 31 => LiveTerminalAction::CommandHelp),
+    prefix_shortcut!(KeyCode::Char('+'), shifted => LiveTerminalAction::OpenWorkspace),
+    prefix_shortcut!(KeyCode::Char('0') => LiveTerminalAction::OpenWorkspaceSwitcher),
+    prefix_shortcut!(KeyCode::Char('1') => LiveTerminalAction::ActivateWorkspace(1)),
+    prefix_shortcut!(KeyCode::Char('2') => LiveTerminalAction::ActivateWorkspace(2)),
+    prefix_shortcut!(KeyCode::Char('3') => LiveTerminalAction::ActivateWorkspace(3)),
+    prefix_shortcut!(KeyCode::Char('4') => LiveTerminalAction::ActivateWorkspace(4)),
+    prefix_shortcut!(KeyCode::Char('5') => LiveTerminalAction::ActivateWorkspace(5)),
+    prefix_shortcut!(KeyCode::Char('6') => LiveTerminalAction::ActivateWorkspace(6)),
+    prefix_shortcut!(KeyCode::Char('7') => LiveTerminalAction::ActivateWorkspace(7)),
+    prefix_shortcut!(KeyCode::Char('8') => LiveTerminalAction::ActivateWorkspace(8)),
+    prefix_shortcut!(KeyCode::Char('9') => LiveTerminalAction::ActivateWorkspace(9)),
+    prefix_shortcut!(KeyCode::Char('o'), legacy = 15 => LiveTerminalAction::Switch),
+    prefix_shortcut!(KeyCode::Char('a'), legacy = 1 => LiveTerminalAction::OpenCloseupModal),
+    prefix_shortcut!(KeyCode::Char('['), legacy = 27 => LiveTerminalAction::PreviousTab),
+    prefix_shortcut!(KeyCode::Char(']'), legacy = 29 => LiveTerminalAction::NextTab),
+    prefix_shortcut!(KeyCode::Char('{'), shifted => LiveTerminalAction::MoveTabPrevious),
+    prefix_shortcut!(KeyCode::Char('}'), shifted => LiveTerminalAction::MoveTabNext),
+    prefix_shortcut!(KeyCode::Char('p'), legacy = 16 => LiveTerminalAction::OpenPullRequests),
+    prefix_shortcut!(KeyCode::Char('v'), legacy = 22 => LiveTerminalAction::OpenPreview),
+    prefix_shortcut!(KeyCode::Char('d'), legacy = 4 => LiveTerminalAction::OpenDecisions),
+    prefix_shortcut!(KeyCode::Char('s'), legacy = 19 => LiveTerminalAction::OpenNotes),
+    prefix_shortcut!(KeyCode::Char(',') => LiveTerminalAction::OpenGarden),
+    prefix_shortcut!(KeyCode::Char('g'), legacy = 7 => LiveTerminalAction::Director),
+    prefix_shortcut!(KeyCode::Char('w'), legacy = 23 => LiveTerminalAction::WorkRuns),
+    prefix_shortcut!(KeyCode::Char('t'), legacy = 20 => LiveTerminalAction::RootTerminal),
+    prefix_shortcut!(KeyCode::Char('z'), legacy = 26 => LiveTerminalAction::RootTerminalFullHeight),
+    prefix_shortcut!(KeyCode::Char('n'), legacy = 14 => LiveTerminalAction::DirectorNew),
+    prefix_shortcut!(KeyCode::Char('x'), legacy = 24 => LiveTerminalAction::CloseTab),
+    prefix_shortcut!(KeyCode::Char('r'), legacy = 18 => LiveTerminalAction::ResumeTab),
+    prefix_shortcut!(KeyCode::Up => LiveTerminalAction::ScrollUp),
+    prefix_shortcut!(KeyCode::Down => LiveTerminalAction::ScrollDown),
+    prefix_shortcut!(KeyCode::End => LiveTerminalAction::ScrollBottom),
 ];
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
-    if let Some((_, _, action)) = LETTER_PREFIX_ACTIONS
+    if let Some(byte) = control_byte_from_key_code(key.code) {
+        return prefix_control_byte_action(byte);
+    }
+    PREFIX_SHORTCUTS
         .iter()
-        .find(|(letter, control, _)| letter_with_optional_control(key, *letter, *control))
-    {
-        return Some(*action);
-    }
-    // `+` is physically Shift+= on common layouts. Crossterm may retain that
-    // Shift bit even though the semantic character is already `+`.
-    if key.code == KeyCode::Char('+')
-        && (key.modifiers == Modifiers::default()
-            || key.modifiers
-                == Modifiers {
-                    shift: true,
-                    ..Modifiers::default()
-                })
-    {
-        return Some(LiveTerminalAction::OpenWorkspace);
-    }
-    // `?` is physically Shift+/ on common layouts. As with `+`, crossterm may
-    // retain Shift even though the semantic character already identifies it.
-    if key.code == KeyCode::Char('?')
-        && (key.modifiers == Modifiers::default()
-            || key.modifiers
-                == Modifiers {
-                    shift: true,
-                    ..Modifiers::default()
-                })
-    {
-        return Some(LiveTerminalAction::CommandHelp);
-    }
-    if let KeyCode::Char(character @ ('{' | '}')) = key.code
-        && (key.modifiers == Modifiers::default()
-            || key.modifiers
-                == Modifiers {
-                    shift: true,
-                    ..Modifiers::default()
-                })
-    {
-        return Some(if character == '}' {
-            LiveTerminalAction::MoveTabNext
-        } else {
-            LiveTerminalAction::MoveTabPrevious
-        });
-    }
-    // Plain follow-ups for the live-terminal view controls the Home reducer does
-    // not own: scroll the PTY output and close the focused tab. A
-    // modified variant (other than the control chords above) is not a prefix
-    // action and falls through to the PTY.
-    if key.modifiers != Modifiers::default() {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('0') => Some(LiveTerminalAction::OpenWorkspaceSwitcher),
-        KeyCode::Char(digit @ '1'..='9') => Some(LiveTerminalAction::ActivateWorkspace(
-            u8::try_from(digit.to_digit(10).unwrap_or(1)).unwrap_or(1),
-        )),
-        KeyCode::Char(',') => Some(LiveTerminalAction::OpenGarden),
-        KeyCode::Char(']') => Some(LiveTerminalAction::NextTab),
-        KeyCode::Char('[') => Some(LiveTerminalAction::PreviousTab),
-        KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
-        KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
-        KeyCode::End => Some(LiveTerminalAction::ScrollBottom),
+        .find(|shortcut| {
+            shortcut.code == key.code
+                && prefix_modifiers_allowed(key.modifiers, shortcut.allow_shift)
+        })
+        .map(|shortcut| shortcut.action)
+}
+
+fn prefix_modifiers_allowed(modifiers: Modifiers, allow_shift: bool) -> bool {
+    (!modifiers.shift || allow_shift)
+        && !modifiers.alt
+        && !modifiers.super_
+        && !modifiers.hyper
+        && !modifiers.meta
+}
+
+fn control_byte_from_key_code(code: KeyCode) -> Option<u8> {
+    match code {
+        KeyCode::Char(character) if character.is_ascii_control() => {
+            u8::try_from(u32::from(character)).ok()
+        }
+        // Legacy terminals cannot distinguish the Escape key from Ctrl-[.
+        // A pending leader owns either form, so both select the previous tab.
+        KeyCode::Escape => Some(27),
         _ => None,
     }
 }
 
-fn letter_with_optional_control(key: &KeyEvent, letter: char, control: char) -> bool {
-    matches!(key.code, KeyCode::Char(character) if character == control)
-        || (matches!(key.code, KeyCode::Char(character) if character == letter)
-            && (key.modifiers == Modifiers::default() || is_only_control(key.modifiers)))
+fn prefix_control_byte_action(byte: u8) -> Option<LiveTerminalAction> {
+    PREFIX_SHORTCUTS
+        .iter()
+        .find(|shortcut| shortcut.control_byte == Some(byte))
+        .map(|shortcut| shortcut.action)
 }
 
-fn control_byte_prefix_action(bytes: &[u8]) -> Option<LiveTerminalAction> {
+fn prefix_bytes_action(bytes: &[u8]) -> Option<LiveTerminalAction> {
     let [byte] = bytes else {
         return None;
     };
-    LETTER_PREFIX_ACTIONS
-        .iter()
-        .find(|(_, control, _)| u32::from(*control) == u32::from(*byte))
-        .map(|(_, _, action)| *action)
+    prefix_control_byte_action(*byte).or_else(|| {
+        let character = char::from(*byte);
+        PREFIX_SHORTCUTS
+            .iter()
+            .find(|shortcut| shortcut.code == KeyCode::Char(character))
+            .map(|shortcut| shortcut.action)
+    })
 }
 
 /// Encodes a press or repeat in the portable terminal form.
@@ -1039,19 +1078,81 @@ mod tests {
     }
 
     #[test]
-    fn letter_prefix_table_has_unique_keys_and_actions() {
-        let mut letters = std::collections::BTreeSet::new();
+    fn prefix_shortcut_table_has_unique_keys_control_bytes_and_actions() {
+        let mut keys = std::collections::BTreeSet::new();
         let mut controls = std::collections::BTreeSet::new();
         let mut actions = std::collections::BTreeSet::new();
-        for (letter, control, action) in LETTER_PREFIX_ACTIONS {
-            assert!(letters.insert(*letter), "duplicate letter prefix: {letter}");
+        for shortcut in PREFIX_SHORTCUTS {
             assert!(
-                controls.insert(u32::from(*control)),
-                "duplicate control-byte prefix: {control:?}"
+                keys.insert(format!("{:?}", shortcut.code)),
+                "duplicate semantic prefix: {:?}",
+                shortcut.code
             );
+            if let Some(control) = shortcut.control_byte {
+                assert!(
+                    controls.insert(control),
+                    "duplicate control-byte prefix: {control:?}"
+                );
+            }
             assert!(
-                actions.insert(format!("{action:?}")),
-                "duplicate action alias: {action:?}"
+                actions.insert(format!("{:?}", shortcut.action)),
+                "duplicate action alias: {:?}",
+                shortcut.action
+            );
+        }
+    }
+
+    #[test]
+    fn every_semantic_prefix_shortcut_accepts_control_on_the_follow_up() {
+        for shortcut in PREFIX_SHORTCUTS {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(
+                    Duration::from_millis(1),
+                    LiveInput::Key(KeyEvent::new(
+                        shortcut.code,
+                        Modifiers {
+                            shift: shortcut.allow_shift,
+                            control: true,
+                            ..Modifiers::default()
+                        },
+                        KeyEventKind::Press,
+                    )),
+                ),
+                LiveInputOutput::Action(shortcut.action),
+                "control-modified follow-up {:?}",
+                shortcut.code
+            );
+        }
+    }
+
+    #[test]
+    fn control_brackets_select_tabs_in_semantic_and_legacy_forms() {
+        let cases = [
+            (ctrl('['), LiveTerminalAction::PreviousTab),
+            (
+                key(KeyCode::Char('\u{1b}')),
+                LiveTerminalAction::PreviousTab,
+            ),
+            (key(KeyCode::Escape), LiveTerminalAction::PreviousTab),
+            (LiveInput::Raw(vec![27]), LiveTerminalAction::PreviousTab),
+            (ctrl(']'), LiveTerminalAction::NextTab),
+            (key(KeyCode::Char('\u{1d}')), LiveTerminalAction::NextTab),
+            (LiveInput::Raw(vec![29]), LiveTerminalAction::NextTab),
+        ];
+        for (follow_up, action) in cases {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), follow_up),
+                LiveInputOutput::Action(action)
             );
         }
     }
@@ -1099,32 +1200,34 @@ mod tests {
     }
 
     #[test]
-    fn raw_control_bytes_after_leader_match_their_letter_actions() {
-        for (byte, action) in [
-            (1, LiveTerminalAction::OpenCloseupModal),
-            (4, LiveTerminalAction::OpenDecisions),
-            (7, LiveTerminalAction::Director),
-            (14, LiveTerminalAction::DirectorNew),
-            (15, LiveTerminalAction::Switch),
-            (16, LiveTerminalAction::OpenPullRequests),
-            (18, LiveTerminalAction::ResumeTab),
-            (19, LiveTerminalAction::OpenNotes),
-            (20, LiveTerminalAction::RootTerminal),
-            (22, LiveTerminalAction::OpenPreview),
-            (23, LiveTerminalAction::WorkRuns),
-            (24, LiveTerminalAction::CloseTab),
-            (26, LiveTerminalAction::RootTerminalFullHeight),
-        ] {
+    fn raw_control_bytes_after_leader_match_their_shortcut_actions() {
+        for shortcut in PREFIX_SHORTCUTS
+            .iter()
+            .filter(|shortcut| shortcut.control_byte.is_some())
+        {
             let mut classifier = LiveInputClassifier::default();
             assert_eq!(
                 classifier.classify(T0, ctrl('o')),
                 LiveInputOutput::Swallowed
             );
             assert_eq!(
-                classifier.classify(Duration::from_millis(1), LiveInput::Raw(vec![byte])),
-                LiveInputOutput::Action(action)
+                classifier.classify(
+                    Duration::from_millis(1),
+                    LiveInput::Raw(vec![shortcut.control_byte.unwrap()]),
+                ),
+                LiveInputOutput::Action(shortcut.action)
             );
         }
+
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), LiveInput::Raw(b"[".to_vec())),
+            LiveInputOutput::Action(LiveTerminalAction::PreviousTab)
+        );
 
         let mut classifier = LiveInputClassifier::default();
         assert_eq!(

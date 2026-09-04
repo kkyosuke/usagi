@@ -499,12 +499,16 @@ scroll や daemon snapshot によって同じセルの session が入れ替わ�
 結合しない。modal と inline 作成中は背景の sidebar click を受け取らず、その前後の click も結合しない。daemon
 snapshot で session 一覧を置き換えた場合も、置換前後の click は同じ `SessionId` が残っていても結合しない。
 
-Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、空の pane を
-表示する。この状態では `a` が Agent、`t` が Terminal を直接起動し、`Enter` が action modal を開く。tab が 1 つ以上ある Closeup は `LiveInputClassifier` がすべての入力を先に分類する。pending な `Ctrl-O`
-prefix（leader）が次の入力を所有し、leader が無い場合は `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` / `Ctrl-X` を control chord として解決する。
-それ以外の非 prefix 入力は、修飾キーを含めて live terminal への passthrough として扱う。leader の follow-up は下表のアクションに
-解決し、それ以外は消費する。tab 切替（`Ctrl-O [` / `Ctrl-O ]`）は reducer が所有するが、scroll・tab close・copy は
+workspace の terminal 入力は、route・overlay・drawer・pane tab の有無にかかわらず、process-wide な
+`LiveInputClassifier` が最初に分類する。pending な `Ctrl-O` prefix（leader）が次の入力を所有し、leader が無い場合は
+`Ctrl-C` / `Ctrl-Q` / `Ctrl-D` / `Ctrl-X` を control chord として解決する。leader の follow-up は全 surface で
+`Ctrl` の有無を同一視して下表のアクションに解決し、それ以外は消費する。tab 切替（`Ctrl-O [` / `Ctrl-O ]`、または2打目も `Ctrl` を押したままの
+`Ctrl-O Ctrl-[` / `Ctrl-O Ctrl-]`）は reducer が所有するが、scroll・tab close・copy は
 reducer に持ち込まず shell と `TerminalSession` が所有する（scroll offset・選択・feedback は shell 側の状態）。
+
+分類後の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、空の pane を
+表示する。この状態では `a` が Agent、`t` が Terminal を直接起動し、`Enter` が action modal を開く。tab が 1 つ以上ある
+Closeup では、leader 以外の入力を修飾キーを含めて live terminal への passthrough として扱う。
 
 controller reducer path も同じ投影を使う。**tab を 1 枚も持たない** target の Closeup への遷移は overlay を
 開かず、空の pane surface へ着地する。live PTY を持たない tab（interrupted Agent history）だけを
@@ -883,7 +887,7 @@ inline の `+ new session` フォームは、名前が既存の worktree と衝�
 
 | 面 | material |
 |---|---|
-| Home | 端末サイズ、`HomeProjection`（reducer state・session 行・metrics・git 差分・live terminal 出力・pane tab・overlay modal・create pending）、quit 確認、create 失敗 dialog、秒単位に丸めた現在時刻 |
+| Home | 端末サイズ、`HomeProjection`（reducer state・session 行・metrics・git 差分・live terminal 出力・pane tab・overlay modal・create pending）、quit 確認、create / terminal 起動失敗 dialog、秒単位に丸めた現在時刻 |
 | Welcome / Open / New / Config | 端末サイズと、その画面のフォーム |
 
 **時刻も material である**。sidebar の session 行が出す相対時刻（`now` / `3m ago`）は実時計に依存するので、時計を
@@ -1602,7 +1606,10 @@ session 作成と同じ interaction gate であり、受付時の interaction co
 （読んでいる画面から focus を奪わない）。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
-pending tab を安全な feedback に置き換える。`Ctrl-O [` / `Ctrl-O ]` は tab を巡回し、`Ctrl-O {` / `Ctrl-O }` は
+pending tab を取り除き、daemon が返した安全な理由を `Terminal failed to open` modal に表示する。
+modal は `Enter` / `Esc` / `Ctrl-C` で閉じ、同じ理由を空 pane の feedback にも保持する。
+別の modal がすでに入力を所有している場合はそれを奪わず、Home notice に理由を保持する。
+`Ctrl-O [` / `Ctrl-O ]` は tab を巡回し、`Ctrl-O {` / `Ctrl-O }` は
 選択 tab を前後へ並べ替える。`Ctrl-O x` / `Ctrl-O Ctrl-X` は generic Terminal / document / interrupted Agent tab と、
 daemon へ未送信の client-owned pending launch を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を
 閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は foreground command を
