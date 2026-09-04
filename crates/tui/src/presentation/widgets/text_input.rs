@@ -43,7 +43,7 @@ impl TextInput {
     /// `value` を初期値とし、キャレットを末尾に置いた入力（続けて打てる状態）。
     #[must_use]
     pub fn with_value(value: impl Into<String>) -> Self {
-        let value = value.into();
+        let value = safe_input_value(value);
         let cursor = value.len();
         Self {
             value,
@@ -100,7 +100,7 @@ impl TextInput {
     /// 値全体を差し替え、キャレットを末尾に置く。キーボード以外から値が入るとき
     /// （履歴呼び出し、導出された候補、picker で選んだパス）に使う。選択は解除する。
     pub fn set_value(&mut self, value: impl Into<String>) {
-        self.value = value.into();
+        self.value = safe_input_value(value);
         self.cursor = self.value.len();
         self.anchor = None;
     }
@@ -126,10 +126,7 @@ impl TextInput {
     /// キャレット位置に文字列をまとめて挿入し、キャレットをその後ろへ進める。選択があれば
     /// 貼り付けた文字列で置換する。空文字列でも選択範囲は削除される。
     pub fn insert_str(&mut self, text: &str) {
-        let filtered = text
-            .chars()
-            .filter(|character| presentation_character_is_safe(*character))
-            .collect::<String>();
+        let filtered = safe_input_value(text);
         if !text.is_empty() && filtered.is_empty() {
             return;
         }
@@ -266,6 +263,12 @@ impl TextInput {
             .find(|index| *index >= byte_offset)
             .unwrap_or(self.value.len())
     }
+}
+
+fn safe_input_value(value: impl Into<String>) -> String {
+    let mut value = value.into();
+    value.retain(presentation_character_is_safe);
+    value
 }
 
 #[cfg(test)]
@@ -410,6 +413,9 @@ mod tests {
 
     #[test]
     fn one_line_input_discards_terminal_and_bidi_controls() {
+        let constructed = TextInput::with_value("safe\n\t\u{1b}\u{202e}text");
+        assert_eq!(constructed.value(), "safetext");
+
         let mut input = TextInput::with_value("safe");
         input.insert_str("\n\t\u{1b}\u{202e}text");
         assert_eq!(input.value(), "safetext");
@@ -425,6 +431,9 @@ mod tests {
             input.selection().is_some(),
             "rejected input must not erase a selection"
         );
+
+        input.set_value("new\r\u{7}\u{2066}value");
+        assert_eq!(input.value(), "newvalue");
     }
 
     #[test]
