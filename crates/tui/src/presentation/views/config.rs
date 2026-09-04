@@ -1177,7 +1177,7 @@ fn workspace_setting_rows(config: &Config) -> Vec<String> {
                 config.settings().default_model != config.current().saved.default_model,
             )
         },
-        select::bracketed(
+        select::render(
             "Workflow",
             work_mode_name(config.settings().work_mode),
             config.field() == Field::WorkMode,
@@ -1298,6 +1298,14 @@ mod tests {
             config.next_field();
         }
         assert_eq!(config.settings().work_mode, WorkMode::Classic);
+        let classic = render(24, 100, &config)
+            .into_iter()
+            .map(|line| strip_ansi(&line))
+            .find(|line| line.contains("Workflow"))
+            .expect("workflow setting");
+        assert!(classic.contains("< classic >"));
+        assert!(!classic.contains("[ classic ]"));
+
         assert!(config.cycle_selected(true));
         assert_eq!(config.settings().work_mode, WorkMode::GoalDriven);
         assert!(config.commit_save(&mut port));
@@ -1309,7 +1317,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains("Workflow"));
-        assert!(rendered.contains("goal-driven"));
+        let workflow = rendered
+            .lines()
+            .find(|line| line.contains("Workflow"))
+            .expect("workflow setting");
+        assert!(workflow.contains("< goal-driven >"));
+        assert!(!workflow.contains("[ goal-driven ]"));
     }
 
     impl SettingsPort for FakeSettingsPort {

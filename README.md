@@ -113,8 +113,9 @@ Overview で `daemon` を実行すると、health・resource 使用量・session
 
 generic terminal の `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。
 `Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、再度開くと新しい terminal になる。Director は画面の
-右側を高さ一杯に使う overlay で、workspace Shell と同時に開ける。両方が開いているときは panel のクリックでも focus が移り、
-左側に見えている Shell の選択・コピーを継続できる。title の `FOCUS` / `click to focus` が入力先を示す。選択 session の Agent は
+右側を高さ一杯に使い、workspace Shell と同じ drawer layer で横に並べて開ける。両方が開いているときは Shell の横幅を
+Director の左端までに縮め、panel のクリックでも focus が移る。左側の Shell では選択・コピーを継続でき、
+title の `FOCUS` / `click to focus` が入力先を示す。選択 session の Agent は
 drawer の背面でも通常の workspace geometry と attachment のまま出力を更新し続ける。最後の実行中または起動中 root Agent が
 消えても Director と現在 route は保持され、Console は停止状態を表示する。
 live Agent では同じ close chord が `Ctrl-D` と同じ終了入力になり、interrupted Agent では選択中の tab を
@@ -282,7 +283,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
 | Base branch | workspace で新しい session を作るときの既定 branch |
-| Workflow | `classic`（既定）の New Conversation、または `goal-driven` の Start Work Run。後者は Goal Composer で目的を一度入力し、review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す |
+| Workflow | 択一の `< classic >`（既定）または `< goal-driven >`。前者は New Conversation、後者は Start Work Run を開き、Goal Composer で目的を一度入力して review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す |
 | [Team](document/10-session-roles.md#catalog) | Enterで構造図付きカードを開き、`none` / `hierarchical`（階層型）/ `flat`（フラット）/ `pipeline`（パイプライン）から session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |

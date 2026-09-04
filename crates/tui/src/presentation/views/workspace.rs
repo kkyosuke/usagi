@@ -2145,6 +2145,30 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     render_home_at(raw_height, raw_width, home, Utc::now())
 }
 
+/// Horizontal band available to the workspace terminal drawer.
+///
+/// A normally sized Director and the Shell share one composition layer, so the
+/// Shell ends where the Director begins. At the narrow breakpoint Director is
+/// intentionally full-width; retaining the Shell's normal width there avoids a
+/// zero-column PTY and lets the foreground Director occlude it safely.
+#[must_use]
+pub(crate) fn root_terminal_available_width(
+    raw_height: usize,
+    raw_width: usize,
+    director_open: bool,
+) -> usize {
+    let (_, width) = widgets::normalize_size(raw_height, raw_width);
+    if !director_open {
+        return width;
+    }
+    let director = director_drawer::geometry(raw_height, raw_width);
+    if director.full_width {
+        width
+    } else {
+        director.left
+    }
+}
+
 /// [`render_home`] against an explicit wall clock.
 ///
 /// The sidebar's per-session relative timestamps are the only part of the Home
@@ -2169,9 +2193,12 @@ pub fn render_home_at(
     let mut frame = Vec::with_capacity(height);
     frame.push(home_header_line(width, home));
     frame.push(home_notice_banner(width, home));
-    // Both root surfaces retain their ordinary geometry. Director is composed
-    // last as a true overlay instead of shrinking the Shell beneath it.
-    let root_terminal_width = width;
+    let director_geometry = home
+        .director_drawer
+        .as_ref()
+        .map(|_| director_drawer::geometry(height, width));
+    let root_terminal_width =
+        root_terminal_available_width(height, width, director_geometry.is_some());
     let body_height = home
         .root_terminal_drawer
         .as_ref()
@@ -2193,6 +2220,13 @@ pub fn render_home_at(
     ));
     frame.truncate(height);
     frame.resize_with(height, || " ".repeat(width));
+    // Side-by-side drawers are peers: paint Director's dimmed Home background
+    // first, then restore the Shell in its left-hand band. At the narrow
+    // full-width breakpoint they overlap, so Director remains foreground.
+    let director_is_full_width = director_geometry.is_some_and(|geometry| geometry.full_width);
+    if !director_is_full_width && let Some(drawer) = &home.director_drawer {
+        frame = director_drawer::render_over(height, width, &frame, drawer);
+    }
     if let Some(drawer) = &home.root_terminal_drawer {
         frame = root_terminal_drawer::render_over_for(
             height,
@@ -2202,7 +2236,7 @@ pub fn render_home_at(
             drawer,
         );
     }
-    if let Some(drawer) = &home.director_drawer {
+    if director_is_full_width && let Some(drawer) = &home.director_drawer {
         frame = director_drawer::render_over(height, width, &frame, drawer);
     }
     render_home_modals(height, width, home, frame, now)
@@ -3200,9 +3234,9 @@ mod tests {
         home_header_action_at, home_header_layout, home_left_pane, home_notice_banner,
         home_row_height, home_row_lines_at, home_viewport_start, load_style,
         new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, right_pane_tab_at, role_identity, short_id,
-        sidebar_agent_line, sidebar_metadata, sidecar_labels, terminal_point_at, with_footer_gap,
-        work_run_state_label,
+        render_home_at, resume_label, right_pane_tab_at, role_identity,
+        root_terminal_available_width, short_id, sidebar_agent_line, sidebar_metadata,
+        sidecar_labels, terminal_point_at, with_footer_gap, work_run_state_label,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -3210,7 +3244,7 @@ mod tests {
         WorkRunControlProjection,
     };
     use crate::presentation::views::root_terminal_drawer::{
-        ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
+        self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
@@ -4581,6 +4615,19 @@ mod tests {
         assert!(concurrent_text.contains("director agent output"));
         assert!(concurrent_text.contains("workspace shell output"));
         assert!(concurrent_text.contains("session output"));
+        let director = director_drawer::geometry(30, 160);
+        assert!(!director.full_width);
+        assert_eq!(root_terminal_available_width(30, 160, true), director.left);
+        assert_eq!(
+            root_terminal_drawer::geometry_for(
+                30,
+                160,
+                root_terminal_available_width(30, 160, true),
+            )
+            .width,
+            director.left,
+            "the concurrent Shell must end where Director begins"
+        );
 
         let narrow_text = render_home(30, 79, &concurrent).join("\n");
         assert!(narrow_text.contains("director agent output"));
