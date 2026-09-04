@@ -8072,13 +8072,7 @@ mod tests {
         assert_eq!(receipt.supervisor_run_id, id);
         assert_eq!(receipt.state_revision, revision);
         assert!(runtime.supervisor.load(id).unwrap().is_none());
-        assert!(
-            runtime
-                .list_workspace(workspace)
-                .unwrap()
-                .iter()
-                .all(|run| run.supervisor_run_id != id)
-        );
+        assert!(runtime.list_workspace(workspace).unwrap().is_empty());
 
         let restarted = SupervisorRuntime::new(temp.path());
         assert_eq!(

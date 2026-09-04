@@ -1371,7 +1371,6 @@ impl WorkspaceRuntime {
     /// committed. Stable target and continuation identity keep a delayed modal
     /// answer from closing whichever unrelated tab is focused now.
     pub fn dismiss_interrupted_tab(&mut self, target: Target, continuation: AgentContinuationRef) {
-        let had_root_agent = self.has_interactive_root_agent_tabs();
         let _ = reduce_registry(
             &mut self.panes,
             PaneRegistryEvent::Pane {
@@ -1380,23 +1379,10 @@ impl WorkspaceRuntime {
             },
         );
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
         self.close_empty_root_terminal_drawer();
     }
 
-    fn close_disappeared_director(&mut self, had_root_agent: bool) {
-        if had_root_agent
-            && self.state.director_drawer_open()
-            && !self.has_interactive_root_agent_tabs()
-        {
-            let effects = self.apply_event(AppEvent::DirectorDrawerEmptied);
-            debug_assert!(
-                effects.is_empty(),
-                "closing an empty Director is state-only"
-            );
-        }
-    }
-
+    #[cfg(test)]
     fn has_interactive_root_agent_tabs(&self) -> bool {
         self.panes
             .pane(Target::Root(self.state.workspace()))
