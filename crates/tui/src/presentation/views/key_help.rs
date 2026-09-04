@@ -29,6 +29,7 @@ pub enum Context {
     CloseupActions,
     CreateSession,
     CreateSessionError,
+    TerminalLaunchError,
     ExitConfirmation,
     ForceRemove,
     CleanupQueue,
@@ -70,6 +71,7 @@ impl Context {
             Self::CloseupActions => "Closeup actions",
             Self::CreateSession => "Create session",
             Self::CreateSessionError => "Create session error",
+            Self::TerminalLaunchError => "Terminal launch error",
             Self::ExitConfirmation => "Exit confirmation",
             Self::ForceRemove => "Force remove",
             Self::CleanupQueue => "Cleanup queue",
@@ -222,7 +224,9 @@ impl Context {
                 ("Tab", "select role"),
                 ("Enter / Esc", "create / cancel"),
             ],
-            Self::CreateSessionError => &[("Enter / Esc / Ctrl-C", "dismiss")],
+            Self::CreateSessionError | Self::TerminalLaunchError => {
+                &[("Enter / Esc / Ctrl-C", "dismiss")]
+            }
             Self::ExitConfirmation => &[
                 ("← → / Tab", "select choice"),
                 ("w", "return to Welcome"),
@@ -398,6 +402,7 @@ mod tests {
             Context::CloseupActions,
             Context::CreateSession,
             Context::CreateSessionError,
+            Context::TerminalLaunchError,
             Context::ExitConfirmation,
             Context::ForceRemove,
             Context::CleanupQueue,
