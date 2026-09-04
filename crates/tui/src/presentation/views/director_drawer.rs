@@ -1737,7 +1737,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // One fixture covers filtering, hierarchy, missing parents, and cycles together.
+    #[allow(clippy::too_many_lines)] // One fixture covers filtering, dedupe, hierarchy, missing parents, and cycles together.
     fn run_overview_joins_only_provenance_sessions_and_re_roots_their_hierarchy() {
         let parent = SessionId::new();
         let child = SessionId::new();
@@ -1763,6 +1763,10 @@ mod tests {
                 generation: 1,
             });
         }
+        let mut duplicate_assignment = run.provenance[1].clone();
+        duplicate_assignment.task_id = run.tasks[0].task_id.clone();
+        duplicate_assignment.dispatch_run_id = OperationId::new();
+        run.provenance.push(duplicate_assignment);
         let organization = vec![
             DirectorOrganizationRow {
                 session_id: None,
