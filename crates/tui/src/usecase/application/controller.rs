@@ -7455,6 +7455,71 @@ mod tests {
     }
 
     #[test]
+    fn director_route_commands_are_guarded_and_open_from_the_root_shell() {
+        let workspace = WorkspaceId::new();
+        let run = SupervisorRunId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+
+        state.director_goal = "discard me".into();
+        state.director_new = DirectorNew::Empty;
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorOrganization
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+        assert_eq!(state.director_new(), DirectorNew::Idle);
+        assert!(state.director_goal().is_empty());
+
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorWorkRuns
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+        state.set_work_mode(WorkMode::GoalDriven);
+        state.director_launching = Some(OperationId::new());
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorWorkRuns
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+        state.director_launching = None;
+        state.director_new = DirectorNew::Empty;
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorWorkRuns
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+
+        state.director_new = DirectorNew::Empty;
+        state.director_goal = "cancel me".into();
+        director_back(&mut state);
+        assert_eq!(state.director_new(), DirectorNew::Idle);
+        assert!(state.director_goal().is_empty());
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        assert!(state.root_terminal_drawer_open());
+        state.set_work_mode(WorkMode::Classic);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
+        assert!(!state.director_drawer_open());
+        state.set_work_mode(WorkMode::GoalDriven);
+        state.director_goal = "clear on route".into();
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
+        assert!(state.director_drawer_open());
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert!(state.director_goal().is_empty());
+
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorRunOverview(run)
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+    }
+
+    #[test]
     fn director_new_picker_has_deterministic_candidates_and_cancel() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());

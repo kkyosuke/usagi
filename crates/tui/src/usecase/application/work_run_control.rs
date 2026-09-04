@@ -1222,4 +1222,119 @@ mod tests {
             Some("The Work Run decision is no longer current")
         );
     }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Every fail-closed edge is kept next to the transition it protects.
+    fn cancel_and_delete_edges_never_retarget_a_confirmed_run() {
+        let running = run(SupervisorRunState::Running);
+        let finished = run(SupervisorRunState::Succeeded);
+        let runs = vec![running.clone(), finished.clone()];
+
+        let mut control = WorkRunControl::default();
+        control.open(&runs);
+        control.set_feedback("fixed footer");
+        assert_eq!(control.feedback(), Some("fixed footer"));
+        control.focus(finished.supervisor_run_id, &runs);
+        assert_eq!(control.selected(), Some(finished.supervisor_run_id));
+        control.focus(SupervisorRunId::new(), &runs);
+        assert_eq!(control.selected(), None);
+
+        control.selected = None;
+        let _ = control.handle(WorkRunControlAction::Cancel, &runs, false);
+        assert_eq!(
+            control.feedback(),
+            Some("Refresh Work Runs before changing one")
+        );
+        let _ = control.handle(WorkRunControlAction::Cancel, &runs, true);
+        assert_eq!(control.feedback(), Some("No Work Run is selected"));
+        let _ = control.handle(WorkRunControlAction::Delete, &runs, false);
+        assert_eq!(
+            control.feedback(),
+            Some("Refresh Work Runs before changing one")
+        );
+        let _ = control.handle(WorkRunControlAction::Delete, &runs, true);
+        assert_eq!(control.feedback(), Some("No Work Run is selected"));
+
+        control.selected = Some(finished.supervisor_run_id);
+        let _ = control.handle(WorkRunControlAction::Delete, &runs, true);
+        assert_eq!(control.mode(), WorkRunControlMode::ConfirmDelete);
+        assert_eq!(
+            control.handle(WorkRunControlAction::Delete, &runs, true),
+            WorkRunControlOutcome::Consumed
+        );
+        let _ = control.handle(WorkRunControlAction::Enter, &runs, false);
+        assert_eq!(
+            control.feedback(),
+            Some("Refresh Work Runs before changing one")
+        );
+
+        control.selected = Some(finished.supervisor_run_id);
+        control.mode = WorkRunControlMode::ConfirmDelete;
+        let _ = control.handle(WorkRunControlAction::Enter, &[], true);
+        assert_eq!(
+            control.feedback(),
+            Some("The selected Work Run is no longer available")
+        );
+
+        control.selected = Some(finished.supervisor_run_id);
+        control.mode = WorkRunControlMode::ConfirmDelete;
+        control.focus(running.supervisor_run_id, &runs);
+        assert_eq!(control.selected(), Some(finished.supervisor_run_id));
+        let mut reactivated = finished.clone();
+        reactivated.state = SupervisorRunState::Running;
+        let _ = control.handle(
+            WorkRunControlAction::Enter,
+            std::slice::from_ref(&reactivated),
+            true,
+        );
+        assert_eq!(
+            control.feedback(),
+            Some("The Work Run action changed; review it again")
+        );
+
+        let mut broken_escalation = run(SupervisorRunState::Escalated);
+        broken_escalation.escalation = None;
+        control.selected = Some(broken_escalation.supervisor_run_id);
+        control.mode = WorkRunControlMode::ConfirmCancel;
+        let _ = control.handle(
+            WorkRunControlAction::Enter,
+            std::slice::from_ref(&broken_escalation),
+            true,
+        );
+        assert_eq!(
+            control.feedback(),
+            Some("The Work Run action changed; review it again")
+        );
+
+        control.selected = Some(running.supervisor_run_id);
+        control.mode = WorkRunControlMode::ConfirmCancel;
+        let request = control
+            .handle(WorkRunControlAction::Enter, &runs, true)
+            .into_request()
+            .unwrap();
+        control.open(&runs);
+        assert_eq!(control.mode(), WorkRunControlMode::Submitting);
+        assert!(
+            !request.accepts_result(&WorkRunControlResult::Deleted(SupervisorRunDeletion {
+                supervisor_run_id: running.supervisor_run_id,
+                state_revision: running.state_revision,
+            }))
+        );
+        let deletion_request = WorkRunControlRequest {
+            operation_id: OperationId::new(),
+            command: SupervisorWorkspaceCommand::Delete {
+                supervisor_run_id: finished.supervisor_run_id,
+                observed_state_revision: finished.state_revision,
+            },
+            observed_state_revision: finished.state_revision,
+        };
+        assert!(
+            !deletion_request.accepts_result(&WorkRunControlResult::Updated(Box::new(finished,)))
+        );
+
+        control.mode = WorkRunControlMode::Retry;
+        control.open(&runs);
+        assert_eq!(control.mode(), WorkRunControlMode::Retry);
+        assert_eq!(control.feedback(), Some(WORK_RUN_ACTION_UNCONFIRMED));
+    }
 }

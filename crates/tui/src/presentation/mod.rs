@@ -1005,7 +1005,7 @@ fn handle_work_run_list_input(
     route: DirectorRoute,
     mut effects: Vec<Effect>,
 ) -> WorkRunControlInput {
-    match key {
+    let (): () = match key {
         Key::Enter => match route {
             DirectorRoute::WorkRuns => {
                 if let Some(run) = control.selected() {
@@ -1054,7 +1054,7 @@ fn handle_work_run_list_input(
                 );
             }
         }
-    }
+    };
     WorkRunControlInput {
         outcome: WorkRunControlOutcome::Consumed,
         effects,
@@ -1069,13 +1069,21 @@ fn select_director_agent(
     let Some(index) = runtime.agent_tab_index(runtime_id, ui.agent_inventory()) else {
         return false;
     };
-    let Some(selection) = runtime.tab_selection_at(index) else {
-        return false;
-    };
+    let selection = runtime
+        .tab_selection_at(index)
+        .expect("an Agent index is returned only for a tab in the same pane");
+    select_director_selection(selection, ui, runtime)
+}
+
+fn select_director_selection(
+    selection: TabSelection,
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+) -> bool {
     let continuation = match &selection {
         TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
         TabSelection::Interrupted(continuation) => Some(*continuation),
-        TabSelection::Pending(_) | TabSelection::Ready(_) => None,
+        TabSelection::Pending(_) | TabSelection::Ready(_) => return false,
     };
     if ui
         .mutate_agent_intent(AgentTabIntentMutation::Select {
@@ -10927,6 +10935,54 @@ mod tests {
         run
     }
 
+    struct FixedWorkRunControl(super::WorkRunControlResult);
+
+    impl super::WorkRunPort for FixedWorkRunControl {
+        fn snapshot(
+            &mut self,
+            _: WorkspaceId,
+        ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
+            unreachable!("control test never observes Work Runs")
+        }
+
+        fn control(
+            &mut self,
+            _: WorkspaceId,
+            _: OperationId,
+            _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
+        ) -> Result<super::WorkRunControlResult, super::WorkRunControlError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn complete_work_run_control(
+        workspace: WorkspaceId,
+        request: super::WorkRunControlRequest,
+        result: super::WorkRunControlResult,
+    ) -> (
+        OperationId,
+        Result<super::WorkRunControlResult, super::WorkRunControlError>,
+    ) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        super::spawn_work_run_control_job(
+            Box::new(FixedWorkRunControl(result)),
+            workspace,
+            request,
+            sender,
+        );
+        let super::WorkRunLaneCompletion::Control {
+            operation_id,
+            result,
+            ..
+        } = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the Work Run control returns its port")
+        else {
+            panic!("control job returned an observation completion");
+        };
+        (operation_id, *result)
+    }
+
     /// Host-action routing without the resident session lane. These tests
     /// exercise which action a dispatched effect produces; the lane's own
     /// behaviour is covered by [`FakeSessionRefreshPort`] and the frame-loop
@@ -11132,6 +11188,10 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::Director)),
             Some(AppEvent::Key(AppKey::ToggleDirectorDrawer))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::DirectorBack)),
+            Some(AppEvent::Key(AppKey::DirectorBack))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::DirectorNew)),
@@ -19926,6 +19986,12 @@ mod tests {
             &mut ui,
             &mut runtime,
         ));
+        assert!(super::select_director_tab(
+            &Key::Down,
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(super::select_director_tab(&Key::Up, &mut ui, &mut runtime,));
         assert!(mutations.lock().unwrap().iter().any(|mutation| matches!(
             mutation,
             AgentTabIntentMutation::Select {
@@ -21708,28 +21774,6 @@ mod tests {
 
     #[test]
     fn work_run_lane_rejects_mismatched_or_private_control_results() {
-        struct MismatchedControl(SupervisorRunQuery);
-        impl super::WorkRunPort for MismatchedControl {
-            fn snapshot(
-                &mut self,
-                _: WorkspaceId,
-            ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>
-            {
-                unreachable!("control test never observes Work Runs")
-            }
-
-            fn control(
-                &mut self,
-                _: WorkspaceId,
-                _: OperationId,
-                _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-            ) -> Result<super::WorkRunControlResult, super::WorkRunControlError> {
-                Ok(super::WorkRunControlResult::Updated(Box::new(
-                    self.0.clone(),
-                )))
-            }
-        }
-
         let workspace = WorkspaceId::new();
         let run = observed_work_run(SupervisorRunState::Running);
         let request = super::WorkRunControlRequest {
@@ -21740,27 +21784,14 @@ mod tests {
             },
             observed_state_revision: run.state_revision,
         };
-        let (sender, receiver) = std::sync::mpsc::channel();
-        super::spawn_work_run_control_job(
-            Box::new(MismatchedControl(observed_work_run(
-                SupervisorRunState::Cancelled,
-            ))),
+        let (operation_id, result) = complete_work_run_control(
             workspace,
             request.clone(),
-            sender,
+            super::WorkRunControlResult::Updated(Box::new(observed_work_run(
+                SupervisorRunState::Cancelled,
+            ))),
         );
-        let super::WorkRunLaneCompletion::Control {
-            operation_id,
-            result,
-            ..
-        } = receiver
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the Work Run control returns its port")
-        else {
-            panic!("control job returned an observation completion");
-        };
         assert_eq!(operation_id, request.operation_id);
-        let result = *result;
         assert_eq!(
             result.unwrap_err(),
             super::WorkRunControlError::Unconfirmed(
@@ -21768,28 +21799,37 @@ mod tests {
             )
         );
 
-        let (sender, receiver) = std::sync::mpsc::channel();
-        super::spawn_work_run_control_job(
-            Box::new(MismatchedControl(with_private_work_run_provenance(
-                run.clone(),
-            ))),
+        let (_, result) = complete_work_run_control(
             workspace,
             request,
-            sender,
+            super::WorkRunControlResult::Updated(Box::new(with_private_work_run_provenance(
+                run.clone(),
+            ))),
         );
-        let super::WorkRunLaneCompletion::Control { result, .. } = receiver
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the private Work Run result returns its port")
-        else {
-            panic!("control job returned an observation completion");
-        };
-        let result = *result;
         assert_eq!(
             result.unwrap_err(),
             super::WorkRunControlError::Unconfirmed(
                 "daemon returned an invalid Work Run result".to_owned()
             )
         );
+        let deletion = usagi_core::domain::supervisor::SupervisorRunDeletion {
+            supervisor_run_id: SupervisorRunId::new(),
+            state_revision: 4,
+        };
+        let request = super::WorkRunControlRequest {
+            operation_id: OperationId::new(),
+            command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand::Delete {
+                supervisor_run_id: deletion.supervisor_run_id,
+                observed_state_revision: deletion.state_revision,
+            },
+            observed_state_revision: deletion.state_revision,
+        };
+        let (_, result) = complete_work_run_control(
+            workspace,
+            request,
+            super::WorkRunControlResult::Deleted(deletion),
+        );
+        assert_eq!(result, Ok(super::WorkRunControlResult::Deleted(deletion)));
     }
 
     #[test]
@@ -24915,6 +24955,222 @@ mod tests {
         );
         assert!(!runtime.state().director_drawer_open());
         assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // This table drives every keyboard edge of the retained run surface.
+    fn work_run_routes_confirmations_and_console_activation_without_implicit_mutation() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        let running = observed_work_run(SupervisorRunState::Running);
+        let runs = super::WorkRunProjection::fresh(vec![running.clone()]);
+        let mut control = super::WorkRunControl::default();
+        let _ = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut control,
+            &runs,
+            &Key::Live(LiveTerminalAction::WorkRuns),
+        );
+
+        let _ = control.handle(super::WorkRunControlAction::Cancel, runs.runs(), true);
+        for key in [Key::Up, Key::Down, Key::Left, Key::Right, Key::CtrlX] {
+            let input =
+                super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &key)
+                    .unwrap();
+            assert_eq!(input.outcome, super::WorkRunControlOutcome::Consumed);
+        }
+        let _ = super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Quit);
+        assert_eq!(control.mode(), super::WorkRunControlMode::List);
+
+        for key in [Key::Escape, Key::Live(LiveTerminalAction::DirectorBack)] {
+            let _ = control.handle(super::WorkRunControlAction::Cancel, runs.runs(), true);
+            let _ = super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &key);
+            assert_eq!(control.mode(), super::WorkRunControlMode::List);
+        }
+        let _ = control.handle(super::WorkRunControlAction::Cancel, runs.runs(), true);
+        let submitted =
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Enter)
+                .unwrap();
+        assert!(submitted.outcome.into_request().is_some());
+
+        let mut empty_control = super::WorkRunControl::default();
+        let empty = super::WorkRunProjection::fresh(Vec::new());
+        empty_control.open(empty.runs());
+        let _ = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut empty_control,
+            &empty,
+            &Key::Enter,
+        );
+        assert_eq!(empty_control.feedback(), Some("No Work Run is selected"));
+
+        let mut inert_control = super::WorkRunControl::default();
+        inert_control.open(runs.runs());
+        for route in [
+            DirectorRoute::Organization,
+            DirectorRoute::Console(DirectorConsoleParent::Organization),
+        ] {
+            let input = super::handle_work_run_list_input(
+                None,
+                &mut runtime,
+                &mut inert_control,
+                &runs,
+                &Key::Enter,
+                route,
+                Vec::new(),
+            );
+            assert_eq!(input.outcome, super::WorkRunControlOutcome::Consumed);
+        }
+        let _ = super::handle_work_run_list_input(
+            None,
+            &mut runtime,
+            &mut inert_control,
+            &runs,
+            &Key::Quit,
+            DirectorRoute::WorkRuns,
+            Vec::new(),
+        );
+        assert_eq!(
+            inert_control.mode(),
+            super::WorkRunControlMode::ConfirmCancel
+        );
+
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorOrganization));
+        let mut suspended = super::WorkRunControl::default();
+        suspended.open(runs.runs());
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut suspended, &runs, &Key::Other,)
+                .is_none()
+        );
+        assert_eq!(suspended.mode(), super::WorkRunControlMode::Closed);
+
+        let terminal = scoped_terminal_ref(workspace, None);
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
+        let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal.clone());
+        let runtime_id = AgentRuntimeId::new();
+        let continuation = AgentContinuationRef::new();
+        let mut run_with_director = running;
+        run_with_director.root_agent_id = Some(runtime_id);
+        let run_id = run_with_director.supervisor_run_id;
+        let overview_runs = super::WorkRunProjection::fresh(vec![run_with_director]);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        ui.agent_inventory = Some(AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: AgentRuntimeRef::new(runtime_id, terminal, None).unwrap(),
+                continuation,
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        });
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorRunOverview(run_id)));
+        let mut overview_control = super::WorkRunControl::default();
+        overview_control.open(overview_runs.runs());
+        let activated = super::handle_work_run_control_input_with_ui(
+            Some(&mut ui),
+            &mut runtime,
+            &mut overview_control,
+            &overview_runs,
+            &Key::Enter,
+        )
+        .unwrap();
+        assert!(activated.effects.is_empty());
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Console(DirectorConsoleParent::RunOverview(run_id))
+        );
+
+        let no_root = observed_work_run(SupervisorRunState::Running);
+        let no_root_id = no_root.supervisor_run_id;
+        let no_root_runs = super::WorkRunProjection::fresh(vec![no_root]);
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorRunOverview(no_root_id)));
+        let mut unavailable_control = super::WorkRunControl::default();
+        unavailable_control.open(no_root_runs.runs());
+        let _ = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut unavailable_control,
+            &no_root_runs,
+            &Key::Enter,
+        );
+        assert_eq!(
+            unavailable_control.feedback(),
+            Some("Director Console is not available for this Work Run")
+        );
+    }
+
+    #[test]
+    fn director_selection_rejects_placeholders_and_surfaces_intent_failure() {
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let runtime_id = AgentRuntimeId::new();
+        let continuation = AgentContinuationRef::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        assert!(!super::select_director_selection(
+            TabSelection::Pending(operation),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(!super::select_director_selection(
+            TabSelection::Ready(operation),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(super::select_director_selection(
+            TabSelection::Interrupted(continuation),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(!super::select_director_agent(
+            runtime_id,
+            &mut ui,
+            &mut runtime,
+        ));
+
+        let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal.clone());
+        ui.agent_inventory = Some(AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: AgentRuntimeRef::new(runtime_id, terminal.clone(), None).unwrap(),
+                continuation,
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        });
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.apply(AgentTabIntentMutation::Upsert {
+            session_id: None,
+            continuation,
+            terminal: terminal.clone(),
+            select: true,
+        });
+        ui = ui.with_agent_tab_intent(
+            workspace,
+            BTreeSet::new(),
+            Box::new(FailingIntentPort {
+                state: Arc::new(Mutex::new(intent)),
+                error: AgentTabIntentError::Unavailable,
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        assert!(!super::select_director_selection(
+            TabSelection::Live(terminal.clone()),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(!super::select_director_agent(
+            runtime_id,
+            &mut ui,
+            &mut runtime,
+        ));
     }
 
     /// `Esc` belongs to the drawer's selected root Agent — an agent CLI reads it
@@ -30018,6 +30274,22 @@ mod tests {
                 "{mode:?}"
             );
         }
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                work_run_mode: super::WorkRunControlMode::List,
+                director_route: DirectorRoute::RunOverview(SupervisorRunId::new()),
+                ..base
+            }),
+            HelpContext::RunOverview
+        );
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                work_run_mode: super::WorkRunControlMode::ConfirmDelete,
+                director_route: DirectorRoute::WorkRuns,
+                ..base
+            }),
+            HelpContext::WorkRunConfirmation
+        );
 
         assert_eq!(
             resolve_workspace_help_context(WorkspaceHelpState {

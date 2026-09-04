@@ -7958,7 +7958,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_delete_is_terminal_revisioned_scoped_and_replayable() {
+    fn workspace_delete_is_terminal_revisioned_and_scoped() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = SupervisorRuntime::new(temp.path());
         let workspace = WorkspaceId::new();
@@ -7994,6 +7994,41 @@ mod tests {
         };
         assert!(
             runtime
+                .control_for_workspace(workspace, OperationId::new(), &command, now())
+                .unwrap_err()
+                .to_string()
+                .contains("delete control path")
+        );
+        assert!(
+            runtime
+                .delete_for_workspace(
+                    workspace,
+                    OperationId::new(),
+                    &SupervisorWorkspaceCommand::Cancel {
+                        supervisor_run_id: id,
+                        reason: "not a deletion".into(),
+                    },
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("delete command is required")
+        );
+        let expired_operation = OperationId::new();
+        let mut durable_state = runtime.load_state().unwrap();
+        durable_state
+            .expired_controls
+            .insert(&expired_operation.to_string());
+        runtime.save_state(&durable_state).unwrap();
+        assert!(
+            runtime
+                .delete_for_workspace(workspace, expired_operation, &command, now())
+                .unwrap_err()
+                .to_string()
+                .contains("outside the retained replay window")
+        );
+        assert!(
+            runtime
                 .delete_for_workspace(
                     workspace,
                     OperationId::new(),
@@ -8014,6 +8049,21 @@ mod tests {
                 .to_string()
                 .contains("does not belong")
         );
+    }
+
+    #[test]
+    fn workspace_delete_is_durable_and_replayable() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let finished = aborted_run(Some(workspace));
+        let id = finished.supervisor_run_id;
+        let revision = finished.state_revision;
+        runtime.supervisor.initialize(&finished).unwrap();
+        let command = SupervisorWorkspaceCommand::Delete {
+            supervisor_run_id: id,
+            observed_state_revision: revision,
+        };
 
         let operation = OperationId::new();
         let receipt = runtime
@@ -8058,6 +8108,23 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("does not exist")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "history deletion does not append an aggregate event")]
+    fn history_deletion_cannot_be_encoded_as_an_aggregate_event() {
+        let run = aborted_run(Some(WorkspaceId::new()));
+        let command = SupervisorWorkspaceCommand::Delete {
+            supervisor_run_id: run.supervisor_run_id,
+            observed_state_revision: run.state_revision,
+        };
+        let _ = control_event(
+            &run,
+            OperationId::new(),
+            "sha256:delete".into(),
+            &command,
+            now(),
         );
     }
 

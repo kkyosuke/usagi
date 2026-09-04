@@ -1826,11 +1826,7 @@ mod tests {
             store.journal_index_path(id),
             store.checkpoint_path(id),
         ] {
-            assert!(
-                !path.exists(),
-                "deleted run file survived: {}",
-                path.display()
-            );
+            assert!(!path.exists());
         }
         assert!(
             store
@@ -1838,6 +1834,30 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("does not exist")
+        );
+
+        let mut blocked = SupervisorRun::new(
+            "caller".into(),
+            "blocked-delete".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        blocked.state = SupervisorRunState::Failed;
+        blocked.state_revision = 2;
+        blocked.terminal_at = Some(now());
+        store.initialize(&blocked).unwrap();
+        let blocked_path = store.journal_index_path(blocked.supervisor_run_id);
+        assert!(!blocked_path.exists());
+        fs::create_dir(&blocked_path).unwrap();
+        let error = store
+            .delete_finished(blocked.supervisor_run_id, blocked.state_revision)
+            .unwrap_err();
+        assert!(error.to_string().contains("failed to remove"));
+        assert!(
+            error
+                .to_string()
+                .contains(&blocked_path.display().to_string())
         );
     }
 

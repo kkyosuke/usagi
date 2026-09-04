@@ -5748,6 +5748,14 @@ mod tests {
                 "daemon returned an invalid Work Run deletion".to_owned()
             ))
         );
+        assert_eq!(
+            decode_work_run_control_reply(DaemonReply::Ok(
+                serde_json::json!({"state": "not-a-supervisor-state"})
+            )),
+            Err(WorkRunControlError::Unconfirmed(
+                "daemon returned an invalid Work Run result".to_owned()
+            ))
+        );
 
         let rejection = usagi_core::infrastructure::ipc::ProtocolError::new(
             usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
@@ -7701,6 +7709,24 @@ mod tests {
             )
             .unwrap_err(),
             "agent launch returned an invalid continuation"
+        );
+        let supervisor_run_id = usagi_core::domain::supervisor::SupervisorRunId::new();
+        let admission = decode_agent_admission(
+            &json!({
+                "terminal": terminal,
+                "supervisor_run_id": supervisor_run_id,
+            }),
+            "goal launch",
+        )
+        .unwrap();
+        assert_eq!(admission.supervisor_run_id, Some(supervisor_run_id));
+        assert_eq!(
+            decode_agent_admission(
+                &json!({"terminal": terminal, "supervisor_run_id": "invalid"}),
+                "goal launch",
+            )
+            .unwrap_err(),
+            "goal launch returned an invalid Work Run identity"
         );
     }
 

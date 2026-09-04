@@ -1577,6 +1577,85 @@ mod tests {
     }
 
     #[test]
+    fn run_overview_and_delete_confirmation_render_stable_routes_and_footers() {
+        let mut run = work_run();
+        let run_id = run.supervisor_run_id;
+        let base = DirectorDrawerProjection {
+            goal_driven: true,
+            route: DirectorRoute::RunOverview(run_id),
+            work_runs: WorkRunProjection::fresh(vec![run.clone()]),
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::List,
+                selected: Some(run_id),
+                ..WorkRunControlProjection::default()
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        let render = |projection: &DirectorDrawerProjection| {
+            drawer_body(120, 14, projection)
+                .into_iter()
+                .map(|row| strip_ansi(&row))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let starting = render(&base);
+        assert!(starting.contains("Director / Work Runs / Review supervisor stability / Overview"));
+        assert!(starting.contains("Director  starting"));
+        assert!(starting.contains("Esc: Work Runs · Ctrl-C cancel · Ctrl-X delete"));
+
+        run.root_agent_id = Some(usagi_core::domain::id::AgentRuntimeId::new());
+        let available = DirectorDrawerProjection {
+            work_runs: WorkRunProjection::fresh(vec![run.clone()]),
+            ..base.clone()
+        };
+        let available_text = render(&available);
+        assert!(available_text.contains("Director  available"));
+        assert!(available_text.contains("Enter: Console"));
+
+        run.root_agent_id = None;
+        run.state = SupervisorRunState::Succeeded;
+        let stopped = DirectorDrawerProjection {
+            work_runs: WorkRunProjection::fresh(vec![run]),
+            ..base.clone()
+        };
+        assert!(render(&stopped).contains("Director  stopped"));
+
+        let unavailable = DirectorDrawerProjection {
+            work_runs: WorkRunProjection::fresh(Vec::new()),
+            ..base.clone()
+        };
+        let unavailable_text = render(&unavailable);
+        assert!(unavailable_text.contains("Work Run unavailable"));
+        assert!(unavailable_text.contains("It may have been deleted in another client"));
+        assert!(unavailable_text.contains("Esc / Ctrl-O b: Work Runs"));
+
+        let deletion = DirectorDrawerProjection {
+            route: DirectorRoute::WorkRuns,
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::ConfirmDelete,
+                selected: Some(run_id),
+                ..WorkRunControlProjection::default()
+            },
+            ..base.clone()
+        };
+        let deletion_text = render(&deletion);
+        assert!(deletion_text.contains("Delete this finished Work Run from history?"));
+        assert!(deletion_text.contains("Enter confirm · Esc / Ctrl-C back"));
+
+        let console = DirectorDrawerProjection {
+            route: DirectorRoute::Console(DirectorConsoleParent::RunOverview(run_id)),
+            ..available
+        };
+        assert!(render(&console).contains("Director / Review supervisor stability / Console"));
+        let unavailable_console = DirectorDrawerProjection {
+            work_runs: WorkRunProjection::fresh(Vec::new()),
+            ..console
+        };
+        assert!(render(&unavailable_console).contains("Director / Unavailable Run / Console"));
+    }
+
+    #[test]
     fn work_run_list_feedback_uses_the_footer_without_moving_run_rows() {
         let run = work_run();
         let selected = run.supervisor_run_id;

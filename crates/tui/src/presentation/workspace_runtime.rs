@@ -3608,6 +3608,42 @@ mod tests {
     }
 
     #[test]
+    fn director_work_runs_shortcut_and_interactive_agent_detection_cover_live_states() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Root(workspace);
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkRuns));
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorBack));
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkRuns));
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
+
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, PaneKind::Agent);
+        assert!(runtime.has_interactive_root_agent_tabs());
+        let terminal = root_terminal_ref(workspace);
+        let _ = runtime.complete_pane(target, operation, terminal);
+        assert!(runtime.has_interactive_root_agent_tabs());
+
+        let mut ready_runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let ready_operation = OperationId::new();
+        let _ = ready_runtime.request_pane(target, ready_operation, PaneKind::Agent);
+        ready_runtime.inject_pane_event_for_test(
+            target,
+            PaneEvent::Resolved {
+                operation: ready_operation,
+            },
+        );
+        assert!(ready_runtime.has_interactive_root_agent_tabs());
+    }
+
+    #[test]
     fn director_stays_open_when_the_last_interactive_root_agent_disappears() {
         let workspace = WorkspaceId::new();
         let target = Target::Root(workspace);
