@@ -189,6 +189,7 @@ fn io_error(error: impl std::fmt::Display) -> std::io::Error {
 }
 
 fn io_error_with_context(context: &str, error: impl std::fmt::Display) -> std::io::Error {
+    let error = io_error(error);
     std::io::Error::other(format!("{context}: {error}"))
 }
 
