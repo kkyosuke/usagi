@@ -25,7 +25,6 @@ pub enum Context {
     LiveTerminal,
     AddWorkspace,
     WorkspaceFinder,
-    CommandList,
     Overview,
     CloseupActions,
     CreateSession,
@@ -68,7 +67,6 @@ impl Context {
             Self::LiveTerminal => "Live terminal",
             Self::AddWorkspace => "Add workspace",
             Self::WorkspaceFinder => "Project / session finder",
-            Self::CommandList => "Command list",
             Self::Overview => "Overview commands",
             Self::CloseupActions => "Closeup actions",
             Self::CreateSession => "Create session",
@@ -168,7 +166,7 @@ impl Context {
                 ("Enter / t", "open Closeup"),
                 ("Ctrl-A / Home", "new session"),
                 (":", "Overview commands"),
-                ("?", "workspace command list"),
+                ("?", "keyboard shortcuts"),
                 ("Ctrl-X", "safe-remove session"),
                 ("Ctrl-Q", "leave / quit prompt"),
             ],
@@ -179,7 +177,7 @@ impl Context {
                 ("Ctrl-O { / }", "reorder pane tab"),
                 ("Ctrl-O x / r", "close / resume tab"),
                 ("Ctrl-O o", "back to Switch"),
-                ("?", "session command list"),
+                ("?", "keyboard shortcuts"),
             ],
             Self::LiveTerminal => &[
                 ("type / paste", "send to terminal"),
@@ -189,7 +187,7 @@ impl Context {
                 ("Ctrl-O x", "close pane tab"),
                 ("Ctrl-O ↑ / ↓ / End", "scroll / live bottom"),
                 ("Ctrl-O o", "back to Switch"),
-                ("Ctrl-O ?", "session command list"),
+                ("Ctrl-O ?", "keyboard shortcuts"),
             ],
             Self::AddWorkspace => &[
                 ("Tab", "registered / directory"),
@@ -205,11 +203,6 @@ impl Context {
                 ("1 … 9", "open project directly"),
                 ("Ctrl-X", "detach project row"),
                 ("Enter / Esc", "open / cancel"),
-            ],
-            Self::CommandList => &[
-                ("Tab / ← / →", "Available / All"),
-                ("↑ / ↓", "select command"),
-                ("? / Esc", "close command list"),
             ],
             Self::Overview => &[
                 ("↑ / ↓", "candidate / history"),
@@ -372,12 +365,12 @@ pub fn render_over(height: usize, width: usize, base: &[String], context: Contex
         })
         .collect::<Vec<_>>();
     body.push(String::new());
-    body.push(
-        Style::new()
-            .fg(Color::White)
-            .dim()
-            .paint("Ctrl-? / Ctrl-/ or Esc: close help"),
-    );
+    let close_hint = match context {
+        Context::Switch | Context::Closeup => "? / Ctrl-? / Ctrl-/ or Esc: close help",
+        Context::LiveTerminal => "Ctrl-O ? / Ctrl-? / Ctrl-/ or Esc: close help",
+        _ => "Ctrl-? / Ctrl-/ or Esc: close help",
+    };
+    body.push(Style::new().fg(Color::White).dim().paint(close_hint));
     modal::render_over(
         height,
         width,
@@ -410,7 +403,6 @@ mod tests {
             Context::LiveTerminal,
             Context::AddWorkspace,
             Context::WorkspaceFinder,
-            Context::CommandList,
             Context::Overview,
             Context::CloseupActions,
             Context::CreateSession,

@@ -21,7 +21,7 @@ TUI 仕様を正本とする。
 
 | 種別 | 規則 |
 |---|---|
-| ヘルプ | `Ctrl-?`（portable alias: `Ctrl-/`）で現在の最前面surfaceに有効なキーだけを表示する |
+| ヘルプ | `Ctrl-?`（portable alias: `Ctrl-/`）は全画面、plain `?` は前面に入力modal / drawerがないworkspace、`Ctrl-O ?` はlive paneで、現在の最前面surfaceに有効なキーだけを表示する |
 | workspace 共通操作 | `Ctrl-O` を leader とする 2 打鍵へ集約し、2 打目は 1 action だけを持つ |
 | tab | `[` / `]` は前 / 次の選択、`{` / `}` は前 / 次への並べ替えとする |
 | 対象の除去 | `Ctrl-X` は選択中の対象を安全に remove / detach / dismiss する。plain `x` / `X` に副作用を割り当てない |
@@ -58,7 +58,7 @@ TUI 仕様を正本とする。
 | `Ctrl-O +` | OpenWorkspace | workspace 追加 |
 | `Ctrl-O 0` | OpenWorkspaceSwitcher | project / session finder |
 | `Ctrl-O 1` … `9` | ActivateWorkspace | project tab を番号で選択 |
-| `Ctrl-O ?` | CommandHelp | live pane から現在の session command 一覧を開く |
+| `Ctrl-O ?` | KeyboardHelp | live paneで使えるキーボードショートカットを表示 |
 | `Ctrl-O o` | Switch | Switchへ戻る |
 | `Ctrl-O a` | OpenCloseupModal | 選択中targetのAction |
 | `Ctrl-O [` | PreviousTab | 前のpane tab |
@@ -141,7 +141,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Switch | `Enter` / `t` | session Closeup、または選択したnew session |
 | Switch | `Ctrl-A` / `Home` | new session form |
 | Switch | `:` | Overview palette |
-| Switch / tab のない Closeup | `?` | 現在の workspace / session command 一覧 |
+| Switch / live pane以外のCloseup | `?` | 現在のsurfaceで使えるキーボードショートカットを表示 |
 | Switch | `Ctrl-X` | 選択sessionのsafe remove |
 | Switch | `Ctrl-Q` | workspace離脱／TUI終了確認 |
 | Switch | `Ctrl-C` | no-op |
@@ -159,7 +159,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | project / session finder | `Enter` / `Esc` | open / cancel |
 | tabのないCloseup | `a` / `t` | Agent / Terminal |
 | tabのないCloseup | `Enter` | Action modal |
-| tabのあるCloseup | `Ctrl-O ?` | 現在の session command 一覧 |
+| tabのあるCloseup | `Ctrl-O ?` | live paneで使えるキーボードショートカットを表示 |
 | Overview palette | `↑` / `↓` | candidate / history |
 | Overview palette | `←` / `→` | caret移動 |
 | Overview palette | `Tab` / `Enter` / `Esc` | complete / run / close |
@@ -221,8 +221,9 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Garden | `←` / `→` | 横pan |
 | Garden | その他のキー / paste | wakeして閉じる |
 
-`?` / `Ctrl-O ?` の command 一覧は Overview / Closeup command registry の実行可否を表示する。
-`Ctrl-?` / `Ctrl-/` の Keyboard help は、command だけでなく現在の最前面 surface が受理する全キーボード操作を表示する。
+前面に入力modal / drawerがないworkspaceの `?`、live paneの `Ctrl-O ?`、全画面の `Ctrl-?` / `Ctrl-/` は
+同じ Keyboard help を開き、現在の最前面surfaceが受理する全キーボード操作を表示する。plain `?` はOverview /
+Closeup paletteなどの文字入力中には入力文字として扱う。
 
 ## テキスト編集
 

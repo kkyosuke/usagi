@@ -177,8 +177,8 @@ pub enum RuntimeEvent<B> {
 /// A TUI-local action reserved by the process-wide terminal leader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveTerminalAction {
-    /// Open the context-aware command list (`Ctrl-O ?`).
-    CommandHelp,
+    /// Open contextual keyboard help (`Ctrl-O ?`).
+    KeyboardHelp,
     /// Open the process-level workspace add overlay (`Ctrl-O +`).
     OpenWorkspace,
     /// Open the process-level project/session fuzzy finder (`Ctrl-O 0`).
@@ -498,7 +498,7 @@ macro_rules! prefix_shortcut {
 /// is optional for every entry so users may keep holding Control after
 /// pressing the leader on any workspace surface.
 const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
-    prefix_shortcut!(KeyCode::Char('?'), shifted, legacy = 31 => LiveTerminalAction::CommandHelp),
+    prefix_shortcut!(KeyCode::Char('?'), shifted, legacy = 31 => LiveTerminalAction::KeyboardHelp),
     prefix_shortcut!(KeyCode::Char('+'), shifted => LiveTerminalAction::OpenWorkspace),
     prefix_shortcut!(KeyCode::Char('0') => LiveTerminalAction::OpenWorkspaceSwitcher),
     prefix_shortcut!(KeyCode::Char('1') => LiveTerminalAction::ActivateWorkspace(1)),
@@ -1304,7 +1304,7 @@ mod tests {
     }
 
     #[test]
-    fn command_help_is_reserved_only_after_the_leader() {
+    fn keyboard_help_is_reserved_only_after_the_leader() {
         for modifiers in [
             Modifiers::default(),
             Modifiers {
@@ -1331,7 +1331,7 @@ mod tests {
             );
             assert_eq!(
                 classifier.classify(Duration::from_millis(1), question()),
-                LiveInputOutput::Action(LiveTerminalAction::CommandHelp)
+                LiveInputOutput::Action(LiveTerminalAction::KeyboardHelp)
             );
         }
     }

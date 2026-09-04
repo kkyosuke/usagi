@@ -93,7 +93,7 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O v` / `Ctrl-O Ctrl-V` | Preview を開く |
 | `Ctrl-O d` / `Ctrl-O Ctrl-D` | pending Decision 一覧を開く |
 | `Ctrl-O s` / `Ctrl-O Ctrl-S` | Scratchpad を開く |
-| `?` / live pane の `Ctrl-O ?` | コマンド一覧を開く（初期表示は現在実行できるコマンド） |
+| `?` / live pane の `Ctrl-O ?` | 現在の画面で使えるキーボードショートカットを表示する |
 | `:` | Overview のコマンドパレットを開く |
 | `Ctrl-X` | Switch で選択中の session を安全に削除する |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
