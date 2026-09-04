@@ -113,8 +113,9 @@ Overview で `daemon` を実行すると、health・resource 使用量・session
 
 generic terminal の `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。
 `Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、再度開くと新しい terminal になる。Director は画面の
-右側を高さ一杯に使う overlay で、workspace Shell と同時に開ける。両方が開いているときは panel のクリックでも focus が移り、
-左側に見えている Shell の選択・コピーを継続できる。title の `FOCUS` / `click to focus` が入力先を示す。選択 session の Agent は
+右側を高さ一杯に使い、workspace Shell と同じ drawer layer で横に並べて開ける。両方が開いているときは Shell の横幅を
+Director の左端までに縮め、panel のクリックでも focus が移る。左側の Shell では選択・コピーを継続でき、
+title の `FOCUS` / `click to focus` が入力先を示す。選択 session の Agent は
 drawer の背面でも通常の workspace geometry と attachment のまま出力を更新し続ける。最後の実行中または起動中 root Agent が
 消えても Director と現在 route は保持され、Console は停止状態を表示する。
 live Agent では同じ close chord が `Ctrl-D` と同じ終了入力になり、interrupted Agent では選択中の tab を

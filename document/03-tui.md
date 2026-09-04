@@ -563,7 +563,7 @@ Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択�
 ## workspace terminal drawer
 
 root scope（`session_id: None`）の generic Terminal は、managed session の Closeup や Agent-only の
-[指示モード](#指示モードdirector-mode)には混ぜず、Home 全幅の下端から重なる workspace terminal drawer に表示する。
+[指示モード](#指示モードdirector-mode)には混ぜず、単独時は Home 全幅の下端から重なる workspace terminal drawer に表示する。
 Home header の `[ ⌂ Shell ]` button、`Ctrl-O Ctrl-T`、または互換操作の `Ctrl-O t` で toggle し、閉じた状態から開く操作は root scope の
 選択済み live Terminal tab が復元されていればその terminal へ再びフォーカスする。既知の live tab が無い場合だけ
 `OpenTerminal` を発行し、daemon に live Terminal があれば同じ runtime を再利用し、無ければ新規に起動する。
@@ -584,10 +584,12 @@ header の直下から下端までを使う。terminal viewport は border、tit
 再入力で通常高へ戻り、選択 tab、scrollback、入力 sequence、terminal process は変更しない。
 完成済みの Home frame の上へ合成する。背景 Home は header を除いて dim にするが、managed terminal の geometry と
 attachment は変えず、全高 drawer に完全に覆われても維持する。`[ ⌂ Shell ]` と `[ ♛ Director ]` は同じ header layout で描画・hit-test し、
-2 つの drawer は同時に開ける。workspace terminal drawer は通常の全幅 geometry を保ち、Director をその右側へ最後に合成する。
-したがって Director は root shell や選択 session の Agent pane を resize / reflow しない真の overlay であり、閉じると元の折返しと
-scrollback がそのまま現れる。最後に開いた drawer が入力を所有し、もう一方の見えている panel をクリックするか再度選ぶと、
-drawer を閉じずに入力を移す。Director が全幅へ縮退する狭幅では、header button から背面の Shell へ focus を移せる。
+2 つの drawer は同時に同じ layer へ開ける。Director が背景を残す通常幅では workspace terminal drawer の右端を
+Director の左端に合わせ、Shell と Director を左右に並べる。Shell の terminal viewport と PTY はこの狭い幅へ resize し、
+Director を閉じると単独時の全幅へ戻す。選択 session の Agent pane は drawer 背景として通常の Home geometry を維持する。
+Director が全幅へ縮退する狭幅では Shell をゼロ幅に resize せず、従来の全幅 geometry のまま背面に維持して Director を前面に描く。
+最後に開いた drawer が入力を所有し、もう一方の見えている panel をクリックするか再度選ぶと、drawer を閉じずに入力を移す。
+狭幅では header button から背面の Shell へ focus を移せる。
 入力を所有している drawer の toggle を実行したときだけその drawer を閉じ、残った drawer へ入力を戻す。
 managed Closeup と root Agent/Terminal の各選択状態はこの切替で保持し、workspace terminal へ再びフォーカスしたときは
 最後に選択していた terminal tab を開く。
