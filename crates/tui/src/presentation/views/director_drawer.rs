@@ -22,10 +22,7 @@ pub const MIN_DRAWER_WIDTH: usize = 56;
 pub const MAX_DRAWER_WIDTH: usize = 96;
 /// Minimum background strip kept visible beside a non-full-width drawer.
 const MIN_BACKGROUND_WIDTH: usize = 24;
-/// Material Design robot glyph from the repository's Nerd Font vocabulary.
-///
-/// Like the existing CPU/memory/mode glyphs, unsupported fonts may render a
-/// missing-glyph cell; Unicode-width clipping keeps layout and hit-testing safe.
+/// Standard Unicode Director marker; it requires no private-use patched font.
 pub const DIRECTOR_ICON: char = '♛';
 /// Rows of drawer chrome the launch picker's candidate rows never get: the Home
 /// header row above the drawer, the panel's two borders and two vertical padding

@@ -349,6 +349,56 @@ fn source_layers_follow_the_documented_dependency_matrix() {
 }
 
 #[test]
+fn tui_application_runtime_ports_are_not_declared_by_presentation() {
+    let root = workspace_root();
+    let source = fs::read_to_string(root.join("crates/tui/src/presentation/mod.rs"))
+        .expect("TUI presentation source is readable");
+    let syntax: File = syn::parse_file(&source).expect("TUI presentation source parses");
+    let declared = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Trait(item) => Some(item.ident.to_string()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let application_ports = [
+        "AgentCommandPort",
+        "AgentCommandPortFactory",
+        "DecisionCommandPort",
+        "DesktopNotificationPort",
+        "EnvironmentStorePort",
+        "ExternalTerminalPort",
+        "GardenInventoryPort",
+        "PaneLaunchCommandPort",
+        "RestoreConnectionPort",
+        "SessionCommandPort",
+        "SessionCommandPortFactory",
+        "SessionRefreshPort",
+        "SessionWorktreeScanPort",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+
+    assert!(
+        declared.is_disjoint(&application_ports),
+        "application runtime ports belong in tui/usecase, not presentation: {:?}",
+        declared
+            .intersection(&application_ports)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        source.contains("struct WorkspaceIoRuntime"),
+        "the presentation loop must name its transport-only coordinator explicitly"
+    );
+    assert!(
+        !source.contains("WorkspaceUi"),
+        "the retired dual-state WorkspaceUi name must not return"
+    );
+}
+
+#[test]
 fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_module() {
     let root = workspace_root();
     let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))

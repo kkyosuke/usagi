@@ -66,12 +66,12 @@ use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config}
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
-    self, AgentCommandPort, AgentPaneAdmission, BannerScreenRunner, ControllerBackendComposition,
-    ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
-    EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, MetricsPort,
-    RestoreConnectionPort, SerializedPaneLaunchPort, SessionCommandPort, SessionCommandResult,
-    SessionRefreshPort, Start, WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceLoader,
-    WorkspaceSnapshot,
+    self, BannerScreenRunner, ControllerBackendComposition, ControllerBackendFactory,
+    ControllerHost, Exit, MetricsPort, Start, WorkspaceCreateCompletion, WorkspaceCreateEffect,
+    WorkspaceLoader, WorkspaceSnapshot,
+};
+use usagi_tui::usecase::application::agent_runtime_ports::{
+    AgentCommandPort, AgentPaneAdmission, ExactAgentResume, SerializedPaneLaunchPort,
 };
 use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -89,6 +89,11 @@ use usagi_tui::usecase::application::daemon_backend::{
 };
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
+use usagi_tui::usecase::application::runtime_ports::{
+    DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
+    RestoreConnectionPort, SessionCommandPort, SessionCommandResult, SessionRefreshPort,
+    SessionWorktreeScanPort,
+};
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSubscription,
@@ -162,9 +167,9 @@ impl DaemonDecisionCommandPort {
         }
     }
 
-    fn safe_error(error: impl std::fmt::Display) -> SafeError {
+    fn safe_error(_error: impl std::fmt::Display) -> SafeError {
         SafeError {
-            message: SafeMessage::new(error.to_string()),
+            message: SafeMessage::new("User decisions are unavailable."),
             error_id: "decision-daemon-error".to_owned(),
         }
     }
@@ -193,7 +198,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
                 workspace,
                 decisions,
             },
-            Err(error) => BackendEvent::Notice(Notice::new(error)),
+            Err(_) => BackendEvent::Notice(Notice::new("User decisions are unavailable.")),
         }
     }
 
@@ -279,15 +284,18 @@ impl RepoEnvironmentStore {
         }
     }
 
-    fn safe_error(reason: impl std::fmt::Display) -> SafeError {
+    fn safe_error(_reason: impl std::fmt::Display) -> SafeError {
         SafeError {
-            message: SafeMessage::new(reason.to_string()),
+            message: SafeMessage::new("Workspace data is unavailable."),
             error_id: "target-store-error".to_owned(),
         }
     }
 
     fn stale_target() -> SafeError {
-        Self::safe_error("this session is no longer available")
+        SafeError {
+            message: SafeMessage::new("This session is no longer available."),
+            error_id: "target-store-error".to_owned(),
+        }
     }
 }
 
@@ -353,9 +361,9 @@ impl SettingsEnvironmentStore {
         Ok(())
     }
 
-    fn safe_error(reason: impl std::fmt::Display) -> SafeError {
+    fn safe_error(_reason: impl std::fmt::Display) -> SafeError {
         SafeError {
-            message: SafeMessage::new(reason.to_string()),
+            message: SafeMessage::new("Environment settings are unavailable."),
             error_id: "environment-settings-error".to_owned(),
         }
     }
@@ -594,9 +602,9 @@ impl ProductionDecisionPort {
                 }
             }
             Err(_) if self.reported_failure => return,
-            Err(error) => {
+            Err(_) => {
                 self.reported_failure = true;
-                BackendEvent::Notice(Notice::new(error))
+                BackendEvent::Notice(Notice::new("User decisions are unavailable."))
             }
         };
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
@@ -670,10 +678,10 @@ fn pr_snapshot_events(
                     revision: snapshot.revision,
                     prs: snapshot.entries,
                 },
-                Err(message) => BackendEvent::PullRequestsError {
+                Err(_) => BackendEvent::PullRequestsError {
                     target,
                     error: SafeError {
-                        message: SafeMessage::new(message),
+                        message: SafeMessage::new("Pull Requests are unavailable."),
                         error_id: "pr-load".to_owned(),
                     },
                 },
@@ -762,8 +770,8 @@ impl BackendOverlayPort for ProductionOverlayPort {
 
     fn open_pull_request(&mut self, url: String, completions: Completions) {
         let event = match usagi_tui::usecase::application::pr::canonical_browser_url(&url) {
-            Some(url) => self.browser.open(&url).err().map(|message| {
-                BackendEvent::Notice(Notice::new(format!("Could not open browser: {message}")))
+            Some(url) => self.browser.open(&url).err().map(|_| {
+                BackendEvent::Notice(Notice::new("Could not open the Pull Request in a browser."))
             }),
             None => Some(BackendEvent::Notice(Notice::new(
                 "Cannot open an invalid PR URL.",
@@ -779,9 +787,7 @@ impl BackendOverlayPort for ProductionOverlayPort {
         let event = match usagi_tui::usecase::application::pr::canonical_browser_url(&url) {
             Some(url) => match self.clipboard.write_text(&url) {
                 Ok(()) => BackendEvent::Notice(Notice::new("PR URL copied.")),
-                Err(message) => {
-                    BackendEvent::Notice(Notice::new(format!("Could not copy PR URL: {message}")))
-                }
+                Err(_) => BackendEvent::Notice(Notice::new("Could not copy the Pull Request URL.")),
             },
             None => BackendEvent::Notice(Notice::new("Cannot copy an invalid PR URL.")),
         };
@@ -810,10 +816,10 @@ impl BackendOverlayPort for ProductionOverlayPort {
                         }
                     })
                     .map_or_else(
-                        |message| BackendEvent::PullRequestsError {
+                        |_| BackendEvent::PullRequestsError {
                             target: Target::Session(session),
                             error: SafeError {
-                                message: SafeMessage::new(message),
+                                message: SafeMessage::new("Could not dismiss the Pull Request."),
                                 error_id: "pr-dismiss".to_owned(),
                             },
                         },
@@ -848,20 +854,12 @@ struct DaemonCommandOutput {
 
 type DaemonCommandRunner = fn(&Path, DaemonAction) -> std::io::Result<DaemonCommandOutput>;
 
-fn daemon_control_error(action: DaemonAction, bytes: &[u8]) -> SafeError {
-    const MAX_CHARS: usize = 240;
-    let raw = String::from_utf8_lossy(bytes);
-    let summary = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("daemon lifecycle command failed")
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(MAX_CHARS)
-        .collect::<String>();
+fn daemon_control_error(action: DaemonAction, _bytes: &[u8]) -> SafeError {
     SafeError {
-        message: SafeMessage::new(format!("{} failed: {summary}", action.label())),
+        message: SafeMessage::new(format!(
+            "Could not {} the daemon; inspect the daemon log for details.",
+            action.argument()
+        )),
         error_id: format!("daemon-{}-failed", action.argument()),
     }
 }
@@ -1013,7 +1011,9 @@ impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
                 })
             })();
             completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                result.unwrap_or_else(|error| format!("Clean failed: {error}")),
+                result.unwrap_or_else(|_| {
+                    "Clean failed; inspect the daemon log for details.".to_owned()
+                }),
             ))));
         });
     }
@@ -1043,7 +1043,7 @@ fn child_directory_names(parent: &Path) -> std::io::Result<Vec<String>> {
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
-impl presentation::SessionWorktreeScanPort for FsSessionWorktreeScanPort {
+impl SessionWorktreeScanPort for FsSessionWorktreeScanPort {
     fn scan(&mut self, workspace: &Path) -> Vec<String> {
         let sessions = workspace.join(".usagi").join("sessions");
         child_directory_names(&sessions).unwrap_or_default()
@@ -2140,7 +2140,9 @@ fn fetch_agent_inventory(
 struct DaemonGardenInventoryPort;
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=cli_tui_pty
-impl presentation::GardenInventoryPort for DaemonGardenInventoryPort {
+impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
+    for DaemonGardenInventoryPort
+{
     fn inventory(
         &mut self,
         workspace: WorkspaceId,
@@ -5574,7 +5576,7 @@ mod tests {
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use usagi_core::infrastructure::bounded_process::ChildObservation;
-    use usagi_tui::presentation::SessionWorktreeScanPort;
+    use usagi_tui::usecase::application::runtime_ports::SessionWorktreeScanPort;
 
     #[test]
     fn reduced_motion_environment_accepts_only_the_documented_opt_in() {
@@ -5587,19 +5589,21 @@ mod tests {
     }
 
     #[test]
-    fn daemon_control_errors_keep_one_bounded_display_safe_line() {
+    fn daemon_control_errors_hide_raw_process_detail() {
         let long = format!("\nrefused\u{7}: {}\nsecret detail", "x".repeat(300));
         let error = daemon_control_error(DaemonAction::Stop, long.as_bytes());
         assert_eq!(error.error_id, "daemon-stop-failed");
-        assert!(error.message.as_str().starts_with("Stop failed: refused:"));
-        assert!(!error.message.as_str().contains('\u{7}'));
+        assert_eq!(
+            error.message.as_str(),
+            "Could not stop the daemon; inspect the daemon log for details."
+        );
+        assert!(!error.message.as_str().contains("refused"));
         assert!(!error.message.as_str().contains("secret detail"));
-        assert!(error.message.as_str().chars().count() <= 253);
 
         let empty = daemon_control_error(DaemonAction::Start, b"\n\n");
         assert_eq!(
             empty.message.as_str(),
-            "Start failed: daemon lifecycle command failed"
+            "Could not start the daemon; inspect the daemon log for details."
         );
 
         let stderr = daemon_control_result(
@@ -5611,7 +5615,10 @@ mod tests {
             }),
         )
         .unwrap_err();
-        assert_eq!(stderr.message.as_str(), "Restart failed: restart refused");
+        assert_eq!(
+            stderr.message.as_str(),
+            "Could not restart the daemon; inspect the daemon log for details."
+        );
         let stdout = daemon_control_result(
             DaemonAction::Start,
             Ok(DaemonCommandOutput {
@@ -5621,13 +5628,19 @@ mod tests {
             }),
         )
         .unwrap_err();
-        assert_eq!(stdout.message.as_str(), "Start failed: start refused");
+        assert_eq!(
+            stdout.message.as_str(),
+            "Could not start the daemon; inspect the daemon log for details."
+        );
         let io = daemon_control_result(
             DaemonAction::Stop,
             Err(std::io::Error::other("process unavailable")),
         )
         .unwrap_err();
-        assert_eq!(io.message.as_str(), "Stop failed: process unavailable");
+        assert_eq!(
+            io.message.as_str(),
+            "Could not stop the daemon; inspect the daemon log for details."
+        );
     }
 
     #[allow(clippy::unnecessary_wraps)] // Matches the injected fallible runner signature.
@@ -6012,8 +6025,8 @@ mod tests {
     use usagi_tui::presentation::views::workspace::ProjectedSession;
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
     use usagi_tui::presentation::{
-        ControllerBackendFactory, ControllerHost, ControllerHostAction, RestoreConnectionPort,
-        WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
+        ControllerBackendFactory, ControllerHost, ControllerHostAction, WorkspaceCreateEffect,
+        WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
     };
     use usagi_tui::usecase::application::Key;
     use usagi_tui::usecase::application::controller::{
@@ -6021,6 +6034,7 @@ mod tests {
         NewEvent, NewForm, NewMode, NewRequest, NewState, Notice, Overlay, Target, update,
         update_entry, update_new,
     };
+    use usagi_tui::usecase::application::runtime_ports::RestoreConnectionPort;
     use usagi_tui::usecase::terminal_input::{
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers, PointerEvent, PointerKind,
     };
@@ -6282,7 +6296,7 @@ mod tests {
     #[test]
     fn production_terminal_input_decodes_every_known_ack_outcome() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let (mut port, server) = terminal_input_port(vec![
             (ResponseOutcome::Ok, json!({ "ack": "Written" })),
@@ -6339,7 +6353,7 @@ mod tests {
     #[test]
     fn production_terminal_input_rejects_accepted_as_a_non_final_ack() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let (mut port, server) = terminal_input_port(vec![(
             ResponseOutcome::Accepted {
@@ -6378,7 +6392,7 @@ mod tests {
     fn production_terminal_input_carries_and_resolves_a_durable_operation() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
         use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
         use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
 
         let operation = OperationId::new();
@@ -6473,7 +6487,7 @@ mod tests {
             ResponseOutcome, TERMINAL_INPUT_OPERATION_CAPABILITY,
         };
         use usagi_core::usecase::client::{DaemonRequest, TerminalRequest};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
         use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
 
         let (mut port, server) = terminal_input_port_with(
@@ -6524,7 +6538,7 @@ mod tests {
         use usagi_core::infrastructure::ipc::{
             ErrorCode, ProtocolError, ResponseOutcome, SideEffect,
         };
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         for (side_effect, expected) in [
             (SideEffect::None, TerminalError::Unavailable),
@@ -6615,7 +6629,7 @@ mod tests {
     #[allow(clippy::too_many_lines)] // Two scripted connections are one epoch contract.
     fn production_shared_connection_epoch_survives_protocol_errors_and_invalidates_on_eof() {
         use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let geometry = Geometry { cols: 20, rows: 3 };
         let attach_body = |subscription: u64| {
@@ -6957,7 +6971,7 @@ mod tests {
     #[test]
     fn a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
         use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
 
         let (client, hung) = hung_terminal_connection(Vec::new());
@@ -7028,7 +7042,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_request_that_never_reached_the_daemon_reports_unknown_without_resending() {
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         // Answers nothing and closes without reading: dispatch never happened.
         let (client, server) = scripted_terminal_connection(Vec::new(), |_| {});
@@ -7069,7 +7083,7 @@ mod tests {
     #[test]
     fn a_lane_deadline_on_one_pane_reattaches_every_pane_through_the_epoch() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let geometry = Geometry { cols: 20, rows: 3 };
         let attach_body = |subscription: u64| {
@@ -7171,7 +7185,7 @@ mod tests {
     #[test]
     fn production_resize_lane_failure_keeps_the_shared_connection_and_epoch() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let geometry = Geometry { cols: 20, rows: 3 };
         let (mut port, server) =
@@ -7208,7 +7222,7 @@ mod tests {
     fn production_malformed_attach_on_same_socket_keeps_epoch_and_next_input_sequence() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
         use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let valid_attach = json!({
             "subscription": 8,
@@ -7273,7 +7287,7 @@ mod tests {
             ProtocolRange, ResponseOutcome, TERMINAL_SCREEN_CHECKPOINT_CAPABILITY,
             TERMINAL_WIRE_GENERATION,
         };
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         type Adjust = fn(&mut usagi_core::infrastructure::ipc::ServerProtocol);
 
@@ -7455,7 +7469,7 @@ mod tests {
         };
         use usagi_core::usecase::client::{ClientPolicy, IpcClient};
         use usagi_daemon::presentation::ipc::{handshake, server_protocol};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
         let build = BuildIdentity {
@@ -8220,7 +8234,7 @@ mod tests {
         use usagi_core::usecase::client::ClientError;
 
         let safe = DaemonDecisionCommandPort::safe_error("decision failed");
-        assert_eq!(safe.message.as_str(), "decision failed");
+        assert_eq!(safe.message.as_str(), "User decisions are unavailable.");
         assert_eq!(safe.error_id, "decision-daemon-error");
 
         for value in [
@@ -9209,7 +9223,7 @@ mod tests {
             RepoEnvironmentStore::safe_error(anyhow::anyhow!("state.json is unreadable"))
                 .message
                 .as_str()
-                .contains("state.json is unreadable")
+                .contains("Workspace data is unavailable")
         );
     }
 

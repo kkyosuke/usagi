@@ -35,7 +35,7 @@ expect_fail() {
   esac
 }
 
-ruby "$subject" "$repo"
+LC_ALL=C LANG=C ruby "$subject" "$repo"
 
 make_fixture "$tmp/dependency"
 sed -i.bak '/| `syn` |/d' "$tmp/dependency/document/06-conventions.md"
@@ -48,7 +48,8 @@ expect_fail "$tmp/stale-dependency" 'documents stale workspace dependency `not-a
 
 make_fixture "$tmp/command"
 sed -i.bak '/pub enum Command {/a\
-    DocsProbe,' "$tmp/command/crates/cli/src/cli/mod.rs"
+    DocsProbe,
+' "$tmp/command/crates/cli/src/cli/mod.rs"
 expect_fail "$tmp/command" 'missing public CLI command `usagi docs-probe`'
 
 make_fixture "$tmp/command-outside-table"
@@ -71,13 +72,17 @@ make_fixture "$tmp/contents"
 sed -i.bak '/^- \[検討した代替案\]/d' "$tmp/contents/document/02-architecture.md"
 expect_fail "$tmp/contents" '02-architecture.md top-level contents do not match body heading order'
 
-make_fixture "$tmp/work-run-tui"
-sed -i.bak '/| `Ctrl-O` `w` | WorkRuns |/d' "$tmp/work-run-tui/document/03-tui.md"
-expect_fail "$tmp/work-run-tui" 'document/03-tui.md is missing the implemented WorkRuns shortcut'
+make_fixture "$tmp/work-run-keybindings"
+sed -i.bak '/| `Ctrl-O w` | WorkRuns |/d' "$tmp/work-run-keybindings/document/11-keybindings.md"
+expect_fail "$tmp/work-run-keybindings" 'document/11-keybindings.md is missing implemented leader action WorkRuns'
 
-make_fixture "$tmp/work-run-readme"
-sed -i.bak '/| `Ctrl-O w` \/ `Ctrl-O Ctrl-W` |/d' "$tmp/work-run-readme/README.md"
-expect_fail "$tmp/work-run-readme" 'README.md is missing the implemented WorkRuns shortcut'
+make_fixture "$tmp/work-run-key-drift"
+sed -i.bak 's/`Ctrl-O w` | WorkRuns/`Ctrl-O q` | WorkRuns/' "$tmp/work-run-key-drift/document/11-keybindings.md"
+expect_fail "$tmp/work-run-key-drift" 'document/11-keybindings.md documents stale leader shortcut `Ctrl-O q` (WorkRuns)'
+
+make_fixture "$tmp/duplicate-shortcut"
+printf '\n| `Ctrl-O w` | WorkRuns |\n' >> "$tmp/duplicate-shortcut/README.md"
+expect_fail "$tmp/duplicate-shortcut" 'README.md duplicates the leader shortcut table owned by document/11-keybindings.md'
 
 make_fixture "$tmp/work-run-ipc"
 sed -i.bak '/^- \[Work Run observation and control\]/d' "$tmp/work-run-ipc/document/04-ipc.md"

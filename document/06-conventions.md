@@ -64,6 +64,7 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 | `rayon` | markdown ファイルの並列スキャン | 本依存 |
 | `shell-words` | `usagi-core` の usecase（`workspace_guard`）による root モードの Bash command の字句分割 | 本依存 |
 | `unicode-width` | 端末セルの表示桁数測定（CJK など全角の 2 桁計上）。`usagi-core` の VT parser（`usecase::vt_screen`）と `usagi-tui` の描画が使う | 本依存 |
+| `unicode-segmentation` | `usagi-tui` のテキスト入力で結合文字・絵文字を見た目上の1文字単位に編集する | 本依存 |
 | `clap` | 入口面 CLI の引数解析（コマンドツリー定義） | 本依存 |
 | `clap_complete` | `usagi completion <shell>` のシェル補完スクリプト生成 | 本依存 |
 | `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 本依存 |
@@ -81,6 +82,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 `unicode-width` は
 `usagi-core` の usecase 層（VT parser `vt_screen`）と `usagi-tui` の描画が使う（domain の
 `chrono` / `serde` / `uuid` 規則は不変で、`unicode-width` は domain には持ち込まない）。
+`unicode-segmentation` は `usagi-tui` の入力 widget だけで使い、domain には持ち込まない。
 `clap` / `clap_complete` は `usagi-cli` が使う。
 `sha2` は合成ルートの `build.rs` が source / build configuration identity、runtime が workspace・executable 別の bootstrap broker endpoint、IPC contract が rollover operation ID を
 作るほか、`usagi-cli` が配布 binary に同梱した self-update installer の identity 検証にも使う。
@@ -321,7 +323,7 @@ readiness 待ちが product の失敗ではなく CPU 競合による timeout �
 | 競合の出どころ | この列が覆うか |
 |---|---|
 | 同じ test binary 内の別 test（libtest の thread 並行） | 覆う（プロセス内 `Mutex`） |
-| 同じ `cargo test --workspace` 実行の別 test binary | 競合しない。cargo は test binary を**直列に**実行する（full run 468 サンプルで同時実行数は常に 1） |
+| 同じ test runner 実行の別 test binary | 覆う。`cargo test` は binary を直列実行する一方、nextest は並行実行するため lock file が必要 |
 | 同じチェックアウトの別 cargo 実行（`cargo test` と `cargo llvm-cov` の同時実行など） | 覆う（lock file を `flock`） |
 | 別チェックアウト・別ユーザー・マシン上の他プロセスの負荷 | 覆わない（環境側の条件として残る） |
 
@@ -414,6 +416,10 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
   除外するときは `.github/security-audit-exceptions.json` に advisory ID、GitHub handle の `owner`、ISO 形式の `expires`、
   具体的な `rationale` を登録する。`expires` は検証日から 90 日以内とし、期限切れ・必須項目欠落・未知フィールド・重複は
   audit 前の checker が拒否する。更新には改めて owner と rationale のレビューを必要とし、恒久的な除外は認めない。
+- third-party GitHub Action は40桁のcommit SHAへ固定し、更新元のrelease / channelを行末コメントに残す。workflow全体の
+  `permissions` は read-only を既定にし、release作成やPRコメントなどのwrite権限は必要なjobだけへ付与する。
+  `scripts/ci/github-actions-policy.rb` がmutable ref、workflow-scope write、permissions欠落を拒否し、
+  `scripts/tests/github-actions-policy.sh` がcheckerをfixtureで固定する。
 - リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
 - `test.yml` の policy check は `scripts/ci/docs-ssot-lint.rb` で、公開 CLI command tree、workspace dependency 一覧、
   番号付き仕様の index と前後 breadcrumb、proposal / design の履歴 banner、廃止済み入口表記、埋め込み orchestration
@@ -435,6 +441,9 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
   required context の全成功を merge の必須条件にする。緊急時に ruleset を変更する場合も、変更前 snapshot と rollback payload を保存し、
   復旧後に contract と一致することを `verify-ruleset` で確認する。
 - `coverage.yml` は 100% 計測の前に `scripts/coverage-off-lint.rb` を実行する。lint 自体は `scripts/tests/coverage-off-lint.sh` の fixture（許可 IO、禁止 reducer、理由欠落、stale、追加、削除、期限切れ）で検証し、`test.yml` でも実行する。
+- coverage の Job Summary は、計測対象外の総数・owner別件数・件数上位pathを常に表示する。100%という率だけで
+  除外規模を隠さず、完全なpath inventoryと上限は `coverage-off-budget.json` が保持する。追加・削除・owner移動は
+  budgetを同時にreviewしない限り失敗する。
 - カバレッジ未達（100% 未満）のとき、`coverage.yml` は `cargo llvm-cov report --json` から**未達ファイルと未達関数**（ファイル path・関数名・宣言行・関数率/行率・不足量・未達行レンジ）のレポートを生成し、PR コメント（同一リポジトリ PR。`marocchino/sticky-pull-request-comment` の header + recreate で再実行時も 1 件に更新）と Job Summary の両方へ出す。Job Summary は権限不要のため fork PR でも一覧が見え、コメント投稿は `continue-on-error` で **coverage gate の合否（exit code）から独立**させる。関数カバレッジは JSON summary（generic の単相化をマージした集計＝gate と一致。lcov の per-monomorphization な `FN/FNDA` を数えると gate と食い違う）を使い、関数名は `c++filt`（binutils。Rust v0 を demangle）で可読化する。出力はファイル/関数/行レンジの上限で切り詰め、超過分は明示する。レポート生成は `scripts/coverage-report-comment.rb`（Ruby, stdlib のみ）に抽出し、`scripts/tests/coverage-report-comment.sh` の fixture test（`test.yml` の script-tests job で実行）で固定する。閾値・対象パッケージ選択の SSoT は `scripts/coverage.sh`。
 - TUI E2E の version 判定は checkout 済みの HEAD ではなく、イベントが渡す base SHA と head SHA のそれぞれからルート `[package].version` を読む。version が不変なら job は skip され、fork PR でも secrets や書き込み権限を必要としない。merge queue では合成 head と queue base を同じ方法で比較する。手動実行は input を明示して release candidate を再検証するときだけ実行する。
 

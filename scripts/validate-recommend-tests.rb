@@ -6,7 +6,7 @@ require "json"
 root, map_file = ARGV
 abort "usage: validate-recommend-tests.rb ROOT MAP METADATA_JSON" unless ARGV.length == 3
 
-metadata = JSON.parse(File.read(ARGV.fetch(2)))
+metadata = JSON.parse(File.read(ARGV.fetch(2), encoding: Encoding::UTF_8))
 packages = metadata.fetch("packages").to_h { |package| [package.fetch("name"), package] }
 root_manifest = File.join(root, "Cargo.toml")
 root_package = packages.values.find { |package| package.fetch("manifest_path") == root_manifest }
@@ -18,7 +18,7 @@ def expand(command, witness)
   command.gsub("{test}", test)
 end
 
-File.foreach(map_file).with_index(1) do |line, line_number|
+File.foreach(map_file, encoding: Encoding::UTF_8).with_index(1) do |line, line_number|
   next if line.strip.empty? || line.start_with?("#")
 
   pattern, area, reason, templates, witness, extra = line.chomp.split("\t", -1)

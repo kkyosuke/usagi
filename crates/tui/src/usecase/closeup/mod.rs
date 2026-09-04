@@ -1,24 +1,9 @@
-//! Closeup コマンド面の application interface。
+//! Closeup command vocabulary and pure parser.
 //!
-//! Closeup のコマンド入力をトップレベルのコマンド名と未解釈の引数へ分け、
-//! コマンドごとのハンドラへ dispatch する。各ハンドラは実 IO や画面状態を直接操作せず、
-//! 純粋な [`CommandResult`] を返す。
-//! サブコマンド・オプションの文法は各ハンドラが所有するため、入口は引数を trim するだけで
-//! 内容を先回りして解釈しない。
-
-mod commands;
+//! The controller maps this typed intent onto real effects. Keeping execution
+//! out of a second stub-handler tree leaves one production command path.
 
 use std::fmt;
-
-/// Closeup コマンドを実行する共通 interface。
-///
-/// 解釈済みコマンドは [`Command::into_handler`] で個別ハンドラへ変換され、呼び出し側は
-/// コマンド型に依存せず一様に `run` できる。返り値は純粋な値なので terminal IO なしで
-/// テストできる。
-pub trait Run {
-    /// コマンドの実行結果を返す。
-    fn run(&self) -> CommandResult;
-}
 
 /// Closeup に登録されるコマンドの表示用 metadata。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,38 +99,6 @@ impl Command {
             Self::Terminal { .. } => "terminal",
         }
     }
-    /// 解釈済みコマンドを、その実行方法を知る個別ハンドラへ変換する。
-    #[must_use]
-    pub fn into_handler(self) -> Box<dyn Run> {
-        use commands as h;
-
-        match self {
-            Self::Agent { arguments } => Box::new(h::Agent { arguments }),
-            Self::Close { arguments } => Box::new(h::Close { arguments }),
-            Self::Diff { arguments } => Box::new(h::Diff { arguments }),
-            Self::Env { arguments } => Box::new(h::Env { arguments }),
-            Self::Terminal { arguments } => Box::new(h::Terminal { arguments }),
-        }
-    }
-}
-
-/// Closeup コマンドの純粋な実行結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommandResult {
-    /// コマンド名と引数の IF は解釈済みだが、コマンド固有処理は持たない。
-    NotImplemented {
-        command: &'static str,
-        arguments: String,
-    },
-}
-
-impl CommandResult {
-    fn not_implemented(command: &'static str, arguments: &str) -> Self {
-        Self::NotImplemented {
-            command,
-            arguments: arguments.to_owned(),
-        }
-    }
 }
 
 /// Closeup コマンド名を解釈できなかった理由。
@@ -193,19 +146,10 @@ pub fn interpret(input: &str) -> Result<Command, ParseError> {
         .ok_or_else(|| ParseError::Unknown(name.to_owned()))
 }
 
-/// Closeup の入力を解釈し、個別ハンドラを一様に実行する。
-///
-/// # Errors
-///
-/// [`interpret`] が入力を解釈できなかった場合、その [`ParseError`] を返す。
-pub fn dispatch(input: &str) -> Result<CommandResult, ParseError> {
-    Ok(interpret(input)?.into_handler().run())
-}
-
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{Command, CommandResult, ParseError, commands, dispatch, interpret};
+    use super::{Command, ParseError, commands, interpret};
 
     #[test]
     fn command_metadata_is_complete_and_sorted() {
@@ -276,21 +220,6 @@ mod tests {
         assert_eq!(
             interpret("reopen"),
             Err(ParseError::Unknown("reopen".to_owned()))
-        );
-    }
-
-    #[test]
-    fn dispatches_through_the_handler_interface() {
-        assert_eq!(
-            dispatch("agent codex").unwrap(),
-            CommandResult::NotImplemented {
-                command: "agent",
-                arguments: "codex".to_owned(),
-            }
-        );
-        assert_eq!(
-            dispatch("bogus").unwrap_err(),
-            ParseError::Unknown("bogus".to_owned())
         );
     }
 }

@@ -1,4 +1,4 @@
-use super::{Workspace, WorkspaceOverview};
+use super::{Workspace, WorkspaceNameError, WorkspaceOverview, validate_workspace_name};
 
 #[test]
 fn new_stamps_equal_created_and_updated_times() {
@@ -31,4 +31,25 @@ fn overview_carries_the_workspace_and_its_counts() {
     // Exercise the derived Clone / PartialEq / Debug.
     assert_eq!(overview.clone(), overview);
     assert!(format!("{overview:?}").contains("app"));
+}
+
+#[test]
+fn workspace_names_reject_empty_terminal_and_direction_controls() {
+    assert_eq!(
+        validate_workspace_name("  "),
+        Err(WorkspaceNameError::Empty)
+    );
+    for name in ["line\nbreak", "bell\u{7}", "spoof\u{202e}txt"] {
+        assert_eq!(
+            validate_workspace_name(name),
+            Err(WorkspaceNameError::UnsafePresentation)
+        );
+    }
+    assert!(validate_workspace_name("安全な workspace").is_ok());
+}
+
+#[test]
+#[should_panic(expected = "workspace display name must be non-empty and presentation-safe")]
+fn workspace_constructor_enforces_the_name_invariant() {
+    let _ = Workspace::new("unsafe\nname", "/tmp/name");
 }

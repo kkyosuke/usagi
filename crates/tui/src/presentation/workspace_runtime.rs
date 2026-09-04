@@ -2363,8 +2363,8 @@ mod tests {
         let _ = runtime.handle_key(Key::Paste("貼\n付".to_owned()));
 
         let modal = runtime.overview_modal().unwrap();
-        assert_eq!(modal.input(), "貼\n付bc");
-        assert_eq!(modal.cursor(), "貼\n付".len());
+        assert_eq!(modal.input(), "貼付bc");
+        assert_eq!(modal.cursor(), "貼付".len());
         assert_eq!(modal.selection(), None);
     }
 
@@ -2592,8 +2592,8 @@ mod tests {
         let _ = runtime.handle_key(Key::Paste("貼\n付".to_owned()));
 
         let modal = runtime.closeup_modal().unwrap();
-        assert_eq!(modal.input(), "貼\n付bc");
-        assert_eq!(modal.cursor(), "貼\n付".len());
+        assert_eq!(modal.input(), "貼付bc");
+        assert_eq!(modal.cursor(), "貼付".len());
         assert_eq!(modal.selection(), None);
     }
 

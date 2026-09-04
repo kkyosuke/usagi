@@ -150,4 +150,12 @@ run_case invalid-utf8-manifest 1 'allowlist.json:1: invalid UTF-8' invalid_utf8_
 run_budget_case exact-budget 0 'ok (1 exclusions)' exact_budget
 run_budget_case increased-budget 1 'coverage budget: total expected 0, scanned 1' increased_budget
 
+summary_root="$tmp/summary"
+mkdir -p "$summary_root/src"
+exact_budget "$summary_root"
+summary=$(ruby "$lint" --root "$summary_root" --manifest allowlist.json --budget budget.json --today 2026-07-21 --summary-markdown)
+grep -Fq 'Coverage measurement excludes **1** reviewed annotations.' <<<"$summary"
+grep -Fq '| `daemon` | 1 |' <<<"$summary"
+grep -Fq -- '- `src/lib.rs`: 1' <<<"$summary"
+
 echo "coverage-off-lint: fixtures ok"

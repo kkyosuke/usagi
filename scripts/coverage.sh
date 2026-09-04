@@ -23,7 +23,7 @@ export COVERAGE_MIN=100
 # coverage 計測前に exclusion policy を検査する。allowlist にない属性、source から
 # 消えた stale entry、期限切れ entry は coverage 率にかかわらず失敗させる。
 coverage_off_lint() {
-  ruby scripts/coverage-off-lint.rb
+  ruby scripts/coverage-off-lint.rb "$@"
 }
 
 # 直前の `cargo llvm-cov --workspace` の計測結果を workspace 全体で再集計する

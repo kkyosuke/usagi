@@ -8,7 +8,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::sync::{Barrier, Mutex};
+use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -37,11 +37,6 @@ use usagi_daemon::usecase::replacement::{SeamlessRefusal, seamless_refusal};
 mod daemon_fixture;
 
 use daemon_fixture::{Channel, DaemonHome};
-
-/// Daemon lifecycle tests spawn the same test binary as a background daemon.
-/// Serialize those starts so parallel integration tests cannot race its process
-/// discovery and readiness publication on a loaded CI runner.
-static DAEMON_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn shipping_issue_adapters_cover_defensive_parsing_and_missing_projection() {
@@ -388,9 +383,7 @@ fn mcp_responses(output: &Output) -> Vec<serde_json::Value> {
 
 #[test]
 fn welcome_entry_renders_the_welcome_screen() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     // 引数なしと `hop` はどちらも welcome 画面を選ぶ。テストでは stdout が tty でないため、
     // 合成ルートは対話ループの代わりに welcome の 1 フレームを描いて返す。
     let home = short_home();
@@ -456,9 +449,7 @@ fn daemon_stop_clears_a_stale_production_record() {
 /// until some unrelated daemon-backed request happens to run.
 #[test]
 fn daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.production_data_dir().join("daemon");
     let mut crashed = home.spawn_serve();
@@ -548,9 +539,7 @@ fn daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused() {
 
 #[test]
 fn fixture_reap_terminates_the_exact_bootstrap_broker_after_a_daemon_crash() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.production_data_dir().join("daemon");
     let mut daemon = home.spawn_serve();
@@ -612,9 +601,7 @@ fn fixture_reap_terminates_the_exact_bootstrap_broker_after_a_daemon_crash() {
 
 #[test]
 fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let output = home.run(&[OsStr::new("daemon"), OsStr::new("restart")]);
     assert!(
@@ -634,9 +621,7 @@ fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
 /// exist, which is why this is asserted on the real binary rather than a fixture.
 #[test]
 fn a_started_daemon_registers_its_generation_and_retires_it_on_stop() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.data_dir().join("daemon");
     let registry = daemon_dir.join("generations.json");
@@ -695,9 +680,7 @@ fn a_started_daemon_registers_its_generation_and_retires_it_on_stop() {
 /// only grow the document one entry per restart.
 #[test]
 fn repeated_restarts_leave_exactly_one_registered_generation() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let registry = home.data_dir().join("daemon/generations.json");
     let mut generations = Vec::new();
@@ -740,9 +723,7 @@ fn repeated_restarts_leave_exactly_one_registered_generation() {
 /// exactly what a rollover needs to be able to name a successor.
 #[test]
 fn a_standby_registers_beside_the_active_generation_without_publishing_a_locator() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.production_data_dir().join("daemon");
     let registry = daemon_dir.join("generations.json");
@@ -838,9 +819,7 @@ fn a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 /// retires only the active's own entry.
 #[test]
 fn a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.production_data_dir().join("daemon");
     let registry = daemon_dir.join("generations.json");
@@ -906,9 +885,7 @@ fn a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds() {
 /// forever, until someone deleted `generations.json` by hand.
 #[test]
 fn a_killed_standby_does_not_wedge_every_later_start() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.production_data_dir().join("daemon");
     let registry = daemon_dir.join("generations.json");
@@ -979,9 +956,7 @@ fn a_killed_standby_does_not_wedge_every_later_start() {
 /// process does not own.
 #[test]
 fn a_standby_is_refused_when_no_registered_active_owns_the_data_directory() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.production_data_dir().join("daemon");
     let registry = daemon_dir.join("generations.json");
@@ -1039,9 +1014,7 @@ fn a_standby_is_refused_when_no_registered_active_owns_the_data_directory() {
 /// alone is what the refusal rests on.
 #[test]
 fn a_second_active_daemon_is_refused_without_disturbing_the_registry() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.production_data_dir().join("daemon");
     let registry = daemon_dir.join("generations.json");
@@ -1076,9 +1049,7 @@ fn a_second_active_daemon_is_refused_without_disturbing_the_registry() {
 /// entry, and activates in its place.
 #[test]
 fn a_killed_active_leaves_a_stale_entry_the_next_start_reclaims() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let daemon_dir = home.production_data_dir().join("daemon");
     let registry = daemon_dir.join("generations.json");
@@ -1163,9 +1134,7 @@ fn registry_document(path: &Path) -> serde_json::Value {
 /// graceful path — retiring its endpoint and clearing its record.
 #[test]
 fn a_daemon_that_loses_its_instance_lock_shuts_itself_down_gracefully() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let mut abandoned = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
@@ -1202,9 +1171,7 @@ fn a_daemon_that_loses_its_instance_lock_shuts_itself_down_gracefully() {
 /// harness). Cleanup must be a silent no-op instead of resurrecting the tree.
 #[test]
 fn a_daemon_whose_data_directory_is_deleted_exits_without_re_creating_it() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let mut abandoned = home.spawn_serve_in(Channel::Local);
     let data_dir = home.data_dir();
@@ -1246,9 +1213,7 @@ fn a_daemon_whose_data_directory_is_deleted_exits_without_re_creating_it() {
 /// the same worktrees.
 #[test]
 fn a_second_daemon_for_the_same_workspace_is_refused_across_modes_and_data_homes() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let owner_home = short_home();
     let owner = owner_home.spawn_serve();
     let daemon_dir = owner_home.path().join("daemon");
@@ -1310,9 +1275,7 @@ fn a_second_daemon_for_the_same_workspace_is_refused_across_modes_and_data_homes
 /// it recorded proves the binding.
 #[test]
 fn a_client_started_daemon_binds_the_fixture_workspace_root() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     // An ordinary daemon-backed request; the daemon is autostarted by bootstrap
     // rather than by an explicit lifecycle command.
@@ -1340,9 +1303,7 @@ fn a_client_started_daemon_binds_the_fixture_workspace_root() {
 
 #[test]
 fn bound_non_repository_is_refused_before_and_after_daemon_cold_start() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let plain = daemon_fixture::short_dir("usagi-plain-cwd-");
     let request = [
@@ -1393,9 +1354,7 @@ fn bound_non_repository_is_refused_before_and_after_daemon_cold_start() {
 /// `stop` → fresh `start` (#507).
 #[test]
 fn explicit_artifact_replacement_runs_under_one_coalesced_operation() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let mut cleanup = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
@@ -1449,9 +1408,7 @@ fn explicit_artifact_replacement_runs_under_one_coalesced_operation() {
 
 #[test]
 fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let mut cleanup = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
@@ -1545,9 +1502,7 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
 
 #[test]
 fn ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let mut killed = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
@@ -1663,9 +1618,7 @@ fn ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle() {
 
 #[test]
 fn cli_daemon_request_autostarts_without_manual_daemon_start() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     // This integration test owns the lifecycle contract.  Command payload
     // rendering is covered at the CLI/IPC boundary, and can legitimately
     // differ between accepted and immediately completed requests.
@@ -1785,9 +1738,7 @@ fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
     use usagi_core::infrastructure::ipc::ClientWorkspace;
     use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let _daemon = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
@@ -1864,9 +1815,7 @@ fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() 
     use usagi_core::infrastructure::ipc::ClientWorkspace;
     use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let _daemon = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
@@ -2012,9 +1961,7 @@ fn hold_workspace_fence(workspace_root: &Path) -> std::fs::File {
 /// workspace's session list, which adoption must not reintroduce.
 #[test]
 fn opening_a_second_workspace_adopts_it_without_disturbing_the_first() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let opened = daemon_fixture::short_dir("usagi-opened-");
     let elsewhere = daemon_fixture::short_dir("usagi-elsewhere-");
@@ -2090,9 +2037,7 @@ fn opening_a_second_workspace_adopts_it_without_disturbing_the_first() {
 
 #[test]
 fn mcp_autostarts_without_manual_daemon_start() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let mut child = home
         .command(&[OsStr::new("mcp")])
@@ -2162,9 +2107,7 @@ fn start_daemon_for(home: &DaemonHome, workspace: &Path) {
 
 #[test]
 fn mcp_store_tools_round_trip_through_stdio_and_durable_files() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let (workspace, session) = linked_issue_session("e2e");
     start_daemon_for(&home, workspace.path());
@@ -2198,9 +2141,7 @@ fn mcp_store_tools_round_trip_through_stdio_and_durable_files() {
 
 #[test]
 fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let (workspace, session) = linked_issue_session("lifecycle");
     start_daemon_for(&home, workspace.path());
@@ -2324,9 +2265,7 @@ fn config_entry_renders_the_config_screen() {
 
 #[test]
 fn config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap() {
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let mut config = home.command(&[OsStr::new("config")]);
     config.stdin(Stdio::null());
@@ -2488,9 +2427,7 @@ fn special_entry_argv_errors_are_rejected_before_runtime_side_effects() {
         args: &'static [&'static str],
     }
 
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let cases = [
         Case {
             name: "unknown daemon verb",
@@ -2664,9 +2601,7 @@ fn one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_o
     use usagi_daemon::infrastructure::generation_registry::TrustedGenerationDirectory;
     use usagi_daemon::infrastructure::unix_transport::connect_generation;
 
-    let _guard = DAEMON_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let _daemon = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");

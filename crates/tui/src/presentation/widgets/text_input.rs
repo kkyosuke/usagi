@@ -1,9 +1,9 @@
 //! 端末非依存の 1 行テキスト入力バッファ。
 //!
 //! [`TextInput`] は入力済みテキストとキャレット位置を持ち、あらゆる入力欄が欲しがる
-//! 編集操作を実装する: キャレット位置への挿入、前後どちらかの削除、移動（←/→ で 1 文字、
-//! Home/End で端）。キャレットは `char` 境界に乗るバイトオフセットなので、複数バイト文字
-//! （日本語など）でも正しく動く — 移動・削除は 1 文字単位で、文字の途中に落ちない。
+//! 編集操作を実装する: キャレット位置への挿入、前後どちらかの削除、移動（←/→ で 1 書記素、
+//! Home/End で端）。キャレットは Unicode extended grapheme cluster 境界に乗るバイト
+//! オフセットなので、結合文字・絵文字修飾子・ZWJ sequence を途中で分割しない。
 //!
 //! 端末 IO を持たないので直接テスト可能で、全画面が append/pop を再実装せず 1 つの編集挙動を
 //! 共有できる。描画側は [`TextInput::before`] / [`TextInput::after`] で行を割り、編集位置に
@@ -13,7 +13,11 @@
 //! キャレットとの間を [`TextInput::selection`] が正規化した `start..end` のバイト範囲で返す。
 //! 選択中の [`TextInput::insert`] / [`TextInput::backspace`] / [`TextInput::delete_forward`] は
 //! まず選択範囲を消してから通常動作へ進み、非選択移動（`move_*`）は選択を解除する。アンカーも
-//! `char` 境界に乗るので、選択・置換・削除が複数バイト文字の途中に落ちることはない。
+//! 書記素境界に乗るので、選択・置換・削除が見た目の 1 文字の途中に落ちることはない。
+
+use unicode_segmentation::UnicodeSegmentation;
+
+use usagi_core::domain::presentation_text::presentation_character_is_safe;
 
 /// キャレット付きの編集可能な 1 行テキスト。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -21,11 +25,11 @@ pub struct TextInput {
     /// 入力済みテキスト。
     value: String,
     /// キャレット位置。`value` へのバイトオフセットで、常に `0..=value.len()` の
-    /// `char` 境界に乗る。
+    /// 書記素境界に乗る。
     cursor: usize,
     /// 選択の起点。`None` は選択なし。`Some(anchor)` のとき選択範囲はアンカーと
     /// キャレットの間で、`anchor == cursor` の空選択では [`Self::selection`] が `None` を
-    /// 返す。アンカーも `char` 境界に乗るバイトオフセット。
+    /// 返す。アンカーも書記素境界に乗るバイトオフセット。
     anchor: Option<usize>,
 }
 
@@ -54,7 +58,7 @@ impl TextInput {
         &self.value
     }
 
-    /// `char` 境界に乗ったバイトオフセットのキャレット位置。描画側が行を割って
+    /// 書記素境界に乗ったバイトオフセットのキャレット位置。描画側が行を割って
     /// 編集位置にキャレットを描くのに使う。
     #[must_use]
     pub fn cursor(&self) -> usize {
@@ -111,17 +115,28 @@ impl TextInput {
     /// キャレット位置に 1 文字挿入し、キャレットをその後ろへ進める。選択があれば
     /// まず選択範囲を置換する（削除してから挿入）。
     pub fn insert(&mut self, c: char) {
+        if !presentation_character_is_safe(c) {
+            return;
+        }
         self.take_selection();
         self.value.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
+        self.cursor = self.boundary_at_or_after(self.cursor + c.len_utf8());
     }
 
     /// キャレット位置に文字列をまとめて挿入し、キャレットをその後ろへ進める。選択があれば
     /// 貼り付けた文字列で置換する。空文字列でも選択範囲は削除される。
     pub fn insert_str(&mut self, text: &str) {
+        let filtered = text
+            .chars()
+            .filter(|character| presentation_character_is_safe(*character))
+            .collect::<String>();
+        if !text.is_empty() && filtered.is_empty() {
+            return;
+        }
         self.take_selection();
-        self.value.insert_str(self.cursor, text);
-        self.cursor += text.len();
+        let insertion_end = self.cursor + filtered.len();
+        self.value.insert_str(self.cursor, &filtered);
+        self.cursor = self.boundary_at_or_after(insertion_end);
     }
 
     /// キャレットの手前の 1 文字を削除し、キャレットを戻す。選択があれば選択範囲を
@@ -224,20 +239,32 @@ impl TextInput {
         removed
     }
 
-    /// キャレット直前の `char` 境界のバイトオフセット（先頭なら 0）。
+    /// キャレット直前の書記素境界のバイトオフセット（先頭なら 0）。
     fn prev_boundary(&self) -> usize {
         self.value[..self.cursor]
-            .char_indices()
+            .grapheme_indices(true)
             .next_back()
-            .map_or(0, |(i, _)| i)
+            .map_or(0, |(index, _)| index)
     }
 
-    /// キャレット直後の `char` 境界のバイトオフセット（末尾なら現在位置）。
+    /// キャレット直後の書記素境界のバイトオフセット（末尾なら現在位置）。
     fn next_boundary(&self) -> usize {
         self.value[self.cursor..]
-            .chars()
+            .graphemes(true)
             .next()
-            .map_or(self.cursor, |c| self.cursor + c.len_utf8())
+            .map_or(self.cursor, |grapheme| self.cursor + grapheme.len())
+    }
+
+    /// Return the first grapheme boundary at or after a byte offset. Insertion
+    /// can merge the clusters on either side (for example by inserting ZWJ),
+    /// so simply adding the inserted byte length would violate the cursor
+    /// invariant.
+    fn boundary_at_or_after(&self, byte_offset: usize) -> usize {
+        self.value
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .find(|index| *index >= byte_offset)
+            .unwrap_or(self.value.len())
     }
 }
 
@@ -281,8 +308,8 @@ mod tests {
         let mut input = TextInput::with_value("aいz");
         input.move_left();
         input.insert_str("貼\n付");
-        assert_eq!(input.value(), "aい貼\n付z");
-        assert_eq!(input.cursor(), "aい貼\n付".len());
+        assert_eq!(input.value(), "aい貼付z");
+        assert_eq!(input.cursor(), "aい貼付".len());
 
         input.select_home();
         input.insert_str("置換");
@@ -351,6 +378,48 @@ mod tests {
         input.move_end();
         assert!(input.backspace()); // 末尾の い を消す
         assert_eq!(input.value(), "あん");
+    }
+
+    #[test]
+    fn editing_steps_whole_grapheme_clusters() {
+        for grapheme in ["e\u{301}", "👍🏽", "👩‍👩‍👧‍👦", "か\u{3099}"] {
+            let mut input = TextInput::with_value(format!("a{grapheme}z"));
+            input.move_left();
+            let after_z = input.cursor();
+            input.move_left();
+            assert_eq!(input.before(), "a", "{grapheme:?}");
+            assert_eq!(input.after(), format!("{grapheme}z"), "{grapheme:?}");
+            input.select_right();
+            assert_eq!(input.selection(), Some((1, after_z)), "{grapheme:?}");
+            assert!(input.backspace());
+            assert_eq!(input.value(), "az", "{grapheme:?}");
+        }
+    }
+
+    #[test]
+    fn insertion_keeps_the_cursor_on_a_boundary_when_clusters_merge() {
+        let mut input = TextInput::with_value("👩👧");
+        input.move_home();
+        input.move_right();
+        input.insert('\u{200d}');
+        assert_eq!(input.value(), "👩‍👧");
+        assert_eq!(input.cursor(), input.value().len());
+        assert!(input.backspace());
+        assert!(input.value().is_empty());
+    }
+
+    #[test]
+    fn one_line_input_discards_terminal_and_bidi_controls() {
+        let mut input = TextInput::with_value("safe");
+        input.insert_str("\n\t\u{1b}\u{202e}text");
+        assert_eq!(input.value(), "safetext");
+
+        input.select_home();
+        input.insert('\u{7}');
+        assert!(
+            input.selection().is_some(),
+            "rejected input must not erase a selection"
+        );
     }
 
     #[test]

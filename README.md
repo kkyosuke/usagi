@@ -67,42 +67,12 @@ Agent 行をクリックすると、その project の Closeup または該当 A
 └──────────────────────┴──────────────────────────────────────────┘
 ```
 
-Home の基本操作は次のとおり。
+Home では画面上のヒントか `?`（live pane では leader に続けて `?`）で、その場で有効な操作を確認できる。
+session がない workspace を開いた直後は session 行を選択しないため、画面上の `+ new session` を選ぶか、
+ヘルプに表示される作成操作を使う。キーボード入力の完全な一覧と leader の規則は
+[キーバインド](document/11-keybindings.md)だけを正本とし、README には複製しない。
 
-session がない workspace を開いた直後は session 行を選択しない。`+ new session` は `↑` / `↓` で明示選択してから
-`Enter` / `t` で開くか、`Ctrl-A` で直接開く。
-
-| 操作 | 動作 |
-|---|---|
-| `↑` / `↓` | session を選ぶ |
-| `←` / `→` | Switch で前 / 次の project tab へ移動する |
-| `Enter` / `t` | 選択した session の Closeup、または明示選択した `+ new session` の作成を開く |
-| `Ctrl-A` | Switch で新規 session の作成を直接開く |
-| `Ctrl-O o` | live pane から Switch へ戻る |
-| `Ctrl-O a` | 選択中 target の action を開く |
-| `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-X` で閉じる） |
-| `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
-| `Ctrl-O` → `0` | 全 project / session の fuzzy finder を開く（`Ctrl-X` は project tab の detach） |
-| `Ctrl-O t` / `Ctrl-O Ctrl-T` | workspace root の Shell drawer を開閉する |
-| `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
-| `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
-| `Ctrl-O b` / `Ctrl-O Ctrl-B` | Director 内で一階層戻る |
-| `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Work Runs を直接開く |
-| `Ctrl-O n` / `Ctrl-O Ctrl-N` | Director の New Conversation / Start Work Run を開く。Shell では新しい terminal tab を追加する |
-| `Ctrl-O [` / `Ctrl-O ]` | 前 / 次の pane tab を選ぶ |
-| `Ctrl-O {` / `Ctrl-O }` | 選択中の pane tab を前 / 次へ並べ替える |
-| `Ctrl-O p` / `Ctrl-O Ctrl-P` | Pull Request 一覧を開く |
-| `Ctrl-O v` / `Ctrl-O Ctrl-V` | Preview を開く |
-| `Ctrl-O d` / `Ctrl-O Ctrl-D` | pending Decision 一覧を開く |
-| `Ctrl-O s` / `Ctrl-O Ctrl-S` | Scratchpad を開く |
-| `?` / live pane の `Ctrl-O ?` | 現在の画面で使えるキーボードショートカットを表示する |
-| `:` | Overview のコマンドパレットを開く |
-| `Ctrl-X` | Switch で選択中の session を安全に削除する |
-| `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
-
-leader 後の文字 shortcut は、2 打目の `Ctrl` の有無を同一視する。たとえば `Ctrl-O n` と
-`Ctrl-O Ctrl-N` は同じ操作になる。直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
-live terminal にフォーカスがある間は、Director の root Agent を含めて `Ctrl-O` prefix 以外の入力を PTY へ直接渡す。
+live terminal にフォーカスがある間は、Director の root Agent を含めて leader 以外の入力を PTY へ直接渡す。
 TUI を離れる操作は
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。

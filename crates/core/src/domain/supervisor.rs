@@ -17,6 +17,8 @@ use crate::domain::{
     pr_inventory::{GitHubRepository, canonicalize},
 };
 
+pub use crate::domain::presentation_text::presentation_text_is_safe;
+
 /// A `UUIDv7` identity for one never-reused supervisor run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SupervisorRunId(Uuid);
@@ -238,24 +240,6 @@ pub const NO_ARTIFACT_CONTRACT: ArtifactContract = ArtifactContract::None;
 /// with all required checks passing.
 pub const GOAL_REVIEW_READY_ARTIFACT_CONTRACT: ArtifactContract =
     ArtifactContract::GoalReviewReadyPullRequestV1;
-
-/// Whether text can be embedded in terminal presentation without changing
-/// control flow or visual direction. Rendering layers still escape defensively;
-/// this is the admission authority for values which are themselves UI labels.
-#[must_use]
-pub fn presentation_text_is_safe(value: &str) -> bool {
-    value.chars().all(|character| {
-        !character.is_control()
-            && !matches!(
-                character,
-                '\u{061c}'
-                    | '\u{200e}'
-                    | '\u{200f}'
-                    | '\u{202a}'..='\u{202e}'
-                    | '\u{2066}'..='\u{206f}'
-            )
-    })
-}
 
 impl TaskId {
     /// Creates an opaque task key.
