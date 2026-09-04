@@ -1,5 +1,5 @@
 use super::{
-    AgentReadinessCommand, AvailableModels, DefaultModel, EnvBindings, GardenSize, LocalSettings,
+    AgentReadinessCommand, AvailableModels, DefaultModel, EnvBindings, LocalSettings,
     ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme, WorkMode,
 };
 
@@ -45,7 +45,6 @@ fn settings_default_uses_the_system_theme() {
     let settings = Settings::default();
     assert_eq!(settings.theme, Theme::System);
     assert_eq!(settings.modal_selection_mode, ModalSelectionMode::Action);
-    assert_eq!(settings.garden_size, GardenSize::Medium);
     assert_eq!(settings.default_model, DefaultModel::OpenAi);
     assert!(settings.issue_enabled);
     assert!(settings.memory_enabled);
@@ -67,11 +66,22 @@ fn settings_ignore_the_removed_local_llm_field() {
 }
 
 #[test]
+fn settings_ignore_the_removed_garden_size_field() {
+    let settings: Settings =
+        serde_json::from_str(r#"{"theme":"dark","garden_size":"large"}"#).unwrap();
+    assert_eq!(settings.theme, Theme::Dark);
+    assert!(
+        !serde_json::to_string(&settings)
+            .unwrap()
+            .contains("garden_size")
+    );
+}
+
+#[test]
 fn settings_round_trip_through_json() {
     let settings = Settings {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Prompt,
-        garden_size: GardenSize::Large,
         pr_auto_open: PrAutoOpen::Always,
         default_model: DefaultModel::Claude,
         default_branch: Some("refs/heads/main".to_owned()),
@@ -85,7 +95,6 @@ fn settings_round_trip_through_json() {
     assert!(json.contains("\"env\":{\"GH_TOKEN\":\"op://Private/GitHub/token\"}"));
     assert!(json.contains("\"theme\":\"dark\""));
     assert!(json.contains("\"modal_selection_mode\":\"prompt\""));
-    assert!(json.contains("\"garden_size\":\"large\""));
     assert!(json.contains("\"default_model\":\"claude\""));
     assert!(json.contains("\"default_branch\":\"refs/heads/main\""));
     assert!(json.contains("\"issue_enabled\":false"));
@@ -95,18 +104,6 @@ fn settings_round_trip_through_json() {
     // Exercise the derived Clone / Debug.
     assert_eq!(settings.clone(), settings);
     assert!(format!("{settings:?}").contains("Dark"));
-}
-
-#[test]
-fn garden_size_cycles_and_unknown_tokens_fall_back_to_medium() {
-    assert_eq!(GardenSize::Small.cycle(true), GardenSize::Medium);
-    assert_eq!(GardenSize::Medium.cycle(true), GardenSize::Large);
-    assert_eq!(GardenSize::Large.cycle(true), GardenSize::Small);
-    assert_eq!(GardenSize::Small.cycle(false), GardenSize::Large);
-    assert_eq!(
-        serde_json::from_str::<GardenSize>("\"future_size\"").unwrap(),
-        GardenSize::Medium
-    );
 }
 
 #[test]
@@ -399,7 +396,6 @@ fn local_settings_overlay_only_workspace_owned_fields() {
     let global = Settings {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Action,
-        garden_size: GardenSize::Large,
         pr_auto_open: PrAutoOpen::SwitchOnly,
         default_model: DefaultModel::Claude,
         default_branch: None,
@@ -422,7 +418,6 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         Settings {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Action,
-            garden_size: GardenSize::Large,
             pr_auto_open: PrAutoOpen::SwitchOnly,
             default_model: DefaultModel::OpenAi,
             default_branch: Some("refs/remotes/origin/main".to_owned()),
@@ -545,7 +540,6 @@ fn full_settings_convert_to_workspace_owned_values_only() {
     let settings = Settings {
         theme: Theme::Light,
         modal_selection_mode: ModalSelectionMode::Prompt,
-        garden_size: GardenSize::Large,
         pr_auto_open: PrAutoOpen::NotifyOnly,
         default_model: DefaultModel::Claude,
         default_branch: Some("refs/heads/main".to_owned()),
@@ -561,7 +555,6 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         Settings {
             theme: Theme::System,
             modal_selection_mode: ModalSelectionMode::Action,
-            garden_size: GardenSize::Medium,
             pr_auto_open: PrAutoOpen::SwitchOnly,
             default_model: DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),
