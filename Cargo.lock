@@ -1082,7 +1082,7 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "usagi"
-version = "4.2.0"
+version = "4.3.0"
 dependencies = [
  "anyhow",
  "chrono",
