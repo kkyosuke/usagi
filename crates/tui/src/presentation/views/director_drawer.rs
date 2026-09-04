@@ -9,10 +9,16 @@ use crate::presentation::theme::{Role, Style};
 use crate::presentation::views::work_run::{WorkRunFreshness, WorkRunProgress, WorkRunProjection};
 use crate::presentation::views::workspace::TerminalViewProjection;
 use crate::presentation::widgets::{self, modal};
+use crate::presentation::workspace_runtime::{
+    DirectorOrganizationTarget, DirectorOverviewFocus, DirectorOverviewScope,
+};
+use crate::usecase::application::controller::DirectorRoute;
 use crate::usecase::application::terminal_selection::TerminalPoint;
 use crate::usecase::application::work_run_control::WorkRunControlMode;
+#[cfg(test)]
+use usagi_core::domain::supervisor::TaskState;
 use usagi_core::domain::supervisor::{
-    EscalationDecision, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskState,
+    EscalationDecision, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
 };
 
 /// Desired lower bound while the drawer can coexist with a visible background.
@@ -63,6 +69,8 @@ pub struct DirectorOrganizationRow {
     pub depth: usize,
     pub label: String,
     pub status: String,
+    pub target: Option<DirectorOrganizationTarget>,
+    pub selected: bool,
 }
 
 /// Presentation-safe state of the drawer's explicit `New` chooser.
@@ -123,6 +131,11 @@ pub struct DirectorDrawerProjection {
     pub focused: bool,
     /// Whether this drawer represents the opt-in objective-driven workflow.
     pub goal_driven: bool,
+    /// Explicit Director screen. Rendering never infers it from the presence of
+    /// terminal, launch, or organization material.
+    pub route: DirectorRoute,
+    pub overview_focus: DirectorOverviewFocus,
+    pub overview_scope: Option<DirectorOverviewScope>,
     pub conversations: Vec<DirectorConversation>,
     pub organization: Vec<DirectorOrganizationRow>,
     pub terminal_view: Option<TerminalViewProjection>,
@@ -132,6 +145,8 @@ pub struct DirectorDrawerProjection {
     pub interrupted_detail: Option<String>,
     /// Drawer feedback used when the selected conversation has no live terminal.
     pub feedback: Option<String>,
+    /// Goal / conversation breadcrumb shown on the Agent screen.
+    pub agent_context: Option<String>,
     pub new: DirectorNewProjection,
     /// Daemon-owned, redaction-safe progress. The shared projection owns
     /// ordering, aggregation, and observation freshness for every surface.
@@ -162,6 +177,14 @@ pub struct DirectorDrawerGeometry {
     pub width: usize,
     pub height: usize,
     pub full_width: bool,
+}
+
+/// Stable action resolved from a pointer press in Director Overview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectorOverviewHit {
+    Scope(DirectorOverviewScope),
+    Conversation(usize),
+    Organization(DirectorOrganizationTarget),
 }
 
 /// Future Agent terminal viewport inside the drawer, independent from the
@@ -204,8 +227,8 @@ pub fn geometry(raw_height: usize, raw_width: usize) -> DirectorDrawerGeometry {
 pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> DirectorTerminalViewport {
     let drawer = geometry(raw_height, raw_width);
     DirectorTerminalViewport {
-        // borders + padding + selector + separators + composer + footer
-        rows: drawer.height.saturating_sub(9),
+        // borders + padding + route header + separator + context + composer + footer
+        rows: drawer.height.saturating_sub(10),
         // left/right borders and one cell of padding on both sides
         cols: drawer.width.saturating_sub(4),
     }
@@ -242,7 +265,7 @@ pub fn terminal_point_at(
     let drawer = geometry(raw_height, raw_width);
     let viewport = terminal_viewport(raw_height, raw_width);
     let column = usize::from(column).checked_sub(drawer.left.saturating_add(2))?;
-    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(4))?;
+    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(5))?;
     if column >= viewport.cols || content_row >= viewport.rows {
         return None;
     }
@@ -262,6 +285,7 @@ pub fn new_button_at(
     column: u16,
     row: u16,
     launching: bool,
+    goal_driven: bool,
 ) -> bool {
     if launching {
         return false;
@@ -271,8 +295,108 @@ pub fn new_button_at(
         return false;
     }
     let right = drawer.left.saturating_add(drawer.width).saturating_sub(2);
-    let left = right.saturating_sub(widgets::display_width("[ New ]"));
+    let left = right.saturating_sub(widgets::display_width(new_button_label(goal_driven)));
     (left..right).contains(&usize::from(column))
+}
+
+/// Resolve one Overview row using the same horizontal/stacked layout as the
+/// renderer. Synthetic headings and empty-state rows deliberately return no
+/// action.
+#[must_use]
+pub fn overview_hit_at(
+    raw_height: usize,
+    raw_width: usize,
+    projection: &DirectorDrawerProjection,
+    column: u16,
+    row: u16,
+) -> Option<DirectorOverviewHit> {
+    if projection.route != DirectorRoute::Overview {
+        return None;
+    }
+    let drawer = geometry(raw_height, raw_width);
+    let body_height = drawer.height.saturating_sub(4);
+    let width = drawer.width.saturating_sub(4);
+    let inner_left = drawer.left.saturating_add(2);
+    let column = usize::from(column).checked_sub(inner_left)?;
+    if column >= width {
+        return None;
+    }
+    let notice_rows = overview_notice_rows(projection);
+    let content_top = drawer.top.saturating_add(4 + notice_rows);
+    let row = usize::from(row);
+    let subject_rows = overview_subject_rows(projection, width);
+    let organization_rows = overview_organization_rows(projection);
+    if width >= 64 {
+        let left_width = (width.saturating_sub(3) * 2 / 5).max(20);
+        let display_index = row.checked_sub(content_top)?;
+        if column < left_width {
+            return overview_subject_hit(projection, display_index);
+        }
+        if column >= left_width.saturating_add(3) {
+            return overview_organization_hit(projection, display_index);
+        }
+        return None;
+    }
+
+    let content = body_height
+        .saturating_sub(2 + notice_rows)
+        .saturating_sub(1);
+    let subject_capacity = content.saturating_sub(1) / 2;
+    let subject_drawn = subject_rows.len().min(subject_capacity);
+    let display_index = row.checked_sub(content_top)?;
+    if display_index < subject_drawn {
+        return overview_subject_hit(projection, display_index);
+    }
+    let organization_top = content_top.saturating_add(subject_drawn + 1);
+    let organization_index = row.checked_sub(organization_top)?;
+    (organization_index < organization_rows.len())
+        .then(|| overview_organization_hit(projection, organization_index))
+        .flatten()
+}
+
+fn overview_subject_hit(
+    projection: &DirectorDrawerProjection,
+    display_index: usize,
+) -> Option<DirectorOverviewHit> {
+    let data_index = display_index.checked_sub(1)?;
+    if projection.goal_driven {
+        if let Some(run) = projection.work_runs.runs().get(data_index) {
+            return Some(DirectorOverviewHit::Scope(DirectorOverviewScope::WorkRun(
+                run.supervisor_run_id,
+            )));
+        }
+        let unassigned_display_index = projection.work_runs.runs().len()
+            + 1
+            + usize::from(projection.work_runs.runs().is_empty());
+        return (display_index == unassigned_display_index).then_some(DirectorOverviewHit::Scope(
+            DirectorOverviewScope::Unassigned,
+        ));
+    }
+    projection
+        .conversations
+        .get(data_index)
+        .map(|_| DirectorOverviewHit::Conversation(data_index))
+}
+
+fn overview_organization_hit(
+    projection: &DirectorDrawerProjection,
+    display_index: usize,
+) -> Option<DirectorOverviewHit> {
+    let data_index = display_index.checked_sub(1)?;
+    projection
+        .organization
+        .get(data_index)?
+        .target
+        .map(DirectorOverviewHit::Organization)
+}
+
+/// Whether a press lands on Agent's visible Overview breadcrumb.
+#[must_use]
+pub fn overview_button_at(raw_height: usize, raw_width: usize, column: u16, row: u16) -> bool {
+    let drawer = geometry(raw_height, raw_width);
+    usize::from(row) == drawer.top.saturating_add(2)
+        && (drawer.left.saturating_add(2)..drawer.left.saturating_add(14))
+            .contains(&usize::from(column))
 }
 
 /// Render the drawer over a dimmed Home frame.
@@ -335,100 +459,270 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
     if height == 0 {
         return Vec::new();
     }
-    let mut rows = vec![selector_row(width, projection)];
+    let mut rows = vec![route_header_row(width, projection)];
     if height > 1 {
         rows.push(Style::new().dim().paint(&"─".repeat(width)));
     }
 
-    if let DirectorNewProjection::Choosing {
-        candidates,
-        selected,
-    } = &projection.new
-    {
-        return provider_picker_body(width, height, rows, candidates, *selected);
+    match projection.route {
+        DirectorRoute::Launcher { .. } => match &projection.new {
+            DirectorNewProjection::Choosing {
+                candidates,
+                selected,
+            } => provider_picker_body(width, height, rows, candidates, *selected),
+            DirectorNewProjection::GoalComposer {
+                candidates,
+                selected,
+                goal,
+            } => goal_composer_body(width, height, rows, candidates, *selected, goal),
+            DirectorNewProjection::Empty => launcher_empty_body(width, height, rows),
+            DirectorNewProjection::Ready | DirectorNewProjection::Launching => {
+                finish_rows(width, height, rows, "Esc: back")
+            }
+        },
+        DirectorRoute::Overview => {
+            if matches!(
+                projection.work_run_control.mode,
+                WorkRunControlMode::ConfirmCancel
+                    | WorkRunControlMode::ResolveEscalation
+                    | WorkRunControlMode::Submitting
+                    | WorkRunControlMode::Retry
+            ) {
+                work_run_control_body(width, height, rows, projection)
+            } else {
+                overview_body(width, height, rows, projection)
+            }
+        }
+        DirectorRoute::Agent => agent_body(width, height, rows, projection),
     }
-    if let DirectorNewProjection::GoalComposer {
-        candidates,
-        selected,
-        goal,
-    } = &projection.new
-    {
-        return goal_composer_body(width, height, rows, candidates, *selected, goal);
-    }
+}
 
-    if projection.work_run_control.mode != WorkRunControlMode::Closed {
-        return work_run_control_body(width, height, rows, projection);
-    }
+fn finish_rows(width: usize, height: usize, mut rows: Vec<String>, footer: &str) -> Vec<String> {
+    rows.truncate(height.saturating_sub(1));
+    rows.resize(height.saturating_sub(1), String::new());
+    rows.push(Style::new().dim().paint(footer));
+    rows.into_iter()
+        .map(|row| widgets::clip_to_width(&row, width))
+        .collect()
+}
 
-    if let Some(run) = projection.work_runs.primary() {
-        rows.extend(work_run_rows(width, run, projection.work_runs.freshness()));
-    } else if projection.work_runs.freshness() == WorkRunFreshness::Unavailable {
+fn launcher_empty_body(width: usize, height: usize, mut rows: Vec<String>) -> Vec<String> {
+    let capacity = height.saturating_sub(rows.len() + 1);
+    let before = capacity.saturating_sub(2) / 2;
+    rows.extend(std::iter::repeat_n(String::new(), before));
+    if capacity > before {
+        rows.push(Role::Accent.style().bold().paint("No Agent CLI installed"));
+    }
+    if capacity > before + 1 {
+        rows.push(
+            Style::new()
+                .dim()
+                .paint("Install claude, codex, or sakana.ai and check Config."),
+        );
+    }
+    finish_rows(width, height, rows, "Esc: back to previous screen")
+}
+
+fn overview_body(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    projection: &DirectorDrawerProjection,
+) -> Vec<String> {
+    if projection.work_runs.freshness() == WorkRunFreshness::Unavailable {
         rows.push(
             Role::Warning
                 .style()
-                .bold()
-                .paint("Work Run progress unavailable"),
+                .paint("Stale · last daemon update unavailable"),
         );
     }
-
-    let footer_hint = if projection.goal_driven {
-        "Enter: send command · Ctrl-O w: Work Runs · click: focus"
+    if let Some(feedback) = &projection.work_run_control.feedback {
+        rows.push(Role::Warning.style().paint(feedback));
+    }
+    if let Some(feedback) = &projection.feedback {
+        rows.push(Role::Warning.style().paint(feedback));
+    }
+    let content = height.saturating_sub(rows.len() + 1);
+    if width >= 64 {
+        let left_width = (width.saturating_sub(3) * 2 / 5).max(20);
+        let right_width = width.saturating_sub(left_width + 3);
+        let subject_rows = overview_subject_rows(projection, left_width);
+        let organization_rows = overview_organization_rows(projection);
+        for index in 0..content {
+            let left = subject_rows.get(index).map_or("", String::as_str);
+            let right = organization_rows.get(index).map_or("", String::as_str);
+            rows.push(join_overview_columns(left, left_width, right, right_width));
+        }
     } else {
-        "Enter: send command · Ctrl-O n: New · Ctrl-O Ctrl-G: close"
+        let subject_rows = overview_subject_rows(projection, width);
+        let organization_rows = overview_organization_rows(projection);
+        let subject_capacity = content.saturating_sub(1) / 2;
+        rows.extend(subject_rows.into_iter().take(subject_capacity));
+        if rows.len() < height.saturating_sub(1) {
+            rows.push(Style::new().dim().paint(&"─".repeat(width)));
+        }
+        let remaining = height.saturating_sub(rows.len() + 1);
+        rows.extend(organization_rows.into_iter().take(remaining));
+    }
+    let footer = if projection.goal_driven {
+        "↑↓ select · Tab/←→ region · Enter action/open · Ctrl-O g close"
+    } else {
+        "↑↓ select · Tab/←→ region · Enter open · Ctrl-O g close"
     };
-    let content_capacity = height.saturating_sub(rows.len() + 1);
-    if matches!(projection.new, DirectorNewProjection::Empty) {
-        let before = content_capacity.saturating_sub(3) / 2;
-        rows.extend(std::iter::repeat_n(String::new(), before));
-        if content_capacity > before {
-            rows.push(Role::Accent.style().bold().paint("No Agent CLI installed"));
-        }
-        if content_capacity > before + 1 {
-            rows.push(
-                Style::new()
-                    .dim()
-                    .paint("Install claude, codex, or sakana.ai and check Config."),
+    finish_rows(width, height, rows, footer)
+}
+
+fn overview_notice_rows(projection: &DirectorDrawerProjection) -> usize {
+    usize::from(projection.work_runs.freshness() == WorkRunFreshness::Unavailable)
+        + usize::from(projection.work_run_control.feedback.is_some())
+        + usize::from(projection.feedback.is_some())
+}
+
+fn overview_subject_rows(projection: &DirectorDrawerProjection, width: usize) -> Vec<String> {
+    let focused = projection.overview_focus == DirectorOverviewFocus::Subjects;
+    let mut rows = vec![
+        Role::Accent
+            .style()
+            .bold()
+            .paint(if projection.goal_driven {
+                "Goals / Work Runs"
+            } else {
+                "Conversations"
+            }),
+    ];
+    if projection.goal_driven {
+        for run in projection.work_runs.runs() {
+            let selected = projection.overview_scope
+                == Some(DirectorOverviewScope::WorkRun(run.supervisor_run_id));
+            let marker = selection_marker(selected, focused);
+            let progress = WorkRunProgress::from_run(run);
+            let suffix = format!(
+                " · {} {}/{} A{}/{}",
+                run_state_label(run.state),
+                progress.succeeded_tasks,
+                progress.total_tasks,
+                progress.active_agents,
+                progress.max_agents,
             );
+            let label_width = width
+                .saturating_sub(widgets::display_width(marker) + 1)
+                .saturating_sub(widgets::display_width(&suffix));
+            let label = widgets::clip_to_width(
+                run.display_label.as_deref().unwrap_or("Untitled"),
+                label_width,
+            );
+            rows.push(format!("{marker} {label}{suffix}"));
         }
-        if content_capacity > before + 2 {
-            rows.push(Style::new().dim().paint("Esc returns to conversations."));
+        let selected = projection.overview_scope == Some(DirectorOverviewScope::Unassigned);
+        rows.push(format!(
+            "{} Unassigned",
+            selection_marker(selected, focused)
+        ));
+        if projection.work_runs.runs().is_empty() {
+            rows.insert(1, Style::new().dim().paint("No goals yet"));
         }
-    } else if let Some(view) = &projection.terminal_view {
+    } else if projection.conversations.is_empty() {
+        rows.push(Style::new().dim().paint("No conversations yet"));
+    } else {
+        rows.extend(projection.conversations.iter().map(|conversation| {
+            format!(
+                "{} {}",
+                selection_marker(conversation.selected, focused),
+                conversation.label
+            )
+        }));
+    }
+    rows
+}
+
+fn overview_organization_rows(projection: &DirectorDrawerProjection) -> Vec<String> {
+    let focused = projection.overview_focus == DirectorOverviewFocus::Organization;
+    let scope = if projection.goal_driven {
+        match projection.overview_scope {
+            Some(DirectorOverviewScope::WorkRun(_)) => "selected Goal",
+            Some(DirectorOverviewScope::Unassigned) | None => "Unassigned",
+        }
+    } else {
+        "workspace"
+    };
+    let mut rows = vec![
+        Role::Accent
+            .style()
+            .bold()
+            .paint(&format!("Organization · {scope}")),
+    ];
+    if projection.organization.is_empty() {
+        rows.push(Style::new().dim().paint("No assigned Sessions or Agents"));
+        return rows;
+    }
+    rows.extend(projection.organization.iter().map(|member| {
+        let branch = if member.depth == 0 { "" } else { "└─ " };
+        format!(
+            "{} {}{}{} · {}",
+            selection_marker(member.selected, focused),
+            "  ".repeat(member.depth),
+            branch,
+            member.label,
+            member.status
+        )
+    }));
+    rows
+}
+
+fn selection_marker(selected: bool, focused: bool) -> &'static str {
+    match (selected, focused) {
+        (true, true) => "›",
+        (true, false) => "•",
+        (false, _) => " ",
+    }
+}
+
+fn join_overview_columns(left: &str, left_width: usize, right: &str, right_width: usize) -> String {
+    let left = widgets::clip_to_width(left, left_width);
+    let gap = left_width.saturating_sub(widgets::display_width(&left));
+    format!(
+        "{left}{} │ {}",
+        " ".repeat(gap),
+        widgets::clip_to_width(right, right_width)
+    )
+}
+
+fn agent_body(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    projection: &DirectorDrawerProjection,
+) -> Vec<String> {
+    rows.push(Style::new().dim().paint(&format!(
+        "Context: {}",
+        projection.agent_context.as_deref().unwrap_or("Workspace")
+    )));
+    let default_footer = "Ctrl-O w: Overview · Ctrl-O [/]: Agent · Ctrl-O g: close";
+    if let Some(view) = &projection.terminal_view {
         return terminal_conversation_body(
             width,
             height,
             rows,
             view,
             projection.command.as_ref(),
-            footer_hint,
+            default_footer,
         );
-    } else if let Some(detail) = &projection.interrupted_detail {
-        rows.push(Style::new().dim().paint(detail));
-    } else if !projection.organization.is_empty() {
-        rows.push(Role::Accent.style().bold().paint("Organization"));
-        for member in &projection.organization {
-            let branch = if member.depth == 0 { "" } else { "└─ " };
-            rows.push(format!(
-                "{}{}{}  {}",
-                "  ".repeat(member.depth),
-                branch,
-                member.label,
-                Style::new().dim().paint(&member.status)
-            ));
-        }
-    } else if projection.conversations.is_empty() {
-        empty_conversation_rows(&mut rows, projection, content_capacity);
     }
-    rows.truncate(height.saturating_sub(1));
-    rows.resize(height.saturating_sub(1), String::new());
-    rows.push(
-        Style::new()
-            .dim()
-            .paint(projection.feedback.as_deref().unwrap_or(footer_hint)),
-    );
-    rows.into_iter()
-        .map(|row| widgets::clip_to_width(&row, width))
-        .collect()
+    let footer = if projection.interrupted_detail.is_some() {
+        projection.feedback.as_deref().unwrap_or(default_footer)
+    } else {
+        default_footer
+    };
+    if let Some(detail) = &projection.interrupted_detail {
+        rows.push(Role::Warning.style().paint(detail));
+    } else if let Some(feedback) = &projection.feedback {
+        rows.push(Role::Warning.style().paint(feedback));
+    } else if matches!(projection.new, DirectorNewProjection::Launching) {
+        rows.push(Role::Accent.style().bold().paint("Starting Agent…"));
+    } else {
+        rows.push(Style::new().dim().paint("Agent conversation unavailable"));
+    }
+    finish_rows(width, height, rows, footer)
 }
 
 fn terminal_conversation_body(
@@ -646,6 +940,7 @@ fn finish_control_rows(rows: &mut Vec<String>, height: usize) {
     rows.push(Style::new().dim().paint(&footer));
 }
 
+#[cfg(test)]
 fn work_run_rows(
     width: usize,
     run: &SupervisorRunQuery,
@@ -727,6 +1022,7 @@ const fn run_state_label(state: SupervisorRunState) -> &'static str {
     }
 }
 
+#[cfg(test)]
 const fn task_state_label(state: TaskState) -> &'static str {
     match state {
         TaskState::Pending => "waiting",
@@ -741,49 +1037,6 @@ const fn task_state_label(state: TaskState) -> &'static str {
         TaskState::Cancelled => "cancelled",
         TaskState::Blocked => "blocked",
     }
-}
-
-fn empty_conversation_rows(
-    rows: &mut Vec<String>,
-    projection: &DirectorDrawerProjection,
-    content_capacity: usize,
-) {
-    let before = content_capacity.saturating_sub(3) / 2;
-    rows.extend(std::iter::repeat_n(String::new(), before));
-    if content_capacity > before {
-        rows.push(
-            Role::Accent
-                .style()
-                .bold()
-                .paint(if projection.goal_driven {
-                    "No Work Runs yet"
-                } else {
-                    "No conversations yet"
-                }),
-        );
-    }
-    if content_capacity > before + 1 {
-        rows.push(Style::new().dim().paint(if projection.goal_driven {
-            "Work Run output and stop reasons appear here."
-        } else {
-            "Conversation inventory is not connected."
-        }));
-    }
-    if content_capacity <= before + 2 {
-        return;
-    }
-    let detail = if matches!(projection.new, DirectorNewProjection::Launching) {
-        if projection.goal_driven {
-            "Waiting for the daemon to start the Work Run."
-        } else {
-            "Waiting for the daemon to start the conversation."
-        }
-    } else if projection.goal_driven {
-        "Choose New, enter one goal, and start the Work Run."
-    } else {
-        "Choose New to start a conversation."
-    };
-    rows.push(Style::new().dim().paint(detail));
 }
 
 fn provider_picker_body(
@@ -882,7 +1135,7 @@ fn picker_rows(candidates: &[String], selected: usize, capacity: usize) -> Vec<S
     modal::bounded_list_rows(&rows, selected, capacity)
 }
 
-fn selector_row(width: usize, projection: &DirectorDrawerProjection) -> String {
+fn route_header_row(width: usize, projection: &DirectorDrawerProjection) -> String {
     let selected = projection
         .conversations
         .iter()
@@ -894,20 +1147,45 @@ fn selector_row(width: usize, projection: &DirectorDrawerProjection) -> String {
     let new = if matches!(projection.new, DirectorNewProjection::Launching) {
         Style::new().dim().paint("[ Starting… ]")
     } else {
-        Role::Accent.style().bold().paint("[ New ]")
+        Role::Accent
+            .style()
+            .bold()
+            .paint(new_button_label(projection.goal_driven))
     };
-    let subject = if projection.goal_driven {
-        "Work Run"
-    } else {
-        "Conversation"
+    let prefix = match projection.route {
+        DirectorRoute::Overview => {
+            if projection.goal_driven {
+                "Overview · Goals".to_owned()
+            } else {
+                "Overview · Conversations".to_owned()
+            }
+        }
+        DirectorRoute::Launcher { .. } => {
+            return widgets::clip_to_width(
+                if projection.goal_driven {
+                    "Start Work Run"
+                } else {
+                    "Start conversation"
+                },
+                width,
+            );
+        }
+        DirectorRoute::Agent => format!("[ Overview ]  Agent · {selected}"),
     };
-    let prefix = format!("{subject}  [{selected}]");
     let reserved = widgets::display_width(&new).saturating_add(2);
     let prefix = widgets::clip_to_width(&prefix, width.saturating_sub(reserved));
     let gap = width
         .saturating_sub(widgets::display_width(&prefix))
         .saturating_sub(widgets::display_width(&new));
     format!("{prefix}{}{new}", " ".repeat(gap))
+}
+
+fn new_button_label(goal_driven: bool) -> &'static str {
+    if goal_driven {
+        "[ New goal ]"
+    } else {
+        "[ New conversation ]"
+    }
 }
 
 #[cfg(test)]
@@ -920,6 +1198,12 @@ mod tests {
     use usagi_core::domain::supervisor::{
         ArtifactContract, EscalationRecord, ExecutionPolicy, SupervisorRunId, TaskId, TaskQuery,
     };
+
+    const fn launcher_route() -> DirectorRoute {
+        DirectorRoute::Launcher {
+            return_to: crate::usecase::application::controller::DirectorReturnRoute::Overview,
+        }
+    }
 
     fn work_run() -> SupervisorRunQuery {
         SupervisorRunQuery {
@@ -980,7 +1264,7 @@ mod tests {
         assert_eq!(zero, geometry(24, 80));
         assert_eq!(
             terminal_viewport(0, 0),
-            DirectorTerminalViewport { rows: 14, cols: 52 }
+            DirectorTerminalViewport { rows: 13, cols: 52 }
         );
         assert_eq!(
             terminal_viewport(1, 1),
@@ -992,7 +1276,7 @@ mod tests {
     fn terminal_viewport_is_independent_from_the_closeup_right_pane() {
         assert_eq!(
             terminal_viewport(24, 100),
-            DirectorTerminalViewport { rows: 14, cols: 56 }
+            DirectorTerminalViewport { rows: 13, cols: 56 }
         );
         assert_ne!(
             (
@@ -1013,9 +1297,9 @@ mod tests {
                 30,
                 0,
                 u16::try_from(drawer.left + 2).unwrap(),
-                u16::try_from(drawer.top + 4).unwrap(),
+                u16::try_from(drawer.top + 5).unwrap(),
             ),
-            Some(TerminalPoint { row: 16, column: 0 })
+            Some(TerminalPoint { row: 17, column: 0 })
         );
         assert_eq!(terminal_point_at(24, 100, 30, 0, 0, 0), None);
         assert_eq!(
@@ -1025,7 +1309,7 @@ mod tests {
                 30,
                 0,
                 u16::try_from(drawer.left + 2).unwrap(),
-                u16::try_from(drawer.top + 4 + terminal_viewport(24, 100).rows).unwrap(),
+                u16::try_from(drawer.top + 5 + terminal_viewport(24, 100).rows).unwrap(),
             ),
             None
         );
@@ -1036,10 +1320,67 @@ mod tests {
         let drawer = geometry(24, 100);
         let row = u16::try_from(drawer.top + 2).unwrap();
         let right = u16::try_from(drawer.left + drawer.width - 3).unwrap();
-        assert!(new_button_at(24, 100, right, row, false));
-        assert!(!new_button_at(24, 100, right, row, true));
-        assert!(!new_button_at(24, 100, 0, row, false));
-        assert!(!new_button_at(24, 100, right, row + 1, false));
+        assert!(new_button_at(24, 100, right, row, false, false));
+        assert!(!new_button_at(24, 100, right, row, true, false));
+        assert!(!new_button_at(24, 100, 0, row, false, false));
+        assert!(!new_button_at(24, 100, right, row + 1, false, false));
+    }
+
+    #[test]
+    fn overview_hit_test_returns_scope_and_organization_identity() {
+        let run = work_run();
+        let session = usagi_core::domain::id::SessionId::new();
+        let target = DirectorOrganizationTarget::Session(session);
+        let projection = DirectorDrawerProjection {
+            goal_driven: true,
+            overview_scope: Some(DirectorOverviewScope::WorkRun(run.supervisor_run_id)),
+            work_runs: WorkRunProjection::fresh(vec![run.clone()]),
+            organization: vec![DirectorOrganizationRow {
+                depth: 0,
+                label: "worker".into(),
+                status: "running".into(),
+                target: Some(target),
+                selected: true,
+            }],
+            ..DirectorDrawerProjection::default()
+        };
+        let drawer = geometry(24, 160);
+        let first_data_row = u16::try_from(drawer.top + 5).unwrap();
+        assert_eq!(
+            overview_hit_at(
+                24,
+                160,
+                &projection,
+                u16::try_from(drawer.left + 2).unwrap(),
+                first_data_row,
+            ),
+            Some(DirectorOverviewHit::Scope(DirectorOverviewScope::WorkRun(
+                run.supervisor_run_id,
+            )))
+        );
+        let inner_width = drawer.width - 4;
+        let left_width = (inner_width.saturating_sub(3) * 2 / 5).max(20);
+        assert_eq!(
+            overview_hit_at(
+                24,
+                160,
+                &projection,
+                u16::try_from(drawer.left + 2 + left_width + 3).unwrap(),
+                first_data_row,
+            ),
+            Some(DirectorOverviewHit::Organization(target))
+        );
+        assert_eq!(
+            overview_hit_at(
+                24,
+                160,
+                &projection,
+                u16::try_from(drawer.left + 2 + left_width + 1).unwrap(),
+                first_data_row,
+            ),
+            None,
+            "the visible column separator is inert"
+        );
     }
 
     #[test]
@@ -1056,10 +1397,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains(&format!("{DIRECTOR_ICON} Director")));
-        assert!(text.contains("Conversation  [No conversations]"));
-        assert!(text.contains("[ New ]"));
+        assert!(text.contains("Overview · Conversations"));
+        assert!(text.contains("[ New conversation ]"));
         assert!(text.contains("No conversations yet"));
-        assert!(text.contains("Ctrl-O n: New"));
+        assert!(text.contains("Organization · workspace"));
         assert!(frame[1].contains("\u{1b}[2m"));
         assert!(!frame[0].contains("\u{1b}[2m"));
         assert!(strip_ansi(&frame[23]).contains('└'));
@@ -1069,6 +1410,7 @@ mod tests {
     #[test]
     fn focus_badge_and_long_ime_command_keep_the_caret_visible() {
         let projection = DirectorDrawerProjection {
+            route: DirectorRoute::Agent,
             focused: true,
             conversations: vec![DirectorConversation {
                 label: "active".to_owned(),
@@ -1138,16 +1480,22 @@ mod tests {
                     depth: 0,
                     label: "Director".into(),
                     status: "active".into(),
+                    target: None,
+                    selected: false,
                 },
                 DirectorOrganizationRow {
                     depth: 1,
                     label: "triage (manager)".into(),
                     status: "waiting".into(),
+                    target: None,
+                    selected: false,
                 },
                 DirectorOrganizationRow {
                     depth: 2,
                     label: "implement (executor)".into(),
                     status: "stopped".into(),
+                    target: None,
+                    selected: false,
                 },
             ],
             ..DirectorDrawerProjection::default()
@@ -1166,6 +1514,7 @@ mod tests {
     #[test]
     fn goal_composer_renders_objective_provider_and_terminal_condition() {
         let projection = DirectorDrawerProjection {
+            route: launcher_route(),
             goal_driven: true,
             new: DirectorNewProjection::GoalComposer {
                 candidates: vec!["claude".into(), "codex".into()],
@@ -1186,7 +1535,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_driven_drawer_names_the_run_and_exposes_the_control_surface() {
+    fn goal_driven_overview_keeps_empty_goals_and_unassigned_organization_visible() {
         let projection = DirectorDrawerProjection {
             goal_driven: true,
             ..DirectorDrawerProjection::default()
@@ -1197,50 +1546,65 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(body.contains("Work Run  [No conversations]"));
-        assert!(body.contains("Work Run output and stop reasons appear here."));
-        assert!(body.contains("Ctrl-O w: Work Runs"));
-        assert!(!body.contains("Choose New to start a conversation."));
+        assert!(body.contains("Overview · Goals"));
+        assert!(body.contains("Goals / Work Runs"));
+        assert!(body.contains("No goals yet"));
+        assert!(body.contains("Unassigned"));
+        assert!(body.contains("Organization"));
     }
 
     #[test]
-    fn director_drawer_renders_daemon_owned_work_run_progress_in_both_modes() {
-        for goal_driven in [false, true] {
-            let projection = DirectorDrawerProjection {
-                goal_driven,
-                work_runs: WorkRunProjection::fresh(vec![work_run()]),
-                ..DirectorDrawerProjection::default()
-            };
-            let body = drawer_body(72, 16, &projection)
-                .into_iter()
-                .map(|row| strip_ansi(&row))
-                .collect::<Vec<_>>()
-                .join("\n");
+    fn goal_driven_overview_renders_daemon_owned_work_run_summary() {
+        let projection = DirectorDrawerProjection {
+            goal_driven: true,
+            work_runs: WorkRunProjection::fresh(vec![work_run()]),
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(92, 16, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-            assert!(body.contains("Work Run  Review supervisor stability"));
-            assert!(body.contains("1/3 tasks"));
-            assert!(body.contains("Agents 1/4"));
-            assert!(body.contains("✓ task-0  done"));
-            assert!(body.contains("● task-1  working"));
-            assert!(body.contains("Stop reason: —"));
-        }
+        assert!(body.contains("Review super"));
+        assert!(body.contains("Working"));
+        assert!(body.contains("Working 1/3 A1/4"));
+        assert!(!body.contains("task-0"));
+    }
+
+    #[test]
+    fn overview_keeps_safe_agent_failure_visible_after_identity_loss() {
+        let projection = DirectorDrawerProjection {
+            feedback: Some("Agent launch failed safely".to_owned()),
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(72, 12, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(body.contains("Agent launch failed safely"));
+        assert!(body.contains("Overview · Conversations"));
     }
 
     #[test]
     fn director_labels_cached_work_runs_and_unavailable_empty_observations() {
         let cached = DirectorDrawerProjection {
+            goal_driven: true,
             work_runs: WorkRunProjection::fresh(vec![work_run()]).unavailable(),
             ..DirectorDrawerProjection::default()
         };
-        let cached = drawer_body(72, 16, &cached)
+        let cached = drawer_body(92, 16, &cached)
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(cached.contains("Stale · last daemon update unavailable"));
-        assert!(cached.contains("1/3 tasks"));
+        assert!(cached.contains("Review super"));
 
         let unavailable = DirectorDrawerProjection {
+            goal_driven: true,
             work_runs: WorkRunProjection::default().unavailable(),
             ..DirectorDrawerProjection::default()
         };
@@ -1249,8 +1613,8 @@ mod tests {
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(unavailable.contains("Work Run progress unavailable"));
-        assert!(!unavailable.contains("Active work"));
+        assert!(unavailable.contains("No goals yet"));
+        assert!(unavailable.contains("Unassigned"));
     }
 
     #[test]
@@ -1369,24 +1733,18 @@ mod tests {
         });
         let selected = run.supervisor_run_id;
         let another = work_run();
-        let base = DirectorDrawerProjection::default()
-            .with_work_runs(WorkRunProjection::fresh(vec![run, another]))
-            .with_work_run_control(WorkRunControlProjection {
-                mode: WorkRunControlMode::List,
-                selected: Some(selected),
-                ..WorkRunControlProjection::default()
-            });
-        let list = drawer_body(60, 12, &base)
-            .into_iter()
-            .map(|row| strip_ansi(&row))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(list.contains("Work Runs"));
-        assert!(list.contains("› Review supervisor stability  #"));
-        assert!(list.contains("  Review supervisor stability  #"));
-        assert!(list.contains("Enter actions"));
+        let base = DirectorDrawerProjection {
+            goal_driven: true,
+            ..DirectorDrawerProjection::default()
+        }
+        .with_work_runs(WorkRunProjection::fresh(vec![run, another]))
+        .with_work_run_control(WorkRunControlProjection {
+            mode: WorkRunControlMode::Closed,
+            selected: Some(selected),
+            ..WorkRunControlProjection::default()
+        });
 
-        let confirmation = DirectorDrawerProjection {
+        let confirmation_projection = DirectorDrawerProjection {
             work_run_control: WorkRunControlProjection {
                 mode: WorkRunControlMode::ConfirmCancel,
                 selected: Some(selected),
@@ -1395,7 +1753,7 @@ mod tests {
             },
             ..base.clone()
         };
-        let confirmation = drawer_body(60, 12, &confirmation)
+        let confirmation = drawer_body(60, 12, &confirmation_projection)
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>()
@@ -1441,7 +1799,7 @@ mod tests {
 
         let cached = DirectorDrawerProjection {
             work_runs: base.work_runs.clone().unavailable(),
-            ..base.clone()
+            ..confirmation_projection
         };
         let cached = drawer_body(60, 12, &cached)
             .into_iter()
@@ -1466,18 +1824,6 @@ mod tests {
             .join("\n");
         assert!(retry.contains("outcome unavailable"));
         assert!(retry.contains("retry same operation"));
-
-        let empty =
-            DirectorDrawerProjection::default().with_work_run_control(WorkRunControlProjection {
-                mode: WorkRunControlMode::List,
-                ..WorkRunControlProjection::default()
-            });
-        let empty = drawer_body(60, 12, &empty)
-            .into_iter()
-            .map(|row| strip_ansi(&row))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(empty.contains("No Work Runs yet"));
     }
 
     #[test]
@@ -1498,6 +1844,7 @@ mod tests {
     #[test]
     fn goal_driven_empty_and_launching_states_render_their_distinct_guidance() {
         let composer = DirectorDrawerProjection {
+            route: launcher_route(),
             goal_driven: true,
             new: DirectorNewProjection::GoalComposer {
                 candidates: vec!["claude".into()],
@@ -1513,6 +1860,7 @@ mod tests {
         assert!(body.iter().any(|row| row.contains("Type a goal")));
 
         let launching = DirectorDrawerProjection {
+            route: DirectorRoute::Agent,
             goal_driven: true,
             new: DirectorNewProjection::Launching,
             ..DirectorDrawerProjection::default()
@@ -1521,15 +1869,13 @@ mod tests {
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>();
-        assert!(
-            body.iter()
-                .any(|row| row.contains("Waiting for the daemon to start the Work Run."))
-        );
+        assert!(body.iter().any(|row| row.contains("Starting Agent")));
     }
 
     #[test]
     fn zero_width_goal_composer_keeps_its_row_contract() {
         let projection = DirectorDrawerProjection {
+            route: launcher_route(),
             goal_driven: true,
             new: DirectorNewProjection::GoalComposer {
                 candidates: vec!["claude".into()],
@@ -1551,8 +1897,11 @@ mod tests {
     #[test]
     fn populated_projection_renders_selected_conversation_and_terminal_rows() {
         let projection = DirectorDrawerProjection {
+            route: DirectorRoute::Agent,
             focused: true,
             goal_driven: false,
+            overview_focus: DirectorOverviewFocus::Subjects,
+            overview_scope: None,
             conversations: vec![
                 DirectorConversation {
                     label: "older".to_owned(),
@@ -1578,6 +1927,7 @@ mod tests {
             command: None,
             interrupted_detail: None,
             feedback: None,
+            agent_context: Some("active conversation".to_owned()),
             new: DirectorNewProjection::Ready,
             work_runs: WorkRunProjection::default(),
             work_run_control: WorkRunControlProjection::default(),
@@ -1588,7 +1938,8 @@ mod tests {
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("Conversation  [active conversation]"));
+        assert!(text.contains("[ Overview ]  Agent"));
+        assert!(text.contains("Context: active conversation"));
         assert!(text.contains("agent output one"));
         assert!(text.contains("agent output two"));
         assert!(text.contains("agent output three"));
@@ -1598,6 +1949,7 @@ mod tests {
     #[test]
     fn terminal_rows_render_even_when_conversation_inventory_is_empty() {
         let projection = DirectorDrawerProjection {
+            route: DirectorRoute::Agent,
             terminal_view: Some(TerminalViewProjection {
                 rows: vec!["live output without inventory".to_owned()],
                 row_offset: 0,
@@ -1622,8 +1974,11 @@ mod tests {
     fn retained_selection_rows_render_the_live_bottom_and_scrolled_windows() {
         let retained = (0..10).map(|row| format!("row {row}")).collect::<Vec<_>>();
         let projection = DirectorDrawerProjection {
+            route: DirectorRoute::Agent,
             focused: true,
             goal_driven: false,
+            overview_focus: DirectorOverviewFocus::Subjects,
+            overview_scope: None,
             conversations: vec![DirectorConversation {
                 label: "active".to_owned(),
                 selected: true,
@@ -1643,6 +1998,7 @@ mod tests {
             }),
             interrupted_detail: None,
             feedback: None,
+            agent_context: Some("active".to_owned()),
             new: DirectorNewProjection::Ready,
             work_runs: WorkRunProjection::default(),
             work_run_control: WorkRunControlProjection::default(),
@@ -1651,7 +2007,8 @@ mod tests {
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>();
-        assert_eq!(&body[2..6], ["row 6", "row 7", "row 8", "row 9"]);
+        assert_eq!(body[2], "Context: active");
+        assert_eq!(&body[3..6], ["row 7", "row 8", "row 9"]);
         assert!(!body.iter().any(|row| row == "row 0"));
         assert_eq!(
             body[6],
@@ -1670,7 +2027,8 @@ mod tests {
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>();
-        assert_eq!(&body[2..6], ["row 4", "row 5", "row 6", "row 7"]);
+        assert_eq!(body[2], "Context: active");
+        assert_eq!(&body[3..6], ["row 5", "row 6", "row 7"]);
         assert!(!body.iter().any(|row| row == "row 9"));
 
         let drawer = geometry(12, 80);
@@ -1681,17 +2039,20 @@ mod tests {
                 10,
                 0,
                 u16::try_from(drawer.left + 2).unwrap(),
-                u16::try_from(drawer.top + 4).unwrap(),
+                u16::try_from(drawer.top + 5).unwrap(),
             ),
-            Some(TerminalPoint { row: 8, column: 0 })
+            Some(TerminalPoint { row: 9, column: 0 })
         );
     }
 
     #[test]
     fn interrupted_detail_has_a_dedicated_body_row_and_feedback_owns_the_footer() {
         let projection = DirectorDrawerProjection {
+            route: DirectorRoute::Agent,
             focused: true,
             goal_driven: false,
+            overview_focus: DirectorOverviewFocus::Subjects,
+            overview_scope: None,
             conversations: vec![DirectorConversation {
                 label: "interrupted".to_owned(),
                 selected: true,
@@ -1701,6 +2062,7 @@ mod tests {
             command: None,
             interrupted_detail: Some("identity unavailable".to_owned()),
             feedback: Some("resume failed safely".to_owned()),
+            agent_context: Some("interrupted".to_owned()),
             new: DirectorNewProjection::Ready,
             work_runs: WorkRunProjection::default(),
             work_run_control: WorkRunControlProjection::default(),
@@ -1709,13 +2071,15 @@ mod tests {
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>();
-        assert_eq!(body[2], "identity unavailable");
+        assert_eq!(body[2], "Context: interrupted");
+        assert_eq!(body[3], "identity unavailable");
         assert_eq!(body[8], "resume failed safely");
     }
 
     #[test]
     fn picker_and_safe_empty_state_render_without_clipping_cjk() {
         let picker = DirectorDrawerProjection {
+            route: launcher_route(),
             new: DirectorNewProjection::Choosing {
                 candidates: vec![
                     "claude".to_owned(),
@@ -1739,6 +2103,7 @@ mod tests {
         assert!(frame.iter().all(|line| display_width(line) == 56));
 
         let empty = DirectorDrawerProjection {
+            route: launcher_route(),
             new: DirectorNewProjection::Empty,
             ..DirectorDrawerProjection::default()
         };
@@ -1751,6 +2116,7 @@ mod tests {
         assert!(text.contains("Install claude, codex, or sakana.ai"));
 
         let launching = DirectorDrawerProjection {
+            route: DirectorRoute::Agent,
             new: DirectorNewProjection::Launching,
             ..DirectorDrawerProjection::default()
         };
@@ -1760,11 +2126,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("[ Starting… ]"));
-        assert!(text.contains("Waiting for the daemon to start the conversation."));
+        assert!(text.contains("Starting Agent"));
     }
 
     fn picker_of(candidates: &[&str], selected: usize) -> DirectorDrawerProjection {
         DirectorDrawerProjection {
+            route: launcher_route(),
             new: DirectorNewProjection::Choosing {
                 candidates: candidates.iter().map(|label| (*label).to_owned()).collect(),
                 selected,
@@ -1823,6 +2190,7 @@ mod tests {
     fn picker_capacity_matches_the_rows_the_drawer_draws() {
         let candidates = (0..20).map(|index| format!("cli-{index:02}")).collect();
         let projection = DirectorDrawerProjection {
+            route: launcher_route(),
             new: DirectorNewProjection::Choosing {
                 candidates,
                 selected: 10,
@@ -1852,6 +2220,7 @@ mod tests {
     #[test]
     fn goal_composer_capacity_matches_visible_provider_rows() {
         let projection = DirectorDrawerProjection {
+            route: launcher_route(),
             goal_driven: true,
             new: DirectorNewProjection::GoalComposer {
                 candidates: vec!["claude".into()],
@@ -1910,8 +2279,11 @@ mod tests {
     #[test]
     fn renderer_handles_tiny_resize_and_cjk_choice_without_style_leak() {
         let projection = DirectorDrawerProjection {
+            route: DirectorRoute::Agent,
             focused: true,
             goal_driven: false,
+            overview_focus: DirectorOverviewFocus::Subjects,
+            overview_scope: None,
             conversations: vec![DirectorConversation {
                 label: "会話の履歴".to_owned(),
                 selected: true,
@@ -1921,6 +2293,7 @@ mod tests {
             command: None,
             interrupted_detail: None,
             feedback: None,
+            agent_context: Some("会話の履歴".to_owned()),
             new: DirectorNewProjection::Ready,
             work_runs: WorkRunProjection::default(),
             work_run_control: WorkRunControlProjection::default(),

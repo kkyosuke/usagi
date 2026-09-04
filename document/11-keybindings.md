@@ -69,7 +69,7 @@ TUI 仕様を正本とする。
 | `Ctrl-O s` | OpenNotes | Scratchpad |
 | `Ctrl-O ,` | OpenGarden | Session Garden |
 | `Ctrl-O g` | Director | Director drawer |
-| `Ctrl-O w` | WorkRuns | Work Runs |
+| `Ctrl-O w` | WorkRuns | Director Overview（閉じていれば開く） |
 | `Ctrl-O t` | WorkspaceTerminal | workspace root Shell drawer |
 | `Ctrl-O z` | WorkspaceTerminalFullHeight | Shell drawerの高さ切替 |
 | `Ctrl-O n` | DirectorNew / NewRootTerminal | Director New。Shell選択中は新しいterminal tab |
@@ -199,17 +199,19 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Decision answer | `PgUp` / `PgDn` | prompt scroll |
 | Decision answer | 文字 / paste / `Backspace` | freeform編集 |
 | Decision answer | `Enter` / `Esc` | submit / listへ戻る |
-| Director conversation | `Ctrl-O [` / `Ctrl-O ]` | conversation選択 |
-| Director conversation | `Ctrl-O x` / `Ctrl-O r` | close / resume |
-| Director conversation | `Ctrl-O ↑` / `Ctrl-O ↓` / `Ctrl-O End` | scroll |
-| Director New | `↑` / `↓` | provider選択 |
+| Director Overview | `Tab` / `←` / `→` | Goal/Conversation と Organization の focus 切替 |
+| Director Overview | `↑` / `↓` | focus 中の stable row 選択 |
+| Director Overview | `Enter` | Work Run action / root Agent / Session Closeup を開く |
+| Director Overview | `Esc` | Director drawerを閉じる |
+| Director Agent | `Ctrl-O w` | Overviewへ戻る |
+| Director Agent | `Ctrl-O [` / `Ctrl-O ]` | conversation選択 |
+| Director Agent | `Ctrl-O x` / `Ctrl-O r` | close / resume |
+| Director Agent | `Ctrl-O ↑` / `Ctrl-O ↓` / `Ctrl-O End` | scroll |
+| Director Launcher | `↑` / `↓` | provider選択 |
 | Director Goal Composer | 文字 / paste / `Backspace` | goal編集 |
-| Director New | `Enter` / `Esc` | launch / cancel |
-| Work Runs list | `↑` / `↓` | run選択 |
-| Work Runs list | `←` / `→` | previous / next run |
-| Work Runs list | `Enter` / `Esc` | actions / close |
-| Work Runs confirm | `Enter` / `Esc` | confirm / back |
-| Work Runs escalation | 矢印 / `Enter` / `Esc` | choice / confirm / back |
+| Director Launcher | `Enter` / `Esc` | launch / 呼び出し元へ戻る |
+| Work Run confirm | `Enter` / `Esc` | confirm / Overviewへ戻る |
+| Work Run escalation | 矢印 / `Enter` / `Esc` | choice / confirm / Overviewへ戻る |
 | Root Shell | `Ctrl-O n` | terminal tab追加 |
 | Root Shell | `Ctrl-O [` / `Ctrl-O ]` | terminal tab選択 |
 | Root Shell | `Ctrl-O z` / `Ctrl-O x` | 高さ切替 / terminal終了 |

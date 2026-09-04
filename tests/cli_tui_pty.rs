@@ -251,13 +251,25 @@ fn click_director_button(master: &mut File) {
     send(master, b"\x1b[<0;91;2M\x1b[<0;91;2m");
 }
 
-/// Click `[ New ]` in the 100-column drawer selector row below the top padding.
-fn click_director_new(master: &mut File) {
-    send(master, b"\x1b[<0;96;5M\x1b[<0;96;5m");
+/// Open the workflow-specific Director launcher with its documented chord.
+fn open_director_new(master: &mut File) {
+    send(master, b"\x0fn");
 }
 
 fn toggle_director_with_key(master: &mut File) {
     send(master, b"\x0f\x07");
+}
+
+/// Move from the Director hub into the selected root Agent conversation.
+fn open_director_agent_from_overview(
+    master: &mut File,
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+) {
+    wait_for_screen_since(output, baseline, "Overview · Conversations");
+    wait_for_screen_absent_since(output, baseline, "No conversations yet");
+    send(master, b"\r");
+    wait_for_screen_since(output, baseline, "[ Overview ]");
 }
 
 fn short_home() -> DaemonHome {
@@ -1091,7 +1103,7 @@ fn select_drawer_conversation_by_label(
     baseline: usize,
     label: &str,
 ) {
-    let selected = format!("[{label}]");
+    let selected = format!("Context: {label}");
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let screen = screen_since(output, baseline).unwrap_or_default();
@@ -1882,8 +1894,8 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
 
     // 指示モードで root Agent（claude）を起動する。
     click_director_button(&mut master);
-    wait_for_screen_since(&captured, baseline, "Enter: send command · Ctrl-O n: New");
-    click_director_new(&mut master);
+    wait_for_screen_since(&captured, baseline, "Overview · Conversations");
+    open_director_new(&mut master);
     wait_for_screen_since(&captured, baseline, "↑↓: select");
     send(&mut master, b"\x1b[A");
     send(&mut master, b"\r");
@@ -2258,12 +2270,8 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
     click_director_button(&mut master);
-    wait_for_screen_since(
-        &captured,
-        first_baseline,
-        "Enter: send command · Ctrl-O n: New",
-    );
-    click_director_new(&mut master);
+    wait_for_screen_since(&captured, first_baseline, "Overview · Conversations");
+    open_director_new(&mut master);
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.
     // Confirm it through the picker. Replay/idempotency is asserted below from
@@ -2415,6 +2423,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let mut reopened = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_baseline);
     toggle_director_with_key(&mut master);
+    open_director_agent_from_overview(&mut master, &captured, reopened_baseline);
     wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-initial");
     let observed = wait_for_agent_tabs(home.path(), 3);
     let codex = continuation_for(&observed, &codex_terminal);
@@ -2542,6 +2551,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
         spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_for_kill_baseline);
     toggle_director_with_key(&mut master);
+    open_director_agent_from_overview(&mut master, &captured, reopened_for_kill_baseline);
     wait_for_screen_since(
         &captured,
         reopened_for_kill_baseline,
@@ -2623,6 +2633,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let mut after_kill = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, after_kill_baseline);
     toggle_director_with_key(&mut master);
+    open_director_agent_from_overview(&mut master, &captured, after_kill_baseline);
     wait_for_screen_since(&captured, after_kill_baseline, "codex-input:codex-one");
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, after_kill_baseline, "[switch]");
@@ -2649,6 +2660,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let mut second_reopen = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, second_reopen_baseline);
     toggle_director_with_key(&mut master);
+    open_director_agent_from_overview(&mut master, &captured, second_reopen_baseline);
     wait_for_screen_since(&captured, second_reopen_baseline, "codex-input:codex-one");
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, second_reopen_baseline, "[switch]");
@@ -2964,6 +2976,7 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     let mut cold = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, cold_baseline);
     toggle_director_with_key(&mut master);
+    open_director_agent_from_overview(&mut master, &captured, cold_baseline);
     select_drawer_conversation_by_label(
         &mut master,
         &captured,
@@ -3084,7 +3097,10 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
         "a refused resume must not spawn a provider"
     );
     let refused = screen_since(&captured, cold_baseline).unwrap_or_default();
-    assert!(refused.contains("[Claude (interrupted)]"), "{refused}");
+    assert!(
+        refused.contains("Context: Claude (interrupted)"),
+        "{refused}"
+    );
 
     fs::rename(&hidden, fixtures.bin.join("claude")).unwrap();
     send(&mut master, b"\x0fr");
@@ -3229,7 +3245,7 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
 
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, baseline, "No conversations yet");
-    click_director_new(&mut master);
+    open_director_new(&mut master);
     wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
     assert!(agent_processes(home.path(), 0).is_empty());
 
@@ -3355,6 +3371,7 @@ fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
     // The root conversation is restored into the drawer and owns its input.
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, baseline, "♛ Director");
+    open_director_agent_from_overview(&mut master, &captured, baseline);
     wait_for_screen_since(&captured, baseline, "claude-ready-unique:");
 
     // Fill the 16-row drawer viewport well past its retained window.

@@ -4456,8 +4456,11 @@ mod tests {
     fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
         let workspace = WorkspaceId::new();
         let material = DirectorDrawerProjection {
+            route: crate::usecase::application::controller::DirectorRoute::Agent,
             focused: true,
             goal_driven: false,
+            overview_focus: crate::presentation::workspace_runtime::DirectorOverviewFocus::Subjects,
+            overview_scope: None,
             conversations: vec![DirectorConversation {
                 label: "root conversation".to_owned(),
                 selected: true,
@@ -4473,6 +4476,7 @@ mod tests {
             command: None,
             interrupted_detail: None,
             feedback: None,
+            agent_context: Some("root conversation".to_owned()),
             new: DirectorNewProjection::default(),
             work_runs: WorkRunProjection::default(),
             work_run_control: WorkRunControlProjection::default(),

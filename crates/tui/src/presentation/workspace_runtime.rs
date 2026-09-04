@@ -20,6 +20,7 @@ use usagi_core::domain::agent::{AgentInventory, AgentResumeRelation};
 use usagi_core::domain::id::AgentContinuationRef;
 use usagi_core::domain::id::{AgentRuntimeId, OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
+use usagi_core::domain::supervisor::{SupervisorRunId, SupervisorRunQuery};
 use usagi_core::usecase::client::DaemonMetrics;
 
 /// Daemon capacity refusal and the action-oriented copy shown in Closeup.
@@ -42,8 +43,8 @@ use crate::presentation::views::workspace::{
 use crate::presentation::widgets::TextInput;
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, DirectorNew, Effect, HomeMode, Overlay, Route, Selection,
-    TabDirection, Target, WorkspaceDrawerFocus, update,
+    AppEvent, AppKey, AppState, DirectorNew, DirectorRoute, Effect, HomeMode, Overlay, Route,
+    Selection, TabDirection, Target, WorkspaceDrawerFocus, update,
 };
 use crate::usecase::application::interrupted_tab::{
     InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
@@ -79,6 +80,31 @@ pub enum DirectorCommandInput {
     /// after a write/ordered queue accepts it, or when retaining it would invite
     /// an unsafe replay of bytes whose effect is uncertain.
     Submit(String),
+}
+
+/// Keyboard focus inside the Director Overview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DirectorOverviewFocus {
+    /// Goal / Work Run rail in goal-driven mode, conversation rail in classic.
+    #[default]
+    Subjects,
+    /// Organization tree for the selected scope.
+    Organization,
+}
+
+/// Stable scope selected in the goal-driven Overview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectorOverviewScope {
+    WorkRun(SupervisorRunId),
+    /// Workspace-owned sessions and root Agents without Work Run provenance.
+    Unassigned,
+}
+
+/// Stable drill-down target selected in the Organization tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectorOrganizationTarget {
+    RootAgent(AgentRuntimeId),
+    Session(SessionId),
 }
 
 const MAX_DIRECTOR_COMMAND_BYTES: usize = 16 * 1024;
@@ -125,6 +151,9 @@ pub struct WorkspaceRuntime {
     director_command: TextInput,
     root_agent_selection: Option<TabSelection>,
     root_terminal_selection: Option<TabSelection>,
+    director_overview_focus: DirectorOverviewFocus,
+    director_overview_scope: Option<DirectorOverviewScope>,
+    director_organization_selection: Option<DirectorOrganizationTarget>,
     material_revision: u64,
     material_size: Option<(u16, u16)>,
 }
@@ -160,6 +189,9 @@ impl WorkspaceRuntime {
             director_command: TextInput::default(),
             root_agent_selection: None,
             root_terminal_selection: None,
+            director_overview_focus: DirectorOverviewFocus::Subjects,
+            director_overview_scope: None,
+            director_organization_selection: None,
             material_revision: 0,
             material_size: None,
         }
@@ -193,6 +225,9 @@ impl WorkspaceRuntime {
     /// Apply the effective workspace Director interaction setting.
     pub fn set_work_mode(&mut self, mode: usagi_core::domain::settings::WorkMode) {
         self.state.set_work_mode(mode);
+        self.director_overview_focus = DirectorOverviewFocus::Subjects;
+        self.director_overview_scope = None;
+        self.director_organization_selection = None;
     }
 
     /// The active target's pane state, for `HomeProjection::with_pane`.
@@ -303,8 +338,7 @@ impl WorkspaceRuntime {
     /// the frontmost of the two concurrently open workspace drawers.
     #[must_use]
     pub fn director_terminal(&self) -> Option<TerminalRef> {
-        self.state
-            .director_drawer_open()
+        (self.state.director_drawer_open() && self.state.director_route() == DirectorRoute::Agent)
             .then(|| self.root_surface_terminal(PaneKind::Agent))
             .flatten()
     }
@@ -376,6 +410,145 @@ impl WorkspaceRuntime {
         &self.director_projection
     }
 
+    #[must_use]
+    pub const fn director_overview_focus(&self) -> DirectorOverviewFocus {
+        self.director_overview_focus
+    }
+
+    #[must_use]
+    pub const fn director_overview_scope(&self) -> Option<DirectorOverviewScope> {
+        self.director_overview_scope
+    }
+
+    #[must_use]
+    pub const fn director_organization_selection(&self) -> Option<DirectorOrganizationTarget> {
+        self.director_organization_selection
+    }
+
+    /// Reconcile Overview selections by stable identity after an asynchronous
+    /// Work Run / organization refresh. Sorting or resizing never changes a
+    /// still-present target.
+    pub fn reconcile_director_overview(
+        &mut self,
+        runs: &[SupervisorRunQuery],
+        organization: &[DirectorOrganizationTarget],
+    ) {
+        let previous = (
+            self.director_overview_scope,
+            self.director_organization_selection,
+        );
+        if self.state.work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven {
+            let current_survives = self
+                .director_overview_scope
+                .is_some_and(|scope| match scope {
+                    DirectorOverviewScope::WorkRun(selected) => {
+                        runs.iter().any(|run| run.supervisor_run_id == selected)
+                    }
+                    DirectorOverviewScope::Unassigned => true,
+                });
+            if !current_survives {
+                self.director_overview_scope = Some(
+                    runs.first()
+                        .map_or(DirectorOverviewScope::Unassigned, |run| {
+                            DirectorOverviewScope::WorkRun(run.supervisor_run_id)
+                        }),
+                );
+            }
+        } else {
+            self.director_overview_scope = None;
+        }
+        if self
+            .director_organization_selection
+            .is_none_or(|selected| !organization.contains(&selected))
+        {
+            self.director_organization_selection = organization.first().copied();
+        }
+        if previous
+            != (
+                self.director_overview_scope,
+                self.director_organization_selection,
+            )
+        {
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
+    }
+
+    pub fn set_director_overview_focus(&mut self, focus: DirectorOverviewFocus) {
+        if self.director_overview_focus != focus {
+            self.director_overview_focus = focus;
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
+    }
+
+    pub fn move_director_scope(&mut self, runs: &[SupervisorRunQuery], next: bool) {
+        let mut scopes = runs
+            .iter()
+            .map(|run| DirectorOverviewScope::WorkRun(run.supervisor_run_id))
+            .collect::<Vec<_>>();
+        scopes.push(DirectorOverviewScope::Unassigned);
+        let current = self
+            .director_overview_scope
+            .and_then(|selected| scopes.iter().position(|scope| *scope == selected))
+            .unwrap_or(0);
+        let selected = if next {
+            (current + 1).min(scopes.len().saturating_sub(1))
+        } else {
+            current.saturating_sub(1)
+        };
+        self.director_overview_scope = scopes.get(selected).copied();
+        self.director_organization_selection = None;
+        self.material_revision = self.material_revision.saturating_add(1);
+    }
+
+    pub fn set_director_scope(&mut self, scope: DirectorOverviewScope) {
+        if self.director_overview_scope != Some(scope) {
+            self.director_overview_scope = Some(scope);
+            self.director_organization_selection = None;
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
+    }
+
+    pub fn move_director_organization(
+        &mut self,
+        organization: &[DirectorOrganizationTarget],
+        next: bool,
+    ) {
+        if organization.is_empty() {
+            self.director_organization_selection = None;
+            return;
+        }
+        let current = self
+            .director_organization_selection
+            .and_then(|selected| organization.iter().position(|target| *target == selected))
+            .unwrap_or(0);
+        let selected = if next {
+            (current + 1).min(organization.len().saturating_sub(1))
+        } else {
+            current.saturating_sub(1)
+        };
+        self.director_organization_selection = organization.get(selected).copied();
+        self.material_revision = self.material_revision.saturating_add(1);
+    }
+
+    pub fn set_director_organization_selection(&mut self, target: DirectorOrganizationTarget) {
+        if self.director_organization_selection != Some(target) {
+            self.director_organization_selection = Some(target);
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
+    }
+
+    pub fn open_director_agent(&mut self) {
+        let _ = self.apply_event(AppEvent::Key(AppKey::OpenDirectorAgent));
+    }
+
+    /// Open a managed Session Closeup while retaining Overview as the Director
+    /// route restored by the next drawer open.
+    pub fn open_director_session(&mut self, session: SessionId) {
+        let _ = self.apply_event(AppEvent::Key(AppKey::OpenDirectorOverview));
+        let _ = self.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        let _ = self.apply_event(AppEvent::VisitSession(session));
+    }
+
     /// Current Director command draft. It is presentation-local and is never
     /// persisted or sent until Enter submits it to the focused Agent PTY.
     #[must_use]
@@ -387,6 +560,7 @@ impl WorkspaceRuntime {
     pub fn handle_director_command(&mut self, key: &Key) -> DirectorCommandInput {
         if self.state.overlay().is_some()
             || self.state.workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Director)
+            || self.state.director_route() != DirectorRoute::Agent
             || self.state.director_launching().is_some()
             || !matches!(self.state.director_new(), DirectorNew::Idle)
             || self.focused_agent_terminal().is_none()
@@ -544,7 +718,7 @@ impl WorkspaceRuntime {
         if self.restore_fence() != (dispatched_interaction, dispatched_registry_revision) {
             return false;
         }
-        let had_root_agent = self.has_interactive_root_agent_tabs();
+        let selected_director_agent = self.selected_director_agent_before_change();
         for target in targets {
             let entry = target.target;
             let root = matches!(entry, Target::Root(_));
@@ -608,7 +782,7 @@ impl WorkspaceRuntime {
             }
         }
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
+        self.return_from_disappeared_director(selected_director_agent);
         true
     }
 
@@ -658,6 +832,9 @@ impl WorkspaceRuntime {
                 }
                 (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::DirectorNew)) => {
                     self.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
+                }
+                (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::WorkRuns)) => {
+                    self.apply_event(AppEvent::Key(AppKey::OpenDirectorOverview))
                 }
                 (_, Key::Escape) => self.apply_event(AppEvent::Key(AppKey::Escape)),
                 (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::Director)) => {
@@ -1021,9 +1198,13 @@ impl WorkspaceRuntime {
 
     fn open_root_surface_kind(&self) -> Option<PaneKind> {
         match self.state.workspace_drawer_focus() {
-            Some(WorkspaceDrawerFocus::Director) => Some(PaneKind::Agent),
+            Some(WorkspaceDrawerFocus::Director)
+                if self.state.director_route() == DirectorRoute::Agent =>
+            {
+                Some(PaneKind::Agent)
+            }
+            Some(WorkspaceDrawerFocus::Director) | None => None,
             Some(WorkspaceDrawerFocus::Terminal) => Some(PaneKind::Terminal),
-            None => None,
         }
     }
 
@@ -1200,6 +1381,11 @@ impl WorkspaceRuntime {
     /// passthrough bytes to it.
     #[must_use]
     pub fn focused_terminal(&self) -> Option<TerminalRef> {
+        if self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director)
+            && self.state.director_route() != DirectorRoute::Agent
+        {
+            return None;
+        }
         let terminal = match self.panes.active_pane().selected() {
             PaneSelection::Tab(TabSelection::Live(terminal)) => terminal.clone(),
             PaneSelection::Tab(
@@ -1373,7 +1559,7 @@ impl WorkspaceRuntime {
         operation: OperationId,
         message: String,
     ) -> Vec<PaneRegistryEffect> {
-        let had_root_agent = self.has_interactive_root_agent_tabs();
+        let selected_director_agent = self.selected_director_agent_before_change();
         let message = if message == AGENT_CAPACITY_EXHAUSTED {
             AGENT_CAPACITY_RECOVERY.to_owned()
         } else {
@@ -1389,7 +1575,7 @@ impl WorkspaceRuntime {
         // A dropped placeholder can never complete, so retire its focus gate.
         self.pane_focus_at_request.remove(&operation);
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
+        self.return_from_disappeared_director(selected_director_agent);
         effects
     }
 
@@ -1432,7 +1618,7 @@ impl WorkspaceRuntime {
 
     /// Remove a live tab the daemon reports as exited.
     pub fn exit_pane(&mut self, target: Target, terminal: TerminalRef) -> Vec<PaneRegistryEffect> {
-        let had_root_agent = self.has_interactive_root_agent_tabs();
+        let selected_director_agent = self.selected_director_agent_before_change();
         let effects = reduce_registry(
             &mut self.panes,
             PaneRegistryEvent::Pane {
@@ -1441,7 +1627,7 @@ impl WorkspaceRuntime {
             },
         );
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
+        self.return_from_disappeared_director(selected_director_agent);
         self.close_empty_root_terminal_drawer();
         effects
     }
@@ -1457,7 +1643,7 @@ impl WorkspaceRuntime {
         {
             return CloseOutcome::default();
         }
-        let had_root_agent = self.has_interactive_root_agent_tabs();
+        let selected_director_agent = self.selected_director_agent_before_change();
         let outcome = match self.panes.active_pane().selected() {
             PaneSelection::Tab(TabSelection::Live(terminal)) => CloseOutcome {
                 detach: Some(terminal.clone()),
@@ -1483,36 +1669,25 @@ impl WorkspaceRuntime {
         }
         let _ = route_tab_command(&mut self.panes, PaneTabCommand::Close);
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
+        self.return_from_disappeared_director(selected_director_agent);
         self.close_empty_root_terminal_drawer();
         outcome
     }
 
-    fn close_disappeared_director(&mut self, had_root_agent: bool) {
-        if had_root_agent
-            && self.state.director_drawer_open()
-            && !self.has_interactive_root_agent_tabs()
-        {
+    fn selected_director_agent_before_change(&self) -> Option<TabSelection> {
+        (self.state.director_drawer_open() && self.state.director_route() == DirectorRoute::Agent)
+            .then(|| self.director_selection())
+            .flatten()
+    }
+
+    fn return_from_disappeared_director(&mut self, previous: Option<TabSelection>) {
+        if previous.is_some_and(|selection| !self.selection_has_kind(&selection, PaneKind::Agent)) {
             let effects = self.apply_event(AppEvent::DirectorDrawerEmptied);
             debug_assert!(
                 effects.is_empty(),
-                "closing an empty Director is state-only"
+                "returning from a disappeared Director Agent is state-only"
             );
         }
-    }
-
-    fn has_interactive_root_agent_tabs(&self) -> bool {
-        self.panes
-            .pane(Target::Root(self.state.workspace()))
-            .is_some_and(|pane| {
-                pane.tabs().iter().any(|tab| match tab {
-                    PaneTab::Pending(pending) | PaneTab::Ready(pending) => {
-                        pending.kind == PaneKind::Agent
-                    }
-                    PaneTab::Live(live) => live.kind == PaneKind::Agent,
-                    PaneTab::Interrupted(_) => false,
-                })
-            })
     }
 
     fn close_empty_root_terminal_drawer(&mut self) {
@@ -1894,6 +2069,41 @@ impl WorkspaceRuntime {
             .map(tab_selection)
     }
 
+    /// Stable selection for one displayed root Agent conversation index.
+    #[must_use]
+    pub fn director_agent_selection_at(&self, index: usize) -> Option<TabSelection> {
+        self.panes
+            .pane(Target::Root(self.state.workspace()))?
+            .tabs()
+            .iter()
+            .filter(|tab| root_tab_is_agent(tab))
+            .nth(index)
+            .map(tab_selection)
+    }
+
+    /// Resolve one daemon-stable root Agent runtime into its retained Director
+    /// tab. No label, order, or timestamp fallback is permitted.
+    #[must_use]
+    pub fn director_agent_selection_for(
+        &self,
+        runtime_id: AgentRuntimeId,
+        inventory: Option<&AgentInventory>,
+    ) -> Option<TabSelection> {
+        let held = inventory?.runtimes.iter().find(|item| {
+            item.runtime.agent_runtime_id == runtime_id && item.runtime.session_id.is_none()
+        })?;
+        self.panes
+            .pane(Target::Root(self.state.workspace()))?
+            .tabs()
+            .iter()
+            .find(|tab| match tab {
+                PaneTab::Live(live) => live.terminal.fences(&held.runtime.terminal),
+                PaneTab::Interrupted(pane) => pane.tab.continuation == held.continuation,
+                PaneTab::Pending(_) | PaneTab::Ready(_) => false,
+            })
+            .map(tab_selection)
+    }
+
     /// Index of the active pane's tab owning one exact Agent runtime, for the
     /// Garden's rabbit click.
     ///
@@ -2244,6 +2454,14 @@ fn root_tab_is_terminal(tab: &PaneTab) -> bool {
     }
 }
 
+fn root_tab_is_agent(tab: &PaneTab) -> bool {
+    match tab {
+        PaneTab::Pending(pending) | PaneTab::Ready(pending) => pending.kind == PaneKind::Agent,
+        PaneTab::Live(live) => live.kind == PaneKind::Agent,
+        PaneTab::Interrupted(_) => true,
+    }
+}
+
 fn normalize_director_command(text: &str) -> String {
     text.chars()
         .filter_map(|character| {
@@ -2289,8 +2507,8 @@ mod tests {
     use crate::presentation::views::workspace::TerminalViewProjection;
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, BackendEvent, Effect, HomeMode, Overlay, Route, Selection, TabDirection,
-        Target, WorkspaceDrawerFocus,
+        AppEvent, AppKey, BackendEvent, DirectorRoute, Effect, HomeMode, Overlay, Route, Selection,
+        TabDirection, Target, WorkspaceDrawerFocus,
     };
     use crate::usecase::application::pane::{
         InterruptedPane, LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection,
@@ -3793,6 +4011,7 @@ mod tests {
         let _ = runtime.request_pane(target, operation, PaneKind::Agent);
         let _ = runtime.complete_pane(target, operation, terminal);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        runtime.open_director_agent();
 
         assert_eq!(
             runtime.handle_director_command(&Key::Char('追')),
@@ -3866,7 +4085,7 @@ mod tests {
     }
 
     #[test]
-    fn director_closes_only_when_the_last_interactive_root_agent_disappears() {
+    fn director_returns_to_overview_when_the_selected_root_agent_disappears() {
         let workspace = WorkspaceId::new();
         let target = Target::Root(workspace);
         let first = root_terminal_ref(workspace);
@@ -3877,19 +4096,21 @@ mod tests {
             let _ = runtime.request_pane(target, operation, PaneKind::Agent);
             let _ = runtime.complete_pane(target, operation, terminal);
         }
+        let _ = runtime.focus_terminal(target, first.clone());
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        runtime.open_director_agent();
         assert!(runtime.state().director_drawer_open());
+        assert_eq!(runtime.director_terminal(), Some(first.clone()));
 
         let _ = runtime.exit_pane(target, first);
         assert!(runtime.state().director_drawer_open());
-        let _ = runtime.exit_pane(target, second);
-        assert!(!runtime.state().director_drawer_open());
+        assert_eq!(runtime.state().director_route(), DirectorRoute::Overview);
 
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        assert!(
-            runtime.state().director_drawer_open(),
-            "an intentionally opened empty Director remains available for New"
-        );
+        runtime.open_director_agent();
+        assert_eq!(runtime.director_terminal(), Some(second.clone()));
+        let _ = runtime.exit_pane(target, second);
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(runtime.state().director_route(), DirectorRoute::Overview);
     }
 
     #[test]
@@ -3945,6 +4166,7 @@ mod tests {
         assert_eq!(runtime.focused_terminal(), Some(managed.clone()));
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        runtime.open_director_agent();
         assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
         assert_eq!(runtime.focused_terminal(), Some(root_agent));
         assert!(runtime.wants_live_input());
@@ -3966,7 +4188,7 @@ mod tests {
         );
         assert_eq!(runtime.active_pane().tabs().len(), before_diff);
 
-        let _ = runtime.handle_key(Key::Escape);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
         assert_eq!(runtime.focused_terminal(), Some(managed));
     }
@@ -4040,6 +4262,7 @@ mod tests {
         assert_eq!(runtime.focused_terminal(), Some(managed));
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        runtime.open_director_agent();
         assert!(runtime.state().director_drawer_open());
         assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
 
@@ -4049,6 +4272,7 @@ mod tests {
         assert_eq!(runtime.focused_terminal(), Some(root_terminal.clone()));
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        runtime.open_director_agent();
         assert!(runtime.state().director_drawer_open());
         assert!(runtime.state().root_terminal_drawer_open());
         assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
@@ -4130,6 +4354,7 @@ mod tests {
         // The same remembered shell wins when both drawers remain visible and
         // focus moves back from Director.
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        runtime.open_director_agent();
         assert_eq!(runtime.focused_terminal(), Some(root_agent));
         assert!(
             runtime
@@ -4365,6 +4590,9 @@ mod tests {
     }
 
     #[test]
+    // This is a single transition matrix fixture: splitting it would obscure
+    // that pending and interrupted roots share the same recovery contract.
+    #[allow(clippy::too_many_lines)]
     fn agent_only_root_cycle_handles_pending_interrupted_and_empty_selection() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -4413,6 +4641,7 @@ mod tests {
                 .is_some()
         );
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        runtime.open_director_agent();
         assert_eq!(
             runtime.active_pane().selected(),
             &PaneSelection::Tab(TabSelection::Pending(pending))
@@ -4430,6 +4659,7 @@ mod tests {
             },
         );
         let _ = pending_runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        pending_runtime.open_director_agent();
         assert_eq!(
             pending_runtime.active_pane().selected(),
             &PaneSelection::Tab(TabSelection::Pending(pending_only))
@@ -4460,8 +4690,13 @@ mod tests {
                 event: PaneEvent::Select(PaneSelection::None),
             },
         );
-        assert!(!interrupted_runtime.has_interactive_root_agent_tabs());
+        assert!(
+            interrupted_runtime
+                .first_selection_of_kind(PaneKind::Agent)
+                .is_some()
+        );
         let _ = interrupted_runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        interrupted_runtime.open_director_agent();
         assert_eq!(
             interrupted_runtime.active_pane().selected(),
             &PaneSelection::Tab(TabSelection::Interrupted(interrupted_continuation))
