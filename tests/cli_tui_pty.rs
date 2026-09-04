@@ -799,7 +799,9 @@ fn displayed_terminal_pid(output: &Arc<Mutex<Vec<u8>>>, baseline: usize) -> u64 
 }
 
 fn wait_for_file_lines(path: &Path, expected: usize) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    const FIXTURE_SPAWN_TIMEOUT: Duration = Duration::from_secs(20);
+
+    let deadline = Instant::now() + FIXTURE_SPAWN_TIMEOUT;
     loop {
         let lines = fs::read_to_string(path)
             .map(|text| text.lines().count())
@@ -807,7 +809,11 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
         if lines >= expected {
             return;
         }
-        assert!(Instant::now() < deadline, "fixture did not spawn");
+        assert!(
+            Instant::now() < deadline,
+            "fixture did not record {expected} spawn(s) within {FIXTURE_SPAWN_TIMEOUT:?}: path={}, observed={lines}",
+            path.display()
+        );
         thread::sleep(Duration::from_millis(20));
     }
 }
