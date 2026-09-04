@@ -2576,6 +2576,17 @@ mod tests {
                 .superseded_by,
             Some(foreign_replacement.runtime.agent_runtime_id)
         );
+        let mut conflicting_source = lineage_source.clone();
+        conflicting_source.superseded_by = Some(AgentRuntimeId::new());
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![conflicting_source, foreign_replacement.clone()],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ResumeRelation
+        );
         let (competing_runtime, competing_operation) = refs(&request);
         let mut competing_replacement = DurableRuntimeRecord {
             runtime: competing_runtime,

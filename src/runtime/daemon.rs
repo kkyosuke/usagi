@@ -16584,6 +16584,10 @@ mod tests {
             ProcessInstanceLock::WorkspaceAlias { .. }
         ));
         assert_eq!(
+            instance.acquire().unwrap_err().to_string(),
+            "daemon workspace fence must be acquired before its aliased instance lock"
+        );
+        assert_eq!(
             workspace.acquire().unwrap(),
             WorkspaceFenceOutcome::Acquired
         );
@@ -16615,6 +16619,9 @@ mod tests {
         assert!(matches!(&independent, ProcessInstanceLock::Independent(_)));
         assert!(independent.acquire().unwrap());
         assert!(independent.locked_inode().is_some());
+        if let ProcessInstanceLock::Independent(lock) = &independent {
+            assert!(InstanceLockCustody::locked_inode(lock).is_some());
+        }
 
         // The shared descriptor still excludes another process description; it
         // only prevents this process from contending with itself.

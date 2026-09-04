@@ -1396,6 +1396,14 @@ fn a_dead_retired_child_cannot_pin_its_running_shard_forever() {
             Some(process(42, "start-42")),
         )]))
         .unwrap();
+    let mut old_shard = world.shard(old);
+    old_shard
+        .accept_command(&resource, &OperationId::new())
+        .unwrap();
+    world
+        .archive
+        .bytes(old)
+        .set(&serde_json::to_string(&old_shard).unwrap());
 
     let active = world.state(new, ObservedChildren::new().with_gone(42));
     let hydrated = active.hydrate().unwrap();
@@ -1404,6 +1412,11 @@ fn a_dead_retired_child_cannot_pin_its_running_shard_forever() {
         world.shard(old).resources[0].state,
         ResourceState::Running,
         "the successor never rewrites a foreign shard"
+    );
+    assert_eq!(
+        world.shard(old).in_flight.len(),
+        1,
+        "the successor drains commands only in its read-only collection view"
     );
     assert_eq!(
         world.allocator().claim(&resource).unwrap().state,
