@@ -6904,7 +6904,7 @@ fn dispatch_supervisor_snapshot(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=workspace_control_is_durable_scoped_and_projects_exact_stop_obligations,supervisor_stop_validates_every_fence_and_retries_an_orphaned_process
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=workspace_control_is_durable_scoped_and_projects_exact_stop_obligations,supervisor_delete_dispatch_returns_exact_receipt,supervisor_stop_validates_every_fence_and_retries_an_orphaned_process
 fn dispatch_supervisor_control(
     supervisor: &SharedSupervisorRuntime,
     agent: &SharedAgentRuntime,
@@ -6936,6 +6936,25 @@ fn dispatch_supervisor_control(
                 ErrorCode::OwnershipUnknown,
                 "supervisor control belongs to another workspace",
             ));
+        }
+
+        if matches!(
+            &command,
+            usagi_core::domain::supervisor::SupervisorWorkspaceCommand::Delete { .. }
+        ) {
+            let deleted = supervisor
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+                })?
+                .delete_for_workspace(workspace, operation_id, &command, Utc::now())
+                .map_err(supervisor_control_error)?;
+            let value = serde_json::to_value(deleted).map_err(|_| {
+                supervisor_control_unconfirmed("supervisor deletion response encoding failed")
+            })?;
+            return bounded_supervisor_query(value).map_err(|_| {
+                supervisor_control_unconfirmed("supervisor deletion response is unavailable")
+            });
         }
 
         prompt_supervisor_retry(supervisor, agent, workspace, &command)?;
@@ -24015,6 +24034,107 @@ instructions = "{instructions}"
         };
         assert!(
             matches!(outcome, ResponseOutcome::Error(error) if error.code == ErrorCode::OwnershipUnknown)
+        );
+    }
+
+    #[test]
+    fn supervisor_delete_dispatch_returns_exact_receipt() {
+        use chrono::Utc;
+        use usagi_core::domain::id::OperationId;
+        use usagi_core::domain::supervisor::{SupervisorRunDeletion, SupervisorWorkspaceCommand};
+        use usagi_core::infrastructure::ipc::{EnvelopeKind, ResponseOutcome};
+        use usagi_core::usecase::client::DaemonRequest;
+        use usagi_daemon::usecase::session_runtime::SessionRuntime;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        let sessions = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                repository.clone(),
+                &temporary.path().join("session-daemon"),
+                DaemonGeneration::new(),
+                AlwaysSuccessfulGit,
+                PermissiveSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        let workspace: WorkspaceId = serde_json::from_value(
+            sessions.lock().unwrap().snapshot().unwrap()["workspace_id"].clone(),
+        )
+        .unwrap();
+        let bound = bound_to(
+            &temporary.path().join("tenants"),
+            &repository,
+            sessions,
+            workspace,
+        );
+        let runtime = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("supervisor"),
+        )));
+        let active = runtime
+            .lock()
+            .unwrap()
+            .start_for_workspace(
+                "caller",
+                workspace,
+                "start",
+                "root".into(),
+                Vec::new(),
+                None,
+                Utc::now(),
+            )
+            .unwrap();
+        let cancelled = runtime
+            .lock()
+            .unwrap()
+            .control_for_workspace(
+                workspace,
+                OperationId::new(),
+                &SupervisorWorkspaceCommand::Cancel {
+                    supervisor_run_id: active.supervisor_run_id,
+                    reason: "operator cancelled".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        let operation_id = OperationId::new();
+        let request = serde_json::to_value(DaemonRequest::SupervisorControl {
+            workspace,
+            operation_id,
+            command: SupervisorWorkspaceCommand::Delete {
+                supervisor_run_id: cancelled.supervisor_run_id,
+                observed_state_revision: cancelled.state_revision,
+            },
+        })
+        .unwrap();
+        let agent =
+            empty_supervisor_agent(DispatchStore::new(temporary.path().join("agent-dispatch")));
+        let reply = dispatch_supervisor_control(
+            &runtime,
+            &agent,
+            &bound,
+            usagi_core::infrastructure::ipc::RequestId("delete".into()),
+            &request,
+            &session_test_hello(),
+        );
+        let EnvelopeKind::Response { outcome, body, .. } = reply.kind else {
+            panic!("supervisor control returned a non-response envelope");
+        };
+        assert_eq!(outcome, ResponseOutcome::Ok);
+        assert_eq!(
+            serde_json::from_value::<SupervisorRunDeletion>(body).unwrap(),
+            SupervisorRunDeletion {
+                supervisor_run_id: cancelled.supervisor_run_id,
+                state_revision: cancelled.state_revision,
+            }
+        );
+        assert!(
+            runtime
+                .lock()
+                .unwrap()
+                .get_for_workspace(workspace, cancelled.supervisor_run_id)
+                .unwrap()
+                .is_none()
         );
     }
 

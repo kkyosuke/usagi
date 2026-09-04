@@ -1686,8 +1686,14 @@ control authorityを発生させることはない。
 `supervisor_control`を通る。requestの`WorkspaceId`はconnection workspaceと完全一致させ、対象runの保存済み
 workspaceも一致した場合だけcommandを適用する。commandはcore domainのtagged enumが正本であり、任意JSON fieldや
 caller文字列からauthorityを組み立てない。daemonは`OperationId`とcommand全体のSHA-256 semantic digestを
-`supervisor-scheduler.json`へ先に予約し、そのIDをevent IDとしてaggregateへCAS適用する。応答断後の再送は同じeventを
-返し、同じIDを別run・別reason・別decisionへ再利用すると`idempotency_conflict`でeffect zeroになる。
+`supervisor-scheduler.json`へ先に予約する。cancel / escalation decision はそのIDをevent IDとしてaggregateへCAS適用する。
+応答断後の再送は同じeventを返し、同じIDを別run・別reason・別decisionへ再利用すると`idempotency_conflict`でeffect zeroになる。
+
+終了済み履歴のdeleteも同じcontrol reservationを使うが、aggregate eventは追加しない。daemonはstore lock内でworkspace ownership、
+`Succeeded` / `Failed` / `Cancelled`、観測済みstate revisionを再検証し、journal、journal index、checkpoint、snapshot、derived list
+entryを削除してexact Run ID / revisionのreceiptを返す。初回のunknown Runは拒否し、reservation保存後に応答を失った同一operationの
+replayだけはsnapshot消失後も同じreceiptへ収束する。active / `Escalated` / stale Runは削除せず、worker停止や他Runへのfallbackも
+行わない。
 
 tick は dispatch run ID と supervisor provenance を照合して terminal fact を reducer event として保存する。
 child terminal 後に parent が `Running` なら `AwaitingDecision` に遷移し、parent provenance と child run、

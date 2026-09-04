@@ -36,7 +36,6 @@ use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::cleanup_modal::{self, CleanupEntry, CleanupModal};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
-use crate::presentation::views::command_help_modal::{self, CommandHelpModal};
 use crate::presentation::views::daemon_modal;
 use crate::presentation::views::decision_modal;
 use crate::presentation::views::director_drawer::{self, DIRECTOR_ICON, DirectorDrawerProjection};
@@ -335,10 +334,8 @@ pub struct HomeProjection {
     /// Persisted Overview command-palette input, when its overlay is open. The
     /// runtime owns this so the caret and filter survive across frames.
     overview_modal: Option<OverviewModal>,
-    /// Context-aware command list opened with `?`.
-    command_help_modal: Option<CommandHelpModal>,
-    /// Overview の `daemon` command が開く読み取り専用 status surface。
-    daemon_overlay: bool,
+    /// Overview の `daemon` command が開く status / lifecycle control surface。
+    daemon_overlay: Option<crate::usecase::application::controller::DaemonControlState>,
     /// session ごとの Agent 群。sidebar の agent 行と Garden の plot が読む唯一の
     /// 素材で、controller の runtime-local phase に daemon inventory を重ねたもの。
     /// 2 つの surface で別々に畳むと、同じ session の Agent 数が画面の 2 か所で
@@ -375,10 +372,8 @@ pub struct HomeProjection {
     /// loading skeleton just above `+ new session` (`document/03-tui.md`) until
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
-    /// Frontmost Director mode drawer material. The empty default is the only
-    /// projection currently connected; later runtime work can populate its
-    /// conversation selector and terminal rows through
-    /// [`Self::with_director_drawer`].
+    /// Frontmost Director mode drawer material, including its explicit route,
+    /// Organization projection, Work Runs, and optional Console terminal.
     director_drawer: Option<DirectorDrawerProjection>,
     work_runs: WorkRunProjection,
     /// Frontmost bottom-anchored workspace-root generic terminal drawer.
@@ -637,9 +632,9 @@ impl HomeProjection {
             preview_overlay: state.preview_overlay().cloned(),
             cleanup_queue,
             overview_modal: None,
-            command_help_modal: None,
-            daemon_overlay: state.overlay()
-                == Some(crate::usecase::application::controller::Overlay::Daemon),
+            daemon_overlay: (state.overlay()
+                == Some(crate::usecase::application::controller::Overlay::Daemon))
+            .then(|| state.daemon_control().clone()),
             session_agents,
             garden_sessions,
             garden_scope: workspace_name.to_owned(),
@@ -768,11 +763,9 @@ impl HomeProjection {
         mut self,
         overview: Option<OverviewModal>,
         closeup: Option<CloseupModal>,
-        command_help: Option<CommandHelpModal>,
     ) -> Self {
         self.overview_modal = overview;
         self.closeup_modal = closeup;
-        self.command_help_modal = command_help;
         self
     }
 
@@ -2222,13 +2215,11 @@ fn render_home_modals(
     frame: Vec<String>,
     now: DateTime<Utc>,
 ) -> Vec<String> {
-    if let Some(modal) = &home.command_help_modal {
-        command_help_modal::render_over(height, width, &frame, modal)
-    } else if let Some(modal) = &home.overview_modal {
+    if let Some(modal) = &home.overview_modal {
         overview_modal::render_over(height, width, &frame, modal)
     } else if let Some(modal) = &home.cleanup_queue {
         cleanup_modal::render_over(height, width, &frame, modal)
-    } else if home.daemon_overlay {
+    } else if let Some(control) = &home.daemon_overlay {
         daemon_modal::render_over(
             height,
             width,
@@ -2239,6 +2230,7 @@ fn render_home_modals(
                 sessions: home.session_states,
                 session_total: home.sessions.len(),
                 runtimes: home.daemon_runtimes.as_deref(),
+                control,
             },
         )
     } else if let Some(overlay) = &home.pr_overlay {
@@ -3213,9 +3205,6 @@ mod tests {
         work_run_state_label,
     };
     use crate::presentation::theme::{Color, Role, Style};
-    use crate::presentation::views::command_help_modal::{
-        CommandHelpContext, CommandHelpModal, CommandScope,
-    };
     use crate::presentation::views::director_drawer::{
         self, DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
         WorkRunControlProjection,
@@ -3277,6 +3266,7 @@ mod tests {
             terminal_at: None,
             terminal_reason: None,
             display_label: Some("Ship Work Run".into()),
+            root_agent_id: None,
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),
@@ -4458,6 +4448,9 @@ mod tests {
         let material = DirectorDrawerProjection {
             focused: true,
             goal_driven: false,
+            route: crate::usecase::application::controller::DirectorRoute::Console(
+                crate::usecase::application::controller::DirectorConsoleParent::Organization,
+            ),
             conversations: vec![DirectorConversation {
                 label: "root conversation".to_owned(),
                 selected: true,
@@ -4470,7 +4463,6 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
-            command: None,
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::default(),
@@ -4490,7 +4482,8 @@ mod tests {
         let open = HomeProjection::from_state(&open_state, "atlas", Path::new("/work"), &[])
             .with_director_drawer(material.clone());
         let open_text = render_home(20, 100, &open).join("\n");
-        assert!(open_text.contains("root conversation"));
+        assert!(open_text.contains("Organization / Console"));
+        assert!(!open_text.contains("root conversation"));
         assert!(open_text.contains("director agent output"));
 
         let terminal_material = RootTerminalDrawerProjection {
@@ -6047,7 +6040,8 @@ mod tests {
             "session #{}  live",
             short_id(&missing_session.to_string())
         )));
-        assert!(frame.contains("Ctrl-D"));
+        assert!(frame.contains("Lifecycle actions (non-force)"));
+        assert!(frame.contains("Restart"));
     }
 
     #[test]
@@ -6858,26 +6852,6 @@ mod tests {
             "no daemon metric row without an observation"
         );
         assert!(strip(&baseline.join("\n")).contains("(o.o)?"));
-    }
-
-    #[test]
-    fn command_help_modal_is_composited_over_home() {
-        let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
-            .with_overlay_modals(
-                None,
-                None,
-                Some(CommandHelpModal::new(CommandHelpContext {
-                    scope: CommandScope::Workspace,
-                    garden_available: true,
-                    agent_available: true,
-                    session_available: false,
-                })),
-            );
-        let rendered = strip(&render_home(30, 100, &home).join("\n"));
-        assert!(rendered.contains("Commands"));
-        assert!(rendered.contains("Available"));
-        assert!(rendered.contains("clean"));
     }
 
     // ── daemon health indicator ─────────────────────────────────────────────

@@ -679,17 +679,25 @@ generic terminal も停止し得るが、再起動後も今回停止した runti
 payload の `WorkspaceId` は connection が束縛する workspace と完全一致する場合だけ受理し、foreign workspace は
 `ownership_unknown` で拒否する。response は task instruction と event provenance を含まず、最大96 UTF-8 bytes の
 presentation-safe な Goal label を任意で持つ `SupervisorRunQuery` の最大16件で、
+root task が workspace-root Agent へ束縛済みの場合だけ redaction-safe な `root_agent_id` も返す。terminal、worktree、
+provider provenance は返さず、TUI はこの stable ID だけで Run Overview から Director Console を解決する。
 判断待ち、失敗、実行中、計画中、終了済みの順（同順位は新しい順）に並ぶ。response が supervisor query の
 512 KiB 上限に達する場合は低順位の末尾から落とす。TUI は専用 background lane から再読し、fresh connection への retry が安全である。
 
 `supervisor_control` は local TUI の human mutation 専用 request で、`workspace`、UUID の `operation_id`、型付き
 `command`（`cancel { supervisor_run_id, reason }` または
-`resolve_escalation { supervisor_run_id, escalation_id, decision }`）だけを持つ。Agent MCP credential や caller 名、path、
+`resolve_escalation { supervisor_run_id, escalation_id, decision }` または
+`delete { supervisor_run_id, observed_state_revision }`）だけを持つ。Agent MCP credential や caller 名、path、
 PID、terminal ID は受け取らない。payload workspace と connection workspace、run に保存された workspace の3者が一致しない
-request は `ownership_unknown` で effect zero になる。operation は daemon の durable semantic reservation と Supervisor event ID で
-replay されるため fresh connection への retry が可能で、同じ ID の別 command は `idempotency_conflict` になる。cancel/fail の成功は
+request は `ownership_unknown` で effect zero になる。operation は daemon の durable semantic reservation で replay され、
+cancel / escalation decision では同じ ID を Supervisor event ID に使うため fresh connection への retry が可能である。
+同じ ID の別 command は `idempotency_conflict` になる。cancel/fail の成功は
 exact Supervisor provenance から選んだ Agent worker の terminate/reap まで含み、停止に失敗した応答も既に commit 済みの run を
 recovery worker が再停止する。
+`delete` は `Succeeded` / `Failed` / `Cancelled` と exact state revision を store lock 内で再検証し、snapshot、journal、index、
+checkpoint と derived list entry を削除して、同じ Run ID / revision の `SupervisorRunDeletion` receipt を返す。初回から存在しない
+Run、active / stale / foreign Run は effect zero で拒否し、durable reservation 後に応答を失った同一 operation の replay だけは、
+すでに snapshot が無くても同じ receipt へ収束する。
 escalation の `resume` は、保存済み provenance の exact live Agent run へ再作業 prompt を配送してから command を commit する。
 配送不能時は escalation を解除せず outcome 未確認を返す。artifact rejection の再開後は同じ候補を自動再検証せず、
 その Agent から新しい completion report が届いた場合だけ verification を再開する。dispatch inbox の初回報告を上書きせず、

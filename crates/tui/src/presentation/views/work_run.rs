@@ -4,7 +4,9 @@
 //! progress aggregation, and observation freshness so the two surfaces cannot
 //! disagree about which run is primary or present cached data as live.
 
-use usagi_core::domain::supervisor::{SupervisorRunQuery, SupervisorRunState, TaskState};
+use usagi_core::domain::supervisor::{
+    SupervisorRunDeletion, SupervisorRunQuery, SupervisorRunState, TaskState,
+};
 
 /// Whether the daemon observation behind the projection is current.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -110,6 +112,16 @@ impl WorkRunProjection {
         sort_runs(&mut self.runs);
         self.freshness = WorkRunFreshness::Fresh;
     }
+
+    /// Removes only the exact run/revision acknowledged by the daemon. A stale
+    /// or foreign receipt is ignored until the next authoritative snapshot.
+    pub fn apply_deletion(&mut self, deletion: SupervisorRunDeletion) {
+        self.runs.retain(|run| {
+            run.supervisor_run_id != deletion.supervisor_run_id
+                || run.state_revision != deletion.state_revision
+        });
+        self.freshness = WorkRunFreshness::Fresh;
+    }
 }
 
 fn sort_runs(runs: &mut [SupervisorRunQuery]) {
@@ -147,6 +159,7 @@ mod tests {
             terminal_at: None,
             terminal_reason: None,
             display_label: Some("Test Goal".into()),
+            root_agent_id: None,
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: task_states
@@ -259,5 +272,24 @@ mod tests {
         projection.apply_control(failed);
         assert_eq!(projection.runs(), std::slice::from_ref(&cancelled));
         assert_eq!(projection.runs()[0].supervisor_run_id, id);
+    }
+
+    #[test]
+    fn deletion_receipt_removes_only_the_exact_observed_revision() {
+        let deleted = run(SupervisorRunState::Succeeded, &[]);
+        let other = run(SupervisorRunState::Failed, &[]);
+        let mut projection = WorkRunProjection::fresh(vec![deleted.clone(), other.clone()]);
+
+        projection.apply_deletion(SupervisorRunDeletion {
+            supervisor_run_id: deleted.supervisor_run_id,
+            state_revision: deleted.state_revision + 1,
+        });
+        assert_eq!(projection.runs().len(), 2);
+        projection.apply_deletion(SupervisorRunDeletion {
+            supervisor_run_id: deleted.supervisor_run_id,
+            state_revision: deleted.state_revision,
+        });
+        assert_eq!(projection.runs(), std::slice::from_ref(&other));
+        assert_eq!(projection.freshness(), WorkRunFreshness::Fresh);
     }
 }

@@ -66,6 +66,18 @@ fn settings_ignore_the_removed_local_llm_field() {
 }
 
 #[test]
+fn settings_ignore_the_removed_garden_size_field() {
+    let settings: Settings =
+        serde_json::from_str(r#"{"theme":"dark","garden_size":"large"}"#).unwrap();
+    assert_eq!(settings.theme, Theme::Dark);
+    assert!(
+        !serde_json::to_string(&settings)
+            .unwrap()
+            .contains("garden_size")
+    );
+}
+
+#[test]
 fn settings_round_trip_through_json() {
     let settings = Settings {
         theme: Theme::Dark,

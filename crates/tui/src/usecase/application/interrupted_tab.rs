@@ -38,9 +38,9 @@ use usagi_core::domain::id::{
 
 /// One interrupted Agent conversation projected as its own tab.
 ///
-/// The tab is read-only until the user explicitly resumes it. It holds no
-/// provider-native identity: [`Self::target`] is the daemon-issued opaque source
-/// and every other field is closed display vocabulary.
+/// The tab owns no terminal input. Explicit selection may resume it or ask to
+/// remove it; [`Self::target`] is the daemon-issued opaque source and every
+/// other field is closed display vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterruptedTab {
     /// Daemon-issued, provider-neutral conversation lineage. This is the tab's

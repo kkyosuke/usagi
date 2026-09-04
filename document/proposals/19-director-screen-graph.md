@@ -2,347 +2,260 @@
 
 > [設計提案一覧](README.md) ｜ 関連する現在仕様: [TUI の指示モード](../03-tui.md#指示モードdirector-mode) ｜ 関連提案: [goal-driven Work Run](18-goal-driven-work-run.md)
 
-> **Status:** 提案中（未実装）
+> **Status:** Adopted（2026-09-04）。本書は Director の画面名、階層、遷移、入力所有権の target design である。
+> 現在実装済みの契約は [TUI](../03-tui.md#指示モードdirector-mode) と [キーバインド](../11-keybindings.md) を正本とする。
 >
-> **Baseline:** commit `c1f7629ee19f698338826f12edb30d4be266e2a6`（2026-09-03）。現在の Director、Work Run
-> 一覧・操作、Goal Composer の仕様は [TUI の指示モード](../03-tui.md#指示モードdirector-mode)を参照する。
+> **Baseline:** 原版 commit `f81ee1b2bc26e6649a21cae730cb713d20e7143d`（2026-09-03）。現在仕様は上記の TUI とキーバインドを参照する。
 
-Director 内の Organization、Work Run、Agent launcher、Agent conversation をどの画面へ置き、どの identity を保って
-遷移するかの target design である。現在の Director drawer は Work Run 一覧・typed action、Organization、New picker /
-Goal Composer、root Agent terminal を個別の状態と表示素材の優先順で切り替える。本提案はこれらを 3 つの明示的な
-sub-route に整理する。現在の実装仕様は [TUI](../03-tui.md#指示モードdirector-mode) が正本であり、本書の screen graph は
-未実装である。goal-driven と classic は route shell を共有するが、Overview の scope と操作まで同一にはしない。
+## 目的
 
-## 目次
+Director の workspace-wide な組織観測、Work Run の選択、1 Run の進捗確認、root Director Agent との対話、新規開始を、
+表示素材の優先順ではなく明示的な route と stable identity で表す。利用者が「全体」「仕事」「1 Run」「1 Agent」のどこに
+いるかを breadcrumb と戻る操作から判断でき、terminal の入力を navigation が奪わないことを目的とする。
 
-- [決定](#決定)
-- [情報階層](#情報階層)
-- [3 画面の責務](#3-画面の責務)
-- [画面遷移](#画面遷移)
-- [Director Overview](#director-overview)
-- [workflow ごとの成立条件](#workflow-ごとの成立条件)
-- [Agent Launcher](#agent-launcher)
-- [Agent](#agent)
-- [入力と戻る操作](#入力と戻る操作)
-- [状態と identity](#状態と-identity)
-- [現在実装との差分](#現在実装との差分)
-- [非同期更新と失敗時の着地](#非同期更新と失敗時の着地)
-- [段階的な実装](#段階的な実装)
-- [受け入れ条件](#受け入れ条件)
-- [採用しない案](#採用しない案)
+## 名称と情報階層
 
-## 決定
-
-3 画面は同格の tab ではなく、次の親子関係にする。
+`Director` は機能全体と drawer shell の名前であり、配下の画面名には重ねない。`Overview` は選択した 1 Work Run の
+観測画面だけに使い、PTY を持つ対話面は `Console` と呼ぶ。`Works` や `Goal Session` は使わず、daemon の
+`SupervisorRun` に対応する利用者向け名称を `Work Run` に統一する。
 
 ```text
-Director Overview              常設のハブ
-├─ Agent                       選択した既存 Agent の詳細
-└─ Agent Launcher              新しい Agent / Work Run を作る一時フロー
-   └─ confirm ───────────────► Agent（starting を含む）
+♛ Director
+├─ Organization                  workspace 全体
+├─ Work Runs                     Work Run の一覧
+│  └─ Run Overview               選択 Run の進捗と構成
+│     └─ Director Console        root Director Agent の PTY
+└─ Start Work Run                新規作成
 ```
 
-- Director を開いた最初の着地点は Overview とする。
-- goal-driven の Overview は Work Run の選択と、選択中 Work Run の Organization tree を同じ画面に置く。
-- classic の Overview は root conversation の選択と、workspace 全体の Organization tree を同じ画面に置く。選択
-  conversation で tree を絞り込まない。
-- 既存 Agent を選ぶ操作は goal-driven では Overview の tree、classic では conversation rail が担う。Agent Launcher は
-  新規作成専用で、既存 Agent の切替には使わない。
-- Agent は 1 つの conversation / terminal に集中する詳細画面とする。Organization tree を常時併記しない。
-- Agent Launcher は独立した永続対象ではなく、呼び出し元を持つ一時 route とする。cancel は呼び出し元へ、confirm は
-  作成した Agent へ進む。
-- drawer 全体を閉じる操作と、Agent から Overview へ戻る操作を分ける。
-
-この構造なら「全体を見る」「新しく始める」「1 人と話す」の入力 owner が一意になり、terminal の `Esc` と navigation が
-競合しない。
-
-## 情報階層
-
-画面名に `Goal Session` は使わない。usagi の `Session` は隔離 worktree を意味するため、目的の単位は UI では
-`Work Run`、短い行見出しでは `Goal` と呼ぶ。
+domain object の階層は次である。画面階層へ lifecycle を複製せず、stable identity で既存 authority を join する。
 
 ```text
 Workspace
-└─ Work Run / Goal                 目的、進捗、停止理由
-   ├─ root Director Agent          目的を受け持つ conversation
-   └─ Task
-      └─ Session                   隔離 worktree と role
-         └─ Agent                  実行 process / conversation
+├─ Work Run / Goal
+│  ├─ root Director Agent
+│  └─ Task
+│     └─ Session
+│        └─ managed Agent
+└─ unassigned root Director Agent / Session
 ```
 
-Work Run と Session を一対一にしない。1 つの目的が複数 Session へ委譲されることと、Session が worktree lifecycle を
-持つことを UI でも区別する。Overview は複数の authority を stable identity で join するだけで、Work Run に
-Session / Agent の lifecycle を複製しない。権威の詳細は
-[goal-driven Work Run の情報階層](18-goal-driven-work-run.md#情報階層と権威)を正本とする。
+Work Run と Session は一対一ではない。1 つの目的は複数 Session へ委譲でき、Session は隔離 worktree の lifecycle を持つ。
 
-classic には Work Run が存在しない。root Agent conversation と、`parent_session_id` で構成する Session tree は workspace を
-共有するが、現在の authority には「どの root conversation がどの root Session を作ったか」を永続的に結ぶ identity がない。
-そのため classic の conversation 選択を Organization の scope と解釈したり、表示順から関連を推測したりしない。
+## 画面の責務
 
-## 3 画面の責務
-
-| 画面 | 答える問い | 主な表示 | 主な操作 |
+| 画面 | 主語 | 表示 | mutation |
 |---|---|---|---|
-| Director Overview | どの目的または conversation があり、workspace で誰が動いているか | workflow に応じた対象一覧、Organization tree、状態の要約 | 対象 / node 選択、tree 展開、Agent / Session への drill-down、新規開始 |
-| Agent Launcher | 誰に新しい仕事を任せるか | launch scope、Goal、provider / profile、effective role / policy | 候補選択、Goal 編集、confirm、cancel |
-| Agent | この Agent は何をしており、何を伝えるか | breadcrumb、状態、terminal / conversation、safe feedback | Agent 入力、scroll / copy、Overview へ戻る、新規開始 |
+| Organization | workspace | root Director、Session、managed Agent の workspace-wide tree | 新規開始だけ |
+| Work Runs | Work Run の集合 | Goal、状態、進捗、短い ID | cancel、終了済み履歴の削除 |
+| Run Overview | 選択 Work Run | Goal、進捗、task、停止理由、run-scoped Organization、成果物 | cancel、終了済み履歴の削除、既存回答面への遷移 |
+| Director Console | 1 root Director Agent | breadcrumb、短い状態、terminal / conversation、safe feedback | Agent PTY 入力、close、resume |
+| Start Work Run | 新規 Run draft | Goal、provider / profile、effective role / policy | Work Run 開始 |
 
-Overview は観測面、Launcher は作成面、Agent は対話面である。Overview から daemon mutation を起こすのは、明示的な
-`New` と goal-driven に既存の typed Work Run action だけに限る。classic に架空の Work Run action を設けない。
+### Organization
+
+Organization は Director を初めて開いたときの着地点で、root conversation selector と workspace-wide tree を正式な画面へ
+昇格したものである。goal に属さない対象もここから観測する。
+
+```text
+┌─ ♛ Director / Organization ────────────────────────────────┐
+│ Directors                                                   │
+│ > Codex · root                                  running     │
+│   Claude · root                                 stopped     │
+│                                                             │
+│ Organization                                                │
+│ ♛ Director                                      active      │
+│ ├─ ◆ auth-api                                   running     │
+│ │  └─ ● reviewer                                waiting     │
+│ └─ ◆ auth-ui                                    ready       │
+│                                                             │
+│ Ctrl-O w: Work Runs  Ctrl-O n: Start  Esc: close           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+root Director の `Enter` はその Console、managed Session / Agent の `Enter` は既存 Session Closeup を開く。managed terminal を
+Director 内へ複製しない。Session Closeup を開くときは Director を閉じるが、route と選択を保持し、`Ctrl-O g` で同じ位置へ
+復帰する。
+
+### Work Runs
+
+Work Runs は Goal の集合を選ぶ画面である。`Enter` は mutation を起こさず、選択 Run の Run Overview を開く。action の
+feedback は一覧の上へ挿入せず固定 footer に表示し、選択行の Y 座標を変えない。
+
+```text
+┌─ ♛ Director / Work Runs ───────────────────────────────────┐
+│ > OAuth ログインを追加      Working          4/6           │
+│   検索を高速化する          Waiting for you  2/5           │
+│   README を再構成する       Completed        3/3           │
+│                                                             │
+│ ↑↓ select  Enter: Overview  Ctrl-C: cancel  Ctrl-X: delete │
+└─────────────────────────────────────────────────────────────┘
+```
+
+並びは `Waiting for you`、停止中、実行中、完了時刻の新しい順とし、選択は `SupervisorRunId` で保持する。
+
+### Run Overview
+
+Run Overview は terminal 出力ではなく daemon の safe projection から 1 Run の状態を描く。task、Session、Agent、PR は
+それぞれの authority を stable identity で join し、会話文から進捗や成功を推測しない。
+
+```text
+┌─ Director / Work Runs / OAuth ログイン / Overview ────────┐
+│ Working                                      Run #01a06972 │
+│ Goal  OAuth ログインを追加し review-ready にする           │
+│ Progress  ███████░░░  4/6 tasks       Agents 2/4          │
+│                                                             │
+│ Tasks                                                       │
+│ ✓ 設計を確定する                              done          │
+│ ● API を実装する                              working       │
+│ ! UI レビュー                                  waiting       │
+│                                                             │
+│ Organization                                                │
+│ > ♛ Director                                   running       │
+│   ├─ ◆ auth-api                                running       │
+│   └─ ◆ auth-ui                                 waiting       │
+│ Artifacts  PR #1841 · checks 5/6                            │
+│ Esc: Work Runs  Enter: open  Ctrl-C: cancel                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+root Director の `Enter` は Console、Session / managed Agent は既存 Closeup、pending decision は既存 Decision、PR は既存
+Pull Request 面へ進む。移動先から戻ったときは同じ `SupervisorRunId` と node selection を復元する。
+
+### Director Console
+
+Console は選択した root Director Agent の terminal を最大化する。Organization、task、progress、追加の command editor は
+置かない。通常文字、IME 確定文字列、paste、`Enter`、`Esc`、`Ctrl-C` は managed Agent と同じ terminal input path で
+PTY へ直接送る。
+
+```text
+┌─ Director / OAuth ログイン / Console ─────────── running ─┐
+│ [ Overview ]                              Director 1 of 1  │
+│                                                            │
+│ terminal / conversation                                   │
+│                                                            │
+│                                                            │
+│ Ctrl-O b: Overview  Ctrl-O w: Work Runs  Ctrl-O g: close  │
+└────────────────────────────────────────────────────────────┘
+```
+
+Console の `Esc` と plain `Ctrl-C` を戻る・Run cancel に使わない。Agent CLI が持つ interrupt / dismiss contract を守る。
+interrupted / stopped でも別画面へ自動 fallback せず、同じ Console に safe reason と `Resume` / `Overview` を表示する。
+
+### Start Work Run
+
+Start Work Run は Goal と provider / profile を同じ画面で確認する一時 route である。`return_to` は Organization、Work Runs、
+Run Overview、Console のいずれか一段だけを保持する。cancel は exact `return_to`、confirm は pending Run の Run Overview へ
+進む。
+
+```text
+┌─ ♛ Director / Start Work Run ──────────────────────────────┐
+│ Goal                                                        │
+│ OAuth ログインを追加し review-ready にする                 │
+│                                                             │
+│ Provider                                                    │
+│   claude                                                    │
+│ > codex                                     workspace default│
+│   sakana.ai                                                  │
+│                                                             │
+│ Esc: cancel                                     Enter: start│
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## 画面遷移
 
 ```text
 Workspace Home
-    │ Director toggle
+    │ Ctrl-O g / header
     ▼
-Director Overview ── Enter on root Agent ───────► Agent
-    │  │                                           │
-    │  ├─ Enter on managed Session / worker ─────► existing Session Closeup
-    │  │                                           │
-    │  └─ New ─────────────► Agent Launcher ◄─────┘ New
-    │                           │       │
-    │                         cancel  confirm
-    │                           │       │
-    ◄───────────────────────────┘       └────────► Agent (starting → live)
-    │
-    └─ Director toggle ──────────────────────────► Workspace Home
+Organization ── Ctrl-O w ──► Work Runs ── Enter ──► Run Overview
+    │                            ▲   │                     │
+    │ Enter root Director        │   │ Esc / Ctrl-O b     │ Enter root Director
+    ▼                            │   └─────────────────────┘
+Director Console ◄───────────────┼─────────────────────────┘
+    │                            │
+    └─ Ctrl-O b ──► Run Overview┘
+
+Organization / Work Runs / Run Overview / Console
+    └─ Ctrl-O n ──► Start Work Run
+                       ├─ Esc / Ctrl-C ──► exact return_to
+                       └─ matching success ─► Run Overview
 ```
 
-managed Session / worker の terminal を Director 内へ複製しない。tree からそれらを選んだ場合は既存 Session Closeup を
-開き、戻ると同じ `WorkRunId` と tree node selection を持つ Overview へ戻す。root Director Agent だけが Director の
-Agent 画面に載る。この境界は [goal-driven Work Run の既存画面との境界](18-goal-driven-work-run.md#既存画面との境界)と
-一致する。
+`Ctrl-O b` は Director 内の一階層 back で、Console のように `Esc` を PTY が所有する面からも利用できる。Organization は
+最上位なので `Ctrl-O b` は no-op、`Esc` または `Ctrl-O g` が drawer を閉じる。`Ctrl-O w` はどの Director route からも
+Work Runs へ直接移動する。
 
-Director toggle で drawer を閉じた場合は Director の sub-route を保持し、再度開いたときは直前の画面を復元する。
-ただし初回、選択 identity の消失、復元不能な schema の場合は Overview へ着地する。drawer の開閉は背面の Home route、
-active Session、pane selection を変更しない。
+drawer close は route、Run、node、Console の stable selection を保持する。再 open は直前の route を復元し、初回、対象消失、
+復元不能 schema の場合だけ Organization へ着地する。背面の Home route、active Session、pane selection は変更しない。
 
-## Director Overview
+## キー契約
 
-通常幅では Goal rail と Organization tree の 2 領域を同時に表示する。Goal rail の選択が tree の scope を決める。
+| context | `Enter` | `Esc` | `Ctrl-O b` | `Ctrl-O w` | `Ctrl-C` | `Ctrl-X` |
+|---|---|---|---|---|---|---|
+| Organization | node を開く | Director close | no-op | Work Runs | no-op | no-op |
+| Work Runs | Run Overview | Organization | Organization | no-op | active Run cancel 確認 | finished Run delete 確認 |
+| Run Overview | node / artifact を開く | Work Runs | Work Runs | Work Runs | active Run cancel 確認 | finished Run delete 確認 |
+| Director Console live | PTY | PTY | Run Overview / Organization | Work Runs | PTY SIGINT | PTY |
+| Director Console non-live | 明示 action | parent overview | parent overview | Work Runs | no-op | no-op |
+| Start Work Run | start | `return_to` | `return_to` | Work Runs | `return_to` | no-op |
+| cancel / delete confirm | confirm | back | back | consumed | back | consumed |
 
-```text
-┌─ ♛ Director / Overview ─────────────────────────────────────┐
-│ Goals                         Organization                  │
-│ > OAuth ログインを追加         ♛ Director        running    │
-│   Working · 4/6               ├─ ◆ planner       waiting    │
-│   検索を高速化する             ├─ ◆ auth-api      running    │
-│   Waiting for you             │  └─ ● reviewer   ready      │
-│   README を再構成する          └─ ◆ auth-ui       stopped    │
-│   PR #1841 ready                                             │
-│                                                              │
-│ + New goal             Enter: action/open  Space: expand    │
-└──────────────────────────────────────────────────────────────┘
-```
+`Ctrl-X` と `Ctrl-O x` は別操作である。Work Runs / Run Overview の plain `Ctrl-X` は終了済み Run の履歴削除、Console の
+`Ctrl-O x` は選択 Agent conversation の close / dismiss を維持する。
 
-Goal の並びは `Waiting for you`、`Stopped`、実行中、完了時刻の新しい順とする。選択変更だけでは Agent を開かない。
-tree は選択中 Goal の provenance に属する node だけを表示する。手動起動した root conversation や goal に属さない Session は
-Goal の一部にせず、rail の固定 synthetic scope `Unassigned` から workspace-wide tree として開く。全 Goal の node を 1 本の
-tree へ混ぜない。
+Run cancel と delete は必ず確認を挟む。delete は `Succeeded / Failed / Cancelled` の terminal Run だけを対象にし、未完了
+Run の `Ctrl-X` は mutation せず `Cancel the Work Run first` を固定 footer に表示する。finished Run の `Ctrl-C` も mutation
+せず `This Work Run is already finished` を同じ位置に表示する。確認中の `Esc` / `Ctrl-C` は何も変更せず元画面へ戻る。
 
-Goal rail と Organization tree は別の focus region とする。Goal rail の `Enter` は現在の Work Run 操作面と同じく、その状態で
-許可された typed action を開く。cancel や escalation 解決の確認は Overview 内の一時 substate であり、第4の常設画面には
-しない。tree の `Enter` は選択 node の drill-down だけを行う。
+## workflow ごとの差分
 
-tree node の種類は icon と label の両方で区別する。状態は色だけでなく短い状態語を併記する。Goal が 0 件でも
-Organization を空にせず、`No goals yet`、`New goal`、`Unassigned` を表示する。
+goal-driven は上記の全 route を使う。classic には Work Run authority がないため Work Runs / Run Overview / Start Work Run を
+捏造せず、Organization、Director Console、`New Conversation` のみを使う。classic の root conversation と Organization tree は
+workspace を共有するが、表示順から親子関係を推測しない。
 
-狭幅では 2 領域を上下へ積み、まず Goal、次に選択 Goal の tree を表示する。別画面へ分割しないため、terminal resize で
-navigation depth が変わらない。
+goal-driven の Work Run から Console へ進むには、daemon projection が redaction-safe な root Agent stable identity を公開する。
+identity が無い Run では Director row を disabled にし、goal 文字列、時刻、terminal order から関連を推測しない。
 
-## workflow ごとの成立条件
-
-3 route と戻る規則は両 workflow で共有する。一方、対象の authority、Overview の scope、許可する action は次のように
-分ける。
-
-| 観点 | goal-driven | classic |
-|---|---|---|
-| Overview の左側 | Work Runs / Goals | root Agent conversations |
-| 左側の選択が決めるもの | 選択 Work Run の Organization scope | 開く Agent。Organization scope は変えない |
-| Organization | Work Run provenance で絞った tree。`Unassigned` だけ workspace-wide | 常に workspace-wide の Session tree |
-| 既存 root Agent を開く | 選択 Work Run に属する root Agent node | conversation rail の項目 |
-| 新規作成 | Goal + provider から Work Run を開始 | provider から conversation を開始 |
-| typed action | cancel / escalation 解決など Work Run action | なし |
-| Agent の next / previous | 同じ Work Run に属する retained root Agents | retained root conversations 全体 |
-
-goal-driven で Work Run と root Director Agent を結ぶには、daemon が redaction-safe な stable Agent identity を Work Run
-projection に含める必要がある。現在の `SupervisorRunQuery` は worker provenance を持つが root Agent identity を公開して
-いないため、TUI が terminal の順番、goal 文字列、時刻から関連を推測してはならない。この join が提供されるまでは Work Run
-から root Agent への drill-down を有効にしない。
-
-classic では conversation と Organization が同じ workspace に並ぶだけで、親子関係ではない。conversation の `Enter` は
-Director の Agent へ、Organization の Session / worker の `Enter` は既存 Session Closeup へ進む。この非対称性を保てば、
-同じ route shell のまま authority を偽らずに両 workflow が成立する。
-
-## Agent Launcher
-
-Launcher は `LaunchContext` を表示し、何を作るのかを confirm 前に明示する。
-
-| workflow / 呼び出し | launch scope | 必須入力 |
-|---|---|---|
-| goal-driven の `New goal` | workspace root に新しい Work Run | Goal、provider / profile |
-| classic の `New conversation` | workspace root に root Agent conversation | provider / profile |
-| 将来の明示的な task delegation | 選択 Work Run / task | role、provider / profile、task instruction |
-
-```text
-┌─ Start Work Run ─────────────────────────────────────────────┐
-│ Goal                                                         │
-│ OAuth ログインを追加し、PR を review-ready にする            │
-│                                                              │
-│ Agent                                                        │
-│   claude                                                     │
-│ > codex                                      workspace default│
-│   sakana.ai                                                  │
-│                                                              │
-│ Role  Director    Delivery  PR ready    Policy  Standard     │
-│ Esc: cancel                                      Enter: start │
-└──────────────────────────────────────────────────────────────┘
-```
-
-Goal と provider を別々の wizard step にしない。submit される値を 1 画面で確認でき、通常フローの確認回数を増やさないためで
-ある。候補選択は install 済み provider の closed vocabulary とし、設定済み default を強調するが自動 submit しない。
-
-Launcher は `return_to` を保持する。Overview の `New goal` / `New conversation` から開いて cancel した場合は同じ Goal /
-tree selection の Overview、Agent の同名 action から開いて cancel した場合は同じ Agent と scroll state へ戻る。confirm 後は
-呼び出し元へ戻らず、新しい Agent 画面へ進む。
-
-## Agent
-
-Agent は conversation / terminal の入力を最大化する。Goal と Organization の詳細を同居させず、breadcrumb と短い状態だけを
-残す。
-
-```text
-┌─ ♛ Director / OAuth ログインを追加 / Director ── running ───┐
-│ [ Overview ]  [ New goal ]                    Agent 1 of 2    │
-│                                                              │
-│  terminal / conversation                                    │
-│                                                              │
-│                                                              │
-│ Ctrl-O w: overview  Ctrl-O [/]: previous/next                │
-│ Ctrl-O g: close                                               │
-└──────────────────────────────────────────────────────────────┘
-```
-
-`next / previous` は同じ Goal に retained root conversation が複数ある場合だけ、その stable order 内を巡回する。別 Goal へ
-暗黙に移らない。別 Goal の Agent へ移る場合は Overview を経由し、現在の context が breadcrumb から突然変わらないように
-する。classic workflow では Overview の `Conversations` に属する root conversation 全体が同じ巡回 group になる。
-
-goal-driven の action label は `New goal`、classic は `New conversation` とし、汎用的な `New` だけを表示しない。現在の
-Agent の子を作る操作に見せず、新しい sibling を作ることを明示するためである。
-
-Agent が interrupted / stopped になっても Agent 画面を Overview へ自動遷移させない。terminal の代わりに safe reason と
-`Resume` / `Retry` / `Overview` のうち daemon projection が許可する action を表示する。履歴の保持や exact resume は現在の
-[interrupted Agent](../03-tui.md#interrupted-agent-の-tab-投影と明示-resume)契約を再利用する。
-
-## 入力と戻る操作
-
-| context | `Enter` | `Esc` | `Ctrl-O w` | `Ctrl-O g` |
-|---|---|---|---|---|
-| Overview | 選択 node を開く | Director を閉じる | no-op | Director を閉じる |
-| Agent Launcher | confirm | cancel して `return_to` へ戻る | cancel して `return_to` へ戻る | Director を閉じ、Launcher draft を保持する |
-| Agent（live） | Agent PTY へ送る | Agent PTY へ送る | Overview へ戻る | Director を閉じる |
-| Agent（non-live） | 選択中の明示 action | Overview へ戻る | Overview へ戻る | Director を閉じる |
-
-`Esc` を live Agent から戻る操作にしない。Agent CLI が中断・取消に使う既存 contract を守るためである。Overview へ戻る
-操作は既存 Work Run 操作面の `Ctrl-O w` と visible button に一本化する。`Ctrl-O g` は drawer 全体の toggle のまま保ち、
-Overview back と Director close を別 intent にする。Agent の previous / next は既存 tab 操作の `Ctrl-O [` / `Ctrl-O ]` を
-再利用する。
-
-mouse は描画と同じ hitbox が stable identity を返す。Goal の single click は scope 選択、tree node の double click または
-`Enter` は drill-down、breadcrumb / button は single click とする。terminal 領域の pointer は Agent が所有し、背景の
-Overview へ fallthrough させない。
-
-## 状態と identity
-
-画面は `terminal_view` や Organization row の有無から推測せず、明示的な route state で表す。
+## route state と identity
 
 ```text
 DirectorRoute
-├─ Overview
-│  ├─ GoalDriven { selected_work_run_id | unassigned, selected_node_id? }
-│  └─ Classic { selected_conversation_id?, selected_node_id? }
-├─ Launcher { return_to, launch_context, draft, operation_id? }
-└─ Agent { context: work_run_id | classic, agent_runtime_id | pending_operation_id }
+├─ Organization { selected_conversation_id?, selected_node_id? }
+├─ WorkRuns { selected_work_run_id? }
+├─ RunOverview { work_run_id, selected_node_id? }
+├─ Console { parent, agent_runtime_id | pending_operation_id }
+└─ StartWorkRun { return_to, draft, operation_id? }
 ```
 
-`return_to` は route 全体の任意 stack ではなく、`Overview` または `Agent` のどちらか一段だけに制限する。Launcher から
-Launcher を開かず、navigation stack の無制限な増加を防ぐ。
+表示 label や配列 index は identity に使わない。Work Run、Session、Agent runtime、pending launch は daemon の stable ID または
+producer の `OperationId` で fence する。refresh、sort、resize、reconnect で別対象へ選択を移さない。
 
-選択 identity と表示 label / 配列 index を分ける。Work Run、Session、Agent runtime、pending launch はそれぞれ daemon の
-stable ID または producer の `OperationId` で fence する。描画順が変わっても選択対象を変えない。
+## delete の権威
 
-## 現在実装との差分
-
-本提案は表示移動の実装修正を含まない。baseline の Director は次の状態である。
-
-- `DirectorRoute` はなく、New / Work Run control / Work Run progress / terminal / interrupted detail / Organization の表示素材の
-  優先順で画面相当の内容を決めている。したがって Overview、Launcher、Agent 間の明示遷移と戻り先保持はまだない。
-- 通常の Director terminal では `Ctrl-O [` / `Ctrl-O ]` が root Agent tab の previous / next を選ぶ経路を持つ。一方、selector
-  は選択中 label だけを描き、conversation 一覧の stable identity や hitbox を持たないため、mouse で Agent を直接選べない。
-- New picker / Goal Composer と Work Run control は前面 input owner であり、その間は `Ctrl-O [` / `Ctrl-O ]` を含む対象外入力を
-  消費する。Agent を切り替えるには先に `Esc` でその一時面を閉じる必要がある。
-- goal-driven の通常 footer は Work Run action と close だけを案内し、既存の Agent next / previous を表示していない。
-  keyboard 経路があっても発見しにくい。
-- 現在の Organization は `parent_session_id` による workspace-wide tree で、選択 Work Run に scope されていない。
-
-したがって実装時は route 導入だけでなく、visible conversation selector、keyboard と mouse の同一 stable-ID selection、選択直後の
-terminal projection 更新、各一時面からの明示 back を一組として直す。単体の tab-cycle helper だけで「Agent 間を移動できる」と
-完了判定しない。
+終了済み Work Run の履歴削除は daemon-owned supervisor store の mutation とする。TUI は `OperationId`、
+`SupervisorRunId`、観測済み state revision を送り、daemon は workspace ownership、terminal state、revision を再検証してから
+削除する。応答喪失後は同じ operation を replay し、重複削除を成功として同じ結果へ収束させる。削除後の snapshot から Run が
+消えたことを確認するまで、TUI は別 Run の削除成功を推測しない。
 
 ## 非同期更新と失敗時の着地
 
-- confirm すると、同じ `OperationId` を持つ pending Agent を tree に加え、Agent の `starting` 画面へ直ちに進む。
-- daemon の final が exact scope / operation / semantic digest と一致した場合だけ pending identity を live Agent identity へ
-  置換する。応答喪失後の replay で Agent や Work Run を増やさない。
-- launch failure は Agent の failed state に留め、safe reason、`Retry`、`Overview` を表示する。失敗を理由に別 Agent や
-  Overview へ暗黙に fallback しない。
-- 表示中 Agent が inventory から消えても、retained history があれば stopped / interrupted として同じ Agent 画面に留める。
-  history も無い場合は tombstone を 1 frame 以上表示してから Overview へ戻せるようにする。
-- 選択 Work Run が削除された Overview は、表示順上の surviving Work Run へ決定的に着地する。無ければ中立な empty state と
-  し、`New goal` を暗黙に選択しない。
-- reconnect / resync 中も `DirectorRoute` を保ち、projection を `State unavailable` にする。route と target の消失を同一視
-  しない。
-
-## 段階的な実装
-
-1. 現在の drawer に visible conversation selector と stable-ID hitbox を追加し、通常面の `Ctrl-O [` / `Ctrl-O ]`、click、選択後の
-   terminal projection を production input route まで通す regression test で固定する。
-2. `DirectorRoute` と各 route の stable selection を reducer に追加し、現在の projection precedence を明示 route へ置き換える。
-3. workflow ごとの scope 契約に従って Work Run、Organization、root Agent inventory を join した Overview renderer、keyboard /
-   mouse navigation を追加する。goal-driven の root Agent drill-down は daemon projection に明示 identity が追加された後に有効にする。
-4. 現在の picker / Goal Composer を `Launcher` へ移し、`return_to` と confirm 後の pending Agent 遷移を追加する。
-5. root Agent terminal を `Agent` route へ移し、Overview back、workflow ごとの next / previous、non-live action を追加する。
-6. Goal rail を現在の `SupervisorRunId` keyed projection に接続し、task provenance から Session Closeup への drill-down を
-   追加する。既存の typed cancel / escalation action と exact operation retry は Overview 内の substate として移す。
-7. production screen graph test で 3 route、drawer close / reopen、resize、reconnect、pending / failure / interrupted を固定する。
-
-現在の Work Run projection が持つ並び順、freshness、typed action、exact operation retry をそのまま再利用する。Overview への
-統合は authority の変更ではなく navigation の再編であり、terminal output から task progress や成功を推測しない。
+- Start confirm は 1 request / 1 pending launch へ収束し、matching success の exact `SupervisorRunId` で Run Overview へ進む。
+- launch failure は開始前の route を保持して safe reason を表示し、別 Run や Console へ silent fallback しない。
+- cancel / delete の送信中は連打を消費する。結果不明は同じ `OperationId` の retry だけを許可する。
+- 選択 Run が外部削除された Run Overview は tombstone を 1 frame 以上表示してから Work Runs へ戻せるようにする。
+- reconnect / resync 中も route と stable selection を保ち、`State unavailable` と authoritative `Failed` を区別する。
+- 一覧 feedback、確認、retry は固定 footer / fixed body slot を使い、Run row の Y 座標を変えない。
 
 ## 受け入れ条件
 
-- Director 初回 open は Overview へ着地し、既存 Agent があっても自動的に terminal 入力へ focus しない。
-- Overview の Goal 選択と tree node 選択は stable identity で保持され、refresh / sort / resize で別対象へ移らない。
-- Overview、Launcher、Agent のどれが前面 input owner か 1 frame ごとに一意である。
-- Launcher の cancel は exact `return_to` へ戻り、confirm は 1 request / 1 pending Agent / 1 live Agent へ収束する。
-- live Agent の `Esc` / 通常文字 / paste は navigation に奪われず、PTY へ 1 回だけ届く。
-- Overview back と Director close は異なる intent で、どちらも背面 Home の target / pane state を変更しない。
-- root Agent は Director の Agent 画面、managed worker は既存 Session Closeup に開き、同じ terminal を 2 画面へ重複投影しない。
-- 通常の Agent 画面では visible selector の click と `Ctrl-O [` / `Ctrl-O ]` が同じ stable identity を選び、次の frame で
-  terminal / conversation 表示がその対象へ移る。一時面が切替を所有しない場合は、その理由と戻る操作を footer に表示する。
-- launch failure、interrupted、projection unavailable で別 Agent へ silent fallback しない。
-- goal-driven と classic の両方が同じ 3 route と戻る規則を使う。Overview の scope、typed action、Agent 巡回 group は
-  [workflow ごとの成立条件](#workflow-ごとの成立条件)どおり分離される。
-
-## 採用しない案
-
-- **3 画面を同格 tab にする**: Launcher が常駐 navigation になり、「見る」と「作る」が同じ重さになる。cancel の戻り先も
-  曖昧になる。
-- **Organization tree を Agent 画面へ常時併記する**: terminal 幅を削り、tree refresh と PTY pointer の input owner が競合する。
-- **表示データの有無で画面を決める**: inventory の遅延や reconnect のたびに Organization と Agent が切り替わり、利用者の
-  navigation intent を失う。
-- **Goal と Session を同じ階層に並べる**: 目的と worktree の一対多関係が見えず、Work Run の完了と Session の終了を混同する。
-- **Agent Launcher を既存 Agent selector と兼用する**: 新規作成と既存対象への移動で `Enter` の副作用が変わる。既存 Agent の
-  選択は goal-driven の Overview tree または classic の conversation rail に限定する。
-- **live Agent の `Esc` で Overview へ戻る**: Agent CLI の中断操作を TUI navigation が奪う。
+- 初回 Director open は Organization、再 open は直前 route と stable selection へ着地する。
+- Work Runs の `Enter` は mutation を起こさず選択 Run の Run Overview を開く。
+- Run Overview と Console は daemon projection / PTY の責務を混ぜない。
+- Console に追加 command editor を置かず、通常入力を managed Agent と同じ path で PTY へ 1 回だけ送る。
+- `Esc` は non-PTY route の back、Console の `Esc` は PTY input になる。
+- `Ctrl-O b` は Console から parent overview へ戻り、`Ctrl-O g` はどの route でも drawer 全体を閉じる。
+- plain `Ctrl-C` は Work Runs / Run Overview だけで Run cancel、Console では PTY SIGINT になる。
+- plain `Ctrl-X` は finished Run の確認付き削除だけに使い、active Run や Console で誤削除しない。
+- feedback 表示、refresh、sort、resizeで一覧行と選択 identityがずれない。
+- managed Session / Agent は既存 Closeup、root Director Agent だけが Console に開く。

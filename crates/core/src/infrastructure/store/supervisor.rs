@@ -251,6 +251,50 @@ impl SupervisorStore {
         self.remove_from_run_list_index(&removed_ids);
         Ok(removed)
     }
+
+    /// Removes one exact terminal run from retained history.
+    ///
+    /// The aggregate is reloaded under the cross-process store lock and must
+    /// still be terminal at the revision the caller confirmed. Auxiliary files
+    /// are removed first and the authoritative snapshot last, so an interrupted
+    /// attempt remains retryable. The derived list index is disposable and is
+    /// invalidated if it cannot be updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the run is missing, active, stale, or any durable
+    /// run file cannot be removed.
+    pub fn delete_finished(&self, id: SupervisorRunId, expected_revision: u64) -> Result<()> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let run = self
+            .load(id)?
+            .ok_or_else(|| anyhow::anyhow!("supervisor run does not exist"))?;
+        if !run.state.is_finished() {
+            bail!("supervisor run must finish before deletion");
+        }
+        if run.state_revision != expected_revision {
+            bail!(
+                "stale supervisor state revision: expected {expected_revision}, got {}",
+                run.state_revision
+            );
+        }
+        for path in [
+            self.journal_path(id),
+            self.journal_index_path(id),
+            self.checkpoint_path(id),
+            self.snapshot_path(id),
+        ] {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).context(format!("failed to remove {}", path.display()));
+                }
+            }
+        }
+        self.remove_from_run_list_index(&[id]);
+        Ok(())
+    }
     /// How many run snapshots the state directory holds, without reading any of
     /// them. A missing directory holds none.
     fn snapshot_count(&self) -> Result<usize> {
@@ -1724,6 +1768,97 @@ mod tests {
         }
         assert_eq!(store.prune_finished_runs().unwrap(), 0);
         assert_eq!(store.runs().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn exact_finished_run_deletion_rechecks_state_and_removes_every_store_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let active = SupervisorRun::new(
+            "caller".into(),
+            "active".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        store.initialize(&active).unwrap();
+        assert!(
+            store
+                .delete_finished(active.supervisor_run_id, active.state_revision)
+                .unwrap_err()
+                .to_string()
+                .contains("must finish")
+        );
+
+        let mut finished = SupervisorRun::new(
+            "caller".into(),
+            "finished".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        finished.state = SupervisorRunState::Succeeded;
+        finished.state_revision = 7;
+        finished.terminal_at = Some(now());
+        let id = finished.supervisor_run_id;
+        store.initialize(&finished).unwrap();
+        assert!(
+            store
+                .delete_finished(id, finished.state_revision - 1)
+                .unwrap_err()
+                .to_string()
+                .contains("stale supervisor state revision")
+        );
+        assert!(store.load(id).unwrap().is_some());
+
+        store.delete_finished(id, finished.state_revision).unwrap();
+        assert!(store.load(id).unwrap().is_none());
+        assert!(
+            !store
+                .runs()
+                .unwrap()
+                .iter()
+                .any(|run| run.supervisor_run_id == id)
+        );
+        for path in [
+            store.snapshot_path(id),
+            store.journal_path(id),
+            store.journal_index_path(id),
+            store.checkpoint_path(id),
+        ] {
+            assert!(!path.exists());
+        }
+        assert!(
+            store
+                .delete_finished(id, finished.state_revision)
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
+
+        let mut blocked = SupervisorRun::new(
+            "caller".into(),
+            "blocked-delete".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        blocked.state = SupervisorRunState::Failed;
+        blocked.state_revision = 2;
+        blocked.terminal_at = Some(now());
+        store.initialize(&blocked).unwrap();
+        let blocked_path = store.journal_index_path(blocked.supervisor_run_id);
+        assert!(!blocked_path.exists());
+        fs::create_dir(&blocked_path).unwrap();
+        let error = store
+            .delete_finished(blocked.supervisor_run_id, blocked.state_revision)
+            .unwrap_err();
+        assert!(error.to_string().contains("failed to remove"));
+        assert!(
+            error
+                .to_string()
+                .contains(&blocked_path.display().to_string())
+        );
     }
 
     /// A prune that cannot delete must say so rather than report a removal it

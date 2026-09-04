@@ -78,14 +78,14 @@ use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit,
 };
 use usagi_tui::usecase::application::controller::{
-    AppEvent, AppKey, BackendEvent, EnvironmentEntry, NewRequest, Notice, RoleChoice,
-    RoleEditorScope, SafeError, SafeMessage, SessionRoleCatalog, SessionRoleProjection, Target,
-    classify_management_input,
+    AppEvent, AppKey, BackendEvent, DaemonAction, EnvironmentEntry, NewRequest, Notice,
+    PendingToken, RoleChoice, RoleEditorScope, SafeError, SafeMessage, SessionRoleCatalog,
+    SessionRoleProjection, Target, classify_management_input,
 };
 use usagi_tui::usecase::application::daemon_backend::{
-    Completions, DaemonBackend, DecisionPort as BackendDecisionPort,
-    OverlayPort as BackendOverlayPort, TargetStorePort as BackendTargetStorePort,
-    WorkspaceCommandPort as BackendWorkspaceCommandPort,
+    Completions, DaemonBackend, DaemonControlPort as BackendDaemonControlPort,
+    DecisionPort as BackendDecisionPort, OverlayPort as BackendOverlayPort,
+    TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
@@ -94,7 +94,7 @@ use usagi_tui::usecase::application::terminal_session::{
     TerminalInputResolution, TerminalSubscription,
 };
 use usagi_tui::usecase::application::work_run_control::{
-    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError,
+    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::doctor::{self, DoctorPort};
@@ -833,6 +833,109 @@ struct ProductionWorkspaceCommands {
     root: PathBuf,
 }
 
+struct ProductionDaemonControl {
+    workspace: WorkspaceId,
+    root: PathBuf,
+    run: DaemonCommandRunner,
+}
+
+#[derive(Debug)]
+struct DaemonCommandOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+type DaemonCommandRunner = fn(&Path, DaemonAction) -> std::io::Result<DaemonCommandOutput>;
+
+fn daemon_control_error(action: DaemonAction, bytes: &[u8]) -> SafeError {
+    const MAX_CHARS: usize = 240;
+    let raw = String::from_utf8_lossy(bytes);
+    let summary = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("daemon lifecycle command failed")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_CHARS)
+        .collect::<String>();
+    SafeError {
+        message: SafeMessage::new(format!("{} failed: {summary}", action.label())),
+        error_id: format!("daemon-{}-failed", action.argument()),
+    }
+}
+
+fn daemon_control_result(
+    action: DaemonAction,
+    output: std::io::Result<DaemonCommandOutput>,
+) -> Result<Notice, SafeError> {
+    let output =
+        output.map_err(|error| daemon_control_error(action, error.to_string().as_bytes()))?;
+    if output.success {
+        return Ok(Notice::new(format!(
+            "Daemon {} completed",
+            action.argument()
+        )));
+    }
+    let detail = if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    Err(daemon_control_error(action, detail))
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_daemon_control_forwards_root_action_token_and_safe_result
+fn run_daemon_control_command(
+    root: &Path,
+    action: DaemonAction,
+) -> std::io::Result<DaemonCommandOutput> {
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .current_dir(root)
+        .args(["daemon", action.argument()])
+        .output()?;
+    Ok(DaemonCommandOutput {
+        success: output.status.success(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+impl BackendDaemonControlPort for ProductionDaemonControl {
+    fn execute(
+        &mut self,
+        workspace: WorkspaceId,
+        action: DaemonAction,
+        token: PendingToken,
+        completions: Completions,
+    ) {
+        if workspace != self.workspace {
+            completions.emit(AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action,
+                token,
+                result: Err(SafeError {
+                    message: SafeMessage::new("daemon target is no longer active"),
+                    error_id: "daemon-target-stale".to_owned(),
+                }),
+            }));
+            return;
+        }
+        let root = self.root.clone();
+        let run = self.run;
+        std::thread::spawn(move || {
+            let result = daemon_control_result(action, run(&root, action));
+            completions.emit(AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action,
+                token,
+                result,
+            }));
+        });
+    }
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
     fn execute(
@@ -1012,6 +1115,11 @@ impl ControllerBackendFactory for ProductionBackendFactory {
                 root: snapshot.workspace.path.clone(),
             }),
         )
+        .with_daemon_control(Box::new(ProductionDaemonControl {
+            workspace: snapshot.workspace_id,
+            root: snapshot.workspace.path.clone(),
+            run: run_daemon_control_command,
+        }))
         .with_decisions(Box::new(ProductionDecisionPort {
             daemon: DaemonDecisionCommandPort,
             notifier: PlatformDesktopNotifier {
@@ -2080,7 +2188,7 @@ impl presentation::WorkRunPort for DaemonWorkRunPort {
         workspace: WorkspaceId,
         operation_id: usagi_core::domain::id::OperationId,
         command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-    ) -> Result<usagi_core::domain::supervisor::SupervisorRunQuery, WorkRunControlError> {
+    ) -> Result<WorkRunControlResult, WorkRunControlError> {
         let mut client =
             crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| {
@@ -2112,13 +2220,27 @@ fn decode_work_run_snapshot_reply(
 
 fn decode_work_run_control_reply(
     reply: DaemonReply,
-) -> Result<usagi_core::domain::supervisor::SupervisorRunQuery, WorkRunControlError> {
+) -> Result<WorkRunControlResult, WorkRunControlError> {
     match reply {
-        DaemonReply::Ok(body) => serde_json::from_value(body).map_err(|_| {
-            WorkRunControlError::Unconfirmed(
-                "daemon returned an invalid Work Run result".to_owned(),
-            )
-        }),
+        DaemonReply::Ok(body) => {
+            if body.get("state").is_some() {
+                serde_json::from_value(body)
+                    .map(|run| WorkRunControlResult::Updated(Box::new(run)))
+                    .map_err(|_| {
+                        WorkRunControlError::Unconfirmed(
+                            "daemon returned an invalid Work Run result".to_owned(),
+                        )
+                    })
+            } else {
+                serde_json::from_value(body)
+                    .map(WorkRunControlResult::Deleted)
+                    .map_err(|_| {
+                        WorkRunControlError::Unconfirmed(
+                            "daemon returned an invalid Work Run deletion".to_owned(),
+                        )
+                    })
+            }
+        }
         // A durable Accepted acknowledgement proves admission, not the final
         // aggregate. Treating its optional body as final could make the UI
         // forget the only operation identity safe to replay after ambiguity.
@@ -2197,9 +2319,17 @@ fn decode_agent_admission(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| format!("{operation} returned an invalid continuation"))?;
+    let supervisor_run_id = body
+        .get("supervisor_run_id")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| format!("{operation} returned an invalid Work Run identity"))?;
     Ok(AgentPaneAdmission {
         terminal,
         continuation,
+        supervisor_run_id,
     })
 }
 
@@ -2388,6 +2518,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         Ok(AgentPaneAdmission {
             terminal: resumed.terminal,
             continuation: resumed.continuation,
+            supervisor_run_id: None,
         })
     }
 
@@ -2493,7 +2624,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 action: TerminalAction::Launch,
                 payload,
             })
-            .map_err(|_| "daemon request failed; reconnect to continue".to_owned())?
+            .map_err(daemon_error_reason)?
         {
             DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body
                 .get("terminal")
@@ -3956,9 +4087,10 @@ impl Terminal for CrosstermTerminal {
     }
 }
 
-/// Apply the live-input ordering policy before projecting terminal input into the
-/// management [`Key`] vocabulary. `LiveInputClassifier` is the sole owner of
-/// leader precedence; this adapter only translates its resolved output.
+/// Apply the process-wide input ordering policy before projecting terminal input
+/// into the management [`Key`] vocabulary. `LiveInputClassifier` is the sole
+/// owner of leader precedence for every workspace surface; this adapter only
+/// translates its resolved output.
 fn classify_terminal_input(
     classifier: &mut LiveInputClassifier,
     now: Duration,
@@ -4019,9 +4151,9 @@ fn terminal_copy_key(input: &LiveInput) -> Option<Key> {
     matches_copy.then_some(Key::TerminalCopy { fallback })
 }
 
-/// Map a non-prefix live input to the management `Key` vocabulary. The classifier
-/// has already reserved the `Ctrl-O` prefix, so this preserves the prior mapping
-/// for every other key and text/paste payload.
+/// Map a non-prefix terminal input to the management `Key` vocabulary. The
+/// process-wide classifier has already reserved the `Ctrl-O` prefix, so this
+/// preserves the prior mapping for every other key and text/paste payload.
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=production_input_classifier_contract
 fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     let key = match input {
@@ -5413,28 +5545,30 @@ mod tests {
 
     use super::{
         AGENT_LAUNCH_UNCORRELATED, AgentGoalIntent, AgentLaunchIntent, AppEvent, AppKey,
-        BackendTargetStorePort, Completions, DaemonAgentCommandPort, DaemonDecisionCommandPort,
-        DaemonReply, DaemonRequest, DaemonRestoreConnectionPort, DoctorDiagnosisError, EnvScope,
+        BackendDaemonControlPort, BackendTargetStorePort, Completions, DaemonAction,
+        DaemonAgentCommandPort, DaemonCommandOutput, DaemonDecisionCommandPort, DaemonReply,
+        DaemonRequest, DaemonRestoreConnectionPort, DoctorDiagnosisError, EnvScope,
         EnvironmentStorePort, FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry,
         LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
-        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, RoleEditorScope,
-        SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
-        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
-        TerminalSubscription, VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError,
-        agent_goal_request, agent_inventory_request, agent_launch_request, child_directory_names,
+        PersistentSettingsPort, ProductionBackendFactory, ProductionDaemonControl,
+        RepoEnvironmentStore, RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start,
+        StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult,
+        WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult, agent_goal_request,
+        agent_inventory_request, agent_launch_request, child_directory_names,
         classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
         correlate_agent_launch, created_session_hook, current_agent_integrations,
-        daemon_error_reason, decision_cadence, decode_agent_admission, decode_attach_screen,
-        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
-        decode_terminal_poll, decode_work_run_control_reply, decode_work_run_snapshot_reply,
-        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
-        provider_resume_projection, reduced_motion_from_environment, reply_geometry,
-        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
-        version_result_from_observation, work_run_control_client_error,
-        workspace_directory_missing, workspace_open_error,
+        daemon_control_error, daemon_control_result, daemon_error_reason, decision_cadence,
+        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
+        decode_work_run_control_reply, decode_work_run_snapshot_reply, doctor_diagnosis_io_error,
+        doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
+        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
+        pr_snapshot_events, probe_path, provider_resume_projection,
+        reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
+        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
+        validate_workspace_directory, version_detail, version_result_from_observation,
+        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -5453,6 +5587,122 @@ mod tests {
     }
 
     #[test]
+    fn daemon_control_errors_keep_one_bounded_display_safe_line() {
+        let long = format!("\nrefused\u{7}: {}\nsecret detail", "x".repeat(300));
+        let error = daemon_control_error(DaemonAction::Stop, long.as_bytes());
+        assert_eq!(error.error_id, "daemon-stop-failed");
+        assert!(error.message.as_str().starts_with("Stop failed: refused:"));
+        assert!(!error.message.as_str().contains('\u{7}'));
+        assert!(!error.message.as_str().contains("secret detail"));
+        assert!(error.message.as_str().chars().count() <= 253);
+
+        let empty = daemon_control_error(DaemonAction::Start, b"\n\n");
+        assert_eq!(
+            empty.message.as_str(),
+            "Start failed: daemon lifecycle command failed"
+        );
+
+        let stderr = daemon_control_result(
+            DaemonAction::Restart,
+            Ok(DaemonCommandOutput {
+                success: false,
+                stdout: b"ignored".to_vec(),
+                stderr: b"restart refused".to_vec(),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(stderr.message.as_str(), "Restart failed: restart refused");
+        let stdout = daemon_control_result(
+            DaemonAction::Start,
+            Ok(DaemonCommandOutput {
+                success: false,
+                stdout: b"start refused".to_vec(),
+                stderr: Vec::new(),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(stdout.message.as_str(), "Start failed: start refused");
+        let io = daemon_control_result(
+            DaemonAction::Stop,
+            Err(std::io::Error::other("process unavailable")),
+        )
+        .unwrap_err();
+        assert_eq!(io.message.as_str(), "Stop failed: process unavailable");
+    }
+
+    #[allow(clippy::unnecessary_wraps)] // Matches the injected fallible runner signature.
+    fn successful_daemon_control(
+        root: &std::path::Path,
+        action: DaemonAction,
+    ) -> std::io::Result<DaemonCommandOutput> {
+        assert!(root.ends_with("workspace"));
+        assert_eq!(action, DaemonAction::Restart);
+        Ok(DaemonCommandOutput {
+            success: true,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn production_daemon_control_forwards_root_action_token_and_safe_result() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("daemon".to_owned())),
+        );
+        let effects = update(&mut state, AppEvent::Key(AppKey::Char('r')));
+        let [
+            Effect::DaemonControl {
+                workspace: effect_workspace,
+                action,
+                token,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("daemon action did not produce its typed effect");
+        };
+        assert_eq!(*effect_workspace, workspace);
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let mut port = ProductionDaemonControl {
+            workspace,
+            root,
+            run: successful_daemon_control,
+        };
+        let (completions, receiver) = Completions::channel();
+        BackendDaemonControlPort::execute(&mut port, workspace, *action, *token, completions);
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace: completed_workspace,
+                action: DaemonAction::Restart,
+                token: completed_token,
+                result: Ok(notice),
+            }) if completed_workspace == workspace
+                && completed_token == *token
+                && notice.message == "Daemon restart completed"
+        ));
+
+        let stale_workspace = WorkspaceId::new();
+        let (completions, receiver) = Completions::channel();
+        BackendDaemonControlPort::execute(&mut port, stale_workspace, *action, *token, completions);
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace: completed_workspace,
+                result: Err(error),
+                ..
+            }) if completed_workspace == stale_workspace
+                && error.error_id == "daemon-target-stale"
+        ));
+    }
+
+    #[test]
     fn work_run_control_accepts_only_a_final_typed_reply() {
         let run = usagi_core::domain::supervisor::SupervisorRunQuery {
             supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId::new(),
@@ -5461,6 +5711,7 @@ mod tests {
             terminal_at: None,
             terminal_reason: Some("cancelled by local operator".to_owned()),
             display_label: Some("Controlled Goal".to_owned()),
+            root_agent_id: None,
             policy: usagi_core::domain::supervisor::ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),
@@ -5469,7 +5720,17 @@ mod tests {
         let body = serde_json::to_value(&run).unwrap();
         assert_eq!(
             decode_work_run_control_reply(DaemonReply::Ok(body.clone())),
-            Ok(run.clone())
+            Ok(WorkRunControlResult::Updated(Box::new(run.clone())))
+        );
+        let deletion = usagi_core::domain::supervisor::SupervisorRunDeletion {
+            supervisor_run_id: run.supervisor_run_id,
+            state_revision: run.state_revision,
+        };
+        assert_eq!(
+            decode_work_run_control_reply(
+                DaemonReply::Ok(serde_json::to_value(deletion).unwrap(),)
+            ),
+            Ok(WorkRunControlResult::Deleted(deletion))
         );
         assert_eq!(
             decode_work_run_control_reply(DaemonReply::Accepted {
@@ -5483,6 +5744,14 @@ mod tests {
         );
         assert_eq!(
             decode_work_run_control_reply(DaemonReply::Ok(serde_json::Value::Null)),
+            Err(WorkRunControlError::Unconfirmed(
+                "daemon returned an invalid Work Run deletion".to_owned()
+            ))
+        );
+        assert_eq!(
+            decode_work_run_control_reply(DaemonReply::Ok(
+                serde_json::json!({"state": "not-a-supervisor-state"})
+            )),
             Err(WorkRunControlError::Unconfirmed(
                 "daemon returned an invalid Work Run result".to_owned()
             ))
@@ -7441,6 +7710,24 @@ mod tests {
             .unwrap_err(),
             "agent launch returned an invalid continuation"
         );
+        let supervisor_run_id = usagi_core::domain::supervisor::SupervisorRunId::new();
+        let admission = decode_agent_admission(
+            &json!({
+                "terminal": terminal,
+                "supervisor_run_id": supervisor_run_id,
+            }),
+            "goal launch",
+        )
+        .unwrap();
+        assert_eq!(admission.supervisor_run_id, Some(supervisor_run_id));
+        assert_eq!(
+            decode_agent_admission(
+                &json!({"terminal": terminal, "supervisor_run_id": "invalid"}),
+                "goal launch",
+            )
+            .unwrap_err(),
+            "goal launch returned an invalid Work Run identity"
+        );
     }
 
     /// The pending pane's own operation is what reaches the daemon: the adapter
@@ -8425,6 +8712,80 @@ mod tests {
             ),
             Some(Key::Char('n'))
         );
+    }
+
+    #[test]
+    fn process_wide_control_brackets_reach_closeup_tab_selection() {
+        use usagi_tui::usecase::application::controller::TabDirection;
+        use usagi_tui::usecase::terminal_input::LiveTerminalAction;
+
+        for (follow_up, action, direction) in [
+            (
+                live_key(KeyCode::Char('['), Modifiers::default()),
+                LiveTerminalAction::PreviousTab,
+                TabDirection::Previous,
+            ),
+            (
+                live_key(KeyCode::Char('['), control()),
+                LiveTerminalAction::PreviousTab,
+                TabDirection::Previous,
+            ),
+            (
+                LiveInput::Raw(vec![27]),
+                LiveTerminalAction::PreviousTab,
+                TabDirection::Previous,
+            ),
+            (
+                live_key(KeyCode::Char(']'), Modifiers::default()),
+                LiveTerminalAction::NextTab,
+                TabDirection::Next,
+            ),
+            (
+                live_key(KeyCode::Char(']'), control()),
+                LiveTerminalAction::NextTab,
+                TabDirection::Next,
+            ),
+            (
+                LiveInput::Raw(vec![29]),
+                LiveTerminalAction::NextTab,
+                TabDirection::Next,
+            ),
+        ] {
+            let mut classifier = usagi_tui::usecase::terminal_input::LiveInputClassifier::default();
+            assert_eq!(
+                classify_terminal_input(
+                    &mut classifier,
+                    Duration::ZERO,
+                    &live_key(KeyCode::Char('o'), control()),
+                ),
+                None,
+            );
+            let key =
+                classify_terminal_input(&mut classifier, Duration::from_millis(1), &follow_up)
+                    .expect("the process-wide leader resolves the follow-up");
+            assert_eq!(key, Key::Live(action));
+
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let mut state = AppState::home(workspace, vec![session]);
+            assert!(
+                update(
+                    &mut state,
+                    AppEvent::PaneTabAvailability {
+                        available: true,
+                        error: None,
+                    },
+                )
+                .is_empty()
+            );
+            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            let event = usagi_tui::presentation::app_event_from_key(key)
+                .expect("the resolved tab action reaches the Home reducer");
+            assert_eq!(
+                update(&mut state, event),
+                vec![Effect::SelectTab { direction }]
+            );
+        }
     }
 
     #[test]

@@ -577,6 +577,13 @@ pub enum SupervisorWorkspaceCommand {
         escalation_id: OperationId,
         decision: EscalationDecision,
     },
+    /// Delete one terminal run from retained history. The observed revision is
+    /// part of the semantic command so a stale confirmation can never delete a
+    /// newer aggregate incarnation.
+    Delete {
+        supervisor_run_id: SupervisorRunId,
+        observed_state_revision: u64,
+    },
 }
 
 impl SupervisorWorkspaceCommand {
@@ -588,9 +595,21 @@ impl SupervisorWorkspaceCommand {
             }
             | Self::ResolveEscalation {
                 supervisor_run_id, ..
+            }
+            | Self::Delete {
+                supervisor_run_id, ..
             } => *supervisor_run_id,
         }
     }
+}
+
+/// Idempotent acknowledgement that one terminal Work Run is absent from the
+/// retained workspace history. It carries the revision confirmed before the
+/// deletion and no private aggregate material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorRunDeletion {
+    pub supervisor_run_id: SupervisorRunId,
+    pub state_revision: u64,
 }
 
 /// Append-only event envelope.  `event_id` is the idempotency key.
@@ -792,6 +811,15 @@ impl SupervisorRun {
     /// Returns a redaction-safe projection for callers.
     #[must_use]
     pub fn query(&self) -> SupervisorRunQuery {
+        let root_agent_id = self
+            .provenance
+            .values()
+            .find(|provenance| {
+                provenance.task_id.0 == "root"
+                    && provenance.parent_task_id.is_none()
+                    && provenance.worker_session_id.is_none()
+            })
+            .map(|provenance| provenance.worker_agent_id);
         SupervisorRunQuery {
             supervisor_run_id: self.supervisor_run_id,
             state_revision: self.state_revision,
@@ -799,6 +827,7 @@ impl SupervisorRun {
             terminal_at: self.terminal_at,
             terminal_reason: self.terminal_reason.clone(),
             display_label: self.display_label.clone(),
+            root_agent_id,
             policy: self.policy.clone(),
             escalation: self.escalation.clone(),
             tasks: self.tasks.values().map(TaskQuery::from).collect(),
@@ -817,6 +846,11 @@ pub struct SupervisorRunQuery {
     pub terminal_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_label: Option<String>,
+    /// Exact workspace-root Director runtime for Console drill-down. This is a
+    /// redaction-safe identity only; terminal, worktree, and provider material
+    /// remain in their existing capability-scoped projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_agent_id: Option<AgentRuntimeId>,
     pub policy: ExecutionPolicy,
     pub escalation: Option<EscalationRecord>,
     pub tasks: Vec<TaskQuery>,
@@ -1995,6 +2029,31 @@ mod tests {
                 .iter()
                 .any(|task| task.instruction_digest == "secret prompt")
         );
+    }
+
+    #[test]
+    fn query_projects_only_the_workspace_root_director_identity() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let task_id = TaskId::new("root").unwrap();
+        let root_agent = AgentRuntimeId::new();
+        run.provenance.insert(
+            task_id.clone(),
+            RunProvenance {
+                supervisor_run_id: run.supervisor_run_id,
+                task_id: task_id.clone(),
+                parent_task_id: None,
+                parent_dispatch_run: None,
+                dispatch_run_id: OperationId::new(),
+                worker_session_id: None,
+                worker_agent_id: root_agent,
+                worker_worktree_id: WorktreeId::new(),
+                generation: 1,
+            },
+        );
+        assert_eq!(run.query().root_agent_id, Some(root_agent));
+
+        run.provenance.get_mut(&task_id).unwrap().worker_session_id = Some(SessionId::new());
+        assert_eq!(run.query().root_agent_id, None);
     }
     #[test]
     fn rejects_bad_sequences_and_terminal_mutation() {

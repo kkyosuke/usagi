@@ -25,11 +25,11 @@ pub enum Context {
     LiveTerminal,
     AddWorkspace,
     WorkspaceFinder,
-    CommandList,
     Overview,
     CloseupActions,
     CreateSession,
     CreateSessionError,
+    TerminalLaunchError,
     ExitConfirmation,
     ForceRemove,
     CleanupQueue,
@@ -40,7 +40,9 @@ pub enum Context {
     Daemon,
     DecisionList,
     DecisionAnswer,
-    Director,
+    Organization,
+    RunOverview,
+    DirectorConsole,
     DirectorNew,
     WorkRuns,
     WorkRunConfirmation,
@@ -67,11 +69,11 @@ impl Context {
             Self::LiveTerminal => "Live terminal",
             Self::AddWorkspace => "Add workspace",
             Self::WorkspaceFinder => "Project / session finder",
-            Self::CommandList => "Command list",
             Self::Overview => "Overview commands",
             Self::CloseupActions => "Closeup actions",
             Self::CreateSession => "Create session",
             Self::CreateSessionError => "Create session error",
+            Self::TerminalLaunchError => "Terminal launch error",
             Self::ExitConfirmation => "Exit confirmation",
             Self::ForceRemove => "Force remove",
             Self::CleanupQueue => "Cleanup queue",
@@ -79,11 +81,13 @@ impl Context {
             Self::Preview => "Markdown preview",
             Self::Scratchpad => "Scratchpad",
             Self::RolesEditor => "Roles editor",
-            Self::Daemon => "Daemon status",
+            Self::Daemon => "Daemon control",
             Self::DecisionList => "Pending decisions",
             Self::DecisionAnswer => "Decision answer",
-            Self::Director => "Director conversation",
-            Self::DirectorNew => "Director New",
+            Self::Organization => "Organization",
+            Self::RunOverview => "Run Overview",
+            Self::DirectorConsole => "Director Console",
+            Self::DirectorNew => "New Conversation / Start Work Run",
             Self::WorkRuns => "Work Runs",
             Self::WorkRunConfirmation => "Work Run confirmation",
             Self::WorkRunEscalation => "Work Run escalation",
@@ -166,7 +170,7 @@ impl Context {
                 ("Enter / t", "open Closeup"),
                 ("Ctrl-A / Home", "new session"),
                 (":", "Overview commands"),
-                ("?", "workspace command list"),
+                ("?", "keyboard shortcuts"),
                 ("Ctrl-X", "safe-remove session"),
                 ("Ctrl-Q", "leave / quit prompt"),
             ],
@@ -177,7 +181,7 @@ impl Context {
                 ("Ctrl-O { / }", "reorder pane tab"),
                 ("Ctrl-O x / r", "close / resume tab"),
                 ("Ctrl-O o", "back to Switch"),
-                ("?", "session command list"),
+                ("?", "keyboard shortcuts"),
             ],
             Self::LiveTerminal => &[
                 ("type / paste", "send to terminal"),
@@ -187,7 +191,7 @@ impl Context {
                 ("Ctrl-O x", "close pane tab"),
                 ("Ctrl-O ↑ / ↓ / End", "scroll / live bottom"),
                 ("Ctrl-O o", "back to Switch"),
-                ("Ctrl-O ?", "session command list"),
+                ("Ctrl-O ?", "keyboard shortcuts"),
             ],
             Self::AddWorkspace => &[
                 ("Tab", "registered / directory"),
@@ -203,11 +207,6 @@ impl Context {
                 ("1 … 9", "open project directly"),
                 ("Ctrl-X", "detach project row"),
                 ("Enter / Esc", "open / cancel"),
-            ],
-            Self::CommandList => &[
-                ("Tab / ← / →", "Available / All"),
-                ("↑ / ↓", "select command"),
-                ("? / Esc", "close command list"),
             ],
             Self::Overview => &[
                 ("↑ / ↓", "candidate / history"),
@@ -229,7 +228,9 @@ impl Context {
                 ("Tab", "select role"),
                 ("Enter / Esc", "create / cancel"),
             ],
-            Self::CreateSessionError => &[("Enter / Esc / Ctrl-C", "dismiss")],
+            Self::CreateSessionError | Self::TerminalLaunchError => {
+                &[("Enter / Esc / Ctrl-C", "dismiss")]
+            }
             Self::ExitConfirmation => &[
                 ("← → / Tab", "select choice"),
                 ("w", "return to Welcome"),
@@ -264,7 +265,12 @@ impl Context {
                 ("Ctrl-S", "save"),
                 ("Esc", "close"),
             ],
-            Self::Daemon => &[("Esc", "close")],
+            Self::Daemon => &[
+                ("↑ ↓ / ← → / Tab", "select action"),
+                ("s / r / x", "start / restart / stop"),
+                ("Enter", "run selected action"),
+                ("Esc", "close"),
+            ],
             Self::DecisionList => &[
                 ("↑ / ↓", "select decision"),
                 ("Enter / Esc", "answer / close"),
@@ -275,24 +281,39 @@ impl Context {
                 ("type / paste", "edit freeform answer"),
                 ("Enter / Esc", "submit / back to list"),
             ],
-            Self::Director => &[
+            Self::Organization => &[
+                ("↑ / ↓", "select root Director"),
+                ("Enter", "open Director Console"),
+                ("Ctrl-O w / n", "Work Runs / start"),
+                ("Esc", "close Director"),
+            ],
+            Self::RunOverview => &[
+                ("Enter", "open Director Console"),
+                ("Ctrl-C / Ctrl-X", "cancel / delete run"),
+                ("Esc / Ctrl-O b", "back to Work Runs"),
+                ("Ctrl-O w / n", "Work Runs / start"),
+            ],
+            Self::DirectorConsole => &[
+                ("type / paste / Enter / Esc", "send directly to Agent PTY"),
                 ("Ctrl-O [ / ]", "select conversation"),
-                ("Ctrl-O n", "new conversation"),
+                ("Ctrl-O b", "back to parent overview"),
+                ("Ctrl-O w / n", "Work Runs / start"),
                 ("Ctrl-O x / r", "close / resume"),
                 ("Ctrl-O ↑ / ↓ / End", "scroll / live bottom"),
-                ("Ctrl-O g / Esc", "close Director"),
+                ("Ctrl-O g", "close Director"),
             ],
             Self::DirectorNew => &[
                 ("↑ / ↓", "select provider"),
                 ("type / paste", "edit goal when shown"),
-                ("Enter / Esc", "launch / cancel"),
+                ("Enter / Esc / Ctrl-C", "launch / cancel"),
             ],
             Self::WorkRuns => &[
                 ("↑ / ↓", "select run"),
-                ("← / →", "previous / next run"),
-                ("Enter / Esc", "actions / close"),
+                ("Enter", "open Run Overview"),
+                ("Ctrl-C / Ctrl-X", "cancel / delete run"),
+                ("Esc / Ctrl-O b", "back to Organization"),
             ],
-            Self::WorkRunConfirmation => &[("Enter / Esc", "confirm / back")],
+            Self::WorkRunConfirmation => &[("Enter / Esc / Ctrl-C", "confirm / back")],
             Self::WorkRunEscalation => &[
                 ("arrows", "select resolution"),
                 ("Enter / Esc", "confirm / back"),
@@ -322,7 +343,7 @@ const WORKSPACE_COMMANDS: &[(&str, &str)] = &[
 ];
 
 const WORKSPACE_BASE_COMMANDS: &[(&str, &str)] = &[
-    ("Ctrl-O a / n", "actions / Director New"),
+    ("Ctrl-O a / n", "actions / Director start"),
     ("Ctrl-O p / v", "Pull Requests / Preview"),
     ("Ctrl-O d / s", "Decisions / Scratchpad"),
     (
@@ -363,12 +384,12 @@ pub fn render_over(height: usize, width: usize, base: &[String], context: Contex
         })
         .collect::<Vec<_>>();
     body.push(String::new());
-    body.push(
-        Style::new()
-            .fg(Color::White)
-            .dim()
-            .paint("Ctrl-? / Ctrl-/ or Esc: close help"),
-    );
+    let close_hint = match context {
+        Context::Switch | Context::Closeup => "? / Ctrl-? / Ctrl-/ or Esc: close help",
+        Context::LiveTerminal => "Ctrl-O ? / Ctrl-? / Ctrl-/ or Esc: close help",
+        _ => "Ctrl-? / Ctrl-/ or Esc: close help",
+    };
+    body.push(Style::new().fg(Color::White).dim().paint(close_hint));
     modal::render_over(
         height,
         width,
@@ -401,11 +422,11 @@ mod tests {
             Context::LiveTerminal,
             Context::AddWorkspace,
             Context::WorkspaceFinder,
-            Context::CommandList,
             Context::Overview,
             Context::CloseupActions,
             Context::CreateSession,
             Context::CreateSessionError,
+            Context::TerminalLaunchError,
             Context::ExitConfirmation,
             Context::ForceRemove,
             Context::CleanupQueue,
@@ -416,7 +437,9 @@ mod tests {
             Context::Daemon,
             Context::DecisionList,
             Context::DecisionAnswer,
-            Context::Director,
+            Context::Organization,
+            Context::RunOverview,
+            Context::DirectorConsole,
             Context::DirectorNew,
             Context::WorkRuns,
             Context::WorkRunConfirmation,

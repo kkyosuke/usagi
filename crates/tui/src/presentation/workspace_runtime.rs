@@ -28,9 +28,6 @@ const AGENT_CAPACITY_EXHAUSTED: &str = "daemon agent runtime capacity is exhaust
 const AGENT_CAPACITY_RECOVERY: &str = "Agent slots full; exit one with Ctrl-D, retry";
 
 use crate::presentation::views::closeup_modal::CloseupModal;
-use crate::presentation::views::command_help_modal::{
-    CommandHelpContext, CommandHelpModal, CommandScope,
-};
 use crate::presentation::views::director_drawer::DirectorDrawerProjection;
 use crate::presentation::views::overview_modal::OverviewModal;
 use crate::presentation::views::root_terminal_drawer::{
@@ -39,11 +36,10 @@ use crate::presentation::views::root_terminal_drawer::{
 use crate::presentation::views::workspace::{
     GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
 };
-use crate::presentation::widgets::TextInput;
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, DirectorNew, Effect, HomeMode, Overlay, Route, Selection,
-    TabDirection, Target, WorkspaceDrawerFocus, update,
+    AppEvent, AppKey, AppState, DirectorConsoleParent, DirectorNew, DirectorRoute, Effect,
+    HomeMode, Overlay, Route, Selection, TabDirection, Target, WorkspaceDrawerFocus, update,
 };
 use crate::usecase::application::interrupted_tab::{
     InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
@@ -68,20 +64,31 @@ pub struct CloseOutcome {
     pub cancel: Option<OperationId>,
 }
 
-/// Result of routing one key through Director's IME-safe command composer.
+/// Destructive confirmation opened when the user activates an interrupted
+/// conversation that has no trustworthy exact resume target.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DirectorCommandInput {
-    /// The key belongs to terminal controls or direct PTY input.
-    Unhandled,
-    /// The composer changed (or deliberately consumed an editing key).
-    Consumed,
-    /// Submit the buffered line to the selected Agent. The buffer is cleared
-    /// after a write/ordered queue accepts it, or when retaining it would invite
-    /// an unsafe replay of bytes whose effect is uncertain.
-    Submit(String),
+pub struct InterruptedRemovalConfirmation {
+    target: Target,
+    tab: InterruptedTab,
+    confirm_selected: bool,
 }
 
-const MAX_DIRECTOR_COMMAND_BYTES: usize = 16 * 1024;
+impl InterruptedRemovalConfirmation {
+    #[must_use]
+    pub const fn target(&self) -> Target {
+        self.target
+    }
+
+    #[must_use]
+    pub const fn tab(&self) -> &InterruptedTab {
+        &self.tab
+    }
+
+    #[must_use]
+    pub const fn is_confirm_selected(&self) -> bool {
+        self.confirm_selected
+    }
+}
 
 /// One target's ordered live panes from a completed restore job, plus the
 /// interrupted Agent conversations projected for the same target (#510).
@@ -93,8 +100,8 @@ pub struct PaneRestoreTarget {
     /// Saved interrupted selection for this target. It is applied only after
     /// the interrupted inventory has been restored, and never starts resume.
     pub selected_interrupted: Option<AgentContinuationRef>,
-    /// Interrupted conversations of this target, in display order. They are
-    /// read-only tabs until the user explicitly resumes one.
+    /// Interrupted conversations of this target, in display order. They stay
+    /// inert during restore; explicit selection activates resume or removal.
     pub interrupted: Vec<InterruptedTab>,
 }
 
@@ -109,8 +116,10 @@ pub struct WorkspaceRuntime {
     /// Persisted input state for the Closeup action modal. Present only while the
     /// controller's [`Overlay::Closeup`] is open.
     closeup_modal: Option<CloseupModal>,
-    /// Context-aware command list opened with `?`.
-    command_help_modal: Option<CommandHelpModal>,
+    /// Frontmost prompt for an explicitly selected interrupted conversation
+    /// that cannot be resumed. It owns input until the user keeps or removes
+    /// the exact lineage.
+    interrupted_removal_confirmation: Option<InterruptedRemovalConfirmation>,
     modal_selection_mode: ModalSelectionMode,
     /// User-interaction count captured when each pane launch was requested. A
     /// completion may focus its tab only while the count is unchanged, mirroring
@@ -119,10 +128,6 @@ pub struct WorkspaceRuntime {
     /// The entry is dropped when the launch completes, fails, or is cancelled.
     pane_focus_at_request: BTreeMap<OperationId, u64>,
     director_projection: DirectorDrawerProjection,
-    /// One-line, Unicode-aware command input for the focused root Agent.
-    /// Committed IME text is edited here before a complete line reaches the
-    /// PTY, avoiding terminal-protocol interpretation during composition.
-    director_command: TextInput,
     root_agent_selection: Option<TabSelection>,
     root_terminal_selection: Option<TabSelection>,
     material_revision: u64,
@@ -153,11 +158,10 @@ impl WorkspaceRuntime {
             panes,
             overview_modal: None,
             closeup_modal: None,
-            command_help_modal: None,
+            interrupted_removal_confirmation: None,
             modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
             director_projection: DirectorDrawerProjection::default(),
-            director_command: TextInput::default(),
             root_agent_selection: None,
             root_terminal_selection: None,
             material_revision: 0,
@@ -178,10 +182,57 @@ impl WorkspaceRuntime {
         self.closeup_modal.as_ref()
     }
 
-    /// The context-aware command list, when `?` owns Home input.
+    /// The unresumable-history removal prompt, when it owns workspace input.
     #[must_use]
-    pub const fn command_help_modal(&self) -> Option<&CommandHelpModal> {
-        self.command_help_modal.as_ref()
+    pub const fn interrupted_removal_confirmation(
+        &self,
+    ) -> Option<&InterruptedRemovalConfirmation> {
+        self.interrupted_removal_confirmation.as_ref()
+    }
+
+    /// Open the removal prompt for the currently selected interrupted tab only
+    /// when the daemon supplied no trustworthy exact resume target.
+    pub fn open_interrupted_removal_confirmation(&mut self) -> bool {
+        let Some(target) = self.panes.active() else {
+            return false;
+        };
+        let Some(tab) = self
+            .focused_interrupted()
+            .filter(|tab| !tab.resumable())
+            .cloned()
+        else {
+            return false;
+        };
+        self.interrupted_removal_confirmation = Some(InterruptedRemovalConfirmation {
+            target,
+            tab,
+            // Enter must be non-destructive until the user deliberately moves
+            // focus to Remove (or uses the explicit `y` shortcut).
+            confirm_selected: false,
+        });
+        self.material_revision = self.material_revision.saturating_add(1);
+        true
+    }
+
+    /// Move focus between Remove and Keep in the frontmost prompt.
+    pub fn toggle_interrupted_removal_choice(&mut self) {
+        let Some(confirmation) = self.interrupted_removal_confirmation.as_mut() else {
+            return;
+        };
+        confirmation.confirm_selected = !confirmation.confirm_selected;
+        self.material_revision = self.material_revision.saturating_add(1);
+    }
+
+    /// Close the prompt and return its exact frozen lineage to the presentation
+    /// shell, which durably commits the dismissal before removing the tab.
+    pub fn take_interrupted_removal_confirmation(
+        &mut self,
+    ) -> Option<InterruptedRemovalConfirmation> {
+        let confirmation = self.interrupted_removal_confirmation.take();
+        if confirmation.is_some() {
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
+        confirmation
     }
 
     /// The controller state driving Home rows, overlays, and markers.
@@ -354,10 +405,6 @@ impl WorkspaceRuntime {
         if let Some(modal) = self.closeup_modal.take() {
             self.closeup_modal = Some(modal.with_agent_models(available, default));
         }
-        let context = self.command_help_context();
-        if let Some(modal) = self.command_help_modal.as_mut() {
-            modal.set_context(context);
-        }
     }
 
     /// Capture both fences carried by an off-thread restore dispatch.
@@ -374,119 +421,6 @@ impl WorkspaceRuntime {
     #[must_use]
     pub const fn director_projection(&self) -> &DirectorDrawerProjection {
         &self.director_projection
-    }
-
-    /// Current Director command draft. It is presentation-local and is never
-    /// persisted or sent until Enter submits it to the focused Agent PTY.
-    #[must_use]
-    pub const fn director_command(&self) -> &TextInput {
-        &self.director_command
-    }
-
-    /// Edit Director's one-line command buffer, including committed IME text.
-    pub fn handle_director_command(&mut self, key: &Key) -> DirectorCommandInput {
-        if self.state.overlay().is_some()
-            || self.state.workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Director)
-            || self.state.director_launching().is_some()
-            || !matches!(self.state.director_new(), DirectorNew::Idle)
-            || self.focused_agent_terminal().is_none()
-        {
-            return DirectorCommandInput::Unhandled;
-        }
-
-        let changed = match key {
-            Key::Char(character) if !character.is_control() => {
-                self.insert_director_command(&character.to_string())
-            }
-            Key::Paste(text) => {
-                let normalized = normalize_director_command(text);
-                self.insert_director_command(&normalized)
-            }
-            // IME commits commonly arrive as a Text/Raw block and are exposed
-            // by the adapter as Passthrough. Only printable UTF-8 is captured;
-            // opaque control sequences keep their exact PTY semantics.
-            Key::Passthrough(bytes) => {
-                let Ok(text) = std::str::from_utf8(bytes) else {
-                    return DirectorCommandInput::Unhandled;
-                };
-                if text.is_empty() || text.chars().any(char::is_control) {
-                    return DirectorCommandInput::Unhandled;
-                }
-                self.insert_director_command(text)
-            }
-            Key::Backspace => self.director_command.backspace(),
-            Key::Delete => self.director_command.delete_forward(),
-            Key::Left => {
-                self.director_command.move_left();
-                true
-            }
-            Key::Right => {
-                self.director_command.move_right();
-                true
-            }
-            Key::Home | Key::LineStart => {
-                self.director_command.move_home();
-                true
-            }
-            Key::End | Key::LineEnd => {
-                self.director_command.move_end();
-                true
-            }
-            Key::SelectLeft => {
-                self.director_command.select_left();
-                true
-            }
-            Key::SelectRight => {
-                self.director_command.select_right();
-                true
-            }
-            Key::SelectHome => {
-                self.director_command.select_home();
-                true
-            }
-            Key::SelectEnd => {
-                self.director_command.select_end();
-                true
-            }
-            Key::Enter => {
-                return DirectorCommandInput::Submit(self.director_command.value().to_owned());
-            }
-            _ => return DirectorCommandInput::Unhandled,
-        };
-        if changed {
-            self.material_revision = self.material_revision.saturating_add(1);
-        }
-        DirectorCommandInput::Consumed
-    }
-
-    /// Clear a command once presentation has classified it as accepted or
-    /// unsafe to offer for replay.
-    pub fn complete_director_command(&mut self) {
-        self.director_command.clear();
-        self.material_revision = self.material_revision.saturating_add(1);
-    }
-
-    fn insert_director_command(&mut self, text: &str) -> bool {
-        if text.is_empty() {
-            return false;
-        }
-        let selected = self
-            .director_command
-            .selection()
-            .map_or(0, |(start, end)| end.saturating_sub(start));
-        let retained = self.director_command.value().len().saturating_sub(selected);
-        let room = MAX_DIRECTOR_COMMAND_BYTES.saturating_sub(retained);
-        let end = text
-            .char_indices()
-            .map(|(index, character)| index + character.len_utf8())
-            .take_while(|end| *end <= room)
-            .last()
-            .unwrap_or(0);
-        if end == 0 {
-            return false;
-        }
-        self.director_command.insert_str(&text[..end]);
-        true
     }
 
     /// Cache fence for controller/modal projection inputs. Pane state has its
@@ -544,7 +478,6 @@ impl WorkspaceRuntime {
         if self.restore_fence() != (dispatched_interaction, dispatched_registry_revision) {
             return false;
         }
-        let had_root_agent = self.has_interactive_root_agent_tabs();
         for target in targets {
             let entry = target.target;
             let root = matches!(entry, Target::Root(_));
@@ -608,7 +541,6 @@ impl WorkspaceRuntime {
             }
         }
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
         true
     }
 
@@ -618,9 +550,6 @@ impl WorkspaceRuntime {
     /// calling this.
     #[must_use]
     pub fn handle_key(&mut self, key: Key) -> Vec<Effect> {
-        if self.state.overlay() == Some(Overlay::CommandHelp) && self.command_help_modal.is_some() {
-            return self.handle_command_help_key(key);
-        }
         // The Overview / Closeup overlays own keyboard input while open: their
         // persisted modal edits its own caret and selection, and the sidebar
         // reducer never sees the key. This is the symmetry the other overlays
@@ -656,12 +585,29 @@ impl WorkspaceRuntime {
                 (DirectorNew::Choosing(_) | DirectorNew::Empty, Key::Enter) => {
                     self.apply_event(AppEvent::Key(AppKey::Enter))
                 }
+                (DirectorNew::Choosing(_) | DirectorNew::Empty, Key::Quit) => {
+                    self.apply_event(AppEvent::Key(AppKey::CtrlC))
+                }
                 (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::DirectorNew)) => {
                     self.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
                 }
                 (_, Key::Escape) => self.apply_event(AppEvent::Key(AppKey::Escape)),
                 (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::Director)) => {
                     self.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
+                }
+                (
+                    _,
+                    Key::Live(crate::usecase::terminal_input::LiveTerminalAction::DirectorBack),
+                ) => self.apply_event(AppEvent::Key(AppKey::DirectorBack)),
+                (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::WorkRuns)) => {
+                    self.apply_event(AppEvent::Key(AppKey::OpenDirectorWorkRuns))
+                }
+                (DirectorNew::Idle, Key::Enter)
+                    if self.state.director_route() == DirectorRoute::Organization =>
+                {
+                    self.apply_event(AppEvent::Key(AppKey::OpenDirectorConsole(
+                        DirectorConsoleParent::Organization,
+                    )))
                 }
                 (
                     _,
@@ -697,43 +643,6 @@ impl WorkspaceRuntime {
         match app_event_from_key(key) {
             Some(event) => self.apply_event(event),
             None => Vec::new(),
-        }
-    }
-
-    /// Drive the read-only command list. Its navigation never reaches the Home
-    /// reducer; only close/global controls are adapted back into controller
-    /// events so the usual overlay ownership rules stay authoritative.
-    fn handle_command_help_key(&mut self, key: Key) -> Vec<Effect> {
-        if !matches!(key, Key::Other | Key::Resize) {
-            self.material_revision = self.material_revision.saturating_add(1);
-        }
-        let modal = self
-            .command_help_modal
-            .as_mut()
-            .expect("command help present when its overlay is open");
-        match key {
-            Key::Tab | Key::Right => {
-                modal.next_tab();
-                Vec::new()
-            }
-            Key::Left => {
-                modal.previous_tab();
-                Vec::new()
-            }
-            Key::Up => {
-                modal.select_previous();
-                Vec::new()
-            }
-            Key::Down => {
-                modal.select_next();
-                Vec::new()
-            }
-            Key::Escape => self.apply_event(AppEvent::Key(AppKey::Escape)),
-            Key::Char('?') => self.apply_event(AppEvent::Key(AppKey::Char('?'))),
-            other => match app_event_from_key(other) {
-                Some(event) => self.apply_event(event),
-                None => Vec::new(),
-            },
         }
     }
 
@@ -933,7 +842,6 @@ impl WorkspaceRuntime {
     #[must_use]
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
         let previous_drawer_focus = self.state.workspace_drawer_focus();
-        let director_was_open = self.state.director_drawer_open();
         let advances_material = match &event {
             AppEvent::Tick => false,
             AppEvent::Resize { width, height } => {
@@ -969,9 +877,6 @@ impl WorkspaceRuntime {
             });
         }
         self.sync_overlay_modals();
-        if director_was_open && !self.state.director_drawer_open() {
-            self.director_command.clear();
-        }
         effects
     }
 
@@ -1117,16 +1022,6 @@ impl WorkspaceRuntime {
     fn sync_overlay_modals(&mut self) {
         let (available_models, default_model) =
             (self.state.available_models(), self.state.default_model());
-        let command_help_context = self.command_help_context();
-        if self.state.overlay() == Some(Overlay::CommandHelp) {
-            if let Some(modal) = self.command_help_modal.as_mut() {
-                modal.set_context(command_help_context);
-            } else {
-                self.command_help_modal = Some(CommandHelpModal::new(command_help_context));
-            }
-        } else {
-            self.command_help_modal = None;
-        }
         if self.state.overlay() == Some(Overlay::Overview) {
             self.overview_modal.get_or_insert_with(|| {
                 OverviewModal::with_selection_mode(self.modal_selection_mode)
@@ -1144,27 +1039,17 @@ impl WorkspaceRuntime {
         }
     }
 
-    fn command_help_context(&self) -> CommandHelpContext {
-        CommandHelpContext {
-            scope: if matches!(self.state.route(), Route::Home(HomeMode::Closeup)) {
-                CommandScope::Session
-            } else {
-                CommandScope::Workspace
-            },
-            garden_available: self.state.garden_available(),
-            agent_available: !self.state.available_models().is_empty(),
-            session_available: self.state.active_session_is_usable(),
-        }
-    }
-
     /// Whether a live terminal currently owns keyboard input, so the shell
     /// forwards raw passthrough bytes to the PTY instead of the reducer. True
     /// only in Closeup with an available live pane whose tab (not the action
     /// modal) owns input.
     #[must_use]
     pub fn wants_live_input(&self) -> bool {
-        (matches!(self.state.route(), Route::Home(HomeMode::Closeup))
-            || self.state.workspace_drawer_open())
+        let live_surface = matches!(self.state.route(), Route::Home(HomeMode::Closeup))
+            || self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal)
+            || (self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director)
+                && matches!(self.state.director_route(), DirectorRoute::Console(_)));
+        live_surface
             && self.state.has_live_pane()
             && (!self.state.workspace_drawer_open() || self.focused_terminal().is_some())
             && self.state.overlay().is_none()
@@ -1373,7 +1258,6 @@ impl WorkspaceRuntime {
         operation: OperationId,
         message: String,
     ) -> Vec<PaneRegistryEffect> {
-        let had_root_agent = self.has_interactive_root_agent_tabs();
         let message = if message == AGENT_CAPACITY_EXHAUSTED {
             AGENT_CAPACITY_RECOVERY.to_owned()
         } else {
@@ -1389,7 +1273,6 @@ impl WorkspaceRuntime {
         // A dropped placeholder can never complete, so retire its focus gate.
         self.pane_focus_at_request.remove(&operation);
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
         effects
     }
 
@@ -1432,7 +1315,6 @@ impl WorkspaceRuntime {
 
     /// Remove a live tab the daemon reports as exited.
     pub fn exit_pane(&mut self, target: Target, terminal: TerminalRef) -> Vec<PaneRegistryEffect> {
-        let had_root_agent = self.has_interactive_root_agent_tabs();
         let effects = reduce_registry(
             &mut self.panes,
             PaneRegistryEvent::Pane {
@@ -1441,7 +1323,6 @@ impl WorkspaceRuntime {
             },
         );
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
         self.close_empty_root_terminal_drawer();
         effects
     }
@@ -1457,7 +1338,6 @@ impl WorkspaceRuntime {
         {
             return CloseOutcome::default();
         }
-        let had_root_agent = self.has_interactive_root_agent_tabs();
         let outcome = match self.panes.active_pane().selected() {
             PaneSelection::Tab(TabSelection::Live(terminal)) => CloseOutcome {
                 detach: Some(terminal.clone()),
@@ -1483,24 +1363,26 @@ impl WorkspaceRuntime {
         }
         let _ = route_tab_command(&mut self.panes, PaneTabCommand::Close);
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
         self.close_empty_root_terminal_drawer();
         outcome
     }
 
-    fn close_disappeared_director(&mut self, had_root_agent: bool) {
-        if had_root_agent
-            && self.state.director_drawer_open()
-            && !self.has_interactive_root_agent_tabs()
-        {
-            let effects = self.apply_event(AppEvent::DirectorDrawerEmptied);
-            debug_assert!(
-                effects.is_empty(),
-                "closing an empty Director is state-only"
-            );
-        }
+    /// Remove one interrupted lineage after its durable dismissal has been
+    /// committed. Stable target and continuation identity keep a delayed modal
+    /// answer from closing whichever unrelated tab is focused now.
+    pub fn dismiss_interrupted_tab(&mut self, target: Target, continuation: AgentContinuationRef) {
+        let _ = reduce_registry(
+            &mut self.panes,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::DismissInterrupted { continuation },
+            },
+        );
+        self.sync_live_pane();
+        self.close_empty_root_terminal_drawer();
     }
 
+    #[cfg(test)]
     fn has_interactive_root_agent_tabs(&self) -> bool {
         self.panes
             .pane(Target::Root(self.state.workspace()))
@@ -2129,6 +2011,7 @@ impl WorkspaceRuntime {
     /// the Ctrl-C grace from being clobbered by the next sample.
     fn sync_live_pane(&mut self) {
         self.ensure_open_root_surface_selection();
+        self.reconcile_interrupted_removal_confirmation();
         // A target that owns any tab shows its tab strip, so the action
         // launcher steps aside and a non-live tab (an interrupted Agent history)
         // can be selected and resumed. This is sampled *before* the live level so
@@ -2153,6 +2036,20 @@ impl WorkspaceRuntime {
                 .any(|tab| matches!(tab, PaneTab::Live(_)))
         };
         let _ = update(&mut self.state, AppEvent::LivePaneAvailability(live));
+    }
+
+    fn reconcile_interrupted_removal_confirmation(&mut self) {
+        let remains_unresumable =
+            self.interrupted_removal_confirmation
+                .as_ref()
+                .is_some_and(|confirmation| {
+                    self.interrupted_pane_for(confirmation.target, confirmation.tab.continuation)
+                        .is_some_and(|pane| !pane.tab.resumable())
+                });
+        if self.interrupted_removal_confirmation.is_some() && !remains_unresumable {
+            self.interrupted_removal_confirmation = None;
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
     }
 
     /// Build the Home frame from the controller state, pane strip, and the
@@ -2187,11 +2084,7 @@ impl WorkspaceRuntime {
                 .with_terminal_view(home_terminal_view)
                 .with_director_drawer(self.director_projection.clone())
                 .with_root_terminal_drawer(root_terminal_projection)
-                .with_overlay_modals(
-                    self.overview_modal.clone(),
-                    self.closeup_modal.clone(),
-                    self.command_help_modal.clone(),
-                );
+                .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
         render_home(height, width, &projection)
     }
 
@@ -2244,20 +2137,6 @@ fn root_tab_is_terminal(tab: &PaneTab) -> bool {
     }
 }
 
-fn normalize_director_command(text: &str) -> String {
-    text.chars()
-        .filter_map(|character| {
-            if character.is_whitespace() {
-                Some(' ')
-            } else if character.is_control() {
-                None
-            } else {
-                Some(character)
-            }
-        })
-        .collect()
-}
-
 fn terminal_belongs_to_target(
     terminal: &TerminalRef,
     target: Target,
@@ -2278,19 +2157,16 @@ fn tab_selection(tab: &PaneTab) -> TabSelection {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentResumeRelation, CloseOutcome, DirectorCommandInput, InterruptedTab,
-        MAX_DIRECTOR_COMMAND_BYTES, PaneEvent, PaneKind, PaneRegistryEffect, PaneRestoreTarget,
-        PaneTab, ResumeRejection, RootTerminalDrawerProjection, RootTerminalTabProjection,
-        TabSelection, WorkspaceRuntime, root_tab_is_terminal, tab_selection,
-    };
-    use crate::presentation::views::command_help_modal::{
-        CommandHelpEntry, CommandHelpTab, CommandScope,
+        AgentResumeRelation, CloseOutcome, InterruptedTab, PaneEvent, PaneKind, PaneRegistryEffect,
+        PaneRestoreTarget, PaneTab, ResumeRejection, RootTerminalDrawerProjection,
+        RootTerminalTabProjection, TabSelection, WorkspaceRuntime, root_tab_is_terminal,
+        tab_selection,
     };
     use crate::presentation::views::workspace::TerminalViewProjection;
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, BackendEvent, Effect, HomeMode, Overlay, Route, Selection, TabDirection,
-        Target, WorkspaceDrawerFocus,
+        AppEvent, AppKey, BackendEvent, DirectorNew, DirectorRoute, Effect, HomeMode, Overlay,
+        Route, Selection, TabDirection, Target, WorkspaceDrawerFocus,
     };
     use crate::usecase::application::pane::{
         InterruptedPane, LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection,
@@ -2380,92 +2256,11 @@ mod tests {
     }
 
     #[test]
-    fn question_mark_opens_available_commands_then_tabs_to_all() {
-        let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), Vec::new());
-
-        assert!(runtime.handle_key(Key::Char('?')).is_empty());
-        assert_eq!(runtime.state().overlay(), Some(Overlay::CommandHelp));
-        let help = runtime.command_help_modal().unwrap();
-        assert_eq!(help.tab(), CommandHelpTab::Available);
-        assert_eq!(help.context().scope, CommandScope::Workspace);
-        assert_eq!(help.entries().len(), 8);
-
-        assert!(runtime.handle_key(Key::Down).is_empty());
-        assert_eq!(runtime.command_help_modal().unwrap().selected(), 1);
-        assert!(runtime.handle_key(Key::Up).is_empty());
-        assert_eq!(runtime.command_help_modal().unwrap().selected(), 0);
-        assert!(runtime.handle_key(Key::Left).is_empty());
-        assert_eq!(
-            runtime.command_help_modal().unwrap().tab(),
-            CommandHelpTab::All
-        );
-        assert!(runtime.handle_key(Key::Right).is_empty());
-        assert_eq!(
-            runtime.command_help_modal().unwrap().tab(),
-            CommandHelpTab::Available
-        );
-        assert!(runtime.handle_key(Key::Tab).is_empty());
-        assert_eq!(
-            runtime.command_help_modal().unwrap().tab(),
-            CommandHelpTab::All
-        );
-        assert_eq!(runtime.command_help_modal().unwrap().entries().len(), 13);
-        assert!(runtime.handle_key(Key::Other).is_empty());
-        assert_eq!(runtime.state().overlay(), Some(Overlay::CommandHelp));
-        assert!(runtime.handle_key(Key::Delete).is_empty());
-        assert_eq!(runtime.state().overlay(), Some(Overlay::CommandHelp));
-
-        assert!(runtime.handle_key(Key::Char('?')).is_empty());
-        assert_eq!(runtime.state().overlay(), None);
-        assert!(runtime.command_help_modal().is_none());
-
-        assert!(runtime.handle_key(Key::Char('?')).is_empty());
-        assert!(runtime.handle_key(Key::Escape).is_empty());
-        assert_eq!(runtime.state().overlay(), None);
-        assert!(runtime.command_help_modal().is_none());
-    }
-
-    #[test]
-    fn closeup_help_lists_only_commands_runnable_in_that_session() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let _ = runtime.handle_key(Key::Enter);
-        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Closeup));
-        assert_eq!(runtime.state().overlay(), None);
-
-        let _ = runtime.handle_key(Key::Char('?'));
-        let names = runtime
-            .command_help_modal()
-            .unwrap()
-            .entries()
-            .iter()
-            .map(CommandHelpEntry::name)
-            .collect::<Vec<_>>();
-        assert_eq!(names, ["agent", "close", "env", "terminal"]);
-        assert_eq!(
-            runtime.command_help_modal().unwrap().context().scope,
-            CommandScope::Session
-        );
-
-        runtime.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
-        let names = runtime
-            .command_help_modal()
-            .unwrap()
-            .entries()
-            .iter()
-            .map(CommandHelpEntry::name)
-            .collect::<Vec<_>>();
-        assert_eq!(names, ["close", "env", "terminal"]);
-    }
-
-    #[test]
     fn question_mark_remains_text_inside_an_existing_command_palette() {
         let mut runtime = overview_on(WorkspaceId::new());
         let _ = runtime.handle_key(Key::Char('?'));
         assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
         assert_eq!(runtime.overview_modal().unwrap().input(), "?");
-        assert!(runtime.command_help_modal().is_none());
     }
 
     fn type_str(runtime: &mut WorkspaceRuntime, text: &str) {
@@ -3470,6 +3265,10 @@ mod tests {
         let second = terminal_ref(workspace, session);
         let _ = runtime.complete_pane(target, pending, second.clone());
         let _ = runtime.focus_terminal(target, second);
+        assert_eq!(
+            runtime.terminal_after_select(TabDirection::Previous),
+            Some(Some(first.clone()))
+        );
         assert_eq!(runtime.terminal_after_close(), Some(Some(first)));
     }
 
@@ -3769,6 +3568,12 @@ mod tests {
             )
         );
         let _ = runtime.handle_key(Key::Escape);
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        let _ = runtime.handle_key(Key::Escape);
         assert!(!runtime.state().director_drawer_open());
         assert_eq!(runtime.active_pane(), &closeup_background.3);
     }
@@ -3781,92 +3586,51 @@ mod tests {
         assert!(runtime.handle_key(Key::Up).is_empty());
         assert!(runtime.handle_key(Key::Char('x')).is_empty());
         assert!(runtime.state().director_drawer_open());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
+        assert!(!matches!(runtime.state().director_new(), DirectorNew::Idle));
+        assert!(runtime.handle_key(Key::Quit).is_empty());
+        assert!(matches!(runtime.state().director_new(), DirectorNew::Idle));
+        assert!(runtime.state().director_drawer_open());
     }
 
     #[test]
-    fn director_command_composes_unicode_and_committed_ime_text() {
+    fn director_work_runs_shortcut_and_interactive_agent_detection_cover_live_states() {
         let workspace = WorkspaceId::new();
         let target = Target::Root(workspace);
-        let terminal = root_terminal_ref(workspace);
-        let operation = OperationId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-        let _ = runtime.request_pane(target, operation, PaneKind::Agent);
-        let _ = runtime.complete_pane(target, operation, terminal);
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkRuns));
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorBack));
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkRuns));
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
 
-        assert_eq!(
-            runtime.handle_director_command(&Key::Char('追')),
-            DirectorCommandInput::Consumed
-        );
-        assert_eq!(
-            runtime.handle_director_command(&Key::Passthrough("加指示".as_bytes().to_vec())),
-            DirectorCommandInput::Consumed
-        );
-        assert_eq!(
-            runtime.handle_director_command(&Key::Paste(" を\n実行".to_owned())),
-            DirectorCommandInput::Consumed
-        );
-        assert_eq!(runtime.director_command().value(), "追加指示 を 実行");
-        assert_eq!(
-            runtime.handle_director_command(&Key::Enter),
-            DirectorCommandInput::Submit("追加指示 を 実行".to_owned())
-        );
-        assert_eq!(
-            runtime.director_command().value(),
-            "追加指示 を 実行",
-            "routing classifies delivery before clearing the runtime draft"
-        );
-        runtime.complete_director_command();
-        assert!(runtime.director_command().is_empty());
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, PaneKind::Agent);
+        assert!(runtime.has_interactive_root_agent_tabs());
+        let terminal = root_terminal_ref(workspace);
+        let _ = runtime.complete_pane(target, operation, terminal);
+        assert!(runtime.has_interactive_root_agent_tabs());
 
-        assert_eq!(
-            runtime.handle_director_command(&Key::Passthrough(vec![0xff])),
-            DirectorCommandInput::Unhandled
+        let mut ready_runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let ready_operation = OperationId::new();
+        let _ = ready_runtime.request_pane(target, ready_operation, PaneKind::Agent);
+        ready_runtime.inject_pane_event_for_test(
+            target,
+            PaneEvent::Resolved {
+                operation: ready_operation,
+            },
         );
-        for key in [Key::Passthrough(Vec::new()), Key::Passthrough(vec![0])] {
-            assert_eq!(
-                runtime.handle_director_command(&key),
-                DirectorCommandInput::Unhandled
-            );
-        }
-        assert_eq!(
-            runtime.handle_director_command(&Key::Paste("\0".to_owned())),
-            DirectorCommandInput::Consumed
-        );
-        for key in [
-            Key::Paste("abc".to_owned()),
-            Key::Left,
-            Key::Right,
-            Key::Home,
-            Key::End,
-            Key::SelectLeft,
-            Key::SelectRight,
-            Key::SelectHome,
-            Key::SelectEnd,
-            Key::Backspace,
-            Key::Delete,
-        ] {
-            assert_eq!(
-                runtime.handle_director_command(&key),
-                DirectorCommandInput::Consumed
-            );
-        }
-        runtime.complete_director_command();
-
-        let _ =
-            runtime.handle_director_command(&Key::Paste("x".repeat(MAX_DIRECTOR_COMMAND_BYTES)));
-        let _ = runtime.handle_director_command(&Key::SelectLeft);
-        let before = runtime.director_command().clone();
-        let _ = runtime.handle_director_command(&Key::Char('日'));
-        assert_eq!(
-            runtime.director_command(),
-            &before,
-            "a replacement that cannot fit must preserve the selected byte"
-        );
+        assert!(ready_runtime.has_interactive_root_agent_tabs());
     }
 
     #[test]
-    fn director_closes_only_when_the_last_interactive_root_agent_disappears() {
+    fn director_stays_open_when_the_last_interactive_root_agent_disappears() {
         let workspace = WorkspaceId::new();
         let target = Target::Root(workspace);
         let first = root_terminal_ref(workspace);
@@ -3883,13 +3647,10 @@ mod tests {
         let _ = runtime.exit_pane(target, first);
         assert!(runtime.state().director_drawer_open());
         let _ = runtime.exit_pane(target, second);
-        assert!(!runtime.state().director_drawer_open());
+        assert!(runtime.state().director_drawer_open());
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        assert!(
-            runtime.state().director_drawer_open(),
-            "an intentionally opened empty Director remains available for New"
-        );
+        assert!(!runtime.state().director_drawer_open());
     }
 
     #[test]
@@ -3947,6 +3708,8 @@ mod tests {
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
         assert_eq!(runtime.focused_terminal(), Some(root_agent));
+        assert!(!runtime.wants_live_input());
+        let _ = runtime.handle_key(Key::Enter);
         assert!(runtime.wants_live_input());
         assert!(runtime.active_pane().tabs().iter().any(
             |tab| matches!(tab, PaneTab::Live(live) if live.kind == PaneKind::Terminal && live.terminal == root_generic)
@@ -3967,6 +3730,13 @@ mod tests {
         assert_eq!(runtime.active_pane().tabs().len(), before_diff);
 
         let _ = runtime.handle_key(Key::Escape);
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        let _ = runtime.handle_key(Key::Escape);
+        assert!(!runtime.state().director_drawer_open());
         assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
         assert_eq!(runtime.focused_terminal(), Some(managed));
     }
@@ -4635,6 +4405,11 @@ mod tests {
         }
         let continuation = history.continuation;
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        // The drawer can open before its asynchronous inventory observation
+        // arrives. Restoring interrupted-only history must establish the real
+        // pane selection without relying on another open transition.
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(runtime.state().director_drawer_open());
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
@@ -4643,12 +4418,20 @@ mod tests {
                 target: Target::Root(workspace),
                 panes: Vec::new(),
                 selected: None,
-                selected_interrupted: Some(continuation),
+                selected_interrupted: None,
                 interrupted: vec![history],
             }],
         ));
+        assert_eq!(
+            runtime
+                .panes()
+                .pane(Target::Root(workspace))
+                .expect("the restored root pane exists")
+                .selected(),
+            &PaneSelection::Tab(TabSelection::Interrupted(continuation)),
+            "root history must not need a live Agent to establish selection"
+        );
 
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(
             runtime.active_pane().selected(),
             &PaneSelection::Tab(TabSelection::Interrupted(continuation))
@@ -5204,8 +4987,8 @@ mod tests {
         )
     }
 
-    /// Seed one target's interrupted history through the restore fence and select
-    /// the first tab, as the shell does after a coherent observation.
+    /// Seed one target's interrupted history through the restore fence. A
+    /// coherent observation selects the first restored tab.
     fn with_history(
         runtime: &mut WorkspaceRuntime,
         target: Target,
@@ -5261,15 +5044,10 @@ mod tests {
             runtime.wants_pane_control_input(),
             "the launcher must step aside for a target that owns tabs"
         );
-        // Tab cycling is a tab-strip concern, not a live-PTY one.
-        for effect in runtime.handle_key(Key::Live(
-            crate::usecase::terminal_input::LiveTerminalAction::NextTab,
-        )) {
-            runtime.on_effect(&effect);
-        }
         assert_eq!(
             runtime.focused_interrupted().map(|tab| tab.continuation),
-            Some(history.continuation)
+            Some(history.continuation),
+            "cold restore must focus history without a tab-cycle workaround"
         );
     }
 
@@ -5332,7 +5110,6 @@ mod tests {
         );
         // A history tab is not a live pane: nothing to attach, poll, or resize.
         assert!(!runtime.state().has_live_pane());
-        let _ = runtime.select_tab(TabDirection::Next);
         assert_eq!(
             runtime.focused_interrupted().map(|tab| tab.continuation),
             Some(history.continuation)
@@ -5354,6 +5131,43 @@ mod tests {
     }
 
     #[test]
+    fn unresumable_removal_prompt_reconciles_empty_resumable_and_refreshed_history() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut empty = WorkspaceRuntime::new(workspace, Vec::new());
+        assert!(!empty.open_interrupted_removal_confirmation());
+        empty.toggle_interrupted_removal_choice();
+        assert!(empty.interrupted_removal_confirmation().is_none());
+
+        let mut runtime = closeup_on(workspace, session);
+        let resumable = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![resumable.clone()],
+        );
+        assert!(!runtime.open_interrupted_removal_confirmation());
+
+        let mut unresumable = resumable.clone();
+        unresumable.target = None;
+        unresumable.reason =
+            usagi_core::domain::agent::ProviderResumeReason::ProviderMetadataUnavailable;
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![unresumable.clone()],
+        );
+        assert!(runtime.open_interrupted_removal_confirmation());
+
+        // An unchanged observation keeps the frozen prompt; learning an exact
+        // resume target closes it instead of offering stale deletion.
+        with_history(&mut runtime, Target::Session(session), vec![unresumable]);
+        assert!(runtime.interrupted_removal_confirmation().is_some());
+        with_history(&mut runtime, Target::Session(session), vec![resumable]);
+        assert!(runtime.interrupted_removal_confirmation().is_none());
+    }
+
+    #[test]
     fn an_explicit_resume_pends_one_tab_and_a_validated_replacement_turns_it_live() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5365,7 +5179,6 @@ mod tests {
             Target::Session(session),
             vec![resumed.clone(), other.clone()],
         );
-        let _ = runtime.select_tab(TabDirection::Next);
 
         let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
         assert_eq!(command.target, *resumed.target.as_ref().unwrap());
@@ -5416,7 +5229,6 @@ mod tests {
             Target::Session(session),
             vec![unresumable.clone(), resumable.clone()],
         );
-        let _ = runtime.select_tab(TabDirection::Next);
         assert_eq!(
             runtime.resume_selected_tab(OperationId::new()),
             Err(ResumeRejection::NotResumable)

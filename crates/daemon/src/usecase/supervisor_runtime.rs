@@ -548,6 +548,9 @@ fn control_event(
                 decision: *decision,
             },
         ),
+        SupervisorWorkspaceCommand::Delete { .. } => {
+            unreachable!("history deletion does not append an aggregate event")
+        }
     };
     SupervisorEvent {
         sequence: run.state_revision + 1,
@@ -2206,6 +2209,9 @@ impl SupervisorRuntime {
         command: &SupervisorWorkspaceCommand,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
+        if matches!(command, SupervisorWorkspaceCommand::Delete { .. }) {
+            anyhow::bail!("supervisor history deletion uses the delete control path");
+        }
         let supervisor_run_id = command.supervisor_run_id();
         let run = self
             .supervisor
@@ -2253,6 +2259,88 @@ impl SupervisorRuntime {
             reduce(&mut candidate, &event).map_err(anyhow::Error::msg)?;
         }
         self.apply_event(&run, &event).map(|run| run.query())
+    }
+
+    /// Deletes one terminal run owned by the connection workspace.
+    ///
+    /// The operation reservation is durable before files are removed. A retry
+    /// after the snapshot disappears therefore returns the same receipt, while
+    /// a first request for an absent run is refused. The observed revision is
+    /// part of the command digest and is rechecked under the store lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign, active, stale, conflicting, expired, or
+    /// durably unreadable run.
+    pub fn delete_for_workspace(
+        &self,
+        workspace: WorkspaceId,
+        operation_id: OperationId,
+        command: &SupervisorWorkspaceCommand,
+        now: DateTime<Utc>,
+    ) -> Result<usagi_core::domain::supervisor::SupervisorRunDeletion> {
+        let SupervisorWorkspaceCommand::Delete {
+            supervisor_run_id,
+            observed_state_revision,
+        } = command
+        else {
+            anyhow::bail!("supervisor delete command is required");
+        };
+        let semantic_digest = control_semantic_digest(command)?;
+        let operation_key = operation_id.to_string();
+        let mut state = self.load_state()?;
+        if state.expired_controls.contains(&operation_key) {
+            anyhow::bail!("supervisor control operation is outside the retained replay window");
+        }
+        let replay = if let Some(existing) = state.controls.get(&operation_key) {
+            if existing.supervisor_run_id != *supervisor_run_id
+                || existing.semantic_digest != semantic_digest
+            {
+                anyhow::bail!("supervisor control operation conflicts with its reservation");
+            }
+            true
+        } else {
+            false
+        };
+
+        let run = self.supervisor.load(*supervisor_run_id)?;
+        if let Some(run) = &run {
+            if run.workspace_id != Some(workspace) {
+                anyhow::bail!("supervisor run does not belong to this workspace");
+            }
+            if !run.state.is_finished() {
+                anyhow::bail!("supervisor run must finish before deletion");
+            }
+            if run.state_revision != *observed_state_revision {
+                anyhow::bail!(
+                    "stale supervisor state revision: expected {observed_state_revision}, got {}",
+                    run.state_revision
+                );
+            }
+        } else if !replay {
+            anyhow::bail!("supervisor run does not exist");
+        }
+
+        if !replay {
+            self.ensure_control_capacity(&mut state)?;
+            state.controls.insert(
+                operation_key,
+                ControlReservation {
+                    semantic_digest,
+                    supervisor_run_id: *supervisor_run_id,
+                    reserved_at: now,
+                },
+            );
+            self.save_state(&state)?;
+        }
+        if run.is_some() {
+            self.supervisor
+                .delete_finished(*supervisor_run_id, *observed_state_revision)?;
+        }
+        Ok(usagi_core::domain::supervisor::SupervisorRunDeletion {
+            supervisor_run_id: *supervisor_run_id,
+            state_revision: *observed_state_revision,
+        })
     }
 
     /// Returns exact worker provenance still owned by aborted runs. Agent
@@ -7867,6 +7955,171 @@ mod tests {
         legacy.terminal_at = Some(now());
         restarted.supervisor.initialize(&legacy).unwrap();
         assert!(restarted.worker_stop_obligations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn workspace_delete_is_terminal_revisioned_and_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+
+        let mut active = SupervisorRun::new(
+            "goal-composer".into(),
+            "active".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        active.workspace_id = Some(workspace);
+        runtime.supervisor.initialize(&active).unwrap();
+        let active_command = SupervisorWorkspaceCommand::Delete {
+            supervisor_run_id: active.supervisor_run_id,
+            observed_state_revision: active.state_revision,
+        };
+        assert!(
+            runtime
+                .delete_for_workspace(workspace, OperationId::new(), &active_command, now())
+                .unwrap_err()
+                .to_string()
+                .contains("must finish")
+        );
+
+        let finished = aborted_run(Some(workspace));
+        let id = finished.supervisor_run_id;
+        let revision = finished.state_revision;
+        runtime.supervisor.initialize(&finished).unwrap();
+        let command = SupervisorWorkspaceCommand::Delete {
+            supervisor_run_id: id,
+            observed_state_revision: revision,
+        };
+        assert!(
+            runtime
+                .control_for_workspace(workspace, OperationId::new(), &command, now())
+                .unwrap_err()
+                .to_string()
+                .contains("delete control path")
+        );
+        assert!(
+            runtime
+                .delete_for_workspace(
+                    workspace,
+                    OperationId::new(),
+                    &SupervisorWorkspaceCommand::Cancel {
+                        supervisor_run_id: id,
+                        reason: "not a deletion".into(),
+                    },
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("delete command is required")
+        );
+        let expired_operation = OperationId::new();
+        let mut durable_state = runtime.load_state().unwrap();
+        durable_state
+            .expired_controls
+            .insert(&expired_operation.to_string());
+        runtime.save_state(&durable_state).unwrap();
+        assert!(
+            runtime
+                .delete_for_workspace(workspace, expired_operation, &command, now())
+                .unwrap_err()
+                .to_string()
+                .contains("outside the retained replay window")
+        );
+        assert!(
+            runtime
+                .delete_for_workspace(
+                    workspace,
+                    OperationId::new(),
+                    &SupervisorWorkspaceCommand::Delete {
+                        supervisor_run_id: id,
+                        observed_state_revision: revision + 1,
+                    },
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("stale supervisor state revision")
+        );
+        assert!(
+            runtime
+                .delete_for_workspace(WorkspaceId::new(), OperationId::new(), &command, now())
+                .unwrap_err()
+                .to_string()
+                .contains("does not belong")
+        );
+    }
+
+    #[test]
+    fn workspace_delete_is_durable_and_replayable() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let finished = aborted_run(Some(workspace));
+        let id = finished.supervisor_run_id;
+        let revision = finished.state_revision;
+        runtime.supervisor.initialize(&finished).unwrap();
+        let command = SupervisorWorkspaceCommand::Delete {
+            supervisor_run_id: id,
+            observed_state_revision: revision,
+        };
+
+        let operation = OperationId::new();
+        let receipt = runtime
+            .delete_for_workspace(workspace, operation, &command, now())
+            .unwrap();
+        assert_eq!(receipt.supervisor_run_id, id);
+        assert_eq!(receipt.state_revision, revision);
+        assert!(runtime.supervisor.load(id).unwrap().is_none());
+        assert!(runtime.list_workspace(workspace).unwrap().is_empty());
+
+        let restarted = SupervisorRuntime::new(temp.path());
+        assert_eq!(
+            restarted
+                .delete_for_workspace(workspace, operation, &command, now())
+                .unwrap(),
+            receipt
+        );
+        assert!(
+            restarted
+                .delete_for_workspace(
+                    workspace,
+                    operation,
+                    &SupervisorWorkspaceCommand::Delete {
+                        supervisor_run_id: id,
+                        observed_state_revision: revision + 1,
+                    },
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with its reservation")
+        );
+        assert!(
+            restarted
+                .delete_for_workspace(workspace, OperationId::new(), &command, now())
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "history deletion does not append an aggregate event")]
+    fn history_deletion_cannot_be_encoded_as_an_aggregate_event() {
+        let run = aborted_run(Some(WorkspaceId::new()));
+        let command = SupervisorWorkspaceCommand::Delete {
+            supervisor_run_id: run.supervisor_run_id,
+            observed_state_revision: run.state_revision,
+        };
+        let _ = control_event(
+            &run,
+            OperationId::new(),
+            "sha256:delete".into(),
+            &command,
+            now(),
+        );
     }
 
     #[test]

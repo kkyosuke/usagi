@@ -28,6 +28,7 @@ use usagi_core::usecase::client::{
 use usagi_daemon::infrastructure::unix_transport::{
     connect_current, ensure_private_dir_all, read_locator,
 };
+use usagi_tui::presentation::widgets::display_width;
 use usagi_tui::usecase::application::agent_tab_intent::AgentTabIntent;
 use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
 
@@ -242,18 +243,45 @@ fn send(master: &mut File, input: &[u8]) {
     master.flush().unwrap();
 }
 
-/// 100-column Home header（project bar の次の行）の右端にある指示モード button を実 mouse event で押す。
+/// Click the center cell of one visible label using a real SGR mouse event.
 ///
-/// SGR mouse coordinates are one-based. The button is right-aligned and occupies
-/// the rightmost 14 cells, so column 91 is safely inside it even when the mode
-/// segment is also present.
-fn click_director_button(master: &mut File) {
-    send(master, b"\x1b[<0;91;2M\x1b[<0;91;2m");
+/// Deriving the coordinate from the rendered frame keeps this boundary test
+/// independent of drawer placement while still checking that rendering and the
+/// product's pointer hitbox agree. SGR coordinates are one-based.
+fn click_visible_label(
+    master: &mut File,
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    label: &str,
+) {
+    click_visible_label_at_size(master, output, baseline, 24, 100, label);
 }
 
-/// Click `[ New ]` in the 100-column drawer selector row below the top padding.
-fn click_director_new(master: &mut File) {
-    send(master, b"\x1b[<0;96;5M\x1b[<0;96;5m");
+fn click_visible_label_at_size(
+    master: &mut File,
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    rows: usize,
+    columns: usize,
+    label: &str,
+) {
+    let screen = screen_since_at_size(output, baseline, rows, columns)
+        .expect("a rendered frame before pointer input");
+    let (row, line, offset) = screen
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| line.find(label).map(|offset| (row, line, offset)))
+        .unwrap_or_else(|| panic!("visible pointer label {label:?} was not rendered: {screen:?}"));
+    let column = display_width(&line[..offset]) + display_width(label) / 2 + 1;
+    let row = row + 1;
+    send(
+        master,
+        format!("\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m").as_bytes(),
+    );
+}
+
+fn click_director_button(master: &mut File, output: &Arc<Mutex<Vec<u8>>>, baseline: usize) {
+    click_visible_label(master, output, baseline, "[ ♛ Director ]");
 }
 
 fn toggle_director_with_key(master: &mut File) {
@@ -771,7 +799,9 @@ fn displayed_terminal_pid(output: &Arc<Mutex<Vec<u8>>>, baseline: usize) -> u64 
 }
 
 fn wait_for_file_lines(path: &Path, expected: usize) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    const FIXTURE_SPAWN_TIMEOUT: Duration = Duration::from_secs(20);
+
+    let deadline = Instant::now() + FIXTURE_SPAWN_TIMEOUT;
     loop {
         let lines = fs::read_to_string(path)
             .map(|text| text.lines().count())
@@ -779,7 +809,11 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
         if lines >= expected {
             return;
         }
-        assert!(Instant::now() < deadline, "fixture did not spawn");
+        assert!(
+            Instant::now() < deadline,
+            "fixture did not record {expected} spawn(s) within {FIXTURE_SPAWN_TIMEOUT:?}: path={}, observed={lines}",
+            path.display()
+        );
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -789,6 +823,15 @@ fn capture_len(output: &Arc<Mutex<Vec<u8>>>) -> usize {
 }
 
 fn screen_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize) -> Option<String> {
+    screen_since_at_size(output, baseline, 24, 100)
+}
+
+fn screen_since_at_size(
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    rows: usize,
+    columns: usize,
+) -> Option<String> {
     const ALT_SCREEN_START: &[u8] = b"\x1b[?1049h";
     let captured = output.lock().unwrap();
     let bytes = captured.get(baseline..)?;
@@ -798,9 +841,30 @@ fn screen_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize) -> Option<String>
     {
         return None;
     }
-    let mut screen = TerminalScreen::new(24, 100);
+    let mut screen = TerminalScreen::new(rows, columns);
     screen.advance(bytes);
     Some(screen.cells().join("\n"))
+}
+
+fn wait_for_screen_since_at_size(
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    rows: usize,
+    columns: usize,
+    needle: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let screen = screen_since_at_size(output, baseline, rows, columns).unwrap_or_default();
+        if screen.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {needle} at {columns}x{rows}; screen={screen:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn wait_for_screen_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, needle: &str) {
@@ -907,13 +971,25 @@ fn send_line_until_delivered(
 }
 
 fn wait_for_screen_absent_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, needle: &str) {
+    wait_for_screen_absent_since_at_size(output, baseline, 24, 100, needle);
+}
+
+fn wait_for_screen_absent_since_at_size(
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    rows: usize,
+    columns: usize,
+    needle: &str,
+) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if screen_since(output, baseline).is_some_and(|screen| !screen.contains(needle)) {
+        if screen_since_at_size(output, baseline, rows, columns)
+            .is_some_and(|screen| !screen.contains(needle))
+        {
             return;
         }
         if Instant::now() >= deadline {
-            let screen = screen_since(output, baseline).unwrap_or_default();
+            let screen = screen_since_at_size(output, baseline, rows, columns).unwrap_or_default();
             panic!("timed out waiting for {needle} to close; screen={screen:?}");
         }
         thread::sleep(Duration::from_millis(20));
@@ -1077,21 +1153,17 @@ fn select_tab_by_label(
     }
 }
 
-/// Director mode drawer の conversation selector を実キーで巡回する。
+/// Director / Organization の Director 行を実キーで巡回する。
 ///
-/// Drawer でも New は `Ctrl-O n` / `Ctrl-O Ctrl-N`、巡回は
-/// `Ctrl-O ]` で行う（`document/03-tui.md` の prefix 表）。
-///
-/// Drawer は Closeup の tab strip ではなく、選択中 conversation だけを
-/// `Conversation  [label]` として描くため、marker ではなく selector の closed
-/// vocabulary を観測する。
-fn select_drawer_conversation_by_label(
+/// Organization は全 Director を同時に表示し、`↑` / `↓` で選択する。
+/// 画面上の `›` を観測するため、永続化された順序には依存しない。
+fn select_organization_director_by_label(
     master: &mut File,
     output: &Arc<Mutex<Vec<u8>>>,
     baseline: usize,
     label: &str,
 ) {
-    let selected = format!("[{label}]");
+    let selected = format!("› {label}");
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let screen = screen_since(output, baseline).unwrap_or_default();
@@ -1100,10 +1172,47 @@ fn select_drawer_conversation_by_label(
         }
         assert!(
             Instant::now() < deadline,
-            "drawer conversation {label} was never selected; screen={screen:?}"
+            "Organization Director {label} was never selected; screen={screen:?}"
         );
-        send(master, b"\x0f]");
+        send(master, b"\x1b[B");
         thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Select one Organization Director and enter its direct-input Console.
+fn open_director_console_by_label(
+    master: &mut File,
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    label: &str,
+) {
+    select_organization_director_by_label(master, output, baseline, label);
+    send(master, b"\r");
+    wait_for_screen_since(output, baseline, "Director / Organization / Console");
+}
+
+/// Wait until Organization has projected the expected number of root Directors.
+/// This fences Enter against the asynchronous inventory append performed after
+/// a fresh TUI open.
+fn wait_for_organization_directors(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let screen = screen_since(output, baseline).unwrap_or_default();
+        let count = screen
+            .lines()
+            .skip_while(|line| !line.contains("Directors"))
+            .skip(1)
+            .take_while(|line| !line.contains("Organization"))
+            .filter(|line| line.contains("Agent ") || line.contains("(interrupted)"))
+            .count();
+        if count >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Organization never projected {expected} Directors; screen={screen:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -1881,9 +1990,9 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
     );
 
     // 指示モードで root Agent（claude）を起動する。
-    click_director_button(&mut master);
-    wait_for_screen_since(&captured, baseline, "Enter: send command · Ctrl-O n: New");
-    click_director_new(&mut master);
+    click_director_button(&mut master, &captured, baseline);
+    wait_for_screen_since(&captured, baseline, "Enter: Console · Ctrl-O n: New");
+    send(&mut master, b"\x0fn");
     wait_for_screen_since(&captured, baseline, "↑↓: select");
     send(&mut master, b"\x1b[A");
     send(&mut master, b"\r");
@@ -2257,13 +2366,9 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let first_baseline = capture_len(&captured);
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
-    click_director_button(&mut master);
-    wait_for_screen_since(
-        &captured,
-        first_baseline,
-        "Enter: send command · Ctrl-O n: New",
-    );
-    click_director_new(&mut master);
+    click_director_button(&mut master, &captured, first_baseline);
+    wait_for_screen_since(&captured, first_baseline, "Enter: Console · Ctrl-O n: New");
+    send(&mut master, b"\x0fn");
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.
     // Confirm it through the picker. Replay/idempotency is asserted below from
@@ -2414,9 +2519,17 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let reopened_baseline = capture_len(&captured);
     let mut reopened = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_baseline);
+    wait_for_screen_since(&captured, reopened_baseline, &session_claude_ready);
     toggle_director_with_key(&mut master);
-    wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-initial");
+    wait_for_organization_directors(&captured, reopened_baseline, 2);
     let observed = wait_for_agent_tabs(home.path(), 3);
+    send(&mut master, b"\r");
+    wait_for_screen_since(
+        &captured,
+        reopened_baseline,
+        "Director / Organization / Console",
+    );
+    wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-initial");
     let codex = continuation_for(&observed, &codex_terminal);
     let root_claude = continuation_for(&observed, &root_claude_terminal);
     let session_claude = continuation_for(&observed, &session_claude_terminal);
@@ -2541,7 +2654,15 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let mut reopened_for_kill =
         spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_for_kill_baseline);
+    wait_for_screen_since(&captured, reopened_for_kill_baseline, &session_claude_ready);
     toggle_director_with_key(&mut master);
+    wait_for_organization_directors(&captured, reopened_for_kill_baseline, 2);
+    send(&mut master, b"\r");
+    wait_for_screen_since(
+        &captured,
+        reopened_for_kill_baseline,
+        "Director / Organization / Console",
+    );
     wait_for_screen_since(
         &captured,
         reopened_for_kill_baseline,
@@ -2622,7 +2743,19 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let after_kill_baseline = capture_len(&captured);
     let mut after_kill = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, after_kill_baseline);
+    wait_for_screen_since(
+        &captured,
+        after_kill_baseline,
+        "claude-input:claude-session-reopened",
+    );
     toggle_director_with_key(&mut master);
+    wait_for_organization_directors(&captured, after_kill_baseline, 2);
+    send(&mut master, b"\r");
+    wait_for_screen_since(
+        &captured,
+        after_kill_baseline,
+        "Director / Organization / Console",
+    );
     wait_for_screen_since(&captured, after_kill_baseline, "codex-input:codex-one");
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, after_kill_baseline, "[switch]");
@@ -2648,7 +2781,19 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let second_reopen_baseline = capture_len(&captured);
     let mut second_reopen = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, second_reopen_baseline);
+    wait_for_screen_since(
+        &captured,
+        second_reopen_baseline,
+        "claude-input:claude-session-after-kill",
+    );
     toggle_director_with_key(&mut master);
+    wait_for_organization_directors(&captured, second_reopen_baseline, 2);
+    send(&mut master, b"\r");
+    wait_for_screen_since(
+        &captured,
+        second_reopen_baseline,
+        "Director / Organization / Console",
+    );
     wait_for_screen_since(&captured, second_reopen_baseline, "codex-input:codex-one");
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, second_reopen_baseline, "[switch]");
@@ -2766,6 +2911,12 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
     let baseline = capture_len(&captured);
     let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, baseline);
+    // Plain `?` is the discoverable shortcut on Switch, and the same key
+    // dismisses Help without leaking through to the workspace underneath it.
+    send(&mut master, b"?");
+    wait_for_screen_since(&captured, baseline, "Keyboard help · Workspace switch");
+    send(&mut master, b"?");
+    wait_for_screen_absent_since(&captured, baseline, "Keyboard help · Workspace switch");
     let intent = wait_for_agent_tabs(home.path(), 1);
     assert!(intent.dismissed.is_empty());
     send(&mut master, b"\r");
@@ -2778,14 +2929,13 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
     send(&mut master, b"before-agent-close\r");
     wait_for_screen_since(&captured, baseline, "claude-input:before-agent-close");
 
-    // Traditional terminals encode Ctrl-/ (the portable Ctrl-? alias) as the
-    // raw US byte. Help must open over a live Agent and exclusively own input;
-    // the text typed behind it never reaches the daemon PTY.
-    send(&mut master, b"\x1f");
+    // The documented Ctrl-O ? chord opens keyboard shortcuts over a live Agent
+    // and exclusively owns input; text typed behind it never reaches the PTY.
+    send(&mut master, b"\x0f?");
     wait_for_screen_since(&captured, baseline, "Keyboard help · Live terminal");
     wait_for_screen_since(&captured, baseline, "Ctrl-O [ / ]");
     send(&mut master, b"help-leak");
-    send(&mut master, b"\x1b");
+    send(&mut master, b"\x0f?");
     wait_for_screen_absent_since(&captured, baseline, "Keyboard help · Live terminal");
     send(&mut master, b"after-help\r");
     wait_for_screen_since(&captured, baseline, "claude-input:after-help");
@@ -2825,17 +2975,17 @@ fn agent_process_for(processes: &[(TerminalRef, u64)], terminal: &TerminalRef) -
 /// resume する product E2E。
 ///
 /// `tests/agent_ipc_e2e.rs` の cold-restart flow は shipping TUI の reducer を直接呼ぶ。ここは
-/// TUI binary を実 PTY で起動し、`Ctrl-O r` / `Ctrl-O Ctrl-X` の実キー入力だけで操作して、
+/// TUI binary を実 PTY で起動し、tab 選択 / `Ctrl-O r` / `Ctrl-O Ctrl-X` の実キー入力だけで操作して、
 /// 次を process 境界で押さえる。
 ///
 /// * root と managed session の history が distinct な tab として描画され、label は closed
 ///   vocabulary（`Claude (interrupted)` / `Codex (interrupted)` / `Agent (interrupted)`）だけである。
 /// * fresh start・TUI open・inventory・interrupted tab close・reconnect は provider を 1 度も起動しない。
-///   provider を起動するのは `Ctrl-O r` の実キー入力だけである。
+///   provider を起動するのは interrupted tab の明示選択または `Ctrl-O r` の retry だけである。
 /// * interrupted tab close は exact lineage を永続化し、inventory refresh と TUI reopen でも復活しない。
-/// * `Ctrl-O r` の 2 連打（double click）が daemon operation 1 件・child spawn 1 件・live tab 1 枚へ
+/// * `Ctrl-O r` の 2 連打が daemon operation 1 件・child spawn 1 件・live tab 1 枚へ
 ///   収束し、resume argv が exact な provider session ID を運ぶ。選ばなかった lineage は変わらない。
-/// * provider が使えない間の resume は tab を interrupted のまま残し、retry が成功する。
+/// * provider が使えない間の選択 resume は tab を interrupted のまま残し、`Ctrl-O r` の retry が成功する。
 /// * provider ID・argv・cwd・transcript は描画 frame と log（同じ PTY へ落ちる stderr）に出ない。
 #[test]
 #[allow(clippy::too_many_lines)] // 1 本の cold-restart product flow を時系列のまま検証する。
@@ -2964,13 +3114,16 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     let mut cold = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, cold_baseline);
     toggle_director_with_key(&mut master);
-    select_drawer_conversation_by_label(
+    // Wait for the fresh daemon inventory to replace stale live intent with
+    // provider-safe interrupted history before selecting an Organization row.
+    wait_for_screen_since(&captured, cold_baseline, "Codex (interrupted)");
+    select_organization_director_by_label(
         &mut master,
         &captured,
         cold_baseline,
         "Codex (interrupted)",
     );
-    select_drawer_conversation_by_label(
+    select_organization_director_by_label(
         &mut master,
         &captured,
         cold_baseline,
@@ -3005,12 +3158,7 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     // ── 4. The root drawer is already open. Select the Codex history with real
     // keys and press `Ctrl-O r` twice. The double activation must converge onto
     // one operation, one child, and one live tab for that lineage alone.
-    select_drawer_conversation_by_label(
-        &mut master,
-        &captured,
-        cold_baseline,
-        "Codex (interrupted)",
-    );
+    open_director_console_by_label(&mut master, &captured, cold_baseline, "Codex (interrupted)");
     wait_for_screen_since(
         &captured,
         cold_baseline,
@@ -3054,24 +3202,24 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
         !after_codex.contains("Codex (interrupted)"),
         "{after_codex}"
     );
-    select_drawer_conversation_by_label(
+    // Console の親である Organization に戻り、別の Director を選ぶ。
+    send(&mut master, b"\x0f\x02");
+    wait_for_screen_absent_since(
+        &captured,
+        cold_baseline,
+        "Director / Organization / Console",
+    );
+    open_director_console_by_label(
         &mut master,
         &captured,
         cold_baseline,
         "Claude (interrupted)",
     );
-
     // ── 5. A resume that the daemon refuses (the provider CLI is unavailable)
-    // leaves the tab interrupted with safe feedback and spawns nothing; the retry
-    // then succeeds against the same lineage.
+    // leaves the tab interrupted with safe feedback and spawns nothing; the
+    // explicit retry then succeeds against the same lineage.
     let hidden = fixtures.bin.join("claude.unavailable");
     fs::rename(fixtures.bin.join("claude"), &hidden).unwrap();
-    select_drawer_conversation_by_label(
-        &mut master,
-        &captured,
-        cold_baseline,
-        "Claude (interrupted)",
-    );
     send(&mut master, b"\x0fr");
     wait_for_screen_since(
         &captured,
@@ -3084,7 +3232,10 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
         "a refused resume must not spawn a provider"
     );
     let refused = screen_since(&captured, cold_baseline).unwrap_or_default();
-    assert!(refused.contains("[Claude (interrupted)]"), "{refused}");
+    assert!(
+        refused.contains("Director / Organization / Console"),
+        "{refused}"
+    );
 
     fs::rename(&hidden, fixtures.bin.join("claude")).unwrap();
     send(&mut master, b"\x0fr");
@@ -3229,7 +3380,9 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
 
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, baseline, "No conversations yet");
-    click_director_new(&mut master);
+    // New is a route-local picker rather than a bottom input bar. With no
+    // installed providers it owns the empty state and remains non-launchable.
+    send(&mut master, b"\x0fn");
     wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
     assert!(agent_processes(home.path(), 0).is_empty());
 
@@ -3237,21 +3390,21 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     // ownership of global input. Ctrl-Q therefore cannot leak through and open
     // the workspace-leave confirmation behind it.
     resize_pty(&master, 70, 16).unwrap();
+    // Replaying the captured stream into the resized grid makes the new header
+    // position observable and avoids racing the click against the resize frame.
+    wait_for_screen_since_at_size(&captured, baseline, 16, 70, "[ ♛ Director ]");
     send(&mut master, b"x");
-    wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
+    wait_for_screen_since_at_size(&captured, baseline, 16, 70, "No Agent CLI installed");
     send(&mut master, b"\x11");
     thread::sleep(Duration::from_millis(200));
-    let narrow = screen_since(&captured, baseline).unwrap_or_default();
+    let narrow = screen_since_at_size(&captured, baseline, 16, 70).unwrap_or_default();
     assert!(narrow.contains("♛ Director"), "{narrow}");
     assert!(!narrow.contains("Leave this workspace?"), "{narrow}");
 
     // The workspace header remains above the full-width drawer, and its
     // Director button closes even while the empty picker owns all other input.
-    // The PTY is 70 columns wide now; column 61 is inside the right-aligned
-    // 14-cell button on the row below the project bar (SGR mouse coordinates
-    // are one-based).
-    send(&mut master, b"\x1b[<0;61;2M\x1b[<0;61;2m");
-    wait_for_screen_absent_since(&captured, baseline, "No Agent CLI installed");
+    click_visible_label_at_size(&mut master, &captured, baseline, 16, 70, "[ ♛ Director ]");
+    wait_for_screen_absent_since_at_size(&captured, baseline, 16, 70, "No Agent CLI installed");
     send(&mut master, b"\x11");
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");
@@ -3352,9 +3505,12 @@ fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
     let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, baseline);
 
-    // The root conversation is restored into the drawer and owns its input.
+    // The root conversation is restored into Organization. Enter moves to its
+    // Console, which then owns ordinary PTY input.
     toggle_director_with_key(&mut master);
-    wait_for_screen_since(&captured, baseline, "♛ Director");
+    wait_for_organization_directors(&captured, baseline, 1);
+    send(&mut master, b"\r");
+    wait_for_screen_since(&captured, baseline, "Director / Organization / Console");
     wait_for_screen_since(&captured, baseline, "claude-ready-unique:");
 
     // Fill the 16-row drawer viewport well past its retained window.

@@ -36,7 +36,7 @@ daemon が cold restart（`daemon restart --force` / `stop` → `start`）また
 | 目標 | 復帰が **1 操作**で始められる（tab ごとの手作業を必須にしない） |
 | 非目標 | PTY master fd の継続。crash 後に同じ child へ input を送ること |
 | 非目標 | 「継続した」と偽ること。live でないものを live として描かない |
-| 非目標 | 明示操作なしの自動 resume。既存の[明示 resume 契約](../03-tui.md#interrupted-agent-の-tab-投影と明示-resume)を維持する |
+| 非目標 | 明示操作なしの自動 resume。既存の[明示 resume 契約](../03-tui.md#interrupted-agent-の-tab-投影と選択時-resume)を維持する |
 | 非目標 | credential・reported phase・in-flight input の hydrate（[復帰しないもの](#復帰しないもの)） |
 
 「復帰」は **同じ scope に新しい runtime を作り、旧 runtime を history として読めるようにする**ことであり、
