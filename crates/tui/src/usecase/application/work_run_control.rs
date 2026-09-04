@@ -219,28 +219,6 @@ impl WorkRunControl {
         }
     }
 
-    /// Open the typed action for one Overview-selected run without routing
-    /// through a second, duplicate run-list screen. The stable run identity is
-    /// supplied by the Overview rail; an outstanding unconfirmed mutation keeps
-    /// precedence so its idempotency key cannot be lost.
-    pub fn open_action_for(
-        &mut self,
-        selected: SupervisorRunId,
-        runs: &[SupervisorRunQuery],
-        fresh: bool,
-    ) -> WorkRunControlOutcome {
-        if self.retry.is_some() {
-            self.mode = WorkRunControlMode::Retry;
-            self.feedback = Some(WORK_RUN_ACTION_UNCONFIRMED.to_owned());
-            return WorkRunControlOutcome::Consumed;
-        }
-        self.selected = Some(selected);
-        self.mode = WorkRunControlMode::List;
-        self.feedback = None;
-        self.open_selected_action(runs, fresh);
-        WorkRunControlOutcome::Consumed
-    }
-
     fn handle_list(
         &mut self,
         action: WorkRunControlAction,

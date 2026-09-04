@@ -2,15 +2,16 @@
 
 > [設計提案一覧](README.md) ｜ 関連する現在仕様: [TUI の指示モード](../03-tui.md#指示モードdirector-mode) ｜ 関連提案: [goal-driven Work Run](18-goal-driven-work-run.md)
 
-> **Status:** 採用・実装済み（2026-09-04）
+> **Status:** 提案中（未実装）
 >
 > **Baseline:** commit `c1f7629ee19f698338826f12edb30d4be266e2a6`（2026-09-03）。現在の Director、Work Run
 > 一覧・操作、Goal Composer の仕様は [TUI の指示モード](../03-tui.md#指示モードdirector-mode)を参照する。
 
 Director 内の Organization、Work Run、Agent launcher、Agent conversation をどの画面へ置き、どの identity を保って
-遷移するかを決めた設計記録である。表示素材の優先順で切り替えていた旧 drawer を 3 つの明示的な sub-route に整理した。
-現在の実装仕様は [TUI](../03-tui.md#指示モードdirector-mode) が正本である。goal-driven と classic は route shell を共有するが、
-Overview の scope と操作まで同一にはしない。
+遷移するかの target design である。現在の Director drawer は Work Run 一覧・typed action、Organization、New picker /
+Goal Composer、root Agent terminal を個別の状態と表示素材の優先順で切り替える。本提案はこれらを 3 つの明示的な
+sub-route に整理する。現在の実装仕様は [TUI](../03-tui.md#指示モードdirector-mode) が正本であり、本書の screen graph は
+未実装である。goal-driven と classic は route shell を共有するが、Overview の scope と操作まで同一にはしない。
 
 ## 目次
 
@@ -24,9 +25,9 @@ Overview の scope と操作まで同一にはしない。
 - [Agent](#agent)
 - [入力と戻る操作](#入力と戻る操作)
 - [状態と identity](#状態と-identity)
-- [実装結果](#実装結果)
+- [現在実装との差分](#現在実装との差分)
 - [非同期更新と失敗時の着地](#非同期更新と失敗時の着地)
-- [実装順序](#実装順序)
+- [段階的な実装](#段階的な実装)
 - [受け入れ条件](#受け入れ条件)
 - [採用しない案](#採用しない案)
 
@@ -165,10 +166,10 @@ navigation depth が変わらない。
 | typed action | cancel / escalation 解決など Work Run action | なし |
 | Agent の next / previous | 同じ Work Run に属する retained root Agents | retained root conversations 全体 |
 
-goal-driven で Work Run と root Director Agent を結ぶ join は、`SupervisorRunQuery.provenance` の
-`worker_session_id: None` と `worker_agent_id` を使う。TUI は terminal の順番、goal 文字列、時刻から関連を推測しない。
-inventory に同じ stable Agent identity の retained root tab がある場合だけ Agent への drill-down を有効にし、消失時は
-Overview に留まって safe feedback を表示する。
+goal-driven で Work Run と root Director Agent を結ぶには、daemon が redaction-safe な stable Agent identity を Work Run
+projection に含める必要がある。現在の `SupervisorRunQuery` は worker provenance を持つが root Agent identity を公開して
+いないため、TUI が terminal の順番、goal 文字列、時刻から関連を推測してはならない。この join が提供されるまでは Work Run
+から root Agent への drill-down を有効にしない。
 
 classic では conversation と Organization が同じ workspace に並ぶだけで、親子関係ではない。conversation の `Enter` は
 Director の Agent へ、Organization の Session / worker の `Enter` は既存 Session Closeup へ進む。この非対称性を保てば、
@@ -248,7 +249,7 @@ Agent が interrupted / stopped になっても Agent 画面を Overview へ自�
 Overview back と Director close を別 intent にする。Agent の previous / next は既存 tab 操作の `Ctrl-O [` / `Ctrl-O ]` を
 再利用する。
 
-mouse は描画と同じ hitbox が stable identity を返す。Goal と tree node の single click は stable identity の選択、
+mouse は描画と同じ hitbox が stable identity を返す。Goal の single click は scope 選択、tree node の double click または
 `Enter` は drill-down、breadcrumb / button は single click とする。terminal 領域の pointer は Agent が所有し、背景の
 Overview へ fallthrough させない。
 
@@ -271,32 +272,39 @@ Launcher を開かず、navigation stack の無制限な増加を防ぐ。
 選択 identity と表示 label / 配列 index を分ける。Work Run、Session、Agent runtime、pending launch はそれぞれ daemon の
 stable ID または producer の `OperationId` で fence する。描画順が変わっても選択対象を変えない。
 
-## 実装結果
+## 現在実装との差分
 
-baseline で表示素材の優先順から暗黙に決めていた画面を `DirectorRoute` に置き換え、Overview / Launcher / Agent の
-foreground input owner と戻り先を reducer で一意にした。Overview は Work Run、Session、root Agent inventory を stable ID で
-join し、goal-driven では provenance scope、classic では workspace scope を使用する。描画と hit-test は同じ projection を読み、
-選択直後の terminal / Closeup projection まで同じ identity を渡す。
+本提案は表示移動の実装修正を含まない。baseline の Director は次の状態である。
 
-既存の Work Run typed action、exact operation retry、interrupted Agent resume、root Agent tab cycle は authority を変えず再利用した。
-production PTY test は Overview からの drill-down、Launcher の cancel / confirm、drawer close / reopen、empty / pending / interrupted、
-goal-driven の cold restart を固定している。
+- `DirectorRoute` はなく、New / Work Run control / Work Run progress / terminal / interrupted detail / Organization の表示素材の
+  優先順で画面相当の内容を決めている。したがって Overview、Launcher、Agent 間の明示遷移と戻り先保持はまだない。
+- 通常の Director terminal では `Ctrl-O [` / `Ctrl-O ]` が root Agent tab の previous / next を選ぶ経路を持つ。一方、selector
+  は選択中 label だけを描き、conversation 一覧の stable identity や hitbox を持たないため、mouse で Agent を直接選べない。
+- New picker / Goal Composer と Work Run control は前面 input owner であり、その間は `Ctrl-O [` / `Ctrl-O ]` を含む対象外入力を
+  消費する。Agent を切り替えるには先に `Esc` でその一時面を閉じる必要がある。
+- goal-driven の通常 footer は Work Run action と close だけを案内し、既存の Agent next / previous を表示していない。
+  keyboard 経路があっても発見しにくい。
+- 現在の Organization は `parent_session_id` による workspace-wide tree で、選択 Work Run に scope されていない。
+
+したがって実装時は route 導入だけでなく、visible conversation selector、keyboard と mouse の同一 stable-ID selection、選択直後の
+terminal projection 更新、各一時面からの明示 back を一組として直す。単体の tab-cycle helper だけで「Agent 間を移動できる」と
+完了判定しない。
 
 ## 非同期更新と失敗時の着地
 
 - confirm すると、同じ `OperationId` を持つ pending Agent を tree に加え、Agent の `starting` 画面へ直ちに進む。
 - daemon の final が exact scope / operation / semantic digest と一致した場合だけ pending identity を live Agent identity へ
   置換する。応答喪失後の replay で Agent や Work Run を増やさない。
-- launch failure で pending identity が失われた場合は safe reason を Overview に残して戻る。別 Agent へ自動選択せず、
-  retry は新しい明示操作として行う。
+- launch failure は Agent の failed state に留め、safe reason、`Retry`、`Overview` を表示する。失敗を理由に別 Agent や
+  Overview へ暗黙に fallback しない。
 - 表示中 Agent が inventory から消えても、retained history があれば stopped / interrupted として同じ Agent 画面に留める。
-  history も無ければ、別 Agent へ自動選択せず Overview へ戻る。
+  history も無い場合は tombstone を 1 frame 以上表示してから Overview へ戻せるようにする。
 - 選択 Work Run が削除された Overview は、表示順上の surviving Work Run へ決定的に着地する。無ければ中立な empty state と
   し、`New goal` を暗黙に選択しない。
 - reconnect / resync 中も `DirectorRoute` を保ち、projection を `State unavailable` にする。route と target の消失を同一視
   しない。
 
-## 実装順序
+## 段階的な実装
 
 1. 現在の drawer に visible conversation selector と stable-ID hitbox を追加し、通常面の `Ctrl-O [` / `Ctrl-O ]`、click、選択後の
    terminal projection を production input route まで通す regression test で固定する。

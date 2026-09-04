@@ -72,8 +72,7 @@ use crate::presentation::workspace_deck::{
     OverlayIntent, ProjectBarTarget, WorkspaceDeck, project_bar, render_overlay,
 };
 use crate::presentation::workspace_runtime::{
-    DirectorCommandInput, DirectorOrganizationTarget, DirectorOverviewFocus, DirectorOverviewScope,
-    PaneRestoreTarget, WorkspaceRuntime,
+    DirectorCommandInput, PaneRestoreTarget, WorkspaceRuntime,
 };
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -81,9 +80,9 @@ use crate::usecase::application::agent_tab_intent::{
 };
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState, DirectorNew,
-    DirectorRoute, Effect, EnvironmentEntry, ExitChoice, Feedback, GardenClick, HomeMode,
-    NewRequest, Notice, OperationResult, Overlay, PendingToken, RoleChoice, Route,
-    SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection, Target, WorkspaceDrawerFocus,
+    Effect, EnvironmentEntry, ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice,
+    OperationResult, Overlay, PendingToken, RoleChoice, Route, SessionBranchCatalog,
+    SessionRoleCatalog, SessionRoleProjection, Target, WorkspaceDrawerFocus,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -884,56 +883,33 @@ struct WorkRunControlInput {
 }
 
 fn handle_work_run_control_input(
-    ui: &mut WorkspaceUi,
     runtime: &mut WorkspaceRuntime,
     control: &mut WorkRunControl,
     runs: &WorkRunProjection,
     key: &Key,
-    height: usize,
-    width: usize,
 ) -> Option<WorkRunControlInput> {
-    if runtime.state().overlay().is_none() && matches!(key, Key::Live(LiveTerminalAction::WorkRuns))
-    {
-        let mut effects = Vec::new();
-        if !runtime.state().director_drawer_open() {
-            effects.extend(runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer)));
-        } else if runtime.state().workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Director) {
-            effects.extend(runtime.apply_event(AppEvent::WorkspaceDrawerFocused(
-                WorkspaceDrawerFocus::Director,
-            )));
-        }
-        effects.extend(runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorOverview)));
-        if control.mode() != WorkRunControlMode::Submitting {
-            control.close();
-        }
-        return Some(WorkRunControlInput {
-            outcome: WorkRunControlOutcome::Consumed,
-            effects,
-        });
-    }
     let can_host = runtime.state().overlay().is_none()
+        && runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven
         && runtime.state().director_launching().is_none()
         && matches!(runtime.state().director_new(), DirectorNew::Idle);
-    let mut effects = Vec::new();
-    if runtime.state().overlay().is_none()
-        && runtime.state().director_drawer_open()
-        && runtime.state().director_route() == DirectorRoute::Agent
-        && let Key::Click { column, row } = key
-        && director_drawer::overview_button_at(height, width, *column, *row)
+    let effects = if can_host
+        && !runtime.state().director_drawer_open()
+        && matches!(key, Key::Live(LiveTerminalAction::WorkRuns))
     {
-        effects.extend(runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorOverview)));
-        return Some(WorkRunControlInput {
-            outcome: WorkRunControlOutcome::Consumed,
-            effects,
-        });
-    }
-    let eligible = can_host
-        && runtime.state().director_drawer_open()
-        && runtime.state().director_route() == DirectorRoute::Overview;
+        runtime.handle_key(Key::Live(LiveTerminalAction::Director))
+    } else {
+        Vec::new()
+    };
+    let eligible = can_host && runtime.state().director_drawer_open();
     if !eligible {
         if control.mode() != WorkRunControlMode::Submitting {
             control.close();
         }
+        return None;
+    }
+    if control.mode() == WorkRunControlMode::Closed
+        && !matches!(key, Key::Live(LiveTerminalAction::WorkRuns))
+    {
         return None;
     }
     if matches!(key, Key::Resize | Key::Other) {
@@ -943,218 +919,29 @@ fn handle_work_run_control_input(
         control.close();
         return None;
     }
-    // New belongs to the route reducer, not the Overview navigation surface.
-    // Let both the documented chord and the visible button continue through the
-    // normal launcher path instead of being swallowed by Overview's catch-all.
-    if matches!(key, Key::Live(LiveTerminalAction::DirectorNew))
-        || is_director_new_click(key, runtime, height, width)
-    {
-        return None;
-    }
-    if control.mode() == WorkRunControlMode::List {
-        control.close();
-    }
-    if control.mode() != WorkRunControlMode::Closed {
-        let action = match key {
-            Key::Up => WorkRunControlAction::Up,
-            Key::Down => WorkRunControlAction::Down,
-            Key::Left => WorkRunControlAction::PreviousDecision,
-            Key::Right => WorkRunControlAction::NextDecision,
-            Key::Enter => WorkRunControlAction::Enter,
-            Key::Escape => WorkRunControlAction::Escape,
-            _ => {
-                return Some(WorkRunControlInput {
-                    outcome: WorkRunControlOutcome::Consumed,
-                    effects,
-                });
-            }
-        };
-        let outcome = control.handle(
+    let action = match key {
+        Key::Live(LiveTerminalAction::WorkRuns) => WorkRunControlAction::Toggle,
+        Key::Up => WorkRunControlAction::Up,
+        Key::Down => WorkRunControlAction::Down,
+        Key::Left => WorkRunControlAction::PreviousDecision,
+        Key::Right => WorkRunControlAction::NextDecision,
+        Key::Enter => WorkRunControlAction::Enter,
+        Key::Escape => WorkRunControlAction::Escape,
+        _ => {
+            return Some(WorkRunControlInput {
+                outcome: WorkRunControlOutcome::Consumed,
+                effects,
+            });
+        }
+    };
+    Some(WorkRunControlInput {
+        outcome: control.handle(
             action,
             runs.runs(),
             runs.freshness() == crate::presentation::views::work_run::WorkRunFreshness::Fresh,
-        );
-        if control.mode() == WorkRunControlMode::List {
-            control.close();
-        }
-        return Some(WorkRunControlInput { outcome, effects });
-    }
-
-    let outcome =
-        handle_director_overview_navigation(ui, runtime, control, runs, key, height, width)?;
-    Some(WorkRunControlInput { outcome, effects })
-}
-
-fn handle_director_overview_navigation(
-    ui: &mut WorkspaceUi,
-    runtime: &mut WorkspaceRuntime,
-    control: &mut WorkRunControl,
-    runs: &WorkRunProjection,
-    key: &Key,
-    height: usize,
-    width: usize,
-) -> Option<WorkRunControlOutcome> {
-    if let Key::Click { column, row } = key {
-        handle_director_overview_click(ui, runtime, height, width, *column, *row);
-        return Some(WorkRunControlOutcome::Consumed);
-    }
-    if runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven
-        && runtime.director_overview_scope().is_none()
-    {
-        runtime.reconcile_director_overview(runs.runs(), &[]);
-    }
-    let organization = director_organization(ui, runtime, runs.runs());
-    let organization_targets = organization
-        .iter()
-        .filter_map(|row| row.target)
-        .collect::<Vec<_>>();
-    runtime.reconcile_director_overview(runs.runs(), &organization_targets);
-    let goal_driven =
-        runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven;
-    Some(match (runtime.director_overview_focus(), key) {
-        (_, Key::Tab | Key::Left | Key::Right) => {
-            let focus = match runtime.director_overview_focus() {
-                DirectorOverviewFocus::Subjects => DirectorOverviewFocus::Organization,
-                DirectorOverviewFocus::Organization => DirectorOverviewFocus::Subjects,
-            };
-            runtime.set_director_overview_focus(focus);
-            WorkRunControlOutcome::Consumed
-        }
-        (DirectorOverviewFocus::Subjects, Key::Up | Key::Down) if goal_driven => {
-            runtime.move_director_scope(runs.runs(), matches!(key, Key::Down));
-            let organization = director_organization(ui, runtime, runs.runs());
-            let targets = organization
-                .iter()
-                .filter_map(|row| row.target)
-                .collect::<Vec<_>>();
-            runtime.reconcile_director_overview(runs.runs(), &targets);
-            WorkRunControlOutcome::Consumed
-        }
-        (DirectorOverviewFocus::Subjects, Key::Up | Key::Down) => {
-            move_director_conversation(ui, runtime, matches!(key, Key::Down));
-            WorkRunControlOutcome::Consumed
-        }
-        (DirectorOverviewFocus::Organization, Key::Up | Key::Down) => {
-            runtime.move_director_organization(&organization_targets, matches!(key, Key::Down));
-            WorkRunControlOutcome::Consumed
-        }
-        (DirectorOverviewFocus::Subjects, Key::Enter) if goal_driven => {
-            match runtime.director_overview_scope() {
-                Some(DirectorOverviewScope::WorkRun(selected)) => control.open_action_for(
-                    selected,
-                    runs.runs(),
-                    runs.freshness()
-                        == crate::presentation::views::work_run::WorkRunFreshness::Fresh,
-                ),
-                Some(DirectorOverviewScope::Unassigned) | None => {
-                    runtime.set_director_overview_focus(DirectorOverviewFocus::Organization);
-                    WorkRunControlOutcome::Consumed
-                }
-            }
-        }
-        (DirectorOverviewFocus::Subjects, Key::Enter) => {
-            if runtime.director_selection().is_some() {
-                runtime.open_director_agent();
-            }
-            WorkRunControlOutcome::Consumed
-        }
-        (DirectorOverviewFocus::Organization, Key::Enter) => {
-            if let Some(target) = runtime.director_organization_selection() {
-                match target {
-                    DirectorOrganizationTarget::RootAgent(runtime_id) => {
-                        open_director_runtime(ui, runtime, runtime_id);
-                    }
-                    DirectorOrganizationTarget::Session(session) => {
-                        runtime.open_director_session(session);
-                    }
-                }
-            }
-            WorkRunControlOutcome::Consumed
-        }
-        (_, Key::Escape) => return None,
-        _ => WorkRunControlOutcome::Consumed,
+        ),
+        effects,
     })
-}
-
-fn handle_director_overview_click(
-    ui: &mut WorkspaceUi,
-    runtime: &mut WorkspaceRuntime,
-    height: usize,
-    width: usize,
-    column: u16,
-    row: u16,
-) {
-    match director_drawer::overview_hit_at(
-        height,
-        width,
-        runtime.director_projection(),
-        column,
-        row,
-    ) {
-        Some(director_drawer::DirectorOverviewHit::Scope(scope)) => {
-            runtime.set_director_scope(scope);
-            runtime.set_director_overview_focus(DirectorOverviewFocus::Subjects);
-        }
-        Some(director_drawer::DirectorOverviewHit::Conversation(index)) => {
-            if let Some(selection) = runtime.director_agent_selection_at(index) {
-                select_director_selection(ui, runtime, selection);
-            }
-            runtime.set_director_overview_focus(DirectorOverviewFocus::Subjects);
-        }
-        Some(director_drawer::DirectorOverviewHit::Organization(target)) => {
-            runtime.set_director_organization_selection(target);
-            runtime.set_director_overview_focus(DirectorOverviewFocus::Organization);
-        }
-        None => {}
-    }
-}
-
-fn select_director_selection(
-    ui: &mut WorkspaceUi,
-    runtime: &mut WorkspaceRuntime,
-    selection: TabSelection,
-) {
-    let continuation = match &selection {
-        TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
-        TabSelection::Interrupted(continuation) => Some(*continuation),
-        TabSelection::Pending(_) | TabSelection::Ready(_) => None,
-    };
-    match ui.mutate_agent_intent(AgentTabIntentMutation::Select {
-        session_id: None,
-        continuation,
-    }) {
-        Ok(()) => {
-            let _ = runtime.select_tab_selection(selection);
-        }
-        Err(error) => surface_agent_tab_intent_error(runtime, error),
-    }
-}
-
-fn move_director_conversation(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, next: bool) {
-    let direction = if next {
-        crate::usecase::application::controller::TabDirection::Next
-    } else {
-        crate::usecase::application::controller::TabDirection::Previous
-    };
-    if let Some(selection) = runtime.agent_selection_after_select(direction) {
-        select_director_selection(ui, runtime, selection);
-    }
-}
-
-fn open_director_runtime(
-    ui: &mut WorkspaceUi,
-    runtime: &mut WorkspaceRuntime,
-    runtime_id: AgentRuntimeId,
-) {
-    let selection = runtime.director_agent_selection_for(runtime_id, ui.agent_inventory());
-    if let Some(selection) = selection {
-        select_director_selection(ui, runtime, selection);
-        runtime.open_director_agent();
-    } else {
-        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-            "Agent detail is no longer available; refresh the Overview",
-        ))));
-    }
 }
 
 fn work_run_control_projection(control: &WorkRunControl) -> WorkRunControlProjection {
@@ -5274,15 +5061,11 @@ fn director_drawer_projection(
         None
     };
     DirectorDrawerProjection {
-        route: runtime.state().director_route(),
         focused: runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director),
         goal_driven: runtime.state().work_mode()
             == usagi_core::domain::settings::WorkMode::GoalDriven,
-        overview_focus: runtime.director_overview_focus(),
-        overview_scope: runtime.director_overview_scope(),
         conversations,
-        organization: Vec::new(),
-        agent_context: None,
+        organization: director_organization(ui),
         terminal_view,
         command: runtime.director_terminal().map(|_| {
             let input = runtime.director_command();
@@ -5336,134 +5119,24 @@ fn director_new_projection(runtime: &WorkspaceRuntime) -> DirectorNewProjection 
     }
 }
 
-fn director_organization(
-    ui: &WorkspaceUi,
-    runtime: &WorkspaceRuntime,
-    runs: &[SupervisorRunQuery],
-) -> Vec<DirectorOrganizationRow> {
-    let goal_driven =
-        runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven;
-    let selected_run = runtime
-        .director_overview_scope()
-        .and_then(|scope| match scope {
-            DirectorOverviewScope::WorkRun(selected) => {
-                runs.iter().find(|run| run.supervisor_run_id == selected)
+fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
+    fn append_children(
+        parent: Option<SessionId>,
+        depth: usize,
+        members: &[(SessionId, Option<SessionId>, DirectorOrganizationRow)],
+        emitted: &mut std::collections::BTreeSet<SessionId>,
+        rows: &mut Vec<DirectorOrganizationRow>,
+    ) {
+        for (id, member_parent, row) in members {
+            if *member_parent == parent && emitted.insert(*id) {
+                let mut row = row.clone();
+                row.depth = depth;
+                rows.push(row);
+                append_children(Some(*id), depth.saturating_add(1), members, emitted, rows);
             }
-            DirectorOverviewScope::Unassigned => None,
-        });
-    let assigned_sessions = runs
-        .iter()
-        .flat_map(|run| {
-            run.provenance
-                .iter()
-                .filter_map(|item| item.worker_session_id)
-        })
-        .collect::<BTreeSet<_>>();
-    let assigned_root_agents = runs
-        .iter()
-        .flat_map(|run| {
-            run.provenance
-                .iter()
-                .filter(|item| item.worker_session_id.is_none())
-                .map(|item| item.worker_agent_id)
-        })
-        .collect::<BTreeSet<_>>();
-    let scoped_sessions = selected_run
-        .map(|run| {
-            run.provenance
-                .iter()
-                .filter_map(|item| item.worker_session_id)
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let scoped_root_agents = selected_run
-        .map(|run| {
-            run.provenance
-                .iter()
-                .filter(|item| item.worker_session_id.is_none())
-                .map(|item| item.worker_agent_id)
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let unassigned =
-        goal_driven && runtime.director_overview_scope() == Some(DirectorOverviewScope::Unassigned);
-    let include_session = |session_id: SessionId| {
-        !goal_driven
-            || if unassigned {
-                !assigned_sessions.contains(&session_id)
-            } else {
-                scoped_sessions.contains(&session_id)
-            }
-    };
+        }
+    }
 
-    let selected = runtime.director_organization_selection();
-    let root_agents = if goal_driven {
-        director_root_agent_rows(
-            ui,
-            selected,
-            unassigned,
-            &assigned_root_agents,
-            scoped_root_agents,
-        )
-    } else {
-        Vec::new()
-    };
-    director_session_rows(ui, selected, goal_driven, include_session, root_agents)
-}
-
-fn director_root_agent_rows(
-    ui: &WorkspaceUi,
-    selected: Option<DirectorOrganizationTarget>,
-    unassigned: bool,
-    assigned: &BTreeSet<AgentRuntimeId>,
-    scoped: BTreeSet<AgentRuntimeId>,
-) -> Vec<DirectorOrganizationRow> {
-    let root_agents = if unassigned {
-        ui.agent_inventory()
-            .into_iter()
-            .flat_map(|inventory| inventory.runtimes.iter())
-            .filter(|item| item.runtime.session_id.is_none())
-            .map(|item| item.runtime.agent_runtime_id)
-            .filter(|id| !assigned.contains(id))
-            .collect::<BTreeSet<_>>()
-    } else {
-        scoped
-    };
-    root_agents
-        .into_iter()
-        .map(|runtime_id| {
-            let state = ui
-                .agent_inventory()
-                .and_then(|inventory| {
-                    inventory.runtimes.iter().find(|item| {
-                        item.runtime.agent_runtime_id == runtime_id
-                            && item.runtime.session_id.is_none()
-                    })
-                })
-                .map_or("recorded", |item| agent_runtime_state_label(item.state));
-            let short_id: String = runtime_id.to_string().chars().take(8).collect();
-            let target = DirectorOrganizationTarget::RootAgent(runtime_id);
-            DirectorOrganizationRow {
-                depth: 0,
-                label: format!(
-                    "{} Director Agent #{short_id}",
-                    director_drawer::DIRECTOR_ICON
-                ),
-                status: state.to_owned(),
-                target: Some(target),
-                selected: selected == Some(target),
-            }
-        })
-        .collect()
-}
-
-fn director_session_rows(
-    ui: &WorkspaceUi,
-    selected: Option<DirectorOrganizationTarget>,
-    goal_driven: bool,
-    include_session: impl Fn(SessionId) -> bool,
-    mut rows: Vec<DirectorOrganizationRow>,
-) -> Vec<DirectorOrganizationRow> {
     let roles = ui.workspace.session_roles();
     let mut members = Vec::new();
     for (session_id, session) in ui
@@ -5472,9 +5145,6 @@ fn director_session_rows(
         .iter()
         .zip(ui.workspace.sessions())
     {
-        if !include_session(*session_id) {
-            continue;
-        }
         let role_identity = roles
             .get(session_id)
             .and_then(|role| role.role_id.as_ref())
@@ -5494,34 +5164,25 @@ fn director_session_rows(
             depth: 0,
             label: format!("{role_identity} · {}", session.name),
             status: status.to_owned(),
-            target: Some(DirectorOrganizationTarget::Session(*session_id)),
-            selected: selected == Some(DirectorOrganizationTarget::Session(*session_id)),
         };
         members.push((
             *session_id,
             roles
                 .get(session_id)
-                .and_then(|role| role.parent_session_id)
-                .filter(|parent| include_session(*parent)),
+                .and_then(|role| role.parent_session_id),
             row,
         ));
     }
     if members.is_empty() {
-        return rows;
+        return Vec::new();
     }
-    rows.push(DirectorOrganizationRow {
+    let mut rows = vec![DirectorOrganizationRow {
         depth: 0,
-        label: if goal_driven {
-            "◆ Task Sessions".to_owned()
-        } else {
-            "◆ Workspace Sessions".to_owned()
-        },
-        status: format!("{} total", members.len()),
-        target: None,
-        selected: false,
-    });
+        label: format!("{} Director", director_drawer::DIRECTOR_ICON),
+        status: "active".into(),
+    }];
     let mut emitted = std::collections::BTreeSet::new();
-    append_director_session_children(None, 1, &members, &mut emitted, &mut rows);
+    append_children(None, 1, &members, &mut emitted, &mut rows);
     // Corrupt or retention-truncated parentage is still visible, but never
     // allowed to form an unbounded/cyclic presentation walk.
     for (id, _, row) in members {
@@ -5532,41 +5193,6 @@ fn director_session_rows(
         }
     }
     rows
-}
-
-fn append_director_session_children(
-    parent: Option<SessionId>,
-    depth: usize,
-    members: &[(SessionId, Option<SessionId>, DirectorOrganizationRow)],
-    emitted: &mut BTreeSet<SessionId>,
-    rows: &mut Vec<DirectorOrganizationRow>,
-) {
-    for (id, member_parent, row) in members {
-        if *member_parent == parent && emitted.insert(*id) {
-            let mut row = row.clone();
-            row.depth = depth;
-            rows.push(row);
-            append_director_session_children(
-                Some(*id),
-                depth.saturating_add(1),
-                members,
-                emitted,
-                rows,
-            );
-        }
-    }
-}
-
-const fn agent_runtime_state_label(state: AgentRuntimeInventoryState) -> &'static str {
-    match state {
-        AgentRuntimeInventoryState::Reserved => "starting",
-        AgentRuntimeInventoryState::Live => "running",
-        AgentRuntimeInventoryState::Sleeping => "sleeping",
-        AgentRuntimeInventoryState::Interrupted => "interrupted",
-        AgentRuntimeInventoryState::Exited => "stopped",
-        AgentRuntimeInventoryState::Reclaimed => "reclaimed",
-        AgentRuntimeInventoryState::Unavailable => "unavailable",
-    }
 }
 
 /// Run the per-frame visible-terminal sweep: poll the attached selection(s),
@@ -6267,9 +5893,7 @@ fn copy_terminal_selection(controls: &mut LiveTerminalControls, term: &mut dyn T
 }
 
 fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) -> bool {
-    if !runtime.state().director_drawer_open()
-        || runtime.state().director_route() != DirectorRoute::Agent
-    {
+    if !runtime.state().director_drawer_open() {
         return false;
     }
     let direction = match key {
@@ -6281,56 +5905,23 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
         }
         _ => return false,
     };
-    let selection =
-        if runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven {
-            let allowed = runtime
-                .director_projection()
-                .organization
-                .iter()
-                .filter_map(|row| match row.target {
-                    Some(DirectorOrganizationTarget::RootAgent(runtime_id)) => {
-                        runtime.director_agent_selection_for(runtime_id, ui.agent_inventory())
-                    }
-                    Some(DirectorOrganizationTarget::Session(_)) | None => None,
-                })
-                .collect::<Vec<_>>();
-            let mut selections = Vec::new();
-            for index in 0.. {
-                let Some(selection) = runtime.director_agent_selection_at(index) else {
-                    break;
-                };
-                if allowed.contains(&selection) {
-                    selections.push(selection);
-                }
-            }
-            if selections.is_empty() {
-                return true;
-            }
-            let current = runtime.director_selection().and_then(|selected| {
-                selections
-                    .iter()
-                    .position(|selection| *selection == selected)
-            });
-            let index = match (current, direction) {
-                (Some(index), crate::usecase::application::controller::TabDirection::Next) => {
-                    (index + 1) % selections.len()
-                }
-                (Some(index), crate::usecase::application::controller::TabDirection::Previous) => {
-                    (index + selections.len() - 1) % selections.len()
-                }
-                (None, crate::usecase::application::controller::TabDirection::Next) => 0,
-                (None, crate::usecase::application::controller::TabDirection::Previous) => {
-                    selections.len() - 1
-                }
-            };
-            selections[index].clone()
-        } else {
-            let Some(selection) = runtime.agent_selection_after_select(direction) else {
-                return true;
-            };
-            selection
-        };
-    select_director_selection(ui, runtime, selection);
+    let Some(selection) = runtime.agent_selection_after_select(direction) else {
+        return true;
+    };
+    let continuation = match &selection {
+        TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
+        TabSelection::Interrupted(continuation) => Some(*continuation),
+        TabSelection::Pending(_) | TabSelection::Ready(_) => None,
+    };
+    match ui.mutate_agent_intent(AgentTabIntentMutation::Select {
+        session_id: None,
+        continuation,
+    }) {
+        Ok(()) => {
+            let _ = runtime.select_tab(direction);
+        }
+        Err(error) => surface_agent_tab_intent_error(runtime, error),
+    }
     true
 }
 
@@ -6430,14 +6021,7 @@ fn is_director_new_click(
     runtime.state().director_drawer_open()
         && matches!(runtime.state().director_new(), DirectorNew::Idle)
         && runtime.state().director_launching().is_none()
-        && director_drawer::new_button_at(
-            height,
-            width,
-            column,
-            row,
-            false,
-            runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven,
-        )
+        && director_drawer::new_button_at(height, width, column, row, false)
 }
 
 /// Whether this press lands on the persistent Director button in the Home
@@ -6487,14 +6071,7 @@ fn is_director_new_pointer(
         _ => return false,
     };
     runtime.state().director_drawer_open()
-        && director_drawer::new_button_at(
-            height,
-            width,
-            column,
-            row,
-            false,
-            runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven,
-        )
+        && director_drawer::new_button_at(height, width, column, row, false)
 }
 
 /// Focus the visible workspace drawer under a pointer press. Director is
@@ -6597,15 +6174,6 @@ fn intercept_live_terminal_control(
     // dimmed/covered background. Ordinary clicks still fall through to the
     // controller: its sidebar hit-test accepts the left pane and treats the
     // dimmed right pane as inert.
-    if runtime.state().director_drawer_open()
-        && runtime.state().director_route() != DirectorRoute::Agent
-        && matches!(
-            key,
-            Key::Live(LiveTerminalAction::NextTab | LiveTerminalAction::PreviousTab)
-        )
-    {
-        return true;
-    }
     let pane_only_control = if let Key::Live(action) = key {
         *action == LiveTerminalAction::ScrollUp
             || *action == LiveTerminalAction::ScrollDown
@@ -8600,45 +8168,10 @@ fn drive_workspace_controller(
             work_run_revision,
         );
         if director_material_key != Some(next_director_key) {
-            if runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven
-                && runtime.director_overview_scope().is_none()
-            {
-                runtime.reconcile_director_overview(work_runs.runs(), &[]);
-            }
-            let mut organization = director_organization(&ui, &runtime, work_runs.runs());
-            let organization_targets = organization
-                .iter()
-                .filter_map(|row| row.target)
-                .collect::<Vec<_>>();
-            runtime.reconcile_director_overview(work_runs.runs(), &organization_targets);
-            organization = director_organization(&ui, &runtime, work_runs.runs());
-            let mut drawer_projection =
+            let drawer_projection =
                 director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref())
                     .with_work_runs(work_runs.clone())
                     .with_work_run_control(work_run_control_projection(&work_run_control));
-            drawer_projection.organization = organization;
-            drawer_projection.agent_context = if drawer_projection.goal_driven {
-                runtime
-                    .director_overview_scope()
-                    .and_then(|scope| match scope {
-                        DirectorOverviewScope::WorkRun(selected) => work_runs
-                            .runs()
-                            .iter()
-                            .find(|run| run.supervisor_run_id == selected)
-                            .map(|run| {
-                                run.display_label
-                                    .clone()
-                                    .unwrap_or_else(|| "Untitled Goal".to_owned())
-                            }),
-                        DirectorOverviewScope::Unassigned => Some("Unassigned".to_owned()),
-                    })
-            } else {
-                drawer_projection
-                    .conversations
-                    .iter()
-                    .find(|conversation| conversation.selected)
-                    .map(|conversation| conversation.label.clone())
-            };
             runtime.set_director_projection(drawer_projection);
             director_material_key = Some(next_director_key);
         }
@@ -9205,13 +8738,10 @@ fn drive_workspace_controller(
         let work_run_input = if garden_route.is_none() && director_header_effects.is_none() {
             let previous = work_run_control.clone();
             let input = handle_work_run_control_input(
-                &mut ui,
                 &mut runtime,
                 &mut work_run_control,
                 &work_runs,
                 &key,
-                height,
-                width,
             );
             if work_run_control != previous {
                 work_run_revision = work_run_revision.wrapping_add(1);
@@ -12816,9 +12346,6 @@ mod tests {
     }
 
     #[test]
-    // Keep the hierarchy/status cases together so their projected ordering is
-    // reviewed as one organization tree contract.
-    #[allow(clippy::too_many_lines)]
     fn director_organization_projects_statuses_hierarchy_and_orphans() {
         use usagi_core::domain::agent::AgentStatus;
 
@@ -12828,8 +12355,7 @@ mod tests {
             WorkspaceView::with_runtime_ids(ws("empty"), empty_state, Vec::new()),
             Box::new(UnavailableSessionCommandPort),
         );
-        let empty_runtime = WorkspaceRuntime::new(WorkspaceId::new(), Vec::new());
-        assert!(director_organization(&empty_ui, &empty_runtime, &[]).is_empty());
+        assert!(director_organization(&empty_ui).is_empty());
 
         let director_child = SessionId::new();
         let manager_child = SessionId::new();
@@ -12889,15 +12415,14 @@ mod tests {
             Some(usagi_core::domain::role::RoleId::new("manager").expect("valid company role"));
         view.set_session_roles(roles);
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
-        let runtime = WorkspaceRuntime::new(WorkspaceId::new(), ids.clone());
 
-        let rows = director_organization(&ui, &runtime, &[]);
+        let rows = director_organization(&ui);
         assert_eq!(
             rows.iter()
                 .map(|row| (row.depth, row.label.as_str(), row.status.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                (0, "◆ Workspace Sessions", "6 total"),
+                (0, "♛ Director", "active"),
                 (1, "◆ Manager · manager", "starting"),
                 (2, "• Executor · worker", "waiting"),
                 (3, "• Executor · stopped", "stopped"),
@@ -12906,36 +12431,6 @@ mod tests {
                 (1, "• Executor · orphan", "ready"),
             ]
         );
-
-        let mut run = observed_work_run(SupervisorRunState::Running);
-        for (task, session) in [
-            ("manager-task", director_child),
-            ("worker-task", manager_child),
-        ] {
-            run.provenance.push(RunProvenance {
-                supervisor_run_id: run.supervisor_run_id,
-                task_id: TaskId::new(task).unwrap(),
-                parent_task_id: None,
-                parent_dispatch_run: None,
-                dispatch_run_id: OperationId::new(),
-                worker_session_id: Some(session),
-                worker_agent_id: AgentRuntimeId::new(),
-                worker_worktree_id: WorktreeId::new(),
-                generation: 1,
-            });
-        }
-        let mut goal_runtime = WorkspaceRuntime::new(WorkspaceId::new(), ids.clone());
-        goal_runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
-        goal_runtime.reconcile_director_overview(std::slice::from_ref(&run), &[]);
-        let scoped = director_organization(&ui, &goal_runtime, std::slice::from_ref(&run));
-        assert!(scoped.iter().any(|row| row.label.contains("manager")));
-        assert!(scoped.iter().any(|row| row.label.contains("worker")));
-        assert!(!scoped.iter().any(|row| row.label.contains("running")));
-
-        goal_runtime.set_director_scope(super::DirectorOverviewScope::Unassigned);
-        let unassigned = director_organization(&ui, &goal_runtime, std::slice::from_ref(&run));
-        assert!(!unassigned.iter().any(|row| row.label.contains("manager")));
-        assert!(unassigned.iter().any(|row| row.label.contains("running")));
 
         let state =
             crate::usecase::application::controller::AppState::home(WorkspaceId::new(), ids);
@@ -14454,7 +13949,7 @@ mod tests {
         drop(intent);
 
         let tabs = runtime.active_pane().tabs().to_vec();
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let _ = runtime.handle_key(Key::Escape);
         assert!(!runtime.state().director_drawer_open());
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.active_pane().tabs(), tabs.as_slice());
@@ -19633,22 +19128,19 @@ mod tests {
                 row: 5,
             }),
         ] {
-            assert!(
-                intercept_live_terminal_control(
-                    &key,
-                    &mut ui,
-                    &mut runtime,
-                    &mut controls,
-                    &mut term,
-                    &mut browser,
-                    &mut pending,
-                    20,
-                    80,
-                    3,
-                    scroll_before,
-                ),
-                "Director route did not consume {key:?}"
-            );
+            assert!(intercept_live_terminal_control(
+                &key,
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                &mut pending,
+                20,
+                80,
+                3,
+                scroll_before,
+            ));
         }
         assert_eq!(controls.project(rows, 1).scroll, scroll_before);
         assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
@@ -19740,13 +19232,12 @@ mod tests {
             );
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        runtime.open_director_agent();
         assert!(super::select_director_tab(
             &Key::Live(LiveTerminalAction::NextTab),
             &mut ui,
             &mut runtime,
         ));
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let _ = runtime.handle_key(Key::Escape);
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
@@ -19769,7 +19260,6 @@ mod tests {
             super::DirectorDrawerProjection::default()
         );
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        runtime.open_director_agent();
         let terminal_view = TerminalViewProjection {
             rows: vec!["retained output".to_owned()],
             row_offset: 0,
@@ -19990,7 +19480,6 @@ mod tests {
         );
 
         runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
         let _ = runtime.handle_key(Key::Char('g'));
         let _ = runtime.handle_key(Key::Paste("o".to_owned()));
         let _ = runtime.handle_key(Key::Backspace);
@@ -20087,7 +19576,6 @@ mod tests {
             &mut runtime,
         ));
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        runtime.open_director_agent();
         assert!(super::select_director_tab(
             &Key::Live(LiveTerminalAction::NextTab),
             &mut ui,
@@ -20137,7 +19625,6 @@ mod tests {
             }],
         ));
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        runtime.open_director_agent();
         ui.start_terminal_session(
             terminal,
             foreground_terminal_geometry(
@@ -20166,7 +19653,7 @@ mod tests {
             PointerEvent {
                 kind: PointerKind::Down,
                 column: 26,
-                row: 6,
+                row: 5,
             },
         ));
     }
@@ -23150,7 +22637,6 @@ mod tests {
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        runtime.open_director_agent();
         assert_drawer_background_attachment(&runtime, &managed);
         ui.sync_visible_terminals(&[
             (root_agent.clone(), director_geometry),
@@ -23294,7 +22780,7 @@ mod tests {
                 .iter()
                 .map(|(terminal, _)| terminal)
                 .collect::<Vec<_>>(),
-            [&root_terminal, &managed]
+            [&root_terminal, &managed, &root_agent]
         );
         assert_eq!(
             visible[1].1,
@@ -23311,12 +22797,12 @@ mod tests {
         assert_eq!(super::root_terminal_available_width(30, 79, true), 79);
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        assert_eq!(runtime.focused_terminal(), None);
+        assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
         let visible = super::workspace_terminal_attachments(&runtime, 30, 160)
             .into_iter()
             .map(|(terminal, _)| terminal)
             .collect::<Vec<_>>();
-        assert_eq!(visible, [managed, root_terminal]);
+        assert_eq!(visible, [root_agent, managed, root_terminal]);
     }
 
     fn sync_test_director_terminals(
@@ -23418,7 +22904,6 @@ mod tests {
         let _ = controls.finish_drag();
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        runtime.open_director_agent();
         assert_eq!(runtime.focused_terminal(), Some(root.clone()));
         sync_test_director_terminals(&mut ui, &root, &managed, 24, 100);
         let retained = ui.retained_terminal_view(&managed, 1).unwrap();
@@ -23444,7 +22929,6 @@ mod tests {
         );
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        runtime.open_director_agent();
         assert_eq!(runtime.focused_terminal(), Some(root.clone()));
         sync_test_director_terminals(&mut ui, &root, &managed, 24, 100);
         let drawer_view = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
@@ -24200,7 +23684,6 @@ mod tests {
         // The root target owns the Agent drawer, so it is the active pane only
         // while the drawer is open.
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        runtime.open_director_agent();
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
@@ -24733,7 +24216,7 @@ mod tests {
             runtime.state().director_new(),
             DirectorNew::Choosing(DefaultModel::Claude)
         ));
-        assert_eq!(runtime.focused_terminal(), None);
+        assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
 
         assert_eq!(
             route_workspace_input_before_reducer(
@@ -24791,13 +24274,7 @@ mod tests {
             WorkspaceInputRoute::Drawer(Vec::new())
         );
         assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
-        assert_eq!(
-            runtime.state().director_route(),
-            super::DirectorRoute::Overview
-        );
         assert!(inputs.lock().unwrap().is_empty());
-
-        runtime.open_director_agent();
 
         assert_eq!(
             route_workspace_input_before_reducer(
@@ -24857,7 +24334,7 @@ mod tests {
                 &mut runtime,
                 &mut controls,
                 &mut term,
-                &Key::Live(LiveTerminalAction::Director),
+                &Key::Escape,
             ),
             WorkspaceInputRoute::Drawer(Vec::new())
         );
@@ -24866,154 +24343,82 @@ mod tests {
     }
 
     #[test]
-    // Keep the global chord matrix together: closed, hidden Launcher, Shell
-    // focus, goal actions, and classic mode must all converge on one Overview.
-    #[allow(clippy::too_many_lines)]
-    fn work_run_chord_opens_overview_and_goal_actions_stay_inside_it() {
+    fn work_run_chord_opens_only_the_goal_driven_director_control() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
-        let mut workspace_state = state("demo");
-        workspace_state.sessions.clear();
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, Vec::new());
-        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
         let run = observed_work_run(SupervisorRunState::Running);
         let runs = super::WorkRunProjection::fresh(vec![run.clone()]);
         let mut control = super::WorkRunControl::default();
 
         let input = super::handle_work_run_control_input(
-            &mut ui,
             &mut runtime,
             &mut control,
             &runs,
             &Key::Live(LiveTerminalAction::WorkRuns),
-            24,
-            100,
         )
-        .expect("the Overview chord owns the input");
+        .expect("the Goal-driven chord owns the input");
         assert!(input.effects.is_empty());
         assert_eq!(input.outcome, super::WorkRunControlOutcome::Consumed);
         assert!(runtime.state().director_drawer_open());
-        assert_eq!(
-            runtime.state().director_route(),
-            super::DirectorRoute::Overview
-        );
-        assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
-
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew));
-        assert!(matches!(
-            runtime.state().director_new(),
-            DirectorNew::Choosing(_) | DirectorNew::Empty
-        ));
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer));
-        assert!(!runtime.state().director_drawer_open());
-        assert!(
-            super::handle_work_run_control_input(
-                &mut ui,
-                &mut runtime,
-                &mut control,
-                &runs,
-                &Key::Live(LiveTerminalAction::WorkRuns),
-                24,
-                100,
-            )
-            .is_some()
-        );
-        assert!(runtime.state().director_drawer_open());
-        assert_eq!(
-            runtime.state().director_route(),
-            super::DirectorRoute::Overview
-        );
-        assert!(matches!(runtime.state().director_new(), DirectorNew::Idle));
-
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
-        assert_eq!(
-            runtime.state().workspace_drawer_focus(),
-            Some(WorkspaceDrawerFocus::Terminal)
-        );
-        assert!(
-            super::handle_work_run_control_input(
-                &mut ui,
-                &mut runtime,
-                &mut control,
-                &runs,
-                &Key::Live(LiveTerminalAction::WorkRuns),
-                24,
-                100,
-            )
-            .is_some()
-        );
-        assert_eq!(
-            runtime.state().workspace_drawer_focus(),
-            Some(WorkspaceDrawerFocus::Director)
-        );
-
-        assert!(
-            super::handle_work_run_control_input(
-                &mut ui,
-                &mut runtime,
-                &mut control,
-                &runs,
-                &Key::Enter,
-                24,
-                100,
-            )
-            .is_some()
-        );
-        assert_eq!(control.mode(), super::WorkRunControlMode::ConfirmCancel);
+        assert_eq!(control.mode(), super::WorkRunControlMode::List);
         assert_eq!(control.selected(), Some(run.supervisor_run_id));
+
+        for key in [Key::Up, Key::Down, Key::Left, Key::Right] {
+            assert!(
+                super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &key,)
+                    .is_some()
+            );
+        }
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Enter,)
+                .is_some()
+        );
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Escape,)
+                .is_some()
+        );
         assert!(
             super::handle_work_run_control_input(
-                &mut ui,
                 &mut runtime,
                 &mut control,
                 &runs,
-                &Key::Escape,
-                24,
-                100,
+                &Key::Char('x'),
             )
             .is_some()
         );
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Resize,)
+                .is_none()
+        );
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Live(LiveTerminalAction::Director),
+            )
+            .is_none()
+        );
         assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Resize,)
+                .is_none()
+        );
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
         assert!(
             super::handle_work_run_control_input(
-                &mut ui,
                 &mut runtime,
                 &mut control,
                 &runs,
                 &Key::Live(LiveTerminalAction::WorkRuns),
-                24,
-                100,
             )
-            .is_some()
+            .is_none()
         );
-        assert!(runtime.state().director_drawer_open());
-        assert_eq!(
-            runtime.state().director_route(),
-            super::DirectorRoute::Overview
-        );
+        assert!(!runtime.state().director_drawer_open());
         assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
-        let operation = OperationId::new();
-        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
-        assert!(
-            super::handle_work_run_control_input(
-                &mut ui,
-                &mut runtime,
-                &mut control,
-                &runs,
-                &Key::Enter,
-                24,
-                100,
-            )
-            .is_some()
-        );
-        assert_eq!(
-            runtime.state().director_route(),
-            super::DirectorRoute::Agent
-        );
     }
 
     /// `Esc` belongs to the drawer's selected root Agent — an agent CLI reads it
@@ -25048,7 +24453,6 @@ mod tests {
         let open = Key::Live(LiveTerminalAction::Director);
         assert!(runtime.handle_key(open).is_empty());
         assert!(runtime.state().director_drawer_open());
-        runtime.open_director_agent();
         assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
 
         // The live conversation owns Esc: it reaches the PTY once and the drawer
@@ -25415,11 +24819,6 @@ mod tests {
             WorkspaceInputRoute::Drawer(Vec::new()),
         );
         assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
-        assert_eq!(
-            runtime.state().director_route(),
-            super::DirectorRoute::Overview
-        );
-        runtime.open_director_agent();
         assert_eq!(
             route_workspace_input_before_reducer(
                 &mut ui,
@@ -30356,7 +29755,7 @@ mod tests {
                 false,
                 Some(WorkspaceDrawerFocus::Director),
             ),
-            Geometry { cols: 56, rows: 13 }
+            Geometry { cols: 56, rows: 14 }
         );
         assert_eq!(
             foreground_terminal_geometry(
@@ -30426,7 +29825,6 @@ mod tests {
         let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
         let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        runtime.open_director_agent();
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
         assert_eq!(
@@ -32652,7 +32050,7 @@ mod tests {
             let text = frame.join("\n");
             text.contains("♛ Director")
                 && (text.contains("No conversations yet") || text.contains("Organization"))
-                && text.contains("[ New conversation ]")
+                && text.contains("[ New ]")
         })
     }
 

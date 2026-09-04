@@ -86,7 +86,7 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O t` / `Ctrl-O Ctrl-T` | workspace root の Shell drawer を開閉する |
 | `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
 | `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
-| `Ctrl-O w` / `Ctrl-O Ctrl-W` | Director Overviewへ戻る（閉じていればOverviewで開く） |
+| `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Director と Work Run 一覧・操作面を開く |
 | `Ctrl-O [` / `Ctrl-O ]` | 前 / 次の pane tab を選ぶ |
 | `Ctrl-O {` / `Ctrl-O }` | 選択中の pane tab を前 / 次へ並べ替える |
 | `Ctrl-O p` / `Ctrl-O Ctrl-P` | Pull Request 一覧を開く |
@@ -107,11 +107,10 @@ daemon-owned process を停止せず、接続だけを外す。正確な入力�
 
 generic terminal の `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。
 `Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、再度開くと新しい terminal になる。Director は画面の
-右側を高さ一杯に使う overlay で、workspace Shell と同時に開ける。Director は Overview（Goal/Conversation と Organization）、
-Launcher（新規作成）、Agent（root conversation 詳細）の3画面を持つ。両方が開いているときは panel のクリックでも focus が移り、
+右側を高さ一杯に使う overlay で、workspace Shell と同時に開ける。両方が開いているときは panel のクリックでも focus が移り、
 左側に見えている Shell の選択・コピーを継続できる。title の `FOCUS` / `click to focus` が入力先を示す。選択 session の Agent は
-drawer の背面でも通常の workspace geometry と attachment のまま出力を更新し続ける。選択中 root Agent が消えた場合は
-drawer を閉じず Overviewへ戻る。
+drawer の背面でも通常の workspace geometry と attachment のまま出力を更新し続ける。最後の実行中または起動中 root Agent が
+消えると Director は自動で閉じる。
 live Agent では同じ close chord が `Ctrl-D` と同じ終了入力になり、interrupted Agent では選択中の tab を
 永続的に閉じる。interrupted tab の close は Agent の resume や新規起動を行わない。
 
@@ -281,8 +280,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | [Roles](document/10-session-roles.md#rolestoml-の設定例) | `roles [workspace|global]` で編集する session / root ごとの追加 instruction、既定 role、委譲制限 |
 
 `goal-driven` を選んだ workspace では `Ctrl-O Ctrl-G` → `New` が Goal Composer になり、目的と provider を確定して
-Work Run を開始する。Director Overview は最大16件の Goal と、選択 Goal の provenance に属する Organization を同時に表示する。
-Goal は目的と進捗、Session は隔離 worktree、Agent は実行 process / conversation であり、一対一ではない。`Ctrl-O w` で Overviewへ戻り、選択 Run の `Enter` から cancel または
+Work Run を開始する。進行と停止理由は Director に表示し、`Ctrl-O w` で最大16件の Run を選択して cancel または
 supervisor escalation の retry / cancel / fail を実行できる。一般の blocking choice は既存 Decision、成果 PR は既存 PR 一覧に表示する。
 詳細な操作と現行契約は [goal-driven workflow](document/03-tui.md#goal-driven-workflow)を参照する。
 

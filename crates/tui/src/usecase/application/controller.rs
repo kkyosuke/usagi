@@ -1048,32 +1048,6 @@ pub enum WorkspaceDrawerFocus {
     Terminal,
 }
 
-/// Explicit screen inside the Director drawer.
-///
-/// The route is independent from daemon projection availability. A delayed
-/// inventory may change what the current screen can draw, but it must not move
-/// the user between the overview, launcher, and one Agent conversation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DirectorRoute {
-    /// Workspace/work-run navigation and the organization tree.
-    #[default]
-    Overview,
-    /// Temporary new-conversation / new-goal flow.
-    Launcher { return_to: DirectorReturnRoute },
-    /// One selected workspace-root Agent conversation.
-    Agent,
-}
-
-/// The single Director screen restored when a launcher is cancelled.
-///
-/// A one-level return target is enough because Launcher cannot open another
-/// Launcher. Keeping this bounded avoids inventing a navigation stack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DirectorReturnRoute {
-    Overview,
-    Agent,
-}
-
 /// controller が所有する application state。
 // These bools are independent runtime flags (live-pane availability, forced
 // action modal, Ctrl-C grace, quit-confirmation focus), not a combinable state
@@ -1085,9 +1059,6 @@ pub struct AppState {
     overlay: Option<Overlay>,
     /// Home's right-anchored Director mode drawer.
     director_drawer_open: bool,
-    /// Explicit Director sub-route. Drawer close/open preserves it; projection
-    /// refreshes never derive it from terminal or organization availability.
-    director_route: DirectorRoute,
     /// Home's bottom-anchored workspace-root generic terminal drawer. It is
     /// independent from Director and preserves the managed Home state beneath
     /// both drawers.
@@ -1272,7 +1243,6 @@ impl AppState {
             route: Route::Home(HomeMode::Switch),
             overlay: None,
             director_drawer_open: false,
-            director_route: DirectorRoute::Overview,
             root_terminal_drawer_open: false,
             root_terminal_full_height: false,
             workspace_drawer_focus: None,
@@ -1340,11 +1310,6 @@ impl AppState {
     #[must_use]
     pub const fn director_drawer_open(&self) -> bool {
         self.director_drawer_open
-    }
-    /// Current explicit Director screen.
-    #[must_use]
-    pub const fn director_route(&self) -> DirectorRoute {
-        self.director_route
     }
     /// Whether the workspace-root terminal drawer owns Home input.
     #[must_use]
@@ -1652,11 +1617,6 @@ impl AppState {
         if mode == WorkMode::Classic {
             self.director_goal.clear();
         }
-        // Workflow changes replace the Overview authority (Goals versus
-        // conversations). Return to that neutral hub instead of retaining a
-        // launcher whose fields no longer describe what it will create.
-        self.director_route = DirectorRoute::Overview;
-        self.director_new = DirectorNew::Idle;
     }
 
     /// Convert the managed active session to the target vocabulary used at
@@ -1999,10 +1959,6 @@ pub enum AppKey {
     OpenRootTerminal,
     /// Open the Director mode drawer and its explicit New CLI picker.
     OpenDirectorNew,
-    /// Return the open Director to its workspace / Work Run overview.
-    OpenDirectorOverview,
-    /// Open the currently selected workspace-root Agent conversation.
-    OpenDirectorAgent,
     /// workspace scope overlay を開く。
     OpenOverview,
     /// workspace Garden を直接開く。
@@ -3541,13 +3497,13 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::DirectorDrawerEmptied => {
-            // Losing the selected identity invalidates Agent detail, but never
-            // closes Director or changes the Home target behind it. Retained
-            // interrupted tabs do not emit this event.
-            if state.director_drawer_open
-                && !matches!(state.director_route, DirectorRoute::Launcher { .. })
-            {
-                state.director_route = DirectorRoute::Overview;
+            state.director_drawer_open = false;
+            state.director_new = DirectorNew::Idle;
+            state.director_goal.clear();
+            if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Director) {
+                state.workspace_drawer_focus = state
+                    .root_terminal_drawer_open
+                    .then_some(WorkspaceDrawerFocus::Terminal);
             }
             Vec::new()
         }
@@ -3887,6 +3843,8 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if matches!(key, AppKey::ToggleDirectorDrawer) {
         state.director_drawer_open = true;
         state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
+        state.director_new = DirectorNew::Idle;
+        state.director_goal.clear();
         return Vec::new();
     }
     if matches!(key, AppKey::OpenDirectorNew) {
@@ -4070,46 +4028,31 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
         state.workspace_drawer_focus = state
             .root_terminal_drawer_open
             .then_some(WorkspaceDrawerFocus::Terminal);
+        state.director_new = DirectorNew::Idle;
+        state.director_goal.clear();
         return Vec::new();
     }
     if update_goal_composer_text(state, &key) {
         return Vec::new();
     }
-    match (state.director_route, state.director_new, key) {
-        (_, DirectorNew::Idle, AppKey::OpenDirectorNew) => {
+    match (state.director_new, key) {
+        (DirectorNew::Idle, AppKey::OpenDirectorNew) => {
             open_director_new(state);
             Vec::new()
         }
-        (DirectorRoute::Overview, DirectorNew::Idle, AppKey::Escape) => {
+        (DirectorNew::Idle, AppKey::Escape) => {
             state.director_drawer_open = false;
             state.workspace_drawer_focus = state
                 .root_terminal_drawer_open
                 .then_some(WorkspaceDrawerFocus::Terminal);
             Vec::new()
         }
-        (DirectorRoute::Agent, DirectorNew::Idle, AppKey::Escape)
-        | (_, DirectorNew::Idle, AppKey::OpenDirectorOverview) => {
-            state.director_route = DirectorRoute::Overview;
-            Vec::new()
-        }
-        (
-            DirectorRoute::Launcher { return_to },
-            DirectorNew::Choosing(_) | DirectorNew::Empty,
-            AppKey::Escape | AppKey::OpenDirectorOverview,
-        ) => {
-            state.director_route = match return_to {
-                DirectorReturnRoute::Overview => DirectorRoute::Overview,
-                DirectorReturnRoute::Agent => DirectorRoute::Agent,
-            };
+        (DirectorNew::Choosing(_) | DirectorNew::Empty, AppKey::Escape) => {
             state.director_new = DirectorNew::Idle;
             state.director_goal.clear();
             Vec::new()
         }
-        (_, DirectorNew::Idle, AppKey::OpenDirectorAgent) => {
-            state.director_route = DirectorRoute::Agent;
-            Vec::new()
-        }
-        (DirectorRoute::Launcher { .. }, DirectorNew::Choosing(selected), AppKey::Up) => {
+        (DirectorNew::Choosing(selected), AppKey::Up) => {
             let candidates = state.available_models.iter().collect::<Vec<_>>();
             if candidates.is_empty() {
                 state.director_new = DirectorNew::Empty;
@@ -4123,7 +4066,7 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             state.director_new = DirectorNew::Choosing(candidates[previous]);
             Vec::new()
         }
-        (DirectorRoute::Launcher { .. }, DirectorNew::Choosing(selected), AppKey::Down) => {
+        (DirectorNew::Choosing(selected), AppKey::Down) => {
             let candidates = state.available_models.iter().collect::<Vec<_>>();
             if candidates.is_empty() {
                 state.director_new = DirectorNew::Empty;
@@ -4137,13 +4080,30 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             state.director_new = DirectorNew::Choosing(candidates[next]);
             Vec::new()
         }
-        (DirectorRoute::Launcher { .. }, DirectorNew::Choosing(selected), AppKey::Enter)
+        (DirectorNew::Choosing(selected), AppKey::Enter)
             if state.director_launching.is_none()
                 && director_picker_shows_selection(state)
                 && (state.work_mode == WorkMode::Classic
                     || !state.director_goal.trim().is_empty()) =>
         {
-            confirm_director_new(state, selected)
+            let operation_id = OperationId::new();
+            state.director_new = DirectorNew::Idle;
+            state.director_launching = Some(operation_id);
+            if state.work_mode == WorkMode::GoalDriven {
+                vec![Effect::LaunchGoal {
+                    workspace: state.workspace,
+                    operation_id,
+                    profile: Some(profile_for(selected)),
+                    goal: std::mem::take(&mut state.director_goal),
+                }]
+            } else {
+                vec![Effect::LaunchAgent {
+                    workspace: state.workspace,
+                    session: None,
+                    operation_id,
+                    profile: Some(profile_for(selected)),
+                }]
+            }
         }
         // Empty, submitted, and unsupported drawer input are all inert. In
         // particular Enter while a root launch is fenced cannot mint a second
@@ -4153,40 +4113,10 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
     }
 }
 
-fn confirm_director_new(state: &mut AppState, selected: DefaultModel) -> Vec<Effect> {
-    let operation_id = OperationId::new();
-    state.director_new = DirectorNew::Idle;
-    state.director_launching = Some(operation_id);
-    state.director_route = DirectorRoute::Agent;
-    if state.work_mode == WorkMode::GoalDriven {
-        vec![Effect::LaunchGoal {
-            workspace: state.workspace,
-            operation_id,
-            profile: Some(profile_for(selected)),
-            goal: std::mem::take(&mut state.director_goal),
-        }]
-    } else {
-        vec![Effect::LaunchAgent {
-            workspace: state.workspace,
-            session: None,
-            operation_id,
-            profile: Some(profile_for(selected)),
-        }]
-    }
-}
-
 fn open_director_new(state: &mut AppState) {
-    if state.director_launching.is_some()
-        || matches!(state.director_route, DirectorRoute::Launcher { .. })
-    {
+    if state.director_launching.is_some() {
         return;
     }
-    let return_to = match state.director_route {
-        DirectorRoute::Overview => DirectorReturnRoute::Overview,
-        DirectorRoute::Agent => DirectorReturnRoute::Agent,
-        DirectorRoute::Launcher { .. } => unreachable!("launcher nesting is refused above"),
-    };
-    state.director_route = DirectorRoute::Launcher { return_to };
     state.director_goal.clear();
     state.director_new = if state.available_models.is_empty() {
         DirectorNew::Empty
@@ -4876,8 +4806,6 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::ToggleRootTerminalFullHeight
         | AppKey::OpenRootTerminal
         | AppKey::OpenDirectorNew
-        | AppKey::OpenDirectorOverview
-        | AppKey::OpenDirectorAgent
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
         | AppKey::SelectNoteSection(_)
@@ -4915,6 +4843,7 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
             state.root_terminal_full_height = false;
             state.director_drawer_open = true;
             state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
+            state.director_new = DirectorNew::Idle;
             Vec::new()
         }
         AppKey::OpenDirectorNew => {
@@ -4949,8 +4878,6 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::OpenQuitConfirmation
         | AppKey::OpenOverview
         | AppKey::OpenCloseupOverlay
-        | AppKey::OpenDirectorOverview
-        | AppKey::OpenDirectorAgent
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
         | AppKey::OpenGarden
@@ -7233,57 +7160,6 @@ mod tests {
     }
 
     #[test]
-    fn director_routes_have_one_hub_and_launcher_returns_to_its_caller() {
-        let workspace = WorkspaceId::new();
-        let mut state = sized_home(workspace, Vec::new(), 100, 30);
-        state.set_agent_models(
-            AvailableModels::new([DefaultModel::OpenAi]),
-            DefaultModel::OpenAi,
-        );
-
-        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
-        assert_eq!(state.director_route(), DirectorRoute::Overview);
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-        assert_eq!(
-            state.director_route(),
-            DirectorRoute::Launcher {
-                return_to: DirectorReturnRoute::Overview,
-            }
-        );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-        assert_eq!(state.director_route(), DirectorRoute::Overview);
-
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorAgent));
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-        assert_eq!(
-            state.director_route(),
-            DirectorRoute::Launcher {
-                return_to: DirectorReturnRoute::Agent,
-            }
-        );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-        assert_eq!(state.director_route(), DirectorRoute::Agent);
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorOverview));
-        assert_eq!(state.director_route(), DirectorRoute::Overview);
-
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
-        assert!(!state.director_drawer_open());
-        assert!(matches!(state.director_new(), DirectorNew::Choosing(_)));
-        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
-        assert_eq!(
-            state.director_route(),
-            DirectorRoute::Launcher {
-                return_to: DirectorReturnRoute::Overview,
-            }
-        );
-        assert!(matches!(state.director_new(), DirectorNew::Choosing(_)));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        assert_eq!(state.director_route(), DirectorRoute::Agent);
-        assert!(state.director_launching().is_some());
-    }
-
-    #[test]
     fn goal_composer_edits_utf8_within_the_daemon_bound_and_discards_drafts() {
         let workspace = WorkspaceId::new();
         let mut state = sized_home(workspace, Vec::new(), 100, 30);
@@ -7471,7 +7347,7 @@ mod tests {
     }
 
     #[test]
-    fn vanished_director_agent_returns_to_overview_without_closing_the_drawer() {
+    fn empty_director_closes_and_returns_focus_to_an_open_workspace_terminal() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
 
@@ -7482,15 +7358,13 @@ mod tests {
             Some(WorkspaceDrawerFocus::Director)
         );
 
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorAgent));
         assert!(update(&mut state, AppEvent::DirectorDrawerEmptied).is_empty());
-        assert!(state.director_drawer_open());
+        assert!(!state.director_drawer_open());
         assert!(state.root_terminal_drawer_open());
         assert_eq!(
             state.workspace_drawer_focus(),
-            Some(WorkspaceDrawerFocus::Director)
+            Some(WorkspaceDrawerFocus::Terminal)
         );
-        assert_eq!(state.director_route(), DirectorRoute::Overview);
     }
 
     #[test]
