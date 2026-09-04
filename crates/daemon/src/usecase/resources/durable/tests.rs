@@ -1382,6 +1382,41 @@ fn a_retired_shard_is_collected_only_once_nothing_retains_it() {
 }
 
 #[test]
+fn a_dead_retired_child_cannot_pin_its_running_shard_forever() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let new = DaemonGeneration::new();
+    let resource = terminal(old);
+    let operation = OperationId::new();
+    ShardedTerminalStore::new(world.state(old, ObservedChildren::new().with(42, "start-42")))
+        .save(terminal_snapshot(vec![terminal_record(
+            &resource,
+            operation,
+            TerminalRuntimeState::Running,
+            Some(process(42, "start-42")),
+        )]))
+        .unwrap();
+
+    let active = world.state(new, ObservedChildren::new().with_gone(42));
+    let hydrated = active.hydrate().unwrap();
+    assert_eq!(hydrated.terminals.records.len(), 1);
+    assert_eq!(
+        world.shard(old).resources[0].state,
+        ResourceState::Running,
+        "the successor never rewrites a foreign shard"
+    );
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+
+    let retained = std::iter::once(resource.terminal_id.as_str()).collect();
+    assert_eq!(active.collect_retired(&retained).unwrap(), 0);
+    assert_eq!(active.collect_retired(&BTreeSet::new()).unwrap(), 1);
+    assert_eq!(world.archive.collected(), vec![old.as_str()]);
+}
+
+#[test]
 fn a_draining_owner_observes_its_own_shard_and_global_claim_together() {
     let world = World::new();
     let owner = DaemonGeneration::new();

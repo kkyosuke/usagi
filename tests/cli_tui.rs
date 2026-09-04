@@ -1032,11 +1032,13 @@ fn a_second_active_daemon_is_refused_without_disturbing_the_registry() {
     let published = std::fs::read(daemon_dir.join("current.json")).unwrap();
 
     let second = run_in_production(&[OsStr::new("daemon"), OsStr::new("serve")], &home);
+    assert_eq!(second.status.code(), Some(1), "{}", stderr(&second));
     assert!(
-        stdout(&second).contains("another daemon already owns this workspace"),
+        stderr(&second).contains("another daemon already owns this workspace"),
         "{}",
-        stdout(&second)
+        stderr(&second)
     );
+    assert!(stdout(&second).is_empty());
     assert_eq!(std::fs::read(&registry).unwrap(), before);
     assert_eq!(
         std::fs::read(daemon_dir.join("current.json")).unwrap(),
@@ -1230,7 +1232,7 @@ fn a_second_daemon_for_the_same_workspace_is_refused_across_modes_and_data_homes
         usagi_core::infrastructure::paths::canonical_workspace_root(owner_home.workspace())
             .unwrap();
     let expected = format!(
-        "another daemon already owns this workspace ({}, pid {})",
+        "another daemon already owns this workspace ({}; unverified owner pid hint {})",
         workspace.display(),
         owner.pid()
     );
@@ -1238,8 +1240,9 @@ fn a_second_daemon_for_the_same_workspace_is_refused_across_modes_and_data_homes
     // Same workspace, different runtime mode: `<home>/local` has its own free
     // instance lock, and the fence is the only thing that can refuse this.
     let refused = owner_home.run(&[OsStr::new("daemon"), OsStr::new("serve")]);
-    assert!(refused.status.success(), "{}", stderr(&refused));
-    assert!(stdout(&refused).contains(&expected), "{}", stdout(&refused));
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains(&expected), "{}", stderr(&refused));
+    assert!(stdout(&refused).is_empty());
 
     // Same workspace, different `$USAGI_HOME`: likewise a free instance lock in a
     // wholly separate data directory, and likewise refused.
@@ -1252,8 +1255,9 @@ fn a_second_daemon_for_the_same_workspace_is_refused_across_modes_and_data_homes
         )
         .output()
         .expect("usagi バイナリを起動できる");
-    assert!(refused.status.success(), "{}", stderr(&refused));
-    assert!(stdout(&refused).contains(&expected), "{}", stdout(&refused));
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains(&expected), "{}", stderr(&refused));
+    assert!(stdout(&refused).is_empty());
 
     // Fencing is per workspace, not global: a daemon for a different workspace
     // still starts, so parallel workspaces (and parallel tests) keep working.

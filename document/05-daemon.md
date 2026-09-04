@@ -197,7 +197,9 @@ recovery、runtime state の hydrate、serve する workspace の adopt を経�
 拒否され、実際には daemon が上がっている。窓は「遅いが健全」な場合に合わせて取る。それでも期限を
 超えた場合は、起動元が自分の spawn した child を停止・reap してから失敗を返すため、失敗報告後に
 同じ child が遅れて authority を登録しない。child が登録前に終了した場合は30秒を待たず終了状態を
-報告し、daemon 自身が error log に理由を残した場合は期限切れの診断へ載せる。
+報告し、daemon 自身が新しい error log entry に理由を残した場合は早期終了の診断にも載せる。別 process から
+`start` / `restart` を呼ぶ lifecycle child は stdout / stderr を capture し、non-zero exit の safe diagnostic を
+呼び出し元へ保持するため、入れ子の起動でも拒否理由を `/dev/null` へ捨てない。
 
 > 期限切れの報告は error log の最後の entry を根拠にするため、待っている間に無関係な entry が
 > 書かれると、そちらを原因として表示することがある。表示される理由が状況と噛み合わないときは
@@ -271,6 +273,11 @@ fence する。2 つは異なる問いに答えるため、片方が他方を包
 start が deadlock することはない。どちらも [IPC endpoint 公開](#daemon-process-lifecycle)の ready hook より前に
 取得し、取得できなかった `serve` は record・endpoint に触れずに typed refusal を出して終了する。
 
+2 つの node が同じ path / inode を指す場合（既定 data home で home directory を workspace として起動した場合）は、
+workspace fence を取った descriptor を単一インスタンス lock の custody にも使う。同じ inode をもう一度 `flock` して
+自分自身に拒否されることはない。論理上の 2 条件と取得順序は変えず、node が異なる通常の workspace では従来どおり
+別々の descriptor を保持する。
+
 #### 2 段 fence が答える問いと、答えない問い
 
 単一インスタンス lock が意味するのは「**この process がこの data directory の active role である**」であり、
@@ -282,8 +289,8 @@ start が deadlock することはない。どちらも [IPC endpoint 公開](#d
 
 | 権威 | 拒否する対象 | 拒否の形 |
 |---|---|---|
-| workspace fence | 同じ workspace を所有しようとする 2 つ目の daemon（data directory と mode を問わない） | `flock` が失敗し、owner pid を示して終了する |
-| 単一インスタンス lock | 同じ data directory の active role を取ろうとする 2 つ目の daemon | `flock` が失敗し、`daemon.json` の pid を示して終了する |
+| workspace fence | 同じ workspace を所有しようとする 2 つ目の daemon（data directory と mode を問わない） | `flock` が失敗し、読めた場合は unverified な owner pid hint を添えて non-zero で終了する |
+| 単一インスタンス lock | 同じ data directory の active role を取ろうとする 2 つ目の daemon | `flock` が失敗し、読めた場合は `daemon.json` の unverified な pid hint を添えて non-zero で終了する |
 | durable registry | 生存を証明できる active generation が既に居る registry への activation（[first activation](#first-activation)） | `authority_retained` の typed refusal。**effect zero** |
 
 lock を取れた process でも registry の CAS で拒否されうるのが要点である。lock は 2 つの start を直列化するが、
@@ -612,11 +619,11 @@ home、launchd が `/` で、どちらも**利用者が選んだ workspace で�
 install した process が解決した workspace root を定義へ書き込む（systemd は `WorkingDirectory=`、launchd は
 `WorkingDirectory` key）。
 
-pin しない場合の失敗は分かりにくい。workspace root が home directory になると、workspace fence
-（`<workspace>/.usagi/daemon/daemon.lock`）と単一インスタンス lock（`<data-dir>/daemon/daemon.lock`）が
-既定の `~/.usagi` data home のもとで**同一ファイル**を指す。daemon は前者を取った後に後者を取れず、
-自分の起動を「daemon already running」として拒否し続ける。client からの cold start は
-`lifecycle_command` が同じ pin を行っており、supervised start もこれに揃える。
+pin しない場合は workspace root が home directory になり、利用者が選んだ project ではなく home 全体を daemon が
+所有してしまう。workspace fence（`<workspace>/.usagi/daemon/daemon.lock`）と単一インスタンス lock
+（`<data-dir>/daemon/daemon.lock`）が既定の `~/.usagi` data home で**同一ファイル**になる場合も、serve は 1 本の
+descriptor を共有して安全に起動できるが、誤った workspace を選んだ事実は変わらない。client からの cold start は
+`lifecycle_command` が project directory を pin しており、supervised start もこれに揃える。
 
 workspace root が UTF-8 で綴れない場合は、base と同じく lossy 変換せず install を拒否する。
 
@@ -1377,8 +1384,10 @@ resume source を exact に fence する。いずれも daemon restart を越え
 resume では active owner が foreign shard を書き換えないため、replacement 側の `resumed_from` を durable な正本とし、
 全 retained shard の hydrate 時に同じ continuation・scope を持つ foreign source の `superseded_by` だけを derived state
 として復元する。各 record の launch scope は runtime terminal の workspace・session・worktree と完全一致しなければならない。
-同一 generation 内の片側 relation、resume source ID を欠く relation、循環 lineage、競合する replacement、未知の source、
-重複 source ID、continuation・scope の不一致は startup validation error である。
+同一 generation 内で counterpart が存在するのに片側だけの relation、resume source ID を欠く relation、循環 lineage、
+競合する replacement、重複 source ID、continuation・scope の不一致は startup validation error である。bounded retention が
+既に counterpart を回収した片側 relation は historical tombstone として受理する。replacement の `resumed_from` は
+回収済み source shard を retain せず、source の `superseded_by` は replacement 回収後も同じ source の再 resume を拒否する。
 
 各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。Codex では [private structured capture request](04-ipc.md#codex-structured-capture-request) の入力だけが native ID を一度 IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は spawn 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
 
@@ -1408,6 +1417,12 @@ ownership-unknown replacement、同じ source の in-flight resume、metadata �
 capacity と operation fence の獲得後、選択した source 一件だけを `reclaimed` へ supersede し、他 history は変更しない。
 成功時は新しい daemon-owned PTY、`AgentRuntimeId`、完全な `TerminalRef` を生成し、同じ continuation と明示的な
 source → replacement relation を返すため、crash 前 PTY への再 attach ではない。
+
+supersede 済み source は最低 visibility TTL を持つ `superseded` final として aggregate retention へ移し、pin を外す。
+age / pressure GC が source record を回収するときは generation ownership も同じ pass で忘れるため、source record、
+generation terminal、foreign shard が互いを永久に retain しない。`interrupted` / `sleeping` / `identity_unknown` の source は
+明示 resume を human acknowledgement として `reclaimed` に閉じ、既に `exited` / `reclaimed` の source も同じ bounded
+retention に従う。
 
 producer `OperationId` と target 全体を semantic key にして dedupe する。duplicate click、reconnect、daemon restart
 後の replay は同じ durable final / relation / `TerminalRef` へ収束し、新しい spawn や capacity reservation を作らない。
@@ -1665,8 +1680,9 @@ GC は startup import、launch admission、exit commit、そして 30 秒周期�
 bounded work（1 pass = GC batch 件）である。owner は「authority が typed marker を付けて evict した final」だけを
 durable record と output journal から外し、store を 1 回書き直す。marker の無い record を消すことはない。
 
-retention の会計は derived state であり、durable な正本は各 owner の record である。daemon 起動時に exited record を
-import して会計を組み直すため、reservation が restart を跨いで leak することも、eviction 決定が半端に残ることもない。
+retention の会計は derived state であり、durable な正本は各 owner の record である。daemon 起動時に exited record と
+supersede 済み reclaimed record を import して会計を組み直すため、reservation が restart を跨いで leak することも、
+eviction 決定が半端に残ることもない。
 GC 中の store write 失敗も runtime を復活させず、memory 上の除去はそのまま、次の pass か次回 startup の import で
 収束する。既存の unbounded な record も同じ import 経路で移行し、cap 超過分は emergency pass が marker 付きで
 段階的に回収する。
@@ -2424,6 +2440,12 @@ in-flight command 0・publish 済み event がすべて consume 済み・capacit
 **誰も retain していない**ときだけ document 全体を削除する。retain の判定は active generation の in-memory truth
 （[final retention と aggregate GC](#final-retention-と-aggregate-gc) が collect した後の record 集合）であり、
 history が残っている間は shard も残る。
+
+foreign shard は successor が書き換えない。retired owner の shard に `Running` / `OwnershipUnknown` が残っていても、
+recorded process identity が OS 観測で definitely gone と証明できた terminal だけは、回収判定用の read-only view で
+`Exited` として扱い、その terminal 宛ての in-flight command も drained とみなす。identity が不明、PID だけ一致、または
+生存を否定できない場合は fail closed のままである。この補正だけで shard は消さず、allocator claim 0、outbox consume 済み、
+retained terminal 0 という他の条件もすべて成立した場合に限って回収する。
 
 ## generation と orphan safety
 

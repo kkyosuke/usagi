@@ -152,8 +152,11 @@ fn confirm_launch(
             return Ok(record.pid);
         }
         if let Some(status) = launcher.launched_exit()? {
-            return Err(io::Error::other(format!(
-                "daemon exited before registering ({status})"
+            return Err(io::Error::other(startup_failure_message(
+                &format!("daemon exited before registering ({status})"),
+                before,
+                launcher.recorded_failure().as_deref(),
+                launcher.failure_log_hint().as_deref(),
             )));
         }
         sleeper.sleep();
@@ -187,19 +190,34 @@ fn startup_timeout_message(
     after: Option<&str>,
     log_hint: Option<&str>,
 ) -> String {
-    let deadline = "daemon did not register within the startup window";
+    startup_failure_message(
+        "daemon did not register within the startup window",
+        before,
+        after,
+        log_hint,
+    )
+}
+
+fn startup_failure_message(
+    failure: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+    log_hint: Option<&str>,
+) -> String {
     match (after, log_hint) {
         (Some(reported), _) if after != before => {
-            format!("{deadline}; the daemon reported: {reported}")
+            format!("{failure}; the daemon reported: {reported}")
         }
-        (_, Some(hint)) => format!("{deadline}; no reason was recorded, see {hint}"),
-        (_, None) => deadline.to_owned(),
+        (_, Some(hint)) => format!("{failure}; no reason was recorded, see {hint}"),
+        (_, None) => failure.to_owned(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_POLLS, launch_and_confirm, start, startup_timeout_message};
+    use super::{
+        MAX_POLLS, launch_and_confirm, start, startup_failure_message, startup_timeout_message,
+    };
     use std::cell::Cell;
 
     use crate::test_support::{
@@ -365,6 +383,41 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "daemon exited before registering (exit status: 78); the launched daemon was stopped"
+        );
+    }
+
+    struct RefusedLauncher(Cell<bool>);
+
+    impl DaemonLauncher for RefusedLauncher {
+        fn launch(&self) -> std::io::Result<()> {
+            self.0.set(true);
+            Ok(())
+        }
+
+        fn launched_exit(&self) -> std::io::Result<Option<String>> {
+            Ok(Some("exit status: 1".into()))
+        }
+
+        fn abort_launch(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn recorded_failure(&self) -> Option<String> {
+            self.0.get().then(|| "workspace fence is held".to_owned())
+        }
+    }
+
+    #[test]
+    fn an_early_refusal_reports_the_new_daemon_failure() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let launcher = RefusedLauncher(Cell::new(false));
+
+        let error = launch_and_confirm(&store, &FixedProbe(true), &launcher, &NoopSleeper)
+            .expect_err("a refused daemon cannot register");
+
+        assert_eq!(
+            error.to_string(),
+            "daemon exited before registering (exit status: 1); the daemon reported: workspace fence is held; the launched daemon was stopped"
         );
     }
 
@@ -640,6 +693,20 @@ mod tests {
         assert!(
             reported.contains("path must be shorter than SUN_LEN"),
             "{reported}"
+        );
+    }
+
+    #[test]
+    fn an_early_exit_reports_what_the_daemon_recorded_for_itself() {
+        let reported = startup_failure_message(
+            "daemon exited before registering (exit status: 1)",
+            None,
+            Some("workspace fence is held"),
+            Some("/home/u/.usagi/logs"),
+        );
+        assert_eq!(
+            reported,
+            "daemon exited before registering (exit status: 1); the daemon reported: workspace fence is held"
         );
     }
 

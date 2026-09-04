@@ -528,8 +528,9 @@ impl ShardedRuntimeState {
         let allocator = self.allocator.load()?.to_document();
         let mut collected = 0;
         for document in self.retained()? {
+            let collection_view = self.retired_collection_view(&document);
             if document.owner == self.owner
-                || retired_collectable(&document, &allocator).is_err()
+                || retired_collectable(&collection_view, &allocator).is_err()
                 || document
                     .resources
                     .iter()
@@ -541,6 +542,46 @@ impl ShardedRuntimeState {
             collected += 1;
         }
         Ok(collected)
+    }
+
+    /// Build a read-only collection view for a dead owner's immutable shard.
+    /// A successor must never rewrite that shard, but an OS observation that
+    /// proves its recorded child is gone is enough to stop the stale `Running`
+    /// bit and commands addressed to that child from blocking collection. The
+    /// allocator and active coordinators still have to release/forget the same
+    /// resource before [`retired_collectable`] can pass.
+    fn retired_collection_view(&self, document: &ShardDocument) -> ShardDocument {
+        let definitely_gone = document
+            .resources
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    crate::usecase::resources::shard::ResourceState::Running
+                        | crate::usecase::resources::shard::ResourceState::OwnershipUnknown
+                )
+            })
+            .filter(|entry| {
+                entry
+                    .process
+                    .as_ref()
+                    .is_some_and(|identity| self.identity.observe(identity).is_definitely_gone())
+            })
+            .map(|entry| entry.resource.terminal_id)
+            .collect::<BTreeSet<_>>();
+        if definitely_gone.is_empty() {
+            return document.clone();
+        }
+        let mut view = document.clone();
+        for entry in &mut view.resources {
+            if definitely_gone.contains(&entry.resource.terminal_id) {
+                entry.state =
+                    crate::usecase::resources::shard::ResourceState::Exited { status: None };
+            }
+        }
+        view.in_flight
+            .retain(|command| !definitely_gone.contains(&command.resource.terminal_id));
+        view
     }
 
     /// Run one bounded collection pass over the operation ledger and the shards

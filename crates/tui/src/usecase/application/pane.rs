@@ -4,6 +4,8 @@
 //! exit を [`PaneEvent`] に翻訳し、[`reduce`] が返す [`PaneEffect`] だけを実行する。
 //! tab の identity は表示名ではなく、完全な [`TerminalRef`] である。
 
+use std::collections::BTreeMap;
+
 use usagi_core::domain::id::{AgentContinuationRef, OperationId, TerminalRef};
 
 use super::controller::{TabDirection, Target};
@@ -291,6 +293,24 @@ impl PaneRegistry {
             .filter_map(|tab| match tab {
                 PaneTab::Live(live) => Some(live.terminal.clone()),
                 PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
+            })
+            .collect()
+    }
+
+    /// Interrupted lineages that actually own a Closeup tab, keyed to the
+    /// exact terminal incarnation that tab projects. Sidebar/Garden membership
+    /// consumes this same set so filtered or dismissed history cannot leave a
+    /// count with no tab and therefore no action route.
+    #[must_use]
+    pub fn interrupted_terminals(&self) -> BTreeMap<AgentContinuationRef, TerminalRef> {
+        self.entries
+            .iter()
+            .flat_map(|entry| entry.pane.tabs())
+            .filter_map(|tab| match tab {
+                PaneTab::Interrupted(pane) => {
+                    Some((pane.tab.continuation, pane.tab.last_terminal.clone()))
+                }
+                PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
             })
             .collect()
     }

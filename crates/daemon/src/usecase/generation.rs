@@ -476,6 +476,27 @@ impl GenerationCoordinator {
         Ok(())
     }
 
+    /// Drops historical process evidence after the runtime record has done the
+    /// same. Live or unresolved ownership may not discard its only exact
+    /// identity; resolved terminals can do so while preserving their terminal
+    /// tombstone and generation fence.
+    pub fn forget_resolved_process(
+        &mut self,
+        terminal: &TerminalRef,
+    ) -> Result<(), GenerationError> {
+        let ownership = self.ownership_mut(terminal)?;
+        if matches!(
+            ownership.state,
+            TerminalState::Available
+                | TerminalState::OrphanRunning
+                | TerminalState::IdentityUnknown
+        ) {
+            return Err(GenerationError::TerminalUnavailable);
+        }
+        ownership.process = None;
+        Ok(())
+    }
+
     /// Forgets a resolved terminal whose durable runtime record is being
     /// deleted. Live ownership must be resolved first, so callers cannot use
     /// record cleanup as an unfenced process kill or capacity release.
@@ -742,13 +763,19 @@ mod tests {
             registry.snapshot().terminals[0].state,
             TerminalState::OrphanRunning
         );
+        assert_eq!(
+            registry.forget_resolved_process(&pane),
+            Err(GenerationError::TerminalUnavailable)
+        );
         registry
             .resolve_orphan(&pane, ProcessObservation::VerifiedAlive(process), true)
             .unwrap();
+        registry.forget_resolved_process(&pane).unwrap();
         assert_eq!(
             registry.snapshot().terminals[0].state,
             TerminalState::Terminated
         );
+        assert!(registry.snapshot().terminals[0].process.is_none());
     }
     #[test]
     fn incomplete_spawn_record_is_never_deleted_or_replaced_after_crash() {
