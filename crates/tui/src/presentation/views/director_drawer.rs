@@ -1470,6 +1470,24 @@ mod tests {
         assert!(fresh_empty.contains("Ctrl-O n: Start Work Run"));
         assert!(!fresh_empty.contains("Loading Work Runs"));
 
+        let compact_empty = DirectorDrawerProjection {
+            goal_driven: true,
+            route: DirectorRoute::WorkRuns,
+            work_runs: WorkRunProjection::fresh(Vec::new()),
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::List,
+                ..WorkRunControlProjection::default()
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        let compact_empty = drawer_body(72, 5, &compact_empty)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(compact_empty.contains("No Work Runs yet"));
+        assert!(!compact_empty.contains("Start one with Ctrl-O n."));
+
         let failed_launch = DirectorDrawerProjection {
             goal_driven: true,
             route: DirectorRoute::WorkRuns,

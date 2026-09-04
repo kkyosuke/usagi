@@ -7963,8 +7963,7 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
             WorkRunControlMode::ConfirmCancel
             | WorkRunControlMode::ConfirmDelete
             | WorkRunControlMode::Retry => return KeyHelpContext::WorkRunConfirmation,
-            WorkRunControlMode::Submitting => return KeyHelpContext::WorkRunSubmitting,
-            WorkRunControlMode::Closed => {}
+            WorkRunControlMode::Submitting | WorkRunControlMode::Closed => {}
         }
     }
     if state.director_new_open && state.drawer_focus == Some(WorkspaceDrawerFocus::Director) {
