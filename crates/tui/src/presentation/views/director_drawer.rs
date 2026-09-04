@@ -9,6 +9,7 @@ use crate::presentation::theme::{Role, Style};
 use crate::presentation::views::work_run::{WorkRunFreshness, WorkRunProgress, WorkRunProjection};
 use crate::presentation::views::workspace::TerminalViewProjection;
 use crate::presentation::widgets::{self, modal};
+use crate::usecase::application::controller::{DirectorConsoleParent, DirectorRoute};
 use crate::usecase::application::terminal_selection::TerminalPoint;
 use crate::usecase::application::work_run_control::WorkRunControlMode;
 use usagi_core::domain::supervisor::{
@@ -26,9 +27,9 @@ const MIN_BACKGROUND_WIDTH: usize = 24;
 /// Like the existing CPU/memory/mode glyphs, unsupported fonts may render a
 /// missing-glyph cell; Unicode-width clipping keeps layout and hit-testing safe.
 pub const DIRECTOR_ICON: char = '♛';
-/// Rows of drawer chrome the New picker's candidate rows never get: the Home
+/// Rows of drawer chrome the launch picker's candidate rows never get: the Home
 /// header row above the drawer, the panel's two borders and two vertical padding
-/// rows, the conversation selector, its separator, and the footer hint.
+/// rows, the route breadcrumb, its separator, and the footer hint.
 const PICKER_CHROME_ROWS: usize = 8;
 const _: () = assert!(
     PICKER_CHROME_ROWS == crate::usecase::application::controller::DIRECTOR_PICKER_CHROME_ROWS
@@ -96,15 +97,6 @@ pub struct WorkRunControlProjection {
     pub feedback: Option<String>,
 }
 
-/// Unicode-safe one-line command composed before it is submitted to the
-/// selected Agent terminal.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DirectorCommandProjection {
-    pub value: String,
-    pub cursor: usize,
-    pub selection: Option<(usize, usize)>,
-}
-
 impl Default for WorkRunControlProjection {
     fn default() -> Self {
         Self {
@@ -121,13 +113,13 @@ impl Default for WorkRunControlProjection {
 pub struct DirectorDrawerProjection {
     /// Whether this drawer currently owns workspace input.
     pub focused: bool,
+    /// Explicit screen inside the persistent Director shell.
+    pub route: DirectorRoute,
     /// Whether this drawer represents the opt-in objective-driven workflow.
     pub goal_driven: bool,
     pub conversations: Vec<DirectorConversation>,
     pub organization: Vec<DirectorOrganizationRow>,
     pub terminal_view: Option<TerminalViewProjection>,
-    /// Present only while a live Agent can accept a complete command line.
-    pub command: Option<DirectorCommandProjection>,
     /// Safe reason for a selected interrupted conversation, outside PTY output.
     pub interrupted_detail: Option<String>,
     /// Drawer feedback used when the selected conversation has no live terminal.
@@ -204,8 +196,8 @@ pub fn geometry(raw_height: usize, raw_width: usize) -> DirectorDrawerGeometry {
 pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> DirectorTerminalViewport {
     let drawer = geometry(raw_height, raw_width);
     DirectorTerminalViewport {
-        // borders + padding + selector + separators + composer + footer
-        rows: drawer.height.saturating_sub(9),
+        // borders + padding + selector + separator + footer
+        rows: drawer.height.saturating_sub(7),
         // left/right borders and one cell of padding on both sides
         cols: drawer.width.saturating_sub(4),
     }
@@ -261,6 +253,7 @@ pub fn new_button_at(
     raw_width: usize,
     column: u16,
     row: u16,
+    goal_driven: bool,
     launching: bool,
 ) -> bool {
     if launching {
@@ -271,7 +264,8 @@ pub fn new_button_at(
         return false;
     }
     let right = drawer.left.saturating_add(drawer.width).saturating_sub(2);
-    let left = right.saturating_sub(widgets::display_width("[ New ]"));
+    let label = if goal_driven { "[ Start ]" } else { "[ New ]" };
+    let left = right.saturating_sub(widgets::display_width(label));
     (left..right).contains(&usize::from(column))
 }
 
@@ -335,7 +329,7 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
     if height == 0 {
         return Vec::new();
     }
-    let mut rows = vec![selector_row(width, projection)];
+    let mut rows = vec![breadcrumb_row(width, projection)];
     if height > 1 {
         rows.push(Style::new().dim().paint(&"─".repeat(width)));
     }
@@ -356,25 +350,55 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
         return goal_composer_body(width, height, rows, candidates, *selected, goal);
     }
 
-    if projection.work_run_control.mode != WorkRunControlMode::Closed {
+    if matches!(
+        projection.work_run_control.mode,
+        WorkRunControlMode::ConfirmCancel
+            | WorkRunControlMode::ConfirmDelete
+            | WorkRunControlMode::ResolveEscalation
+            | WorkRunControlMode::Submitting
+            | WorkRunControlMode::Retry
+    ) {
         return work_run_control_body(width, height, rows, projection);
     }
 
-    if let Some(run) = projection.work_runs.primary() {
-        rows.extend(work_run_rows(width, run, projection.work_runs.freshness()));
-    } else if projection.work_runs.freshness() == WorkRunFreshness::Unavailable {
-        rows.push(
-            Role::Warning
-                .style()
-                .bold()
-                .paint("Work Run progress unavailable"),
-        );
+    match projection.route {
+        DirectorRoute::WorkRuns => work_run_control_body(width, height, rows, projection),
+        DirectorRoute::RunOverview(run_id) => {
+            run_overview_body(width, height, rows, projection, run_id)
+        }
+        DirectorRoute::Console(_) => {
+            let footer = "Ctrl-O b: back · Ctrl-O w: Work Runs · Ctrl-O g: close";
+            if let Some(view) = &projection.terminal_view {
+                return terminal_conversation_body(width, height, rows, view, footer);
+            }
+            if let Some(detail) = &projection.interrupted_detail {
+                rows.push(Style::new().dim().paint(detail));
+            }
+            rows.truncate(height.saturating_sub(1));
+            rows.resize(height.saturating_sub(1), String::new());
+            rows.push(
+                Style::new()
+                    .dim()
+                    .paint(projection.feedback.as_deref().unwrap_or(footer)),
+            );
+            rows.into_iter()
+                .map(|row| widgets::clip_to_width(&row, width))
+                .collect()
+        }
+        DirectorRoute::Organization => organization_body(width, height, rows, projection),
     }
+}
 
+fn organization_body(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    projection: &DirectorDrawerProjection,
+) -> Vec<String> {
     let footer_hint = if projection.goal_driven {
-        "Enter: send command · Ctrl-O w: Work Runs · click: focus"
+        "↑↓ select · Enter: Console · Ctrl-O w: Work Runs · Ctrl-O n: Start · Esc: close"
     } else {
-        "Enter: send command · Ctrl-O n: New · Ctrl-O Ctrl-G: close"
+        "↑↓ select · Enter: Console · Ctrl-O n: New · Esc: close"
     };
     let content_capacity = height.saturating_sub(rows.len() + 1);
     if matches!(projection.new, DirectorNewProjection::Empty) {
@@ -393,31 +417,30 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
         if content_capacity > before + 2 {
             rows.push(Style::new().dim().paint("Esc returns to conversations."));
         }
-    } else if let Some(view) = &projection.terminal_view {
-        return terminal_conversation_body(
-            width,
-            height,
-            rows,
-            view,
-            projection.command.as_ref(),
-            footer_hint,
-        );
-    } else if let Some(detail) = &projection.interrupted_detail {
-        rows.push(Style::new().dim().paint(detail));
-    } else if !projection.organization.is_empty() {
-        rows.push(Role::Accent.style().bold().paint("Organization"));
-        for member in &projection.organization {
-            let branch = if member.depth == 0 { "" } else { "└─ " };
-            rows.push(format!(
-                "{}{}{}  {}",
-                "  ".repeat(member.depth),
-                branch,
-                member.label,
-                Style::new().dim().paint(&member.status)
-            ));
+    } else {
+        if !projection.conversations.is_empty() {
+            rows.push(Role::Accent.style().bold().paint("Directors"));
+            for conversation in &projection.conversations {
+                let marker = if conversation.selected { "›" } else { " " };
+                rows.push(format!("{marker} {}", conversation.label));
+            }
+            rows.push(String::new());
         }
-    } else if projection.conversations.is_empty() {
-        empty_conversation_rows(&mut rows, projection, content_capacity);
+        if !projection.organization.is_empty() {
+            rows.push(Role::Accent.style().bold().paint("Organization"));
+            for member in &projection.organization {
+                let branch = if member.depth == 0 { "" } else { "└─ " };
+                rows.push(format!(
+                    "{}{}{}  {}",
+                    "  ".repeat(member.depth),
+                    branch,
+                    member.label,
+                    Style::new().dim().paint(&member.status)
+                ));
+            }
+        } else if projection.conversations.is_empty() {
+            empty_conversation_rows(&mut rows, projection, content_capacity);
+        }
     }
     rows.truncate(height.saturating_sub(1));
     rows.resize(height.saturating_sub(1), String::new());
@@ -436,23 +459,15 @@ fn terminal_conversation_body(
     height: usize,
     mut rows: Vec<String>,
     view: &TerminalViewProjection,
-    command: Option<&DirectorCommandProjection>,
     footer_hint: &str,
 ) -> Vec<String> {
-    let command_rows = usize::from(command.is_some()) * 2;
-    let terminal_rows = height
-        .saturating_sub(rows.len() + 1)
-        .saturating_sub(command_rows);
+    let terminal_rows = height.saturating_sub(rows.len() + 1);
     rows.extend(widgets::live_terminal::viewport_rows(
         view,
         width,
         terminal_rows,
     ));
-    rows.resize(height.saturating_sub(command_rows + 1), String::new());
-    if let Some(command) = command {
-        rows.push(Style::new().dim().paint(&"─".repeat(width)));
-        rows.push(command_line(width, command));
-    }
+    rows.resize(height.saturating_sub(1), String::new());
     rows.truncate(height.saturating_sub(1));
     rows.resize(height.saturating_sub(1), String::new());
     rows.push(
@@ -461,44 +476,6 @@ fn terminal_conversation_body(
             .paint(view.feedback.as_deref().unwrap_or(footer_hint)),
     );
     rows
-}
-
-fn command_line(width: usize, command: &DirectorCommandProjection) -> String {
-    const LABEL: &str = "Command › ";
-    let label = Role::Accent.style().bold().paint(LABEL);
-    let capacity = width.saturating_sub(widgets::display_width(LABEL));
-    let mut cursor = command.cursor.min(command.value.len());
-    while !command.value.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
-    let mut start = cursor;
-    let mut used = 0usize;
-    for (index, character) in command.value[..cursor].char_indices().rev() {
-        let character_width = widgets::display_width(&character.to_string());
-        if used.saturating_add(character_width) >= capacity {
-            break;
-        }
-        used += character_width;
-        start = index;
-    }
-    let selection = command
-        .selection
-        .and_then(|(selection_start, selection_end)| {
-            let selection_start = selection_start.max(start);
-            let selection_end = selection_end.min(command.value.len());
-            (selection_start < selection_end)
-                .then_some((selection_start - start, selection_end - start))
-        });
-    let input = widgets::block_caret_with_selection(
-        &command.value[start..],
-        cursor.saturating_sub(start),
-        selection,
-        &Style::new(),
-    );
-    widgets::clip_to_width(
-        &format!("{label}{}", widgets::clip_to_width(&input, capacity)),
-        width,
-    )
 }
 
 fn work_run_control_body(
@@ -510,13 +487,16 @@ fn work_run_control_body(
     let control = &projection.work_run_control;
     rows.push(Role::Accent.style().bold().paint("Work Runs"));
     if projection.work_runs.freshness() == WorkRunFreshness::Unavailable {
-        rows.push(
-            Role::Warning
-                .style()
-                .paint("Cached · refresh required before actions"),
-        );
+        let message = if projection.work_runs.runs().is_empty() {
+            "Work Run progress unavailable"
+        } else {
+            "Cached · refresh required before actions"
+        };
+        rows.push(Role::Warning.style().paint(message));
     }
-    if let Some(feedback) = &control.feedback {
+    if control.mode != WorkRunControlMode::List
+        && let Some(feedback) = &control.feedback
+    {
         let style = if control.mode == WorkRunControlMode::Retry {
             Role::Warning.style()
         } else {
@@ -533,45 +513,23 @@ fn work_run_control_body(
     });
 
     match control.mode {
-        WorkRunControlMode::Closed => unreachable!("closed control uses the normal drawer"),
-        WorkRunControlMode::List => {
-            let footer = "↑↓ select · Enter actions · Esc close";
-            let capacity = height.saturating_sub(rows.len() + 1);
-            let runs = projection.work_runs.runs();
-            let selected = control
-                .selected
-                .and_then(|id| runs.iter().position(|run| run.supervisor_run_id == id))
-                .unwrap_or(0);
-            let start = selected.saturating_sub(capacity.saturating_sub(1));
-            for run in runs.iter().skip(start).take(capacity) {
-                let marker = if Some(run.supervisor_run_id) == control.selected {
-                    "›"
-                } else {
-                    " "
-                };
-                let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
-                let progress = WorkRunProgress::from_run(run);
-                let label = run.display_label.as_deref().unwrap_or("Untitled Work Run");
-                rows.push(format!(
-                    "{marker} {label}  #{short_id}  {:<15} {}/{}",
-                    run_state_label(run.state),
-                    progress.succeeded_tasks,
-                    progress.total_tasks
-                ));
-            }
-            if runs.is_empty() && capacity > 0 {
-                rows.push(Style::new().dim().paint("No Work Runs yet"));
-            }
-            rows.truncate(height.saturating_sub(1));
-            rows.resize(height.saturating_sub(1), String::new());
-            rows.push(Style::new().dim().paint(footer));
+        WorkRunControlMode::Closed | WorkRunControlMode::List => {
+            return work_run_list_body(width, height, rows, projection);
         }
         WorkRunControlMode::ConfirmCancel => {
             rows.extend(control_prompt_rows(
                 selected_run,
                 "Cancel this Work Run and stop its active Agents?",
             ));
-            rows.push("Enter confirm · Esc back".into());
+            rows.push("Enter confirm · Esc / Ctrl-C back".into());
+            finish_control_rows(&mut rows, height);
+        }
+        WorkRunControlMode::ConfirmDelete => {
+            rows.extend(control_prompt_rows(
+                selected_run,
+                "Delete this finished Work Run from history?",
+            ));
+            rows.push("Enter confirm · Esc / Ctrl-C back".into());
             finish_control_rows(&mut rows, height);
         }
         WorkRunControlMode::ResolveEscalation => {
@@ -595,6 +553,125 @@ fn work_run_control_body(
             finish_control_rows(&mut rows, height);
         }
     }
+    rows.into_iter()
+        .map(|row| widgets::clip_to_width(&row, width))
+        .collect()
+}
+
+fn work_run_list_body(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    projection: &DirectorDrawerProjection,
+) -> Vec<String> {
+    let control = &projection.work_run_control;
+    let footer = control
+        .feedback
+        .as_deref()
+        .unwrap_or("↑↓ select · Enter Overview · Ctrl-C cancel · Ctrl-X delete");
+    let capacity = height.saturating_sub(rows.len() + 1);
+    let runs = projection.work_runs.runs();
+    let selected = control
+        .selected
+        .and_then(|id| runs.iter().position(|run| run.supervisor_run_id == id))
+        .unwrap_or(0);
+    let start = selected.saturating_sub(capacity.saturating_sub(1));
+    for run in runs.iter().skip(start).take(capacity) {
+        let marker = if Some(run.supervisor_run_id) == control.selected {
+            "›"
+        } else {
+            " "
+        };
+        let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
+        let progress = WorkRunProgress::from_run(run);
+        let label = run.display_label.as_deref().unwrap_or("Untitled Work Run");
+        rows.push(format!(
+            "{marker} {label}  #{short_id}  {:<15} {}/{}",
+            run_state_label(run.state),
+            progress.succeeded_tasks,
+            progress.total_tasks
+        ));
+    }
+    if runs.is_empty() && capacity > 0 {
+        rows.push(Style::new().dim().paint("No Work Runs yet"));
+    }
+    rows.truncate(height.saturating_sub(1));
+    rows.resize(height.saturating_sub(1), String::new());
+    rows.push(if control.feedback.is_some() {
+        Role::Warning.style().paint(footer)
+    } else {
+        Style::new().dim().paint(footer)
+    });
+    rows.into_iter()
+        .map(|row| widgets::clip_to_width(&row, width))
+        .collect()
+}
+
+fn run_overview_body(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    projection: &DirectorDrawerProjection,
+    run_id: SupervisorRunId,
+) -> Vec<String> {
+    let Some(run) = projection
+        .work_runs
+        .runs()
+        .iter()
+        .find(|run| run.supervisor_run_id == run_id)
+    else {
+        rows.push(Role::Warning.style().bold().paint("Work Run unavailable"));
+        rows.push(
+            Style::new().dim().paint(
+                "It may have been deleted in another client. Return to Work Runs to continue.",
+            ),
+        );
+        return finish_overview_rows(
+            width,
+            height,
+            rows,
+            projection
+                .work_run_control
+                .feedback
+                .as_deref()
+                .unwrap_or("Esc / Ctrl-O b: Work Runs"),
+        );
+    };
+    rows.extend(work_run_rows(width, run, projection.work_runs.freshness()));
+    rows.push(Role::Accent.style().bold().paint("Organization"));
+    let director_status = if run.root_agent_id.is_some() {
+        "available"
+    } else if run.state.is_finished() {
+        "stopped"
+    } else {
+        "starting"
+    };
+    rows.push(format!(
+        "› {DIRECTOR_ICON} Director  {}",
+        Style::new().dim().paint(director_status)
+    ));
+    let footer =
+        projection
+            .work_run_control
+            .feedback
+            .as_deref()
+            .unwrap_or(if run.root_agent_id.is_some() {
+                "Enter: Console · Esc: Work Runs · Ctrl-C cancel · Ctrl-X delete"
+            } else {
+                "Esc: Work Runs · Ctrl-C cancel · Ctrl-X delete"
+            });
+    finish_overview_rows(width, height, rows, footer)
+}
+
+fn finish_overview_rows(
+    width: usize,
+    height: usize,
+    mut rows: Vec<String>,
+    footer: &str,
+) -> Vec<String> {
+    rows.truncate(height.saturating_sub(1));
+    rows.resize(height.saturating_sub(1), String::new());
+    rows.push(Style::new().dim().paint(footer));
     rows.into_iter()
         .map(|row| widgets::clip_to_width(&row, width))
         .collect()
@@ -882,28 +959,49 @@ fn picker_rows(candidates: &[String], selected: usize, capacity: usize) -> Vec<S
     modal::bounded_list_rows(&rows, selected, capacity)
 }
 
-fn selector_row(width: usize, projection: &DirectorDrawerProjection) -> String {
-    let selected = projection
-        .conversations
-        .iter()
-        .find(|conversation| conversation.selected)
-        .or_else(|| projection.conversations.first())
-        .map_or("No conversations", |conversation| {
-            conversation.label.as_str()
-        });
+fn breadcrumb_row(width: usize, projection: &DirectorDrawerProjection) -> String {
     let new = if matches!(projection.new, DirectorNewProjection::Launching) {
         Style::new().dim().paint("[ Starting… ]")
+    } else if projection.goal_driven {
+        Role::Accent.style().bold().paint("[ Start ]")
     } else {
         Role::Accent.style().bold().paint("[ New ]")
     };
-    let subject = if projection.goal_driven {
-        "Work Run"
+    let route = if matches!(projection.new, DirectorNewProjection::Ready) {
+        match projection.route {
+            DirectorRoute::Organization => "Director / Organization".to_owned(),
+            DirectorRoute::WorkRuns => "Director / Work Runs".to_owned(),
+            DirectorRoute::RunOverview(run) => {
+                let label = projection
+                    .work_runs
+                    .runs()
+                    .iter()
+                    .find(|candidate| candidate.supervisor_run_id == run)
+                    .and_then(|candidate| candidate.display_label.as_deref())
+                    .unwrap_or("Unavailable Run");
+                format!("Director / Work Runs / {label} / Overview")
+            }
+            DirectorRoute::Console(parent) => {
+                let parent = match parent {
+                    DirectorConsoleParent::Organization => "Organization".to_owned(),
+                    DirectorConsoleParent::RunOverview(run) => projection
+                        .work_runs
+                        .runs()
+                        .iter()
+                        .find(|candidate| candidate.supervisor_run_id == run)
+                        .and_then(|candidate| candidate.display_label.clone())
+                        .unwrap_or_else(|| "Unavailable Run".to_owned()),
+                };
+                format!("Director / {parent} / Console")
+            }
+        }
+    } else if projection.goal_driven {
+        "Director / Start Work Run".to_owned()
     } else {
-        "Conversation"
+        "Director / New Conversation".to_owned()
     };
-    let prefix = format!("{subject}  [{selected}]");
     let reserved = widgets::display_width(&new).saturating_add(2);
-    let prefix = widgets::clip_to_width(&prefix, width.saturating_sub(reserved));
+    let prefix = widgets::clip_to_width(&route, width.saturating_sub(reserved));
     let gap = width
         .saturating_sub(widgets::display_width(&prefix))
         .saturating_sub(widgets::display_width(&new));
@@ -929,6 +1027,7 @@ mod tests {
             terminal_at: None,
             terminal_reason: None,
             display_label: Some("Review supervisor stability".into()),
+            root_agent_id: None,
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: [TaskState::Succeeded, TaskState::Running, TaskState::Pending]
@@ -980,7 +1079,7 @@ mod tests {
         assert_eq!(zero, geometry(24, 80));
         assert_eq!(
             terminal_viewport(0, 0),
-            DirectorTerminalViewport { rows: 14, cols: 52 }
+            DirectorTerminalViewport { rows: 16, cols: 52 }
         );
         assert_eq!(
             terminal_viewport(1, 1),
@@ -992,7 +1091,7 @@ mod tests {
     fn terminal_viewport_is_independent_from_the_closeup_right_pane() {
         assert_eq!(
             terminal_viewport(24, 100),
-            DirectorTerminalViewport { rows: 14, cols: 56 }
+            DirectorTerminalViewport { rows: 16, cols: 56 }
         );
         assert_ne!(
             (
@@ -1015,7 +1114,7 @@ mod tests {
                 u16::try_from(drawer.left + 2).unwrap(),
                 u16::try_from(drawer.top + 4).unwrap(),
             ),
-            Some(TerminalPoint { row: 16, column: 0 })
+            Some(TerminalPoint { row: 14, column: 0 })
         );
         assert_eq!(terminal_point_at(24, 100, 30, 0, 0, 0), None);
         assert_eq!(
@@ -1036,10 +1135,11 @@ mod tests {
         let drawer = geometry(24, 100);
         let row = u16::try_from(drawer.top + 2).unwrap();
         let right = u16::try_from(drawer.left + drawer.width - 3).unwrap();
-        assert!(new_button_at(24, 100, right, row, false));
-        assert!(!new_button_at(24, 100, right, row, true));
-        assert!(!new_button_at(24, 100, 0, row, false));
-        assert!(!new_button_at(24, 100, right, row + 1, false));
+        assert!(new_button_at(24, 100, right, row, false, false));
+        assert!(!new_button_at(24, 100, right, row, false, true));
+        assert!(!new_button_at(24, 100, 0, row, false, false));
+        assert!(!new_button_at(24, 100, right, row + 1, false, false));
+        assert!(new_button_at(24, 100, right - 7, row, true, false));
     }
 
     #[test]
@@ -1056,7 +1156,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains(&format!("{DIRECTOR_ICON} Director")));
-        assert!(text.contains("Conversation  [No conversations]"));
+        assert!(text.contains("Director / Organization"));
         assert!(text.contains("[ New ]"));
         assert!(text.contains("No conversations yet"));
         assert!(text.contains("Ctrl-O n: New"));
@@ -1067,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_badge_and_long_ime_command_keep_the_caret_visible() {
+    fn focus_badge_distinguishes_the_active_director() {
         let projection = DirectorDrawerProjection {
             focused: true,
             conversations: vec![DirectorConversation {
@@ -1081,17 +1181,11 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
-            command: Some(DirectorCommandProjection {
-                value: "日本語で追加の指示を入力します".repeat(4),
-                cursor: "日本語で追加の指示を入力します".repeat(4).len(),
-                selection: None,
-            }),
             ..DirectorDrawerProjection::default()
         };
         let frame = render_over(16, 80, &[], &projection);
         let text = frame.join("\n");
         assert!(strip_ansi(&text).contains("Director · FOCUS"));
-        assert!(text.contains(crate::presentation::frame::INPUT_CURSOR_MARKER));
         assert!(frame.iter().all(|line| display_width(line) == 80));
 
         let inactive = render_over(
@@ -1105,17 +1199,6 @@ mod tests {
         )
         .join("\n");
         assert!(strip_ansi(&inactive).contains("Director · click to focus"));
-
-        let repaired = command_line(
-            20,
-            &DirectorCommandProjection {
-                value: "日本".to_owned(),
-                cursor: 1,
-                selection: Some((0, usize::MAX)),
-            },
-        );
-        assert!(repaired.contains(crate::presentation::frame::INPUT_CURSOR_MARKER));
-        assert!(display_width(&repaired) <= 20);
     }
 
     #[test]
@@ -1197,7 +1280,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(body.contains("Work Run  [No conversations]"));
+        assert!(body.contains("Director / Organization"));
+        assert!(body.contains("[ Start ]"));
         assert!(body.contains("Work Run output and stop reasons appear here."));
         assert!(body.contains("Ctrl-O w: Work Runs"));
         assert!(!body.contains("Choose New to start a conversation."));
@@ -1206,9 +1290,11 @@ mod tests {
     #[test]
     fn director_drawer_renders_daemon_owned_work_run_progress_in_both_modes() {
         for goal_driven in [false, true] {
+            let run = work_run();
             let projection = DirectorDrawerProjection {
                 goal_driven,
-                work_runs: WorkRunProjection::fresh(vec![work_run()]),
+                route: DirectorRoute::RunOverview(run.supervisor_run_id),
+                work_runs: WorkRunProjection::fresh(vec![run]),
                 ..DirectorDrawerProjection::default()
             };
             let body = drawer_body(72, 16, &projection)
@@ -1228,8 +1314,10 @@ mod tests {
 
     #[test]
     fn director_labels_cached_work_runs_and_unavailable_empty_observations() {
+        let run = work_run();
         let cached = DirectorDrawerProjection {
-            work_runs: WorkRunProjection::fresh(vec![work_run()]).unavailable(),
+            route: DirectorRoute::RunOverview(run.supervisor_run_id),
+            work_runs: WorkRunProjection::fresh(vec![run]).unavailable(),
             ..DirectorDrawerProjection::default()
         };
         let cached = drawer_body(72, 16, &cached)
@@ -1241,6 +1329,7 @@ mod tests {
         assert!(cached.contains("1/3 tasks"));
 
         let unavailable = DirectorDrawerProjection {
+            route: DirectorRoute::WorkRuns,
             work_runs: WorkRunProjection::default().unavailable(),
             ..DirectorDrawerProjection::default()
         };
@@ -1376,6 +1465,10 @@ mod tests {
                 selected: Some(selected),
                 ..WorkRunControlProjection::default()
             });
+        let base = DirectorDrawerProjection {
+            route: DirectorRoute::WorkRuns,
+            ..base
+        };
         let list = drawer_body(60, 12, &base)
             .into_iter()
             .map(|row| strip_ansi(&row))
@@ -1384,7 +1477,7 @@ mod tests {
         assert!(list.contains("Work Runs"));
         assert!(list.contains("› Review supervisor stability  #"));
         assert!(list.contains("  Review supervisor stability  #"));
-        assert!(list.contains("Enter actions"));
+        assert!(list.contains("Enter Overview"));
 
         let confirmation = DirectorDrawerProjection {
             work_run_control: WorkRunControlProjection {
@@ -1467,17 +1560,60 @@ mod tests {
         assert!(retry.contains("outcome unavailable"));
         assert!(retry.contains("retry same operation"));
 
-        let empty =
-            DirectorDrawerProjection::default().with_work_run_control(WorkRunControlProjection {
-                mode: WorkRunControlMode::List,
-                ..WorkRunControlProjection::default()
-            });
+        let empty = DirectorDrawerProjection {
+            route: DirectorRoute::WorkRuns,
+            ..DirectorDrawerProjection::default()
+        }
+        .with_work_run_control(WorkRunControlProjection {
+            mode: WorkRunControlMode::List,
+            ..WorkRunControlProjection::default()
+        });
         let empty = drawer_body(60, 12, &empty)
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(empty.contains("No Work Runs yet"));
+    }
+
+    #[test]
+    fn work_run_list_feedback_uses_the_footer_without_moving_run_rows() {
+        let run = work_run();
+        let selected = run.supervisor_run_id;
+        let projection = DirectorDrawerProjection::default()
+            .with_work_runs(WorkRunProjection::fresh(vec![run]))
+            .with_work_run_control(WorkRunControlProjection {
+                mode: WorkRunControlMode::List,
+                selected: Some(selected),
+                ..WorkRunControlProjection::default()
+            });
+        let projection = DirectorDrawerProjection {
+            route: DirectorRoute::WorkRuns,
+            ..projection
+        };
+        let render = |projection: &DirectorDrawerProjection| {
+            drawer_body(60, 8, projection)
+                .into_iter()
+                .map(|row| strip_ansi(&row))
+                .collect::<Vec<_>>()
+        };
+        let normal = render(&projection);
+        let with_feedback = render(&DirectorDrawerProjection {
+            work_run_control: WorkRunControlProjection {
+                feedback: Some("This Work Run is already finished".into()),
+                ..projection.work_run_control.clone()
+            },
+            ..projection
+        });
+        let run_row = |rows: &[String]| {
+            rows.iter()
+                .position(|row| row.contains("Review supervisor stability"))
+        };
+        assert_eq!(run_row(&normal), run_row(&with_feedback));
+        assert_eq!(
+            with_feedback.last().map(String::as_str),
+            Some("This Work Run is already finished")
+        );
     }
 
     #[test]
@@ -1489,10 +1625,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "closed control uses the normal drawer")]
-    fn closed_work_run_control_cannot_enter_the_control_renderer() {
+    fn closed_work_run_control_renders_a_safe_empty_list() {
         let projection = DirectorDrawerProjection::default();
-        let _ = work_run_control_body(60, 12, vec![], &projection);
+        let rows = work_run_control_body(60, 12, vec![], &projection);
+        assert!(rows.join("\n").contains("No Work Runs yet"));
     }
 
     #[test]
@@ -1553,6 +1689,7 @@ mod tests {
         let projection = DirectorDrawerProjection {
             focused: true,
             goal_driven: false,
+            route: DirectorRoute::Console(DirectorConsoleParent::Organization),
             conversations: vec![
                 DirectorConversation {
                     label: "older".to_owned(),
@@ -1575,7 +1712,6 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
-            command: None,
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::Ready,
@@ -1588,7 +1724,7 @@ mod tests {
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("Conversation  [active conversation]"));
+        assert!(text.contains("Director / Organization / Console"));
         assert!(text.contains("agent output one"));
         assert!(text.contains("agent output two"));
         assert!(text.contains("agent output three"));
@@ -1598,6 +1734,7 @@ mod tests {
     #[test]
     fn terminal_rows_render_even_when_conversation_inventory_is_empty() {
         let projection = DirectorDrawerProjection {
+            route: DirectorRoute::Console(DirectorConsoleParent::Organization),
             terminal_view: Some(TerminalViewProjection {
                 rows: vec!["live output without inventory".to_owned()],
                 row_offset: 0,
@@ -1624,6 +1761,7 @@ mod tests {
         let projection = DirectorDrawerProjection {
             focused: true,
             goal_driven: false,
+            route: DirectorRoute::Console(DirectorConsoleParent::Organization),
             conversations: vec![DirectorConversation {
                 label: "active".to_owned(),
                 selected: true,
@@ -1636,11 +1774,6 @@ mod tests {
                 scroll: 0,
                 feedback: Some("copied 2 lines".to_owned()),
             }),
-            command: Some(DirectorCommandProjection {
-                value: "追加指示".to_owned(),
-                cursor: "追加指示".len(),
-                selection: None,
-            }),
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::Ready,
@@ -1651,13 +1784,11 @@ mod tests {
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>();
-        assert_eq!(&body[2..6], ["row 6", "row 7", "row 8", "row 9"]);
-        assert!(!body.iter().any(|row| row == "row 0"));
         assert_eq!(
-            body[6],
-            "────────────────────────────────────────────────────"
+            &body[2..8],
+            ["row 4", "row 5", "row 6", "row 7", "row 8", "row 9"]
         );
-        assert!(body[7].contains("Command › 追加指示"));
+        assert!(!body.iter().any(|row| row == "row 0"));
         assert_eq!(body[8], "copied 2 lines");
 
         let mut scrolled = projection;
@@ -1670,7 +1801,10 @@ mod tests {
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>();
-        assert_eq!(&body[2..6], ["row 4", "row 5", "row 6", "row 7"]);
+        assert_eq!(
+            &body[2..8],
+            ["row 2", "row 3", "row 4", "row 5", "row 6", "row 7"]
+        );
         assert!(!body.iter().any(|row| row == "row 9"));
 
         let drawer = geometry(12, 80);
@@ -1683,7 +1817,7 @@ mod tests {
                 u16::try_from(drawer.left + 2).unwrap(),
                 u16::try_from(drawer.top + 4).unwrap(),
             ),
-            Some(TerminalPoint { row: 8, column: 0 })
+            Some(TerminalPoint { row: 6, column: 0 })
         );
     }
 
@@ -1692,13 +1826,13 @@ mod tests {
         let projection = DirectorDrawerProjection {
             focused: true,
             goal_driven: false,
+            route: DirectorRoute::Console(DirectorConsoleParent::Organization),
             conversations: vec![DirectorConversation {
                 label: "interrupted".to_owned(),
                 selected: true,
             }],
             organization: Vec::new(),
             terminal_view: None,
-            command: None,
             interrupted_detail: Some("identity unavailable".to_owned()),
             feedback: Some("resume failed safely".to_owned()),
             new: DirectorNewProjection::Ready,
@@ -1912,13 +2046,13 @@ mod tests {
         let projection = DirectorDrawerProjection {
             focused: true,
             goal_driven: false,
+            route: DirectorRoute::Console(DirectorConsoleParent::Organization),
             conversations: vec![DirectorConversation {
                 label: "会話の履歴".to_owned(),
                 selected: true,
             }],
             organization: Vec::new(),
             terminal_view: None,
-            command: None,
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::Ready,

@@ -36,11 +36,10 @@ use crate::presentation::views::root_terminal_drawer::{
 use crate::presentation::views::workspace::{
     GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
 };
-use crate::presentation::widgets::TextInput;
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, DirectorNew, Effect, HomeMode, Overlay, Route, Selection,
-    TabDirection, Target, WorkspaceDrawerFocus, update,
+    AppEvent, AppKey, AppState, DirectorConsoleParent, DirectorNew, DirectorRoute, Effect,
+    HomeMode, Overlay, Route, Selection, TabDirection, Target, WorkspaceDrawerFocus, update,
 };
 use crate::usecase::application::interrupted_tab::{
     InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
@@ -91,21 +90,6 @@ impl InterruptedRemovalConfirmation {
     }
 }
 
-/// Result of routing one key through Director's IME-safe command composer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DirectorCommandInput {
-    /// The key belongs to terminal controls or direct PTY input.
-    Unhandled,
-    /// The composer changed (or deliberately consumed an editing key).
-    Consumed,
-    /// Submit the buffered line to the selected Agent. The buffer is cleared
-    /// after a write/ordered queue accepts it, or when retaining it would invite
-    /// an unsafe replay of bytes whose effect is uncertain.
-    Submit(String),
-}
-
-const MAX_DIRECTOR_COMMAND_BYTES: usize = 16 * 1024;
-
 /// One target's ordered live panes from a completed restore job, plus the
 /// interrupted Agent conversations projected for the same target (#510).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,10 +128,6 @@ pub struct WorkspaceRuntime {
     /// The entry is dropped when the launch completes, fails, or is cancelled.
     pane_focus_at_request: BTreeMap<OperationId, u64>,
     director_projection: DirectorDrawerProjection,
-    /// One-line, Unicode-aware command input for the focused root Agent.
-    /// Committed IME text is edited here before a complete line reaches the
-    /// PTY, avoiding terminal-protocol interpretation during composition.
-    director_command: TextInput,
     root_agent_selection: Option<TabSelection>,
     root_terminal_selection: Option<TabSelection>,
     material_revision: u64,
@@ -182,7 +162,6 @@ impl WorkspaceRuntime {
             modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
             director_projection: DirectorDrawerProjection::default(),
-            director_command: TextInput::default(),
             root_agent_selection: None,
             root_terminal_selection: None,
             material_revision: 0,
@@ -444,119 +423,6 @@ impl WorkspaceRuntime {
         &self.director_projection
     }
 
-    /// Current Director command draft. It is presentation-local and is never
-    /// persisted or sent until Enter submits it to the focused Agent PTY.
-    #[must_use]
-    pub const fn director_command(&self) -> &TextInput {
-        &self.director_command
-    }
-
-    /// Edit Director's one-line command buffer, including committed IME text.
-    pub fn handle_director_command(&mut self, key: &Key) -> DirectorCommandInput {
-        if self.state.overlay().is_some()
-            || self.state.workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Director)
-            || self.state.director_launching().is_some()
-            || !matches!(self.state.director_new(), DirectorNew::Idle)
-            || self.focused_agent_terminal().is_none()
-        {
-            return DirectorCommandInput::Unhandled;
-        }
-
-        let changed = match key {
-            Key::Char(character) if !character.is_control() => {
-                self.insert_director_command(&character.to_string())
-            }
-            Key::Paste(text) => {
-                let normalized = normalize_director_command(text);
-                self.insert_director_command(&normalized)
-            }
-            // IME commits commonly arrive as a Text/Raw block and are exposed
-            // by the adapter as Passthrough. Only printable UTF-8 is captured;
-            // opaque control sequences keep their exact PTY semantics.
-            Key::Passthrough(bytes) => {
-                let Ok(text) = std::str::from_utf8(bytes) else {
-                    return DirectorCommandInput::Unhandled;
-                };
-                if text.is_empty() || text.chars().any(char::is_control) {
-                    return DirectorCommandInput::Unhandled;
-                }
-                self.insert_director_command(text)
-            }
-            Key::Backspace => self.director_command.backspace(),
-            Key::Delete => self.director_command.delete_forward(),
-            Key::Left => {
-                self.director_command.move_left();
-                true
-            }
-            Key::Right => {
-                self.director_command.move_right();
-                true
-            }
-            Key::Home | Key::LineStart => {
-                self.director_command.move_home();
-                true
-            }
-            Key::End | Key::LineEnd => {
-                self.director_command.move_end();
-                true
-            }
-            Key::SelectLeft => {
-                self.director_command.select_left();
-                true
-            }
-            Key::SelectRight => {
-                self.director_command.select_right();
-                true
-            }
-            Key::SelectHome => {
-                self.director_command.select_home();
-                true
-            }
-            Key::SelectEnd => {
-                self.director_command.select_end();
-                true
-            }
-            Key::Enter => {
-                return DirectorCommandInput::Submit(self.director_command.value().to_owned());
-            }
-            _ => return DirectorCommandInput::Unhandled,
-        };
-        if changed {
-            self.material_revision = self.material_revision.saturating_add(1);
-        }
-        DirectorCommandInput::Consumed
-    }
-
-    /// Clear a command once presentation has classified it as accepted or
-    /// unsafe to offer for replay.
-    pub fn complete_director_command(&mut self) {
-        self.director_command.clear();
-        self.material_revision = self.material_revision.saturating_add(1);
-    }
-
-    fn insert_director_command(&mut self, text: &str) -> bool {
-        if text.is_empty() {
-            return false;
-        }
-        let selected = self
-            .director_command
-            .selection()
-            .map_or(0, |(start, end)| end.saturating_sub(start));
-        let retained = self.director_command.value().len().saturating_sub(selected);
-        let room = MAX_DIRECTOR_COMMAND_BYTES.saturating_sub(retained);
-        let end = text
-            .char_indices()
-            .map(|(index, character)| index + character.len_utf8())
-            .take_while(|end| *end <= room)
-            .last()
-            .unwrap_or(0);
-        if end == 0 {
-            return false;
-        }
-        self.director_command.insert_str(&text[..end]);
-        true
-    }
-
     /// Cache fence for controller/modal projection inputs. Pane state has its
     /// own registry revision and is intentionally returned separately.
     #[must_use]
@@ -612,7 +478,6 @@ impl WorkspaceRuntime {
         if self.restore_fence() != (dispatched_interaction, dispatched_registry_revision) {
             return false;
         }
-        let had_root_agent = self.has_interactive_root_agent_tabs();
         for target in targets {
             let entry = target.target;
             let root = matches!(entry, Target::Root(_));
@@ -676,7 +541,6 @@ impl WorkspaceRuntime {
             }
         }
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
         true
     }
 
@@ -721,12 +585,29 @@ impl WorkspaceRuntime {
                 (DirectorNew::Choosing(_) | DirectorNew::Empty, Key::Enter) => {
                     self.apply_event(AppEvent::Key(AppKey::Enter))
                 }
+                (DirectorNew::Choosing(_) | DirectorNew::Empty, Key::Quit) => {
+                    self.apply_event(AppEvent::Key(AppKey::CtrlC))
+                }
                 (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::DirectorNew)) => {
                     self.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
                 }
                 (_, Key::Escape) => self.apply_event(AppEvent::Key(AppKey::Escape)),
                 (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::Director)) => {
                     self.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
+                }
+                (
+                    _,
+                    Key::Live(crate::usecase::terminal_input::LiveTerminalAction::DirectorBack),
+                ) => self.apply_event(AppEvent::Key(AppKey::DirectorBack)),
+                (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::WorkRuns)) => {
+                    self.apply_event(AppEvent::Key(AppKey::OpenDirectorWorkRuns))
+                }
+                (DirectorNew::Idle, Key::Enter)
+                    if self.state.director_route() == DirectorRoute::Organization =>
+                {
+                    self.apply_event(AppEvent::Key(AppKey::OpenDirectorConsole(
+                        DirectorConsoleParent::Organization,
+                    )))
                 }
                 (
                     _,
@@ -961,7 +842,6 @@ impl WorkspaceRuntime {
     #[must_use]
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
         let previous_drawer_focus = self.state.workspace_drawer_focus();
-        let director_was_open = self.state.director_drawer_open();
         let advances_material = match &event {
             AppEvent::Tick => false,
             AppEvent::Resize { width, height } => {
@@ -997,9 +877,6 @@ impl WorkspaceRuntime {
             });
         }
         self.sync_overlay_modals();
-        if director_was_open && !self.state.director_drawer_open() {
-            self.director_command.clear();
-        }
         effects
     }
 
@@ -1168,8 +1045,11 @@ impl WorkspaceRuntime {
     /// modal) owns input.
     #[must_use]
     pub fn wants_live_input(&self) -> bool {
-        (matches!(self.state.route(), Route::Home(HomeMode::Closeup))
-            || self.state.workspace_drawer_open())
+        let live_surface = matches!(self.state.route(), Route::Home(HomeMode::Closeup))
+            || self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal)
+            || (self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director)
+                && matches!(self.state.director_route(), DirectorRoute::Console(_)));
+        live_surface
             && self.state.has_live_pane()
             && (!self.state.workspace_drawer_open() || self.focused_terminal().is_some())
             && self.state.overlay().is_none()
@@ -1378,7 +1258,6 @@ impl WorkspaceRuntime {
         operation: OperationId,
         message: String,
     ) -> Vec<PaneRegistryEffect> {
-        let had_root_agent = self.has_interactive_root_agent_tabs();
         let message = if message == AGENT_CAPACITY_EXHAUSTED {
             AGENT_CAPACITY_RECOVERY.to_owned()
         } else {
@@ -1394,7 +1273,6 @@ impl WorkspaceRuntime {
         // A dropped placeholder can never complete, so retire its focus gate.
         self.pane_focus_at_request.remove(&operation);
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
         effects
     }
 
@@ -1437,7 +1315,6 @@ impl WorkspaceRuntime {
 
     /// Remove a live tab the daemon reports as exited.
     pub fn exit_pane(&mut self, target: Target, terminal: TerminalRef) -> Vec<PaneRegistryEffect> {
-        let had_root_agent = self.has_interactive_root_agent_tabs();
         let effects = reduce_registry(
             &mut self.panes,
             PaneRegistryEvent::Pane {
@@ -1446,7 +1323,6 @@ impl WorkspaceRuntime {
             },
         );
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
         self.close_empty_root_terminal_drawer();
         effects
     }
@@ -1462,7 +1338,6 @@ impl WorkspaceRuntime {
         {
             return CloseOutcome::default();
         }
-        let had_root_agent = self.has_interactive_root_agent_tabs();
         let outcome = match self.panes.active_pane().selected() {
             PaneSelection::Tab(TabSelection::Live(terminal)) => CloseOutcome {
                 detach: Some(terminal.clone()),
@@ -1488,7 +1363,6 @@ impl WorkspaceRuntime {
         }
         let _ = route_tab_command(&mut self.panes, PaneTabCommand::Close);
         self.sync_live_pane();
-        self.close_disappeared_director(had_root_agent);
         self.close_empty_root_terminal_drawer();
         outcome
     }
@@ -2277,20 +2151,6 @@ fn root_tab_is_terminal(tab: &PaneTab) -> bool {
     }
 }
 
-fn normalize_director_command(text: &str) -> String {
-    text.chars()
-        .filter_map(|character| {
-            if character.is_whitespace() {
-                Some(' ')
-            } else if character.is_control() {
-                None
-            } else {
-                Some(character)
-            }
-        })
-        .collect()
-}
-
 fn terminal_belongs_to_target(
     terminal: &TerminalRef,
     target: Target,
@@ -2311,16 +2171,16 @@ fn tab_selection(tab: &PaneTab) -> TabSelection {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentResumeRelation, CloseOutcome, DirectorCommandInput, InterruptedTab,
-        MAX_DIRECTOR_COMMAND_BYTES, PaneEvent, PaneKind, PaneRegistryEffect, PaneRestoreTarget,
-        PaneTab, ResumeRejection, RootTerminalDrawerProjection, RootTerminalTabProjection,
-        TabSelection, WorkspaceRuntime, root_tab_is_terminal, tab_selection,
+        AgentResumeRelation, CloseOutcome, InterruptedTab, PaneEvent, PaneKind, PaneRegistryEffect,
+        PaneRestoreTarget, PaneTab, ResumeRejection, RootTerminalDrawerProjection,
+        RootTerminalTabProjection, TabSelection, WorkspaceRuntime, root_tab_is_terminal,
+        tab_selection,
     };
     use crate::presentation::views::workspace::TerminalViewProjection;
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, BackendEvent, Effect, HomeMode, Overlay, Route, Selection, TabDirection,
-        Target, WorkspaceDrawerFocus,
+        AppEvent, AppKey, BackendEvent, DirectorNew, DirectorRoute, Effect, HomeMode, Overlay,
+        Route, Selection, TabDirection, Target, WorkspaceDrawerFocus,
     };
     use crate::usecase::application::pane::{
         InterruptedPane, LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection,
@@ -3722,6 +3582,12 @@ mod tests {
             )
         );
         let _ = runtime.handle_key(Key::Escape);
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        let _ = runtime.handle_key(Key::Escape);
         assert!(!runtime.state().director_drawer_open());
         assert_eq!(runtime.active_pane(), &closeup_background.3);
     }
@@ -3734,92 +3600,15 @@ mod tests {
         assert!(runtime.handle_key(Key::Up).is_empty());
         assert!(runtime.handle_key(Key::Char('x')).is_empty());
         assert!(runtime.state().director_drawer_open());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
+        assert!(!matches!(runtime.state().director_new(), DirectorNew::Idle));
+        assert!(runtime.handle_key(Key::Quit).is_empty());
+        assert!(matches!(runtime.state().director_new(), DirectorNew::Idle));
+        assert!(runtime.state().director_drawer_open());
     }
 
     #[test]
-    fn director_command_composes_unicode_and_committed_ime_text() {
-        let workspace = WorkspaceId::new();
-        let target = Target::Root(workspace);
-        let terminal = root_terminal_ref(workspace);
-        let operation = OperationId::new();
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-        let _ = runtime.request_pane(target, operation, PaneKind::Agent);
-        let _ = runtime.complete_pane(target, operation, terminal);
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-
-        assert_eq!(
-            runtime.handle_director_command(&Key::Char('追')),
-            DirectorCommandInput::Consumed
-        );
-        assert_eq!(
-            runtime.handle_director_command(&Key::Passthrough("加指示".as_bytes().to_vec())),
-            DirectorCommandInput::Consumed
-        );
-        assert_eq!(
-            runtime.handle_director_command(&Key::Paste(" を\n実行".to_owned())),
-            DirectorCommandInput::Consumed
-        );
-        assert_eq!(runtime.director_command().value(), "追加指示 を 実行");
-        assert_eq!(
-            runtime.handle_director_command(&Key::Enter),
-            DirectorCommandInput::Submit("追加指示 を 実行".to_owned())
-        );
-        assert_eq!(
-            runtime.director_command().value(),
-            "追加指示 を 実行",
-            "routing classifies delivery before clearing the runtime draft"
-        );
-        runtime.complete_director_command();
-        assert!(runtime.director_command().is_empty());
-
-        assert_eq!(
-            runtime.handle_director_command(&Key::Passthrough(vec![0xff])),
-            DirectorCommandInput::Unhandled
-        );
-        for key in [Key::Passthrough(Vec::new()), Key::Passthrough(vec![0])] {
-            assert_eq!(
-                runtime.handle_director_command(&key),
-                DirectorCommandInput::Unhandled
-            );
-        }
-        assert_eq!(
-            runtime.handle_director_command(&Key::Paste("\0".to_owned())),
-            DirectorCommandInput::Consumed
-        );
-        for key in [
-            Key::Paste("abc".to_owned()),
-            Key::Left,
-            Key::Right,
-            Key::Home,
-            Key::End,
-            Key::SelectLeft,
-            Key::SelectRight,
-            Key::SelectHome,
-            Key::SelectEnd,
-            Key::Backspace,
-            Key::Delete,
-        ] {
-            assert_eq!(
-                runtime.handle_director_command(&key),
-                DirectorCommandInput::Consumed
-            );
-        }
-        runtime.complete_director_command();
-
-        let _ =
-            runtime.handle_director_command(&Key::Paste("x".repeat(MAX_DIRECTOR_COMMAND_BYTES)));
-        let _ = runtime.handle_director_command(&Key::SelectLeft);
-        let before = runtime.director_command().clone();
-        let _ = runtime.handle_director_command(&Key::Char('日'));
-        assert_eq!(
-            runtime.director_command(),
-            &before,
-            "a replacement that cannot fit must preserve the selected byte"
-        );
-    }
-
-    #[test]
-    fn director_closes_only_when_the_last_interactive_root_agent_disappears() {
+    fn director_stays_open_when_the_last_interactive_root_agent_disappears() {
         let workspace = WorkspaceId::new();
         let target = Target::Root(workspace);
         let first = root_terminal_ref(workspace);
@@ -3836,13 +3625,10 @@ mod tests {
         let _ = runtime.exit_pane(target, first);
         assert!(runtime.state().director_drawer_open());
         let _ = runtime.exit_pane(target, second);
-        assert!(!runtime.state().director_drawer_open());
+        assert!(runtime.state().director_drawer_open());
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        assert!(
-            runtime.state().director_drawer_open(),
-            "an intentionally opened empty Director remains available for New"
-        );
+        assert!(!runtime.state().director_drawer_open());
     }
 
     #[test]
@@ -3900,6 +3686,8 @@ mod tests {
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
         assert_eq!(runtime.focused_terminal(), Some(root_agent));
+        assert!(!runtime.wants_live_input());
+        let _ = runtime.handle_key(Key::Enter);
         assert!(runtime.wants_live_input());
         assert!(runtime.active_pane().tabs().iter().any(
             |tab| matches!(tab, PaneTab::Live(live) if live.kind == PaneKind::Terminal && live.terminal == root_generic)
@@ -3920,6 +3708,13 @@ mod tests {
         assert_eq!(runtime.active_pane().tabs().len(), before_diff);
 
         let _ = runtime.handle_key(Key::Escape);
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        let _ = runtime.handle_key(Key::Escape);
+        assert!(!runtime.state().director_drawer_open());
         assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
         assert_eq!(runtime.focused_terminal(), Some(managed));
     }

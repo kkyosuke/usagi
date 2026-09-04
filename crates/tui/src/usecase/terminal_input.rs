@@ -213,6 +213,8 @@ pub enum LiveTerminalAction {
     /// Home surface: opening it never mutates the background route, selection, or
     /// active managed session, and re-issuing it closes the drawer.
     Director,
+    /// Move one level up inside the Director hierarchy (`Ctrl-O b`).
+    DirectorBack,
     /// Open the Home Director mode drawer and its explicit New CLI picker
     /// (`Ctrl-O n`). Plain `n` remains terminal input without the leader.
     DirectorNew,
@@ -512,6 +514,7 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     prefix_shortcut!(KeyCode::Char('9') => LiveTerminalAction::ActivateWorkspace(9)),
     prefix_shortcut!(KeyCode::Char('o'), legacy = 15 => LiveTerminalAction::Switch),
     prefix_shortcut!(KeyCode::Char('a'), legacy = 1 => LiveTerminalAction::OpenCloseupModal),
+    prefix_shortcut!(KeyCode::Char('b'), legacy = 2 => LiveTerminalAction::DirectorBack),
     prefix_shortcut!(KeyCode::Char('['), legacy = 27 => LiveTerminalAction::PreviousTab),
     prefix_shortcut!(KeyCode::Char(']'), legacy = 29 => LiveTerminalAction::NextTab),
     prefix_shortcut!(KeyCode::Char('{'), shifted => LiveTerminalAction::MoveTabPrevious),
@@ -1185,7 +1188,7 @@ mod tests {
             );
         }
 
-        for obsolete in ['f', 'u', 'b'] {
+        for obsolete in ['f', 'u'] {
             let mut classifier = LiveInputClassifier::default();
             assert_eq!(
                 classifier.classify(T0, ctrl('o')),
