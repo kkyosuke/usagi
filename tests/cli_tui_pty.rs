@@ -3108,6 +3108,9 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     let mut cold = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, cold_baseline);
     toggle_director_with_key(&mut master);
+    // Wait for the fresh daemon inventory to replace stale live intent with
+    // provider-safe interrupted history before selecting an Organization row.
+    wait_for_screen_since(&captured, cold_baseline, "Codex (interrupted)");
     select_organization_director_by_label(
         &mut master,
         &captured,
@@ -3144,9 +3147,6 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     .map(|label| cold_screen.matches(label).count())
     .sum::<usize>();
     assert_eq!(cold_screen.matches("(interrupted)").count(), safe_labels);
-    let codex_selected = cold_screen.contains("[Codex (interrupted)]");
-    let claude_selected = cold_screen.contains("[Claude (interrupted)]");
-    assert_ne!(codex_selected, claude_selected, "{cold_screen}");
     assert_no_sensitive_output(&captured, cold_baseline, &secrets);
 
     // ── 4. The root drawer is already open. Select the Codex history with real

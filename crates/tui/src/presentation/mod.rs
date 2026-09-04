@@ -6034,7 +6034,9 @@ fn select_director_tab_and_activate(
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
 ) -> bool {
     let outcome = select_director_tab_outcome(key, ui, runtime);
-    if outcome == DirectorTabSelection::Selected {
+    if outcome == DirectorTabSelection::Selected
+        && matches!(runtime.state().director_route(), DirectorRoute::Console(_))
+    {
         activate_focused_interrupted_tab(ui, runtime, pending_targets);
     }
     outcome != DirectorTabSelection::Unhandled
