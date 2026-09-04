@@ -174,7 +174,7 @@ pub enum RuntimeEvent<B> {
     Backend(B),
 }
 
-/// A TUI-local action reserved from the live terminal stream.
+/// A TUI-local action reserved by the process-wide terminal leader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveTerminalAction {
     /// Open the context-aware command list (`Ctrl-O ?`).
@@ -283,7 +283,7 @@ pub enum LiveInputOutput {
     Swallowed,
 }
 
-/// Pure state machine for the default `Ctrl-O` live-terminal prefix scheme.
+/// Pure state machine for the process-wide `Ctrl-O` prefix scheme.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LiveInputClassifier {
     leader_at: Option<Duration>,
@@ -491,12 +491,12 @@ macro_rules! prefix_shortcut {
     };
 }
 
-/// Every action reserved by the live-terminal leader.
+/// Every action reserved by the process-wide terminal leader.
 ///
 /// `control_byte` records the legacy terminal encoding of a control-modified
 /// follow-up. Printable and semantic key events use `code`; their Control bit
 /// is optional for every entry so users may keep holding Control after
-/// pressing the leader.
+/// pressing the leader on any workspace surface.
 const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     prefix_shortcut!(KeyCode::Char('?'), shifted, legacy = 31 => LiveTerminalAction::CommandHelp),
     prefix_shortcut!(KeyCode::Char('+'), shifted => LiveTerminalAction::OpenWorkspace),

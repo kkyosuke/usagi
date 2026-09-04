@@ -48,7 +48,8 @@ TUI 仕様を正本とする。
 
 ## workspace 共通コマンド
 
-`Ctrl-O` の次の入力は 1 秒以内に行う。2打目はすべて `Ctrl` の有無を同一視するため、たとえば
+`Ctrl-O` の次の入力は 1 秒以内に行う。workspace の route・modal・drawer・pane の有無にかかわらず、
+2打目はすべて `Ctrl` の有無を同一視するため、たとえば
 `Ctrl-O p` と `Ctrl-O Ctrl-P`、`Ctrl-O [` と `Ctrl-O Ctrl-[` はそれぞれ同じ操作になる。
 従来型terminalが `Ctrl-[` / `Ctrl-]` を raw `0x1b` / `0x1d` として送る場合も、前 / 次のtabとして扱う。
 
