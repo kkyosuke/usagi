@@ -94,7 +94,7 @@ use usagi_tui::usecase::application::terminal_session::{
     TerminalInputResolution, TerminalSubscription,
 };
 use usagi_tui::usecase::application::work_run_control::{
-    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError,
+    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::doctor::{self, DoctorPort};
@@ -2188,7 +2188,7 @@ impl presentation::WorkRunPort for DaemonWorkRunPort {
         workspace: WorkspaceId,
         operation_id: usagi_core::domain::id::OperationId,
         command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-    ) -> Result<usagi_core::domain::supervisor::SupervisorRunQuery, WorkRunControlError> {
+    ) -> Result<WorkRunControlResult, WorkRunControlError> {
         let mut client =
             crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| {
@@ -2220,13 +2220,27 @@ fn decode_work_run_snapshot_reply(
 
 fn decode_work_run_control_reply(
     reply: DaemonReply,
-) -> Result<usagi_core::domain::supervisor::SupervisorRunQuery, WorkRunControlError> {
+) -> Result<WorkRunControlResult, WorkRunControlError> {
     match reply {
-        DaemonReply::Ok(body) => serde_json::from_value(body).map_err(|_| {
-            WorkRunControlError::Unconfirmed(
-                "daemon returned an invalid Work Run result".to_owned(),
-            )
-        }),
+        DaemonReply::Ok(body) => {
+            if body.get("state").is_some() {
+                serde_json::from_value(body)
+                    .map(|run| WorkRunControlResult::Updated(Box::new(run)))
+                    .map_err(|_| {
+                        WorkRunControlError::Unconfirmed(
+                            "daemon returned an invalid Work Run result".to_owned(),
+                        )
+                    })
+            } else {
+                serde_json::from_value(body)
+                    .map(WorkRunControlResult::Deleted)
+                    .map_err(|_| {
+                        WorkRunControlError::Unconfirmed(
+                            "daemon returned an invalid Work Run deletion".to_owned(),
+                        )
+                    })
+            }
+        }
         // A durable Accepted acknowledgement proves admission, not the final
         // aggregate. Treating its optional body as final could make the UI
         // forget the only operation identity safe to replay after ambiguity.
@@ -2305,9 +2319,17 @@ fn decode_agent_admission(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| format!("{operation} returned an invalid continuation"))?;
+    let supervisor_run_id = body
+        .get("supervisor_run_id")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| format!("{operation} returned an invalid Work Run identity"))?;
     Ok(AgentPaneAdmission {
         terminal,
         continuation,
+        supervisor_run_id,
     })
 }
 
@@ -2496,6 +2518,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         Ok(AgentPaneAdmission {
             terminal: resumed.terminal,
             continuation: resumed.continuation,
+            supervisor_run_id: None,
         })
     }
 
@@ -5531,7 +5554,7 @@ mod tests {
         RepoEnvironmentStore, RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start,
         StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
         TerminalSnapshotMode, TerminalSubscription, VersionProbeResult,
-        WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, agent_goal_request,
+        WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult, agent_goal_request,
         agent_inventory_request, agent_launch_request, child_directory_names,
         classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
         correlate_agent_launch, created_session_hook, current_agent_integrations,
@@ -5688,6 +5711,7 @@ mod tests {
             terminal_at: None,
             terminal_reason: Some("cancelled by local operator".to_owned()),
             display_label: Some("Controlled Goal".to_owned()),
+            root_agent_id: None,
             policy: usagi_core::domain::supervisor::ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),
@@ -5696,7 +5720,17 @@ mod tests {
         let body = serde_json::to_value(&run).unwrap();
         assert_eq!(
             decode_work_run_control_reply(DaemonReply::Ok(body.clone())),
-            Ok(run.clone())
+            Ok(WorkRunControlResult::Updated(Box::new(run.clone())))
+        );
+        let deletion = usagi_core::domain::supervisor::SupervisorRunDeletion {
+            supervisor_run_id: run.supervisor_run_id,
+            state_revision: run.state_revision,
+        };
+        assert_eq!(
+            decode_work_run_control_reply(
+                DaemonReply::Ok(serde_json::to_value(deletion).unwrap(),)
+            ),
+            Ok(WorkRunControlResult::Deleted(deletion))
         );
         assert_eq!(
             decode_work_run_control_reply(DaemonReply::Accepted {
@@ -5710,6 +5744,14 @@ mod tests {
         );
         assert_eq!(
             decode_work_run_control_reply(DaemonReply::Ok(serde_json::Value::Null)),
+            Err(WorkRunControlError::Unconfirmed(
+                "daemon returned an invalid Work Run deletion".to_owned()
+            ))
+        );
+        assert_eq!(
+            decode_work_run_control_reply(DaemonReply::Ok(
+                serde_json::json!({"state": "not-a-supervisor-state"})
+            )),
             Err(WorkRunControlError::Unconfirmed(
                 "daemon returned an invalid Work Run result".to_owned()
             ))
@@ -7667,6 +7709,24 @@ mod tests {
             )
             .unwrap_err(),
             "agent launch returned an invalid continuation"
+        );
+        let supervisor_run_id = usagi_core::domain::supervisor::SupervisorRunId::new();
+        let admission = decode_agent_admission(
+            &json!({
+                "terminal": terminal,
+                "supervisor_run_id": supervisor_run_id,
+            }),
+            "goal launch",
+        )
+        .unwrap();
+        assert_eq!(admission.supervisor_run_id, Some(supervisor_run_id));
+        assert_eq!(
+            decode_agent_admission(
+                &json!({"terminal": terminal, "supervisor_run_id": "invalid"}),
+                "goal launch",
+            )
+            .unwrap_err(),
+            "goal launch returned an invalid Work Run identity"
         );
     }
 

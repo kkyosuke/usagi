@@ -86,7 +86,9 @@ session がない workspace を開いた直後は session 行を選択しない�
 | `Ctrl-O t` / `Ctrl-O Ctrl-T` | workspace root の Shell drawer を開閉する |
 | `Ctrl-O z` / `Ctrl-O Ctrl-Z` | Shell drawer の高さを通常 / 画面いっぱいで切り替える |
 | `Ctrl-O g` / `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
-| `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Director と Work Run 一覧・操作面を開く |
+| `Ctrl-O b` / `Ctrl-O Ctrl-B` | Director 内で一階層戻る |
+| `Ctrl-O w` / `Ctrl-O Ctrl-W` | goal-driven workspace の Work Runs を直接開く |
+| `Ctrl-O n` / `Ctrl-O Ctrl-N` | Director の New Conversation / Start Work Run を開く。Shell では新しい terminal tab を追加する |
 | `Ctrl-O [` / `Ctrl-O ]` | 前 / 次の pane tab を選ぶ |
 | `Ctrl-O {` / `Ctrl-O }` | 選択中の pane tab を前 / 次へ並べ替える |
 | `Ctrl-O p` / `Ctrl-O Ctrl-P` | Pull Request 一覧を開く |
@@ -100,8 +102,8 @@ session がない workspace を開いた直後は session 行を選択しない�
 
 leader 後の文字 shortcut は、2 打目の `Ctrl` の有無を同一視する。たとえば `Ctrl-O n` と
 `Ctrl-O Ctrl-N` は同じ操作になる。直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
-live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。Director では通常文字と paste を
-IME 対応の `Command ›` 入力欄で編集し、`Enter` で 1 行の追加指示として root Agent へ送る。TUI を離れる操作は
+live terminal にフォーカスがある間は、Director の root Agent を含めて `Ctrl-O` prefix 以外の入力を PTY へ直接渡す。
+TUI を離れる操作は
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
 
@@ -114,7 +116,7 @@ generic terminal の `Ctrl-C` は foreground command を割り込んで画面を
 右側を高さ一杯に使う overlay で、workspace Shell と同時に開ける。両方が開いているときは panel のクリックでも focus が移り、
 左側に見えている Shell の選択・コピーを継続できる。title の `FOCUS` / `click to focus` が入力先を示す。選択 session の Agent は
 drawer の背面でも通常の workspace geometry と attachment のまま出力を更新し続ける。最後の実行中または起動中 root Agent が
-消えると Director は自動で閉じる。
+消えても Director と現在 route は保持され、Console は停止状態を表示する。
 live Agent では同じ close chord が `Ctrl-D` と同じ終了入力になり、interrupted Agent では選択中の tab を
 永続的に閉じる。interrupted tab の close は Agent の resume や新規起動を行わない。
 interrupted tab をクリックまたは tab 移動で明示選択すると、exact resume 可能ならその会話だけを再開する。
@@ -280,15 +282,16 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
 | Base branch | workspace で新しい session を作るときの既定 branch |
-| Workflow | `classic`（既定）の会話 picker、または `goal-driven` の Goal Composer。後者は Director の New で目的を一度入力し、review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す |
+| Workflow | `classic`（既定）の New Conversation、または `goal-driven` の Start Work Run。後者は Goal Composer で目的を一度入力し、review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す |
 | [Team](document/10-session-roles.md#catalog) | Enterで構造図付きカードを開き、`none` / `hierarchical`（階層型）/ `flat`（フラット）/ `pipeline`（パイプライン）から session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
 | [Roles](document/10-session-roles.md#rolestoml-の設定例) | `roles [workspace|global]` で編集する session / root ごとの追加 instruction、既定 role、委譲制限 |
 
-`goal-driven` を選んだ workspace では `Ctrl-O Ctrl-G` → `New` が Goal Composer になり、目的と provider を確定して
-Work Run を開始する。進行と停止理由は Director に表示し、`Ctrl-O w` で最大16件の Run を選択して cancel または
-supervisor escalation の retry / cancel / fail を実行できる。一般の blocking choice は既存 Decision、成果 PR は既存 PR 一覧に表示する。
+`goal-driven` を選んだ workspace では `Ctrl-O n` または Director の `[ Start ]` から Goal Composer を開き、目的と
+provider を確定して Work Run を開始する。`Ctrl-O w` は最大16件の Work Runs を直接開き、`Enter` で選択 Run の
+Run Overview へ進む。Work Runs / Run Overview の `Ctrl-C` は active Run の cancel 確認、`Ctrl-X` は終了済み Run の
+履歴削除確認で、確認中の `Ctrl-C` / `Esc` は取り消しになる。一般の blocking choice は既存 Decision、成果 PR は既存 PR 一覧に表示する。
 詳細な操作と現行契約は [goal-driven workflow](document/03-tui.md#goal-driven-workflow)を参照する。
 
 環境変数は Config の `Env  [ N variables ]`、Overview の `env [workspace|global]`、Closeup の `env` で編集する。

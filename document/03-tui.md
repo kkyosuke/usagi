@@ -534,10 +534,11 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `s` | OpenNotes | focused target の Scratchpad を開く |
 | `Ctrl-O` `,` | OpenGarden | 前面 modal が無い workspace の session garden を開く |
 | `Ctrl-O` `g` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
-| `Ctrl-O` `w` | WorkRuns | goal-driven workspace の Work Run 一覧・操作面を開く。Director が閉じていれば同じ操作で drawer も開く。classic、overlay 表示中、Director の New / launch 中は Work Run 面へ遷移せず、leader のない `w` / `Ctrl-W` は PTY が所有する |
+| `Ctrl-O` `b` | DirectorBack | Director 内で一階層戻る。Console では PTY に送らず parent の Organization / Run Overview へ戻る |
+| `Ctrl-O` `w` | WorkRuns | goal-driven workspace の Work Runs を直接開く。Director が閉じていれば同じ操作で drawer も開く。classic、overlay 表示中、Start Work Run / launch 中は遷移せず、leader のない `w` / `Ctrl-W` は PTY が所有する |
 | `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する |
 | `Ctrl-O` `z` | WorkspaceTerminalFullHeight | workspace terminal の高さを通常 drawer / 画面いっぱいで切り替える |
-| `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する。workspace terminal では新しい terminal tab を開く |
+| `Ctrl-O` `n` | DirectorNew | Director を開き、classic では New Conversation、goal-driven では Start Work Run を表示する。workspace terminal では新しい terminal tab を開く |
 | `Ctrl-O` `}` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `{` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
@@ -547,7 +548,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 | `Ctrl-O` `End` | ScrollBottom | 右ペインを live bottom へ 1 手で戻し、新しい出力への追従を再開する |
 
-follow-up の letter は `a` / `d` / `g` / `n` / `o` / `p` / `r` / `s` / `t` / `v` / `w` / `x` / `z` である。
+follow-up の letter は `a` / `b` / `d` / `g` / `n` / `o` / `p` / `r` / `s` / `t` / `v` / `w` / `x` / `z` である。
 leader 後は 2 打目の `Ctrl` の有無を同一視し、semantic key と raw control byte のどちらでも同じ action に正規化する。
 たとえば `Ctrl-O n` と `Ctrl-O Ctrl-N` はどちらも New、`Ctrl-O p` と `Ctrl-O Ctrl-P` はどちらも Pull Request になる。
 `Ctrl-O` leader がない単体 letter は PTY へ送る。`?` / `,` / `[` / `]` / `{` / `}` / `↑` / `↓` / `End` も
@@ -602,18 +603,20 @@ workspace open / daemon reconnect では live root generic Terminal を inventor
 
 ## 指示モード（Director mode）
 
-選択中の Director terminal がないとき、drawer は role projection から Organization tree を表示する。root Director の下に
-Manager、さらに Executor をインデントし、各行には `active` / `waiting` / `stopped` / `ready` の安全な状態だけを表示する。
-provider 固有 ID、prompt、inbox 本文は表示しない。
-
 root scope（`session_id: None`）の Agent へ指示を出し、session を作らせる面を**指示モード**（英語 / identifier は
 `director`）と呼ぶ。この節が指示モードの名称と仕様の正本である。managed session の実作業を見る面
 （[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home header の下から右端へ重なる drawer として現れる。
 
+Director shell は明示 route を持ち、初回 open は `Organization`、再 open は直前 route へ戻る。階層は
+`Organization`、`Work Runs` → `Run Overview` → `Director Console`、および一時的な `Start Work Run` である。
+各画面は `Director / …` breadcrumb を表示する。Organization は root Director conversation と role projection の
+workspace-wide tree、Work Runs は Run の集合、Run Overview は daemon projection の 1 Run、Console は 1 root Agent の
+PTY だけを所有する。provider 固有 ID、prompt、inbox 本文は表示しない。
+
 Home header の右端には Unicode の chess queen を使う `[ ♛ Director ]` button を表示し、drawer title も
 `♛ Director` とする。glyph は直接描画し、狭幅でも
-Unicode display width による clip と hit-test を維持する。workspace identity は直上の project tab だけに表示し、
-Home header へ重複する breadcrumb は置かない。mode toggle、pending decision の notice badge、button は 1 つの
+Unicode display width による clip と hit-test を維持する。workspace identity は直上の project tab だけに表示する。
+mode toggle、pending decision の notice badge、button は 1 つの
 header layout が表示幅と click range を同時に計算する。そのため notice の有無や狭幅での clip があっても、
 描画された button / badge と hit-test は同じ terminal cell を指す。
 
@@ -622,40 +625,37 @@ button の強調は mode toggle と同じ「入力 focus を持つ面がアク�
 うち Director が focus を持つ frame だけ accent + reverse になり、入力先が一意に読める。狭幅で mode toggle を落として button だけを
 clip する場合も、この対比は変わらない。
 
-button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
-指示モードの open/closed state を toggle する。drawer の通常幅は端末幅の 60% とし、
+button または `Ctrl-O g`（`Ctrl-O Ctrl-G`）は、Switch、managed-session Closeup、live pane のいずれからも同じ
+指示モードの open/closed state を toggle し、close 中も Director route を保持する。drawer の通常幅は端末幅の 60% とし、
 56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
 同時に保てない幅では全幅へ縮退する。PR modal と同じ合成 overlay であり、背景 Home は header を残して ANSI span ごと dim にするが、
 完全に隠れる managed terminal も通常の Home geometry と attachment を維持する。
-drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
+Console の terminal viewport は drawer の border、breadcrumb、separator、footer を除いて計算し、
 managed-session Closeup の right pane viewport とは別の pure geometry とする。背景に見えている managed Agent は
 その通常の right pane viewport の幅と attachment、出力 poll を維持し、dim 表示中も live output を描く。
 
-drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
-conversation selector に表示する。generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
-Diff と Terminal pending/action は Director の restore projection と pane admission で拒否する。live Agent の continuation が intent context 未作成、未 observe、CAS 後の投影遅延で
-まだ得られない場合も terminal fence を identity として selector に残し、provider metadata を含まない `Agent` を
-fallback label にする。terminal view がある frame は conversation inventory の有無にかかわらず PTY 出力を描き、
-terminal view も conversation も無い場合だけ empty state を描く。drawer の開閉状態にかかわらず `Ctrl-O n`
-（または `Ctrl-O Ctrl-N`）、または `[ New ]` の mouse-down hit で drawer を開いて
-合成ルートから注入された install 済み CLI だけを `claude`、`codex`、`sakana.ai` の順で picker に表示する。
+Organization は root scope（`session_id: None`）の live / pending / interrupted Agent conversation と、managed Session / Agent の
+Organization tree を表示する。generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
+Diff と Terminal pending/action は Director の restore projection と pane admission で拒否する。`↑` / `↓` は root Director を
+stable tab identity で選び、`Enter` は選択した root Agent の Console を開く。Console だけが terminal view を描き、
+Organization、Work Run progress、追加の command editor は混ぜない。
+
+drawer の開閉状態にかかわらず `Ctrl-O n`（または `Ctrl-O Ctrl-N`）、または `[ New ]` / `[ Start ]` の mouse-down hit で
+classic の `New Conversation` または goal-driven の `Start Work Run` を開く。合成ルートから注入された install 済み CLI だけを
+`claude`、`codex`、`sakana.ai` の順で picker に表示する。
 設定済み default が候補ならそこを、なければ先頭候補を highlight するが、自動確定はしない。`↑↓` は循環選択し、
-`Enter` は選択した CLI の explicit profile を確定する。`Esc` は conversation order / selection と drawer open
-状態を変えず picker だけを閉じる。候補が 0 件なら picker を開かず、installation と Config の確認を促す
+`Enter` は選択した CLI の explicit profile を確定する。`Esc` は保存済み Director route / selection と drawer open
+状態を変えず picker だけを閉じる。候補が 0 件なら installation と Config の確認を促す
 safe empty state を表示し、daemon request を発行しない。
 
-live Agent を選択している通常の Director は terminal の下に 1 行の `Command ›` composer を表示する。通常文字、
-Backspace / Delete、Home / End、左右移動と Shift 選択、paste を Unicode の文字境界で編集し、`Enter` で draft 全文と
-末尾の `CR` を一度に selected root Agent の PTY へ送って実行する。IME の確定文字列として届く printable UTF-8 block も
-直接 PTY protocol に解釈させず同じ composer へ挿入するため、日本語の確定文字列と caret が入力欄に留まる。
-paste 内の改行・tab は可視 space に正規化し、control byte は command に混ぜない。draft は 16 KiB の完全な UTF-8 境界まで保持し、
-terminal が入力を書き込むか順序 queue へ受理したときに clear する。確実な未送信時は draft を残して再送できるが、部分書き込みや
-acknowledgement loss で効果が不明な場合は二重実行を避けるため clear して警告する。`Esc` と opaque control sequence、
-terminal selection / copy、`Ctrl-O` control は composer が奪わず、従来どおり Agent PTY または TUI control が所有する。
+live Agent の Director Console は managed session の Agent pane と同じ入力経路を使う。通常文字、IME の
+確定文字列、paste、`Enter`、`Esc`、編集キーは追加の入力欄へ保持せず selected root Agent の PTY へ直接送る。
+terminal selection / copy と `Ctrl-O` control は既存の live terminal contract を共有する。`Ctrl-O b` は PTY に送らず
+Console の parent（Organization または Run Overview）へ戻り、`Ctrl-O w` は Work Runs へ直接移動する。
 
 Director を開いた状態で最後の live / starting root Agent が exit、close、launch failure、または authoritative restore により
-消えた場合、Director は自動で閉じる。root Shell も開いていれば focus を Shell へ戻す。利用者が空の Director を明示的に
-開いた場合は New を開始できるよう自動では閉じず、interrupted history も再度開けば選択・resume できる。
+消えても drawer と route は保持する。Console は safe failure / stopped detail を表示し、`Ctrl-O b` で parent へ戻れる。
+drawer 全体を閉じるのは `Ctrl-O g`、header button、または Organization の `Esc` だけである。
 
 picker の viewport は selection に追従し、候補が picker の行数を超える端末でも highlight 中の候補を必ず描く。
 窓の外に残る候補は `↑ N more` / `↓ N more` へ畳むが、この indicator は候補と同じ行数を分け合うため、
@@ -675,10 +675,10 @@ conversation だけで、managed Closeup の tab count・identity・selection �
 
 ### goal-driven workflow
 
-実効 Workspace 設定の Workflow が `goal-driven` の場合、New は CLI だけの picker ではなく Goal Composer を開く。
+実効 Workspace 設定の Workflow が `goal-driven` の場合、Start Work Run は CLI だけの picker ではなく Goal Composer を開く。
 Composer は必須の `Goal` と install 済み provider の選択を同じ drawer に表示し、通常文字、Backspace、bracketed paste を
 Goal が所有する。paste 内の改行・tabを含む区切り whitespace は単一 field の可視 space へ正規化し、その他の terminal control と bidi control は
-保存しない。`↑` / `↓` は provider だけを循環し、`Esc` は draft を破棄して conversation へ戻る。空または空白だけの
+保存しない。`↑` / `↓` は provider だけを循環し、`Esc` は draft を破棄して開始前の exact Director route へ戻る。空または空白だけの
 Goal、または選択中 provider を描けない高さは launch を発行せず、footer に `Terminal too short to choose provider` を出す。
 TUI は 16 KiB を超える入力部分を受け付けず、上限までの完全な UTF-8 境界だけを保持する。daemon も 16 KiB 超の request と
 非空条件を admission 前に再検証する。
@@ -707,17 +707,21 @@ Home と Director は共通 projection から同じ並び順・集計を読む�
 IPCは行わない。
 workspace 所有情報を持たない旧 run は別 workspace へ推測せず表示しない。
 
-Goal-driven Director では `Ctrl-O w` が同じ projection の最大16件を stable run ID で選べる Work Run 操作面を開く。
-Director が閉じていれば同時に drawer を開き、操作面の一覧では `↑` / `↓`（`←` / `→` も同じ）で Run を選び、
-`Enter` で状態に応じた action へ進み、`Esc` または一覧上の `Ctrl-O w` で閉じる。終了済みと Escalated 以外の run の
-cancel は再度 `Enter` を押す確認を必須とする。Escalated run は観測した exact escalation ID に対する
-Resume work / Cancel run / Mark failed だけを提示し、停止理由と safe evidence を同じ画面に表示する。
-artifact rejection の `Resume work` は保存済み provenance の exact Agent run へ修正と再報告を指示できた場合だけ escalation を解除し、
-Agent が既に停止している場合は結果未確認として run を停止状態のまま保つ。Agent 再作業を伴わない escalation は durable decision を直接適用する。
-`↑` / `↓` / `←` / `→` で選択して `Enter` で確定する。
-完了済み run は read-only である。観測が失敗した cached snapshot と初回 pending は操作を拒否し、
-fresh snapshot を取得してからだけ typed command を送る。送信中の連打は消費し、応答が未確認なら `Enter` は新しい操作を作らず
-同じ operation ID を再送する。副作用なしの確定拒否は再試行画面にせず理由を表示して一覧へ戻る。`Esc` は確認・判断画面から一覧へ戻り、cancel 自体を暗黙に実行しない。結果不明の再試行画面では operation ID を破棄せず操作面だけを閉じ、再度開いたときに同じ operation の再試行へ戻す。
+Goal-driven Director では `Ctrl-O w` が同じ projection の最大16件を stable run ID で選べる Work Runs を直接開く。
+Director が閉じていれば同時に drawer を開き、`↑` / `↓` で Run を選ぶ。`Enter` は mutation を起こさず、選択した
+`SupervisorRunId` の Run Overview を開く。Run Overview は Goal、state、task progress、停止理由と redaction-safe な root
+Director identity を表示し、root Director の `Enter` だけが Console を開く。identity が無い場合は時刻、label、tab 順から推測せず
+固定 footer に unavailable feedback を出す。
+
+Work Runs と Run Overview の plain `Ctrl-C` は active Run の cancel 確認、plain `Ctrl-X` は
+`Succeeded` / `Failed` / `Cancelled` の終了済み Run の delete 確認を開く。active Run の `Ctrl-X` と finished Run の
+`Ctrl-C` は mutation を起こさず、一覧行を動かさない固定 footer に理由を表示する。Escalated Run の cancel は観測した exact
+escalation ID の `Cancel` decision として送る。確認中の `Esc` / `Ctrl-C` は元画面へ戻る。
+
+cancel / delete は fresh snapshot からだけ typed command を送る。delete は fresh `OperationId`、exact `SupervisorRunId`、
+観測済み state revision を daemon に渡し、daemon が workspace ownership、terminal state、revision を再検証して
+supervisor store から履歴を削除する。送信中の連打は消費し、応答が未確認なら新しい操作を作らず同じ operation ID を再送する。
+確定拒否は理由を固定位置へ表示し、削除 receipt は exact ID / revision が一致したときだけ projection から row を除く。
 
 snapshot と command は workspace ごとの単一 `WorkRunPort` lane を直列に共有するため、古い観測が操作結果を追い越さない。
 snapshot は workspace・件数上限・重複・private provenance を、command 応答は exact run ID・private provenance を境界で検証し、
@@ -764,44 +768,43 @@ next / previous・Garden のうさぎで明示選択したとき、resume 可能
 `TerminalRef` がすべて一致した成功だけを同 slot の live Agent tab へ置換する。drawer を閉じている間に応答した置換は
 root background entry だけを更新し、managed foreground を奪わない。resume 不可の明示選択は削除確認を前面に出す。
 
-drawer open 中は focus 中の drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
-それらへ key / click / pointer を伝播しない。root Agent tab の terminal input と `Ctrl-O` tab controls、および
-New picker の `↑↓` / `Enter` / `Esc`、`Ctrl-O n` の New、`Ctrl-O g` の close だけを受理する。picker が閉じている
-間の通常文字と編集キーは command composer、`Enter` は composer の一括送信、`Esc` と opaque control sequence は root Agent terminal へ送る。`[ New ]` の mouse-down は
-drawer が先に消費して picker を開き、同じ pointer gesture を背景 Closeup の click / focus / attach 選択へ
-fallthrough させない。picker Choosing 中の `[ New ]` 再クリックは inert とし、mouse-up も背景へ渡さないため、
-launch は明示的な `Enter` だけが発行する。開閉は Home mode、selected cursor、active managed session、
-managed pane の selected tab、terminal scroll / text selection を変更しない。既存 modal が前面にある間は drawer
-shortcut と header button を受理しない。drawer open 中の root foreground availability は背景 Closeup modal を
-開かず、modal と drawer は同時に visible にならない。
+drawer open 中は focus 中の Director route が sidebar、managed pane、Home header の別 action、通常の global action の入力を
+所有し、それらへ key / click / pointer を伝播しない。Organization、Work Runs、Run Overview、Start Work Run は management
+surface であり、通常文字や `Enter` を背面の PTY へ送らない。Director Console だけが root Agent terminal input と
+`Ctrl-O` tab controls を受理し、追加の入力 bar や command composer は持たない。`[ New ]` / `[ Start ]` の mouse-down は
+drawer が先に消費し、同じ pointer gesture を背景 Closeup の click / focus / attach 選択へ fallthrough させない。picker 中の
+button 再クリックは inert とし、launch は明示的な `Enter` だけが発行する。開閉は Home mode、selected cursor、active managed
+session、managed pane の selected tab、terminal scroll / text selection を変更しない。既存 modal が前面にある間は drawer
+shortcut と header button を受理せず、modal と drawer は同時に visible にならない。
 
-**`Esc` は selected root Agent が所有する**。agent CLI は `Esc` を自身の中断・取消として読むため、live
-conversation が attach している間の `Esc` は drawer を閉じず、その PTY へ `0x1b` を 1 回だけ送る。drawer を
-閉じるのは `Ctrl-O Ctrl-G` と header button である。`Esc` が drawer の close になるのは、`Esc` を受け取れる
-live conversation が無い frame（conversation が空、または pending / interrupted tab だけを選択中）に限る。
-picker が開いている間の `Esc` は picker だけを閉じ、PTY へは届かない。
+Director Console が live Agent を attach している間の `Esc` は Agent CLI が所有し、PTY へ `0x1b` を 1 回だけ送る。
+Console から parent route へ戻る操作は `Ctrl-O b`、drawer 全体を閉じる操作は `Ctrl-O g` または header button である。
+Console が non-live の場合だけ `Esc` でも parent route へ戻る。Organization の `Esc` は drawer を閉じ、Work Runs / Run
+Overview の `Esc` は一階層戻る。
 
-New picker の `Choosing` / `Empty` と launch pending (`Launching`) は排他的な foreground input owner である。この owner は
-上記の picker 予約操作以外の keyboard / `Char` / paste / terminal copy / pointer と、tab の選択・移動・close・resume、
-terminal scroll を inert に消費する。したがって背後の root Agent PTY bytes、pane/tab state、scroll、text selection、
-attach/detach は変化しない。terminal resize と backend/timer tick だけは owner を越えて通常の frame 処理へ進む。
-`Esc` で picker を閉じた次の input から drawer conversation の規則へ戻り、通常文字・paste・`Enter` は selected root
-Agent PTY へ送る。
+New Conversation / Start Work Run の `Choosing` / `Empty` と launch pending (`Launching`) は排他的な foreground input owner
+である。この owner は picker / composer の予約操作以外の keyboard / paste / terminal copy / pointer と、tab の選択・移動・
+close・resume、terminal scroll を inert に消費する。したがって背後の root Agent PTY bytes、pane/tab state、scroll、text
+selection、attach/detach は変化しない。terminal resize と backend/timer tick だけは owner を越えて通常の frame 処理へ進む。
+`Esc` は draft を破棄して開始前の exact Director route へ戻り、PTY へは届かない。
 
 入力 context の優先順位と遷移は次のとおりである。
 
 | 現在の context | 入力 | 次の context / effect |
 |---|---|---|
 | modal | drawer chord / button | modal を維持し、drawer は開かない |
-| drawer conversation | `Ctrl-O Ctrl-G` / header button | drawer を閉じ、元の route / managed pane selection / focus を復元する |
-| drawer conversation（live Agent あり） | `Esc` | selected root Agent PTY へ `0x1b`。drawer は開いたまま |
-| drawer conversation（live Agent なし） | `Esc` | drawer を閉じ、元の route / managed pane selection / focus を復元する |
-| drawer conversation | `Ctrl-O n` / `[ New ]` click | drawer picker。背景への pointer / key effect は発行しない |
-| drawer conversation | `Ctrl-O [` / `Ctrl-O ]` | conversation の前 / 次を選ぶ |
-| drawer conversation | 通常文字 / `Enter` | selected root Agent PTY。New picker は開かない |
-| drawer picker | `↑` / `↓` | picker 内の CLI 選択だけを循環する |
-| drawer picker | `Esc` | picker だけを閉じ、drawer conversation に戻る |
-| drawer picker | `Enter` | root scope launch を 1 件発行し、drawer を最前面に保つ |
+| Organization | `Enter` / `Esc` | 選択 root Director の Console / drawer close |
+| Work Runs | `Enter` / `Esc` | 選択 Run の Run Overview / Organization |
+| Run Overview | `Enter` / `Esc` | root Director の Console / Work Runs |
+| Work Runs / Run Overview | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の delete 確認 |
+| Work Run 確認 | `Enter` / `Esc` / `Ctrl-C` | command 発行 / 元 route へ戻る |
+| Director Console（live） | `Esc` / 通常文字 / `Enter` | selected root Agent PTY |
+| Director Console | `Ctrl-O b` | Organization または Run Overview |
+| Director route | `Ctrl-O g` / header button | drawer を閉じ、route と背面の selection / focus を保持する |
+| Director route | `Ctrl-O n` / `[ New ]` / `[ Start ]` click | New Conversation / Start Work Run。背景への effect は発行しない |
+| New Conversation / Start Work Run | `↑` / `↓` | provider 選択だけを循環する |
+| New Conversation / Start Work Run | `Esc` | draft を捨て、開始前の exact route へ戻る |
+| New Conversation / Start Work Run | `Enter` | root scope launch を 1 件発行する。goal-driven は該当 Run Overview へ進む |
 
 ## Home frame loop と背景観測 lane
 
@@ -1932,8 +1935,9 @@ burst も1件ずつ収束する。入力は1 MiB、stdout/stderr は各8 KiBを�
 Linux `xdg-open` / Windows `cmd /C start "" <url>`）を使い、未対応 platform・起動失敗は TUI を乱さず safe feedback にする。
 pointer の release は PTY へ入力として転送しない。
 
-live terminal に focus がある間、Director の command composer が前面で所有する通常文字・paste・編集キー・`Enter` を除き、leader が無い
-`Ctrl-C` / `Ctrl-Q` / `Ctrl-D` / `Ctrl-X` / `Ctrl-?`（`Ctrl-/`）以外の非 prefix キー入力（修飾キー・raw bytes・Tab・矢印など）は management ではなく PTY へ送られる。
+live terminal に focus がある間、leader が無い `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` / `Ctrl-X` / `Ctrl-?`（`Ctrl-/`）以外の
+非 prefix キー入力（修飾キー・raw bytes・Tab・矢印など）は management ではなく PTY へ送られる。Director Console も同じ
+経路を使い、通常文字・paste・編集キー・`Enter` を横取りする command composer や入力 bar は置かない。
 矢印は対応する CSI 列、Enter は `CR` に符号化する。端末では bracketed paste（DECSET 2004）を有効にし、複数行の貼り付けを 1 つの paste イベントとして受け取る。PTY 側の program が DECSET 2004 を要求している間だけ bracketed paste マーカー（`ESC[200~` … `ESC[201~`）で包んで転送し、agent が埋め込まれた改行ごとに 1 行ずつ実行せず 1 ブロックとして挿入できるようにする（貼り付け内に含まれる終了マーカーは注入対策として除去する）。要求していない間は元の text をそのまま転送し、マーカーを文字として混入させない。tab 巡回、PR modal、Closeup/Switch の遷移は
 `Ctrl-O` prefix（tab の `Ctrl-O [` / `Ctrl-O ]`、PR の `Ctrl-O p`、Preview の `Ctrl-O v`、Switch の `Ctrl-O o`）だけが所有する。前面 modal や forced action modal がある間は
 その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。
@@ -2264,11 +2268,11 @@ resume request を作らない。要求は選択中の exact tab の `AgentResum
 ### surface ごとの表示と操作
 
 投影された interrupted tab は target ごとの pane registry entry に入り、root と managed session の history は
-互いに混ざらない。root は[指示モード](#指示モードdirector-mode)の conversation selector、managed session は Closeup の live tab と
+互いに混ざらない。root は[指示モード](#指示モードdirector-mode)の Organization と Director Console、managed session は Closeup の live tab と
 同じ tab strip に表示する。live restore は live membership だけを所有し、interrupted tab の membership・順序・
 selection は projection だけが所有する。
 
-cold restart 直後のように **interrupted tab しか無い target** でも、root drawer は conversation surface、
+cold restart 直後のように **interrupted tab しか無い target** でも、root drawer は Organization、
 managed-session Closeup は action launcher ではなく tab strip へ着地する（[Closeup pane](#closeup-pane) の入力所有者は
 live PTY の有無ではなく tab の有無で決まる）。history tab は managed-session Closeup と root drawer のどちらでも
 click または `Ctrl-O [` / `Ctrl-O ]` で明示選択する。resume 可能なら選択時に exact resume を開始し、選択済み tab は

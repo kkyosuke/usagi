@@ -35,7 +35,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
-use usagi_core::domain::supervisor::{MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, SupervisorRunQuery};
+use usagi_core::domain::supervisor::{MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, SupervisorRunId};
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
@@ -49,8 +49,8 @@ use crate::presentation::theme::{Color, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::create_session_error_modal;
 use crate::presentation::views::director_drawer::{
-    self, DirectorCommandProjection, DirectorConversation, DirectorDrawerProjection,
-    DirectorNewProjection, DirectorOrganizationRow, WorkRunControlProjection,
+    self, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
+    DirectorOrganizationRow, WorkRunControlProjection,
 };
 use crate::presentation::views::key_help::{self, Context as KeyHelpContext};
 use crate::presentation::views::new::{self, DirectoryCompletion, Field, New};
@@ -72,17 +72,18 @@ use crate::presentation::workspace_deck::{
     OverlayIntent, ProjectBarTarget, WorkspaceDeck, project_bar, render_overlay,
 };
 use crate::presentation::workspace_runtime::{
-    DirectorCommandInput, InterruptedRemovalConfirmation, PaneRestoreTarget, WorkspaceRuntime,
+    InterruptedRemovalConfirmation, PaneRestoreTarget, WorkspaceRuntime,
 };
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
     AgentTabIntentPortCommit, AgentTabProjection,
 };
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState, DirectorNew,
-    Effect, EnvironmentEntry, ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice,
-    OperationResult, Overlay, PendingToken, RoleChoice, Route, SessionBranchCatalog,
-    SessionRoleCatalog, SessionRoleProjection, Target, WorkspaceDrawerFocus,
+    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState,
+    DirectorConsoleParent, DirectorNew, DirectorRoute, Effect, EnvironmentEntry, ExitChoice,
+    Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay, PendingToken,
+    RoleChoice, Route, SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection, Target,
+    WorkspaceDrawerFocus,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -101,14 +102,13 @@ use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
-    SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputError,
-    TerminalInputOutcome, TerminalInputResolution, TerminalSession, TerminalStreamPort,
-    TerminalSubscription,
+    SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
+    TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
 };
 pub use crate::usecase::application::work_run_control::WorkRunPort;
 use crate::usecase::application::work_run_control::{
     WORK_RUN_ACTION_UNCONFIRMED, WorkRunControl, WorkRunControlAction, WorkRunControlError,
-    WorkRunControlMode, WorkRunControlOutcome, WorkRunControlRequest,
+    WorkRunControlMode, WorkRunControlOutcome, WorkRunControlRequest, WorkRunControlResult,
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal, open_failure_notice};
 use crate::usecase::overview::SessionCommand;
@@ -128,6 +128,9 @@ pub use crate::usecase::application::{
 pub struct AgentPaneAdmission {
     pub terminal: TerminalRef,
     pub continuation: Option<AgentContinuationRef>,
+    /// Present only for a goal-driven root launch, allowing Start Work Run to
+    /// enter the exact daemon-owned Run Overview without label/order inference.
+    pub supervisor_run_id: Option<SupervisorRunId>,
 }
 
 /// Daemon client vocabulary for one workspace's Agent / terminal boundary.
@@ -843,7 +846,8 @@ fn workspace_foreground_input_owner(runtime: &WorkspaceRuntime) -> WorkspaceFore
     if runtime.state().overlay().is_none()
         && runtime.state().director_drawer_open()
         && (runtime.state().director_launching().is_some()
-            || !matches!(runtime.state().director_new(), DirectorNew::Idle))
+            || !matches!(runtime.state().director_new(), DirectorNew::Idle)
+            || !matches!(runtime.state().director_route(), DirectorRoute::Console(_)))
     {
         WorkspaceForegroundInputOwner::DirectorPicker
     } else {
@@ -856,14 +860,29 @@ fn workspace_foreground_input_owner(runtime: &WorkspaceRuntime) -> WorkspaceFore
 /// stall behind the foreground owner.
 fn handle_director_picker_input(runtime: &mut WorkspaceRuntime, key: &Key) -> Option<Vec<Effect>> {
     if workspace_foreground_input_owner(runtime) == WorkspaceForegroundInputOwner::DirectorPicker {
+        // Organization is management-owned, but its Director selector lives at
+        // the pane seam because changing a row also persists exact Agent intent.
+        // Let only those navigation keys reach `select_director_tab`; every
+        // other non-Console input remains exclusive to the drawer.
+        if matches!(runtime.state().director_new(), DirectorNew::Idle)
+            && runtime.state().director_route() == DirectorRoute::Organization
+            && matches!(
+                key,
+                Key::Up
+                    | Key::Down
+                    | Key::Live(LiveTerminalAction::PreviousTab | LiveTerminalAction::NextTab)
+            )
+        {
+            return None;
+        }
         return match key {
             Key::Resize | Key::Other => None,
             _ => Some(runtime.handle_key(key.clone())),
         };
     }
-    // The conversation is not exclusive because its selected root Agent owns
-    // ordinary terminal input. Its drawer-local open/close operations still
-    // precede PTY forwarding and the Home reducer.
+    // Console is not exclusive because its selected root Agent owns ordinary
+    // terminal input. Its drawer-local open/close operations still precede PTY
+    // forwarding and the Home reducer.
     if runtime.state().overlay().is_none()
         && runtime.state().director_drawer_open()
         && (matches!(
@@ -882,7 +901,18 @@ struct WorkRunControlInput {
     effects: Vec<Effect>,
 }
 
+#[cfg(test)]
 fn handle_work_run_control_input(
+    runtime: &mut WorkspaceRuntime,
+    control: &mut WorkRunControl,
+    runs: &WorkRunProjection,
+    key: &Key,
+) -> Option<WorkRunControlInput> {
+    handle_work_run_control_input_with_ui(None, runtime, control, runs, key)
+}
+
+fn handle_work_run_control_input_with_ui(
+    ui: Option<&mut WorkspaceUi>,
     runtime: &mut WorkspaceRuntime,
     control: &mut WorkRunControl,
     runs: &WorkRunProjection,
@@ -892,41 +922,63 @@ fn handle_work_run_control_input(
         && runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven
         && runtime.state().director_launching().is_none()
         && matches!(runtime.state().director_new(), DirectorNew::Idle);
-    let effects = if can_host
-        && !runtime.state().director_drawer_open()
-        && matches!(key, Key::Live(LiveTerminalAction::WorkRuns))
-    {
-        runtime.handle_key(Key::Live(LiveTerminalAction::Director))
+    let direct_work_runs = matches!(key, Key::Live(LiveTerminalAction::WorkRuns));
+    let effects = if can_host && direct_work_runs {
+        runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorWorkRuns))
     } else {
         Vec::new()
     };
     let eligible = can_host && runtime.state().director_drawer_open();
     if !eligible {
         if control.mode() != WorkRunControlMode::Submitting {
-            control.close();
+            control.suspend();
         }
         return None;
     }
-    if control.mode() == WorkRunControlMode::Closed
-        && !matches!(key, Key::Live(LiveTerminalAction::WorkRuns))
-    {
+    if direct_work_runs {
+        control.open(runs.runs());
+        return Some(WorkRunControlInput {
+            outcome: WorkRunControlOutcome::Consumed,
+            effects,
+        });
+    }
+    let route = runtime.state().director_route();
+    let run_surface = matches!(
+        route,
+        DirectorRoute::WorkRuns | DirectorRoute::RunOverview(_)
+    );
+    if !run_surface {
+        if control.mode() != WorkRunControlMode::Submitting {
+            control.suspend();
+        }
         return None;
+    }
+    if control.mode() == WorkRunControlMode::Closed {
+        control.open(runs.runs());
+    }
+    if let DirectorRoute::RunOverview(run_id) = route {
+        control.focus(run_id, runs.runs());
     }
     if matches!(key, Key::Resize | Key::Other) {
         return None;
     }
     if matches!(key, Key::Live(LiveTerminalAction::Director)) {
-        control.close();
+        control.suspend();
         return None;
     }
+    if control.mode() == WorkRunControlMode::List {
+        return Some(handle_work_run_list_input(
+            ui, runtime, control, runs, key, route, effects,
+        ));
+    }
     let action = match key {
-        Key::Live(LiveTerminalAction::WorkRuns) => WorkRunControlAction::Toggle,
         Key::Up => WorkRunControlAction::Up,
         Key::Down => WorkRunControlAction::Down,
         Key::Left => WorkRunControlAction::PreviousDecision,
         Key::Right => WorkRunControlAction::NextDecision,
         Key::Enter => WorkRunControlAction::Enter,
-        Key::Escape => WorkRunControlAction::Escape,
+        Key::Escape | Key::Live(LiveTerminalAction::DirectorBack) => WorkRunControlAction::Escape,
+        Key::Quit => WorkRunControlAction::Cancel,
         _ => {
             return Some(WorkRunControlInput {
                 outcome: WorkRunControlOutcome::Consumed,
@@ -942,6 +994,108 @@ fn handle_work_run_control_input(
         ),
         effects,
     })
+}
+
+fn handle_work_run_list_input(
+    ui: Option<&mut WorkspaceUi>,
+    runtime: &mut WorkspaceRuntime,
+    control: &mut WorkRunControl,
+    runs: &WorkRunProjection,
+    key: &Key,
+    route: DirectorRoute,
+    mut effects: Vec<Effect>,
+) -> WorkRunControlInput {
+    let (): () = match key {
+        Key::Enter => match route {
+            DirectorRoute::WorkRuns => {
+                if let Some(run) = control.selected() {
+                    effects.extend(
+                        runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorRunOverview(run))),
+                    );
+                } else {
+                    control.set_feedback("No Work Run is selected");
+                }
+            }
+            DirectorRoute::RunOverview(run_id) => {
+                let root = runs
+                    .runs()
+                    .iter()
+                    .find(|run| run.supervisor_run_id == run_id)
+                    .and_then(|run| run.root_agent_id);
+                if root.is_some_and(|root| {
+                    ui.is_some_and(|ui| select_director_agent(root, ui, runtime))
+                }) {
+                    effects.extend(runtime.apply_event(AppEvent::Key(
+                        AppKey::OpenDirectorConsole(DirectorConsoleParent::RunOverview(run_id)),
+                    )));
+                } else {
+                    control.set_feedback("Director Console is not available for this Work Run");
+                }
+            }
+            DirectorRoute::Organization | DirectorRoute::Console(_) => {}
+        },
+        Key::Escape | Key::Live(LiveTerminalAction::DirectorBack) => {
+            effects.extend(runtime.apply_event(AppEvent::Key(AppKey::DirectorBack)));
+        }
+        _ => {
+            let action = match key {
+                Key::Up => Some(WorkRunControlAction::Up),
+                Key::Down => Some(WorkRunControlAction::Down),
+                Key::Quit => Some(WorkRunControlAction::Cancel),
+                Key::CtrlX => Some(WorkRunControlAction::Delete),
+                _ => None,
+            };
+            if let Some(action) = action {
+                let _ = control.handle(
+                    action,
+                    runs.runs(),
+                    runs.freshness()
+                        == crate::presentation::views::work_run::WorkRunFreshness::Fresh,
+                );
+            }
+        }
+    };
+    WorkRunControlInput {
+        outcome: WorkRunControlOutcome::Consumed,
+        effects,
+    }
+}
+
+fn select_director_agent(
+    runtime_id: AgentRuntimeId,
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+) -> bool {
+    let Some(index) = runtime.agent_tab_index(runtime_id, ui.agent_inventory()) else {
+        return false;
+    };
+    let selection = runtime
+        .tab_selection_at(index)
+        .expect("an Agent index is returned only for a tab in the same pane");
+    select_director_selection(selection, ui, runtime)
+}
+
+fn select_director_selection(
+    selection: TabSelection,
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+) -> bool {
+    let continuation = match &selection {
+        TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
+        TabSelection::Interrupted(continuation) => Some(*continuation),
+        TabSelection::Pending(_) | TabSelection::Ready(_) => return false,
+    };
+    if ui
+        .mutate_agent_intent(AgentTabIntentMutation::Select {
+            session_id: None,
+            continuation,
+        })
+        .is_err()
+    {
+        return false;
+    }
+    let _ = runtime.select_tab_selection(selection);
+    true
 }
 
 fn work_run_control_projection(control: &WorkRunControl) -> WorkRunControlProjection {
@@ -1143,83 +1297,10 @@ fn route_workspace_input_before_reducer(
 ) -> WorkspaceInputRoute {
     if let Some(effects) = handle_director_picker_input(runtime, key) {
         WorkspaceInputRoute::Drawer(effects)
-    } else if handle_director_command_input(ui, runtime, key) {
-        WorkspaceInputRoute::Drawer(Vec::new())
     } else if forward_live_terminal_input(ui, runtime, controls, term, key) {
         WorkspaceInputRoute::Forwarded
     } else {
         WorkspaceInputRoute::Unhandled
-    }
-}
-
-fn handle_director_command_input(
-    ui: &mut WorkspaceUi,
-    runtime: &mut WorkspaceRuntime,
-    key: &Key,
-) -> bool {
-    match runtime.handle_director_command(key) {
-        DirectorCommandInput::Unhandled => false,
-        DirectorCommandInput::Consumed => true,
-        DirectorCommandInput::Submit(command) => {
-            let terminal = runtime
-                .focused_agent_terminal()
-                .expect("the Director composer gates submission on a focused Agent");
-            let mut bytes = command.into_bytes();
-            bytes.push(b'\r');
-            let delivery = ui.send_director_command_bytes(&terminal, &bytes);
-            if delivery.clear_draft {
-                runtime.complete_director_command();
-            }
-            if let Some(message) = delivery.feedback {
-                runtime.surface_focused_pane_feedback(message);
-            }
-            true
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DirectorCommandDelivery {
-    clear_draft: bool,
-    feedback: Option<String>,
-}
-
-impl DirectorCommandDelivery {
-    fn written() -> Self {
-        Self {
-            clear_draft: true,
-            feedback: None,
-        }
-    }
-
-    fn not_delivered(message: impl Into<String>) -> Self {
-        Self {
-            clear_draft: false,
-            feedback: Some(message.into()),
-        }
-    }
-
-    fn from_terminal_result(result: Result<(), TerminalInputError>) -> Self {
-        match result {
-            Ok(()) => Self::written(),
-            Err(error) => {
-                // Ambiguous writes must not be replayed, and a fenced command is
-                // already accepted by the ordered producer queue. Clearing both
-                // prevents Enter from accidentally enqueueing the same command
-                // a second time while still surfacing the delivery state.
-                let clear_draft = matches!(
-                    error,
-                    TerminalInputError::Rejected(
-                        TerminalInputOutcome::Ambiguous { .. } | TerminalInputOutcome::Written
-                    ) | TerminalInputError::Transport(TerminalError::InputEffectUnknown)
-                        | TerminalInputError::Fenced { .. }
-                );
-                Self {
-                    clear_draft,
-                    feedback: Some(error.message()),
-                }
-            }
-        }
     }
 }
 
@@ -1456,7 +1537,7 @@ impl WorkRunPort for UnavailableWorkRunPort {
         _: WorkspaceId,
         _: OperationId,
         _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-    ) -> Result<usagi_core::domain::supervisor::SupervisorRunQuery, WorkRunControlError> {
+    ) -> Result<WorkRunControlResult, WorkRunControlError> {
         Err(WorkRunControlError::Rejected(
             "Work Run action is unavailable; refresh and try again".to_owned(),
         ))
@@ -2247,7 +2328,7 @@ enum WorkRunLaneCompletion {
     Control {
         port: Box<dyn WorkRunPort>,
         operation_id: OperationId,
-        result: Box<Result<SupervisorRunQuery, WorkRunControlError>>,
+        result: Box<Result<WorkRunControlResult, WorkRunControlError>>,
     },
 }
 
@@ -2387,6 +2468,7 @@ fn spawn_work_run_control_job(
     std::thread::spawn(move || {
         let operation_id = request.operation_id;
         let expected = request.command.supervisor_run_id();
+        let expected_revision = request.observed_state_revision;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             port.control(workspace, operation_id, request.command)
         }))
@@ -2395,14 +2477,21 @@ fn spawn_work_run_control_job(
                 WORK_RUN_ACTION_UNCONFIRMED.to_owned(),
             ))
         })
-        .and_then(|run| {
-            (run.supervisor_run_id == expected && run.provenance.is_empty())
-                .then_some(run)
-                .ok_or_else(|| {
-                    WorkRunControlError::Unconfirmed(
-                        "daemon returned an invalid Work Run result".to_owned(),
-                    )
-                })
+        .and_then(|result| {
+            let valid = match &result {
+                WorkRunControlResult::Updated(run) => {
+                    run.supervisor_run_id == expected && run.provenance.is_empty()
+                }
+                WorkRunControlResult::Deleted(deletion) => {
+                    deletion.supervisor_run_id == expected
+                        && deletion.state_revision == expected_revision
+                }
+            };
+            valid.then_some(result).ok_or_else(|| {
+                WorkRunControlError::Unconfirmed(
+                    "daemon returned an invalid Work Run result".to_owned(),
+                )
+            })
         });
         let _ = sender.send(WorkRunLaneCompletion::Control {
             port,
@@ -2993,32 +3082,6 @@ impl WorkspaceUi {
             Ok(()) => Ok(()),
             Err(error) => Err(error.message()),
         }
-    }
-
-    /// Submit one complete Director command while preserving the durable input
-    /// contract. A definitely rejected command remains editable; an ambiguous
-    /// or already queued command is cleared so the UI never suggests replaying
-    /// bytes whose effect is unknown.
-    fn send_director_command_bytes(
-        &mut self,
-        terminal: &TerminalRef,
-        bytes: &[u8],
-    ) -> DirectorCommandDelivery {
-        let Some(agent) = self.agent.as_mut() else {
-            return DirectorCommandDelivery::not_delivered("terminal stream is unavailable");
-        };
-        let Some(session) = self
-            .terminals
-            .iter_mut()
-            .find(|session| session.terminal().fences(terminal))
-        else {
-            return DirectorCommandDelivery::not_delivered(
-                "terminal session is no longer available",
-            );
-        };
-        DirectorCommandDelivery::from_terminal_result(
-            session.send_input(&mut AgentStreamPort(agent.port.as_mut()), bytes),
-        )
     }
 
     fn clear_terminal_for_user(&mut self, terminal: &TerminalRef) -> bool {
@@ -4430,7 +4493,9 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::OpenGarden => Some(AppKey::OpenGarden),
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
+        LiveTerminalAction::DirectorBack => Some(AppKey::DirectorBack),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
+        LiveTerminalAction::WorkRuns => Some(AppKey::OpenDirectorWorkRuns),
         LiveTerminalAction::RootTerminal => Some(AppKey::ToggleRootTerminalDrawer),
         LiveTerminalAction::RootTerminalFullHeight => Some(AppKey::ToggleRootTerminalFullHeight),
         LiveTerminalAction::NewRootTerminal => Some(AppKey::OpenRootTerminal),
@@ -4439,7 +4504,6 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         | LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
         | LiveTerminalAction::ActivateWorkspace(_)
-        | LiveTerminalAction::WorkRuns
         | LiveTerminalAction::CloseTab
         | LiveTerminalAction::ResumeTab
         | LiveTerminalAction::MoveTabNext
@@ -5066,19 +5130,12 @@ fn director_drawer_projection(
     };
     DirectorDrawerProjection {
         focused: runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director),
+        route: runtime.state().director_route(),
         goal_driven: runtime.state().work_mode()
             == usagi_core::domain::settings::WorkMode::GoalDriven,
         conversations,
         organization: director_organization(ui),
         terminal_view,
-        command: runtime.director_terminal().map(|_| {
-            let input = runtime.director_command();
-            DirectorCommandProjection {
-                value: input.value().to_owned(),
-                cursor: input.cursor(),
-                selection: input.selection(),
-            }
-        }),
         interrupted_detail,
         feedback,
         new: director_new_projection(runtime),
@@ -5934,6 +5991,12 @@ fn select_director_tab_outcome(
         Key::Live(LiveTerminalAction::PreviousTab) => {
             crate::usecase::application::controller::TabDirection::Previous
         }
+        Key::Down if runtime.state().director_route() == DirectorRoute::Organization => {
+            crate::usecase::application::controller::TabDirection::Next
+        }
+        Key::Up if runtime.state().director_route() == DirectorRoute::Organization => {
+            crate::usecase::application::controller::TabDirection::Previous
+        }
         _ => return DirectorTabSelection::Unhandled,
     };
     let Some(selection) = runtime.agent_selection_after_select(direction) else {
@@ -5949,7 +6012,7 @@ fn select_director_tab_outcome(
         continuation,
     }) {
         Ok(()) => {
-            let _ = runtime.select_tab(direction);
+            let _ = runtime.select_tab_selection(selection);
             DirectorTabSelection::Selected
         }
         Err(error) => {
@@ -5971,7 +6034,9 @@ fn select_director_tab_and_activate(
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
 ) -> bool {
     let outcome = select_director_tab_outcome(key, ui, runtime);
-    if outcome == DirectorTabSelection::Selected {
+    if outcome == DirectorTabSelection::Selected
+        && matches!(runtime.state().director_route(), DirectorRoute::Console(_))
+    {
         activate_focused_interrupted_tab(ui, runtime, pending_targets);
     }
     outcome != DirectorTabSelection::Unhandled
@@ -6080,7 +6145,14 @@ fn is_director_new_click(
     runtime.state().director_drawer_open()
         && matches!(runtime.state().director_new(), DirectorNew::Idle)
         && runtime.state().director_launching().is_none()
-        && director_drawer::new_button_at(height, width, column, row, false)
+        && director_drawer::new_button_at(
+            height,
+            width,
+            column,
+            row,
+            runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven,
+            false,
+        )
 }
 
 /// Whether this press lands on the persistent Director button in the Home
@@ -6130,7 +6202,14 @@ fn is_director_new_pointer(
         _ => return false,
     };
     runtime.state().director_drawer_open()
-        && director_drawer::new_button_at(height, width, column, row, false)
+        && director_drawer::new_button_at(
+            height,
+            width,
+            column,
+            row,
+            runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven,
+            false,
+        )
 }
 
 /// Focus the visible workspace drawer under a pointer press. Director is
@@ -7035,70 +7114,7 @@ fn drain_pane_completions_into_runtime(
         }
         match completion.outcome {
             PaneLaunchOutcome::Agent { operation, result } => {
-                if result.is_ok() {
-                    // The daemon has admitted a new live runtime. Sidebar and
-                    // Garden membership comes from the coherent inventory, so
-                    // a cached pre-launch snapshot must not filter it back out.
-                    ui.request_agent_inventory_change_observation();
-                }
-                let Some(target) = pending_targets.remove(&operation) else {
-                    continue;
-                };
-                match result {
-                    Ok(admission) => {
-                        let terminal = admission.terminal;
-                        if let Some(continuation) = admission.continuation {
-                            // A confirmed drawer New always becomes the root
-                            // conversation selection. This durable selection is
-                            // committed atomically with its order slot before
-                            // the pending runtime is promoted. Managed-session
-                            // launches retain the existing no-focus-steal gate.
-                            let select = matches!(target, Target::Root(_))
-                                || runtime.pane_completion_will_focus(operation);
-                            match ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
-                                session_id: target.session_id(),
-                                continuation,
-                                terminal: terminal.clone(),
-                                select,
-                            }) {
-                                Ok(()) => {
-                                    let _ = runtime.complete_pane_focus_if_uninterrupted(
-                                        target, operation, terminal,
-                                    );
-                                }
-                                Err(error) => {
-                                    let _ = runtime.fail_pane(
-                                        target,
-                                        operation,
-                                        error.safe_message().to_owned(),
-                                    );
-                                    surface_agent_tab_intent_error(runtime, error);
-                                }
-                            }
-                        } else if matches!(target, Target::Root(_)) && ui.agent_tab_intent.is_some()
-                        {
-                            // A production root conversation must have the
-                            // daemon-issued continuation needed to atomically
-                            // persist its order/selection. Compatibility
-                            // embedders without an intent port retain their
-                            // pre-intent pane behaviour.
-                            let _ = runtime.fail_pane(
-                                target,
-                                operation,
-                                "daemon did not return a root Agent conversation".to_owned(),
-                            );
-                        } else {
-                            let _ = runtime
-                                .complete_pane_focus_if_uninterrupted(target, operation, terminal);
-                        }
-                    }
-                    Err(message) => {
-                        let _ = runtime.fail_pane(target, operation, message);
-                    }
-                }
-                if matches!(target, Target::Root(_)) {
-                    let _ = runtime.apply_event(AppEvent::DirectorLaunchFinished(operation));
-                }
+                apply_agent_launch_completion(ui, runtime, pending_targets, operation, result);
             }
             PaneLaunchOutcome::ResumeExact {
                 operation,
@@ -7158,6 +7174,75 @@ fn fail_terminal_launch(
 ) {
     let _ = runtime.fail_pane(target, operation, message.clone());
     let _ = runtime.apply_event(AppEvent::TerminalLaunchFailed(Notice::new(message)));
+}
+
+fn apply_agent_launch_completion(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+    operation: OperationId,
+    result: Result<AgentPaneAdmission, String>,
+) {
+    if result.is_ok() {
+        // A cached pre-launch inventory must not filter an admitted runtime out.
+        ui.request_agent_inventory_change_observation();
+    }
+    let Some(target) = pending_targets.remove(&operation) else {
+        return;
+    };
+    let admission = match result {
+        Ok(admission) => admission,
+        Err(message) => {
+            let _ = runtime.fail_pane(target, operation, message);
+            complete_director_launch(runtime, target, operation, None, false);
+            return;
+        }
+    };
+    let supervisor_run_id = admission.supervisor_run_id;
+    let terminal = admission.terminal;
+    if let Some(continuation) = admission.continuation {
+        let select =
+            matches!(target, Target::Root(_)) || runtime.pane_completion_will_focus(operation);
+        match ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
+            session_id: target.session_id(),
+            continuation,
+            terminal: terminal.clone(),
+            select,
+        }) {
+            Ok(()) => {
+                let _ = runtime.complete_pane_focus_if_uninterrupted(target, operation, terminal);
+            }
+            Err(error) => {
+                let _ = runtime.fail_pane(target, operation, error.safe_message().to_owned());
+                surface_agent_tab_intent_error(runtime, error);
+            }
+        }
+    } else if matches!(target, Target::Root(_)) && ui.agent_tab_intent.is_some() {
+        let _ = runtime.fail_pane(
+            target,
+            operation,
+            "daemon did not return a root Agent conversation".to_owned(),
+        );
+    } else {
+        let _ = runtime.complete_pane_focus_if_uninterrupted(target, operation, terminal);
+    }
+    complete_director_launch(runtime, target, operation, supervisor_run_id, true);
+}
+
+fn complete_director_launch(
+    runtime: &mut WorkspaceRuntime,
+    target: Target,
+    operation: OperationId,
+    supervisor_run_id: Option<SupervisorRunId>,
+    succeeded: bool,
+) {
+    if matches!(target, Target::Root(_)) {
+        let _ = runtime.apply_event(AppEvent::DirectorLaunchFinished {
+            operation,
+            supervisor_run_id,
+            succeeded,
+        });
+    }
 }
 
 /// Apply one explicit per-tab resume answer (#510).
@@ -7794,6 +7879,7 @@ struct WorkspaceHelpState {
     decision_answer_open: bool,
     work_run_mode: WorkRunControlMode,
     director_new_open: bool,
+    director_route: DirectorRoute,
     drawer_focus: Option<WorkspaceDrawerFocus>,
     base: WorkspaceBaseHelp,
 }
@@ -7826,18 +7912,33 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
         };
     }
     match state.work_run_mode {
-        WorkRunControlMode::List => return KeyHelpContext::WorkRuns,
+        WorkRunControlMode::List if state.director_route == DirectorRoute::WorkRuns => {
+            return KeyHelpContext::WorkRuns;
+        }
+        WorkRunControlMode::List
+            if matches!(state.director_route, DirectorRoute::RunOverview(_)) =>
+        {
+            return KeyHelpContext::RunOverview;
+        }
         WorkRunControlMode::ResolveEscalation => return KeyHelpContext::WorkRunEscalation,
         WorkRunControlMode::ConfirmCancel
+        | WorkRunControlMode::ConfirmDelete
         | WorkRunControlMode::Submitting
         | WorkRunControlMode::Retry => return KeyHelpContext::WorkRunConfirmation,
-        WorkRunControlMode::Closed => {}
+        WorkRunControlMode::List | WorkRunControlMode::Closed => {}
     }
     if state.director_new_open {
         return KeyHelpContext::DirectorNew;
     }
     match state.drawer_focus {
-        Some(WorkspaceDrawerFocus::Director) => return KeyHelpContext::Director,
+        Some(WorkspaceDrawerFocus::Director) => {
+            return match state.director_route {
+                DirectorRoute::Organization => KeyHelpContext::Organization,
+                DirectorRoute::WorkRuns => KeyHelpContext::WorkRuns,
+                DirectorRoute::RunOverview(_) => KeyHelpContext::RunOverview,
+                DirectorRoute::Console(_) => KeyHelpContext::DirectorConsole,
+            };
+        }
         Some(WorkspaceDrawerFocus::Terminal) => return KeyHelpContext::RootShell,
         None => {}
     }
@@ -7867,6 +7968,7 @@ fn workspace_help_context(
         work_run_mode: work_run_control.mode(),
         director_new_open: state.director_launching().is_some()
             || state.director_new() != DirectorNew::Idle,
+        director_route: state.director_route(),
         drawer_focus: state.workspace_drawer_focus(),
         base: WorkspaceBaseHelp::new(state.route(), runtime.wants_live_input()),
     })
@@ -8259,8 +8361,16 @@ fn drive_workspace_controller(
                     let result = *result;
                     let previous_control = work_run_control.clone();
                     let accepted = work_run_control.complete(operation_id, &result);
-                    if accepted && let Ok(run) = &result {
-                        work_runs.apply_control(run.clone());
+                    if accepted && let Ok(result) = &result {
+                        match result {
+                            WorkRunControlResult::Updated(run) => {
+                                work_runs.apply_control(run.as_ref().clone());
+                            }
+                            WorkRunControlResult::Deleted(deletion) => {
+                                work_runs.apply_deletion(*deletion);
+                                work_run_control.sync_selection(work_runs.runs());
+                            }
+                        }
                     }
                     if work_run_control != previous_control || accepted {
                         work_run_revision = work_run_revision.wrapping_add(1);
@@ -8986,14 +9096,15 @@ fn drive_workspace_controller(
         });
         if director_header_effects.is_some() {
             let previous = work_run_control.clone();
-            work_run_control.close();
+            work_run_control.suspend();
             if work_run_control != previous {
                 work_run_revision = work_run_revision.wrapping_add(1);
             }
         }
         let work_run_input = if garden_route.is_none() && director_header_effects.is_none() {
             let previous = work_run_control.clone();
-            let input = handle_work_run_control_input(
+            let input = handle_work_run_control_input_with_ui(
+                Some(&mut ui),
                 &mut runtime,
                 &mut work_run_control,
                 &work_runs,
@@ -10660,25 +10771,25 @@ mod tests {
         AgentCommandPort, AgentCommandPortFactory, AgentPaneAdmission, AgentTabIntentPort,
         AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
-        DesktopNotificationPort, DirectorCommandDelivery, EnvironmentStorePort, Exit,
-        ExternalTerminalPort, FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute,
-        GardenInventoryPort, Geometry, GitDiff, IdleWatch, LaunchAgentRequest,
-        MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, MissingWorkspacePrompt,
-        NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS,
-        PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
-        SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory,
-        SessionCommandResult, SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort,
-        SessionWorktreeHint, SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk,
-        TerminalError, TerminalInputError, TerminalInputOutcome, TerminalInputResolution,
-        TerminalSubscription, TerminalViewProjection, UnavailableAgentCommandPort,
-        UnavailableBackendPort, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
-        UnavailableEnvironmentStore, UnavailableExternalTerminalPort,
-        UnavailableGardenInventoryPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
-        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory,
-        WORKSPACE_SWITCH_LOADING_GRACE, WelcomeStep, WorkspaceConfigContext, WorkspaceConfigStep,
-        WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
-        WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
-        WorkspaceView, activate_focused_interrupted_tab, activate_workspace_responsive,
+        DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
+        FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort,
+        Geometry, GitDiff, IdleWatch, LaunchAgentRequest, MAX_BACKGROUND_EXITS_PER_FRAME,
+        MetricsPort, MetricsPortFactory, MissingWorkspacePrompt, NewStep, NoDesktopNotifications,
+        NoMetrics, NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort,
+        PrModalClickRoute, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
+        SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
+        SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
+        SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
+        TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
+        TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
+        UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
+        UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
+        UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        UnavailableSessionCommandPortFactory, WORKSPACE_SWITCH_LOADING_GRACE, WelcomeStep,
+        WorkspaceConfigContext, WorkspaceConfigStep, WorkspaceCreateCompletion,
+        WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute,
+        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        activate_focused_interrupted_tab, activate_workspace_responsive,
         adjust_project_bar_pointer, app_event_from_key, cached_workspace_switch_frame,
         close_director_from_header, close_exited_panes, compose_workspace_shell_frame,
         controller_terminal_view, copy_terminal_selection, director_organization,
@@ -10723,9 +10834,10 @@ mod tests {
     };
     use crate::usecase::application::controller::WorkspaceDrawerFocus;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry,
-        GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode, NewRequest, Overlay, PendingToken,
-        RoleEditorScope, Route, SessionCreateIntent, SessionRoleCatalog, TabDirection, Target,
+        AppEvent, AppKey, AppState, BackendEvent, DirectorConsoleParent, DirectorNew,
+        DirectorRoute, Effect, EnvironmentEntry, GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode,
+        NewRequest, Overlay, PendingToken, RoleEditorScope, Route, SessionCreateIntent,
+        SessionRoleCatalog, TabDirection, Target,
     };
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -10801,6 +10913,7 @@ mod tests {
             terminal_at: None,
             terminal_reason: None,
             display_label: Some("Observed Goal".into()),
+            root_agent_id: None,
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),
@@ -10821,6 +10934,54 @@ mod tests {
             generation: 1,
         });
         run
+    }
+
+    struct FixedWorkRunControl(super::WorkRunControlResult);
+
+    impl super::WorkRunPort for FixedWorkRunControl {
+        fn snapshot(
+            &mut self,
+            _: WorkspaceId,
+        ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
+            unreachable!("control test never observes Work Runs")
+        }
+
+        fn control(
+            &mut self,
+            _: WorkspaceId,
+            _: OperationId,
+            _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
+        ) -> Result<super::WorkRunControlResult, super::WorkRunControlError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn complete_work_run_control(
+        workspace: WorkspaceId,
+        request: super::WorkRunControlRequest,
+        result: super::WorkRunControlResult,
+    ) -> (
+        OperationId,
+        Result<super::WorkRunControlResult, super::WorkRunControlError>,
+    ) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        super::spawn_work_run_control_job(
+            Box::new(FixedWorkRunControl(result)),
+            workspace,
+            request,
+            sender,
+        );
+        let super::WorkRunLaneCompletion::Control {
+            operation_id,
+            result,
+            ..
+        } = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the Work Run control returns its port")
+        else {
+            panic!("control job returned an observation completion");
+        };
+        (operation_id, *result)
     }
 
     /// Host-action routing without the resident session lane. These tests
@@ -11030,12 +11191,16 @@ mod tests {
             Some(AppEvent::Key(AppKey::ToggleDirectorDrawer))
         );
         assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::DirectorBack)),
+            Some(AppEvent::Key(AppKey::DirectorBack))
+        );
+        assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::DirectorNew)),
             Some(AppEvent::Key(AppKey::OpenDirectorNew))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::WorkRuns)),
-            None
+            Some(AppEvent::Key(AppKey::OpenDirectorWorkRuns))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::RootTerminal)),
@@ -12926,6 +13091,7 @@ mod tests {
                     result: Ok(AgentPaneAdmission {
                         terminal: terminal.clone(),
                         continuation: None,
+                        supervisor_run_id: None,
                     }),
                 },
             })
@@ -13208,6 +13374,7 @@ mod tests {
             Ok(AgentPaneAdmission {
                 terminal: self.terminal.clone(),
                 continuation: None,
+                supervisor_run_id: None,
             })
         }
 
@@ -13264,6 +13431,7 @@ mod tests {
             Ok(AgentPaneAdmission {
                 terminal: self.terminal.clone(),
                 continuation: None,
+                supervisor_run_id: None,
             })
         }
 
@@ -13526,6 +13694,7 @@ mod tests {
             Ok(AgentPaneAdmission {
                 terminal: self.record("agent", operation, workspace, session),
                 continuation: None,
+                supervisor_run_id: None,
             })
         }
 
@@ -13539,6 +13708,7 @@ mod tests {
             Ok(AgentPaneAdmission {
                 terminal: self.record("goal", operation, workspace, None),
                 continuation: None,
+                supervisor_run_id: None,
             })
         }
 
@@ -13805,6 +13975,7 @@ mod tests {
                         result: Ok(AgentPaneAdmission {
                             terminal,
                             continuation: None,
+                            supervisor_run_id: None,
                         }),
                     },
                 })
@@ -14020,6 +14191,7 @@ mod tests {
                     result: Ok(AgentPaneAdmission {
                         terminal: stale_terminal,
                         continuation: None,
+                        supervisor_run_id: None,
                     }),
                 },
             })
@@ -14125,6 +14297,7 @@ mod tests {
                     result: Ok(AgentPaneAdmission {
                         terminal: agent_terminal.clone(),
                         continuation: Some(continuation),
+                        supervisor_run_id: None,
                     }),
                 },
             })
@@ -14236,6 +14409,7 @@ mod tests {
                     result: Ok(AgentPaneAdmission {
                         terminal: terminal.clone(),
                         continuation: Some(continuation),
+                        supervisor_run_id: None,
                     }),
                 },
             })
@@ -14259,6 +14433,12 @@ mod tests {
         drop(intent);
 
         let tabs = runtime.active_pane().tabs().to_vec();
+        let _ = runtime.handle_key(Key::Escape);
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
         let _ = runtime.handle_key(Key::Escape);
         assert!(!runtime.state().director_drawer_open());
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
@@ -14315,6 +14495,7 @@ mod tests {
                     result: Ok(AgentPaneAdmission {
                         terminal: scoped_terminal_ref(workspace, None),
                         continuation: None,
+                        supervisor_run_id: None,
                     }),
                 },
             })
@@ -14523,6 +14704,7 @@ mod tests {
             Ok(AgentPaneAdmission {
                 terminal: self.0.clone(),
                 continuation: None,
+                supervisor_run_id: None,
             })
         }
 
@@ -14536,6 +14718,7 @@ mod tests {
             Ok(AgentPaneAdmission {
                 terminal: self.0.clone(),
                 continuation: None,
+                supervisor_run_id: None,
             })
         }
     }
@@ -17699,6 +17882,7 @@ mod tests {
             Ok(AgentPaneAdmission {
                 terminal: self.terminal.clone(),
                 continuation: None,
+                supervisor_run_id: None,
             })
         }
 
@@ -17772,6 +17956,7 @@ mod tests {
             Ok(AgentPaneAdmission {
                 terminal: self.terminal.clone(),
                 continuation: None,
+                supervisor_run_id: None,
             })
         }
 
@@ -17818,6 +18003,7 @@ mod tests {
             Ok(AgentPaneAdmission {
                 terminal: self.terminal.clone(),
                 continuation: None,
+                supervisor_run_id: None,
             })
         }
 
@@ -19801,6 +19987,12 @@ mod tests {
             &mut ui,
             &mut runtime,
         ));
+        assert!(super::select_director_tab(
+            &Key::Down,
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(super::select_director_tab(&Key::Up, &mut ui, &mut runtime,));
         assert!(mutations.lock().unwrap().iter().any(|mutation| matches!(
             mutation,
             AgentTabIntentMutation::Select {
@@ -19976,6 +20168,7 @@ mod tests {
             }],
         ));
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let _ = runtime.handle_key(Key::Enter);
         ui.start_terminal_session(
             terminal,
             foreground_terminal_geometry(
@@ -21508,10 +21701,7 @@ mod tests {
                 _: WorkspaceId,
                 _: OperationId,
                 _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-            ) -> Result<
-                usagi_core::domain::supervisor::SupervisorRunQuery,
-                super::WorkRunControlError,
-            > {
+            ) -> Result<super::WorkRunControlResult, super::WorkRunControlError> {
                 unreachable!("observation test never controls a Work Run")
             }
         }
@@ -21585,26 +21775,6 @@ mod tests {
 
     #[test]
     fn work_run_lane_rejects_mismatched_or_private_control_results() {
-        struct MismatchedControl(SupervisorRunQuery);
-        impl super::WorkRunPort for MismatchedControl {
-            fn snapshot(
-                &mut self,
-                _: WorkspaceId,
-            ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String>
-            {
-                unreachable!("control test never observes Work Runs")
-            }
-
-            fn control(
-                &mut self,
-                _: WorkspaceId,
-                _: OperationId,
-                _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-            ) -> Result<SupervisorRunQuery, super::WorkRunControlError> {
-                Ok(self.0.clone())
-            }
-        }
-
         let workspace = WorkspaceId::new();
         let run = observed_work_run(SupervisorRunState::Running);
         let request = super::WorkRunControlRequest {
@@ -21615,27 +21785,14 @@ mod tests {
             },
             observed_state_revision: run.state_revision,
         };
-        let (sender, receiver) = std::sync::mpsc::channel();
-        super::spawn_work_run_control_job(
-            Box::new(MismatchedControl(observed_work_run(
-                SupervisorRunState::Cancelled,
-            ))),
+        let (operation_id, result) = complete_work_run_control(
             workspace,
             request.clone(),
-            sender,
+            super::WorkRunControlResult::Updated(Box::new(observed_work_run(
+                SupervisorRunState::Cancelled,
+            ))),
         );
-        let super::WorkRunLaneCompletion::Control {
-            operation_id,
-            result,
-            ..
-        } = receiver
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the Work Run control returns its port")
-        else {
-            panic!("control job returned an observation completion");
-        };
         assert_eq!(operation_id, request.operation_id);
-        let result = *result;
         assert_eq!(
             result.unwrap_err(),
             super::WorkRunControlError::Unconfirmed(
@@ -21643,28 +21800,37 @@ mod tests {
             )
         );
 
-        let (sender, receiver) = std::sync::mpsc::channel();
-        super::spawn_work_run_control_job(
-            Box::new(MismatchedControl(with_private_work_run_provenance(
-                run.clone(),
-            ))),
+        let (_, result) = complete_work_run_control(
             workspace,
             request,
-            sender,
+            super::WorkRunControlResult::Updated(Box::new(with_private_work_run_provenance(
+                run.clone(),
+            ))),
         );
-        let super::WorkRunLaneCompletion::Control { result, .. } = receiver
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the private Work Run result returns its port")
-        else {
-            panic!("control job returned an observation completion");
-        };
-        let result = *result;
         assert_eq!(
             result.unwrap_err(),
             super::WorkRunControlError::Unconfirmed(
                 "daemon returned an invalid Work Run result".to_owned()
             )
         );
+        let deletion = usagi_core::domain::supervisor::SupervisorRunDeletion {
+            supervisor_run_id: SupervisorRunId::new(),
+            state_revision: 4,
+        };
+        let request = super::WorkRunControlRequest {
+            operation_id: OperationId::new(),
+            command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand::Delete {
+                supervisor_run_id: deletion.supervisor_run_id,
+                observed_state_revision: deletion.state_revision,
+            },
+            observed_state_revision: deletion.state_revision,
+        };
+        let (_, result) = complete_work_run_control(
+            workspace,
+            request,
+            super::WorkRunControlResult::Deleted(deletion),
+        );
+        assert_eq!(result, Ok(super::WorkRunControlResult::Deleted(deletion)));
     }
 
     #[test]
@@ -21684,7 +21850,7 @@ mod tests {
                 _: WorkspaceId,
                 _: OperationId,
                 _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-            ) -> Result<SupervisorRunQuery, super::WorkRunControlError> {
+            ) -> Result<super::WorkRunControlResult, super::WorkRunControlError> {
                 panic!("control adapter panic")
             }
         }
@@ -23707,6 +23873,7 @@ mod tests {
                     result: Ok(AgentPaneAdmission {
                         terminal: replacement.clone(),
                         continuation: Some(continuation),
+                        supervisor_run_id: None,
                     }),
                 },
             })
@@ -24627,6 +24794,24 @@ mod tests {
         assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
         assert!(inputs.lock().unwrap().is_empty());
 
+        for key in [
+            Key::Up,
+            Key::Down,
+            Key::Live(LiveTerminalAction::PreviousTab),
+            Key::Live(LiveTerminalAction::NextTab),
+        ] {
+            assert_eq!(
+                route_workspace_input_before_reducer(
+                    &mut ui,
+                    &mut runtime,
+                    &mut controls,
+                    &mut term,
+                    &key,
+                ),
+                WorkspaceInputRoute::Unhandled
+            );
+        }
+
         assert_eq!(
             route_workspace_input_before_reducer(
                 &mut ui,
@@ -24647,10 +24832,7 @@ mod tests {
             ),
             WorkspaceInputRoute::Drawer(Vec::new())
         );
-        assert_eq!(
-            *inputs.lock().unwrap(),
-            vec![(root_agent.clone(), b"x\r".to_vec())]
-        );
+        assert!(inputs.lock().unwrap().is_empty());
 
         assert_eq!(
             route_workspace_input_before_reducer(
@@ -24689,8 +24871,9 @@ mod tests {
             ),
             WorkspaceInputRoute::Drawer(Vec::new())
         );
-        assert!(!runtime.state().director_drawer_open());
-        assert_eq!(*inputs.lock().unwrap(), vec![(root_agent, b"x\r".to_vec())]);
+        assert!(runtime.state().director_drawer_open());
+        assert!(runtime.state().director_launching().is_some());
+        assert!(inputs.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -24712,6 +24895,7 @@ mod tests {
         assert!(input.effects.is_empty());
         assert_eq!(input.outcome, super::WorkRunControlOutcome::Consumed);
         assert!(runtime.state().director_drawer_open());
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
         assert_eq!(control.mode(), super::WorkRunControlMode::List);
         assert_eq!(control.selected(), Some(run.supervisor_run_id));
 
@@ -24725,19 +24909,20 @@ mod tests {
             super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Enter,)
                 .is_some()
         );
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::RunOverview(run.supervisor_run_id)
+        );
         assert!(
             super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Escape,)
                 .is_some()
         );
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
         assert!(
-            super::handle_work_run_control_input(
-                &mut runtime,
-                &mut control,
-                &runs,
-                &Key::Char('x'),
-            )
-            .is_some()
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::CtrlX,)
+                .is_some()
         );
+        assert_eq!(control.feedback(), Some("Cancel the Work Run first"));
         assert!(
             super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Resize,)
                 .is_none()
@@ -24752,6 +24937,7 @@ mod tests {
             .is_none()
         );
         assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
+        assert_eq!(control.selected(), Some(run.supervisor_run_id));
         assert!(
             super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Resize,)
                 .is_none()
@@ -24770,6 +24956,222 @@ mod tests {
         );
         assert!(!runtime.state().director_drawer_open());
         assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // This table drives every keyboard edge of the retained run surface.
+    fn work_run_routes_confirmations_and_console_activation_without_implicit_mutation() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        let running = observed_work_run(SupervisorRunState::Running);
+        let runs = super::WorkRunProjection::fresh(vec![running.clone()]);
+        let mut control = super::WorkRunControl::default();
+        let _ = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut control,
+            &runs,
+            &Key::Live(LiveTerminalAction::WorkRuns),
+        );
+
+        let _ = control.handle(super::WorkRunControlAction::Cancel, runs.runs(), true);
+        for key in [Key::Up, Key::Down, Key::Left, Key::Right, Key::CtrlX] {
+            let input =
+                super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &key)
+                    .unwrap();
+            assert_eq!(input.outcome, super::WorkRunControlOutcome::Consumed);
+        }
+        let _ = super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Quit);
+        assert_eq!(control.mode(), super::WorkRunControlMode::List);
+
+        for key in [Key::Escape, Key::Live(LiveTerminalAction::DirectorBack)] {
+            let _ = control.handle(super::WorkRunControlAction::Cancel, runs.runs(), true);
+            let _ = super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &key);
+            assert_eq!(control.mode(), super::WorkRunControlMode::List);
+        }
+        let _ = control.handle(super::WorkRunControlAction::Cancel, runs.runs(), true);
+        let submitted =
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Enter)
+                .unwrap();
+        assert!(submitted.outcome.into_request().is_some());
+
+        let mut empty_control = super::WorkRunControl::default();
+        let empty = super::WorkRunProjection::fresh(Vec::new());
+        empty_control.open(empty.runs());
+        let _ = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut empty_control,
+            &empty,
+            &Key::Enter,
+        );
+        assert_eq!(empty_control.feedback(), Some("No Work Run is selected"));
+
+        let mut inert_control = super::WorkRunControl::default();
+        inert_control.open(runs.runs());
+        for route in [
+            DirectorRoute::Organization,
+            DirectorRoute::Console(DirectorConsoleParent::Organization),
+        ] {
+            let input = super::handle_work_run_list_input(
+                None,
+                &mut runtime,
+                &mut inert_control,
+                &runs,
+                &Key::Enter,
+                route,
+                Vec::new(),
+            );
+            assert_eq!(input.outcome, super::WorkRunControlOutcome::Consumed);
+        }
+        let _ = super::handle_work_run_list_input(
+            None,
+            &mut runtime,
+            &mut inert_control,
+            &runs,
+            &Key::Quit,
+            DirectorRoute::WorkRuns,
+            Vec::new(),
+        );
+        assert_eq!(
+            inert_control.mode(),
+            super::WorkRunControlMode::ConfirmCancel
+        );
+
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorOrganization));
+        let mut suspended = super::WorkRunControl::default();
+        suspended.open(runs.runs());
+        assert!(
+            super::handle_work_run_control_input(&mut runtime, &mut suspended, &runs, &Key::Other,)
+                .is_none()
+        );
+        assert_eq!(suspended.mode(), super::WorkRunControlMode::Closed);
+
+        let terminal = scoped_terminal_ref(workspace, None);
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
+        let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal.clone());
+        let runtime_id = AgentRuntimeId::new();
+        let continuation = AgentContinuationRef::new();
+        let mut run_with_director = running;
+        run_with_director.root_agent_id = Some(runtime_id);
+        let run_id = run_with_director.supervisor_run_id;
+        let overview_runs = super::WorkRunProjection::fresh(vec![run_with_director]);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        ui.agent_inventory = Some(AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: AgentRuntimeRef::new(runtime_id, terminal, None).unwrap(),
+                continuation,
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        });
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorRunOverview(run_id)));
+        let mut overview_control = super::WorkRunControl::default();
+        overview_control.open(overview_runs.runs());
+        let activated = super::handle_work_run_control_input_with_ui(
+            Some(&mut ui),
+            &mut runtime,
+            &mut overview_control,
+            &overview_runs,
+            &Key::Enter,
+        )
+        .unwrap();
+        assert!(activated.effects.is_empty());
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Console(DirectorConsoleParent::RunOverview(run_id))
+        );
+
+        let no_root = observed_work_run(SupervisorRunState::Running);
+        let no_root_id = no_root.supervisor_run_id;
+        let no_root_runs = super::WorkRunProjection::fresh(vec![no_root]);
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorRunOverview(no_root_id)));
+        let mut unavailable_control = super::WorkRunControl::default();
+        unavailable_control.open(no_root_runs.runs());
+        let _ = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut unavailable_control,
+            &no_root_runs,
+            &Key::Enter,
+        );
+        assert_eq!(
+            unavailable_control.feedback(),
+            Some("Director Console is not available for this Work Run")
+        );
+    }
+
+    #[test]
+    fn director_selection_rejects_placeholders_and_surfaces_intent_failure() {
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let runtime_id = AgentRuntimeId::new();
+        let continuation = AgentContinuationRef::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        assert!(!super::select_director_selection(
+            TabSelection::Pending(operation),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(!super::select_director_selection(
+            TabSelection::Ready(operation),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(super::select_director_selection(
+            TabSelection::Interrupted(continuation),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(!super::select_director_agent(
+            runtime_id,
+            &mut ui,
+            &mut runtime,
+        ));
+
+        let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal.clone());
+        ui.agent_inventory = Some(AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: AgentRuntimeRef::new(runtime_id, terminal.clone(), None).unwrap(),
+                continuation,
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        });
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.apply(AgentTabIntentMutation::Upsert {
+            session_id: None,
+            continuation,
+            terminal: terminal.clone(),
+            select: true,
+        });
+        ui = ui.with_agent_tab_intent(
+            workspace,
+            BTreeSet::new(),
+            Box::new(FailingIntentPort {
+                state: Arc::new(Mutex::new(intent)),
+                error: AgentTabIntentError::Unavailable,
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        assert!(!super::select_director_selection(
+            TabSelection::Live(terminal.clone()),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(!super::select_director_agent(
+            runtime_id,
+            &mut ui,
+            &mut runtime,
+        ));
     }
 
     /// `Esc` belongs to the drawer's selected root Agent — an agent CLI reads it
@@ -24805,6 +25207,11 @@ mod tests {
         assert!(runtime.handle_key(open).is_empty());
         assert!(runtime.state().director_drawer_open());
         assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        assert!(runtime.handle_key(Key::Enter).is_empty());
 
         // The live conversation owns Esc: it reaches the PTY once and the drawer
         // stays open.
@@ -25118,7 +25525,6 @@ mod tests {
             Key::SelectEnd,
             Key::Backspace,
             Key::Tab,
-            Key::Quit,
             Key::CtrlQ,
             Key::CtrlD,
             Key::Char('x'),
@@ -25157,31 +25563,24 @@ mod tests {
             );
         }
 
-        // Escape returns Choosing to the conversation command composer. The
-        // next committed character stays local until Enter submits one line.
+        // Ctrl-C cancels Choosing and returns to Organization. Enter explicitly
+        // opens the selected Director Console; only that surface forwards Agent
+        // PTY input.
         assert_eq!(
             route_workspace_input_before_reducer(
                 &mut ui,
                 &mut runtime,
                 &mut controls,
                 &mut term,
-                &Key::Escape,
+                &Key::Quit,
             ),
             WorkspaceInputRoute::Drawer(Vec::new()),
         );
         assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
         assert_eq!(
-            route_workspace_input_before_reducer(
-                &mut ui,
-                &mut runtime,
-                &mut controls,
-                &mut term,
-                &Key::Char('z'),
-            ),
-            WorkspaceInputRoute::Drawer(Vec::new()),
+            runtime.state().director_route(),
+            DirectorRoute::Organization
         );
-        assert_eq!(runtime.director_command().value(), "z");
-        assert!(inputs.lock().unwrap().is_empty());
         assert_eq!(
             route_workspace_input_before_reducer(
                 &mut ui,
@@ -25193,12 +25592,40 @@ mod tests {
             WorkspaceInputRoute::Drawer(Vec::new()),
         );
         assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Char('z'),
+            ),
+            WorkspaceInputRoute::Forwarded,
+        );
+        assert_eq!(
             inputs
                 .lock()
                 .unwrap()
                 .last()
                 .map(|(_, bytes)| bytes.as_slice()),
-            Some(b"z\r".as_slice())
+            Some(b"z".as_slice())
+        );
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Enter,
+            ),
+            WorkspaceInputRoute::Forwarded,
+        );
+        assert_eq!(
+            inputs
+                .lock()
+                .unwrap()
+                .last()
+                .map(|(_, bytes)| bytes.as_slice()),
+            Some(b"\r".as_slice())
         );
         inputs.lock().unwrap().clear();
 
@@ -29733,6 +30160,7 @@ mod tests {
             decision_answer_open: false,
             work_run_mode: super::WorkRunControlMode::Closed,
             director_new_open: false,
+            director_route: DirectorRoute::Organization,
             drawer_focus: None,
             base: WorkspaceBaseHelp::Switch,
         };
@@ -29840,12 +30268,29 @@ mod tests {
             assert_eq!(
                 resolve_workspace_help_context(WorkspaceHelpState {
                     work_run_mode: mode,
+                    director_route: DirectorRoute::WorkRuns,
                     ..base
                 }),
                 expected,
                 "{mode:?}"
             );
         }
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                work_run_mode: super::WorkRunControlMode::List,
+                director_route: DirectorRoute::RunOverview(SupervisorRunId::new()),
+                ..base
+            }),
+            HelpContext::RunOverview
+        );
+        assert_eq!(
+            resolve_workspace_help_context(WorkspaceHelpState {
+                work_run_mode: super::WorkRunControlMode::ConfirmDelete,
+                director_route: DirectorRoute::WorkRuns,
+                ..base
+            }),
+            HelpContext::WorkRunConfirmation
+        );
 
         assert_eq!(
             resolve_workspace_help_context(WorkspaceHelpState {
@@ -29855,12 +30300,32 @@ mod tests {
             HelpContext::DirectorNew
         );
         for (drawer_focus, expected) in [
-            (WorkspaceDrawerFocus::Director, HelpContext::Director),
+            (WorkspaceDrawerFocus::Director, HelpContext::Organization),
             (WorkspaceDrawerFocus::Terminal, HelpContext::RootShell),
         ] {
             assert_eq!(
                 resolve_workspace_help_context(WorkspaceHelpState {
                     drawer_focus: Some(drawer_focus),
+                    ..base
+                }),
+                expected
+            );
+        }
+        for (director_route, expected) in [
+            (
+                DirectorRoute::Console(DirectorConsoleParent::Organization),
+                HelpContext::DirectorConsole,
+            ),
+            (
+                DirectorRoute::RunOverview(SupervisorRunId::new()),
+                HelpContext::RunOverview,
+            ),
+            (DirectorRoute::WorkRuns, HelpContext::WorkRuns),
+        ] {
+            assert_eq!(
+                resolve_workspace_help_context(WorkspaceHelpState {
+                    director_route,
+                    drawer_focus: Some(WorkspaceDrawerFocus::Director),
                     ..base
                 }),
                 expected
@@ -30121,7 +30586,7 @@ mod tests {
                 false,
                 Some(WorkspaceDrawerFocus::Director),
             ),
-            Geometry { cols: 56, rows: 14 }
+            Geometry { cols: 56, rows: 16 }
         );
         assert_eq!(
             foreground_terminal_geometry(
@@ -30137,86 +30602,6 @@ mod tests {
         assert_eq!(
             foreground_terminal_geometry(24, 100, false, false, false, None),
             terminal_geometry(24, 100)
-        );
-    }
-
-    #[test]
-    fn director_command_draft_is_never_offered_for_unsafe_replay() {
-        for result in [
-            Err(TerminalInputError::Rejected(
-                TerminalInputOutcome::Ambiguous { applied_prefix: 2 },
-            )),
-            Err(TerminalInputError::Transport(
-                TerminalError::InputEffectUnknown,
-            )),
-            Err(TerminalInputError::Fenced { queued: 1 }),
-        ] {
-            let delivery = DirectorCommandDelivery::from_terminal_result(result);
-            assert!(delivery.clear_draft);
-            assert!(delivery.feedback.is_some());
-        }
-
-        for result in [
-            Err(TerminalInputError::Rejected(TerminalInputOutcome::Failed)),
-            Err(TerminalInputError::Transport(TerminalError::Unavailable)),
-            Err(TerminalInputError::FenceFull { queued: 16 }),
-        ] {
-            let delivery = DirectorCommandDelivery::from_terminal_result(result);
-            assert!(!delivery.clear_draft);
-            assert!(delivery.feedback.is_some());
-        }
-
-        assert_eq!(
-            DirectorCommandDelivery::from_terminal_result(Ok(())),
-            DirectorCommandDelivery::written()
-        );
-
-        let workspace = WorkspaceId::new();
-        let terminal = scoped_terminal_ref(workspace, None);
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
-        let mut no_stream = WorkspaceUi::new(view.clone(), Box::new(UnavailableSessionCommandPort));
-        assert_eq!(
-            no_stream.send_director_command_bytes(&terminal, b"echo unavailable\r"),
-            DirectorCommandDelivery::not_delivered("terminal stream is unavailable")
-        );
-        let mut no_session = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
-            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort));
-        assert_eq!(
-            no_session.send_director_command_bytes(&terminal, b"echo missing\r"),
-            DirectorCommandDelivery::not_delivered("terminal session is no longer available")
-        );
-
-        let operation = OperationId::new();
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
-        let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal);
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        let mut controls = LiveTerminalControls::default();
-        let mut term = FakeTerminal::default();
-        assert_eq!(
-            route_workspace_input_before_reducer(
-                &mut no_stream,
-                &mut runtime,
-                &mut controls,
-                &mut term,
-                &Key::Char('x'),
-            ),
-            WorkspaceInputRoute::Drawer(Vec::new())
-        );
-        assert_eq!(
-            route_workspace_input_before_reducer(
-                &mut no_stream,
-                &mut runtime,
-                &mut controls,
-                &mut term,
-                &Key::Enter,
-            ),
-            WorkspaceInputRoute::Drawer(Vec::new())
-        );
-        assert_eq!(runtime.director_command().value(), "x");
-        assert_eq!(
-            runtime.active_pane().error(),
-            Some("terminal stream is unavailable")
         );
     }
 

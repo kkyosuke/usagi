@@ -372,10 +372,8 @@ pub struct HomeProjection {
     /// loading skeleton just above `+ new session` (`document/03-tui.md`) until
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
-    /// Frontmost Director mode drawer material. The empty default is the only
-    /// projection currently connected; later runtime work can populate its
-    /// conversation selector and terminal rows through
-    /// [`Self::with_director_drawer`].
+    /// Frontmost Director mode drawer material, including its explicit route,
+    /// Organization projection, Work Runs, and optional Console terminal.
     director_drawer: Option<DirectorDrawerProjection>,
     work_runs: WorkRunProjection,
     /// Frontmost bottom-anchored workspace-root generic terminal drawer.
@@ -3268,6 +3266,7 @@ mod tests {
             terminal_at: None,
             terminal_reason: None,
             display_label: Some("Ship Work Run".into()),
+            root_agent_id: None,
             policy: ExecutionPolicy::default(),
             escalation: None,
             tasks: Vec::new(),
@@ -4449,6 +4448,9 @@ mod tests {
         let material = DirectorDrawerProjection {
             focused: true,
             goal_driven: false,
+            route: crate::usecase::application::controller::DirectorRoute::Console(
+                crate::usecase::application::controller::DirectorConsoleParent::Organization,
+            ),
             conversations: vec![DirectorConversation {
                 label: "root conversation".to_owned(),
                 selected: true,
@@ -4461,7 +4463,6 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
-            command: None,
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::default(),
@@ -4481,7 +4482,8 @@ mod tests {
         let open = HomeProjection::from_state(&open_state, "atlas", Path::new("/work"), &[])
             .with_director_drawer(material.clone());
         let open_text = render_home(20, 100, &open).join("\n");
-        assert!(open_text.contains("root conversation"));
+        assert!(open_text.contains("Organization / Console"));
+        assert!(!open_text.contains("root conversation"));
         assert!(open_text.contains("director agent output"));
 
         let terminal_material = RootTerminalDrawerProjection {
