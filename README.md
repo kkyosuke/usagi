@@ -105,6 +105,10 @@ IME 対応の `Command ›` 入力欄で編集し、`Enter` で 1 行の追加�
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
 
+Overview で `daemon` を実行すると、health・resource 使用量・session / Agent 状態をまとめた管理 modal が開く。
+ここから non-force の Start / Restart / Stop を実行でき、live runtime を破棄し得る強制操作は CLI にだけ残る。
+詳細は [Overview と modal](document/03-tui.md#overview-と-modal)を参照する。
+
 generic terminal の `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。
 `Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、再度開くと新しい terminal になる。Director は画面の
 右側を高さ一杯に使う overlay で、workspace Shell と同時に開ける。両方が開いているときは panel のクリックでも focus が移り、

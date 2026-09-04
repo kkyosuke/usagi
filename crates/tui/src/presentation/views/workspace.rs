@@ -334,8 +334,8 @@ pub struct HomeProjection {
     /// Persisted Overview command-palette input, when its overlay is open. The
     /// runtime owns this so the caret and filter survive across frames.
     overview_modal: Option<OverviewModal>,
-    /// Overview の `daemon` command が開く読み取り専用 status surface。
-    daemon_overlay: bool,
+    /// Overview の `daemon` command が開く status / lifecycle control surface。
+    daemon_overlay: Option<crate::usecase::application::controller::DaemonControlState>,
     /// session ごとの Agent 群。sidebar の agent 行と Garden の plot が読む唯一の
     /// 素材で、controller の runtime-local phase に daemon inventory を重ねたもの。
     /// 2 つの surface で別々に畳むと、同じ session の Agent 数が画面の 2 か所で
@@ -634,8 +634,9 @@ impl HomeProjection {
             preview_overlay: state.preview_overlay().cloned(),
             cleanup_queue,
             overview_modal: None,
-            daemon_overlay: state.overlay()
-                == Some(crate::usecase::application::controller::Overlay::Daemon),
+            daemon_overlay: (state.overlay()
+                == Some(crate::usecase::application::controller::Overlay::Daemon))
+            .then(|| state.daemon_control().clone()),
             session_agents,
             garden_sessions,
             garden_scope: workspace_name.to_owned(),
@@ -2220,7 +2221,7 @@ fn render_home_modals(
         overview_modal::render_over(height, width, &frame, modal)
     } else if let Some(modal) = &home.cleanup_queue {
         cleanup_modal::render_over(height, width, &frame, modal)
-    } else if home.daemon_overlay {
+    } else if let Some(control) = &home.daemon_overlay {
         daemon_modal::render_over(
             height,
             width,
@@ -2231,6 +2232,7 @@ fn render_home_modals(
                 sessions: home.session_states,
                 session_total: home.sessions.len(),
                 runtimes: home.daemon_runtimes.as_deref(),
+                control,
             },
         )
     } else if let Some(overlay) = &home.pr_overlay {
@@ -6036,7 +6038,8 @@ mod tests {
             "session #{}  live",
             short_id(&missing_session.to_string())
         )));
-        assert!(frame.contains("Ctrl-D"));
+        assert!(frame.contains("Lifecycle actions (non-force)"));
+        assert!(frame.contains("Restart"));
     }
 
     #[test]
