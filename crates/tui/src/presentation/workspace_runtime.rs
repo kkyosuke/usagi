@@ -239,7 +239,9 @@ impl WorkspaceRuntime {
         self.interrupted_removal_confirmation = Some(InterruptedRemovalConfirmation {
             target,
             tab,
-            confirm_selected: true,
+            // Enter must be non-destructive until the user deliberately moves
+            // focus to Remove (or uses the explicit `y` shortcut).
+            confirm_selected: false,
         });
         self.material_revision = self.material_revision.saturating_add(1);
         true

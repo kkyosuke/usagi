@@ -2899,17 +2899,17 @@ fn agent_process_for(processes: &[(TerminalRef, u64)], terminal: &TerminalRef) -
 /// resume する product E2E。
 ///
 /// `tests/agent_ipc_e2e.rs` の cold-restart flow は shipping TUI の reducer を直接呼ぶ。ここは
-/// TUI binary を実 PTY で起動し、`Ctrl-O r` / `Ctrl-O Ctrl-X` の実キー入力だけで操作して、
+/// TUI binary を実 PTY で起動し、tab 選択 / `Ctrl-O r` / `Ctrl-O Ctrl-X` の実キー入力だけで操作して、
 /// 次を process 境界で押さえる。
 ///
 /// * root と managed session の history が distinct な tab として描画され、label は closed
 ///   vocabulary（`Claude (interrupted)` / `Codex (interrupted)` / `Agent (interrupted)`）だけである。
 /// * fresh start・TUI open・inventory・interrupted tab close・reconnect は provider を 1 度も起動しない。
-///   provider を起動するのは `Ctrl-O r` の実キー入力だけである。
+///   provider を起動するのは interrupted tab の明示選択または `Ctrl-O r` の retry だけである。
 /// * interrupted tab close は exact lineage を永続化し、inventory refresh と TUI reopen でも復活しない。
-/// * `Ctrl-O r` の 2 連打（double click）が daemon operation 1 件・child spawn 1 件・live tab 1 枚へ
+/// * `Ctrl-O r` の 2 連打が daemon operation 1 件・child spawn 1 件・live tab 1 枚へ
 ///   収束し、resume argv が exact な provider session ID を運ぶ。選ばなかった lineage は変わらない。
-/// * provider が使えない間の resume は tab を interrupted のまま残し、retry が成功する。
+/// * provider が使えない間の選択 resume は tab を interrupted のまま残し、`Ctrl-O r` の retry が成功する。
 /// * provider ID・argv・cwd・transcript は描画 frame と log（同じ PTY へ落ちる stderr）に出ない。
 #[test]
 #[allow(clippy::too_many_lines)] // 1 本の cold-restart product flow を時系列のまま検証する。
@@ -3038,17 +3038,10 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     let mut cold = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, cold_baseline);
     toggle_director_with_key(&mut master);
-    select_drawer_conversation_by_label(
-        &mut master,
+    wait_for_screen_since(
         &captured,
         cold_baseline,
-        "Codex (interrupted)",
-    );
-    select_drawer_conversation_by_label(
-        &mut master,
-        &captured,
-        cold_baseline,
-        "Claude (interrupted)",
+        "This conversation was interrupted",
     );
     let fresh_daemon = daemon_pid(home.path());
     let fresh_generation = daemon_generation(home.path());
@@ -3074,23 +3067,20 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     .map(|label| cold_screen.matches(label).count())
     .sum::<usize>();
     assert_eq!(cold_screen.matches("(interrupted)").count(), safe_labels);
+    let codex_selected = cold_screen.contains("[Codex (interrupted)]");
+    let claude_selected = cold_screen.contains("[Claude (interrupted)]");
+    assert_ne!(codex_selected, claude_selected, "{cold_screen}");
     assert_no_sensitive_output(&captured, cold_baseline, &secrets);
 
-    // ── 4. The root drawer is already open. Select the Codex history with real
-    // keys and press `Ctrl-O r` twice. The double activation must converge onto
-    // one operation, one child, and one live tab for that lineage alone.
-    select_drawer_conversation_by_label(
-        &mut master,
-        &captured,
-        cold_baseline,
-        "Codex (interrupted)",
-    );
-    wait_for_screen_since(
-        &captured,
-        cold_baseline,
-        "This conversation was interrupted",
-    );
-    send(&mut master, b"\x0fr");
+    // ── 4. The root drawer may passively restore either history first. Activate
+    // Codex with a retry when it is already focused, or with a real next-tab key
+    // otherwise. A repeated retry must still converge onto one operation, one
+    // child, and one live tab for that lineage.
+    if codex_selected {
+        send(&mut master, b"\x0fr");
+    } else {
+        send(&mut master, b"\x0f]");
+    }
     send(&mut master, b"\x0fr");
     assert_spawns_settle(&fixtures.codex_count, 2);
     let resumed_codex = agent_processes(home.path(), 1);
@@ -3128,16 +3118,9 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
         !after_codex.contains("Codex (interrupted)"),
         "{after_codex}"
     );
-    select_drawer_conversation_by_label(
-        &mut master,
-        &captured,
-        cold_baseline,
-        "Claude (interrupted)",
-    );
-
     // ── 5. A resume that the daemon refuses (the provider CLI is unavailable)
-    // leaves the tab interrupted with safe feedback and spawns nothing; the retry
-    // then succeeds against the same lineage.
+    // is triggered by selecting the tab, leaves it interrupted with safe feedback,
+    // and spawns nothing; the explicit retry then succeeds against the same lineage.
     let hidden = fixtures.bin.join("claude.unavailable");
     fs::rename(fixtures.bin.join("claude"), &hidden).unwrap();
     select_drawer_conversation_by_label(
@@ -3146,7 +3129,6 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
         cold_baseline,
         "Claude (interrupted)",
     );
-    send(&mut master, b"\x0fr");
     wait_for_screen_since(
         &captured,
         cold_baseline,

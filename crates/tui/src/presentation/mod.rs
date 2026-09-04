@@ -30661,7 +30661,7 @@ mod tests {
             .interrupted_removal_confirmation()
             .expect("an unresumable selection opens its removal prompt");
         assert_eq!(prompt.tab().continuation, continuation);
-        assert!(prompt.is_confirm_selected());
+        assert!(!prompt.is_confirm_selected());
         let frame = render_home_material(&home_frame_material(
             20,
             80,
@@ -30678,8 +30678,8 @@ mod tests {
         ))
         .join("\n");
         assert!(frame.contains("Remove interrupted Agent"));
-        assert!(frame.contains("[ remove ]"));
-        assert!(frame.contains("[ keep"));
+        assert!(frame.contains("[ remove"));
+        assert!(frame.contains("[ keep   ]"));
         assert!(frame.contains("kept no resume metadata"));
 
         // The prompt owns all input. A terminal EOF cannot leak to a pane
@@ -30691,11 +30691,6 @@ mod tests {
         ));
         assert!(runtime.interrupted_removal_confirmation().is_some());
         assert!(handle_interrupted_removal_confirmation(
-            &Key::Right,
-            &mut ui,
-            &mut runtime,
-        ));
-        assert!(handle_interrupted_removal_confirmation(
             &Key::Enter,
             &mut ui,
             &mut runtime,
@@ -30704,9 +30699,14 @@ mod tests {
         assert!(runtime.active_pane().has_tabs());
         assert!(ui.agent_dismissed().is_empty());
 
-        // Selecting the same tab again reopens a fresh affirmative prompt.
+        // Selecting the same tab again reopens a fresh safe-default prompt.
         assert!(select_right_pane_tab(&mut ui, &mut runtime, 0));
         activate_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending_targets);
+        assert!(handle_interrupted_removal_confirmation(
+            &Key::Left,
+            &mut ui,
+            &mut runtime,
+        ));
         assert!(handle_interrupted_removal_confirmation(
             &Key::Enter,
             &mut ui,

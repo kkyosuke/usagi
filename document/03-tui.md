@@ -2279,7 +2279,7 @@ click または `Ctrl-O [` / `Ctrl-O ]` で明示選択する。resume 可能な
 5. live tab の `Ctrl-O x` は CLI へ `Ctrl-D` と同じ EOT を送り、daemon が runtime の終了を観測した時点で tab を閉じる。
    interrupted tab では EOT を送らず、exact lineage の dismissal を永続化できた時点で tab を閉じる。どちらも別 runtime の
    resume / spawn は発火しない。
-6. resume 不可の tab を明示選択すると safe reason を載せた Remove / Keep modal を開く。modal は `Enter` で
+6. resume 不可の tab を明示選択すると safe reason を載せ、Keep を初期選択にした Remove / Keep modal を開く。modal は `Enter` で
    選択中の回答、`y` で Remove、`Esc` / `n` で Keep を確定し、`←` / `→` / `Tab` で回答を切り替える。Remove は exact lineage の
    dismissal を永続化してからその tab だけを閉じ、失敗時は tab を残す。modal が開いている間は `Ctrl-D` を含む入力を
    背後の pane へ渡さない。
