@@ -860,6 +860,21 @@ fn workspace_foreground_input_owner(runtime: &WorkspaceRuntime) -> WorkspaceFore
 /// stall behind the foreground owner.
 fn handle_director_picker_input(runtime: &mut WorkspaceRuntime, key: &Key) -> Option<Vec<Effect>> {
     if workspace_foreground_input_owner(runtime) == WorkspaceForegroundInputOwner::DirectorPicker {
+        // Organization is management-owned, but its Director selector lives at
+        // the pane seam because changing a row also persists exact Agent intent.
+        // Let only those navigation keys reach `select_director_tab`; every
+        // other non-Console input remains exclusive to the drawer.
+        if matches!(runtime.state().director_new(), DirectorNew::Idle)
+            && runtime.state().director_route() == DirectorRoute::Organization
+            && matches!(
+                key,
+                Key::Up
+                    | Key::Down
+                    | Key::Live(LiveTerminalAction::PreviousTab | LiveTerminalAction::NextTab)
+            )
+        {
+            return None;
+        }
         return match key {
             Key::Resize | Key::Other => None,
             _ => Some(runtime.handle_key(key.clone())),
@@ -24737,6 +24752,24 @@ mod tests {
         );
         assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
         assert!(inputs.lock().unwrap().is_empty());
+
+        for key in [
+            Key::Up,
+            Key::Down,
+            Key::Live(LiveTerminalAction::PreviousTab),
+            Key::Live(LiveTerminalAction::NextTab),
+        ] {
+            assert_eq!(
+                route_workspace_input_before_reducer(
+                    &mut ui,
+                    &mut runtime,
+                    &mut controls,
+                    &mut term,
+                    &key,
+                ),
+                WorkspaceInputRoute::Unhandled
+            );
+        }
 
         assert_eq!(
             route_workspace_input_before_reducer(
