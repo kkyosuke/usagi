@@ -1991,7 +1991,7 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
 
     // 指示モードで root Agent（claude）を起動する。
     click_director_button(&mut master, &captured, baseline);
-    wait_for_screen_since(&captured, baseline, "Enter: Console · Ctrl-O n: New");
+    wait_for_screen_since(&captured, baseline, "Director / Organization");
     send(&mut master, b"\x0fn");
     wait_for_screen_since(&captured, baseline, "↑↓: select");
     send(&mut master, b"\x1b[A");
@@ -2367,7 +2367,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
     click_director_button(&mut master, &captured, first_baseline);
-    wait_for_screen_since(&captured, first_baseline, "Enter: Console · Ctrl-O n: New");
+    wait_for_screen_since(&captured, first_baseline, "Director / Organization");
     send(&mut master, b"\x0fn");
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.

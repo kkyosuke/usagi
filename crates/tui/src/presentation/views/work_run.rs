@@ -11,8 +11,8 @@ use usagi_core::domain::supervisor::{
 /// Whether the daemon observation behind the projection is current.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WorkRunFreshness {
-    /// No observation has completed yet. An empty projection stays visually
-    /// quiet during the first frame.
+    /// No observation has completed yet. The goal-driven Director renders an
+    /// explicit loading state instead of claiming that the inventory is empty.
     #[default]
     Pending,
     /// The last observation completed coherently.
