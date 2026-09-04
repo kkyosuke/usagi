@@ -520,7 +520,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 
 | prefix | アクション | 効果 |
 |---|---|---|
-| `Ctrl-O` `?` | CommandHelp | 現在の Home scope に応じたコマンド一覧を開く |
+| `Ctrl-O` `?` | KeyboardHelp | live pane で使えるキーボードショートカットを表示する |
 | `Ctrl-O` `+` | OpenWorkspace | Add workspace overlay を開く |
 | `Ctrl-O` `1` … `9` | ActivateWorkspace | 対応する project tab へ切り替える |
 | `Ctrl-O` `0` | OpenWorkspaceSwitcher | 全 project / session の fuzzy finder を開く |
@@ -979,13 +979,11 @@ skeleton は session 行ではなく作成中の 2 行として、選択でき�
 
 ## Overview と modal
 
-前面に入力 modal / drawer がない Home では `?` で context-aware な Commands modal を開く。live pane は通常の
-`?` を PTY へ渡し、`Ctrl-O ?` で同じ modal を開く。初期 tab の `Available` は Switch なら Overview、Closeup なら
-active session に対して、その時点で実行できる command だけを既存 command registry から表示する。`All` は両 registry の
-全 command を表示し、現在実行できない行を `○`、実行できる行を `●` で区別する。Garden の端末寸法、Agent CLI の有無、
-active session の利用可否を availability に反映し、実行経路が未実装の `diff` は実行可能に見せない。`Tab` / `←` / `→` で
-tab を切り替え、`↑` / `↓` で行を選び、`?` / `Esc` で閉じる。Overview / Closeup palette が既に開いている場合の `?` は
-filter / command line の文字入力として扱う。
+前面に入力 modal / drawer がない Home では `?` で、現在の surface が受理するキーボードショートカットを表示する。
+live pane は通常の `?` を PTY へ渡し、`Ctrl-O ?` で同じ Keyboard help を開く。Help は読み取り専用の最前面 input owner
+として背面への入力を止めるが、daemon 更新と terminal 観測は継続する。Overview / Closeup palette が既に開いている場合の
+plain `?` は filter / command line の文字入力として扱う。全画面の Help alias と表示内容は
+[11. キーバインド](11-keybindings.md#全画面共通)を正本とする。
 
 Overview palette の Tab は選択中のトップレベル command を補完する。`session` の第 1 引数は
 登録済み subcommand の一意な prefix を補完する。`cleanup` の追加により `session c` は曖昧なので入力を変えず、
