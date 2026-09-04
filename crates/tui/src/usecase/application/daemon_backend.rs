@@ -27,8 +27,8 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::usecase::env::EnvScope;
 
 use super::controller::{
-    AppEvent, Effect, EnvironmentEntry, PendingToken, RoleEditorScope, SessionCreateIntent,
-    TabDirection, Target,
+    AppEvent, DaemonAction, Effect, EnvironmentEntry, PendingToken, RoleEditorScope,
+    SessionCreateIntent, TabDirection, Target,
 };
 use crate::usecase::overview;
 
@@ -224,6 +224,45 @@ pub trait WorkspaceCommandPort {
     );
 }
 
+/// Daemon process lifecycle boundary used by the management modal.
+///
+/// This is separate from daemon IPC ports because it must still be able to
+/// start a missing daemon and because stopping the daemon necessarily closes
+/// the connection being controlled.
+pub trait DaemonControlPort {
+    fn execute(
+        &mut self,
+        workspace: WorkspaceId,
+        action: DaemonAction,
+        token: PendingToken,
+        completions: Completions,
+    );
+}
+
+struct NoDaemonControl;
+
+impl DaemonControlPort for NoDaemonControl {
+    fn execute(
+        &mut self,
+        workspace: WorkspaceId,
+        action: DaemonAction,
+        token: PendingToken,
+        completions: Completions,
+    ) {
+        completions.emit(AppEvent::Backend(
+            super::controller::BackendEvent::DaemonControlFinished {
+                workspace,
+                action,
+                token,
+                result: Err(super::controller::SafeError {
+                    message: super::controller::SafeMessage::new("daemon control is unavailable"),
+                    error_id: "daemon-control-unavailable".to_owned(),
+                }),
+            },
+        ));
+    }
+}
+
 /// Daemon-owned durable decision snapshot and resolve boundary.
 pub trait DecisionPort {
     /// Non-blocking drain of a resident observation worker, called once per
@@ -351,6 +390,7 @@ pub struct DaemonBackend {
     agent: Box<dyn AgentPort>,
     store: Box<dyn TargetStorePort>,
     workspace_commands: Box<dyn WorkspaceCommandPort>,
+    daemon_control: Box<dyn DaemonControlPort>,
     decisions: Box<dyn DecisionPort>,
     overlay: Box<dyn OverlayPort>,
     completions_tx: Sender<AppEvent>,
@@ -372,6 +412,7 @@ impl DaemonBackend {
             agent,
             store,
             workspace_commands,
+            daemon_control: Box::new(NoDaemonControl),
             decisions: Box::new(NoDecisions),
             overlay: Box::new(NoOverlay),
             completions_tx,
@@ -383,6 +424,13 @@ impl DaemonBackend {
     #[must_use]
     pub fn with_decisions(mut self, decisions: Box<dyn DecisionPort>) -> Self {
         self.decisions = decisions;
+        self
+    }
+
+    /// Connect the process-lifecycle port used by the daemon modal.
+    #[must_use]
+    pub fn with_daemon_control(mut self, daemon_control: Box<dyn DaemonControlPort>) -> Self {
+        self.daemon_control = daemon_control;
         self
     }
 
@@ -509,6 +557,14 @@ impl DaemonBackend {
             Effect::WorkspaceCommand { workspace, command } => {
                 self.workspace_commands
                     .execute(workspace, command, self.completions());
+            }
+            Effect::DaemonControl {
+                workspace,
+                action,
+                token,
+            } => {
+                self.daemon_control
+                    .execute(workspace, action, token, self.completions());
             }
             Effect::RefreshDecisions { workspace } => {
                 self.decisions.refresh(workspace, self.completions());
@@ -826,6 +882,25 @@ mod tests {
             completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
                 "command accepted",
             ))));
+        }
+    }
+
+    struct FakeDaemonControl;
+
+    impl DaemonControlPort for FakeDaemonControl {
+        fn execute(
+            &mut self,
+            workspace: WorkspaceId,
+            action: DaemonAction,
+            token: PendingToken,
+            completions: Completions,
+        ) {
+            completions.emit(AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace,
+                action,
+                token,
+                result: Ok(Notice::new("lifecycle complete")),
+            }));
         }
     }
 
@@ -1147,6 +1222,46 @@ mod tests {
         assert!(matches!(
             backend.drain_events().as_slice(),
             [AppEvent::Backend(BackendEvent::Notice(_))]
+        ));
+    }
+
+    #[test]
+    fn daemon_control_reaches_its_port_and_refluxes_the_fenced_result() {
+        let workspace = WorkspaceId::new();
+        let mut configured = backend().with_daemon_control(Box::new(FakeDaemonControl));
+        assert_eq!(
+            configured.dispatch(Effect::DaemonControl {
+                workspace,
+                action: DaemonAction::Restart,
+                token: PendingToken::from_raw(7),
+            }),
+            Flow::Continue
+        );
+        assert!(matches!(
+            configured.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                workspace: completed_workspace,
+                action: DaemonAction::Restart,
+                token,
+                result: Ok(notice),
+            })] if *completed_workspace == workspace
+                && *token == PendingToken::from_raw(7)
+                && notice.message == "lifecycle complete"
+        ));
+
+        let mut unavailable = backend();
+        let _ = unavailable.dispatch(Effect::DaemonControl {
+            workspace,
+            action: DaemonAction::Stop,
+            token: PendingToken::from_raw(8),
+        });
+        assert!(matches!(
+            unavailable.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::DaemonControlFinished {
+                action: DaemonAction::Stop,
+                result: Err(error),
+                ..
+            })] if error.error_id == "daemon-control-unavailable"
         ));
     }
 

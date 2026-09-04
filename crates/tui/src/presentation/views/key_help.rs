@@ -79,7 +79,7 @@ impl Context {
             Self::Preview => "Markdown preview",
             Self::Scratchpad => "Scratchpad",
             Self::RolesEditor => "Roles editor",
-            Self::Daemon => "Daemon status",
+            Self::Daemon => "Daemon control",
             Self::DecisionList => "Pending decisions",
             Self::DecisionAnswer => "Decision answer",
             Self::Director => "Director conversation",
@@ -261,7 +261,12 @@ impl Context {
                 ("Ctrl-S", "save"),
                 ("Esc", "close"),
             ],
-            Self::Daemon => &[("Esc", "close")],
+            Self::Daemon => &[
+                ("↑ ↓ / ← → / Tab", "select action"),
+                ("s / r / x", "start / restart / stop"),
+                ("Enter", "run selected action"),
+                ("Esc", "close"),
+            ],
             Self::DecisionList => &[
                 ("↑ / ↓", "select decision"),
                 ("Enter / Esc", "answer / close"),

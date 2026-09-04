@@ -1017,7 +1017,16 @@ modal を開くたびに既存の coalesced restore lane へ新しい coherent i
 launch admission や ownership の判断には使わない。metrics 未取得と Agent concurrency 未報告はそれぞれ
 `waiting for daemon observation` / `unreported` と表示し、Agent inventory の初回取得前も待機表示にして idle と読み替えない。
 
-live Agent の枠は対象 tab で `Ctrl-D` により Agent を終了して解放する。status modal 自体は読み取り専用で、Esc で閉じる。
+同じ modal は `Start` / `Restart` / `Stop` の lifecycle action を持つ。`↑` / `↓` / `←` / `→` / `Tab` で選択し、
+Enter で 1 件だけ非同期に実行する。`s` / `r` / `x` はそれぞれ Start / Restart / Stop の直接 shortcut である。
+処理中は二重送信と選択変更を抑止し、workspace identity・action・TUI-local token が一致する completion だけを結果として表示する。
+Stop により接続先が消えても lifecycle 操作は daemon IPC connection そのものに依存しないため、modal に留まって
+Start を実行できる。metrics と inventory の observation lane は daemon を cold start せず、復帰後に再接続する。
+
+modal の action は常に non-force である。Restart は live runtime を保持する seamless rollover を試み、Stop は live
+Agent / terminal があれば daemon 側で拒否される。live PTY を破棄し得る `--force` は誤操作できないよう CLI にだけ残す。
+live Agent の枠は対象 tab で `Ctrl-D` により Agent を終了して解放する。Esc は操作中を含め modal だけを閉じ、
+既に受理された lifecycle command は取り消さない。
 
 `session sleep <name>` は、対象 session の idle Agent process と PTY を止めて concurrency slot を解放する。
 実行できるのは daemon が `ready` または `ended` と観測し、exact provider resume metadata を保持する Agent だけである。
