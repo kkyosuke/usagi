@@ -2631,7 +2631,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 Ok(terminals) => terminals,
                 Err(error) => {
                     ErrorLog::record(&tui_error_entry(
-                        "terminal reuse inventory",
+                        "terminal inventory",
                         &format!("{error:?}"),
                     ));
                     return Err("daemon unavailable; reconnect to continue".to_owned());
@@ -2649,8 +2649,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let lifecycle = match request_lifecycle_snapshot() {
             Ok(lifecycle) => lifecycle,
             Err(error) => {
-                let reason = error.reason();
-                ErrorLog::record(&tui_error_entry("terminal lifecycle request", &reason));
+                ErrorLog::record(&tui_error_entry("terminal lifecycle", &error.reason()));
                 return Err("daemon unavailable; reconnect to continue".to_owned());
             }
         };
@@ -2698,10 +2697,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let mut client = match crate::runtime::daemon::policy_client(ClientPolicy::tui()) {
             Ok(client) => client,
             Err(error) => {
-                ErrorLog::record(&tui_error_entry(
-                    "terminal launch connect",
-                    &error.to_string(),
-                ));
+                ErrorLog::record(&tui_error_entry("terminal connect", &error.to_string()));
                 return Err("daemon unavailable; reconnect to continue".to_owned());
             }
         };
