@@ -65,6 +65,32 @@ pub struct CloseOutcome {
     pub cancel: Option<OperationId>,
 }
 
+/// Destructive confirmation opened when the user activates an interrupted
+/// conversation that has no trustworthy exact resume target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedRemovalConfirmation {
+    target: Target,
+    tab: InterruptedTab,
+    confirm_selected: bool,
+}
+
+impl InterruptedRemovalConfirmation {
+    #[must_use]
+    pub const fn target(&self) -> Target {
+        self.target
+    }
+
+    #[must_use]
+    pub const fn tab(&self) -> &InterruptedTab {
+        &self.tab
+    }
+
+    #[must_use]
+    pub const fn is_confirm_selected(&self) -> bool {
+        self.confirm_selected
+    }
+}
+
 /// Result of routing one key through Director's IME-safe command composer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectorCommandInput {
@@ -90,8 +116,8 @@ pub struct PaneRestoreTarget {
     /// Saved interrupted selection for this target. It is applied only after
     /// the interrupted inventory has been restored, and never starts resume.
     pub selected_interrupted: Option<AgentContinuationRef>,
-    /// Interrupted conversations of this target, in display order. They are
-    /// read-only tabs until the user explicitly resumes one.
+    /// Interrupted conversations of this target, in display order. They stay
+    /// inert during restore; explicit selection activates resume or removal.
     pub interrupted: Vec<InterruptedTab>,
 }
 
@@ -106,6 +132,10 @@ pub struct WorkspaceRuntime {
     /// Persisted input state for the Closeup action modal. Present only while the
     /// controller's [`Overlay::Closeup`] is open.
     closeup_modal: Option<CloseupModal>,
+    /// Frontmost prompt for an explicitly selected interrupted conversation
+    /// that cannot be resumed. It owns input until the user keeps or removes
+    /// the exact lineage.
+    interrupted_removal_confirmation: Option<InterruptedRemovalConfirmation>,
     modal_selection_mode: ModalSelectionMode,
     /// User-interaction count captured when each pane launch was requested. A
     /// completion may focus its tab only while the count is unchanged, mirroring
@@ -148,6 +178,7 @@ impl WorkspaceRuntime {
             panes,
             overview_modal: None,
             closeup_modal: None,
+            interrupted_removal_confirmation: None,
             modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
             director_projection: DirectorDrawerProjection::default(),
@@ -170,6 +201,59 @@ impl WorkspaceRuntime {
     #[must_use]
     pub const fn closeup_modal(&self) -> Option<&CloseupModal> {
         self.closeup_modal.as_ref()
+    }
+
+    /// The unresumable-history removal prompt, when it owns workspace input.
+    #[must_use]
+    pub const fn interrupted_removal_confirmation(
+        &self,
+    ) -> Option<&InterruptedRemovalConfirmation> {
+        self.interrupted_removal_confirmation.as_ref()
+    }
+
+    /// Open the removal prompt for the currently selected interrupted tab only
+    /// when the daemon supplied no trustworthy exact resume target.
+    pub fn open_interrupted_removal_confirmation(&mut self) -> bool {
+        let Some(target) = self.panes.active() else {
+            return false;
+        };
+        let Some(tab) = self
+            .focused_interrupted()
+            .filter(|tab| !tab.resumable())
+            .cloned()
+        else {
+            return false;
+        };
+        self.interrupted_removal_confirmation = Some(InterruptedRemovalConfirmation {
+            target,
+            tab,
+            // Enter must be non-destructive until the user deliberately moves
+            // focus to Remove (or uses the explicit `y` shortcut).
+            confirm_selected: false,
+        });
+        self.material_revision = self.material_revision.saturating_add(1);
+        true
+    }
+
+    /// Move focus between Remove and Keep in the frontmost prompt.
+    pub fn toggle_interrupted_removal_choice(&mut self) {
+        let Some(confirmation) = self.interrupted_removal_confirmation.as_mut() else {
+            return;
+        };
+        confirmation.confirm_selected = !confirmation.confirm_selected;
+        self.material_revision = self.material_revision.saturating_add(1);
+    }
+
+    /// Close the prompt and return its exact frozen lineage to the presentation
+    /// shell, which durably commits the dismissal before removing the tab.
+    pub fn take_interrupted_removal_confirmation(
+        &mut self,
+    ) -> Option<InterruptedRemovalConfirmation> {
+        let confirmation = self.interrupted_removal_confirmation.take();
+        if confirmation.is_some() {
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
+        confirmation
     }
 
     /// The controller state driving Home rows, overlays, and markers.
@@ -1409,6 +1493,23 @@ impl WorkspaceRuntime {
         outcome
     }
 
+    /// Remove one interrupted lineage after its durable dismissal has been
+    /// committed. Stable target and continuation identity keep a delayed modal
+    /// answer from closing whichever unrelated tab is focused now.
+    pub fn dismiss_interrupted_tab(&mut self, target: Target, continuation: AgentContinuationRef) {
+        let had_root_agent = self.has_interactive_root_agent_tabs();
+        let _ = reduce_registry(
+            &mut self.panes,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::DismissInterrupted { continuation },
+            },
+        );
+        self.sync_live_pane();
+        self.close_disappeared_director(had_root_agent);
+        self.close_empty_root_terminal_drawer();
+    }
+
     fn close_disappeared_director(&mut self, had_root_agent: bool) {
         if had_root_agent
             && self.state.director_drawer_open()
@@ -2050,6 +2151,7 @@ impl WorkspaceRuntime {
     /// the Ctrl-C grace from being clobbered by the next sample.
     fn sync_live_pane(&mut self) {
         self.ensure_open_root_surface_selection();
+        self.reconcile_interrupted_removal_confirmation();
         // A target that owns any tab shows its tab strip, so the action
         // launcher steps aside and a non-live tab (an interrupted Agent history)
         // can be selected and resumed. This is sampled *before* the live level so
@@ -2074,6 +2176,20 @@ impl WorkspaceRuntime {
                 .any(|tab| matches!(tab, PaneTab::Live(_)))
         };
         let _ = update(&mut self.state, AppEvent::LivePaneAvailability(live));
+    }
+
+    fn reconcile_interrupted_removal_confirmation(&mut self) {
+        let remains_unresumable =
+            self.interrupted_removal_confirmation
+                .as_ref()
+                .is_some_and(|confirmation| {
+                    self.interrupted_pane_for(confirmation.target, confirmation.tab.continuation)
+                        .is_some_and(|pane| !pane.tab.resumable())
+                });
+        if self.interrupted_removal_confirmation.is_some() && !remains_unresumable {
+            self.interrupted_removal_confirmation = None;
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
     }
 
     /// Build the Home frame from the controller state, pane strip, and the
@@ -3303,6 +3419,10 @@ mod tests {
         let second = terminal_ref(workspace, session);
         let _ = runtime.complete_pane(target, pending, second.clone());
         let _ = runtime.focus_terminal(target, second);
+        assert_eq!(
+            runtime.terminal_after_select(TabDirection::Previous),
+            Some(Some(first.clone()))
+        );
         assert_eq!(runtime.terminal_after_close(), Some(Some(first)));
     }
 
@@ -4468,6 +4588,11 @@ mod tests {
         }
         let continuation = history.continuation;
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        // The drawer can open before its asynchronous inventory observation
+        // arrives. Restoring interrupted-only history must establish the real
+        // pane selection without relying on another open transition.
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(runtime.state().director_drawer_open());
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
@@ -4476,12 +4601,20 @@ mod tests {
                 target: Target::Root(workspace),
                 panes: Vec::new(),
                 selected: None,
-                selected_interrupted: Some(continuation),
+                selected_interrupted: None,
                 interrupted: vec![history],
             }],
         ));
+        assert_eq!(
+            runtime
+                .panes()
+                .pane(Target::Root(workspace))
+                .expect("the restored root pane exists")
+                .selected(),
+            &PaneSelection::Tab(TabSelection::Interrupted(continuation)),
+            "root history must not need a live Agent to establish selection"
+        );
 
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(
             runtime.active_pane().selected(),
             &PaneSelection::Tab(TabSelection::Interrupted(continuation))
@@ -5037,8 +5170,8 @@ mod tests {
         )
     }
 
-    /// Seed one target's interrupted history through the restore fence and select
-    /// the first tab, as the shell does after a coherent observation.
+    /// Seed one target's interrupted history through the restore fence. A
+    /// coherent observation selects the first restored tab.
     fn with_history(
         runtime: &mut WorkspaceRuntime,
         target: Target,
@@ -5094,15 +5227,10 @@ mod tests {
             runtime.wants_pane_control_input(),
             "the launcher must step aside for a target that owns tabs"
         );
-        // Tab cycling is a tab-strip concern, not a live-PTY one.
-        for effect in runtime.handle_key(Key::Live(
-            crate::usecase::terminal_input::LiveTerminalAction::NextTab,
-        )) {
-            runtime.on_effect(&effect);
-        }
         assert_eq!(
             runtime.focused_interrupted().map(|tab| tab.continuation),
-            Some(history.continuation)
+            Some(history.continuation),
+            "cold restore must focus history without a tab-cycle workaround"
         );
     }
 
@@ -5165,7 +5293,6 @@ mod tests {
         );
         // A history tab is not a live pane: nothing to attach, poll, or resize.
         assert!(!runtime.state().has_live_pane());
-        let _ = runtime.select_tab(TabDirection::Next);
         assert_eq!(
             runtime.focused_interrupted().map(|tab| tab.continuation),
             Some(history.continuation)
@@ -5187,6 +5314,43 @@ mod tests {
     }
 
     #[test]
+    fn unresumable_removal_prompt_reconciles_empty_resumable_and_refreshed_history() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut empty = WorkspaceRuntime::new(workspace, Vec::new());
+        assert!(!empty.open_interrupted_removal_confirmation());
+        empty.toggle_interrupted_removal_choice();
+        assert!(empty.interrupted_removal_confirmation().is_none());
+
+        let mut runtime = closeup_on(workspace, session);
+        let resumable = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![resumable.clone()],
+        );
+        assert!(!runtime.open_interrupted_removal_confirmation());
+
+        let mut unresumable = resumable.clone();
+        unresumable.target = None;
+        unresumable.reason =
+            usagi_core::domain::agent::ProviderResumeReason::ProviderMetadataUnavailable;
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![unresumable.clone()],
+        );
+        assert!(runtime.open_interrupted_removal_confirmation());
+
+        // An unchanged observation keeps the frozen prompt; learning an exact
+        // resume target closes it instead of offering stale deletion.
+        with_history(&mut runtime, Target::Session(session), vec![unresumable]);
+        assert!(runtime.interrupted_removal_confirmation().is_some());
+        with_history(&mut runtime, Target::Session(session), vec![resumable]);
+        assert!(runtime.interrupted_removal_confirmation().is_none());
+    }
+
+    #[test]
     fn an_explicit_resume_pends_one_tab_and_a_validated_replacement_turns_it_live() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5198,7 +5362,6 @@ mod tests {
             Target::Session(session),
             vec![resumed.clone(), other.clone()],
         );
-        let _ = runtime.select_tab(TabDirection::Next);
 
         let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
         assert_eq!(command.target, *resumed.target.as_ref().unwrap());
@@ -5249,7 +5412,6 @@ mod tests {
             Target::Session(session),
             vec![unresumable.clone(), resumable.clone()],
         );
-        let _ = runtime.select_tab(TabDirection::Next);
         assert_eq!(
             runtime.resume_selected_tab(OperationId::new()),
             Err(ResumeRejection::NotResumable)

@@ -117,6 +117,8 @@ drawer の背面でも通常の workspace geometry と attachment のまま出�
 消えると Director は自動で閉じる。
 live Agent では同じ close chord が `Ctrl-D` と同じ終了入力になり、interrupted Agent では選択中の tab を
 永続的に閉じる。interrupted tab の close は Agent の resume や新規起動を行わない。
+interrupted tab をクリックまたは tab 移動で明示選択すると、exact resume 可能ならその会話だけを再開する。
+resume 不可なら Remove / Keep の確認を出し、Remove を確定した lineage だけを永続的に一覧から除く。
 
 ## 必要なもの
 
@@ -230,7 +232,8 @@ terminal new     # 外部ターミナルを開き、modal を閉じて Closeup �
 ```
 
 daemon 再起動などで Agent が中断した場合は、自動的に別の会話へ接続せず、保持された provider conversation を
-`session resume <name>` で明示的に再開する。
+TUI の interrupted tab 選択、または `session resume <name>` で明示的に再開する。TUI の起動・workspace open・
+inventory refresh 自体は再開を発火しない。
 終了済みの会話を保持したまま Agent process と PTY だけを止める場合は `session sleep <name>` を使う。
 同時起動枠は 16 で、枠が埋まった状態から新しく起動すると、exact resume 可能な終了済み Agent のうち最古の 1 件が
 自動的に sleep へ移る。session、worktree、provider conversation は削除されず、同じ `session resume <name>` で再開できる。
