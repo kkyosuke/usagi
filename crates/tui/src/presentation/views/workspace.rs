@@ -352,9 +352,6 @@ pub struct HomeProjection {
     /// more open projects contribute cached plots.
     garden_scope: String,
     garden_workspaces: BTreeMap<SessionId, WorkspaceId>,
-    /// Renderer-independent horizontal column offset owned by the controller. The
-    /// Garden layout clamps it against the current terminal capacity and session count.
-    garden_scroll: usize,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
     /// Canonical Garden animation tick supplied by the composition root's
@@ -667,7 +664,6 @@ impl HomeProjection {
             garden_sessions,
             garden_scope: workspace_name.to_owned(),
             garden_workspaces,
-            garden_scroll: state.garden_scroll(),
             garden_motion: GardenMotion::Full,
             garden_tick: None,
             daemon_runtimes: None,
@@ -714,11 +710,10 @@ impl HomeProjection {
             return self;
         };
         let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        self.garden_tick = widgets::garden::canonical_tick_scrolled(
+        self.garden_tick = widgets::garden::canonical_tick(
             height,
             width,
             sessions,
-            self.garden_scroll,
             tick,
             self.garden_motion.is_reduced(),
         );
@@ -2099,12 +2094,11 @@ fn garden_frame(
 ) -> Option<widgets::garden::GardenFrame> {
     let sessions = home.garden_sessions.as_ref()?;
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    widgets::garden::render_scrolled(
+    widgets::garden::render(
         height,
         width,
         &home.garden_scope,
         sessions,
-        home.garden_scroll,
         home.garden_tick.unwrap_or_else(|| garden_tick(now)),
         home.garden_motion.is_reduced(),
     )
@@ -2141,18 +2135,10 @@ pub fn garden_click_at(
 ) -> Option<GardenClick> {
     let frame = garden_frame(raw_height, raw_width, home, now)?;
     let (column, row) = (usize::from(column), usize::from(row));
-    if let Some(hitbox) = frame
-        .scroll_hitboxes
-        .iter()
-        .find(|hitbox| hitbox.contains(column, row))
-    {
-        return Some(GardenClick::Scroll(hitbox.scroll));
-    }
     Some(
         frame
-            .panel_hitboxes
+            .hitboxes
             .iter()
-            .chain(&frame.hitboxes)
             .find(|hitbox| hitbox.contains(column, row))
             .and_then(|hitbox| {
                 home.garden_workspaces
@@ -2166,25 +2152,6 @@ pub fn garden_click_at(
             })
             .unwrap_or(GardenClick::Dismiss),
     )
-}
-
-/// Resolve a Garden scroll arrow against the same clamped viewport represented by
-/// the current frame. Boundary arrows target the current offset and remain consumed.
-#[must_use]
-pub fn garden_scroll_action(
-    raw_height: usize,
-    raw_width: usize,
-    home: &HomeProjection,
-    now: DateTime<Utc>,
-    forward: bool,
-) -> Option<GardenClick> {
-    let frame = garden_frame(raw_height, raw_width, home, now)?;
-    let scroll = if forward {
-        (frame.scroll + 1).min(frame.max_scroll)
-    } else {
-        frame.scroll.saturating_sub(1)
-    };
-    Some(GardenClick::Scroll(scroll))
 }
 
 /// controller projection の Home frame を描く。
@@ -3296,14 +3263,14 @@ mod tests {
         HomeProjection, LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession,
         SESSION_ROW_LINES, SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED,
         WorkRunProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
-        feedback_label, format_memory, garden_click_at, garden_fits, garden_frame,
-        garden_scroll_action, garden_tick, health_badge, health_reason_label,
-        home_header_action_at, home_header_layout, home_left_pane, home_notice_banner,
-        home_row_height, home_row_lines_at, home_viewport_start, load_style,
-        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, right_pane_tab_at, role_identity,
-        root_terminal_available_width, short_id, sidebar_agent_line, sidebar_metadata,
-        sidecar_labels, terminal_point_at, with_footer_gap, work_run_state_label,
+        feedback_label, format_memory, garden_click_at, garden_fits, garden_frame, garden_tick,
+        health_badge, health_reason_label, home_header_action_at, home_header_layout,
+        home_left_pane, home_notice_banner, home_row_height, home_row_lines_at,
+        home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
+        pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
+        right_pane_tab_at, role_identity, root_terminal_available_width, short_id,
+        sidebar_agent_line, sidebar_metadata, sidecar_labels, terminal_point_at, with_footer_gap,
+        work_run_state_label,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -5497,8 +5464,8 @@ mod tests {
                 .any(|agent| agent.phase == AgentPhase::Running)
         );
 
-        // A wide viewport keeps every virtual-world home in this aggregate phase fixture.
-        // Ordinary terminals pan through the same material one region at a time.
+        // A wide viewport keeps every detailed plot in this aggregate phase fixture;
+        // narrower terminals condense the same material without a second viewport.
         let frame = render_home_at(24, 540, &home, now());
         let text = frame
             .iter()
@@ -5509,11 +5476,10 @@ mod tests {
         // Garden が Home を置き換えている（sidebar ではなく庭の footer が出る）。
         assert!(text.contains("Garden Action Center"));
         assert!(text.contains("click"));
-        assert!(text.contains("any key · wake"));
-        assert!(text.contains("Agents"));
-        assert!(text.contains("running"));
+        assert!(text.contains("any key · return"));
+        assert!(!text.contains("Agents"));
         assert!(text.contains("waiting"));
-        assert!(!text.contains("1 run · 1 done"));
+        assert!(text.contains("1 run · 1 done"));
         assert!(!text.contains("> s0"));
         assert!(text.contains("failed · worktree missing"));
         assert!(text.contains("s0"));
@@ -5599,9 +5565,9 @@ mod tests {
             phase: AgentPhase::Running,
         }));
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        // 注意順（waiting が先）の glyph だけを示し、pose と同じ action caption は重ねない。
+        // 注意順（waiting が先）の glyph と短い状態内訳を示す。
         assert!(text.contains("◆ ●"), "{text}");
-        assert!(!text.contains("1 wait · 1 run"), "{text}");
+        assert!(text.contains("1 wait · 1 run"), "{text}");
         assert!(!text.contains("no agents"));
     }
 
@@ -5687,7 +5653,7 @@ mod tests {
         let garden = home.garden_sessions.as_ref().expect("garden projection");
         assert_eq!(garden[0].agents, home.session_agents[&session]);
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        assert!(text.contains("1 plots"), "{text}");
+        assert!(text.contains("1 session"), "{text}");
         assert!(text.contains("1 usagi"), "{text}");
         assert!(text.contains("o.o"), "{text}");
         assert!(!text.contains("1 run"), "{text}");
@@ -5811,8 +5777,8 @@ mod tests {
             );
         }
 
-        // 右 panel は左の viewport に関係なく inactive project の Agent を持ち、
-        // runtime identity を失わず click target にする。
+        // inactive project の Agent も同じ庭へうさぎとして置き、runtime identity を
+        // 失わず click target にする。
         let foreign_workspace = WorkspaceId::new();
         let foreign_session = SessionId::new();
         let foreign_agent = AgentRuntimeId::new();
@@ -5839,10 +5805,10 @@ mod tests {
         );
         let frame = garden_frame(24, 100, &deck_home, now()).expect("Garden frame");
         let agent_row = frame
-            .panel_hitboxes
+            .hitboxes
             .iter()
             .find(|hitbox| hitbox.agent == Some(foreign_agent))
-            .expect("the inactive project's Agent is listed in the right panel");
+            .expect("the inactive project's Agent is drawn as a usagi");
         assert_eq!(
             garden_click_at(
                 24,
@@ -5875,8 +5841,6 @@ mod tests {
         );
         assert_eq!(garden_click_at(24, 100, &plain, now(), 10, 10), None);
         assert_eq!(garden_click_at(12, 100, &home, now(), 10, 10), None);
-        assert_eq!(garden_scroll_action(24, 100, &plain, now(), true), None);
-        assert_eq!(garden_scroll_action(12, 100, &home, now(), true), None);
     }
 
     fn garden_project_rows() -> Vec<(WorkspaceId, widgets::garden::GardenSession)> {
@@ -5904,7 +5868,7 @@ mod tests {
     }
 
     #[test]
-    fn garden_horizontal_scroll_reaches_later_projects_with_keyboard_and_footer_buttons() {
+    fn garden_fits_every_open_project_without_a_hidden_viewport() {
         let active_workspace = WorkspaceId::new();
         let mut state = AppState::home(active_workspace, Vec::new());
         let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
@@ -5914,43 +5878,28 @@ mod tests {
             HomeProjection::from_state(state, "active", Path::new("/work"), &[])
                 .with_deck_garden("5 open projects".to_owned(), rows.clone())
         };
-        let first = project(&state);
-        let first_frame = garden_frame(23, 80, &first, now()).expect("first viewport fits");
-        assert_eq!(first_frame.scroll, 0);
-        assert_eq!(first_frame.max_scroll, 2);
-        assert_eq!(first_frame.hitboxes.len(), 2);
+        let garden = project(&state);
+        let frame = garden_frame(23, 80, &garden, now()).expect("Garden fits");
+        assert_eq!(frame.hitboxes.len(), rows.len());
         assert_eq!(
-            garden_scroll_action(23, 80, &first, now(), true),
-            Some(GardenClick::Scroll(1))
+            frame
+                .hitboxes
+                .iter()
+                .map(|hitbox| hitbox.session_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            rows.len()
         );
-        let _ = update(&mut state, AppEvent::GardenClick(GardenClick::Scroll(1)));
-        let second = project(&state);
-        let second_frame = garden_frame(23, 80, &second, now()).expect("shifted viewport fits");
-        assert_eq!(second_frame.scroll, 1);
-        assert_eq!(second_frame.hitboxes.len(), 2);
-        assert_eq!(
-            garden_scroll_action(23, 80, &second, now(), false),
-            Some(GardenClick::Scroll(0))
-        );
-        assert_eq!(
-            garden_scroll_action(23, 80, &second, now(), true),
-            Some(GardenClick::Scroll(2))
-        );
-        let _ = update(&mut state, AppEvent::GardenClick(GardenClick::Scroll(2)));
-        let last = project(&state);
-        let last_frame = garden_frame(23, 80, &last, now()).expect("last viewport fits");
-        assert_eq!(last_frame.scroll, 2);
-        assert_eq!(last_frame.hitboxes.len(), 1);
-        let plot = *last_frame
+        let plot = *frame
             .hitboxes
             .iter()
             .find(|hitbox| hitbox.session_id == later_session)
-            .expect("later project is visible after scrolling");
+            .expect("the last project remains visible in the same frame");
         assert_eq!(
             garden_click_at(
                 23,
                 80,
-                &last,
+                &garden,
                 now(),
                 u16::try_from(plot.column).expect("fits u16"),
                 u16::try_from(plot.row).expect("fits u16"),
@@ -5960,33 +5909,6 @@ mod tests {
                 session: later_session,
                 agent: None,
             })
-        );
-
-        let previous = last_frame.scroll_hitboxes[0];
-        let next = last_frame.scroll_hitboxes[1];
-        assert_eq!(
-            garden_click_at(
-                23,
-                80,
-                &last,
-                now(),
-                u16::try_from(previous.column).expect("fits u16"),
-                u16::try_from(previous.row).expect("fits u16"),
-            ),
-            Some(GardenClick::Scroll(1))
-        );
-        // The disabled boundary button remains a consumed no-op rather than
-        // dismissing the Garden through the generic background click.
-        assert_eq!(
-            garden_click_at(
-                23,
-                80,
-                &last,
-                now(),
-                u16::try_from(next.column).expect("fits u16"),
-                u16::try_from(next.row).expect("fits u16"),
-            ),
-            Some(GardenClick::Scroll(2))
         );
     }
 
