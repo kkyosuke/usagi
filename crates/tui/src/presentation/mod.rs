@@ -27583,14 +27583,14 @@ mod tests {
         );
 
         let mut team = Config::load(&mut settings);
-        for _ in 0..5 {
+        for _ in 0..6 {
             let _ = step_config(&mut team, Key::Down, &mut settings);
         }
         let _ = step_config(&mut team, Key::Enter, &mut settings);
         assert_eq!(super::config_help_context(&team), HelpContext::TeamPicker);
 
         let mut environment = Config::load(&mut settings);
-        for _ in 0..2 {
+        for _ in 0..3 {
             let _ = step_config(&mut environment, Key::Down, &mut settings);
         }
         let _ = step_config(&mut environment, Key::Enter, &mut settings);
@@ -27699,7 +27699,7 @@ mod tests {
 
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
-        for _ in 0..5 {
+        for _ in 0..6 {
             step_config(&mut config, Key::Down, &mut settings);
         }
         assert_eq!(config.field(), ConfigField::TeamTemplate);
@@ -27733,6 +27733,7 @@ mod tests {
 
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         assert_eq!(config.field(), ConfigField::Environment);
@@ -27806,6 +27807,7 @@ mod tests {
             ConfigStep::Stay
         ));
         step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
@@ -28036,7 +28038,7 @@ mod tests {
         };
         let mut config = Config::load(&mut settings);
         let _ = step_config(&mut config, Key::Right, &mut settings);
-        for _ in 0..9 {
+        for _ in 0..10 {
             let _ = step_config(&mut config, Key::Down, &mut settings);
         }
         assert!(matches!(
@@ -28098,6 +28100,7 @@ mod tests {
         let mut environment = Config::load(&mut inline);
         let _ = step_config(&mut environment, Key::Down, &mut inline);
         let _ = step_config(&mut environment, Key::Down, &mut inline);
+        let _ = step_config(&mut environment, Key::Down, &mut inline);
         let _ = step_config(&mut environment, Key::Enter, &mut inline);
         let _ = step_config(
             &mut environment,
@@ -28120,6 +28123,7 @@ mod tests {
             ..RecordingSettingsPort::default()
         };
         let mut config = Config::load(&mut settings);
+        let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Enter, &mut settings);
@@ -28176,6 +28180,7 @@ mod tests {
         let mut term = FakeTerminal::with_keys(&[
             Key::Down,
             Key::Down,
+            Key::Down,
             Key::Enter,
             Key::Paste("GLOBAL=1".to_owned()),
             Key::Management {
@@ -28204,10 +28209,11 @@ mod tests {
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Environment → Agent model → Workflow → Team →
-    // Issue → Memory → PR → Save).
-    const CONFIG_SAVE_KEYS: [Key; 11] = [
+    // Save (Theme → Modal mode → Terminal PTYs → Environment → Agent model →
+    // Workflow → Team → Issue → Memory → PR → Save).
+    const CONFIG_SAVE_KEYS: [Key; 12] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,

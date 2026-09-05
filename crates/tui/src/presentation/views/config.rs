@@ -18,7 +18,7 @@ use crate::usecase::application::{
 const TITLE: &str = "Config";
 const FOOTER: &str = "↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
 const MODAL_INNER_WIDTH: usize = 64;
-const MODAL_BODY_HEIGHT: usize = 13;
+const MODAL_BODY_HEIGHT: usize = 12;
 const MODAL_FOOTER: &str = "↑↓: select  ←→: change  Enter: save  Esc: back";
 const SECTION_HEADING_WIDTH: usize = 41;
 const ENVIRONMENT_INNER_WIDTH: usize = 64;
