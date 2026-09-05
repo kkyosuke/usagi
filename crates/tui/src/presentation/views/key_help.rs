@@ -176,6 +176,8 @@ impl Context {
             Self::Switch => &[
                 ("↑ / ↓", "select session"),
                 ("← / →", "previous / next project"),
+                ("Ctrl+Option+↑ / ↓", "previous / next session"),
+                ("Ctrl+Option+← / →", "previous / next project"),
                 ("Enter / t", "open Closeup"),
                 ("Ctrl-A / Home", "new session"),
                 (":", "Overview commands"),
@@ -187,6 +189,8 @@ impl Context {
             Self::Closeup => &[
                 ("a / t", "open Agent / Terminal"),
                 ("Enter", "open Action menu"),
+                ("Ctrl+Option+↑ / ↓", "previous / next session"),
+                ("Ctrl+Option+← / →", "previous / next project"),
                 ("Ctrl-O [ / ]", "select pane tab"),
                 ("Ctrl-O { / }", "reorder pane tab"),
                 ("Ctrl-O x / r", "close / resume tab"),
@@ -196,6 +200,8 @@ impl Context {
             Self::LiveTerminal => &[
                 ("type / paste", "send to terminal"),
                 ("Ctrl-C / Ctrl-D", "interrupt / EOT"),
+                ("Ctrl+Option+↑ / ↓", "previous / next session"),
+                ("Ctrl+Option+← / →", "previous / next project"),
                 ("Ctrl-O [ / ]", "select pane tab"),
                 ("Ctrl-O { / }", "reorder pane tab"),
                 ("Ctrl-O x", "close pane tab"),

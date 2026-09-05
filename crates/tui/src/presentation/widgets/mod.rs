@@ -145,6 +145,10 @@ fn floor_boundary(value: &str, mut offset: usize) -> usize {
 /// 反転し、結合文字や ZWJ sequence の途中へ ANSI SGR を挿入しない。空文字列・行末では
 /// 反転空白を 1 セル描く。`cursor` は [`TextInput`] が保証する書記素境界を受け取るが、
 /// 外部 caller にも安全なよう value の範囲へ飽和する。
+///
+/// 戻り値は SGR を含むので、**plain text 専用の [`wrap_to_width`] へ直接渡さない**
+/// （ESC だけが落ちて `[7m` が可視文字として残る）。折り返しが要るときは
+/// [`wrap_with_trailing_caret`] を使う。
 #[must_use]
 pub fn block_caret(value: &str, cursor: usize, base: &Style) -> String {
     let mut cursor = cursor.min(value.len());
@@ -250,6 +254,11 @@ pub fn clip_to_width(text: &str, max: usize) -> String {
 /// `text` を表示桁数 `width` 以下の行に折り返す。空白を持たない CJK でも折れるよう、
 /// 文字の境目で分割する。単体で `width` を超える 1 文字（幅 1 の行に幅 2 の全角など）は
 /// その行に単独で置いて溢れさせ、文字を落とさない。`width == 0` か空文字は 0 行を返す。
+///
+/// **plain text 専用である**。[`clip_to_width`] / [`display_width`] と違い ANSI エスケープを
+/// 0 桁として読み飛ばさず、`presentation_character_is_safe` が制御文字の ESC だけを落とすため、
+/// styled な文字列を渡すと後続の `[7m` / `[0m` が可視文字として残る。styled 行が要るときは
+/// **plain を折り返してから行ごとに塗る**（caret 付き入力は [`wrap_with_trailing_caret`]）。
 #[must_use]
 pub fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
@@ -273,6 +282,36 @@ pub fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     if !current.is_empty() {
         lines.push(current);
     }
+    lines
+}
+
+/// 末尾に block cursor を持つ 1 行入力を、表示桁数 `width` の行へ折り返して塗る。
+///
+/// [`wrap_to_width`] は plain text 専用なので、[`block_caret`] の戻り値をそのまま渡すと SGR が
+/// 可視文字として画面へ漏れる。ここでは **plain な `value` を折り返してから行ごとに `base` で塗り**、
+/// 最終行の末尾にだけ [`block_caret`] の反転セルを置く。
+///
+/// caret は 1 桁を占めるので、最終行が `width` を使い切っているときは caret だけの行を足して
+/// 折り返す（`clip_to_width` に caret を削らせない）。`width == 0` や空の `value` でも caret 行を
+/// 1 行返すので、呼び手の行数計算が幅で崩れない。
+#[must_use]
+pub fn wrap_with_trailing_caret(value: &str, width: usize, base: &Style) -> Vec<String> {
+    let mut wrapped = wrap_to_width(value, width);
+    let tail = match wrapped.pop() {
+        // 最終行に caret の 1 桁が残るなら、その行の末尾へ caret を置く。
+        Some(last) if display_width(&last) < width => last,
+        // 使い切っているなら最終行はそのまま残し、caret を次の行へ折り返す。
+        Some(last) => {
+            wrapped.push(last);
+            String::new()
+        }
+        None => String::new(),
+    };
+    let mut lines = wrapped
+        .iter()
+        .map(|line| base.paint(line))
+        .collect::<Vec<_>>();
+    lines.push(block_caret(&tail, tail.len(), base));
     lines
 }
 
@@ -487,7 +526,7 @@ mod tests {
     use super::{
         Shimmer, block_caret, block_caret_with_selection, centered_padding, clip_to_width,
         dim_ansi, display_width, normalize_size, relative_session_time, relative_time,
-        shimmer_text, shimmer_text_with, strip_ansi, wrap_to_width,
+        shimmer_text, shimmer_text_with, strip_ansi, wrap_to_width, wrap_with_trailing_caret,
     };
     use crate::presentation::theme::{Role, Style};
     use chrono::{DateTime, Duration, Utc};
@@ -716,6 +755,49 @@ mod tests {
         // 幅 1 の行に全角: 各文字が単独行で溢れる（落とさない）。
         assert_eq!(wrap_to_width("あい", 1), vec!["あ", "い"]);
         assert_eq!(wrap_to_width("a\nb\t\u{202e}c", 2), vec!["ab", "c"]);
+    }
+
+    #[test]
+    fn wrap_with_trailing_caret_wraps_plain_text_and_keeps_sgr_out_of_the_glyphs() {
+        let accent = Role::Accent.style();
+
+        // 空 value でも caret 行を 1 行返す。
+        let empty = wrap_with_trailing_caret("", 8, &accent);
+        assert_eq!(empty, vec![block_caret("", 0, &accent)]);
+
+        // 描ける桁が無くても行数契約は保つ。
+        assert_eq!(wrap_with_trailing_caret("", 0, &accent).len(), 1);
+        assert_eq!(wrap_with_trailing_caret("abc", 0, &accent).len(), 1);
+
+        // 幅に収まる value は最終行の末尾へ caret を置く。
+        assert_eq!(
+            wrap_with_trailing_caret("ab", 8, &accent),
+            vec![block_caret("ab", 2, &accent)]
+        );
+
+        // 幅ちょうどなら caret の 1 桁が残らないので、caret だけの行へ折り返す。
+        let exact = wrap_with_trailing_caret("abcd", 4, &accent);
+        assert_eq!(exact.len(), 2);
+        assert_eq!(strip_ansi(&exact[0]), "abcd");
+        assert_eq!(strip_ansi(&exact[1]), " ");
+
+        // CJK は 2 桁で折り返し、caret は最終行の末尾に付く。
+        let cjk = wrap_with_trailing_caret("あいう", 4, &accent);
+        assert_eq!(cjk.len(), 2);
+        assert_eq!(strip_ansi(&cjk[0]), "あい");
+        assert_eq!(strip_ansi(&cjk[1]), "う ");
+
+        // caret を足しても行は幅に収まる（SGR は 0 桁として測られる）。
+        for line in exact.iter().chain(&cjk) {
+            assert!(display_width(line) <= 4, "{line:?}");
+        }
+
+        // どの行でも SGR はエスケープのままで、可視文字にならない。
+        for line in [empty, exact, cjk].concat() {
+            let visible = strip_ansi(&line);
+            assert!(!visible.contains('\u{1b}'), "{visible:?}");
+            assert!(!visible.contains('['), "{visible:?}");
+        }
     }
 
     #[test]
