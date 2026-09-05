@@ -1906,7 +1906,7 @@ daemon の cell / checkpoint frame budget で oldest row の eviction と追記�
 一方の origin を他方の追記量へ混ぜない。保持している間は live bottom までの距離が会話とともに伸びるため、
 `Ctrl-O End`（ScrollBottom）が 1 手で live bottom へ戻して追従を再開する。
 
-出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。複数の物理行にまたがる選択では、PTY の明示改行だけを改行としてコピーし、端末幅による自動折り返し境界は改行を挿入せず連結する。drag 中も
+出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。複数の物理行にまたがる選択では、PTY の明示改行だけを改行としてコピーし、その直前にある端末 grid の空白 padding は除く。端末幅による自動折り返し境界は改行を挿入せず、語間の空白を保って連結する。drag 中も
 drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。Agent の返信描画が primary / alternate screen の
 DECSTBM scroll region を動かした場合は、VT parser が報告する retained-row motion を同じ buffer の選択表示へ適用する。
 したがってコピー対象は drag 開始時の snapshot のまま変えず、ハイライトだけが選択した行と一緒に自動スクロールする。
