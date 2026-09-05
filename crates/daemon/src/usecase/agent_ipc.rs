@@ -8736,6 +8736,8 @@ mod tests {
             credential
         );
         assert!(runtime.authenticates_mcp_child(&credential, 9003));
+        runtime.release_mcp_child(9003);
+        assert!(!runtime.authenticates_mcp_child(&credential, 9003));
         assert_eq!(runtime.mcp_caller("forged"), None);
         let run_id = OperationId::parse(&operation).unwrap();
         assert_eq!(

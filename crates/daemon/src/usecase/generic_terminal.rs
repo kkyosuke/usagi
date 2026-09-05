@@ -2116,6 +2116,8 @@ mod tests {
         coordinator.exit(&terminal, 0, &mut store).unwrap();
         clock.advance(1000);
         coordinator.retain_live_connections(&BTreeSet::new(), &mut Writer::default());
+        // The exact path remains idempotent after a coalesced sweep.
+        coordinator.disconnect(connection, &mut Writer::default());
         retention.collect();
         assert_eq!(coordinator.collect_garbage(&mut store), 1);
     }
