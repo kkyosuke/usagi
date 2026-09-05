@@ -97,7 +97,7 @@ use crate::usecase::application::daemon_backend::{
     WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
-use crate::usecase::application::pane::{PaneKind, PaneTab, TabSelection};
+use crate::usecase::application::pane::{PaneKind, PaneRegistry, PaneTab, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
@@ -6002,8 +6002,14 @@ impl FrameMaterialKey {
 }
 
 impl HomeFrameMaterial {
-    fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
-        self.projection = self.projection.with_agent_inventory(inventory);
+    fn with_agent_inventory(
+        mut self,
+        inventory: Option<&AgentInventory>,
+        panes: &PaneRegistry,
+    ) -> Self {
+        self.projection = self
+            .projection
+            .with_agent_inventory_and_panes(inventory, panes);
         self
     }
 
@@ -8112,7 +8118,7 @@ fn drive_workspace_controller(
                     .map(|create| create.name.as_str()),
                 now,
             )
-            .with_agent_inventory(ui.agent_inventory())
+            .with_agent_inventory(ui.agent_inventory(), runtime.panes())
             .with_work_runs(work_runs.clone())
             .with_workspace_deck_garden(deck)
             .with_garden_animation(animation, garden_reduced_motion);
@@ -31324,7 +31330,7 @@ mod tests {
             None,
             now(),
         )
-        .with_agent_inventory(ui.agent_inventory());
+        .with_agent_inventory(ui.agent_inventory(), runtime.panes());
         let click = (0..24)
             .flat_map(|row| (0..80).map(move |column| (column, row)))
             .find(|&(column, row)| {

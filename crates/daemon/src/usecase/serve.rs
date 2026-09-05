@@ -155,25 +155,30 @@ pub fn serve(
     // authority over these worktrees must not touch this data directory's
     // record or endpoint on its way to being refused.
     if let WorkspaceFenceOutcome::Held { workspace, owner } = workspace.acquire()? {
-        return match owner {
-            Some(owner) => writeln!(
-                out,
-                "{describe}: another daemon already owns this workspace ({workspace}, pid {owner})"
-            ),
-            None => writeln!(
-                out,
-                "{describe}: another daemon already owns this workspace ({workspace})"
-            ),
-        };
+        let message = owner.map_or_else(
+            || format!("{describe}: another daemon already owns this workspace ({workspace})"),
+            |owner| {
+                format!(
+                    "{describe}: another daemon already owns this workspace ({workspace}; unverified owner pid hint {owner})"
+                )
+            },
+        );
+        return Err(io::Error::new(io::ErrorKind::WouldBlock, message));
     }
 
     if !lock.acquire()? {
         // Another daemon holds the lock. Name it from its record if we can; a
         // live holder always has one, but tolerate a missing/racing record.
-        return match store.load()?.map(|record| record.pid) {
-            Some(running) => writeln!(out, "{describe}: daemon already running (pid {running})"),
-            None => writeln!(out, "{describe}: daemon already running"),
-        };
+        let message = store.load()?.map_or_else(
+            || format!("{describe}: daemon already running"),
+            |running| {
+                format!(
+                    "{describe}: daemon already running (unverified recorded pid hint {})",
+                    running.pid
+                )
+            },
+        );
+        return Err(io::Error::new(io::ErrorKind::WouldBlock, message));
     }
 
     // Prepare signal delivery before registration makes this process visible or
@@ -1043,7 +1048,7 @@ mod tests {
             2222,
             &info(),
         )
-        .unwrap();
+        .unwrap_err();
         assert_eq!(refused_ready.published.get(), 0);
     }
 
@@ -1145,12 +1150,12 @@ mod tests {
     }
 
     #[test]
-    fn refuses_and_names_the_holder_when_the_lock_is_held() {
+    fn refuses_and_names_the_holder_hint_when_the_lock_is_held() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let existing = DaemonRecord::new(1111);
         store.save(&existing).unwrap();
         let mut buf = Vec::new();
-        serve(
+        let error = serve(
             &mut buf,
             &store,
             &NoopReady,
@@ -1162,11 +1167,13 @@ mod tests {
             2222,
             &info(),
         )
-        .unwrap();
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "usagi v0.1.0: daemon already running (pid 1111)\n"
+            error.to_string(),
+            "usagi v0.1.0: daemon already running (unverified recorded pid hint 1111)"
         );
+        assert!(buf.is_empty());
         // The existing record is left untouched — we did not register or clear.
         assert_eq!(store.load().unwrap(), Some(existing));
     }
@@ -1175,7 +1182,7 @@ mod tests {
     fn refuses_without_a_pid_when_the_lock_is_held_and_no_record_exists() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let mut buf = Vec::new();
-        serve(
+        let error = serve(
             &mut buf,
             &store,
             &NoopReady,
@@ -1187,22 +1194,21 @@ mod tests {
             2222,
             &info(),
         )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "usagi v0.1.0: daemon already running\n"
-        );
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(error.to_string(), "usagi v0.1.0: daemon already running");
+        assert!(buf.is_empty());
     }
 
     /// The refusal must land before this data directory's guard is touched, so
     /// these cases pair the held fence with a lock that errors if acquired: an
     /// `Ok` result is proof the instance lock was never reached.
-    fn serve_with_held_workspace(fence: &FakeWorkspaceFence) -> (String, bool) {
+    fn serve_with_held_workspace(fence: &FakeWorkspaceFence) -> (io::Error, bool) {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let existing = DaemonRecord::new(1111);
         store.save(&existing).unwrap();
         let mut buf = Vec::new();
-        serve(
+        let error = serve(
             &mut buf,
             &store,
             &NoopReady,
@@ -1214,30 +1220,33 @@ mod tests {
             2222,
             &info(),
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(buf.is_empty());
         // The other daemon lives in a different data directory, so this one's
         // record must survive untouched.
         let untouched = store.load().unwrap() == Some(existing);
-        (String::from_utf8(buf).unwrap(), untouched)
+        (error, untouched)
     }
 
     #[test]
     fn refuses_and_names_the_owner_when_another_daemon_owns_the_workspace() {
-        let (line, record_untouched) = serve_with_held_workspace(&FakeWorkspaceFence::Held(7777));
+        let (error, record_untouched) = serve_with_held_workspace(&FakeWorkspaceFence::Held(7777));
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(
-            line,
-            "usagi v0.1.0: another daemon already owns this workspace (/fixture/workspace, pid 7777)\n"
+            error.to_string(),
+            "usagi v0.1.0: another daemon already owns this workspace (/fixture/workspace; unverified owner pid hint 7777)"
         );
         assert!(record_untouched);
     }
 
     #[test]
     fn refuses_without_an_owner_pid_when_the_workspace_owner_is_unreadable() {
-        let (line, record_untouched) =
+        let (error, record_untouched) =
             serve_with_held_workspace(&FakeWorkspaceFence::HeldAnonymously);
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(
-            line,
-            "usagi v0.1.0: another daemon already owns this workspace (/fixture/workspace)\n"
+            error.to_string(),
+            "usagi v0.1.0: another daemon already owns this workspace (/fixture/workspace)"
         );
         assert!(record_untouched);
     }

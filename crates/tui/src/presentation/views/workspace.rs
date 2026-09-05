@@ -54,10 +54,12 @@ use crate::usecase::application::controller::{
     PreviewOverlay, Selection, SessionRoleProjection, Target, TargetPhase,
 };
 use crate::usecase::application::pane::{
-    PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
+    PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab, TabSelection,
 };
 use crate::usecase::application::terminal_selection::TerminalPoint;
-use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
+use usagi_core::domain::id::{
+    AgentContinuationRef, AgentRuntimeId, SessionId, TerminalRef, WorkspaceId,
+};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -843,14 +845,38 @@ impl HomeProjection {
     /// status modal. Runtime identity is shortened only for the modal; Garden
     /// joins by stable `SessionId` / `AgentRuntimeId`, never visible labels.
     ///
-    /// The inventory is also the **membership authority**: a runtime it no longer
-    /// holds in a present state ([`present_agent_phase`]) leaves neither a rabbit
-    /// nor a sidebar glyph, even when this TUI still remembers the last
-    /// runtime-local phase it pushed. Controller phases accumulate for the life
-    /// of a session, so without this an Agent the user closed kept a `done`
-    /// rabbit in the garden that owned no Closeup tab.
+    /// The inventory bounds membership: a runtime it no longer holds in a
+    /// present state ([`present_agent_phase`]) leaves neither a rabbit nor a
+    /// sidebar glyph, even when this TUI still remembers the last runtime-local
+    /// phase it pushed. Production additionally intersects interrupted rows with
+    /// the pane reducer's exact membership below.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
+    fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
+        self.apply_agent_inventory(inventory, None);
+        self
+    }
+
+    /// Production projection that takes interrupted membership from the pane
+    /// reducer which already applied scope, live-lineage, dismissal, and exact
+    /// session fences. The inventory remains the phase/detail authority, but an
+    /// interrupted runtime cannot create a sidebar/Garden entry without its tab.
+    #[must_use]
+    pub(crate) fn with_agent_inventory_and_panes(
+        mut self,
+        inventory: Option<&AgentInventory>,
+        panes: &PaneRegistry,
+    ) -> Self {
+        let interrupted = panes.interrupted_terminals();
+        self.apply_agent_inventory(inventory, Some(&interrupted));
+        self
+    }
+
+    fn apply_agent_inventory(
+        &mut self,
+        inventory: Option<&AgentInventory>,
+        interrupted: Option<&BTreeMap<AgentContinuationRef, TerminalRef>>,
+    ) {
         if let Some(inventory) = inventory {
             // Present runtimes per session, from the one observation that also
             // decides the Closeup tab strip.
@@ -869,6 +895,13 @@ impl HomeProjection {
                     // Exited, reclaimed, and unavailable runtimes own no tab.
                     continue;
                 };
+                if item.state == AgentRuntimeInventoryState::Interrupted
+                    && interrupted.is_some_and(|tabs| {
+                        tabs.get(&item.continuation) != Some(&item.runtime.terminal)
+                    })
+                {
+                    continue;
+                }
                 present
                     .entry(session_id)
                     .or_default()
@@ -935,7 +968,6 @@ impl HomeProjection {
                 })
                 .collect()
         });
-        self
     }
 
     /// Attach the diagnostic daemon-health observer for the sidecar indicator.
@@ -3281,7 +3313,7 @@ mod tests {
         update,
     };
     use crate::usecase::application::pane::{
-        PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
+        PaneEvent, PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
     use crate::usecase::application::terminal_selection::TerminalPoint;
     use std::path::Path;
@@ -4058,6 +4090,39 @@ mod tests {
             garden.session_agents[&session]
         );
         assert_eq!(garden.session_agents, sidebar.session_agents);
+    }
+
+    #[test]
+    fn interrupted_inventory_without_a_tab_creates_no_sidebar_or_garden_agent() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let runtime = runtime_ref(workspace, session);
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime,
+                continuation: AgentContinuationRef::new(),
+                state: AgentRuntimeInventoryState::Interrupted,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        };
+        let panes = PaneRegistry::new(Some(Target::Session(session)));
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "builder", "/work/builder")],
+        )
+        .with_agent_inventory_and_panes(Some(&inventory), &panes);
+
+        assert!(home.session_agents.is_empty());
+        assert_eq!(
+            home.daemon_runtimes.as_ref().map(Vec::len),
+            Some(1),
+            "diagnostic inventory remains visible without inventing an actionable tab"
+        );
     }
 
     #[test]
