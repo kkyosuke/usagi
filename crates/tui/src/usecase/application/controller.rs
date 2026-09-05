@@ -30,7 +30,9 @@ use usagi_core::usecase::agent_phase::AgentPhaseAggregation;
 use usagi_core::usecase::env::EnvScope;
 
 use crate::usecase::application::environment_source::EnvironmentSourceEditor;
-use crate::usecase::terminal_input::{KeyCode, KeyEventKind, LiveInput, RuntimeEvent};
+use crate::usecase::terminal_input::{
+    KeyCode, KeyEventKind, LiveInput, RuntimeEvent, is_control_and_shift,
+};
 use crate::usecase::{agent_command, closeup, overview};
 
 /// Home の常駐 route。これ以外の常駐 mode は作らない。
@@ -2154,16 +2156,7 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         return None;
     }
     match key.code {
-        KeyCode::Char('x' | 'X')
-            if key.modifiers.control
-                && key.modifiers.shift
-                && !key.modifiers.alt
-                && !key.modifiers.super_
-                && !key.modifiers.hyper
-                && !key.modifiers.meta =>
-        {
-            Some(AppKey::CtrlShiftX)
-        }
+        KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => Some(AppKey::CtrlShiftX),
         KeyCode::Char('s')
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
@@ -7028,6 +7021,47 @@ mod tests {
             )),
             Some(AppKey::CtrlShiftX)
         );
+    }
+
+    #[test]
+    fn management_classifier_rejects_extra_modifiers_for_ctrl_shift_x() {
+        for modifiers in [
+            crate::usecase::terminal_input::Modifiers {
+                control: true,
+                shift: true,
+                alt: true,
+                ..crate::usecase::terminal_input::Modifiers::default()
+            },
+            crate::usecase::terminal_input::Modifiers {
+                control: true,
+                shift: true,
+                super_: true,
+                ..crate::usecase::terminal_input::Modifiers::default()
+            },
+            crate::usecase::terminal_input::Modifiers {
+                control: true,
+                shift: true,
+                hyper: true,
+                ..crate::usecase::terminal_input::Modifiers::default()
+            },
+            crate::usecase::terminal_input::Modifiers {
+                control: true,
+                shift: true,
+                meta: true,
+                ..crate::usecase::terminal_input::Modifiers::default()
+            },
+        ] {
+            assert_eq!(
+                classify_management_input(LiveInput::Key(
+                    crate::usecase::terminal_input::KeyEvent::new(
+                        KeyCode::Char('X'),
+                        modifiers,
+                        KeyEventKind::Press,
+                    )
+                )),
+                None
+            );
+        }
     }
 
     #[test]
