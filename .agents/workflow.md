@@ -4,6 +4,31 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 コーディング・コミット・PR の規約は [document/06-conventions.md](../document/06-conventions.md) を参照。
 The documentation index is [document/README.md](../document/README.md).
 
+## 実装依頼の完了条件
+
+ユーザーから実装を依頼された場合、ローカルでの実装やコミットだけでは完了とせず、Draft PR の作成から
+サブエージェントレビュー、必要な修正、CI の確認まで行う。質問への回答、調査・設計だけの依頼は対象外とする。
+この節が AI エージェントによる実装依頼の提出・レビュー手順の正本である。
+レビューサイクルは 1 件の実装依頼または追加修正ごとに数え、PR 作成後または追加修正の push 後の
+初回レビューを 1 回目とする。レビュー指摘による修正の push は同じサイクルに属し、回数をリセットしない。
+既存 PR への追加修正では、PR が Ready for review なら `gh pr ready <number> --undo` で Draft に戻してから
+修正を push し、更新後のレビューと CI が完了するまで Draft を保つ。
+
+```text
+実装・ローカル検証 → Draft PR 作成 → サブエージェントレビュー・修正（最大 3 回） → CI 確認 → Ready for review
+                                      └──────── 指摘があれば commit・push ────────┘
+```
+
+- Draft PR を作成したら、サブエージェントへ PR の差分レビューと、妥当な指摘に対する修正・検証を委譲する。
+  レビューでは正しさ、回帰、テスト、ドキュメント、規約への適合を確認する。
+- 修正が入った場合は親エージェントが差分を確認して commit・push し、更新後の差分を再レビューさせる。
+  初回を含めて最大 3 回まで繰り返し、マージを妨げる指摘がなくなればレビューを終了する。
+- 3 回のレビュー後もマージを妨げる未解決事項が残る場合は、マージ可能とみなさず、PR を Draft のまま保って
+  未解決事項をユーザーへ報告する。
+- ベースブランチの最新状態を反映した差分についてレビューを終え、必須 CI がすべて green、
+  マージ競合なし、マージを妨げる未解決事項なしを確認してから
+  PR を Ready for review にする。ここまでを「マージできるレベル」の完了条件とする。
+
 ## 新規作業（新しいタスクを始めるとき）
 
 ### 0. 着手する issue を選ぶ
@@ -84,7 +109,7 @@ The documentation index is [document/README.md](../document/README.md).
 ```bash
 git push origin HEAD:refs/heads/<branch>
 gh pr create --head <branch> --draft --title "<type>: <説明>" --body "<概要>"
-# CI（fmt / clippy / full test / coverage 100%、documentation SSoT lint、該当時は Markdown link check）が green になったら:
+# 上記「実装依頼の完了条件」をすべて満たしたら:
 gh pr ready <number>
 ```
 
@@ -93,6 +118,7 @@ gh pr ready <number>
 - **PR は Draft で開き、CI の必須チェックが green になってから Ready for review にする**。ローカル push では重い full gate を
   走らせないため、最終的な full gate の green は CI で確認する。CI が落ちたら Draft のまま修正して push し直す
   （正本は [06-conventions.md#プルリクエスト](../document/06-conventions.md#プルリクエスト)）。
+- PR 作成後は [実装依頼の完了条件](#実装依頼の完了条件) に従い、サブエージェントレビューと必要な修正を完了する。
 
 ---
 
@@ -108,11 +134,15 @@ gh pr ready <number>
 
 追加した変更に合わせて `document/` および必要なら `README.md` を更新する。
 
-### 3. PR のタイトル・概要を更新する
+### 3. PR を Draft に戻し、タイトル・概要を更新する
 
+Draft に戻す条件と手順は [実装依頼の完了条件](#実装依頼の完了条件) を正本とする。
 変更によって PR のスコープが変わった場合は、タイトルと本文を実態に合わせて更新する。
 
 ```bash
 git push origin HEAD:refs/heads/<branch>
 gh pr edit <number> --title "<新しいタイトル>" --body "<更新した概要>"
 ```
+
+push 後は [実装依頼の完了条件](#実装依頼の完了条件) のレビューサイクルを改めて実行し、更新後の PR が
+マージできるレベルであることを確認する。
