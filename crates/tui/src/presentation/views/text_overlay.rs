@@ -26,6 +26,7 @@ pub struct TextOverlay {
     document: OverlayDocument,
     scroll: usize,
     dismiss_on_any_key: bool,
+    footer: String,
 }
 
 impl TextOverlay {
@@ -37,6 +38,7 @@ impl TextOverlay {
             document,
             scroll: 0,
             dismiss_on_any_key: false,
+            footer: "↑↓ scroll   Esc: close".to_owned(),
         }
     }
 
@@ -45,6 +47,13 @@ impl TextOverlay {
     #[must_use]
     pub fn acknowledgement(mut self) -> Self {
         self.dismiss_on_any_key = true;
+        self
+    }
+
+    /// Replace the default viewer controls with context-specific hints.
+    #[must_use]
+    pub fn with_footer(mut self, footer: impl Into<String>) -> Self {
+        self.footer = footer.into();
         self
     }
 
@@ -102,7 +111,7 @@ impl TextOverlay {
         body.push(modal::footer(if self.dismiss_on_any_key {
             "Press any key to close"
         } else {
-            "↑↓ scroll   Esc: close"
+            &self.footer
         }));
         modal::fixed_body(body, body_height)
     }

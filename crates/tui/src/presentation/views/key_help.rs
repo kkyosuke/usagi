@@ -86,7 +86,7 @@ impl Context {
             Self::CleanupQueue => "Cleanup queue",
             Self::RemoveSessions => "Remove sessions",
             Self::PullRequests => "Pull Requests",
-            Self::Preview => "Markdown preview",
+            Self::Preview => "File preview",
             Self::Scratchpad => "Scratchpad",
             Self::RolesEditor => "Roles editor",
             Self::Daemon => "Daemon control",
@@ -277,7 +277,12 @@ impl Context {
                 ("Ctrl-X", "dismiss selected"),
                 ("Enter / Esc", "open in browser / close"),
             ],
-            Self::Preview => &[("↑ / ↓", "scroll"), ("Esc", "close")],
+            Self::Preview => &[
+                ("type / paste", "edit fuzzy filter"),
+                ("↑ / ↓", "select file / scroll"),
+                ("Enter", "preview selected file"),
+                ("Esc", "back / close"),
+            ],
             Self::Scratchpad => &[("paste", "append to draft"), ("Esc", "close")],
             Self::RolesEditor => &[
                 ("Tab", "global / workspace scope"),

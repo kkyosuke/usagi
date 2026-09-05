@@ -114,6 +114,7 @@ use usagi_tui::usecase::terminal_input::{
 use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
 use crate::runtime::daemon::LaneClient;
+use crate::runtime::file_preview::{FilePreviewError, list_files, read_file};
 use crate::runtime::inventory_pump::TerminalInventoryPump;
 use crate::runtime::platform_child_reaper::PlatformChildReaper;
 use crate::runtime::refresh_pump::{RefreshCadence, RefreshPump};
@@ -706,7 +707,6 @@ fn pr_snapshot_events(
 }
 
 struct ProductionOverlayPort {
-    workspace_name: String,
     root: PathBuf,
     sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
     pr_sessions: Arc<Mutex<Vec<SessionId>>>,
@@ -720,6 +720,18 @@ impl ProductionOverlayPort {
         let sessions = lock_pr_sessions(&self.pr_sessions).clone();
         for event in pr_snapshot_events(result, &sessions) {
             completions.emit(event);
+        }
+    }
+
+    fn target_root(&self, target: Target) -> Result<&Path, FilePreviewError> {
+        match target {
+            Target::Root(_) => Ok(&self.root),
+            Target::Session(id) => self
+                .sessions
+                .iter()
+                .find(|(known, _, _)| *known == id)
+                .map(|(_, _, path)| path.as_path())
+                .ok_or(FilePreviewError::FileUnavailable),
         }
     }
 }
@@ -756,31 +768,30 @@ impl BackendOverlayPort for ProductionOverlayPort {
         }
     }
 
-    fn load_preview(&mut self, target: Target, completions: Completions) {
-        let lines = match target {
-            Target::Root(_) => vec![
-                format!("workspace: {}", self.workspace_name),
-                format!("path: {}", self.root.display()),
-            ],
-            Target::Session(id) => self
-                .sessions
-                .iter()
-                .find(|(known, _, _)| *known == id)
-                .map_or_else(
-                    || vec!["session is no longer available".to_owned()],
-                    |(_, name, path)| {
-                        vec![
-                            format!("session: {name}"),
-                            format!("path: {}", path.display()),
-                        ]
-                    },
-                ),
+    fn load_preview(&mut self, target: Target, path: Option<String>, completions: Completions) {
+        let result = self
+            .target_root(target)
+            .and_then(|root| match path.as_deref() {
+                Some(path) => read_file(root, path).map(|lines| (Vec::new(), lines)),
+                None => list_files(&SystemGit, root).map(|files| (files, Vec::new())),
+            });
+        let event = match result {
+            Ok((files, lines)) => BackendEvent::PreviewLoaded {
+                target,
+                path,
+                files,
+                lines,
+            },
+            Err(error) => BackendEvent::PreviewError {
+                target,
+                path,
+                error: SafeError {
+                    message: SafeMessage::new(error.message()),
+                    error_id: error.error_id().to_owned(),
+                },
+            },
         };
-        completions.emit(
-            usagi_tui::usecase::application::controller::AppEvent::Backend(
-                BackendEvent::PreviewLoaded { target, lines },
-            ),
-        );
+        completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
     }
 
     fn open_pull_request(&mut self, url: String, completions: Completions) {
@@ -1146,7 +1157,6 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             reported_failure: false,
         }))
         .with_overlay(Box::new(ProductionOverlayPort {
-            workspace_name: snapshot.workspace.name.clone(),
             root: snapshot.workspace.path.clone(),
             sessions,
             pr_sessions,
@@ -10039,6 +10049,14 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn production_backend_factory_preserves_terminal_arguments_and_completes_store_routes() {
         let temporary = tempfile::tempdir().unwrap();
+        let git = usagi_core::infrastructure::git::GitRunner::run(
+            &usagi_daemon::infrastructure::session_worktree::SystemGit,
+            temporary.path(),
+            &["init", "--quiet"],
+        )
+        .unwrap();
+        assert!(git.success);
+        std::fs::write(temporary.path().join("README.md"), "preview fixture").unwrap();
         let workspace_id = WorkspaceId::new();
         let session_ids = vec![SessionId::new(), SessionId::new()];
         let session = |name: &str, display_name| SessionRecord {
@@ -10088,6 +10106,7 @@ mod tests {
         });
         composition.backend.dispatch(Effect::LoadPreview {
             target: Target::Root(workspace_id),
+            path: None,
         });
         let completions = composition.backend.drain_events();
         assert!(matches!(
@@ -10100,9 +10119,14 @@ mod tests {
                     BackendEvent::EnvironmentLoaded { .. }
                 ),
                 usagi_tui::usecase::application::controller::AppEvent::Backend(
-                    BackendEvent::PreviewLoaded { .. }
+                    BackendEvent::PreviewLoaded {
+                        path: None,
+                        files,
+                        lines,
+                        ..
+                    }
                 )
-            ]
+            ] if files == &["README.md"] && lines.is_empty()
         ));
 
         composition.backend.dispatch(Effect::SaveEnvironment {

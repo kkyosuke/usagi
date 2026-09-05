@@ -22,6 +22,7 @@ use crate::presentation::widgets::garden::{GardenAgent, GardenSession};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::Key;
 use crate::usecase::application::WorkspaceSnapshot;
+use crate::usecase::fuzzy::fuzzy_score;
 
 const TAB_NAME_WIDTH: usize = 18;
 const ADD_LABEL: &str = "+ Open";
@@ -941,36 +942,6 @@ impl FinderRow {
             },
         }
     }
-}
-
-/// Rank a case-insensitive subsequence match. Contiguous matches sort before
-/// gapped matches, then shorter gaps and earlier starts win. The caller keeps
-/// source order as the final stable tie-break.
-fn fuzzy_score(candidate: &str, query: &str) -> Option<usize> {
-    let query = query.to_lowercase();
-    if query.is_empty() {
-        return Some(0);
-    }
-    let candidate = candidate.to_lowercase();
-    if let Some(start) = candidate.find(&query) {
-        return Some(start);
-    }
-
-    let mut positions = Vec::new();
-    let mut query_chars = query.chars();
-    let mut wanted = query_chars.next()?;
-    for (position, character) in candidate.chars().enumerate() {
-        if character == wanted {
-            positions.push(position);
-            let Some(next) = query_chars.next() else {
-                let start = positions[0];
-                let gaps = position + 1 - start - positions.len();
-                return Some(candidate.len() + gaps * 4 + start);
-            };
-            wanted = next;
-        }
-    }
-    None
 }
 
 /// Identity-bearing target for one cell range in the project bar.
