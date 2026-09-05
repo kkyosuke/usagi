@@ -1,34 +1,11 @@
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
-use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render_scrolled};
+use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render};
 
 fn main() {
     let sessions = sample_sessions();
-    scene(
-        "120x24 · spacious world left edge + Agent panel",
-        24,
-        120,
-        &sessions,
-        1,
-        false,
-    );
-    scene_scrolled(
-        "120x24 · spacious world right edge + Agent panel",
-        24,
-        120,
-        &sessions,
-        usize::MAX,
-        66,
-        false,
-    );
-    scene(
-        "120x24 · spacious world reduced motion",
-        24,
-        120,
-        &sessions,
-        1,
-        true,
-    );
+    scene("120x24 · roomy Garden", 24, 120, &sessions, 1, false);
+    scene("120x24 · reduced motion", 24, 120, &sessions, 1, true);
     scene("120x24 · session 0 件", 24, 120, &[], 1, false);
     let mut open_projects = sessions[..2].to_vec();
     "alpha / session-auth".clone_into(&mut open_projects[0].label);
@@ -43,31 +20,19 @@ fn main() {
     inactive.agents.clear();
     open_projects.push(inactive);
     scene_in_scope(
-        "120x24 · 2 open projects world",
+        "120x24 · 2 open projects",
         24,
         120,
         "2 open projects",
         &open_projects,
-        0,
         (1, false),
     );
-    // 64x14 terminal の先頭 1 行は project bar、残る 13 行では 1 plot が見える。
-    // 左右端を出し、1 列ずつ横スクロールして全 session へ到達できることを眺める。
-    scene_scrolled(
-        "64x14 terminal · compact Garden left edge",
+    // 64x14 terminal の先頭 1 行は project bar、残る 13 行へ全 Agent card が収まる。
+    scene(
+        "64x14 terminal · compact Garden",
         13,
         64,
         &sessions,
-        0,
-        1,
-        false,
-    );
-    scene_scrolled(
-        "64x14 terminal · compact Garden right edge",
-        13,
-        64,
-        &sessions,
-        usize::MAX,
         1,
         false,
     );
@@ -126,25 +91,12 @@ fn scene(
     tick: u64,
     reduced_motion: bool,
 ) {
-    scene_scrolled(caption, height, width, sessions, 0, tick, reduced_motion);
-}
-
-fn scene_scrolled(
-    caption: &str,
-    height: usize,
-    width: usize,
-    sessions: &[GardenSession],
-    scroll: usize,
-    tick: u64,
-    reduced_motion: bool,
-) {
     scene_in_scope(
         caption,
         height,
         width,
         "my-project",
         sessions,
-        scroll,
         (tick, reduced_motion),
     );
 }
@@ -155,11 +107,10 @@ fn scene_in_scope(
     width: usize,
     scope: &str,
     sessions: &[GardenSession],
-    scroll: usize,
     animation: (u64, bool),
 ) {
     let (tick, reduced_motion) = animation;
-    let frame = render_scrolled(height, width, scope, sessions, scroll, tick, reduced_motion)
+    let frame = render(height, width, scope, sessions, tick, reduced_motion)
         .expect("the sample uses Garden-compatible terminal sizes");
     println!("--- {caption} ---");
     println!("{}\n", frame.rows.join("\n"));

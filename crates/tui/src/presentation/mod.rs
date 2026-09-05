@@ -65,8 +65,8 @@ use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::work_run::WorkRunProjection;
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, garden_click_at, garden_fits, garden_scroll_action,
-    home_header_action_at, render_home, render_home_at, right_pane_tab_at, terminal_point_at,
+    Workspace as WorkspaceView, garden_click_at, garden_fits, home_header_action_at, render_home,
+    render_home_at, right_pane_tab_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_deck::{
@@ -282,7 +282,7 @@ fn key_to_terminal_bytes_for_mode(key: Key, bracketed_paste: bool) -> Option<Vec
         Key::Quit => vec![3],
         Key::CtrlQ => vec![17],
         Key::CtrlD => vec![4],
-        Key::CtrlX | Key::CtrlShiftX => vec![24],
+        Key::CtrlX => vec![24],
         // Contextual help is presentation-owned and must never reach a PTY.
         Key::Help => return None,
         Key::Live(_)
@@ -808,17 +808,6 @@ fn route_garden_input(
             *pointer_gesture = true;
             GardenClick::Dismiss
         }
-        Key::Left | Key::Right => material
-            .and_then(|material| {
-                garden_scroll_action(
-                    material.height,
-                    material.width,
-                    &material.projection,
-                    material.now,
-                    matches!(key, Key::Right),
-                )
-            })
-            .unwrap_or(GardenClick::Dismiss),
         _ => GardenClick::Dismiss,
     };
     let effects = runtime.apply_event(AppEvent::GardenClick(pointer));
@@ -3127,7 +3116,6 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Tab
         | Key::CtrlD
         | Key::CtrlX
-        | Key::CtrlShiftX
         | Key::Help
         | Key::Live(_)
         | Key::Click { .. }
@@ -3236,7 +3224,6 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         },
         Key::CtrlD
         | Key::CtrlX
-        | Key::CtrlShiftX
         | Key::Help
         | Key::PageUp
         | Key::PageDown
@@ -3412,7 +3399,6 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         | Key::Management { .. }
         | Key::TerminalCopy { .. }
         | Key::CtrlD
-        | Key::CtrlShiftX
         | Key::Help
         | Key::PageUp
         | Key::PageDown
@@ -3855,7 +3841,6 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
         Key::CtrlX => AppKey::CtrlX,
-        Key::CtrlShiftX => AppKey::CtrlShiftX,
         Key::Help => return None,
         Key::TerminalCopy { fallback } => {
             return {
@@ -10718,10 +10703,6 @@ mod tests {
             Some(AppEvent::Key(AppKey::CtrlX))
         );
         assert_eq!(
-            app_event_from_key(Key::CtrlShiftX),
-            Some(AppEvent::Key(AppKey::CtrlShiftX))
-        );
-        assert_eq!(
             app_event_from_key(Key::Management {
                 action: AppKey::SaveRoles,
                 passthrough: vec![0x13],
@@ -11345,7 +11326,7 @@ mod tests {
         );
         let observed = render_home_material(&material);
         assert!(!observed.iter().any(|row| row.contains("project inactive")));
-        assert!(observed.iter().any(|row| row.contains("2 plots")));
+        assert!(observed.iter().any(|row| row.contains("2 sessions")));
         assert!(observed.iter().any(|row| row.contains("1 usagi")));
         assert!(observed.iter().any(|row| row.contains("-.-")));
         assert!(observed.iter().any(|row| row.contains("completed")));
@@ -11353,7 +11334,7 @@ mod tests {
     }
 
     #[test]
-    fn garden_arrow_scrolls_one_drawn_column_without_waking_home() {
+    fn garden_arrow_wakes_home_without_reaching_the_surface_behind_it() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
@@ -11407,8 +11388,7 @@ mod tests {
             ),
             Some(GardenInputRoute::Local(Vec::new())),
         );
-        assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
-        assert_eq!(runtime.state().garden_scroll(), 1);
+        assert_eq!(runtime.state().overlay(), None);
     }
 
     #[test]
@@ -30372,7 +30352,7 @@ mod tests {
             .find(|frame| frame.contains("Keyboard help · Workspace switch"))
             .expect("workspace Help frame");
         assert!(help.contains("Ctrl-X"));
-        assert!(help.contains("safe-remove session"));
+        assert!(help.contains("remove session / purge orphan"));
         assert!(!help.contains("Available"));
         assert!(
             term.frames
@@ -30571,7 +30551,6 @@ mod tests {
         assert_eq!(key_to_terminal_bytes(Key::CtrlQ), Some(vec![17]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlD), Some(vec![4]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlX), Some(vec![24]));
-        assert_eq!(key_to_terminal_bytes(Key::CtrlShiftX), Some(vec![24]));
         assert_eq!(key_to_terminal_bytes(Key::Help), None);
         assert_eq!(key_to_terminal_bytes(Key::Other), None);
         assert_eq!(

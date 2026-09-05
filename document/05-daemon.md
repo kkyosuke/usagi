@@ -397,6 +397,10 @@ accept worker は exit guard を持ち、panic または unexpected exit で sha
 OS signal と同じ fence を監視するため、worker を失ったまま singleton lock と record を永久保持しない。main は wake 後に
 join failure を観測しても独立 cleanup token から retirement を試み、cleanup 成功後だけ record を消去する。
 
+admit 済み client worker と connection cleanup worker も panic 時だけ同じ shutdown fence を立てる。request dispatch が shared
+runtime lock の内側で panic した場合や cleanup consumer が停止した場合に、daemon が endpoint を公開し workspace fence を保持したまま
+機能不全になることを許さない。通常の client disconnect と cleanup worker の planned completion は daemon shutdown を要求しない。
+
 client worker の retirement barrier は `shutdown(2)` の起こしに依存しない。retirement は**まず flag を公開してから**
 socket を shutdown し、worker 側は次の frame を待つ read を毎回 `poll(2)` の bounded な readiness 待ちで囲って、
 待ちが空振りするたびにその flag を確認する。これは idle policy ではない（空振りは透過的に再試行され、idle な
@@ -1138,7 +1142,7 @@ dirty、未統合、detached、`usagi/` 外 branch、診断不能、linked workt
 通常の `force` では保護を解除しない。利用者は変更を commit/stash し、branch を PR で基点へ統合してから再実行する。
 内容を破棄すると確認できた integrity orphan だけは、CLI の
 `usagi session remove <name> --force --purge-orphan`、MCP `session_remove` の
-`force: true, purge_orphan: true`、または TUI で exact integrity row を選択して `Ctrl-Shift-X` を押すことで
+`force: true, purge_orphan: true`、または TUI で exact integrity row を選択して `Ctrl-X` を押すことで
 exact session target を回収できる。
 `purge_orphan` は integrity failure 以外へ指定できず、`force` との対が必須である。effect 直前の canonical
 path confinement は通常 remove と同じく再検証し、session container 外や保護 root を削除対象にしない。

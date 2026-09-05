@@ -1337,11 +1337,6 @@ pub struct AppState {
     /// behind an invisible overlay. The renderer injects this layout fact; the
     /// reducer uses it to admit both automatic and manual opening consistently.
     garden_available: bool,
-    /// Renderer-owned zero-based horizontal Garden position selected through scroll controls.
-    /// Presentation clamps it to the current range before drawing, and
-    /// sends the exact resulting target back instead of asking the reducer to
-    /// derive terminal-dependent capacity.
-    garden_scroll: usize,
     /// Last session press eligible to become the first half of a double click.
     /// The controller owns this stable identity after hit-testing; the shell
     /// supplies only coordinates and a monotonic timestamp.
@@ -1551,7 +1546,6 @@ impl AppState {
             mascot_tick: 0,
             size: None,
             garden_available: true,
-            garden_scroll: 0,
             pending_session_click: None,
             has_live_pane: false,
             has_pane_tab: false,
@@ -1829,11 +1823,6 @@ impl AppState {
     #[must_use]
     pub const fn size(&self) -> Option<(u16, u16)> {
         self.size
-    }
-    /// Renderer-owned zero-based horizontal position requested for the open Garden.
-    #[must_use]
-    pub const fn garden_scroll(&self) -> usize {
-        self.garden_scroll
     }
     /// Whether the current Home projection has a live terminal or Agent pane.
     #[must_use]
@@ -2238,10 +2227,9 @@ pub enum AppKey {
     CtrlC,
     /// Management-screen Ctrl-Q. Live Ctrl-Q is likewise PTY passthrough.
     CtrlQ,
-    /// Remove or dismiss the selected object from a management surface.
+    /// Remove the selected session, purging it when it is a diagnosed integrity
+    /// orphan, or dismiss the selected object from another management surface.
     CtrlX,
-    /// Explicitly purge the selected integrity-orphan session.
-    CtrlShiftX,
     /// Open the detach confirmation from a reserved live-pane action.
     OpenQuitConfirmation,
     /// Toggle the frontmost Director mode drawer. Opening is ignored while an
@@ -2334,7 +2322,7 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         return None;
     }
     match key.code {
-        KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => Some(AppKey::CtrlShiftX),
+        KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => Some(AppKey::CtrlX),
         KeyCode::Char('s')
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
@@ -2488,8 +2476,8 @@ pub enum AppEvent {
     /// the garden once its *user* has stopped touching the keyboard.
     IdleElapsed(std::time::Duration),
     /// An interaction with the open Garden, already resolved against the
-    /// frame's own plot/viewport layout by presentation. The reducer never sees a
-    /// cell or terminal capacity, so CJK labels, resize, and scrolling cannot
+    /// frame's own plot layout by presentation. The reducer never sees a cell or
+    /// terminal capacity, so CJK labels and resize cannot
     /// move a rabbit away from the session it draws.
     GardenClick(GardenClick),
     /// Focus one stable session row without activating its Closeup. The process
@@ -2510,10 +2498,6 @@ pub enum AppEvent {
 /// rectangles the garden renderer returns for the frame currently on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GardenClick {
-    /// A horizontal scroll control or arrow key. The renderer has already clamped
-    /// the target against the frame currently on screen, so this keeps the Garden
-    /// open and replaces the requested horizontal position exactly.
-    Scroll(usize),
     /// A session's plot. Its stable project/session pair becomes the process
     /// shell's visit target; this reducer activates it only when `workspace`
     /// names its own Home.
@@ -5090,13 +5074,10 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             Vec::new()
         }
         Overlay::Daemon => update_daemon_control(state, &key),
-        // Scroll arrows are resolved against the drawn frame by presentation.
-        // Every other first input remains a wake-up consumed before Home.
+        // The Garden has no hidden viewport. Every key is a wake-up consumed
+        // before Home, including the arrow keys used by other surfaces.
         Overlay::Garden => {
-            if !matches!(key, AppKey::Left | AppKey::Right) {
-                state.overlay = None;
-                state.garden_scroll = 0;
-            }
+            state.overlay = None;
             Vec::new()
         }
         Overlay::CreateSessionError | Overlay::TerminalLaunchError | Overlay::AgentLaunchError => {
@@ -5533,19 +5514,16 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 direction: TabDirection::Previous,
             }]
         }
-        // Ctrl-X removes only the cursor's session. Keep this unavailable while
-        // an overlay owns input, and never turn the workspace root, the new-session
-        // row, or a lifecycle that cannot be removed into a deletion target.
-        // A rejected safe removal opens the existing explicit force confirmation.
+        // Ctrl-X removes only the cursor's session. A diagnosed integrity orphan
+        // is the sole direct purge target; every other row keeps the safe removal
+        // path. Keep this unavailable while an overlay owns input, and never turn
+        // the workspace root, the new-session row, or an ineligible lifecycle into
+        // a deletion target. A rejected safe removal opens the existing explicit
+        // force confirmation.
         AppKey::CtrlX
             if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
         {
-            remove_selected_session(state, false)
-        }
-        AppKey::CtrlShiftX
-            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
-        {
-            purge_selected_orphan(state)
+            remove_selected_session(state)
         }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
@@ -5572,7 +5550,6 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::CtrlN
         | AppKey::CtrlP
         | AppKey::CtrlX
-        | AppKey::CtrlShiftX
         | AppKey::Escape
         | AppKey::Tab
         | AppKey::Left
@@ -5680,7 +5657,6 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::CtrlC
         | AppKey::CtrlQ
         | AppKey::CtrlX
-        | AppKey::CtrlShiftX
         | AppKey::OpenQuitConfirmation
         | AppKey::OpenOverview
         | AppKey::OpenDirectorOrganization
@@ -5720,29 +5696,11 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
 /// stable identity while the presentation turns the row into a loading skeleton.
 /// Snapshot reconciliation moves it only after the daemon removes the row.
 ///
-/// `force` is the whole forced removal, not just the dirty-worktree half: it
-/// also discards an unmerged session branch. The keyboard never supplies it
-/// directly; only the failed-delete confirmation or an explicit command does.
-fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
-    let Selection::Target(Target::Session(session)) = state.selected else {
-        return Vec::new();
-    };
-    if !state.session_can_remove(session) {
-        return Vec::new();
-    }
-    vec![Effect::RemoveSession {
-        workspace: state.workspace,
-        session,
-        force,
-        force_delete_branch: force,
-        purge_orphan: false,
-    }]
-}
-
-/// Purge only the exact selected integrity-orphan row. The dedicated chord is
-/// the destructive acknowledgement; ordinary failed/delete and available rows
-/// keep their existing safe/confirmed removal paths.
-fn purge_selected_orphan(state: &AppState) -> Vec<Effect> {
+/// A diagnosed integrity orphan is already an unusable recovery row, so Ctrl-X
+/// acknowledges the whole destructive removal for that exact identity. Every
+/// other removable row stays on the safe path; ordinary force removal still
+/// requires the failed-delete confirmation or an explicit command.
+fn remove_selected_session(state: &AppState) -> Vec<Effect> {
     let Selection::Target(Target::Session(session)) = state.selected else {
         return Vec::new();
     };
@@ -5753,15 +5711,18 @@ fn purge_selected_orphan(state: &AppState) -> Vec<Effect> {
             projection.lifecycle == SessionLifecycle::Failed
                 && projection.failure_stage == Some(FailureStage::Integrity)
         });
-    if !state.sessions.contains(&session) || !integrity_orphan {
+    if !state.sessions.contains(&session) {
+        return Vec::new();
+    }
+    if !integrity_orphan && !state.session_can_remove(session) {
         return Vec::new();
     }
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
-        force: true,
-        force_delete_branch: true,
-        purge_orphan: true,
+        force: integrity_orphan,
+        force_delete_branch: integrity_orphan,
+        purge_orphan: integrity_orphan,
     }]
 }
 
@@ -6188,7 +6149,6 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             if arguments.trim().is_empty() {
                 if state.garden_available {
                     state.overlay = Some(Overlay::Garden);
-                    state.garden_scroll = 0;
                     state.notice = None;
                 } else {
                     state.overlay = None;
@@ -6575,7 +6535,6 @@ fn update_pointer(
 fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect> {
     if elapsed >= GARDEN_IDLE_THRESHOLD && garden_may_auto_open(state) {
         state.overlay = Some(Overlay::Garden);
-        state.garden_scroll = 0;
     }
     Vec::new()
 }
@@ -6600,20 +6559,14 @@ fn garden_may_auto_open(state: &AppState) -> bool {
 /// Reduce a click the presentation layer already resolved against the garden's
 /// own hitboxes.
 ///
-/// Scroll controls retain the Garden and replace its requested horizontal offset. Every other
-/// click closes it; only a rabbit also activates a session. A session that
+/// Every click closes the Garden; only a rabbit also activates a session. A session that
 /// disappeared from the snapshot between the frame and the press is a stale
 /// target, so it closes the garden and does nothing else.
 fn update_garden_click(state: &mut AppState, click: GardenClick) -> Vec<Effect> {
     if state.overlay != Some(Overlay::Garden) {
         return Vec::new();
     }
-    if let GardenClick::Scroll(scroll) = click {
-        state.garden_scroll = scroll;
-        return Vec::new();
-    }
     state.overlay = None;
-    state.garden_scroll = 0;
     let GardenClick::Visit {
         workspace, session, ..
     } = click
@@ -7538,12 +7491,12 @@ mod tests {
                     KeyEventKind::Press,
                 )
             )),
-            Some(AppKey::CtrlShiftX)
+            Some(AppKey::CtrlX)
         );
     }
 
     #[test]
-    fn management_classifier_rejects_extra_modifiers_for_ctrl_shift_x() {
+    fn management_classifier_rejects_extra_modifiers_for_ctrl_x() {
         for modifiers in [
             crate::usecase::terminal_input::Modifiers {
                 control: true,
@@ -10191,19 +10144,26 @@ mod tests {
     }
 
     #[test]
-    fn switch_ctrl_shift_x_purges_only_the_selected_integrity_orphan() {
+    fn switch_ctrl_x_safely_removes_regular_sessions_and_purges_integrity_orphans() {
         let (workspace, session, _) = ids();
         let mut empty_state = AppState::home(workspace, Vec::new());
         assert!(
-            update(&mut empty_state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            update(&mut empty_state, AppEvent::Key(AppKey::CtrlX)).is_empty(),
             "a non-session selection must not become a purge target"
         );
 
         let mut state = AppState::home(workspace, vec![session]);
 
-        assert!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
-            "an available session must not become a purge target"
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: false,
+                force_delete_branch: false,
+                purge_orphan: false,
+            }],
+            "an available session stays on the safe removal path"
         );
         let _ = update(
             &mut state,
@@ -10216,9 +10176,16 @@ mod tests {
                 },
             )]))),
         );
-        assert!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
-            "an ordinary delete failure keeps its confirmation path"
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: false,
+                force_delete_branch: false,
+                purge_orphan: false,
+            }],
+            "an ordinary delete failure keeps the safe removal path"
         );
 
         let _ = update(
@@ -10233,7 +10200,7 @@ mod tests {
             )]))),
         );
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)),
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
             vec![Effect::RemoveSession {
                 workspace,
                 session,
@@ -10245,7 +10212,7 @@ mod tests {
 
         state.sessions.clear();
         assert!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)).is_empty(),
             "a stale selected identity must not become a purge target"
         );
 
@@ -10258,9 +10225,16 @@ mod tests {
                 failure_summary: Some("incoherent projection".to_owned()),
             },
         );
-        assert!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
-            "an integrity stage without the failed lifecycle must fail closed"
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: false,
+                force_delete_branch: false,
+                purge_orphan: false,
+            }],
+            "an integrity stage without the failed lifecycle stays safe"
         );
     }
 
@@ -11621,7 +11595,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_garden_opens_a_screen_saver_that_non_scroll_keys_wake() {
+    fn overview_garden_opens_a_screen_saver_that_any_key_wakes() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
         state.overlay = Some(Overlay::Overview);
@@ -11636,10 +11610,12 @@ mod tests {
         assert_eq!(state.overlay(), Some(Overlay::Garden));
         assert!(state.notice().is_none());
 
-        // 横スクロール矢印以外の最初の入力は wake-up として消費され Home へ戻る。
-        // Escape 専用ではなく、drawer を開く key でも背面へ渡らない。
+        // 最初の入力は wake-up として消費され Home へ戻る。Escape 専用ではなく、
+        // 矢印や drawer を開く key も背面へ渡らない。
         for key in [
             AppKey::Escape,
+            AppKey::Left,
+            AppKey::Right,
             AppKey::Down,
             AppKey::ToggleDirectorDrawer,
             AppKey::OpenDirectorNew,
@@ -11667,24 +11643,17 @@ mod tests {
     }
 
     #[test]
-    fn garden_scroll_actions_keep_the_overlay_and_dismiss_resets_the_offset() {
+    fn garden_click_and_arrow_keys_wake_the_overlay() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
         state.overlay = Some(Overlay::Garden);
 
-        assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Scroll(3))).is_empty());
-        assert_eq!(state.overlay(), Some(Overlay::Garden));
-        assert_eq!(state.garden_scroll(), 3);
-
-        // Reducer-only arrow delivery is consumed without waking the Garden;
-        // the composition shell supplies the exact scroll action in production.
         assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
-        assert_eq!(state.overlay(), Some(Overlay::Garden));
-        assert_eq!(state.garden_scroll(), 3);
+        assert_eq!(state.overlay(), None);
 
+        state.overlay = Some(Overlay::Garden);
         assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)).is_empty());
         assert_eq!(state.overlay(), None);
-        assert_eq!(state.garden_scroll(), 0);
     }
 
     #[test]
@@ -11976,7 +11945,6 @@ mod tests {
         let route = state.route();
 
         for click in [
-            GardenClick::Scroll(1),
             GardenClick::Visit {
                 workspace,
                 session,
