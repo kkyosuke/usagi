@@ -5409,6 +5409,9 @@ fn paste_decision_freeform(editor: &mut DecisionEditor, text: &str) {
 /// row or a failed/deleting checkout as a navigation destination. Switch keeps
 /// its cursor semantics; Closeup updates the active target and remains Closeup.
 fn navigate_session(state: &mut AppState, direction: TabDirection) -> Vec<Effect> {
+    if state.overlay.is_some() || state.workspace_drawer_open() {
+        return Vec::new();
+    }
     let anchor = if matches!(state.route, Route::Home(HomeMode::Closeup)) {
         state.active
     } else {
@@ -9550,6 +9553,25 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::PreviousSession));
         assert_eq!((state.selected(), state.active(), state.route()), before);
         assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+
+        let mut closeup_actions = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut closeup_actions, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut closeup_actions, AppEvent::Key(AppKey::Enter));
+        assert_eq!(closeup_actions.overlay(), Some(Overlay::Closeup));
+        let before = (
+            closeup_actions.selected(),
+            closeup_actions.active(),
+            closeup_actions.route(),
+        );
+        let _ = update(&mut closeup_actions, AppEvent::Key(AppKey::NextSession));
+        assert_eq!(
+            (
+                closeup_actions.selected(),
+                closeup_actions.active(),
+                closeup_actions.route(),
+            ),
+            before
+        );
     }
 
     #[test]

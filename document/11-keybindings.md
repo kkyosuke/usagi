@@ -53,7 +53,8 @@ record から生成する。CI は catalog の key/action 組と本書の worksp
 
 `Ctrl+Option+矢印` は前面に modal / drawer がない Switch と Closeup で動作する。`↑/↓` は利用可能な
 managed session だけを循環し、Switch では cursor を、Closeup では active session を移動して移動先の Closeup に留まる。
-`←/→` は open project を循環する。terminal が Control と Option（Alt）の修飾を区別して報告できない場合は予約せず、
+`←/→` は open project を循環し、Closeup から移動した場合は移動先 project の記憶済み（なければ先頭の利用可能な）
+session の Closeup に留まる。terminal が Control と Option（Alt）の修飾を区別して報告できない場合は予約せず、
 通常の terminal 入力として扱う。
 
 | 入力 | action | 動作 |

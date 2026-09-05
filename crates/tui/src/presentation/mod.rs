@@ -6942,6 +6942,20 @@ fn restore_workspace_session_focus(
     }
 }
 
+/// Re-enter Closeup after a keyboard-driven project transition. This runs after
+/// session/lifecycle synchronization so an unusable cached row never opens.
+fn restore_workspace_closeup(
+    deck: &mut WorkspaceDeck,
+    path: &Path,
+    runtime: &mut WorkspaceRuntime,
+) {
+    let Some(session) = deck.take_closeup_session(path) else {
+        return;
+    };
+    let _ = runtime.apply_event(AppEvent::FocusSession(session));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
+}
+
 /// Run one blocking operation on a scoped worker while continuing to paint.
 /// For cancellable workspace opens, Escape discards a late result; the
 /// underlying call is allowed to settle safely before its borrowed port is
@@ -7784,6 +7798,7 @@ fn drive_workspace_controller(
             restore_clock.elapsed(),
         );
         sync_runtime_sessions(&mut runtime, &ui, worktree_names);
+        restore_workspace_closeup(deck, &root_cwd, &mut runtime);
         if let Some(visit) = pending_garden_visit.take() {
             let _ = runtime.apply_event(AppEvent::VisitSession(visit.session));
             pending_garden_agent = visit.agent.map(|agent| (visit.session, agent));
@@ -8304,6 +8319,12 @@ fn drive_workspace_controller(
                 frame_material_key = None;
                 continue;
             }
+            let preserve_closeup = matches!(
+                key,
+                Key::Live(
+                    LiveTerminalAction::PreviousWorkspace | LiveTerminalAction::NextWorkspace
+                )
+            ) && runtime.state().route() == Route::Home(HomeMode::Closeup);
             if let Some(prepared) =
                 prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
                 && prepare_activation_settings(
@@ -8315,6 +8336,9 @@ fn drive_workspace_controller(
                 )
             {
                 remember_workspace_session_focus(deck, runtime.state());
+                if preserve_closeup {
+                    deck.schedule_closeup(prepared.workspace.path.clone());
+                }
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             drawn_material = None;
@@ -10343,9 +10367,10 @@ mod tests {
         remember_workspace_session_focus, remove_registry_paths, render_controller_frame,
         render_home_material, render_home_snapshot, render_missing_workspace_prompt,
         reset_projection_build_counts, restore_open_panes, restore_prepared_workspace,
-        restore_workspace_session_focus, retarget_drawer_chords, route_garden_input,
-        route_pr_modal_click, route_workspace_input_before_reducer, run as run_from_start,
-        run_screen_graph_with_backend, run_screen_graph_with_backend_and_notice, run_with_settings,
+        restore_workspace_closeup, restore_workspace_session_focus, retarget_drawer_chords,
+        route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
+        run as run_from_start, run_screen_graph_with_backend,
+        run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -27226,6 +27251,14 @@ mod tests {
         );
         assert_eq!(restored.state().route(), Route::Home(HomeMode::Switch));
 
+        deck.schedule_closeup(beta.workspace.path.clone());
+        let _ = restored.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
+            beta.session_lifecycles.clone(),
+        )));
+        restore_workspace_closeup(&mut deck, &beta.workspace.path, &mut restored);
+        assert_eq!(restored.state().active(), Some(remembered));
+        assert_eq!(restored.state().route(), Route::Home(HomeMode::Closeup));
+
         let transition = strip_ansi(
             &cached_workspace_switch_frame(
                 &deck,
@@ -32480,7 +32513,6 @@ mod tests {
             Key::Right,
             Key::Enter,
             Key::Live(LiveTerminalAction::NextWorkspace),
-            Key::Enter,
             Key::Live(LiveTerminalAction::PreviousWorkspace),
             Key::CtrlQ,
             Key::Char('q'),

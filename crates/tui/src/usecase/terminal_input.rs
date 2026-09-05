@@ -401,7 +401,7 @@ impl LiveInputClassifier {
             self.leader_at = Some(now);
             return LiveInputOutput::Swallowed;
         }
-        if let Some(action) = workspace_navigation_action(key) {
+        if let Some(action) = session_workspace_navigation_action(key) {
             return LiveInputOutput::Action(action);
         }
         if let Some(control) = global_control_key(key) {
@@ -416,7 +416,7 @@ impl LiveInputClassifier {
 /// Raw terminal bytes cannot reliably distinguish this chord, so only semantic
 /// key events whose backend preserves both Control and Alt (Option on macOS)
 /// claim the navigation action. Every other modified arrow remains PTY input.
-fn workspace_navigation_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
+fn session_workspace_navigation_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     if !is_control_and_alt(key.modifiers) {
         return None;
     }
