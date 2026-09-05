@@ -683,6 +683,7 @@ daemon は利用者の Goal を次の固定 operating contract と結合し、`L
 
 - Draft PR、required check 成功、human review ready、または本当に必要な user decision まで再 prompt なしで継続する。
 - repository の `AGENTS.md` に従い、既存 session / delegation tool で必要な worktree と worker を作る。
+- 委譲する worker は Work Run の root Agent と同じ provider/runtime を使う。model は task に必要な能力へ合わせ、より小さい model で十分な場合に最上位 model を既定で選ばない。
 - 通常の不確実性や回復可能な failure では質問せず、blocking choice だけを durable user-decision tool へ送る。
 - 停止時は安全な理由と回復 action を root conversation に出し、PR は自動 merge しない。
 

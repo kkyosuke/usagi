@@ -475,6 +475,20 @@ mod tests {
                 InputKeyEventKind::Repeat,
             ))))
         );
+
+        let navigation = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::ALT);
+        assert_eq!(
+            adapt_event::<()>(Event::Key(navigation)),
+            Some(RuntimeEvent::Input(LiveInput::Key(InputKeyEvent::new(
+                usagi_tui::usecase::terminal_input::KeyCode::Right,
+                Modifiers {
+                    control: true,
+                    alt: true,
+                    ..Modifiers::default()
+                },
+                InputKeyEventKind::Press,
+            ))))
+        );
         assert_eq!(
             adapt_event::<()>(Event::Paste("貼り付け\ntext".into())),
             Some(RuntimeEvent::Input(LiveInput::Paste(
