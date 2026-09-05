@@ -41,6 +41,7 @@ use crate::presentation::views::decision_modal;
 use crate::presentation::views::director_drawer::{self, DIRECTOR_ICON, DirectorDrawerProjection};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
+use crate::presentation::views::remove_modal::{self, RemoveEntry, RemoveModal};
 use crate::presentation::views::root_terminal_drawer::{
     self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
 };
@@ -331,6 +332,8 @@ pub struct HomeProjection {
     preview_overlay: Option<PreviewOverlay>,
     /// Merge-confirmed cleanup queue projected with current session labels.
     cleanup_queue: Option<CleanupModal>,
+    /// Explicit removal checklist projected with current session labels.
+    remove_queue: Option<RemoveModal>,
     /// Persisted Overview command-palette input, when its overlay is open. The
     /// runtime owns this so the caret and filter survive across frames.
     overview_modal: Option<OverviewModal>,
@@ -436,6 +439,28 @@ fn project_cleanup_queue(state: &AppState, sessions: &[ProjectedSession]) -> Opt
     Some(CleanupModal {
         entries,
         cursor: queue.cursor(),
+        feedback: queue.feedback().map(clone_notice_message),
+    })
+}
+
+fn project_remove_queue(state: &AppState, sessions: &[ProjectedSession]) -> Option<RemoveModal> {
+    let queue = state.remove_queue()?;
+    let entries = queue
+        .candidates()
+        .iter()
+        .filter_map(|session| {
+            let projected = sessions.iter().find(|entry| entry.id == *session)?;
+            Some(RemoveEntry {
+                label: projected.label.clone(),
+                selected: queue.selected().contains(session),
+                removing: queue.in_flight() == Some(*session),
+            })
+        })
+        .collect();
+    Some(RemoveModal {
+        entries,
+        cursor: queue.cursor(),
+        force: queue.force(),
         feedback: queue.feedback().map(clone_notice_message),
     })
 }
@@ -562,6 +587,7 @@ impl HomeProjection {
     ) -> Self {
         let create_draft = state.create_session_form().map(CreateDraft::from);
         let cleanup_queue = project_cleanup_queue(state, &sessions);
+        let remove_queue = project_remove_queue(state, &sessions);
         let create_role = state
             .create_session_form()
             .and_then(CreateSessionForm::selected_role)
@@ -631,6 +657,7 @@ impl HomeProjection {
             pr_overlay: state.pr_overlay().cloned(),
             preview_overlay: state.preview_overlay().cloned(),
             cleanup_queue,
+            remove_queue,
             overview_modal: None,
             daemon_overlay: (state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Daemon))
@@ -1059,6 +1086,7 @@ impl HomeProjection {
             && self.pr_overlay.is_none()
             && self.preview_overlay.is_none()
             && self.decision_overlay.is_none()
+            && self.remove_queue.is_none()
     }
 
     fn active_label(&self) -> &str {
@@ -2251,6 +2279,8 @@ fn render_home_modals(
 ) -> Vec<String> {
     if let Some(modal) = &home.overview_modal {
         overview_modal::render_over(height, width, &frame, modal)
+    } else if let Some(modal) = &home.remove_queue {
+        remove_modal::render_over(height, width, &frame, modal)
     } else if let Some(modal) = &home.cleanup_queue {
         cleanup_modal::render_over(height, width, &frame, modal)
     } else if let Some(control) = &home.daemon_overlay {
@@ -3500,6 +3530,43 @@ mod tests {
         assert!(text.contains("Merged session cleanup"));
         assert!(text.contains("ready"));
         assert!(text.contains("waiting for the current removal"));
+    }
+
+    #[test]
+    fn remove_queue_projection_joins_stable_sessions_and_renders_force_warning() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview(
+                "session remove -s --force".to_owned(),
+            )),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        let sessions: Arc<[ProjectedSession]> = Arc::from([
+            projected_session(first, "first", "/work/first"),
+            projected_session(second, "second", "/work/second"),
+        ]);
+        let home = HomeProjection::from_ordered_state(&state, "work", sessions);
+        let queue = home.remove_queue.as_ref().unwrap();
+        assert_eq!(queue.cursor, 1);
+        assert_eq!(queue.entries.len(), 2);
+        assert!(!queue.entries[0].selected);
+        assert_eq!(queue.entries[1].label, "second");
+        assert!(queue.entries[1].selected);
+        assert!(queue.entries[1].removing);
+        assert!(queue.force);
+
+        let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
+        assert!(text.contains("Remove sessions"));
+        assert!(text.contains("second"));
+        assert!(text.contains("force removes dirty worktrees"));
     }
 
     fn now() -> DateTime<Utc> {

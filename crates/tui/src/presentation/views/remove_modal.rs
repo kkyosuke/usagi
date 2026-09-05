@@ -1,13 +1,8 @@
 //! Session-removal checklist modal.
 //!
-//! The modal owns only a snapshot of the sessions the user saw when opening it.
-//! Before dispatch, the runtime verifies the record still matches the current
-//! sidebar projection so a refresh cannot turn a checked row into a different
-//! removal target.
-
-use std::collections::BTreeSet;
-
-use usagi_core::domain::session::SessionRecord;
+//! Stable selection and sequential dispatch belong to the controller. This
+//! view receives only display labels and state flags, so a refresh cannot make
+//! presentation-owned row indexes into deletion identities.
 
 use crate::presentation::theme::Role;
 use crate::presentation::widgets::{self, modal};
@@ -15,165 +10,62 @@ use crate::presentation::widgets::{self, modal};
 const INNER_WIDTH: usize = 52;
 const BODY_HEIGHT: usize = 14;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveEntry {
+    pub label: String,
+    pub selected: bool,
+    pub removing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveModal {
-    entries: Vec<SessionRecord>,
-    cursor: usize,
-    selected: BTreeSet<String>,
-    force: bool,
-    feedback: Option<String>,
-}
-
-impl RemoveModal {
-    #[must_use]
-    pub fn new(entries: Vec<SessionRecord>, force: bool) -> Self {
-        Self {
-            entries,
-            cursor: 0,
-            selected: BTreeSet::new(),
-            force,
-            feedback: None,
-        }
-    }
-
-    #[must_use]
-    pub fn entries(&self) -> &[SessionRecord] {
-        &self.entries
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    #[must_use]
-    pub fn force(&self) -> bool {
-        self.force
-    }
-
-    #[must_use]
-    pub fn selected_entries(&self) -> Vec<SessionRecord> {
-        self.entries
-            .iter()
-            .filter(|entry| self.selected.contains(&entry.name))
-            .cloned()
-            .collect()
-    }
-
-    pub fn move_up(&mut self) {
-        if !self.entries.is_empty() {
-            self.cursor = self.cursor.checked_sub(1).unwrap_or(self.entries.len() - 1);
-        }
-    }
-
-    pub fn move_down(&mut self) {
-        if !self.entries.is_empty() {
-            self.cursor = (self.cursor + 1) % self.entries.len();
-        }
-    }
-
-    pub fn toggle(&mut self) {
-        let Some(entry) = self.entries.get(self.cursor) else {
-            return;
-        };
-        if !self.selected.insert(entry.name.clone()) {
-            self.selected.remove(&entry.name);
-        }
-        self.feedback = None;
-    }
-
-    pub fn set_feedback(&mut self, message: impl Into<String>) {
-        self.feedback = Some(message.into());
-    }
-
-    pub fn remove_entry(&mut self, entry: &SessionRecord) {
-        self.entries
-            .retain(|candidate| !same_incarnation(candidate, entry));
-        self.selected.remove(&entry.name);
-        self.cursor = self.cursor.min(self.entries.len().saturating_sub(1));
-    }
-
-    /// Drop checked entries that no longer denote the same record in a fresh
-    /// daemon snapshot. The selector never rebinds a checked entry by name.
-    pub fn reconcile(&mut self, current: &[SessionRecord]) {
-        let mut retained = Vec::new();
-        for entry in std::mem::take(&mut self.entries) {
-            let mut current_incarnation = false;
-            for candidate in current {
-                if same_incarnation(candidate, &entry) {
-                    current_incarnation = true;
-                    break;
-                }
-            }
-            if current_incarnation {
-                retained.push(entry);
-            }
-        }
-        self.entries = retained;
-        let mut selected = BTreeSet::new();
-        for name in std::mem::take(&mut self.selected) {
-            for entry in &self.entries {
-                if entry.name == name {
-                    selected.insert(name.clone());
-                }
-            }
-        }
-        self.selected = selected;
-        self.cursor = self.cursor.min(self.entries.len().saturating_sub(1));
-    }
-}
-
-/// `SessionRecord` itself carries no durable ID. At this legacy/display-record
-/// boundary, the composite fields fence a refresh from retargeting a checked row
-/// to a same-named new record; the TUI keeps daemon lifecycle IDs in a separate
-/// projection.
-#[must_use]
-pub fn same_incarnation(left: &SessionRecord, right: &SessionRecord) -> bool {
-    left.name == right.name && left.root == right.root && left.created_at == right.created_at
-}
-
-fn row(entry: &SessionRecord, cursor: bool, selected: bool, width: usize) -> String {
-    let marker = modal::selection_marker(cursor);
-    let check = if selected {
-        Role::Danger.style().bold().paint("[x]")
-    } else {
-        "[ ]".to_owned()
-    };
-    let label = widgets::clip_to_width(entry.display_label(), width.saturating_sub(8));
-    let label = if selected {
-        Role::Danger.style().paint(&label)
-    } else {
-        label
-    };
-    modal::content_line(&format!("{marker} {check} {label}"), width)
+    pub entries: Vec<RemoveEntry>,
+    pub cursor: usize,
+    pub force: bool,
+    pub feedback: Option<String>,
 }
 
 fn body(state: &RemoveModal) -> Vec<String> {
-    // The removal checklist is the one modal whose help hint leads the body
-    // instead of closing it.
-    let footer = format!(
+    let mut lines = vec![format!(
         "{}{}{}",
-        modal::footer("  Space: select   "),
+        modal::footer("Space: select  ·  "),
         Role::Danger.style().bold().paint("Enter: remove"),
-        modal::footer("   Esc: cancel"),
-    );
-    let mut lines = vec![footer];
-    if state.is_empty() {
-        lines.push(modal::empty_notice("no sessions to remove"));
+        modal::footer("  ·  Esc: cancel"),
+    )];
+    if state.entries.is_empty() {
+        lines.push(modal::empty_notice("no sessions can be removed"));
     } else {
-        for (index, entry) in state.entries.iter().enumerate() {
-            lines.push(row(
-                entry,
-                index == state.cursor,
-                state.selected.contains(&entry.name),
-                INNER_WIDTH,
-            ));
-        }
+        let rows = state
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let marker = modal::selection_marker(index == state.cursor);
+                let check = if entry.removing {
+                    Role::Feature.style().bold().paint("[…]")
+                } else if entry.selected {
+                    Role::Danger.style().bold().paint("[x]")
+                } else {
+                    "[ ]".to_owned()
+                };
+                let label = widgets::clip_to_width(&entry.label, INNER_WIDTH.saturating_sub(10));
+                let label = if entry.selected {
+                    Role::Danger.style().paint(&label)
+                } else {
+                    label
+                };
+                modal::content_line(&format!("{marker} {check} {label}"), INNER_WIDTH)
+            })
+            .collect::<Vec<_>>();
+        let (start, end) = modal::list_window(rows.len(), state.cursor, 8);
+        lines.extend(modal::scroll_window(&rows, start, end));
     }
     lines.push(String::new());
     lines.push(match &state.feedback {
-        Some(message) => Role::Danger.style().paint(&format!("  {message}")),
-        None if state.force => Role::Danger.style().paint("  force removal enabled"),
+        Some(message) => Role::Warning.style().paint(&format!("  {message}")),
+        None if state.force => Role::Danger
+            .style()
+            .paint("  force removes dirty worktrees and unmerged branches"),
         None => String::new(),
     });
     lines
@@ -181,14 +73,14 @@ fn body(state: &RemoveModal) -> Vec<String> {
 
 #[must_use]
 pub fn render_over(
-    raw_height: usize,
-    raw_width: usize,
+    height: usize,
+    width: usize,
     base: &[String],
     state: &RemoveModal,
 ) -> Vec<String> {
     modal::render_body_over(
-        raw_height,
-        raw_width,
+        height,
+        width,
         base,
         "Remove sessions",
         INNER_WIDTH,
@@ -200,91 +92,52 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use chrono::{TimeZone, Utc};
-    use std::path::PathBuf;
-    use usagi_core::domain::note::Scratchpad;
-    use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
-    use super::{RemoveModal, render_over, same_incarnation};
-
-    fn session(name: &str, created: i64) -> SessionRecord {
-        SessionRecord {
-            name: name.to_owned(),
-            display_name: None,
-            origin: SessionOrigin::Human,
-            started_from: None,
-            root: PathBuf::from(format!("/tmp/{name}")),
-            created_at: Utc.timestamp_opt(created, 0).unwrap(),
-            last_active: None,
-            notes: Scratchpad::default(),
-            prs: Vec::new(),
-        }
-    }
+    use super::*;
+    use crate::presentation::widgets::strip_ansi;
 
     #[test]
-    fn toggles_and_wraps_without_selecting_an_empty_modal() {
-        let mut modal = RemoveModal::new(vec![session("a", 1), session("b", 2)], false);
-        modal.move_up();
-        modal.toggle();
-        assert_eq!(modal.selected_entries(), vec![session("b", 2)]);
-        modal.move_down();
-        modal.toggle();
-        assert_eq!(
-            modal.selected_entries(),
-            vec![session("a", 1), session("b", 2)]
-        );
-        let mut empty = RemoveModal::new(Vec::new(), false);
-        empty.move_up();
-        empty.move_down();
-        empty.toggle();
-        assert!(empty.selected_entries().is_empty());
-    }
+    fn renders_selection_progress_force_warning_and_empty_feedback() {
+        let state = RemoveModal {
+            entries: vec![
+                RemoveEntry {
+                    label: "review".to_owned(),
+                    selected: true,
+                    removing: false,
+                },
+                RemoveEntry {
+                    label: "stack".to_owned(),
+                    selected: true,
+                    removing: true,
+                },
+                RemoveEntry {
+                    label: "later".to_owned(),
+                    selected: false,
+                    removing: false,
+                },
+            ],
+            cursor: 1,
+            force: true,
+            feedback: None,
+        };
+        let frame = render_over(24, 80, &vec![String::new(); 24], &state);
+        let rendered = frame.join("\n");
+        assert!(rendered.contains("\u{1b}[1;31mEnter: remove\u{1b}[0m"));
+        let text = strip_ansi(&rendered);
+        assert_eq!(frame.len(), 24);
+        assert!(text.contains("Remove sessions"));
+        assert!(text.contains("review"));
+        assert!(text.contains("[…]"));
+        assert!(text.contains("force removes dirty worktrees"));
 
-    #[test]
-    fn reconcile_drops_a_same_named_new_incarnation() {
-        let old = session("same", 1);
-        let new = session("same", 2);
-        assert!(!same_incarnation(&old, &new));
-        let mut modal = RemoveModal::new(vec![old], false);
-        modal.toggle();
-        modal.reconcile(&[new]);
-        assert!(modal.is_empty());
-        assert!(modal.selected_entries().is_empty());
-
-        let retained = session("retained", 3);
-        let mut modal = RemoveModal::new(vec![retained.clone()], false);
-        modal.toggle();
-        modal.reconcile(std::slice::from_ref(&retained));
-        assert_eq!(modal.selected_entries(), vec![retained]);
-    }
-
-    #[test]
-    fn feedback_removal_and_rendering_cover_the_selector_states() {
-        let first = session("a", 1);
-        let second = session("b", 2);
-        assert!(same_incarnation(&first, &first));
-
-        let mut modal = RemoveModal::new(vec![first.clone(), second.clone()], true);
-        assert_eq!(modal.entries().len(), 2);
-        assert!(modal.force());
-        let force = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
-        assert!(force.contains("force removal enabled"));
-        let normal = RemoveModal::new(vec![second.clone()], false);
-        let normal_frame = render_over(12, 60, &vec![String::new(); 12], &normal).join("\n");
-        assert!(!normal_frame.contains("force removal enabled"));
-        modal.toggle();
-        let selected = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
-        assert!(selected.contains("\u{1b}[1;31m[x]\u{1b}[0m"));
-        assert!(selected.contains("\u{1b}[31ma\u{1b}[0m"));
-        assert!(selected.contains("\u{1b}[1;31mEnter: remove\u{1b}[0m"));
-        modal.set_feedback("cannot remove");
-        let frame = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
-        assert!(frame.contains("cannot remove"));
-        modal.toggle();
-        modal.remove_entry(&first);
-        assert_eq!(modal.entries(), &[second]);
-        modal.reconcile(&[]);
-        let empty = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
-        assert!(empty.contains("no sessions to remove"));
+        let empty = RemoveModal {
+            entries: Vec::new(),
+            cursor: 0,
+            force: false,
+            feedback: Some("removal complete".to_owned()),
+        };
+        let text = strip_ansi(&render_over(24, 80, &frame, &empty).join("\n"));
+        assert!(text.contains("no sessions can be removed"));
+        assert!(text.contains("removal complete"));
     }
 }

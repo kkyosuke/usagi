@@ -326,7 +326,7 @@ fn parse_remove(arguments: &str) -> Result<SessionCommand, &'static str> {
             Ok(SessionCommand::Remove {
                 name: (*name).to_owned(),
                 force: true,
-                force_delete_branch: false,
+                force_delete_branch: true,
             })
         }
         _ => Err("invalid session remove arguments"),
@@ -625,7 +625,7 @@ mod tests {
             Ok(SessionCommand::Remove {
                 name: "feature-x".into(),
                 force: true,
-                force_delete_branch: false,
+                force_delete_branch: true,
             })
         );
         assert_eq!(
