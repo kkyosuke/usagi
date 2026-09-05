@@ -1,8 +1,8 @@
 //! Application settings.
 //!
 //! The global, per-user preferences persisted as `settings.json` in the data
-//! directory, plus workspace settings persisted beside a project. Theme and
-//! modal interaction and the generic Terminal PTY ceiling stay global; Agent,
+//! directory, plus workspace settings persisted beside a project. Theme, icon
+//! rendering, modal interaction, and the generic Terminal PTY ceiling stay global; Agent,
 //! Workflow, Team, Issue, and Memory values are copied to a workspace when it is
 //! registered and may then be changed independently.
 //! Environment bindings ([`env`]) exist in both scopes and merge, so a workspace
@@ -109,6 +109,24 @@ pub enum Theme {
     #[default]
     #[serde(other)]
     System,
+}
+
+/// Whether terminal chrome uses Nerd Font glyphs or readable text labels.
+///
+/// A terminal cannot report whether its configured font contains private-use
+/// glyphs, so this is an explicit global preference. Nerd Font is the default
+/// visual language; [`Self::Text`] is the deterministic fallback for terminals
+/// without a patched font.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IconMode {
+    /// Use self-explanatory ASCII labels and markers.
+    Text,
+    /// Use Nerd Font glyphs for compact terminal chrome. This is also the
+    /// fallback for unknown stored tokens.
+    #[default]
+    #[serde(other)]
+    NerdFont,
 }
 
 /// How Overview and Closeup accept a command.
@@ -481,6 +499,8 @@ impl AvailableModels {
 pub struct Settings {
     /// The UI color theme.
     pub theme: Theme,
+    /// Nerd Font glyphs or text fallbacks for terminal chrome.
+    pub icon_mode: IconMode,
     /// The command-selection interaction used by Overview and Closeup modals.
     pub modal_selection_mode: ModalSelectionMode,
     /// Whether a newly detected PR opens its modal automatically.
@@ -513,6 +533,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: Theme::default(),
+            icon_mode: IconMode::default(),
             modal_selection_mode: ModalSelectionMode::default(),
             pr_auto_open: PrAutoOpen::default(),
             terminal_max_concurrent: TerminalConcurrencyLimit::default(),
@@ -539,6 +560,7 @@ impl Settings {
     #[must_use]
     pub fn with_config(mut self, settings: &Self) -> Self {
         self.theme = settings.theme;
+        self.icon_mode = settings.icon_mode;
         self.modal_selection_mode = settings.modal_selection_mode;
         self.pr_auto_open = settings.pr_auto_open;
         self.terminal_max_concurrent = settings.terminal_max_concurrent;
@@ -551,7 +573,7 @@ impl Settings {
     }
 
     /// Apply workspace-owned Agent, Base branch, Workflow, Team, Issue, Memory, and
-    /// environment values over this global baseline. Theme, modal interaction,
+    /// environment values over this global baseline. Theme, icon rendering, modal interaction,
     /// and the generic Terminal PTY ceiling always remain global.
     ///
     /// Environment bindings accumulate rather than replace: the workspace map is

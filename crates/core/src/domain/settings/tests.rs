@@ -1,5 +1,5 @@
 use super::{
-    AgentReadinessCommand, AvailableModels, DefaultModel, EnvBindings, LocalSettings,
+    AgentReadinessCommand, AvailableModels, DefaultModel, EnvBindings, IconMode, LocalSettings,
     ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, TerminalConcurrencyLimit, Theme,
     WorkMode,
 };
@@ -42,9 +42,28 @@ fn theme_degrades_an_unrecognised_token_to_system() {
 }
 
 #[test]
+fn icon_mode_defaults_to_nerd_font_and_round_trips_text_fallback() {
+    assert_eq!(IconMode::default(), IconMode::NerdFont);
+    assert_eq!(
+        serde_json::to_value(IconMode::NerdFont).unwrap(),
+        "nerd_font"
+    );
+    assert_eq!(serde_json::to_value(IconMode::Text).unwrap(), "text");
+    assert_eq!(
+        serde_json::from_str::<IconMode>("\"text\"").unwrap(),
+        IconMode::Text
+    );
+    assert_eq!(
+        serde_json::from_str::<IconMode>("\"future\"").unwrap(),
+        IconMode::NerdFont
+    );
+}
+
+#[test]
 fn settings_default_uses_the_system_theme() {
     let settings = Settings::default();
     assert_eq!(settings.theme, Theme::System);
+    assert_eq!(settings.icon_mode, IconMode::NerdFont);
     assert_eq!(settings.modal_selection_mode, ModalSelectionMode::Action);
     assert_eq!(settings.default_model, DefaultModel::OpenAi);
     assert_eq!(settings.terminal_max_concurrent.get(), 64);
@@ -83,6 +102,7 @@ fn settings_ignore_the_removed_garden_size_field() {
 fn settings_round_trip_through_json() {
     let settings = Settings {
         theme: Theme::Dark,
+        icon_mode: IconMode::Text,
         modal_selection_mode: ModalSelectionMode::Prompt,
         pr_auto_open: PrAutoOpen::Always,
         terminal_max_concurrent: TerminalConcurrencyLimit::new(128).unwrap(),
@@ -97,6 +117,7 @@ fn settings_round_trip_through_json() {
     let json = serde_json::to_string(&settings).unwrap();
     assert!(json.contains("\"env\":{\"GH_TOKEN\":\"op://Private/GitHub/token\"}"));
     assert!(json.contains("\"theme\":\"dark\""));
+    assert!(json.contains("\"icon_mode\":\"text\""));
     assert!(json.contains("\"modal_selection_mode\":\"prompt\""));
     assert!(json.contains("\"terminal_max_concurrent\":128"));
     assert!(json.contains("\"default_model\":\"claude\""));
@@ -437,6 +458,7 @@ fn work_mode_is_opt_in_and_unknown_tokens_stay_classic() {
 fn local_settings_overlay_only_workspace_owned_fields() {
     let global = Settings {
         theme: Theme::Dark,
+        icon_mode: IconMode::Text,
         modal_selection_mode: ModalSelectionMode::Action,
         pr_auto_open: PrAutoOpen::SwitchOnly,
         terminal_max_concurrent: TerminalConcurrencyLimit::default(),
@@ -460,6 +482,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         global.with_local(&local),
         Settings {
             theme: Theme::Dark,
+            icon_mode: IconMode::Text,
             modal_selection_mode: ModalSelectionMode::Action,
             pr_auto_open: PrAutoOpen::SwitchOnly,
             terminal_max_concurrent: TerminalConcurrencyLimit::default(),
@@ -585,6 +608,7 @@ fn local_settings_ignore_global_only_and_unknown_workspace_values() {
 fn full_settings_convert_to_workspace_owned_values_only() {
     let settings = Settings {
         theme: Theme::Light,
+        icon_mode: IconMode::Text,
         modal_selection_mode: ModalSelectionMode::Prompt,
         pr_auto_open: PrAutoOpen::NotifyOnly,
         terminal_max_concurrent: TerminalConcurrencyLimit::new(128).unwrap(),
@@ -601,6 +625,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         Settings::default().with_local(&local),
         Settings {
             theme: Theme::System,
+            icon_mode: IconMode::NerdFont,
             modal_selection_mode: ModalSelectionMode::Action,
             pr_auto_open: PrAutoOpen::SwitchOnly,
             terminal_max_concurrent: TerminalConcurrencyLimit::default(),

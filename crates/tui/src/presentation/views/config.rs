@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use usagi_core::domain::settings::{
-    DefaultModel, EnvBindings, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
-    WorkMode, format_env_bindings,
+    DefaultModel, EnvBindings, IconMode, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate,
+    Theme, WorkMode, format_env_bindings,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -123,6 +123,7 @@ enum SavePhase {
 pub enum Field {
     #[default]
     Theme,
+    Icons,
     ModalSelectionMode,
     TerminalLimit,
     PrAutoOpen,
@@ -266,7 +267,8 @@ impl Config {
     pub fn next_field(&mut self) {
         self.field = match self.scope {
             SettingsScope::Global => match self.field {
-                Field::Theme => Field::ModalSelectionMode,
+                Field::Theme => Field::Icons,
+                Field::Icons => Field::ModalSelectionMode,
                 Field::ModalSelectionMode => Field::TerminalLimit,
                 Field::TerminalLimit => Field::Environment,
                 Field::Environment => Field::DefaultModel,
@@ -288,6 +290,7 @@ impl Config {
                 Field::Memory => Field::Save,
                 Field::Save
                 | Field::Theme
+                | Field::Icons
                 | Field::ModalSelectionMode
                 | Field::TerminalLimit
                 | Field::PrAutoOpen => Field::DefaultModel,
@@ -307,7 +310,8 @@ impl Config {
         self.field = match self.scope {
             SettingsScope::Global => match self.field {
                 Field::Theme => Field::Save,
-                Field::ModalSelectionMode => Field::Theme,
+                Field::Icons => Field::Theme,
+                Field::ModalSelectionMode => Field::Icons,
                 Field::TerminalLimit => Field::ModalSelectionMode,
                 Field::Environment => Field::TerminalLimit,
                 Field::DefaultModel | Field::DefaultBranch => Field::Environment,
@@ -328,6 +332,7 @@ impl Config {
                 Field::Save => Field::Memory,
                 Field::DefaultModel
                 | Field::Theme
+                | Field::Icons
                 | Field::ModalSelectionMode
                 | Field::TerminalLimit
                 | Field::PrAutoOpen => Field::Save,
@@ -368,6 +373,16 @@ impl Config {
             (Theme::System, true) | (Theme::Light, false) => Theme::Dark,
             (Theme::Dark, true) | (Theme::System, false) => Theme::Light,
             (Theme::Light, true) | (Theme::Dark, false) => Theme::System,
+        };
+        self.notice = None;
+    }
+
+    /// Toggle between Nerd Font glyphs and readable text fallbacks.
+    pub fn cycle_icon_mode(&mut self) {
+        let mode = &mut self.current_mut().draft.icon_mode;
+        *mode = match *mode {
+            IconMode::NerdFont => IconMode::Text,
+            IconMode::Text => IconMode::NerdFont,
         };
         self.notice = None;
     }
@@ -507,6 +522,7 @@ impl Config {
     pub fn cycle_selected(&mut self, forward: bool) -> bool {
         match self.field {
             Field::Theme => self.cycle_theme(forward),
+            Field::Icons => self.cycle_icon_mode(),
             Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
             Field::TerminalLimit => self.cycle_terminal_limit(forward),
             Field::PrAutoOpen => self.cycle_pr_auto_open(forward),
@@ -969,6 +985,12 @@ fn global_rows(config: &Config) -> Vec<String> {
             config.settings().theme != config.current().saved.theme,
         ),
         select::render(
+            "Icons",
+            icon_mode_name(config.settings().icon_mode),
+            config.field() == Field::Icons,
+            config.settings().icon_mode != config.current().saved.icon_mode,
+        ),
+        select::render(
             "Modal mode",
             modal_selection_mode_name(config.settings().modal_selection_mode),
             config.field() == Field::ModalSelectionMode,
@@ -1256,6 +1278,13 @@ fn theme_name(theme: Theme) -> &'static str {
     }
 }
 
+fn icon_mode_name(mode: IconMode) -> &'static str {
+    match mode {
+        IconMode::NerdFont => "Nerd Font",
+        IconMode::Text => "text",
+    }
+}
+
 fn modal_selection_mode_name(mode: ModalSelectionMode) -> &'static str {
     match mode {
         ModalSelectionMode::Action => "action",
@@ -1298,7 +1327,8 @@ mod tests {
     };
     use std::io;
     use usagi_core::domain::settings::{
-        DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme, WorkMode,
+        DefaultModel, IconMode, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
+        WorkMode,
     };
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -1367,6 +1397,16 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    fn move_to_field(config: &mut Config, target: Field) {
+        for _ in 0..=12 {
+            if config.field() == target {
+                break;
+            }
+            config.next_field();
+        }
+        assert_eq!(config.field(), target);
     }
 
     /// Settings port that counts successful saves, used to prove a double press
@@ -1441,12 +1481,29 @@ mod tests {
     }
 
     #[test]
+    fn global_icons_default_to_nerd_font_and_offer_a_text_fallback() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+
+        assert_eq!(config.settings().icon_mode, IconMode::NerdFont);
+        assert!(render(24, 80, &config).join("\n").contains("Nerd Font"));
+        config.next_field();
+        assert_eq!(config.field(), Field::Icons);
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.settings().icon_mode, IconMode::Text);
+        assert!(render(24, 80, &config).join("\n").contains("text"));
+        while config.field() != Field::Save {
+            config.next_field();
+        }
+        assert!(config.commit_save(&mut port));
+        assert_eq!(port.global.icon_mode, IconMode::Text);
+    }
+
+    #[test]
     fn global_environment_is_edited_and_saved_from_config() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Environment);
         assert_eq!(config.field(), Field::Environment);
         assert!(config.open_environment(&mut port));
         assert!(config.is_editing_environment());
@@ -1549,9 +1606,7 @@ mod tests {
             ..FakeSettingsPort::default()
         };
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Environment);
         assert!(config.open_environment(&mut port));
         config.type_environment("A=1");
         assert!(!config.save_environment(&mut port));
@@ -1574,9 +1629,7 @@ mod tests {
     fn global_environment_validation_error_does_not_shift_the_modal() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Environment);
         assert!(config.open_environment(&mut port));
         config.type_environment("MISSING_EQUALS");
 
@@ -1598,9 +1651,7 @@ mod tests {
     fn global_environment_editor_uses_a_fresh_snapshot_and_reports_load_failure() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Environment);
         port.global.env = [("FRESH".to_owned(), "value".to_owned())]
             .into_iter()
             .collect();
@@ -1619,9 +1670,7 @@ mod tests {
     fn multiline_environment_text_keeps_invalid_input_for_retry() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Environment);
         assert!(config.open_environment(&mut port));
 
         config.paste_environment("A=1\rB=2\nC=3");
@@ -1669,9 +1718,7 @@ mod tests {
             ..FakeSettingsPort::default()
         };
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Environment);
         assert!(config.open_environment(&mut port));
         config.move_environment_edge(false);
         assert!(render(24, 80, &config).join("\n").contains("↓ 1 more"));
@@ -1774,9 +1821,7 @@ mod tests {
             .unwrap();
         assert_eq!(column_of(&dirty, "●"), changed_column);
 
-        for _ in 0..10 {
-            config.next_field();
-        }
+        move_to_field(&mut config, Field::Save);
         let save_frame = render(24, 80, &config)
             .iter()
             .map(|line| strip_ansi(line))
@@ -1938,9 +1983,7 @@ mod tests {
     fn pr_auto_open_cycles_all_safe_modes_from_global_config() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        for _ in 0..9 {
-            config.next_field();
-        }
+        move_to_field(&mut config, Field::PrAutoOpen);
         assert_eq!(config.field(), Field::PrAutoOpen);
         assert_eq!(config.settings().pr_auto_open, PrAutoOpen::SwitchOnly);
         for expected in [
@@ -1964,17 +2007,14 @@ mod tests {
     fn terminal_limit_cycles_and_is_saved_only_by_global_config() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::TerminalLimit);
         assert_eq!(config.field(), Field::TerminalLimit);
         assert_eq!(config.settings().terminal_max_concurrent.get(), 64);
         assert!(render(24, 80, &config).join("\n").contains("Terminal PTYs"));
 
         assert!(config.cycle_selected(true));
         assert_eq!(config.settings().terminal_max_concurrent.get(), 128);
-        for _ in 0..8 {
-            config.next_field();
-        }
+        move_to_field(&mut config, Field::Save);
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
         assert_eq!(port.global.terminal_max_concurrent.get(), 128);
@@ -1992,28 +2032,11 @@ mod tests {
     fn save_is_selectable_only_with_an_unsaved_change() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Save);
         assert_eq!(config.field(), Field::Save);
         assert!(!config.can_save());
 
-        config.previous_field();
-        config.previous_field();
-        config.previous_field();
-        config.previous_field();
-        config.previous_field();
-        config.previous_field();
-        config.previous_field();
-        config.previous_field();
-        config.previous_field();
+        move_to_field(&mut config, Field::ModalSelectionMode);
         config.cycle_modal_selection_mode();
         config.cycle_modal_selection_mode();
         config.cycle_selected(true);
@@ -2021,15 +2044,7 @@ mod tests {
             config.settings().modal_selection_mode,
             ModalSelectionMode::Prompt
         );
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Save);
         assert!(config.can_save());
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
@@ -2066,18 +2081,12 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::ModalSelectionMode);
         config.previous_field();
+        assert_eq!(config.field(), Field::Icons);
+        config.previous_field();
         assert_eq!(config.field(), Field::Theme);
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        for _ in 0..12 {
+            config.next_field();
+        }
         assert_eq!(config.field(), Field::Theme);
     }
 
@@ -2085,10 +2094,7 @@ mod tests {
     fn default_model_cycles_and_is_saved_with_the_global_settings() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::DefaultModel);
         assert_eq!(config.field(), Field::DefaultModel);
         // The row cycles through every installed provider and wraps.
         config.cycle_selected(true);
@@ -2166,10 +2172,7 @@ mod tests {
         assert!(frame.contains("\u{1b}[2m"));
         config.cycle_default_model();
         assert_eq!(config.settings().default_model, DefaultModel::OpenAi);
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::WorkMode);
         assert_eq!(config.field(), Field::WorkMode);
         config.next_field();
         assert_eq!(config.field(), Field::TeamTemplate);
@@ -2240,13 +2243,7 @@ mod tests {
     fn issue_and_memory_availability_toggle_independently() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Issue);
         assert_eq!(config.field(), Field::Issue);
         assert!(config.cycle_selected(true));
         assert!(!config.settings().issue_enabled);
@@ -2371,16 +2368,7 @@ mod tests {
     fn dirty_on_save_row(port: &mut FakeSettingsPort) -> Config {
         let mut config = Config::load(port);
         config.cycle_theme(true);
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
-        config.next_field();
+        move_to_field(&mut config, Field::Save);
         assert_eq!(config.field(), Field::Save);
         assert!(config.can_save());
         config
@@ -2432,16 +2420,7 @@ mod tests {
         let mut config = {
             let mut base = Config::load(&mut port);
             base.cycle_theme(true);
-            base.next_field();
-            base.next_field();
-            base.next_field();
-            base.next_field();
-            base.next_field();
-            base.next_field();
-            base.next_field();
-            base.next_field();
-            base.next_field();
-            base.next_field();
+            move_to_field(&mut base, Field::Save);
             base
         };
         assert_eq!(config.field(), Field::Save);

@@ -22,6 +22,7 @@ use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
 };
+use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::supervisor::SupervisorRunState;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
@@ -78,12 +79,46 @@ const SESSION_ROW_LINES: usize = 3;
 const _: () = assert!(
     SESSION_ROW_LINES == crate::usecase::application::controller::SIDEBAR_SESSION_ROW_LINES
 );
-/// Plain-text labels keep operational metrics understandable without a patched
-/// font or an icon legend.
-const CPU_ICON: &str = "CPU";
-const MEMORY_ICON: &str = "MEM";
-const AGENT_ICON: &str = "Agents";
-const DECISION_NOTICE_ICON: char = '!';
+/// Nerd Font glyphs used by Home's compact chrome.
+const CPU_ICON: &str = "\u{f2db}";
+const MEMORY_ICON: &str = "\u{f233}";
+const AGENT_ICON: &str = "\u{f085}";
+const DECISION_NOTICE_ICON: &str = "\u{f0f3}";
+const PR_ICON: &str = "\u{ea64}";
+const SESSION_CURSOR_ICON: &str = "\u{f0907}";
+const SWITCH_ICON: &str = "\u{f0ec}";
+const CLOSEUP_ICON: &str = "\u{f00e}";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IconSet {
+    cpu: &'static str,
+    memory: &'static str,
+    agents: &'static str,
+    decision: &'static str,
+    pull_request: &'static str,
+    session_cursor: &'static str,
+}
+
+const fn icon_set(mode: IconMode) -> IconSet {
+    match mode {
+        IconMode::NerdFont => IconSet {
+            cpu: CPU_ICON,
+            memory: MEMORY_ICON,
+            agents: AGENT_ICON,
+            decision: DECISION_NOTICE_ICON,
+            pull_request: PR_ICON,
+            session_cursor: SESSION_CURSOR_ICON,
+        },
+        IconMode::Text => IconSet {
+            cpu: "CPU",
+            memory: "MEM",
+            agents: "Agents",
+            decision: "!",
+            pull_request: "PR",
+            session_cursor: ">",
+        },
+    }
+}
 /// daemon が Agent concurrency を報告しない場合の表示。`0` と読み違えられない
 /// 1 文字にするため em dash を使う。
 const UNREPORTED: char = '—';
@@ -128,8 +163,8 @@ pub struct ProjectedSession {
     pub last_modified: DateTime<Utc>,
     /// note scratchpad に表示できる内容があるか。icon の幅は常に予約する。
     pub has_notes: bool,
-    /// dismissed を除いた PR の表示安全な要約。未解決 title は表示に要求しない。
-    pub pr_summary: Option<String>,
+    /// dismissed を除いた PR の件数。表示 glyph は global icon mode から決める。
+    pub pr_count: usize,
     /// True while daemon-owned removal is pending.
     pub removing: bool,
     /// Safe interrupted/resume projection; provider-native IDs never enter the
@@ -154,8 +189,6 @@ pub struct ProjectedSession {
     pub organization_depth: usize,
 }
 
-/// Pull Request badge label; no patched-font dependency or icon legend.
-const PR_ICON: &str = "PR";
 /// Keep the common one-digit badge column stable even before a PR is detected.
 const PR_RESERVE_WIDTH: usize = 3;
 
@@ -183,7 +216,7 @@ impl ProjectedSession {
             cwd: record.root.clone(),
             last_modified: record.last_active_or_created(),
             has_notes: !record.notes.is_empty(),
-            pr_summary: pr_summary(&record.prs),
+            pr_count: visible_pr_links(&record.prs),
             removing: false,
             agent_resume: None,
             // Lifecycle is daemon-authoritative and joined by stable ID in
@@ -244,16 +277,20 @@ fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, 
     format!("{role}{lineage}")
 }
 
-pub(crate) fn pr_summary(prs: &[PrLink]) -> Option<String> {
-    summary_for_visible(prs.iter().filter(|pr| pr.is_visible()).count())
+pub(crate) fn visible_pr_links(prs: &[PrLink]) -> usize {
+    prs.iter().filter(|pr| pr.is_visible()).count()
 }
 
-pub(crate) fn pr_inventory_summary(prs: &[PrEntry]) -> Option<String> {
-    summary_for_visible(prs.iter().filter(|pr| pr.is_visible()).count())
+pub(crate) fn visible_pr_entries(prs: &[PrEntry]) -> usize {
+    prs.iter().filter(|pr| pr.is_visible()).count()
 }
 
-fn summary_for_visible(visible: usize) -> Option<String> {
-    (visible > 0).then(|| format!("{PR_ICON}{visible}"))
+fn pr_summary(visible: usize, mode: IconMode) -> Option<String> {
+    let icon = icon_set(mode).pull_request;
+    (visible > 0).then(|| match mode {
+        IconMode::NerdFont => format!("{icon} {visible}"),
+        IconMode::Text => format!("{icon}{visible}"),
+    })
 }
 
 fn short_id(id: &str) -> String {
@@ -279,6 +316,7 @@ impl GardenMotion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HomeProjection {
     workspace_name: String,
+    icon_mode: IconMode,
     sessions: Arc<[ProjectedSession]>,
     selected: Selection,
     active: Option<SessionId>,
@@ -549,7 +587,7 @@ impl HomeProjection {
             .filter_map(|id| {
                 let mut session = (*snapshot_by_id.get(id)?).clone();
                 if let Some(prs) = state.session_prs(*id) {
-                    session.pr_summary = pr_inventory_summary(prs);
+                    session.pr_count = visible_pr_entries(prs);
                 }
                 session.role_id = state
                     .session_roles()
@@ -624,6 +662,7 @@ impl HomeProjection {
             garden_workspace_index(state.workspace(), garden_sessions.as_deref());
         Self {
             workspace_name: workspace_name.to_owned(),
+            icon_mode: IconMode::default(),
             sessions,
             selected: state.selected(),
             active: state.active(),
@@ -686,6 +725,13 @@ impl HomeProjection {
                 .root_terminal_drawer_open()
                 .then(RootTerminalDrawerProjection::default),
         }
+    }
+
+    /// Attach the global icon preference resolved by the composition root.
+    #[must_use]
+    pub const fn with_icon_mode(mut self, icon_mode: IconMode) -> Self {
+        self.icon_mode = icon_mode;
+        self
     }
 
     /// Attach the composition-owned motion preference without teaching the
@@ -1426,12 +1472,18 @@ impl Workspace {
 
 // ── header ──────────────────────────────────────────────────────────────────
 
-/// Plain-text mode labels; the active mode alone receives the accent style.
-fn mode_toggle(current: Mode) -> String {
+/// Mode labels use compact Nerd Font glyphs when configured and readable text
+/// alone in fallback mode; the active mode alone receives the accent style.
+fn mode_toggle(current: Mode, icon_mode: IconMode) -> String {
     Mode::ALL
         .iter()
         .map(|mode| {
-            let label = mode.label().to_ascii_lowercase();
+            let name = mode.label().to_ascii_lowercase();
+            let label = match (icon_mode, mode) {
+                (IconMode::NerdFont, Mode::Switch) => format!("{SWITCH_ICON} {name}"),
+                (IconMode::NerdFont, Mode::Closeup) => format!("{CLOSEUP_ICON} {name}"),
+                (IconMode::Text, _) => name,
+            };
             if *mode == current {
                 Role::Accent.style().bold().paint(&label)
             } else {
@@ -1480,6 +1532,7 @@ pub fn home_header_action_at(
 }
 
 fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
+    let icons = icon_set(home.icon_mode);
     let mode = match home.mode {
         HomeMode::Switch => Mode::Switch,
         HomeMode::Closeup => Mode::Closeup,
@@ -1502,7 +1555,8 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
     };
     let notice = (!home.unread_decision_ids.is_empty()).then(|| {
         format!(
-            "{DECISION_NOTICE_ICON} {} notice",
+            "{} {} notice",
+            icons.decision,
             home.unread_decision_ids.len()
         )
     });
@@ -1517,7 +1571,7 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .dim()
             .paint(&format!("[ {ROOT_TERMINAL_ICON} Shell ]"))
     };
-    let mode = mode_toggle(mode);
+    let mode = mode_toggle(mode, home.icon_mode);
 
     // Preserve the drawer entry first, then the mode indicator, then the notice.
     // Whole optional segments are admitted only when they fit. Workspace
@@ -1666,11 +1720,11 @@ fn sidebar_metadata(
     format!("{prefix}{}{right}", " ".repeat(gap))
 }
 
-fn sidebar_pr_width(sessions: &[ProjectedSession]) -> usize {
+fn sidebar_pr_width(sessions: &[ProjectedSession], icon_mode: IconMode) -> usize {
     sessions
         .iter()
-        .filter_map(|session| session.pr_summary.as_deref())
-        .map(widgets::display_width)
+        .filter_map(|session| pr_summary(session.pr_count, icon_mode))
+        .map(|summary| widgets::display_width(&summary))
         .max()
         .unwrap_or_default()
         .max(PR_RESERVE_WIDTH)
@@ -1792,7 +1846,17 @@ fn session_state_sidecar(counts: SessionStateCounts) -> Option<String> {
     Some(segments.join(" "))
 }
 
+#[cfg(test)]
 fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
+    mascot_metrics_with_icon_mode(metrics, frame, IconMode::default())
+}
+
+fn mascot_metrics_with_icon_mode(
+    metrics: Option<&DaemonMetrics>,
+    frame: usize,
+    icon_mode: IconMode,
+) -> Vec<String> {
+    let icons = icon_set(icon_mode);
     metrics.map_or_else(
         || {
             // Replace exactly one character in the status text while sweeping;
@@ -1810,14 +1874,16 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
         },
         |metrics| {
             let cpu_label = format!(
-                "{CPU_ICON} {:<4}",
+                "{} {:<4}",
+                icons.cpu,
                 format!("{}%", metrics.cpu_percent_hundredths / 100)
             );
             let cpu = load_style(u64::from(metrics.cpu_percent_hundredths), 3_000, 12_000)
                 .paint(&cpu_label);
             let memory = load_style(metrics.resident_memory_bytes, 512 * MEBIBYTE, 2 * GIBIBYTE)
                 .paint(&format!(
-                    "{MEMORY_ICON} {}",
+                    "{} {}",
+                    icons.memory,
                     format_memory(metrics.resident_memory_bytes)
                 ));
             // The sidecar is bottom-aligned beside the rabbit, so the Agent
@@ -1825,7 +1891,7 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
             // keeps the bottom position it has drawn at since it was introduced,
             // and the session-state summary stays the topmost line.
             vec![
-                agent_concurrency_row(metrics.agent_concurrency),
+                agent_concurrency_row_with_icon_mode(metrics.agent_concurrency, icon_mode),
                 format!("{cpu}  {memory}"),
             ]
         },
@@ -1842,12 +1908,21 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
 ///
 /// `None` means the daemon reported nothing (a peer older than metrics schema 3),
 /// which is drawn as a dash so it cannot be read as an idle `0`.
+#[cfg(test)]
 fn agent_concurrency_row(concurrency: Option<AgentConcurrency>) -> String {
+    agent_concurrency_row_with_icon_mode(concurrency, IconMode::default())
+}
+
+fn agent_concurrency_row_with_icon_mode(
+    concurrency: Option<AgentConcurrency>,
+    icon_mode: IconMode,
+) -> String {
+    let agent_icon = icon_set(icon_mode).agents;
     // The mascot row is pink, so a calm value sets white explicitly for the same
     // reason `load_style` does.
     let calm = Style::new().fg(Color::White).dim();
     match concurrency {
-        None => calm.paint(&format!("{AGENT_ICON} {UNREPORTED}")),
+        None => calm.paint(&format!("{agent_icon} {UNREPORTED}")),
         Some(concurrency) => {
             let style = if concurrency.is_saturated() {
                 // The next Agent launch is refused, which is worth the strongest
@@ -1859,7 +1934,7 @@ fn agent_concurrency_row(concurrency: Option<AgentConcurrency>) -> String {
                 calm
             };
             style.paint(&format!(
-                "{AGENT_ICON} {}/{}",
+                "{agent_icon} {}/{}",
                 concurrency.in_use, concurrency.limit
             ))
         }
@@ -1872,11 +1947,22 @@ fn agent_concurrency_row(concurrency: Option<AgentConcurrency>) -> String {
 /// 3 行が揃っても mascot の予約行数（[`widgets::mascot::MascotBlock::reserved_rows`]）は
 /// 変わらない。health の badge は「異常時だけ」の行なので最上段に置き、常設の
 /// 件数・metrics 行の上へ載せる。**health が `Ok` のときの戻り値は health 導入前と同一である。**
+#[cfg(test)]
 fn sidecar_labels(
     width: usize,
     metrics: Option<&DaemonMetrics>,
     health: DaemonHealth,
     session_states: SessionStateCounts,
+) -> Vec<String> {
+    sidecar_labels_with_icon_mode(width, metrics, health, session_states, IconMode::default())
+}
+
+fn sidecar_labels_with_icon_mode(
+    width: usize,
+    metrics: Option<&DaemonMetrics>,
+    health: DaemonHealth,
+    session_states: SessionStateCounts,
+    icon_mode: IconMode,
 ) -> Vec<String> {
     let badge = health_badge(health, width);
     // session 件数は lifecycle / phase projection だけから決まるので、daemon の観測が
@@ -1885,7 +1971,7 @@ fn sidecar_labels(
     // 観測が無いときは Agent concurrency 行も CPU / メモリ行も出さない（metrics 導入前と
     // 同じ静けさ）。health だけが非 Ok なら badge 行だけが出る。
     let mut metric_rows = metrics
-        .map(|metrics| mascot_metrics(Some(metrics), 0))
+        .map(|metrics| mascot_metrics_with_icon_mode(Some(metrics), 0, icon_mode))
         .unwrap_or_default();
     // 供給元は 4 つあるが、sidecar はうさぎの 3 行にしか載らない。4 つとも語ることが
     // あるときは **Agent concurrency 行が譲る**。異常な daemon の方が急を要する報せで
@@ -2099,14 +2185,17 @@ fn garden_frame(
 ) -> Option<widgets::garden::GardenFrame> {
     let sessions = home.garden_sessions.as_ref()?;
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    widgets::garden::render_scrolled(
+    widgets::garden::render_scrolled_with_options(
         height,
         width,
         &home.garden_scope,
         sessions,
-        home.garden_scroll,
-        home.garden_tick.unwrap_or_else(|| garden_tick(now)),
-        home.garden_motion.is_reduced(),
+        widgets::garden::GardenRenderOptions::new(
+            home.garden_scroll,
+            home.garden_tick.unwrap_or_else(|| garden_tick(now)),
+            home.garden_motion.is_reduced(),
+            icon_set(home.icon_mode).agents,
+        ),
     )
 }
 
@@ -2418,9 +2507,14 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
         .iter()
         .find(|item| home.unread_decision_ids.contains(&item.decision_id));
     if let Some(decision) = decision {
+        let control = match home.icon_mode {
+            IconMode::NerdFont => "bell",
+            IconMode::Text => "indicator",
+        };
         return widgets::clip_to_width(
             &format!(
-                "  {DECISION_NOTICE_ICON} {}: {}  (click indicator to review)",
+                "  {} {}: {}  (click {control} to review)",
+                icon_set(home.icon_mode).decision,
                 decision
                     .owner
                     .session_id
@@ -2498,7 +2592,7 @@ fn home_left_pane(
         .map(|session| session.id)
         .collect::<Vec<_>>();
     let columns = sidebar_diff_columns(&session_ids, &home.git_diffs);
-    let pr_width = sidebar_pr_width(&home.sessions);
+    let pr_width = sidebar_pr_width(&home.sessions, home.icon_mode);
     if height == 1 {
         return home_row_lines_at(width, home, rows[0], columns, pr_width, now)
             .into_iter()
@@ -2511,11 +2605,12 @@ fn home_left_pane(
     // pre-metrics home frame byte-for-byte unchanged. The diagnostic health
     // badge is evaluated against the frame's own clock — the renderer stays the
     // only place that reads time, so `now` remains the whole time input.
-    let sidecar = sidecar_labels(
+    let sidecar = sidecar_labels_with_icon_mode(
         width,
         home.metrics.as_ref(),
         home.health.evaluate(now.timestamp_millis()),
         home.session_states,
+        home.icon_mode,
     );
     // 明示された mascot speech を優先し、無ければ正常系以外の daemon 状態を吹き出しへ落とす。
     let daemon_speech = abnormal_daemon_speech(home.feedback.as_ref());
@@ -2554,7 +2649,12 @@ fn home_left_pane(
         if matches!(row, Selection::NewSession)
             && let Some(name) = home.create_pending.as_deref()
         {
-            lines.extend(create_skeleton_lines(width, name, home.mascot_tick));
+            lines.extend(create_skeleton_lines(
+                width,
+                name,
+                home.mascot_tick,
+                home.icon_mode,
+            ));
         }
         let row_lines = home_row_lines_at(width, home, *row, columns, pr_width, now);
         if row_line_count + row_lines.len() > viewport_capacity {
@@ -2618,7 +2718,7 @@ const CREATE_SKELETON_ROWS: usize = SESSION_ROW_LINES;
 /// (green), never Accent (cyan), and is never a cursor or current target. The
 /// final placeholder mirrors the landed session's Agent row so replacement does
 /// not move the rows below it.
-fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
+fn create_skeleton_lines(width: usize, name: &str, tick: u64, icon_mode: IconMode) -> Vec<String> {
     let wave = widgets::Shimmer {
         style: Role::Success.style().bold(),
         base_style: Role::Success.style().dim(),
@@ -2640,7 +2740,11 @@ fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
         widgets::pad_to_width(
             &format!(
                 "  {}",
-                widgets::shimmer_text_with(&format!("{AGENT_ICON} …"), frame, wave)
+                widgets::shimmer_text_with(
+                    &format!("{} …", icon_set(icon_mode).agents),
+                    frame,
+                    wave,
+                )
             ),
             width,
         ),
@@ -2711,6 +2815,7 @@ fn home_failed_row_lines(
     width: usize,
     selected: bool,
     current: bool,
+    icon_mode: IconMode,
 ) -> Vec<String> {
     let label_width = if session.failure_stage == Some(FailureStage::Delete) {
         width.saturating_sub(2)
@@ -2727,7 +2832,7 @@ fn home_failed_row_lines(
     } else {
         Role::Danger.style().dim().paint(&clipped)
     };
-    let marker = home_row_marker(row, selected, current);
+    let marker = home_row_marker(row, selected, current, icon_mode);
     if session.failure_stage == Some(FailureStage::Delete) {
         let first = widgets::pad_to_width(&format!("{marker} {label}{badge}"), width);
         let detail = format!(
@@ -2811,7 +2916,7 @@ fn home_row_lines_at(
         let frame = usize::try_from(home.mascot_tick).unwrap_or(usize::MAX);
         let badge = role_badge(session);
         let label = widgets::shimmer_text_with(&organization_label(session), frame, wave);
-        let marker = home_row_marker(row, selected, false);
+        let marker = home_row_marker(row, selected, false, home.icon_mode);
         return vec![
             widgets::pad_to_width(
                 &format!(
@@ -2830,9 +2935,16 @@ fn home_row_lines_at(
     // two competing selections.
     let current_marker = current && home.mode == HomeMode::Closeup;
     if let Some(session) = session.filter(|session| session.lifecycle == SessionLifecycle::Failed) {
-        return home_failed_row_lines(session, row, width, selected, current_marker);
+        return home_failed_row_lines(
+            session,
+            row,
+            width,
+            selected,
+            current_marker,
+            home.icon_mode,
+        );
     }
-    let marker = home_row_marker(row, selected, current_marker);
+    let marker = home_row_marker(row, selected, current_marker, home.icon_mode);
     let badge = session.map(role_badge).unwrap_or_default();
     let owned_label = session.map(organization_label);
     let label = if session.is_some() {
@@ -2890,11 +3002,12 @@ fn home_row_lines_at(
         } else {
             metadata
         };
+        let pr = pr_summary(session.pr_count, home.icon_mode);
         let metadata = sidebar_metadata(
             &metadata,
             home.git_diffs.get(&session.id),
             columns,
-            session.pr_summary.as_deref(),
+            pr.as_deref(),
             pr_width,
             width,
             inactive,
@@ -2911,7 +3024,14 @@ fn home_row_lines_at(
         vec![
             first,
             widgets::pad_to_width(&metadata, width),
-            sidebar_agent_line(agents, width, selected, current_marker, inactive),
+            sidebar_agent_line_with_icon_mode(
+                agents,
+                width,
+                selected,
+                current_marker,
+                inactive,
+                home.icon_mode,
+            ),
         ]
     } else {
         vec![first]
@@ -2927,6 +3047,7 @@ fn home_row_lines_at(
 ///
 /// 色は phase そのものの情報なので、cursor 行では落とさない。cursor でない Switch 行
 /// （`inactive`）だけを、2 行目の Git 列と同じ規則で行ごと沈める。
+#[cfg(test)]
 fn sidebar_agent_line(
     agents: &[widgets::agent_status::AgentStatus],
     width: usize,
@@ -2934,10 +3055,31 @@ fn sidebar_agent_line(
     current: bool,
     inactive: bool,
 ) -> String {
-    // Preserve the phase symbols on unusually narrow panes. Normal geometry
-    // uses the self-explanatory label; the compact `A` is only a last-resort
-    // abbreviation when spelling it out would consume the useful content.
-    let agent_label = if width >= 16 { AGENT_ICON } else { "A" };
+    sidebar_agent_line_with_icon_mode(
+        agents,
+        width,
+        selected,
+        current,
+        inactive,
+        IconMode::default(),
+    )
+}
+
+fn sidebar_agent_line_with_icon_mode(
+    agents: &[widgets::agent_status::AgentStatus],
+    width: usize,
+    selected: bool,
+    current: bool,
+    inactive: bool,
+    icon_mode: IconMode,
+) -> String {
+    // Preserve the phase symbols on unusually narrow panes. Text fallback uses
+    // the compact `A` only when spelling out `Agents` would consume the useful content.
+    let agent_label = match icon_mode {
+        IconMode::NerdFont => icon_set(icon_mode).agents,
+        IconMode::Text if width >= 16 => icon_set(icon_mode).agents,
+        IconMode::Text => "A",
+    };
     let icon = Style::new().dim().paint(agent_label);
     let prefix = format!(
         "{} {icon} ",
@@ -3064,10 +3206,13 @@ fn create_session_input_lines(
 /// in Closeup its active three-line stack is green. Switch does not retain a rail
 /// for the previous target because its cursor is the sole selection indicator.
 /// The action row remains chevron-free even while it owns the Switch cursor.
-fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
+fn home_row_marker(row: Selection, selected: bool, current: bool, icon_mode: IconMode) -> String {
     if selected {
         return match row {
-            Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint(">"),
+            Selection::Target(Target::Session(_)) => Role::Danger
+                .style()
+                .bold()
+                .paint(icon_set(icon_mode).session_cursor),
             Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => {
                 " ".to_string()
             }
@@ -3293,17 +3438,18 @@ mod tests {
     use super::{
         AGENT_ICON, AgentConcurrency, CHROME_ROWS, CPU_ICON, CREATE_SKELETON_ROWS, CreateDraft,
         DECISION_NOTICE_ICON, DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction,
-        HomeProjection, LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession,
-        SESSION_ROW_LINES, SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED,
-        WorkRunProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
-        feedback_label, format_memory, garden_click_at, garden_fits, garden_frame,
-        garden_scroll_action, garden_tick, health_badge, health_reason_label,
-        home_header_action_at, home_header_layout, home_left_pane, home_notice_banner,
-        home_row_height, home_row_lines_at, home_viewport_start, load_style,
-        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, right_pane_tab_at, role_identity,
-        root_terminal_available_width, short_id, sidebar_agent_line, sidebar_metadata,
-        sidecar_labels, terminal_point_at, with_footer_gap, work_run_state_label,
+        HomeProjection, IconMode, LEFT_WIDTH, MEBIBYTE, MEMORY_ICON, PR_ICON, PR_RESERVE_WIDTH,
+        ProjectedSession, SESSION_CURSOR_ICON, SESSION_ROW_LINES, SIDECAR_GUTTER,
+        SidebarDiffColumns, TerminalViewProjection, UNREPORTED, WorkRunProjection, Workspace,
+        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
+        garden_click_at, garden_fits, garden_frame, garden_scroll_action, garden_tick,
+        health_badge, health_reason_label, home_header_action_at, home_header_layout,
+        home_left_pane, home_notice_banner, home_row_height, home_row_lines_at,
+        home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
+        pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
+        right_pane_tab_at, role_identity, root_terminal_available_width, short_id,
+        sidebar_agent_line, sidebar_metadata, sidecar_labels, terminal_point_at, with_footer_gap,
+        work_run_state_label,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -3705,7 +3851,7 @@ mod tests {
             cwd: PathBuf::from(cwd),
             last_modified: now(),
             has_notes: false,
-            pr_summary: None,
+            pr_count: 0,
             removing: false,
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
@@ -3966,7 +4112,7 @@ mod tests {
             PR_RESERVE_WIDTH,
             now(),
         );
-        assert!(strip(&selected_lines[0]).starts_with('>'));
+        assert!(strip(&selected_lines[0]).starts_with(SESSION_CURSOR_ICON));
 
         let mut unselected_state = state;
         let _ = update(&mut unselected_state, AppEvent::Key(AppKey::Down));
@@ -4490,6 +4636,12 @@ mod tests {
         let mut home =
             HomeProjection::from_state(&state, "日本語 workspace", Path::new("/work"), &[]);
 
+        let text_banner = strip(&home_notice_banner(
+            100,
+            &home.clone().with_icon_mode(IconMode::Text),
+        ));
+        assert!(text_banner.contains("click indicator to review"));
+
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
         assert!(!strip(&layout.line).contains("USAGI"));
@@ -4807,7 +4959,7 @@ mod tests {
 
     #[test]
     fn create_skeleton_draws_three_padded_lines_that_wave_with_the_tick() {
-        let first = create_skeleton_lines(30, "atlas", 0);
+        let first = create_skeleton_lines(30, "atlas", 0, IconMode::NerdFont);
         assert_eq!(CREATE_SKELETON_ROWS, SESSION_ROW_LINES);
         assert_eq!(first.len(), CREATE_SKELETON_ROWS);
         // All lines are padded to the sidebar width and carry the typed name,
@@ -4819,9 +4971,13 @@ mod tests {
         assert!(strip(&first[2]).contains(AGENT_ICON));
         // The sweep is animated, not a static blink: a later tick paints a
         // different frame while keeping the same display width and text.
-        let later = create_skeleton_lines(30, "atlas", 12);
+        let later = create_skeleton_lines(30, "atlas", 12, IconMode::NerdFont);
         assert_ne!(first[0], later[0]);
         assert!(strip(&later[0]).contains("atlas"));
+
+        let text = create_skeleton_lines(30, "atlas", 0, IconMode::Text);
+        assert!(strip(&text[2]).contains("Agents …"));
+        assert!(!strip(&text[2]).contains(AGENT_ICON));
         assert_eq!(display_width(&later[0]), 30);
     }
 
@@ -5510,13 +5666,21 @@ mod tests {
         assert!(text.contains("Garden Action Center"));
         assert!(text.contains("click"));
         assert!(text.contains("any key · wake"));
-        assert!(text.contains("Agents"));
+        assert!(text.contains(AGENT_ICON));
         assert!(text.contains("running"));
         assert!(text.contains("waiting"));
         assert!(!text.contains("1 run · 1 done"));
         assert!(!text.contains("> s0"));
         assert!(text.contains("failed · worktree missing"));
         assert!(text.contains("s0"));
+
+        let fallback = render_home_at(24, 540, &home.clone().with_icon_mode(IconMode::Text), now());
+        assert!(
+            fallback
+                .iter()
+                .map(|line| strip(line))
+                .any(|line| line.contains("Agents"))
+        );
 
         // 最小サイズに満たない端末では Garden を開かず Home を保つ。操作できる一覧を
         // screen saver で覆わない。
@@ -6283,7 +6447,7 @@ mod tests {
             Path::new("/work"),
             &[projected_session(session, "session", "/work/session")],
         );
-        assert!(strip(&render_home(30, 100, &home).join("\n")).contains(&format!("{PR_ICON}2")));
+        assert!(strip(&render_home(30, 100, &home).join("\n")).contains(&format!("{PR_ICON} 2")));
     }
 
     #[test]
@@ -6309,6 +6473,69 @@ mod tests {
         let text = joined_home(&home);
         assert!(text.contains("Pull Request"));
         assert!(text.contains("gh unavailable"));
+    }
+
+    #[test]
+    fn icon_mode_switches_home_chrome_between_nerd_font_and_text() {
+        let session = SessionId::new();
+        let nerd = super::icon_set(IconMode::NerdFont);
+        let text = super::icon_set(IconMode::Text);
+
+        assert_eq!(
+            super::pr_summary(2, IconMode::NerdFont),
+            Some(format!("{PR_ICON} 2"))
+        );
+        assert_eq!(super::pr_summary(2, IconMode::Text).as_deref(), Some("PR2"));
+        assert_eq!(text.agents, "Agents");
+        assert_eq!(text.cpu, "CPU");
+        assert_eq!(text.memory, "MEM");
+        assert_eq!(text.decision, "!");
+        assert_eq!(text.session_cursor, ">");
+        assert_eq!(nerd.session_cursor, super::SESSION_CURSOR_ICON);
+
+        let nerd_marker = strip(&super::home_row_marker(
+            Selection::Target(Target::Session(session)),
+            true,
+            false,
+            IconMode::NerdFont,
+        ));
+        let text_marker = strip(&super::home_row_marker(
+            Selection::Target(Target::Session(session)),
+            true,
+            false,
+            IconMode::Text,
+        ));
+        assert_eq!(nerd_marker, super::SESSION_CURSOR_ICON);
+        assert_eq!(text_marker, ">");
+
+        let nerd_modes = strip(&super::mode_toggle(super::Mode::Switch, IconMode::NerdFont));
+        let text_modes = strip(&super::mode_toggle(super::Mode::Switch, IconMode::Text));
+        assert!(nerd_modes.contains(super::SWITCH_ICON));
+        assert!(nerd_modes.contains(super::CLOSEUP_ICON));
+        assert_eq!(text_modes, "switch  closeup");
+
+        let concurrency = Some(AgentConcurrency {
+            in_use: 3,
+            limit: 16,
+        });
+        assert_eq!(
+            strip(&super::agent_concurrency_row_with_icon_mode(
+                concurrency,
+                IconMode::Text,
+            )),
+            "Agents 3/16"
+        );
+        assert!(
+            strip(&super::sidebar_agent_line_with_icon_mode(
+                &[],
+                10,
+                false,
+                false,
+                false,
+                IconMode::Text,
+            ))
+            .contains("A —")
+        );
     }
 
     #[test]
@@ -6422,7 +6649,11 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>();
         assert!(lines.iter().all(|line| !line.contains("| first")));
-        assert!(lines.iter().any(|line| line.contains("> second")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("{SESSION_CURSOR_ICON} second")))
+        );
         let text = joined_home(&home);
         assert!(text.contains("a: agent / t: terminal / Enter: actions"));
     }
@@ -6483,7 +6714,7 @@ mod tests {
         let switch = HomeProjection::from_state(&state, "work", Path::new("/work"), &snapshot);
         let switch_text = joined_home(&switch);
         assert!(!switch_text.contains("| 同じ名前"));
-        assert!(switch_text.contains("> 同じ名前"));
+        assert!(switch_text.contains(&format!("{SESSION_CURSOR_ICON} 同じ名前")));
         assert!(switch_text.contains("[switch] ←→ project / ↑↓ select"));
 
         for line in render_home(8, 7, &switch) {
@@ -6532,7 +6763,7 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
         let mut active_session = projected_session(active, "active", "/work/active");
         active_session.last_modified = Utc::now();
-        active_session.pr_summary = Some(format!("{PR_ICON}2"));
+        active_session.pr_count = 2;
         let home = HomeProjection::from_state(
             &state,
             "work",
@@ -6562,7 +6793,7 @@ mod tests {
         assert!(!metadata.contains("\u{1b}[1;32m|"));
         assert!(metadata.contains("\u{1b}[2;36m↑1"));
         assert!(metadata.contains("\u{1b}[2;35m↓2"));
-        assert!(metadata.contains(&format!("{PR_ICON}2")));
+        assert!(metadata.contains(&format!("{PR_ICON} 2")));
         assert!(metadata.contains("\u{1b}[2;32m+ 3"));
         assert!(metadata.contains("\u{1b}[2;31m- 4"));
         assert!(!metadata.contains("\u{1b}[0m now"));
@@ -6670,6 +6901,7 @@ mod tests {
             12,
             true,
             false,
+            IconMode::default(),
         );
 
         assert!(strip(&lines[0]).contains("abcdefghi…"));
@@ -6883,7 +7115,7 @@ mod tests {
             .expect("daemon metric row beside usagi");
 
         // The row carries both glyphs and the CPU/memory summary text.
-        assert!(strip(controller_row).contains("CPU 1%    MEM 45MB"));
+        assert!(strip(controller_row).contains(&format!("{CPU_ICON} 1%    {MEMORY_ICON} 45MB")));
 
         // The Agent concurrency the daemon admits from sits on its own row below,
         // as `in use / limit`.
@@ -6891,7 +7123,7 @@ mod tests {
             .iter()
             .find(|line| line.contains(AGENT_ICON))
             .expect("agent concurrency row beside usagi");
-        assert!(strip(concurrency_row).contains("Agents 3/16"));
+        assert!(strip(concurrency_row).contains(&format!("{AGENT_ICON} 3/16")));
     }
 
     /// The concurrency row reports the daemon's own admission level, so the three
@@ -6907,10 +7139,10 @@ mod tests {
                 in_use: 0,
                 limit: 16
             })),
-            "Agents 0/16"
+            format!("{AGENT_ICON} 0/16")
         );
         // A daemon that reports nothing is a dash, which cannot be read as zero.
-        assert_eq!(row(None), "Agents —");
+        assert_eq!(row(None), format!("{AGENT_ICON} —"));
 
         // Colour escalates with the level and is strongest once the next launch
         // would be refused.
@@ -6926,11 +7158,11 @@ mod tests {
             in_use: 16,
             limit: 16,
         }));
-        assert_eq!(strip(&full), "Agents 16/16");
+        assert_eq!(strip(&full), format!("{AGENT_ICON} 16/16"));
         assert_ne!(calm, busy);
         assert_ne!(busy, full);
-        assert!(full.contains(&Role::Danger.style().paint("Agents 16/16")));
-        assert!(busy.contains(&Role::Warning.style().paint("Agents 12/16")));
+        assert!(full.contains(&Role::Danger.style().paint(&format!("{AGENT_ICON} 16/16"))));
+        assert!(busy.contains(&Role::Warning.style().paint(&format!("{AGENT_ICON} 12/16"))));
         // The unreported dash stays as quiet as a calm level.
         assert_eq!(
             super::agent_concurrency_row(None).contains("\u{1b}[2m"),
@@ -6973,12 +7205,12 @@ mod tests {
             .iter()
             .find(|line| line.contains(AGENT_ICON))
             .expect("agent concurrency row is still drawn");
-        assert!(strip(row).contains("Agents —"));
+        assert!(strip(row).contains(&format!("{AGENT_ICON} —")));
         // The CPU/memory row is unaffected by the missing projection.
         assert!(
             unreported
                 .iter()
-                .any(|line| strip(line).contains("CPU 1%    MEM 45MB"))
+                .any(|line| strip(line).contains(&format!("{CPU_ICON} 1%    {MEMORY_ICON} 45MB")))
         );
 
         // Reporting a level changes only that row's content, not the frame's shape.
@@ -6991,7 +7223,7 @@ mod tests {
         assert!(
             reported
                 .iter()
-                .any(|line| strip(line).contains("Agents 2/16"))
+                .any(|line| strip(line).contains(&format!("{AGENT_ICON} 2/16")))
         );
     }
 
@@ -7008,7 +7240,7 @@ mod tests {
                 in_use: 16,
                 limit: 16,
             })),
-            "CPU 1%    MEM 45MB".to_owned(),
+            format!("{CPU_ICON} 1%    {MEMORY_ICON} 45MB"),
         ];
         let block = sidebar_block_with_sidecar(SIDEBAR_MASCOT_MIN_LEFT, 0, None, &sidecar)
             .expect("the rabbit fits its minimum width");
@@ -7812,7 +8044,7 @@ mod tests {
             added: 3,
             removed: 1,
         };
-        let badge = format!("{PR_ICON}2");
+        let badge = format!("{PR_ICON} 2");
         let rendered = sidebar_metadata(
             "| 2h ago",
             Some(&diff),
@@ -7832,7 +8064,7 @@ mod tests {
 
     #[test]
     fn sidebar_metadata_prioritizes_the_pr_badge_when_too_narrow() {
-        let badge = format!("{PR_ICON}2");
+        let badge = format!("{PR_ICON} 2");
         let rendered = sidebar_metadata(
             "| 2h ago",
             Some(&GitDiff {
@@ -8174,17 +8406,13 @@ mod tests {
         let mut one = session("one", None, SessionOrigin::Human);
         one.prs.push(PrLink::new(1, "https://example.test/pull/1"));
         assert_eq!(
-            ProjectedSession::from_record(SessionId::new(), &one)
-                .pr_summary
-                .as_deref(),
-            Some(format!("{PR_ICON}1").as_str())
+            ProjectedSession::from_record(SessionId::new(), &one).pr_count,
+            1
         );
         one.prs.push(PrLink::new(2, "https://example.test/pull/2"));
         assert_eq!(
-            ProjectedSession::from_record(SessionId::new(), &one)
-                .pr_summary
-                .as_deref(),
-            Some(format!("{PR_ICON}2").as_str())
+            ProjectedSession::from_record(SessionId::new(), &one).pr_count,
+            2
         );
 
         let target = Target::Root(WorkspaceId::new());

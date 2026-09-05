@@ -102,7 +102,7 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
             .unwrap()
             .with_timezone(&Utc),
         has_notes: false,
-        pr_summary: None,
+        pr_count: 0,
         removing: false,
         agent_resume: None,
         lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,

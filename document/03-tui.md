@@ -89,7 +89,7 @@ stale / duplicate completion が別の draft や workspace を開くことはな
 worker 内の `git clone` 自体は強制終了しないため、処理が完了するまで新しい作成は開始しない。失敗・cancel のどちらでも
 既存 directory は削除せず、clone が途中まで作った destination も自動削除しない。`Ctrl+C` / `Ctrl+Q` は TUI を終了する。
 
-Welcome の Config は、`Global` 見出しに全体へ適用する Theme・Modal mode・Terminal PTYs・PR auto-open・Environment、`Workspace init` 見出しに
+Welcome の Config は、`Global` 見出しに全体へ適用する Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Workflow・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
 実行した場合は、Home 上の overlay modal に Agent・Base branch・Workflow・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
 `↑↓` で行を、`←→` で値を切り替える。Workflow 行は択一値として `< classic >` / `< goal-driven >` と表示する。
@@ -233,17 +233,29 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
-| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・Terminal PTYs・PR auto-open・Environment はすべての workspace に適用する。Agent・Workflow・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
+| Global | build channel ごとの user data directory にある `settings.json` | Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment はすべての workspace に適用する。Agent・Workflow・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
 | Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Workflow・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field は Global を継承する。Workflow の未知 token は自律実行を暗黙に有効化せず `classic` へ縮退する |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
-merge して atomic write する。Global Config は Theme・Modal mode・Terminal PTYs・PR auto-open・Agent・Workflow・Team・Issue・Memory を所有し、Environment 行の
+merge して atomic write する。Global Config は Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Agent・Workflow・Team・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
 Workspace Config は Agent・Base branch・Workflow・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
-Terminal PTYs は global-only の `terminal_max_concurrent`、Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Workflow は `work_mode`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。Terminal PTYs は次の daemon generation の起動時に反映され、値域と resource policy は [daemon の capacity pool](05-daemon.md#capacity-pool) を正本とする。
+Icons は global-only の `icon_mode`、Terminal PTYs は global-only の `terminal_max_concurrent`、Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Workflow は `work_mode`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。Terminal PTYs は次の daemon generation の起動時に反映され、値域と resource policy は [daemon の capacity pool](05-daemon.md#capacity-pool) を正本とする。
+`icon_mode` は `nerd_font`（既定）または `text` である。端末から利用者が設定した font の glyph coverage を
+確実には判定できないため自動検出は行わず、patched font がない場合は Global Config の Icons 行で `text` を選ぶ。
+Home の対応は次のとおりで、Nerd Font glyph は Private Use Area の codepoint を使う。
+
+| 表示面 | `nerd_font` | `text` fallback |
+|---|---|---|
+| PR 件数 | `U+EA64` | `PR` |
+| session cursor | rabbit `U+F0907` | `>` |
+| Agents / Agent concurrency | `U+F085` | `Agents`（狭幅は `A`） |
+| CPU / resident memory | `U+F2DB` / `U+F233` | `CPU` / `MEM` |
+| pending decision | bell `U+F0F3` | `!` |
+| Switch / Closeup mode | `U+F0EC` / `U+F00E` と mode 名 | mode 名 |
 Workflow の `classic` は既定値で、従来どおり New が CLI picker を開き、選択した root Agent conversation を空の
 initial prompt で起動する。`goal-driven` は明示的な opt-in で、New を [Goal Composer](#goal-driven-workflow) に替える。
 Global / Workspace の field 欠落と Global の未知値は `classic`、Workspace の明示的な未知値も `classic` へ縮退するため、
@@ -265,7 +277,7 @@ settings 形式へ temp file、fsync、rename の順で atomic write する。�
 縮退し、設定ファイルの破損だけで workspace を開けなくしない。
 
 direct workspace、Welcome の Open / Recent、New の作成成功は、snapshot の workspace path を identity として
-settings port を毎回束縛し直す。次に Global とその workspace の Local を解決し、effective な Modal mode を
+settings port を毎回束縛し直す。次に Global とその workspace の Local を解決し、effective な Icons と Modal mode を
 Overview / Closeup を生成する Home runtime へ渡す。この束縛は workspace entry ごとの lifecycle であり、直前に
 開いた workspace の port や modal state を次の workspace へ持ち越さない。Config へ入るたびにも現在の束縛から
 両 scope を読み直すため、保存後の再 entry とプロセス再起動で同じ値になる。
@@ -431,7 +443,7 @@ decision の title、prompt、option label/description、freeform は modal 幅�
 内容は `PageUp` / `PageDown` で読み進め、`↑` / `↓` による option 選択へ戻ると選択中の行へ表示を戻す。
 freeform を入力・削除・paste した場合は入力欄へ表示を移し、長い prompt や option の後でも編集中の文字を表示する。
 
-新しい pending decision を resync で観測すると、Home header の右上に標準ASCIIの `!` indicator と
+新しい pending decision を resync で観測すると、Home header の右上に Icons 設定に応じた bell または `!` indicator と
 `N notice` を表示し、その直下の banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。indicatorをクリックすると existing decision modal を
 開き、未読表示を既読にする。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
 stable decision ID 集合であり、同じ snapshot の replay、reconnect、resync は再び未読にしない。decision が
@@ -461,7 +473,7 @@ Success の太字、Closeup は Success の非太字で描き、太字は Switch
 乗っていない `+ new session` は上記の非アクティブ dim に従う（この dim だけが Success 色を上書きする）。この Success 色は
 full sidebar 行・rail の `+`・右ペイン preview 見出しで共有する単一の役割決定であり、生の ANSI 色ではなく
 意味的 palette 役割で描くため、theme を retune しても追従し accent（青）へは落ちない。Closeup では cursor を
-描かず、current marker だけを残す。session cursor は標準ASCIIの `>` と太字の名前、
+描かず、current marker だけを残す。session cursor は Icons 設定に応じた rabbit または `>` と太字の名前、
 `+ new session` は Switch で選択されていても chevron を描かない。cursor ではない current target は緑の `▎`
 で示す。`+ new session` と pending
 skeleton は current target にならない。名前・補足・marker は ANSI を閉じた表示幅で clip/pad するため、
@@ -1116,7 +1128,7 @@ resident にせず、観測できていない membership を推測もしない�
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
-Garden 本体は左、`Agents` panel は右に分ける。panel は端末幅の 3 分の 1 を基準に 24〜36 桁を使い、
+Garden 本体は左、Icons 設定に応じた Agent icon または `Agents` 見出しの panel は右に分ける。panel は端末幅の 3 分の 1 を基準に 24〜36 桁を使い、
 左の Garden は残りの幅を使う。左領域が 80 桁 × 18 行以上（通常の panel 幅では端末全体が 120 桁 × 18 行以上）なら、
 横方向に広い仮想世界を描く。session 順に 96 cell の地域を割り当て、立札と巣穴を home にし、その周囲へ池・餌場・
 木陰と小道を置く。viewport より広い分は footer の `← Pan` / `Pan →` button または `←` / `→` key で 16 cell ずつ
@@ -1315,8 +1327,8 @@ current project を保ったまま project switcher に安全な理由を表示�
 ## PR modal と browser effect
 
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない PR の件数を
-sidebar の右端に標準ASCIIの `PR` label とともに固定列で投影する。
-`Ctrl-O p`、または PR label＋件数のクリックは、対象 `SessionId` について resident PR lane を wake する。
+sidebar の右端に Icons 設定に応じた PR icon または `PR` label とともに固定列で投影する。
+`Ctrl-O p`、または PR 表示＋件数のクリックは、対象 `SessionId` について resident PR lane を wake する。
 dismissed でない PR がある場合だけ同じ PR modal を表示し、snapshot が空なら modal は閉じたままにする。modal の枠タイトルは `Pull Request` の 1 か所だけに置く。repository は連続する PR 群の見出しとして 1 回表示し、その下の各行へ状態・番号・title・CI / review を
 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。modal の枠外をクリックすると閉じ、枠内と枠外のクリックはいずれも背後の project bar・header・pane・sidebar へ伝播しない。sidebar projection は新しい revision だけで進み、
 開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
@@ -1474,7 +1486,7 @@ mascot の右には最大 3 行の観測 status（sidecar）を並べる。sidec
 mascot block の予約行数を増やさず session viewport の容量を奪わない。各行は rabbit の幅に揃えた同じ列から
 始まり、sidebar 幅に合わせて clip する。現在の供給元は上から
 [daemon health indicator](#daemon-health-indicator)（異常時だけ）、[session 状態別件数](#session-状態別件数)、
-[Agent concurrency](#agent-concurrency)、daemon metrics（CPU / resident memory）の 4 つで、mascot block ごと
+[Agent concurrency](#agent-concurrency)、daemon metrics（CPU / resident memory）の 4 つで、表示 prefix は Icons 設定に従い、mascot block ごと
 省略される狭幅ではいずれも表示しない。後ろ 2 つは同じ metrics snapshot から来るため、snapshot が無ければ
 どちらも出ない。
 
@@ -1565,10 +1577,10 @@ supervisor run の同時実行数とは別物である（正本は
 
 | 状態 | 表示 | 色 |
 |---|---|---|
-| 使用中あり（上限未満） | `3/16` | 上限の 3/4 未満は dim、3/4 以上は Warning |
-| 上限到達（次の Agent launch は拒否される） | `16/16` | Danger |
-| idle と報告された | `0/16` | dim |
-| daemon が報告しない（metrics schema 3 より前の peer） | `—` | dim |
+| 使用中あり（上限未満） | Agent icon / `Agents` と `3/16` | 上限の 3/4 未満は dim、3/4 以上は Warning |
+| 上限到達（次の Agent launch は拒否される） | Agent icon / `Agents` と `16/16` | Danger |
+| idle と報告された | Agent icon / `Agents` と `0/16` | dim |
+| daemon が報告しない（metrics schema 3 より前の peer） | Agent icon / `Agents` と `—` | dim |
 
 - **`0/16` と `—` を描き分ける**。前者は「daemon が idle と報告した」であり、後者は「daemon が何も言っていない」
   である。報告されない level を 0 と描くと、枠が空いているという誤った断定になる。
