@@ -3379,6 +3379,13 @@ struct ConnectionCleanupInbox {
     wake: Receiver<()>,
 }
 
+#[derive(Clone)]
+struct PeerProcess {
+    pid: u32,
+    process_start_identity: Option<String>,
+    lineage: Option<(u32, u32)>,
+}
+
 impl ConnectionCleanup {
     fn connected(&self, connection: ConnectionId, peer_pid: u32) {
         self.live
@@ -3477,9 +3484,9 @@ fn start_connection_cleanup_worker(
             // The snapshot is taken while this owner is locked. A newly
             // registered connection cannot add owner state until after the
             // sweep, so it cannot be removed by a snapshot that predates it.
-            let (live, live_pids) = disconnected.live();
+            let (live, _) = disconnected.live();
             agent.retain_live_connections(&live);
-            agent.retain_live_mcp_children(&live_pids);
+            agent.retain_live_mcp_connections(&live);
         }
         if let Ok(mut terminal) = terminal.lock() {
             // The generic owner has a separate mutex, so it needs a fresh
@@ -5325,13 +5332,14 @@ fn start_ipc_accept_loop(
                         // ordinary same-UID client (including an orphaned
                         // bootstrap broker reparented to PID 1) needs only its
                         // kernel-authenticated peer PID to complete hello.
-                        let peer_process = (
-                            peer_pid,
-                            parent_pid(peer_pid).and_then(|parent| {
+                        let peer_process = PeerProcess {
+                            pid: peer_pid,
+                            process_start_identity: process_start_identity(peer_pid).ok(),
+                            lineage: parent_pid(peer_pid).and_then(|parent| {
                                 process_group(peer_pid)
                                     .map(|process_group| (parent, process_group))
                             }).ok(),
-                        );
+                        };
                         let Some(pre_handshake_permit) = pre_handshake.try_admit() else {
                             // No hello has been read, so sending a framed protocol
                             // error here would invent a new wire state. Closing the
@@ -5505,7 +5513,7 @@ fn start_ipc_accept_loop(
                                 let census_fence = CensusConnectionFence {
                                     inner: connection_fence.as_ref(),
                                     cleanup: connection_cleanup,
-                                    peer_pid: peer_process.0,
+                                    peer_pid: peer_process.pid,
                                 };
                                 let result = usagi_daemon::presentation::ipc::handle_admitted_connection_with_terminal_and_observe(
                                     &mut reader,
@@ -5513,11 +5521,23 @@ fn start_ipc_accept_loop(
                                     admitted,
                                     &census_fence,
                                     &mut owner,
-                                    &mut |request_id, body, hello, _connection, client| {
+                                    &mut |request_id, body, hello, connection, client| {
                                         if let Some(credential) = request_mcp_credential(&body)
                                             && !agent_launch
                                                 .lock()
-                                                .is_ok_and(|runtime| runtime.authenticates_mcp_child(credential, peer_process.0))
+                                                .is_ok_and(|mut runtime| {
+                                                    peer_process
+                                                        .process_start_identity
+                                                        .as_deref()
+                                                        .is_some_and(|identity| {
+                                                            runtime.authenticate_mcp_child_connection(
+                                                                credential,
+                                                                peer_process.pid,
+                                                                identity,
+                                                                connection,
+                                                            )
+                                                        })
+                                                })
                                         {
                                             return envelope(
                                                 hello,
@@ -5532,13 +5552,13 @@ fn start_ipc_accept_loop(
                                             );
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
-                                            Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, peer_process, request_id, &body, hello),
+                                            Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
                                             Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                             Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                             Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
                                             Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
-                                            Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
-                                            Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
+                                            Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, &body, hello),
+                                            Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, &body, hello),
                                             Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                             Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                             Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
@@ -6090,6 +6110,24 @@ fn dispatch_agent_tool(
                 let session_name = input.session.name;
                 let requested_role = input.session.role;
                 drop(runtime);
+                let supervised = supervisor
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "supervisor runtime is unavailable",
+                        )
+                    })?
+                    .supervises_dispatch(parent_dispatch_run)
+                    .map_err(supervisor_error)?;
+                if supervised {
+                    agent
+                        .lock()
+                        .map_err(|_| {
+                            ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                        })?
+                        .require_same_dispatch_runtime(workspace, &caller, &selected)?;
+                }
                 let _delegation_permit = authorize_delegation(
                     bound,
                     agent,
@@ -8230,12 +8268,15 @@ fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
         })
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
+#[allow(clippy::too_many_arguments)] // Claim binds workspace roots, exact peer identity, and the admitted transport in one response.
 fn dispatch_mcp_child_claim(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     data_dir: &Path,
-    peer_process: (u32, Option<(u32, u32)>),
+    peer_process: &PeerProcess,
+    connection: ConnectionId,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -8257,13 +8298,33 @@ fn dispatch_mcp_child_claim(
             let mut runtime = agent.lock().map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
             })?;
-            let (parent_pid, process_group) = peer_process.1.ok_or_else(|| {
+            let (parent_pid, process_group) = peer_process.lineage.ok_or_else(|| {
                 ProtocolError::new(
                     ErrorCode::OwnershipUnknown,
                     "MCP child process lineage is unavailable",
                 )
             })?;
-            let credential = runtime.claim_mcp_child(peer_process.0, parent_pid, process_group)?;
+            let peer_start_identity =
+                peer_process
+                    .process_start_identity
+                    .as_deref()
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::OwnershipUnknown,
+                            "MCP child process identity is unavailable",
+                        )
+                    })?;
+            let credential = runtime.claim_mcp_child(
+                peer_process.pid,
+                peer_start_identity,
+                parent_pid,
+                process_group,
+                connection,
+                &|pid, expected_identity| match process_start_identity(pid) {
+                    Ok(actual_identity) => actual_identity == expected_identity,
+                    Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+                },
+            )?;
             let session_id = runtime.caller_session(&credential);
             (credential, session_id)
         };
@@ -9404,8 +9465,8 @@ fn delegate_brief(
 
     let credential = required_payload_string(payload, "_caller_credential")?;
     let (workspace, parent_dispatch_run, caller, repository_root) = {
-        let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
-        let authenticated = runtime
+        let agent_runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
+        let authenticated = agent_runtime
             .mcp_dispatch_context(credential)
             .ok_or(SessionRuntimeError::ScopeUnavailable)?;
         let sessions = bound
@@ -9429,6 +9490,28 @@ fn delegate_brief(
             sessions.repository_root().to_path_buf(),
         )
     };
+    let supervised = supervisor
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .supervises_dispatch(parent_dispatch_run)
+        .map_err(|_| SessionRuntimeError::Storage)?;
+    if supervised {
+        agent
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .require_same_dispatch_runtime(
+                workspace,
+                &caller,
+                &DispatchAgentIntent::New {
+                    runtime: runtime.clone(),
+                    model: model.clone(),
+                },
+            )
+            .map_err(|error| SessionRuntimeError::AgentFailure {
+                code: error.code,
+                message: error.message,
+            })?;
+    }
     let _delegation_permit = authorize_delegation(
         bound,
         agent,
@@ -10273,7 +10356,7 @@ fn dispatch_agent_after_preflight(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
-    peer_process: (u32, Option<(u32, u32)>),
+    peer_process: &PeerProcess,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -10301,8 +10384,8 @@ fn dispatch_codex_session_capture(
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
                 .or_else(|| {
-                    let (parent_pid, process_group) = peer_process.1?;
-                    agent.hook_credential(peer_process.0, parent_pid, process_group)
+                    let (parent_pid, process_group) = peer_process.lineage?;
+                    agent.hook_credential(peer_process.pid, parent_pid, process_group)
                 })
                 .map(str::to_owned)
                 .ok_or_else(|| {
@@ -10337,7 +10420,7 @@ fn dispatch_codex_session_capture(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_agent_phase_report_without_a_live_credential_fails_closed
 fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
-    peer_process: (u32, Option<(u32, u32)>),
+    peer_process: &PeerProcess,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -10366,8 +10449,8 @@ fn dispatch_agent_phase_report(
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
                 .or_else(|| {
-                    let (parent_pid, process_group) = peer_process.1?;
-                    agent.hook_credential(peer_process.0, parent_pid, process_group)
+                    let (parent_pid, process_group) = peer_process.lineage?;
+                    agent.hook_credential(peer_process.pid, parent_pid, process_group)
                 })
                 .map(str::to_owned)
                 .ok_or_else(|| {
