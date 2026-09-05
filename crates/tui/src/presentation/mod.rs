@@ -3898,6 +3898,8 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
     match action {
         LiveTerminalAction::Switch => Some(AppKey::CtrlO),
         LiveTerminalAction::OpenCloseupModal => Some(AppKey::OpenCloseupOverlay),
+        LiveTerminalAction::PreviousSession => Some(AppKey::PreviousSession),
+        LiveTerminalAction::NextSession => Some(AppKey::NextSession),
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
         LiveTerminalAction::OpenPullRequests => Some(AppKey::OpenPrs),
@@ -3918,6 +3920,8 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         | LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
         | LiveTerminalAction::ActivateWorkspace(_)
+        | LiveTerminalAction::PreviousWorkspace
+        | LiveTerminalAction::NextWorkspace
         | LiveTerminalAction::CloseTab
         | LiveTerminalAction::ResumeTab
         | LiveTerminalAction::MoveTabNext
@@ -7285,17 +7289,29 @@ impl IdleWatch {
     }
 }
 
-fn switch_arrow_target(deck: &WorkspaceDeck, state: &AppState, key: &Key) -> Option<PathBuf> {
+fn workspace_navigation_target(
+    deck: &WorkspaceDeck,
+    state: &AppState,
+    key: &Key,
+) -> Option<PathBuf> {
     if deck.overlay_open()
         || state.overlay().is_some()
         || state.director_drawer_open()
-        || state.route() != Route::Home(HomeMode::Switch)
+        || state.root_terminal_drawer_open()
     {
         return None;
     }
     match key {
-        Key::Left => Some(deck.previous_path().to_path_buf()),
-        Key::Right => Some(deck.next_path().to_path_buf()),
+        Key::Left if state.route() == Route::Home(HomeMode::Switch) => {
+            Some(deck.previous_path().to_path_buf())
+        }
+        Key::Right if state.route() == Route::Home(HomeMode::Switch) => {
+            Some(deck.next_path().to_path_buf())
+        }
+        Key::Live(LiveTerminalAction::PreviousWorkspace) => {
+            Some(deck.previous_path().to_path_buf())
+        }
+        Key::Live(LiveTerminalAction::NextWorkspace) => Some(deck.next_path().to_path_buf()),
         _ => None,
     }
 }
@@ -8244,17 +8260,17 @@ fn drive_workspace_controller(
         };
         let key = adjust_project_bar_pointer(raw_key);
 
-        // Leader shortcuts and the remaining project-bar clicks are process-level
-        // and win over every workspace surface, including a focused live PTY and
-        // Director. A PR modal claimed its outside click immediately above.
+        // Process shortcuts and the remaining project-bar clicks win over the
+        // unobscured workspace surface, including a focused live PTY. Foreground
+        // overlays/drawers retain ownership through the target resolver below.
         // Plain arrows are deliberately local to unobscured Switch mode.
-        let switch_arrow_target = switch_arrow_target(deck, runtime.state(), &key);
+        let workspace_navigation_target = workspace_navigation_target(deck, runtime.state(), &key);
         let direct_target = match (&key, &bar_target) {
             (Key::Live(LiveTerminalAction::ActivateWorkspace(number)), _) => deck
                 .path_at(usize::from(number.saturating_sub(1)))
                 .map(Path::to_path_buf),
             (_, Some(ProjectBarTarget::Workspace(path))) => Some(path.clone()),
-            _ => switch_arrow_target,
+            _ => workspace_navigation_target,
         };
         let opens_add = matches!(key, Key::Live(LiveTerminalAction::OpenWorkspace))
             || matches!(bar_target, Some(ProjectBarTarget::Add));
@@ -10679,6 +10695,14 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::OpenCloseupModal)),
             Some(AppEvent::Key(AppKey::OpenCloseupOverlay))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::PreviousSession)),
+            Some(AppEvent::Key(AppKey::PreviousSession))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::NextSession)),
+            Some(AppEvent::Key(AppKey::NextSession))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::NextTab)),
@@ -32443,7 +32467,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_arrows_follow_project_tab_order_and_wrap() {
+    fn project_arrows_follow_tab_order_and_ctrl_option_reaches_closeup() {
         let mut term = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Enter,
@@ -32454,6 +32478,10 @@ mod tests {
             Key::Left,
             Key::Right,
             Key::Right,
+            Key::Enter,
+            Key::Live(LiveTerminalAction::NextWorkspace),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::PreviousWorkspace),
             Key::CtrlQ,
             Key::Char('q'),
         ]);
@@ -32485,6 +32513,8 @@ mod tests {
                 PathBuf::from("/tmp/alpha"),
                 PathBuf::from("/tmp/beta"),
                 PathBuf::from("/tmp/alpha"),
+                PathBuf::from("/tmp/beta"),
+                PathBuf::from("/tmp/alpha"),
             ]
         );
         assert_eq!(
@@ -32495,12 +32525,14 @@ mod tests {
                 2 * RESIDENT_PORTS_PER_COMPOSITION,
                 3 * RESIDENT_PORTS_PER_COMPOSITION,
                 4 * RESIDENT_PORTS_PER_COMPOSITION,
+                5 * RESIDENT_PORTS_PER_COMPOSITION,
+                6 * RESIDENT_PORTS_PER_COMPOSITION,
             ]
         );
     }
 
     #[test]
-    fn switch_arrows_are_owned_only_by_unobscured_switch_mode() {
+    fn project_navigation_chords_reach_closeup_but_yield_to_foreground_surfaces() {
         let alpha = snapshot("alpha");
         let beta = snapshot("beta");
         let gamma = snapshot("gamma");
@@ -32508,21 +32540,43 @@ mod tests {
         let mut state = AppState::home(alpha.workspace_id, alpha.session_ids.clone());
 
         assert_eq!(
-            super::switch_arrow_target(&deck, &state, &Key::Left),
+            super::workspace_navigation_target(&deck, &state, &Key::Left),
             Some(PathBuf::from("/tmp/gamma"))
         );
         assert_eq!(
-            super::switch_arrow_target(&deck, &state, &Key::Right),
+            super::workspace_navigation_target(&deck, &state, &Key::Right),
             Some(PathBuf::from("/tmp/beta"))
         );
-        assert_eq!(super::switch_arrow_target(&deck, &state, &Key::Up), None);
+        assert_eq!(
+            super::workspace_navigation_target(&deck, &state, &Key::Up),
+            None
+        );
 
         let _ = crate::usecase::application::controller::update(
             &mut state,
             AppEvent::Key(AppKey::Enter),
         );
         assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
-        assert_eq!(super::switch_arrow_target(&deck, &state, &Key::Right), None);
+        assert_eq!(
+            super::workspace_navigation_target(&deck, &state, &Key::Right),
+            None
+        );
+        assert_eq!(
+            super::workspace_navigation_target(
+                &deck,
+                &state,
+                &Key::Live(LiveTerminalAction::PreviousWorkspace),
+            ),
+            Some(PathBuf::from("/tmp/gamma"))
+        );
+        assert_eq!(
+            super::workspace_navigation_target(
+                &deck,
+                &state,
+                &Key::Live(LiveTerminalAction::NextWorkspace),
+            ),
+            Some(PathBuf::from("/tmp/beta"))
+        );
 
         let mut state = AppState::home(alpha.workspace_id, alpha.session_ids.clone());
         let _ = crate::usecase::application::controller::update(
@@ -32530,13 +32584,24 @@ mod tests {
             AppEvent::Key(AppKey::CtrlQ),
         );
         assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
-        assert_eq!(super::switch_arrow_target(&deck, &state, &Key::Left), None);
+        assert_eq!(
+            super::workspace_navigation_target(
+                &deck,
+                &state,
+                &Key::Live(LiveTerminalAction::PreviousWorkspace),
+            ),
+            None
+        );
 
         let mut overlay_deck = deck;
         overlay_deck.open_switcher();
         let state = AppState::home(alpha.workspace_id, alpha.session_ids);
         assert_eq!(
-            super::switch_arrow_target(&overlay_deck, &state, &Key::Right),
+            super::workspace_navigation_target(
+                &overlay_deck,
+                &state,
+                &Key::Live(LiveTerminalAction::NextWorkspace),
+            ),
             None
         );
     }
