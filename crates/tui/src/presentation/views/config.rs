@@ -1402,11 +1402,11 @@ mod tests {
     fn move_to_field(config: &mut Config, target: Field) {
         for _ in 0..=12 {
             if config.field() == target {
-                return;
+                break;
             }
             config.next_field();
         }
-        panic!("field navigation did not reach {target:?}");
+        assert_eq!(config.field(), target);
     }
 
     /// Settings port that counts successful saves, used to prove a double press

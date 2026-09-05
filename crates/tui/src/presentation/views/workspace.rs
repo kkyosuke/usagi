@@ -4636,6 +4636,12 @@ mod tests {
         let mut home =
             HomeProjection::from_state(&state, "日本語 workspace", Path::new("/work"), &[]);
 
+        let text_banner = strip(&home_notice_banner(
+            100,
+            &home.clone().with_icon_mode(IconMode::Text),
+        ));
+        assert!(text_banner.contains("click indicator to review"));
+
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
         assert!(!strip(&layout.line).contains("USAGI"));
@@ -6518,6 +6524,17 @@ mod tests {
                 IconMode::Text,
             )),
             "Agents 3/16"
+        );
+        assert!(
+            strip(&super::sidebar_agent_line_with_icon_mode(
+                &[],
+                10,
+                false,
+                false,
+                false,
+                IconMode::Text,
+            ))
+            .contains("A —")
         );
     }
 
