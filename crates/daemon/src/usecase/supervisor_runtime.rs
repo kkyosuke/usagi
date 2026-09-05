@@ -1196,6 +1196,21 @@ impl SupervisorRuntime {
         }))
     }
 
+    /// Whether a live Director Work run owns this exact dispatch.
+    ///
+    /// This read-only query lets the composition layer apply Work Run-only
+    /// policy before session creation without changing classic dispatch.
+    ///
+    /// # Errors
+    /// Returns an error when the durable Supervisor inventory is unavailable.
+    pub fn supervises_dispatch(&self, dispatch_run: OperationId) -> Result<bool> {
+        Ok(self.unfinished_runs()?.iter().any(|run| {
+            run.provenance
+                .values()
+                .any(|provenance| provenance.dispatch_run_id == dispatch_run)
+        }))
+    }
+
     /// Pending delegated task reservations recoverable from their stable task
     /// IDs and daemon-only origin marker.
     ///
@@ -5415,6 +5430,7 @@ mod tests {
         let dispatch = DispatchStore::new(temp.path());
         let workspace = WorkspaceId::new();
         let root_operation = OperationId::new();
+        assert!(!scheduler.supervises_dispatch(root_operation).unwrap());
         dispatch
             .upsert_run(DispatchRun {
                 run_id: root_operation,
@@ -5436,6 +5452,7 @@ mod tests {
                 now(),
             )
             .unwrap();
+        assert!(scheduler.supervises_dispatch(root_operation).unwrap());
         let before_oversized = scheduler
             .get("goal-composer", root.supervisor_run_id)
             .unwrap()

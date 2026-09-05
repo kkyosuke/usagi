@@ -10,7 +10,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -2562,8 +2562,6 @@ impl DecisionWaker for DeferredDecisionWaker {
 /// safe unavailable error rather than a client-side fallback.
 struct SharedAgent {
     runtime: SharedAgentRuntime,
-    disconnected: Sender<ConnectionCleanup>,
-    mcp_child_pid: u32,
 }
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 impl AgentTerminalActor for SharedAgent {
@@ -2607,17 +2605,7 @@ impl AgentTerminalActor for SharedAgent {
             .map(|agent| AgentTerminalActor::completed_inventory(&*agent, scope))
             .unwrap_or_default()
     }
-    fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
-        // Connection workers must release their socket and JoinHandle promptly.
-        // Runtime cleanup can be O(number of terminals) and contends with live
-        // output/input, so serialize it on the daemon-owned cleanup worker
-        // instead of leaving one blocked worker (and three socket descriptors)
-        // behind for every short-lived client.
-        let _ = self.disconnected.send(ConnectionCleanup {
-            connection,
-            mcp_child_pid: self.mcp_child_pid,
-        });
-    }
+    fn disconnect(&mut self, _connection: usagi_core::domain::id::ConnectionId) {}
 }
 
 enum AgentPtyObservation {
@@ -3199,6 +3187,11 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(10);
 /// subject to this deadline.
 const PRE_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(2);
 
+/// One absolute budget for transmitting a complete established response frame.
+/// It is deliberately not an idle timeout: the clock starts only when the first
+/// prefix byte is written and is reset after the complete payload is accepted.
+const ESTABLISHED_RESPONSE_WRITE_DEADLINE_MS: u64 = 2_000;
+
 /// Fallback when the process soft descriptor limit cannot be observed.
 const CLIENT_CONNECTION_LIMIT_FALLBACK: usize = 32;
 /// Established connections remain bounded even when the process has a very
@@ -3372,71 +3365,147 @@ impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
     }
 }
 
-/// Serializes connection-local terminal cleanup away from socket workers.
-///
-/// A disconnect visits every terminal ledger. Long-lived chats can make that
-/// visit contend with output and input requests; doing it in the connection
-/// worker retains the accepted reader, writer, and retirement descriptor until
-/// the mutex is acquired. One daemon-owned consumer bounds the contention and
-/// lets the connection worker close all three descriptors immediately.
-#[derive(Clone, Copy)]
+/// The only per-connection state retained while cleanup is delayed: the live
+/// connection census itself. Its cardinality is bounded by the accepted-worker
+/// limit, unlike a queue containing one item for every historical disconnect.
+#[derive(Clone)]
 struct ConnectionCleanup {
-    connection: ConnectionId,
-    mcp_child_pid: u32,
+    live: Arc<Mutex<BTreeMap<ConnectionId, u32>>>,
+    wake: SyncSender<()>,
 }
 
-/// Cleanup is intentionally a non-blocking producer path. A bounded channel
-/// cannot bound pending historical disconnects by the live-client limit: worker
-/// slots are reused while the cleanup consumer waits for an owner lock. Making
-/// those workers wait would retain their socket triplets and exhaust the live
-/// connection limit before the consumer can recover.
-fn connection_cleanup_channel() -> (Sender<ConnectionCleanup>, Receiver<ConnectionCleanup>) {
-    mpsc::channel()
+struct ConnectionCleanupInbox {
+    live: Arc<Mutex<BTreeMap<ConnectionId, u32>>>,
+    wake: Receiver<()>,
 }
 
-const CONNECTION_CLEANUP_BATCH_ITEMS: usize = CLIENT_CONNECTION_LIMIT_CEILING;
+#[derive(Clone)]
+struct PeerProcess {
+    pid: u32,
+    process_start_identity: Option<String>,
+    lineage: Option<(u32, u32)>,
+}
+
+impl ConnectionCleanup {
+    fn connected(&self, connection: ConnectionId, peer_pid: u32) {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(connection, peer_pid);
+    }
+
+    fn disconnected(&self, connection: ConnectionId) {
+        let removed = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&connection)
+            .is_some();
+        if removed {
+            // A full one-item channel already promises a sweep that will observe
+            // this removal. Never wait for the consumer from a socket worker.
+            let _ = self.wake.try_send(());
+        }
+    }
+}
+
+impl ConnectionCleanupInbox {
+    fn live(&self) -> (BTreeSet<ConnectionId>, BTreeSet<u32>) {
+        let live = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            live.keys().copied().collect(),
+            live.values().copied().collect(),
+        )
+    }
+}
+
+/// Couples the presentation-owned connection ID with its authenticated peer
+/// PID at admission, then removes both through the same guaranteed disconnect
+/// callback. This registers even an idle connection, so MCP PID retention is a
+/// census of admitted sockets rather than only sockets that issued a request.
+struct CensusConnectionFence<'a> {
+    inner: &'a dyn usagi_daemon::presentation::ipc::ConnectionFence,
+    cleanup: ConnectionCleanup,
+    peer_pid: u32,
+}
+
+impl usagi_daemon::presentation::ipc::ConnectionFence for CensusConnectionFence<'_> {
+    fn admitted(
+        &self,
+        connection: ConnectionId,
+        hello: &usagi_core::infrastructure::ipc::ClientHello,
+    ) {
+        self.cleanup.connected(connection, self.peer_pid);
+        self.inner.admitted(connection, hello);
+    }
+
+    fn admit(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<Option<AdmissionLease>, usagi_core::infrastructure::ipc::ProtocolError> {
+        self.inner.admit(body)
+    }
+
+    fn disconnected(&self, connection: ConnectionId) {
+        self.inner.disconnected(connection);
+        self.cleanup.disconnected(connection);
+    }
+}
+
+/// Disconnect wakeups are bounded to one item and coalesced. The worker derives
+/// stale state by comparing each owner ledger with the bounded live census, so
+/// no historical disconnect queue exists and producers never block.
+fn connection_cleanup_channel() -> (ConnectionCleanup, ConnectionCleanupInbox) {
+    let live = Arc::new(Mutex::new(BTreeMap::new()));
+    let (wake, receiver) = mpsc::sync_channel(1);
+    (
+        ConnectionCleanup {
+            live: Arc::clone(&live),
+            wake,
+        },
+        ConnectionCleanupInbox {
+            live,
+            wake: receiver,
+        },
+    )
+}
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=drawer_close_reopen_continues_input_on_the_same_daemon_connection
 fn start_connection_cleanup_worker(
     agent: SharedAgentRuntime,
     terminal: SharedTerminalRuntime,
-    disconnected: Receiver<ConnectionCleanup>,
+    disconnected: ConnectionCleanupInbox,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    start_connection_cleanup_worker_with(disconnected, move |batch| {
+    start_connection_cleanup_worker_with(disconnected, move |disconnected| {
         if let Ok(mut agent) = agent.lock() {
-            for cleanup in batch {
-                AgentTerminalActor::disconnect(&mut *agent, cleanup.connection);
-                agent.release_mcp_child(cleanup.mcp_child_pid);
-            }
+            // The snapshot is taken while this owner is locked. A newly
+            // registered connection cannot add owner state until after the
+            // sweep, so it cannot be removed by a snapshot that predates it.
+            let (live, _) = disconnected.live();
+            agent.retain_live_connections(&live);
+            agent.retain_live_mcp_connections(&live);
         }
         if let Ok(mut terminal) = terminal.lock() {
-            for cleanup in batch {
-                usagi_daemon::usecase::terminal_owner::TerminalOwner::disconnect(
-                    &mut *terminal,
-                    cleanup.connection,
-                );
-            }
+            // The generic owner has a separate mutex, so it needs a fresh
+            // census snapshot under that mutex for the same ordering guarantee.
+            let (live, _) = disconnected.live();
+            terminal.retain_live_connections(&live);
         }
     })
 }
 
 fn start_connection_cleanup_worker_with(
-    disconnected: Receiver<ConnectionCleanup>,
-    mut cleanup: impl FnMut(&[ConnectionCleanup]) + Send + 'static,
+    disconnected: ConnectionCleanupInbox,
+    mut cleanup: impl FnMut(&ConnectionCleanupInbox) + Send + 'static,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("usagi-connection-cleanup".to_string())
         .spawn(move || {
-            while let Ok(first) = disconnected.recv() {
-                let mut batch = Vec::with_capacity(CONNECTION_CLEANUP_BATCH_ITEMS);
-                batch.push(first);
-                while batch.len() < CONNECTION_CLEANUP_BATCH_ITEMS {
-                    match disconnected.try_recv() {
-                        Ok(next) => batch.push(next),
-                        Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
-                    }
-                }
-                cleanup(&batch);
+            while disconnected.wake.recv().is_ok() {
+                cleanup(&disconnected);
             }
         })
 }
@@ -3687,9 +3756,9 @@ fn spawn_ipc_server(
         Arc::clone(&supervisor),
         Arc::clone(&shutdown),
     )?);
-    // Socket workers only enqueue connection-local ledger cleanup. The single
-    // consumer prevents a disconnect storm from retaining one accepted socket
-    // triplet per worker while all of them contend on the terminal owners.
+    // Socket workers only remove themselves from the bounded live census and
+    // coalesce a wake. The single consumer sweeps stale ledger state without a
+    // disconnect storm retaining historical queue entries or socket triplets.
     let (disconnected, disconnects) = connection_cleanup_channel();
     let connection_cleanup =
         start_connection_cleanup_worker(Arc::clone(&agent), Arc::clone(&terminal), disconnects)?;
@@ -5192,7 +5261,7 @@ fn start_ipc_accept_loop(
     supervisor: SharedSupervisorRuntime,
     fence: Arc<GenerationFence>,
     workers: Arc<ClientWorkers>,
-    disconnected: Sender<ConnectionCleanup>,
+    disconnected: ConnectionCleanup,
     connection_cleanup: std::thread::JoinHandle<()>,
     mut background_workers: DaemonBackgroundWorkers,
     shutdown: Arc<ShutdownRequest>,
@@ -5263,13 +5332,14 @@ fn start_ipc_accept_loop(
                         // ordinary same-UID client (including an orphaned
                         // bootstrap broker reparented to PID 1) needs only its
                         // kernel-authenticated peer PID to complete hello.
-                        let peer_process = (
-                            peer_pid,
-                            parent_pid(peer_pid).and_then(|parent| {
+                        let peer_process = PeerProcess {
+                            pid: peer_pid,
+                            process_start_identity: process_start_identity(peer_pid).ok(),
+                            lineage: parent_pid(peer_pid).and_then(|parent| {
                                 process_group(peer_pid)
                                     .map(|process_group| (parent, process_group))
                             }).ok(),
-                        );
+                        };
                         let Some(pre_handshake_permit) = pre_handshake.try_admit() else {
                             // No hello has been read, so sending a framed protocol
                             // error here would invent a new wire state. Closing the
@@ -5306,7 +5376,7 @@ fn start_ipc_accept_loop(
                         let supervisor = Arc::clone(&supervisor);
                         let connection_fence = Arc::clone(&fence);
                         let connection_data_dir = data_dir.clone();
-                        let connection_disconnected = disconnected.clone();
+                        let connection_cleanup = disconnected.clone();
                         // A worker without a shutdown half cannot participate in
                         // the generation retirement barrier, so descriptor
                         // duplication failure refuses the connection before a
@@ -5416,42 +5486,58 @@ fn start_ipc_accept_loop(
                                     ));
                                     return;
                                 }
-                                // Established policy: no deadline, but every read
-                                // is gated on a bounded readiness wait the worker
-                                // uses to observe retirement. `shutdown(2)` alone
-                                // can leave this thread parked forever, and the
-                                // barrier would then never join it. The writer is
-                                // untouched: a worker parks waiting for the next
-                                // frame, not waiting to send one.
+                                // Established reads have no idle deadline, but
+                                // each response write has one fixed frame budget.
+                                // Read readiness is gated so the worker observes
+                                // retirement; `shutdown(2)` alone can leave this
+                                // thread parked forever, and the barrier would
+                                // then never join it.
                                 let mut reader = RetiringReader::new(
                                     reader.into_inner(),
                                     retirement,
                                     CLIENT_RETIREMENT_POLL,
                                 );
-                                let mut writer = writer.into_inner();
+                                let mut writer = EstablishedResponseWriter::new(
+                                    SystemClock::new(),
+                                    DeadlineUnixStream(writer.into_inner()),
+                                    ESTABLISHED_RESPONSE_WRITE_DEADLINE_MS,
+                                );
                                 let mut owner =
                                     SharedTerminalOwner::with_visibility_and_retention(
-                                        SharedAgent {
-                                            runtime: agent_owner,
-                                            disconnected: connection_disconnected,
-                                            mcp_child_pid: peer_process.0,
-                                        },
+                                        SharedAgent { runtime: agent_owner },
                                         SharedTerminal(Arc::clone(&terminal)),
                                         visibility,
                                         retention,
                                     );
                                 let mut metrics_observer = None;
+                                let census_fence = CensusConnectionFence {
+                                    inner: connection_fence.as_ref(),
+                                    cleanup: connection_cleanup,
+                                    peer_pid: peer_process.pid,
+                                };
                                 let result = usagi_daemon::presentation::ipc::handle_admitted_connection_with_terminal_and_observe(
                                     &mut reader,
                                     &mut writer,
                                     admitted,
-                                    connection_fence.as_ref(),
+                                    &census_fence,
                                     &mut owner,
-                                    &mut |request_id, body, hello, _connection, client| {
+                                    &mut |request_id, body, hello, connection, client| {
                                         if let Some(credential) = request_mcp_credential(&body)
                                             && !agent_launch
                                                 .lock()
-                                                .is_ok_and(|runtime| runtime.authenticates_mcp_child(credential, peer_process.0))
+                                                .is_ok_and(|mut runtime| {
+                                                    peer_process
+                                                        .process_start_identity
+                                                        .as_deref()
+                                                        .is_some_and(|identity| {
+                                                            runtime.authenticate_mcp_child_connection(
+                                                                credential,
+                                                                peer_process.pid,
+                                                                identity,
+                                                                connection,
+                                                            )
+                                                        })
+                                                })
                                         {
                                             return envelope(
                                                 hello,
@@ -5466,13 +5552,13 @@ fn start_ipc_accept_loop(
                                             );
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
-                                            Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, peer_process, request_id, &body, hello),
+                                            Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
                                             Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                             Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                             Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
                                             Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
-                                            Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
-                                            Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
+                                            Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, &body, hello),
+                                            Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, &body, hello),
                                             Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                             Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                             Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
@@ -5548,9 +5634,9 @@ fn start_ipc_accept_loop(
                     "daemon shutdown retired with client worker failures: {report:?}"
                 ));
             }
-            // Every connection worker has now returned and dropped its sender.
-            // Closing the last producer drains all queued ledger cleanup before
-            // the owner runtimes are allowed to leave the daemon generation.
+            // Every connection worker has now returned and removed itself from
+            // the census. Closing the last producer lets the final coalesced
+            // sweep finish before owner runtimes leave this daemon generation.
             drop(disconnected);
             if connection_cleanup.join().is_err() {
                 ErrorLog::record("daemon connection cleanup worker panicked");
@@ -6024,6 +6110,24 @@ fn dispatch_agent_tool(
                 let session_name = input.session.name;
                 let requested_role = input.session.role;
                 drop(runtime);
+                let supervised = supervisor
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "supervisor runtime is unavailable",
+                        )
+                    })?
+                    .supervises_dispatch(parent_dispatch_run)
+                    .map_err(supervisor_error)?;
+                if supervised {
+                    agent
+                        .lock()
+                        .map_err(|_| {
+                            ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                        })?
+                        .require_same_dispatch_runtime(workspace, &caller, &selected)?;
+                }
                 let _delegation_permit = authorize_delegation(
                     bound,
                     agent,
@@ -8164,12 +8268,15 @@ fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
         })
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
+#[allow(clippy::too_many_arguments)] // Claim binds workspace roots, exact peer identity, and the admitted transport in one response.
 fn dispatch_mcp_child_claim(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     data_dir: &Path,
-    peer_process: (u32, Option<(u32, u32)>),
+    peer_process: &PeerProcess,
+    connection: ConnectionId,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -8191,13 +8298,33 @@ fn dispatch_mcp_child_claim(
             let mut runtime = agent.lock().map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
             })?;
-            let (parent_pid, process_group) = peer_process.1.ok_or_else(|| {
+            let (parent_pid, process_group) = peer_process.lineage.ok_or_else(|| {
                 ProtocolError::new(
                     ErrorCode::OwnershipUnknown,
                     "MCP child process lineage is unavailable",
                 )
             })?;
-            let credential = runtime.claim_mcp_child(peer_process.0, parent_pid, process_group)?;
+            let peer_start_identity =
+                peer_process
+                    .process_start_identity
+                    .as_deref()
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::OwnershipUnknown,
+                            "MCP child process identity is unavailable",
+                        )
+                    })?;
+            let credential = runtime.claim_mcp_child(
+                peer_process.pid,
+                peer_start_identity,
+                parent_pid,
+                process_group,
+                connection,
+                &|pid, expected_identity| match process_start_identity(pid) {
+                    Ok(actual_identity) => actual_identity == expected_identity,
+                    Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+                },
+            )?;
             let session_id = runtime.caller_session(&credential);
             (credential, session_id)
         };
@@ -9338,8 +9465,8 @@ fn delegate_brief(
 
     let credential = required_payload_string(payload, "_caller_credential")?;
     let (workspace, parent_dispatch_run, caller, repository_root) = {
-        let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
-        let authenticated = runtime
+        let agent_runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
+        let authenticated = agent_runtime
             .mcp_dispatch_context(credential)
             .ok_or(SessionRuntimeError::ScopeUnavailable)?;
         let sessions = bound
@@ -9363,6 +9490,28 @@ fn delegate_brief(
             sessions.repository_root().to_path_buf(),
         )
     };
+    let supervised = supervisor
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .supervises_dispatch(parent_dispatch_run)
+        .map_err(|_| SessionRuntimeError::Storage)?;
+    if supervised {
+        agent
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .require_same_dispatch_runtime(
+                workspace,
+                &caller,
+                &DispatchAgentIntent::New {
+                    runtime: runtime.clone(),
+                    model: model.clone(),
+                },
+            )
+            .map_err(|error| SessionRuntimeError::AgentFailure {
+                code: error.code,
+                message: error.message,
+            })?;
+    }
     let _delegation_permit = authorize_delegation(
         bound,
         agent,
@@ -10207,7 +10356,7 @@ fn dispatch_agent_after_preflight(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
-    peer_process: (u32, Option<(u32, u32)>),
+    peer_process: &PeerProcess,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -10235,8 +10384,8 @@ fn dispatch_codex_session_capture(
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
                 .or_else(|| {
-                    let (parent_pid, process_group) = peer_process.1?;
-                    agent.hook_credential(peer_process.0, parent_pid, process_group)
+                    let (parent_pid, process_group) = peer_process.lineage?;
+                    agent.hook_credential(peer_process.pid, parent_pid, process_group)
                 })
                 .map(str::to_owned)
                 .ok_or_else(|| {
@@ -10271,7 +10420,7 @@ fn dispatch_codex_session_capture(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_agent_phase_report_without_a_live_credential_fails_closed
 fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
-    peer_process: (u32, Option<(u32, u32)>),
+    peer_process: &PeerProcess,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -10300,8 +10449,8 @@ fn dispatch_agent_phase_report(
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
                 .or_else(|| {
-                    let (parent_pid, process_group) = peer_process.1?;
-                    agent.hook_credential(peer_process.0, parent_pid, process_group)
+                    let (parent_pid, process_group) = peer_process.lineage?;
+                    agent.hook_credential(peer_process.pid, parent_pid, process_group)
                 })
                 .map(str::to_owned)
                 .ok_or_else(|| {
@@ -11909,7 +12058,11 @@ fn spawn_standby_client_worker(
             // barrier, and `shutdown(2)` can fail to return this parked read.
             let mut reader =
                 RetiringReader::new(reader.into_inner(), retirement, CLIENT_RETIREMENT_POLL);
-            let mut writer = writer.into_inner();
+            let mut writer = EstablishedResponseWriter::new(
+                SystemClock::new(),
+                DeadlineUnixStream(writer.into_inner()),
+                ESTABLISHED_RESPONSE_WRITE_DEADLINE_MS,
+            );
             let _ = usagi_daemon::presentation::ipc::handle_admitted_connection_with(
                 &mut reader,
                 &mut writer,
@@ -12050,6 +12203,124 @@ impl Write for PreHandshakeDeadlineStream {
     fn flush(&mut self) -> std::io::Result<()> {
         self.stream.set_write_timeout(Some(self.remaining()?))?;
         self.stream.flush().map_err(Self::deadline_error)
+    }
+}
+
+/// Progress through the u32-length-prefixed response currently being written.
+///
+/// The presentation layer writes the prefix and payload separately, while
+/// `Write::write` may accept either only partially. Tracking accepted bytes here
+/// makes one fixed deadline span every syscall of that complete frame.
+#[derive(Default)]
+struct ResponseFrameProgress {
+    prefix: [u8; 4],
+    prefix_len: usize,
+    payload_remaining: usize,
+}
+
+impl ResponseFrameProgress {
+    fn at_frame_start(&self) -> bool {
+        self.prefix_len == 0
+    }
+
+    fn observe(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            if self.prefix_len < self.prefix.len() {
+                let copied = (self.prefix.len() - self.prefix_len).min(bytes.len());
+                self.prefix[self.prefix_len..self.prefix_len + copied]
+                    .copy_from_slice(&bytes[..copied]);
+                self.prefix_len += copied;
+                bytes = &bytes[copied..];
+                if self.prefix_len == self.prefix.len() {
+                    self.payload_remaining = u32::from_be_bytes(self.prefix) as usize;
+                    if self.payload_remaining == 0 {
+                        self.prefix_len = 0;
+                    }
+                }
+                continue;
+            }
+
+            let copied = self.payload_remaining.min(bytes.len());
+            self.payload_remaining -= copied;
+            bytes = &bytes[copied..];
+            if self.payload_remaining == 0 {
+                self.prefix_len = 0;
+            }
+        }
+    }
+}
+
+/// Arms an absolute monotonic write deadline for each established response.
+/// Partial prefix or payload progress consumes the original budget instead of
+/// restarting it, so a peer that stops reading cannot retain its worker forever.
+struct EstablishedResponseWriter<Cl, C> {
+    clock: Cl,
+    inner: C,
+    budget_ms: u64,
+    deadline_ms: Option<u64>,
+    progress: ResponseFrameProgress,
+}
+
+impl<Cl: MonotonicClock, C: DeadlineConnection> EstablishedResponseWriter<Cl, C> {
+    fn new(clock: Cl, inner: C, budget_ms: u64) -> Self {
+        Self {
+            clock,
+            inner,
+            budget_ms,
+            deadline_ms: None,
+            progress: ResponseFrameProgress::default(),
+        }
+    }
+
+    fn arm(&mut self) -> std::io::Result<()> {
+        let now = self.clock.now_ms();
+        let deadline = *self
+            .deadline_ms
+            .get_or_insert_with(|| now.saturating_add(self.budget_ms));
+        if deadline <= now {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "daemon established response write deadline exceeded",
+            ));
+        }
+        self.inner
+            .set_write_deadline(Duration::from_millis(deadline - now))
+    }
+
+    fn deadline_error(error: std::io::Error) -> std::io::Error {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "daemon established response write deadline exceeded",
+            )
+        } else {
+            error
+        }
+    }
+}
+
+impl<Cl: MonotonicClock, C: DeadlineConnection> Write for EstablishedResponseWriter<Cl, C> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() {
+            return self.inner.write(bytes);
+        }
+        self.arm()?;
+        let written = self.inner.write(bytes).map_err(Self::deadline_error)?;
+        self.progress.observe(&bytes[..written]);
+        if self.progress.at_frame_start() {
+            self.deadline_ms = None;
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.deadline_ms.is_some() {
+            self.arm()?;
+        }
+        self.inner.flush().map_err(Self::deadline_error)
     }
 }
 
@@ -25576,37 +25847,273 @@ instructions = "{instructions}"
         )));
     }
 
+    #[derive(Clone)]
+    struct ResponseDeadlineTestClock(Arc<AtomicU64>);
+
+    impl MonotonicClock for ResponseDeadlineTestClock {
+        fn now_ms(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[derive(Default)]
+    struct ResponseWriteObservation {
+        deadlines: Vec<Duration>,
+        bytes: Vec<u8>,
+    }
+
+    struct PartialResponseConnection {
+        clock: Arc<AtomicU64>,
+        observation: Arc<Mutex<ResponseWriteObservation>>,
+        max_write: usize,
+        advance_ms: u64,
+    }
+
+    impl Read for PartialResponseConnection {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            unreachable!("the response adapter never reads from its writer half")
+        }
+    }
+
+    impl Write for PartialResponseConnection {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let written = bytes.len().min(self.max_write);
+            self.observation
+                .lock()
+                .unwrap()
+                .bytes
+                .extend_from_slice(&bytes[..written]);
+            self.clock.fetch_add(self.advance_ms, Ordering::SeqCst);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl DeadlineConnection for PartialResponseConnection {
+        fn set_read_deadline(&mut self, _: Duration) -> std::io::Result<()> {
+            unreachable!("the response adapter never arms its writer half for reads")
+        }
+
+        fn set_write_deadline(&mut self, timeout: Duration) -> std::io::Result<()> {
+            self.observation.lock().unwrap().deadlines.push(timeout);
+            Ok(())
+        }
+    }
+
+    struct ErrorResponseConnection {
+        arm_failure: Option<std::io::ErrorKind>,
+        write_fault: Option<std::io::ErrorKind>,
+        flush_error: Option<std::io::ErrorKind>,
+    }
+
+    impl Read for ErrorResponseConnection {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            unreachable!("the response adapter never reads from its writer half")
+        }
+    }
+
+    impl Write for ErrorResponseConnection {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            match self.write_fault {
+                Some(kind) => Err(std::io::Error::new(kind, "write failed")),
+                None => Ok(bytes.len()),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            match self.flush_error {
+                Some(kind) => Err(std::io::Error::new(kind, "flush failed")),
+                None => Ok(()),
+            }
+        }
+    }
+
+    impl DeadlineConnection for ErrorResponseConnection {
+        fn set_read_deadline(&mut self, _: Duration) -> std::io::Result<()> {
+            unreachable!("the response adapter never arms its writer half for reads")
+        }
+
+        fn set_write_deadline(&mut self, _: Duration) -> std::io::Result<()> {
+            match self.arm_failure {
+                Some(kind) => Err(std::io::Error::new(kind, "deadline failed")),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn error_response_writer(
+        deadline_error: Option<std::io::ErrorKind>,
+        write_error: Option<std::io::ErrorKind>,
+        flush_error: Option<std::io::ErrorKind>,
+    ) -> EstablishedResponseWriter<ResponseDeadlineTestClock, ErrorResponseConnection> {
+        EstablishedResponseWriter::new(
+            ResponseDeadlineTestClock(Arc::new(AtomicU64::new(0))),
+            ErrorResponseConnection {
+                arm_failure: deadline_error,
+                write_fault: write_error,
+                flush_error,
+            },
+            100,
+        )
+    }
+
+    fn response_deadline_writer(
+        budget_ms: u64,
+        max_write: usize,
+        advance_ms: u64,
+    ) -> (
+        EstablishedResponseWriter<ResponseDeadlineTestClock, PartialResponseConnection>,
+        Arc<Mutex<ResponseWriteObservation>>,
+    ) {
+        let clock = Arc::new(AtomicU64::new(0));
+        let observation = Arc::new(Mutex::new(ResponseWriteObservation::default()));
+        (
+            EstablishedResponseWriter::new(
+                ResponseDeadlineTestClock(Arc::clone(&clock)),
+                PartialResponseConnection {
+                    clock,
+                    observation: Arc::clone(&observation),
+                    max_write,
+                    advance_ms,
+                },
+                budget_ms,
+            ),
+            observation,
+        )
+    }
+
     #[test]
-    fn connection_cleanup_worker_drains_disconnects_in_order_before_shutdown() {
+    fn established_response_partial_writes_share_one_absolute_frame_deadline() {
+        let (mut writer, observation) = response_deadline_writer(100, 2, 20);
+        let frame = [0, 0, 0, 4, b't', b'e', b's', b't'];
+
+        writer.write_all(&frame).unwrap();
+        writer.write_all(&frame).unwrap();
+
+        let observation = observation.lock().unwrap();
+        assert_eq!(observation.bytes, [frame, frame].concat());
+        assert_eq!(
+            observation.deadlines,
+            [100, 80, 60, 40, 100, 80, 60, 40].map(Duration::from_millis)
+        );
+    }
+
+    #[test]
+    fn established_response_deadline_expires_despite_partial_progress() {
+        let (mut writer, observation) = response_deadline_writer(100, 2, 100);
+        let frame = [0, 0, 0, 4, b't', b'e', b's', b't'];
+
+        let error = writer.write_all(&frame).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let observation = observation.lock().unwrap();
+        assert_eq!(observation.bytes, frame[..2]);
+        assert_eq!(observation.deadlines, [Duration::from_millis(100)]);
+    }
+
+    #[test]
+    fn established_response_writer_covers_frame_and_transport_boundaries() {
+        let mut progress = ResponseFrameProgress::default();
+        progress.observe(&[0, 0, 0, 0, 0, 0, 0, 1, b'x']);
+        assert!(progress.at_frame_start());
+
+        let (mut writer, observation) = response_deadline_writer(100, 2, 0);
+        assert_eq!(writer.write(&[]).unwrap(), 0);
+        writer.flush().unwrap();
+        assert!(observation.lock().unwrap().deadlines.is_empty());
+        assert_eq!(writer.write(&[0]).unwrap(), 1);
+        writer.flush().unwrap();
+        assert_eq!(
+            observation.lock().unwrap().deadlines,
+            [Duration::from_millis(100), Duration::from_millis(100)]
+        );
+
+        let mut blocked = error_response_writer(None, Some(std::io::ErrorKind::WouldBlock), None);
+        assert_eq!(
+            blocked.write(&[0]).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        let mut broken = error_response_writer(None, Some(std::io::ErrorKind::BrokenPipe), None);
+        assert_eq!(
+            broken.write(&[0]).unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        let mut unarmable =
+            error_response_writer(Some(std::io::ErrorKind::PermissionDenied), None, None);
+        assert_eq!(
+            unarmable.write(&[0]).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let mut blocked_flush =
+            error_response_writer(None, None, Some(std::io::ErrorKind::WouldBlock));
+        assert_eq!(
+            blocked_flush.flush().unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        let mut broken_flush =
+            error_response_writer(None, None, Some(std::io::ErrorKind::BrokenPipe));
+        assert_eq!(
+            broken_flush.flush().unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn census_fence_tracks_every_admitted_connection_until_disconnect() {
+        use usagi_daemon::presentation::ipc::ConnectionFence as _;
+
+        let (cleanup, inbox) = connection_cleanup_channel();
+        let connection = ConnectionId::new();
+        let fence = CensusConnectionFence {
+            inner: &usagi_daemon::presentation::ipc::UnfencedConnection,
+            cleanup: cleanup.clone(),
+            peer_pid: 41,
+        };
+
+        fence.admitted(connection, &fence_client_hello(Vec::new()));
+        assert_eq!(
+            inbox.live(),
+            (BTreeSet::from([connection]), BTreeSet::from([41]))
+        );
+        assert!(fence.admit(&serde_json::Value::Null).unwrap().is_none());
+        fence.disconnected(connection);
+        assert_eq!(inbox.live(), (BTreeSet::new(), BTreeSet::new()));
+
+        // A repeated disconnect is a no-op, and a dead cleanup worker never
+        // turns disconnection into a producer failure or a wait.
+        fence.disconnected(connection);
+        drop(inbox);
+        let after_worker = ConnectionId::new();
+        cleanup.connected(after_worker, 42);
+        cleanup.disconnected(after_worker);
+    }
+
+    #[test]
+    fn connection_cleanup_worker_converges_to_the_final_live_census() {
         let (disconnected, disconnects) = connection_cleanup_channel();
         let cleaned = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&cleaned);
-        let worker = start_connection_cleanup_worker_with(disconnects, move |batch| {
-            observed
-                .lock()
-                .unwrap()
-                .extend(batch.iter().map(|cleanup| cleanup.connection));
-        })
-        .unwrap();
         let first = ConnectionId::new();
         let second = ConnectionId::new();
 
-        disconnected
-            .send(ConnectionCleanup {
-                connection: first,
-                mcp_child_pid: 41,
-            })
-            .unwrap();
-        disconnected
-            .send(ConnectionCleanup {
-                connection: second,
-                mcp_child_pid: 42,
-            })
-            .unwrap();
+        disconnected.connected(first, 41);
+        disconnected.connected(second, 42);
+        disconnected.disconnected(first);
+        disconnected.disconnected(second);
         drop(disconnected);
+        let worker = start_connection_cleanup_worker_with(disconnects, move |inbox| {
+            observed.lock().unwrap().push(inbox.live());
+        })
+        .unwrap();
         worker.join().unwrap();
 
-        assert_eq!(*cleaned.lock().unwrap(), vec![first, second]);
+        assert_eq!(
+            *cleaned.lock().unwrap(),
+            vec![(BTreeSet::new(), BTreeSet::new())]
+        );
     }
 
     #[test]
@@ -25623,24 +26130,18 @@ instructions = "{instructions}"
             }
         })
         .unwrap();
-        disconnected
-            .send(ConnectionCleanup {
-                connection: ConnectionId::new(),
-                mcp_child_pid: 40,
-            })
-            .unwrap();
+        let initial = ConnectionId::new();
+        disconnected.connected(initial, 40);
+        disconnected.disconnected(initial);
         observed_entry.recv_timeout(Duration::from_secs(1)).unwrap();
 
         let producer = disconnected.clone();
         let (completion_notice, submission_complete) = mpsc::channel();
         let producer_worker = std::thread::spawn(move || {
             for _ in 0..=client_connection_limit() {
-                producer
-                    .send(ConnectionCleanup {
-                        connection: ConnectionId::new(),
-                        mcp_child_pid: 40,
-                    })
-                    .unwrap();
+                let connection = ConnectionId::new();
+                producer.connected(connection, 40);
+                producer.disconnected(connection);
             }
             completion_notice.send(()).unwrap();
         });
