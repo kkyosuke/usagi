@@ -747,7 +747,7 @@ fn key_to_terminal_bytes_for_mode(key: Key, bracketed_paste: bool) -> Option<Vec
         Key::Quit => vec![3],
         Key::CtrlQ => vec![17],
         Key::CtrlD => vec![4],
-        Key::CtrlX => vec![24],
+        Key::CtrlX | Key::CtrlShiftX => vec![24],
         // Contextual help is presentation-owned and must never reach a PTY.
         Key::Help => return None,
         Key::Live(_)
@@ -3715,6 +3715,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Tab
         | Key::CtrlD
         | Key::CtrlX
+        | Key::CtrlShiftX
         | Key::Help
         | Key::Live(_)
         | Key::Click { .. }
@@ -3823,6 +3824,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         },
         Key::CtrlD
         | Key::CtrlX
+        | Key::CtrlShiftX
         | Key::Help
         | Key::PageUp
         | Key::PageDown
@@ -3998,6 +4000,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         | Key::Management { .. }
         | Key::TerminalCopy { .. }
         | Key::CtrlD
+        | Key::CtrlShiftX
         | Key::Help
         | Key::PageUp
         | Key::PageDown
@@ -4440,6 +4443,7 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
         Key::CtrlX => AppKey::CtrlX,
+        Key::CtrlShiftX => AppKey::CtrlShiftX,
         Key::Help => return None,
         Key::TerminalCopy { fallback } => {
             return {
@@ -6899,6 +6903,7 @@ fn drain_controller_host_actions(
                             name,
                             force: request.force,
                             force_delete_branch: request.force_delete_branch,
+                            purge_orphan: request.purge_orphan,
                         },
                         SessionBackendCompletion::Remove {
                             session: request.session,
@@ -11141,6 +11146,10 @@ mod tests {
             Some(AppEvent::Key(AppKey::CtrlX))
         );
         assert_eq!(
+            app_event_from_key(Key::CtrlShiftX),
+            Some(AppEvent::Key(AppKey::CtrlShiftX))
+        );
+        assert_eq!(
             app_event_from_key(Key::Management {
                 action: AppKey::SaveRoles,
                 passthrough: vec![0x13],
@@ -12301,6 +12310,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One host fixture verifies the complete routing matrix.
     fn backend_host_and_explicit_error_adapters_cover_the_full_route_matrix() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -12334,6 +12344,7 @@ mod tests {
                 session,
                 force: true,
                 force_delete_branch: false,
+                purge_orphan: false,
             },
             Effect::SleepSession { workspace, session },
             Effect::LaunchAgent {
@@ -12473,6 +12484,7 @@ mod tests {
                 session: SessionId::new(),
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             },
             Effect::LaunchAgent {
                 workspace,
@@ -12566,6 +12578,7 @@ mod tests {
             session,
             force: true,
             force_delete_branch: false,
+            purge_orphan: false,
         });
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -17438,6 +17451,7 @@ mod tests {
                     session,
                     force: false,
                     force_delete_branch: false,
+                    purge_orphan: false,
                 },
                 completions,
             ),
@@ -30570,6 +30584,7 @@ mod tests {
         assert_eq!(key_to_terminal_bytes(Key::CtrlQ), Some(vec![17]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlD), Some(vec![4]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlX), Some(vec![24]));
+        assert_eq!(key_to_terminal_bytes(Key::CtrlShiftX), Some(vec![24]));
         assert_eq!(key_to_terminal_bytes(Key::Help), None);
         assert_eq!(key_to_terminal_bytes(Key::Other), None);
         assert_eq!(

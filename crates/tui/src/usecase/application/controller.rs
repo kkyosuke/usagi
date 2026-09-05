@@ -2060,6 +2060,8 @@ pub enum AppKey {
     CtrlQ,
     /// Remove or dismiss the selected object from a management surface.
     CtrlX,
+    /// Explicitly purge the selected integrity-orphan session.
+    CtrlShiftX,
     /// Open the detach confirmation from a reserved live-pane action.
     OpenQuitConfirmation,
     /// Toggle the frontmost Director mode drawer. Opening is ignored while an
@@ -2152,6 +2154,16 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         return None;
     }
     match key.code {
+        KeyCode::Char('x' | 'X')
+            if key.modifiers.control
+                && key.modifiers.shift
+                && !key.modifiers.alt
+                && !key.modifiers.super_
+                && !key.modifiers.hyper
+                && !key.modifiers.meta =>
+        {
+            Some(AppKey::CtrlShiftX)
+        }
         KeyCode::Char('s')
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
@@ -2599,6 +2611,9 @@ pub enum Effect {
         force: bool,
         /// Whether the confirmed recovery may discard an unmerged session branch.
         force_delete_branch: bool,
+        /// Whether the exact target is a diagnosed integrity orphan whose
+        /// unregistered files and unmerged commits may be discarded.
+        purge_orphan: bool,
     },
     /// Open a workspace and request the Home snapshot for this exact incarnation.
     ///
@@ -4441,6 +4456,7 @@ fn commit_force_remove(state: &mut AppState, confirmed: bool) -> Vec<Effect> {
         session,
         force: true,
         force_delete_branch: true,
+        purge_orphan: false,
     }]
 }
 
@@ -4534,6 +4550,7 @@ fn begin_next_cleanup(state: &mut AppState, continuing: bool) -> Vec<Effect> {
         session,
         force: false,
         force_delete_branch: false,
+        purge_orphan: false,
     }]
 }
 
@@ -5080,6 +5097,11 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         {
             remove_selected_session(state, false)
         }
+        AppKey::CtrlShiftX
+            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
+        {
+            purge_selected_orphan(state)
+        }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::OpenPrs => open_prs(state),
@@ -5105,6 +5127,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::CtrlN
         | AppKey::CtrlP
         | AppKey::CtrlX
+        | AppKey::CtrlShiftX
         | AppKey::Escape
         | AppKey::Tab
         | AppKey::Left
@@ -5207,6 +5230,7 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::CtrlC
         | AppKey::CtrlQ
         | AppKey::CtrlX
+        | AppKey::CtrlShiftX
         | AppKey::OpenQuitConfirmation
         | AppKey::OpenOverview
         | AppKey::OpenDirectorOrganization
@@ -5261,6 +5285,33 @@ fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
         session,
         force,
         force_delete_branch: force,
+        purge_orphan: false,
+    }]
+}
+
+/// Purge only the exact selected integrity-orphan row. The dedicated chord is
+/// the destructive acknowledgement; ordinary failed/delete and available rows
+/// keep their existing safe/confirmed removal paths.
+fn purge_selected_orphan(state: &AppState) -> Vec<Effect> {
+    let Selection::Target(Target::Session(session)) = state.selected else {
+        return Vec::new();
+    };
+    let integrity_orphan = state
+        .session_lifecycles
+        .get(&session)
+        .is_some_and(|projection| {
+            projection.lifecycle == SessionLifecycle::Failed
+                && projection.failure_stage == Some(FailureStage::Integrity)
+        });
+    if !state.sessions.contains(&session) || !integrity_orphan {
+        return Vec::new();
+    }
+    vec![Effect::RemoveSession {
+        workspace: state.workspace,
+        session,
+        force: true,
+        force_delete_branch: true,
+        purge_orphan: true,
     }]
 }
 
@@ -5911,6 +5962,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                     session: active_session,
                     force,
                     force_delete_branch: force,
+                    purge_orphan: false,
                 })
             } else {
                 state.notice = Some(Notice::new("invalid close arguments"));
@@ -6962,6 +7014,20 @@ mod tests {
         for code in [KeyCode::Char('\u{18}'), KeyCode::Char('x')] {
             assert_eq!(classify_management_input(ctrl_a(code)), Some(AppKey::CtrlX));
         }
+        assert_eq!(
+            classify_management_input(LiveInput::Key(
+                crate::usecase::terminal_input::KeyEvent::new(
+                    KeyCode::Char('X'),
+                    crate::usecase::terminal_input::Modifiers {
+                        control: true,
+                        shift: true,
+                        ..crate::usecase::terminal_input::Modifiers::default()
+                    },
+                    KeyEventKind::Press,
+                )
+            )),
+            Some(AppKey::CtrlShiftX)
+        );
     }
 
     #[test]
@@ -9195,6 +9261,7 @@ mod tests {
                 session: first,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
@@ -9210,9 +9277,58 @@ mod tests {
                 session: second,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+    }
+
+    #[test]
+    fn switch_ctrl_shift_x_purges_only_the_selected_integrity_orphan() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "an available session must not become a purge target"
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Delete),
+                    failure_summary: Some("remove failed".to_owned()),
+                },
+            )]))),
+        );
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "an ordinary delete failure keeps its confirmation path"
+        );
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Integrity),
+                    failure_summary: Some("orphan session".to_owned()),
+                },
+            )]))),
+        );
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+                force_delete_branch: true,
+                purge_orphan: true,
+            }]
+        );
     }
 
     #[test]
@@ -9300,6 +9416,7 @@ mod tests {
                 session,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
     }
@@ -9332,6 +9449,7 @@ mod tests {
                 session,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.overlay(), None);
@@ -9395,6 +9513,7 @@ mod tests {
                 session,
                 force: true,
                 force_delete_branch: true,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.overlay(), None);
@@ -9836,6 +9955,7 @@ mod tests {
                 session,
                 force: true,
                 force_delete_branch: true,
+                purge_orphan: false,
             }]
         );
 
@@ -11558,6 +11678,7 @@ mod tests {
                 session: first,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.cleanup_queue().unwrap().in_flight(), Some(first));
@@ -11576,6 +11697,7 @@ mod tests {
                     session: second,
                     force: false,
                     force_delete_branch: false,
+                    purge_orphan: false,
                 },
             ]
         );
