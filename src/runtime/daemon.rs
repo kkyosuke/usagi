@@ -20488,10 +20488,8 @@ mod tests {
 
         let codex = codex_integration_arguments(command).unwrap();
         assert_eq!(
-            &codex[..14],
+            &codex[..12],
             [
-                "-c",
-                "mcp_optional_startup_grace_ms = 0",
                 "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
                 "-c",
@@ -20506,7 +20504,7 @@ mod tests {
                 "features.hooks = true",
             ]
         );
-        assert_eq!(codex.len(), 26);
+        assert_eq!(codex.len(), 24);
         for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
             if matches!(event, "Notification" | "PermissionRequest") {
                 assert!(

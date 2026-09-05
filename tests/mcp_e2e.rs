@@ -1497,12 +1497,8 @@ fn production_user_decision_round_trip_reaches_the_original_caller() {
 if [ "$1 $2" = "login status" ]; then exit 0; fi
 credential_excluded=false
 approval_disabled=false
-full_startup_wait=false
 usagi_required=false
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-c" ] && [ "$2" = 'mcp_optional_startup_grace_ms = 0' ]; then
-    full_startup_wait=true
-  fi
   if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]' ]; then
     credential_excluded=true
   fi
@@ -1514,8 +1510,8 @@ while [ "$#" -gt 0 ]; do
   fi
   shift
 done
-if [ "$credential_excluded" != true ] || [ "$approval_disabled" != true ] || [ "$full_startup_wait" != true ] || [ "$usagi_required" != true ]; then
-  printf 'unsafe, optional, interrupted, or interactive Codex MCP configuration\n' >> "$USAGI_MCP_FIXTURE_LOG"
+if [ "$credential_excluded" != true ] || [ "$approval_disabled" != true ] || [ "$usagi_required" != true ]; then
+  printf 'unsafe, optional, or interactive Codex MCP configuration\n' >> "$USAGI_MCP_FIXTURE_LOG"
   exit 1
 fi
 {{

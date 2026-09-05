@@ -87,11 +87,6 @@ pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
     }
 
     let mut arguments = Vec::new();
-    // Managed Agents must start with the complete tool catalog. Codex otherwise
-    // gives all optional MCP servers one shared one-second grace period; a slow
-    // sibling such as codex_apps can consume it before this local server is
-    // initialized. Zero restores each server's own startup timeout.
-    arguments.extend(assignment("mcp_optional_startup_grace_ms", "0"));
     arguments.extend(assignment(
         "mcp_servers.usagi.command",
         &string(usagi_command),
@@ -349,8 +344,6 @@ mod wiring_tests {
             arguments,
             [
                 "-c",
-                "mcp_optional_startup_grace_ms = 0",
-                "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi\"",
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
@@ -376,7 +369,7 @@ mod wiring_tests {
             5
         );
         assert_eq!(
-            arguments[3],
+            arguments[1],
             r#"mcp_servers.usagi.command = "/opt/\"usagi""#
         );
     }
