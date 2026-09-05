@@ -1138,7 +1138,7 @@ dirty、未統合、detached、`usagi/` 外 branch、診断不能、linked workt
 通常の `force` では保護を解除しない。利用者は変更を commit/stash し、branch を PR で基点へ統合してから再実行する。
 内容を破棄すると確認できた integrity orphan だけは、CLI の
 `usagi session remove <name> --force --purge-orphan`、MCP `session_remove` の
-`force: true, purge_orphan: true`、または TUI で exact integrity row を選択して `Ctrl-Shift-X` を押すことで
+`force: true, purge_orphan: true`、または TUI で exact integrity row を選択して `Ctrl-X` を押すことで
 exact session target を回収できる。
 `purge_orphan` は integrity failure 以外へ指定できず、`force` との対が必須である。effect 直前の canonical
 path confinement は通常 remove と同じく再検証し、session container 外や保護 root を削除対象にしない。

@@ -277,9 +277,6 @@ pub enum GlobalControlChord {
     CtrlD,
     /// Remove or dismiss the selected management object (`Ctrl-X`).
     CtrlX,
-    /// Explicitly purge the selected integrity-orphan session
-    /// (`Ctrl-Shift-X`) when the terminal preserves the Shift modifier.
-    CtrlShiftX,
     /// Open contextual keyboard help (`Ctrl-?` / `Ctrl-/`).
     Help,
 }
@@ -444,7 +441,7 @@ fn global_control_key(key: &KeyEvent) -> Option<GlobalControlChord> {
         KeyCode::Char('q') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlQ),
         KeyCode::Char('d') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlD),
         KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => {
-            Some(GlobalControlChord::CtrlShiftX)
+            Some(GlobalControlChord::CtrlX)
         }
         KeyCode::Char('x') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlX),
         KeyCode::Char('/' | '7') if is_only_control(key.modifiers) => {
@@ -1658,7 +1655,7 @@ mod tests {
             (key(KeyCode::Char('\u{4}')), GlobalControlChord::CtrlD),
             (LiveInput::Raw(vec![4]), GlobalControlChord::CtrlD),
             (ctrl('x'), GlobalControlChord::CtrlX),
-            (ctrl_shift('X'), GlobalControlChord::CtrlShiftX),
+            (ctrl_shift('X'), GlobalControlChord::CtrlX),
             (key(KeyCode::Char('\u{18}')), GlobalControlChord::CtrlX),
             (LiveInput::Raw(vec![24]), GlobalControlChord::CtrlX),
             (ctrl('/'), GlobalControlChord::Help),
