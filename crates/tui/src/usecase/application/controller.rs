@@ -9286,6 +9286,12 @@ mod tests {
     #[test]
     fn switch_ctrl_shift_x_purges_only_the_selected_integrity_orphan() {
         let (workspace, session, _) = ids();
+        let mut empty_state = AppState::home(workspace, Vec::new());
+        assert!(
+            update(&mut empty_state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "a non-session selection must not become a purge target"
+        );
+
         let mut state = AppState::home(workspace, vec![session]);
 
         assert!(
@@ -9328,6 +9334,26 @@ mod tests {
                 force_delete_branch: true,
                 purge_orphan: true,
             }]
+        );
+
+        state.sessions.clear();
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "a stale selected identity must not become a purge target"
+        );
+
+        state.sessions.push(session);
+        state.session_lifecycles.insert(
+            session,
+            SessionLifecycleProjection {
+                lifecycle: SessionLifecycle::Available,
+                failure_stage: Some(FailureStage::Integrity),
+                failure_summary: Some("incoherent projection".to_owned()),
+            },
+        );
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "an integrity stage without the failed lifecycle must fail closed"
         );
     }
 
