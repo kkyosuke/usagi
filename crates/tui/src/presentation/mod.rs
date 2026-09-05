@@ -14782,7 +14782,7 @@ mod tests {
     #[test]
     fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
         // Once a create request is in flight, the shell threads its name here and
-        // the sidebar draws a two-line loading skeleton just above `+ new
+        // the sidebar draws a three-line loading skeleton just above `+ new
         // session` (document/03-tui.md). The sweep paints each cell with its own
         // SGR run, so compare on ANSI-stripped text.
         let strip = |frame: &[String]| {
