@@ -254,7 +254,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | [Terminal PTYs](document/05-daemon.md#capacity-pool) | generic Terminal の同時 PTY 数に対する最後の安全上限。画面メモリは保持中の実セル数で別に制御する |
 | Agent | 新しい Agent pane の既定 CLI |
 | Base branch | workspace で新しい session を作るときの既定 branch |
-| Workflow | 択一の `< classic >`（既定）または `< goal-driven >`。前者は New Conversation、後者は Start Work Run を開き、Goal Composer で目的を一度入力して review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す |
+| Workflow | 択一の `< classic >`（既定）または `< goal-driven >`。前者は New Conversation、後者は Start Work Run を開き、Goal Composer で目的を一度入力して review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す。Work Run の委譲先は root と同じ provider/runtime を使い、task に必要十分な model を選ぶ |
 | [Team](document/10-session-roles.md#catalog) | Enterで構造図付きカードを開き、`none` / `hierarchical`（階層型）/ `flat`（フラット）/ `pipeline`（パイプライン）から session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |

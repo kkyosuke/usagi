@@ -2202,6 +2202,10 @@ pub enum AppKey {
     Up,
     /// cursor を次の row へ動かす。
     Down,
+    /// Select the previous usable managed session. Closeup also activates it.
+    PreviousSession,
+    /// Select the next usable managed session. Closeup also activates it.
+    NextSession,
     /// Move the focus left within a horizontal choice (the Yes/No confirmation).
     /// Outside such an overlay it is inert.
     Left,
@@ -5401,6 +5405,52 @@ fn paste_decision_freeform(editor: &mut DecisionEditor, text: &str) {
     follow_decision_freeform(editor);
 }
 
+/// Move between usable managed sessions without exposing the synthetic create
+/// row or a failed/deleting checkout as a navigation destination. Switch keeps
+/// its cursor semantics; Closeup updates the active target and remains Closeup.
+fn navigate_session(state: &mut AppState, direction: TabDirection) -> Vec<Effect> {
+    if state.overlay.is_some() || state.workspace_drawer_open() {
+        return Vec::new();
+    }
+    let anchor = if matches!(state.route, Route::Home(HomeMode::Closeup)) {
+        state.active
+    } else {
+        match state.selected {
+            Selection::Target(Target::Session(session)) => Some(session),
+            Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => {
+                state.active
+            }
+        }
+    };
+    let candidates = state
+        .sessions
+        .iter()
+        .copied()
+        .filter(|session| state.session_can_use(*session))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let current = anchor.and_then(|session| {
+        candidates
+            .iter()
+            .position(|candidate| *candidate == session)
+    });
+    let index = match (current, direction) {
+        (Some(index), TabDirection::Next) => (index + 1) % candidates.len(),
+        (Some(index), TabDirection::Previous) => (index + candidates.len() - 1) % candidates.len(),
+        (None, TabDirection::Next) => 0,
+        (None, TabDirection::Previous) => candidates.len() - 1,
+    };
+    let session = candidates[index];
+    state.selected = Selection::Target(Target::Session(session));
+    if matches!(state.route, Route::Home(HomeMode::Closeup)) {
+        state.active = Some(session);
+        state.closeup_action_forced = false;
+    }
+    Vec::new()
+}
+
 /// Open the pending-decision list and ask its owner for a fresh snapshot.
 fn open_decisions(state: &mut AppState) -> Vec<Effect> {
     state.unread_decisions.clear();
@@ -5426,6 +5476,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             state.move_selection(1);
             Vec::new()
         }
+        AppKey::PreviousSession => navigate_session(state, TabDirection::Previous),
+        AppKey::NextSession => navigate_session(state, TabDirection::Next),
         AppKey::OpenOverview | AppKey::Char(':') => {
             state.overlay = Some(Overlay::Overview);
             Vec::new()
@@ -5613,6 +5665,8 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         // mutations remain inert while the drawer is frontmost.
         AppKey::CtrlN
         | AppKey::CtrlP
+        | AppKey::PreviousSession
+        | AppKey::NextSession
         | AppKey::Escape
         | AppKey::Tab
         | AppKey::Left
@@ -9450,6 +9504,95 @@ mod tests {
         assert_eq!(state.active(), Some(first));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         assert_eq!(state.active(), Some(second));
+    }
+
+    #[test]
+    fn session_navigation_cycles_usable_rows_and_keeps_closeup_active() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let failed = SessionId::new();
+        let third = SessionId::new();
+        let mut state = AppState::home(workspace, vec![first, failed, third]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([
+                (first, lifecycle(SessionLifecycle::Available)),
+                (failed, lifecycle(SessionLifecycle::Failed)),
+                (third, lifecycle(SessionLifecycle::Available)),
+            ]))),
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        let _ = update(&mut state, AppEvent::Key(AppKey::NextSession));
+        assert_eq!(state.selected(), Selection::Target(Target::Session(third)));
+        assert_eq!(state.active(), Some(third));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::NextSession));
+        assert_eq!(
+            state.active(),
+            Some(first),
+            "next wraps past the failed row"
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::PreviousSession));
+        assert_eq!(state.active(), Some(third), "previous wraps the other way");
+    }
+
+    #[test]
+    fn session_navigation_moves_only_the_switch_cursor_and_yields_to_overlays() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::NextSession));
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+        assert_eq!(state.active(), Some(first));
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
+        let before = (state.selected(), state.active(), state.route());
+        let _ = update(&mut state, AppEvent::Key(AppKey::PreviousSession));
+        assert_eq!((state.selected(), state.active(), state.route()), before);
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+
+        let mut closeup_actions = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut closeup_actions, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut closeup_actions, AppEvent::Key(AppKey::Enter));
+        assert_eq!(closeup_actions.overlay(), Some(Overlay::Closeup));
+        let before = (
+            closeup_actions.selected(),
+            closeup_actions.active(),
+            closeup_actions.route(),
+        );
+        let _ = update(&mut closeup_actions, AppEvent::Key(AppKey::NextSession));
+        assert_eq!(
+            (
+                closeup_actions.selected(),
+                closeup_actions.active(),
+                closeup_actions.route(),
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn session_navigation_uses_directional_edges_without_an_anchor() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        state.selected = Selection::NewSession;
+        state.active = None;
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::NextSession));
+        assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
+
+        state.selected = Selection::NewSession;
+        state.active = None;
+        let _ = update(&mut state, AppEvent::Key(AppKey::PreviousSession));
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+
+        let mut empty = AppState::home(workspace, Vec::new());
+        let before = (empty.selected(), empty.active(), empty.route());
+        assert!(update(&mut empty, AppEvent::Key(AppKey::NextSession)).is_empty());
+        assert_eq!((empty.selected(), empty.active(), empty.route()), before);
     }
 
     #[test]

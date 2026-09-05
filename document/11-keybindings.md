@@ -25,6 +25,7 @@ record から生成する。CI は catalog の key/action 組と本書の worksp
 |---|---|
 | ヘルプ | `Ctrl-?`（portable alias: `Ctrl-/`）は全画面、plain `?` は前面に入力modal / drawerがないworkspace、`Ctrl-O ?` はlive paneで、現在の最前面surfaceに有効なキーだけを表示する |
 | workspace 共通操作 | `Ctrl-O` を leader とする 2 打鍵へ集約し、2 打目は 1 action だけを持つ |
+| session / project 移動 | `Ctrl+Option+↑/↓` は前 / 次の session、`Ctrl+Option+←/→` は前 / 次の project とし、Closeup の live terminal より先に解決する |
 | tab | `[` / `]` は前 / 次の選択、`{` / `}` は前 / 次への並べ替えとする |
 | 対象の除去 | `Ctrl-X` は選択中の対象を安全に remove / detach / dismiss する。plain `x` / `X` に副作用を割り当てない |
 | tab の終了 | `Ctrl-O x` は現在の pane tab を閉じる。`x` の「現在対象を閉じる」という意味を維持し、session remove とは入力 scope を分ける |
@@ -49,6 +50,17 @@ record から生成する。CI は catalog の key/action 組と本書の worksp
 表示を更新する。
 
 ## workspace 共通コマンド
+
+`Ctrl+Option+矢印` は前面に modal / drawer がない Switch と Closeup で動作する。`↑/↓` は利用可能な
+managed session だけを循環し、Switch では cursor を、Closeup では active session を移動して移動先の Closeup に留まる。
+`←/→` は open project を循環し、Closeup から移動した場合は移動先 project の記憶済み（なければ先頭の利用可能な）
+session の Closeup に留まる。terminal が Control と Option（Alt）の修飾を区別して報告できない場合は予約せず、
+通常の terminal 入力として扱う。
+
+| 入力 | action | 動作 |
+|---|---|---|
+| `Ctrl+Option+↑` / `Ctrl+Option+↓` | PreviousSession / NextSession | 前 / 次の session |
+| `Ctrl+Option+←` / `Ctrl+Option+→` | PreviousWorkspace / NextWorkspace | 前 / 次の project |
 
 `Ctrl-O` の次の入力は 1 秒以内に行う。workspace の route・modal・drawer・pane の有無にかかわらず、
 2打目はすべて `Ctrl` の有無を同一視するため、たとえば
