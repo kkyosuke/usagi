@@ -10,7 +10,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -55,7 +55,7 @@ use usagi_core::infrastructure::workspace_state;
 use usagi_core::usecase::claude_sandbox::{self, SandboxMode};
 use usagi_core::usecase::client::{
     ClientError, ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient,
-    MonotonicClock, PolicyClient,
+    MonotonicClock, PolicyClient, TerminalLaneBudget,
 };
 use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::child_identity::UnixChildProbe;
@@ -2562,7 +2562,8 @@ impl DecisionWaker for DeferredDecisionWaker {
 /// safe unavailable error rather than a client-side fallback.
 struct SharedAgent {
     runtime: SharedAgentRuntime,
-    disconnected: SyncSender<ConnectionId>,
+    disconnected: Sender<ConnectionCleanup>,
+    mcp_child_pid: u32,
 }
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 impl AgentTerminalActor for SharedAgent {
@@ -2612,7 +2613,10 @@ impl AgentTerminalActor for SharedAgent {
         // output/input, so serialize it on the daemon-owned cleanup worker
         // instead of leaving one blocked worker (and three socket descriptors)
         // behind for every short-lived client.
-        let _ = self.disconnected.send(connection);
+        let _ = self.disconnected.send(ConnectionCleanup {
+            connection,
+            mcp_child_pid: self.mcp_child_pid,
+        });
     }
 }
 
@@ -3204,6 +3208,10 @@ const CLIENT_CONNECTION_LIMIT_CEILING: usize = 256;
 const CLIENT_CONNECTION_RESERVED_FDS: u64 = 128;
 /// Reader, writer, and retirement/shutdown descriptor retained per worker.
 const CLIENT_CONNECTION_FDS: u64 = 3;
+/// The smallest soft descriptor allowance that admits the bounded maximum of
+/// established client workers while retaining the daemon's internal reserve.
+const CLIENT_NOFILE_TARGET: u64 =
+    CLIENT_CONNECTION_RESERVED_FDS + CLIENT_CONNECTION_FDS * CLIENT_CONNECTION_LIMIT_CEILING as u64;
 
 /// How often the decision maintenance worker makes due expiries durable and
 /// drains the resolved-decision outbox.
@@ -3371,34 +3379,64 @@ impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
 /// worker retains the accepted reader, writer, and retirement descriptor until
 /// the mutex is acquired. One daemon-owned consumer bounds the contention and
 /// lets the connection worker close all three descriptors immediately.
+#[derive(Clone, Copy)]
+struct ConnectionCleanup {
+    connection: ConnectionId,
+    mcp_child_pid: u32,
+}
+
+/// Cleanup is intentionally a non-blocking producer path. A bounded channel
+/// cannot bound pending historical disconnects by the live-client limit: worker
+/// slots are reused while the cleanup consumer waits for an owner lock. Making
+/// those workers wait would retain their socket triplets and exhaust the live
+/// connection limit before the consumer can recover.
+fn connection_cleanup_channel() -> (Sender<ConnectionCleanup>, Receiver<ConnectionCleanup>) {
+    mpsc::channel()
+}
+
+const CONNECTION_CLEANUP_BATCH_ITEMS: usize = CLIENT_CONNECTION_LIMIT_CEILING;
+
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=drawer_close_reopen_continues_input_on_the_same_daemon_connection
 fn start_connection_cleanup_worker(
     agent: SharedAgentRuntime,
     terminal: SharedTerminalRuntime,
-    disconnected: Receiver<ConnectionId>,
+    disconnected: Receiver<ConnectionCleanup>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    start_connection_cleanup_worker_with(disconnected, move |connection| {
+    start_connection_cleanup_worker_with(disconnected, move |batch| {
         if let Ok(mut agent) = agent.lock() {
-            AgentTerminalActor::disconnect(&mut *agent, connection);
+            for cleanup in batch {
+                AgentTerminalActor::disconnect(&mut *agent, cleanup.connection);
+                agent.release_mcp_child(cleanup.mcp_child_pid);
+            }
         }
         if let Ok(mut terminal) = terminal.lock() {
-            usagi_daemon::usecase::terminal_owner::TerminalOwner::disconnect(
-                &mut *terminal,
-                connection,
-            );
+            for cleanup in batch {
+                usagi_daemon::usecase::terminal_owner::TerminalOwner::disconnect(
+                    &mut *terminal,
+                    cleanup.connection,
+                );
+            }
         }
     })
 }
 
 fn start_connection_cleanup_worker_with(
-    disconnected: Receiver<ConnectionId>,
-    mut cleanup: impl FnMut(ConnectionId) + Send + 'static,
+    disconnected: Receiver<ConnectionCleanup>,
+    mut cleanup: impl FnMut(&[ConnectionCleanup]) + Send + 'static,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("usagi-connection-cleanup".to_string())
         .spawn(move || {
-            while let Ok(connection) = disconnected.recv() {
-                cleanup(connection);
+            while let Ok(first) = disconnected.recv() {
+                let mut batch = Vec::with_capacity(CONNECTION_CLEANUP_BATCH_ITEMS);
+                batch.push(first);
+                while batch.len() < CONNECTION_CLEANUP_BATCH_ITEMS {
+                    match disconnected.try_recv() {
+                        Ok(next) => batch.push(next),
+                        Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+                cleanup(&batch);
             }
         })
 }
@@ -3652,7 +3690,7 @@ fn spawn_ipc_server(
     // Socket workers only enqueue connection-local ledger cleanup. The single
     // consumer prevents a disconnect storm from retaining one accepted socket
     // triplet per worker while all of them contend on the terminal owners.
-    let (disconnected, disconnects) = mpsc::sync_channel(client_connection_limit());
+    let (disconnected, disconnects) = connection_cleanup_channel();
     let connection_cleanup =
         start_connection_cleanup_worker(Arc::clone(&agent), Arc::clone(&terminal), disconnects)?;
     background_workers.push(start_pr_projection_worker(
@@ -3843,6 +3881,28 @@ struct CapacityRefusalLog {
     reported: bool,
 }
 
+/// Coalesces an unchanged periodic failure until the lane succeeds or its
+/// diagnostic changes. A durable fault remains visible without growing the
+/// daily log once per scheduler tick.
+#[derive(Default)]
+struct FailureTransitionLog {
+    last: Option<String>,
+}
+
+impl FailureTransitionLog {
+    fn changed(&mut self, failure: Option<String>) -> Option<String> {
+        let Some(failure) = failure else {
+            self.last = None;
+            return None;
+        };
+        if self.last.as_deref() == Some(&failure) {
+            return None;
+        }
+        self.last = Some(failure.clone());
+        Some(failure)
+    }
+}
+
 impl CapacityRefusalLog {
     /// Report one transition into saturation, not every reconnect accepted and
     /// immediately refused while all established slots remain occupied.
@@ -3868,6 +3928,15 @@ fn client_connection_limit_from_nofile(soft_limit: u64) -> usize {
         .clamp(1, CLIENT_CONNECTION_LIMIT_CEILING)
 }
 
+fn preferred_client_nofile_soft_limit(soft_limit: u64, hard_limit: u64) -> u64 {
+    let available = if hard_limit == libc::RLIM_INFINITY {
+        CLIENT_NOFILE_TARGET
+    } else {
+        hard_limit
+    };
+    soft_limit.max(available.min(CLIENT_NOFILE_TARGET))
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 fn client_connection_limit() -> usize {
     let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
@@ -3877,7 +3946,19 @@ fn client_connection_limit() -> usize {
         return CLIENT_CONNECTION_LIMIT_FALLBACK;
     }
     // SAFETY: the successful `getrlimit` above initialized the value.
-    let limit = unsafe { limit.assume_init() };
+    let mut limit = unsafe { limit.assume_init() };
+    let preferred = preferred_client_nofile_soft_limit(limit.rlim_cur, limit.rlim_max);
+    if preferred > limit.rlim_cur {
+        let raised = libc::rlimit {
+            rlim_cur: preferred,
+            rlim_max: limit.rlim_max,
+        };
+        // SAFETY: `raised` is a valid rlimit value derived from the current
+        // hard bound. A refused raise leaves the observed soft limit in force.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const raised) } == 0 {
+            limit.rlim_cur = preferred;
+        }
+    }
     if limit.rlim_cur == libc::RLIM_INFINITY {
         CLIENT_CONNECTION_LIMIT_CEILING
     } else {
@@ -5111,7 +5192,7 @@ fn start_ipc_accept_loop(
     supervisor: SharedSupervisorRuntime,
     fence: Arc<GenerationFence>,
     workers: Arc<ClientWorkers>,
-    disconnected: SyncSender<ConnectionId>,
+    disconnected: Sender<ConnectionCleanup>,
     connection_cleanup: std::thread::JoinHandle<()>,
     mut background_workers: DaemonBackgroundWorkers,
     shutdown: Arc<ShutdownRequest>,
@@ -5171,15 +5252,24 @@ fn start_ipc_accept_loop(
                             drop(stream);
                             continue;
                         }
-                        let Ok(peer_process) = peer_pid(&stream).and_then(|pid| {
-                            let parent = parent_pid(pid)?;
-                            process_group(pid).map(|process_group| (pid, parent, process_group))
-                        }) else {
+                        let Ok(peer_pid) = peer_pid(&stream) else {
                             ErrorLog::record(
                                 "daemon connection refused: peer process identity unavailable",
                             );
                             continue;
                         };
+                        // Parent and process-group identity is authority only
+                        // for credential bootstrap and bearer-less hooks. An
+                        // ordinary same-UID client (including an orphaned
+                        // bootstrap broker reparented to PID 1) needs only its
+                        // kernel-authenticated peer PID to complete hello.
+                        let peer_process = (
+                            peer_pid,
+                            parent_pid(peer_pid).and_then(|parent| {
+                                process_group(peer_pid)
+                                    .map(|process_group| (parent, process_group))
+                            }).ok(),
+                        );
                         let Some(pre_handshake_permit) = pre_handshake.try_admit() else {
                             // No hello has been read, so sending a framed protocol
                             // error here would invent a new wire state. Closing the
@@ -5241,7 +5331,7 @@ fn start_ipc_accept_loop(
                                 // every early-return and established-connection
                                 // exit; ClientWorkers still owns the handle needed
                                 // to join the finished thread exactly once.
-                                let _completion =
+                                let completion_guard =
                                     ShutdownAcceptedStreamOnDrop(worker_completion);
                                 if let Err(error) = stream.set_nonblocking(false) {
                                     ErrorLog::record(&format!(
@@ -5344,6 +5434,7 @@ fn start_ipc_accept_loop(
                                         SharedAgent {
                                             runtime: agent_owner,
                                             disconnected: connection_disconnected,
+                                            mcp_child_pid: peer_process.0,
                                         },
                                         SharedTerminal(Arc::clone(&terminal)),
                                         visibility,
@@ -5405,13 +5496,18 @@ fn start_ipc_accept_loop(
                                         }
                                     },
                                 );
+                                // No disconnect-side bookkeeping may extend the
+                                // accepted connection's lifetime. Close the reader,
+                                // writer, and retained retirement descriptor before
+                                // touching any daemon-wide runtime.
+                                drop(owner);
+                                drop(reader);
+                                drop(writer);
+                                drop(completion_guard);
                                 if let Some(observer) = metrics_observer
-                                    && let Ok(mut broker) = metrics.lock()
+                                    && let Ok(mut broker) = metrics.try_lock()
                                 {
                                     broker.unsubscribe(observer.subscription());
-                                }
-                                if let Ok(mut agent) = agent_launch.lock() {
-                                    agent.release_mcp_child(peer_process.0);
                                 }
                                 if let Err(error) = result
                                     && !expected_client_disconnect(error.kind())
@@ -6459,31 +6555,49 @@ fn start_supervisor_recovery(
         .spawn(move || {
             let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::SupervisorRecovery);
+            let mut promotion_log = FailureTransitionLog::default();
+            let mut worker_log = FailureTransitionLog::default();
+            let mut artifact_log = FailureTransitionLog::default();
+            let mut state_log = FailureTransitionLog::default();
             while !shutdown.is_requested() {
                 let now = chrono::Utc::now();
-                if let Err(error) = reconcile_pending_supervisor_promotions(&supervisor, &agent) {
-                    ErrorLog::record(&format!(
-                        "supervisor promotion reconciliation deferred: {error}"
-                    ));
+                let failure = reconcile_pending_supervisor_promotions(&supervisor, &agent)
+                    .err()
+                    .map(|error| format!("supervisor promotion reconciliation deferred: {error}"));
+                if let Some(entry) = promotion_log.changed(failure) {
+                    ErrorLog::record(&entry);
                 }
-                if let Err(error) = reconcile_aborted_supervisor_workers(&supervisor, &agent) {
-                    ErrorLog::record(&format!(
-                        "supervisor worker termination reconciliation deferred: {error}"
-                    ));
+                let failure = reconcile_aborted_supervisor_workers(&supervisor, &agent)
+                    .err()
+                    .map(|error| {
+                        format!("supervisor worker termination reconciliation deferred: {error}")
+                    });
+                if let Some(entry) = worker_log.changed(failure) {
+                    ErrorLog::record(&entry);
                 }
-                if let Err(error) = reconcile_pending_goal_artifacts(&supervisor, &workspaces, now)
-                {
-                    ErrorLog::record(&format!(
-                        "Goal artifact verification reconciliation deferred: {error}"
-                    ));
+                let failure = reconcile_pending_goal_artifacts(&supervisor, &workspaces, now)
+                    .err()
+                    .map(|error| {
+                        format!("Goal artifact verification reconciliation deferred: {error}")
+                    });
+                if let Some(entry) = artifact_log.changed(failure) {
+                    ErrorLog::record(&entry);
                 }
-                if let Ok(runtime) = supervisor.lock()
-                    && let Err(error) =
-                        runtime.tick_all(now, &mut AgentDecisionWaker { agent: &agent })
-                {
-                    ErrorLog::record(&format!(
-                        "supervisor state reconciliation deferred: {error}"
-                    ));
+                let failure = supervisor.lock().map_or_else(
+                    |_| {
+                        Some("supervisor state reconciliation deferred: runtime unavailable".into())
+                    },
+                    |runtime| {
+                        runtime
+                            .tick_all(now, &mut AgentDecisionWaker { agent: &agent })
+                            .err()
+                            .map(|error| {
+                                format!("supervisor state reconciliation deferred: {error}")
+                            })
+                    },
+                );
+                if let Some(entry) = state_log.changed(failure) {
+                    ErrorLog::record(&entry);
                 }
                 if shutdown.wait_for_tick(SUPERVISOR_RECOVERY_TICK) {
                     break;
@@ -8055,7 +8169,7 @@ fn dispatch_mcp_child_claim(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     data_dir: &Path,
-    peer_process: (u32, u32, u32),
+    peer_process: (u32, Option<(u32, u32)>),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -8077,8 +8191,13 @@ fn dispatch_mcp_child_claim(
             let mut runtime = agent.lock().map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
             })?;
-            let credential =
-                runtime.claim_mcp_child(peer_process.0, peer_process.1, peer_process.2)?;
+            let (parent_pid, process_group) = peer_process.1.ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "MCP child process lineage is unavailable",
+                )
+            })?;
+            let credential = runtime.claim_mcp_child(peer_process.0, parent_pid, process_group)?;
             let session_id = runtime.caller_session(&credential);
             (credential, session_id)
         };
@@ -8316,18 +8435,14 @@ fn clean_orphan_session_resources(
         Ok((root, names))
     };
     let (root, names) = lifecycle()?;
-    let repository = observe_repository(&SystemGit, &root)
+    let repositories = observe_repository(&SystemGit, &root)
         .map_err(|error| {
             SessionRuntimeError::DurableFailure(format!(
                 "could not inspect orphan session resources: {error}"
             ))
         })?
-        .ok_or_else(|| {
-            SessionRuntimeError::DurableFailure(
-                "could not inspect orphan session resources: workspace is not a Git repository"
-                    .into(),
-            )
-        })?;
+        .into_iter()
+        .collect();
     let candidates = plan(&CleanInventory {
         daemon_data: vec![DaemonWorkspaceData {
             root: root.clone(),
@@ -8335,7 +8450,7 @@ fn clean_orphan_session_resources(
             root_exists: true,
             sessions: Some(names),
         }],
-        repositories: vec![repository],
+        repositories,
         ..CleanInventory::default()
     });
     let git_candidates = candidates
@@ -10092,7 +10207,7 @@ fn dispatch_agent_after_preflight(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
-    peer_process: (u32, u32, u32),
+    peer_process: (u32, Option<(u32, u32)>),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -10119,7 +10234,10 @@ fn dispatch_codex_session_capture(
                 .as_ref()
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
-                .or_else(|| agent.hook_credential(peer_process.0, peer_process.1, peer_process.2))
+                .or_else(|| {
+                    let (parent_pid, process_group) = peer_process.1?;
+                    agent.hook_credential(peer_process.0, parent_pid, process_group)
+                })
                 .map(str::to_owned)
                 .ok_or_else(|| {
                     ProtocolError::new(
@@ -10153,7 +10271,7 @@ fn dispatch_codex_session_capture(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_agent_phase_report_without_a_live_credential_fails_closed
 fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
-    peer_process: (u32, u32, u32),
+    peer_process: (u32, Option<(u32, u32)>),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -10181,7 +10299,10 @@ fn dispatch_agent_phase_report(
                 .as_ref()
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
-                .or_else(|| agent.hook_credential(peer_process.0, peer_process.1, peer_process.2))
+                .or_else(|| {
+                    let (parent_pid, process_group) = peer_process.1?;
+                    agent.hook_credential(peer_process.0, parent_pid, process_group)
+                })
                 .map(str::to_owned)
                 .ok_or_else(|| {
                     ProtocolError::new(
@@ -12925,7 +13046,7 @@ fn request_broker_start(data_dir: &Path, workspace: &Path, exe: &Path) -> std::i
     let address = bootstrap_broker_address(data_dir, workspace, &exe);
     request_bootstrap_broker(&address, BROKER_START)?;
     for _ in 0..BROKER_READINESS_ATTEMPTS {
-        if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+        if current_daemon_is_reachable(data_dir) {
             return Ok(());
         }
         RealSleeper.sleep();
@@ -12992,12 +13113,12 @@ fn bootstrap_serve_command(exe: &Path, workspace: &Path) -> std::process::Comman
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn launch_broker_daemon(exe: &Path, workspace: &Path, data_dir: &Path) -> std::io::Result<()> {
-    if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+    if current_daemon_is_reachable(data_dir) {
         return Ok(());
     }
     let child = bootstrap_serve_command(exe, workspace).spawn()?;
     for _ in 0..BROKER_READINESS_ATTEMPTS {
-        if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+        if current_daemon_is_reachable(data_dir) {
             reap_child(child);
             return Ok(());
         }
@@ -13179,8 +13300,7 @@ fn spawn_broker_idle_watch(
             if !broker_endpoint_present(&address.socket) {
                 std::process::exit(0);
             }
-            let daemon_live =
-                usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir).is_ok();
+            let daemon_live = current_daemon_is_reachable(&data_dir);
             if broker_may_retire(idle_for, idle.timeout, daemon_live)
                 && request_bootstrap_broker(&address, BROKER_STOP).is_ok()
             {
@@ -13273,7 +13393,7 @@ fn serve_bootstrap_broker(
         let outcome = handle_bootstrap_broker_request(
             request[0],
             || launch_broker_daemon(&exe, &workspace, data_dir),
-            || usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok(),
+            || current_daemon_is_reachable(data_dir),
         );
         let _ = stream.write_all(&[if outcome.accepted { BROKER_OK } else { b'E' }]);
         if outcome.retire {
@@ -14547,6 +14667,33 @@ pub(crate) type LaneClient = IpcClient<LaneStream>;
 fn client_incarnation() -> &'static str {
     static INCARNATION: OnceLock<String> = OnceLock::new();
     INCARNATION.get_or_init(|| usagi_core::domain::id::ClientId::new().as_str())
+}
+
+fn daemon_probe_result_is_reachable<T>(result: &Result<T, ClientError>) -> bool {
+    matches!(result, Ok(_) | Err(ClientError::Protocol(_)))
+}
+
+/// Completes the mandatory hello against the published endpoint without
+/// sending a request. A framed protocol refusal still proves the endpoint is
+/// reachable; only a transport failure means a broker may start another daemon.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=passive_restore_socket_eof_emits_one_reconnect_epoch_and_drop_cancels_watchers
+pub(crate) fn current_daemon_is_reachable(data_dir: &Path) -> bool {
+    let policy = ClientPolicy::tui();
+    let clock = SystemClock::new();
+    let result = (|| {
+        let stream = usagi_daemon::infrastructure::unix_transport::connect_current(data_dir)
+            .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+        let deadline = deadline_transport(clock, stream, TerminalLaneBudget::CONNECT_MS);
+        IpcClient::connect(
+            deadline,
+            client_incarnation().to_owned(),
+            format!("readiness-{}", usagi_core::domain::id::OperationId::new()),
+            policy,
+            current_build(),
+            ClientWorkspace::Unbound,
+        )
+    })();
+    daemon_probe_result_is_reachable(&result)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
@@ -20488,7 +20635,7 @@ mod tests {
 
         let codex = codex_integration_arguments(command).unwrap();
         assert_eq!(
-            &codex[..10],
+            &codex[..12],
             [
                 "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
@@ -20497,12 +20644,14 @@ mod tests {
                 "-c",
                 "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\"]",
                 "-c",
+                "mcp_servers.usagi.required = true",
+                "-c",
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
                 "-c",
                 "features.hooks = true",
             ]
         );
-        assert_eq!(codex.len(), 22);
+        assert_eq!(codex.len(), 24);
         for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
             if matches!(event, "Notification" | "PermissionRequest") {
                 assert!(
@@ -21072,6 +21221,40 @@ instructions = "{instructions}"
             .workspace_at(root)
             .expect("the fixture workspace is adopted");
         ConnectionWorkspace { tenant, workspaces }
+    }
+
+    #[test]
+    fn non_git_tenant_has_no_orphan_git_candidates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("plain-workspace");
+        std::fs::create_dir(&root).unwrap();
+        let sessions = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                root.clone(),
+                &temporary.path().join("session-daemon"),
+                DaemonGeneration::new(),
+                AlwaysSuccessfulGit,
+                PermissiveSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        let workspace = serde_json::from_value(
+            sessions.lock().unwrap().snapshot().unwrap()["workspace_id"].clone(),
+        )
+        .unwrap();
+        let bound = bound_to(
+            &temporary.path().join("tenants"),
+            &root,
+            sessions,
+            workspace,
+        );
+
+        for apply in [false, true] {
+            let result = clean_orphan_session_resources(&bound, None, apply, false).unwrap();
+            assert!(result["candidates"].as_array().unwrap().is_empty());
+            assert_eq!(result["removed"], 0);
+            assert_eq!(result["protected"], 0);
+        }
     }
 
     fn provision_context(session: Option<SessionId>) -> ProvisionContext {
@@ -25346,6 +25529,16 @@ instructions = "{instructions}"
         assert_eq!(client_connection_limit_from_nofile(256), 42);
         assert_eq!(client_connection_limit_from_nofile(2_560), 256);
         assert_eq!(client_connection_limit_from_nofile(u64::MAX), 256);
+        assert_eq!(preferred_client_nofile_soft_limit(32, 256), 256);
+        assert_eq!(
+            preferred_client_nofile_soft_limit(256, 10_240),
+            CLIENT_NOFILE_TARGET
+        );
+        assert_eq!(
+            preferred_client_nofile_soft_limit(256, libc::RLIM_INFINITY),
+            CLIENT_NOFILE_TARGET
+        );
+        assert_eq!(preferred_client_nofile_soft_limit(1_024, 10_240), 1_024);
     }
 
     #[test]
@@ -25358,23 +25551,109 @@ instructions = "{instructions}"
     }
 
     #[test]
+    fn periodic_failure_log_records_transitions_and_recovery() {
+        let mut log = FailureTransitionLog::default();
+        assert_eq!(log.changed(Some("first".into())), Some("first".into()));
+        assert_eq!(log.changed(Some("first".into())), None);
+        assert_eq!(log.changed(Some("second".into())), Some("second".into()));
+        assert_eq!(log.changed(None), None);
+        assert_eq!(log.changed(Some("second".into())), Some("second".into()));
+    }
+
+    #[test]
+    fn endpoint_probe_accepts_a_framed_refusal_but_not_transport_failure() {
+        use usagi_core::infrastructure::ipc::ProtocolError;
+
+        assert!(daemon_probe_result_is_reachable(&Ok(())));
+        assert!(daemon_probe_result_is_reachable::<()>(&Err(
+            ClientError::Protocol(ProtocolError::new(
+                ErrorCode::ProtocolMismatch,
+                "older daemon"
+            ))
+        )));
+        assert!(!daemon_probe_result_is_reachable::<()>(&Err(
+            ClientError::Unavailable("socket closed".into())
+        )));
+    }
+
+    #[test]
     fn connection_cleanup_worker_drains_disconnects_in_order_before_shutdown() {
-        let (disconnected, disconnects) = mpsc::channel();
+        let (disconnected, disconnects) = connection_cleanup_channel();
         let cleaned = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&cleaned);
-        let worker = start_connection_cleanup_worker_with(disconnects, move |connection| {
-            observed.lock().unwrap().push(connection);
+        let worker = start_connection_cleanup_worker_with(disconnects, move |batch| {
+            observed
+                .lock()
+                .unwrap()
+                .extend(batch.iter().map(|cleanup| cleanup.connection));
         })
         .unwrap();
         let first = ConnectionId::new();
         let second = ConnectionId::new();
 
-        disconnected.send(first).unwrap();
-        disconnected.send(second).unwrap();
+        disconnected
+            .send(ConnectionCleanup {
+                connection: first,
+                mcp_child_pid: 41,
+            })
+            .unwrap();
+        disconnected
+            .send(ConnectionCleanup {
+                connection: second,
+                mcp_child_pid: 42,
+            })
+            .unwrap();
         drop(disconnected);
         worker.join().unwrap();
 
         assert_eq!(*cleaned.lock().unwrap(), vec![first, second]);
+    }
+
+    #[test]
+    fn connection_cleanup_submission_does_not_wait_for_a_stalled_consumer() {
+        let (disconnected, disconnects) = connection_cleanup_channel();
+        let (entered, observed_entry) = mpsc::sync_channel(0);
+        let (release, wait_for_release) = mpsc::sync_channel(0);
+        let mut first_batch = true;
+        let worker = start_connection_cleanup_worker_with(disconnects, move |_| {
+            if first_batch {
+                entered.send(()).unwrap();
+                wait_for_release.recv().unwrap();
+                first_batch = false;
+            }
+        })
+        .unwrap();
+        disconnected
+            .send(ConnectionCleanup {
+                connection: ConnectionId::new(),
+                mcp_child_pid: 40,
+            })
+            .unwrap();
+        observed_entry.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let producer = disconnected.clone();
+        let (completion_notice, submission_complete) = mpsc::channel();
+        let producer_worker = std::thread::spawn(move || {
+            for _ in 0..=client_connection_limit() {
+                producer
+                    .send(ConnectionCleanup {
+                        connection: ConnectionId::new(),
+                        mcp_child_pid: 40,
+                    })
+                    .unwrap();
+            }
+            completion_notice.send(()).unwrap();
+        });
+        let submission = submission_complete.recv_timeout(Duration::from_secs(1));
+
+        release.send(()).unwrap();
+        producer_worker.join().unwrap();
+        drop(disconnected);
+        worker.join().unwrap();
+        assert!(
+            submission.is_ok(),
+            "disconnect notification inherited cleanup backpressure"
+        );
     }
 
     #[test]

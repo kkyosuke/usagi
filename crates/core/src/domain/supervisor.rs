@@ -1209,6 +1209,7 @@ fn dispatch(
         .get_mut(task_id)
         .ok_or(SupervisorError::MissingTask)?;
     task.assigned_dispatch_run = Some(provenance.dispatch_run_id);
+    task.promotion_reserved_at = None;
     task.state = TaskState::Dispatched;
     run.provenance.insert(task_id.clone(), provenance);
     run.dispatch_reservations
@@ -2097,6 +2098,7 @@ mod tests {
         )
         .unwrap();
         let root_id = TaskId::new("root").unwrap();
+        run.tasks.get_mut(&root_id).unwrap().promotion_reserved_at = Some(now());
         let dispatch = OperationId::new();
         let provenance = RunProvenance {
             supervisor_run_id: run.supervisor_run_id,
@@ -2121,6 +2123,7 @@ mod tests {
             ),
         )
         .unwrap();
+        assert_eq!(run.tasks[&root_id].promotion_reserved_at, None);
         reduce(
             &mut run,
             &event(

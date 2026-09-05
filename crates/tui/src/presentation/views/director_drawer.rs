@@ -951,14 +951,10 @@ fn goal_composer_body(
         rows.push(Role::Accent.style().bold().paint("Goal"));
     }
     if content_capacity > 1 {
-        let caret = widgets::block_caret(goal, goal.len(), &Style::new());
         let available = content_capacity.saturating_sub(3);
-        let mut input = widgets::wrap_to_width(&caret, width)
-            .into_iter()
-            .collect::<Vec<_>>();
-        if input.is_empty() {
-            input.push(caret);
-        }
+        // plain な goal を折り返してから塗る。styled な caret を plain 専用の
+        // `wrap_to_width` に渡すと、SGR が可視文字として画面へ漏れる。
+        let input = widgets::wrap_with_trailing_caret(goal, width, &Style::new());
         rows.extend(
             input
                 .into_iter()
@@ -1966,6 +1962,55 @@ mod tests {
         assert!(!body.iter().any(|row| row.contains("Start Work Run ·")));
         assert!(!body.iter().any(|row| row.contains("New Conversation")));
         assert!(!body.iter().any(|row| row.contains("Enter Overview")));
+    }
+
+    #[test]
+    fn goal_composer_input_renders_the_caret_without_leaking_sgr() {
+        let composer = |goal: &str| DirectorDrawerProjection {
+            goal_driven: true,
+            new: DirectorNewProjection::GoalComposer {
+                candidates: vec!["claude".into()],
+                selected: 0,
+                goal: goal.to_owned(),
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        // Goal ラベルの次の行が入力行。既存 test は `strip_ansi` 済みの行だけを見ており、
+        // ESC が既に落ちた `[7m` は素の文字として残るので回帰を検出できなかった。
+        let input_row = |rows: &[String]| {
+            let label = rows
+                .iter()
+                .position(|row| strip_ansi(row).trim() == "Goal")
+                .expect("goal label row");
+            strip_ansi(&rows[label + 1])
+        };
+
+        // 空 Goal は反転セル 1 桁だけを描く（回帰時はここが `[7m [0m` だった）。
+        assert_eq!(input_row(&drawer_body(52, 12, &composer(""))), " ");
+        // 入力済みの Goal は末尾へ caret セルを足すだけ。
+        assert_eq!(
+            input_row(&drawer_body(52, 12, &composer("Implement the work run"))),
+            "Implement the work run "
+        );
+
+        // 幅境界・折り返し・CJK でも SGR が可視文字にならず、行は幅に収まる。
+        for goal in ["", "Implement the work run", "作業計画をまとめる"] {
+            for width in [0, 1, 2, 5, 13, 52] {
+                for row in drawer_body(width, 14, &composer(goal)) {
+                    let visible = strip_ansi(&row);
+                    assert!(
+                        !visible.contains('\u{1b}')
+                            && !visible.contains("[7m")
+                            && !visible.contains("[0m"),
+                        "goal={goal:?} width={width} row={row:?}"
+                    );
+                    assert!(
+                        display_width(&row) <= width,
+                        "goal={goal:?} width={width} row={row:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

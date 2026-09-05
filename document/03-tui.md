@@ -683,6 +683,7 @@ daemon は利用者の Goal を次の固定 operating contract と結合し、`L
 
 - Draft PR、required check 成功、human review ready、または本当に必要な user decision まで再 prompt なしで継続する。
 - repository の `AGENTS.md` に従い、既存 session / delegation tool で必要な worktree と worker を作る。
+- 委譲する worker は Work Run の root Agent と同じ provider/runtime を使う。model は task に必要な能力へ合わせ、より小さい model で十分な場合に最上位 model を既定で選ばない。
 - 通常の不確実性や回復可能な failure では質問せず、blocking choice だけを durable user-decision tool へ送る。
 - 停止時は安全な理由と回復 action を root conversation に出し、PR は自動 merge しない。
 
@@ -2106,7 +2107,8 @@ resume を自動送信しない。利用者による interrupted tab の明示�
   transport・partial・不整合は controller 所有の capped exponential backoff で再試行し、初回 frame・キー入力・animation を
   待たせない。失敗時は last valid intent を空 snapshot で上書きせず、generic tab だけを部分適用せず、local spawn もしない。
   成功後も dedicated restore port を保持する。restore socket の passive EOF を検知し、current endpoint が再び接続可能になった
-  ときだけ monotonic / coalesced connection epoch を 1 件発行して、その epoch につき fresh observation を一度送る。frame tick
+  ときだけ monotonic / coalesced connection epoch を 1 件発行して、その epoch につき fresh observation を一度送る。接続可能性は
+  raw socket の open/close ではなく `unbound` hello の完了で判定し、framed protocol refusal も endpoint 到達として扱う。frame tick
   自体は inventory RPC を発行しない。restore request が slow / hung でも off-thread worker 内に隔離されるが、request deadline
   そのものは [IPC の attempt deadline と reconnect budget](04-ipc.md#attempt-deadline-と-reconnect-budget)の責務である。
 - **投影**: saved Agent は完全な `TerminalRef` が両 inventory で trusted live と確認できたときだけ保存順で復元する。

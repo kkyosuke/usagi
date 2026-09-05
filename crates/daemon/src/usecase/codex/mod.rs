@@ -65,8 +65,8 @@ pub trait CodexProvisioner {
 
 /// Render daemon-owned MCP servers as Codex `-c` overrides.
 ///
-/// Every value is a TOML basic string rendered through `serde_json`'s compatible
-/// string escaping, so a command path cannot create another override.
+/// Caller-supplied values are TOML basic strings rendered through `serde_json`'s
+/// compatible string escaping, so a command path cannot create another override.
 #[must_use]
 pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
     fn assignment(key: &str, value: &str) -> [String; 2] {
@@ -96,6 +96,7 @@ pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
         "mcp_servers.usagi.env_vars",
         &array(&["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]),
     ));
+    arguments.extend(assignment("mcp_servers.usagi.required", "true"));
     arguments.extend(assignment(
         "mcp_servers.usagi.default_tools_approval_mode",
         &string("approve"),
@@ -349,6 +350,8 @@ mod wiring_tests {
                 "-c",
                 "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\"]",
                 "-c",
+                "mcp_servers.usagi.required = true",
+                "-c",
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
             ]
         );
@@ -363,7 +366,7 @@ mod wiring_tests {
                 .iter()
                 .filter(|value| value.starts_with("mcp_servers."))
                 .count(),
-            4
+            5
         );
         assert_eq!(
             arguments[1],

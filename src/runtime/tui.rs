@@ -1449,11 +1449,7 @@ impl DaemonRestoreConnectionPublisher {
             while !publisher.cancelled.load(Ordering::Acquire)
                 && !local_cancelled.load(Ordering::Acquire)
             {
-                if usagi_daemon::infrastructure::unix_transport::connect_current(
-                    &publisher.data_dir,
-                )
-                .is_ok()
-                {
+                if crate::runtime::daemon::current_daemon_is_reachable(&publisher.data_dir) {
                     let epoch = publisher.next_epoch.fetch_add(1, Ordering::AcqRel) + 1;
                     match publisher.epochs.try_send(epoch) {
                         Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
@@ -7775,6 +7771,10 @@ mod tests {
 
     #[test]
     fn passive_restore_socket_eof_emits_one_reconnect_epoch_and_drop_cancels_watchers() {
+        use usagi_core::infrastructure::ipc::{
+            Bootstrap, DEFAULT_MAX_FRAME_BYTES, ErrorCode, ProtocolError, read_json_frame,
+            write_json_frame,
+        };
         use usagi_daemon::infrastructure::unix_transport::{SecureUnixListener, connect_current};
 
         let temporary = tempfile::tempdir().unwrap();
@@ -7800,6 +7800,31 @@ mod tests {
         assert_eq!(events.take_reconnected_epoch(), None);
 
         drop(peer);
+        let responder = std::thread::spawn(move || {
+            let mut peer = loop {
+                match listener.accept() {
+                    Ok(peer) => break peer,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("fixture listener failed: {error}"),
+                }
+            };
+            peer.set_nonblocking(false).unwrap();
+            assert!(matches!(
+                read_json_frame::<Bootstrap>(&mut peer, DEFAULT_MAX_FRAME_BYTES).unwrap(),
+                Some(Bootstrap::ClientHello(_))
+            ));
+            write_json_frame(
+                &mut peer,
+                &Bootstrap::Error(ProtocolError::new(
+                    ErrorCode::ProtocolMismatch,
+                    "probe reached the replacement endpoint",
+                )),
+                DEFAULT_MAX_FRAME_BYTES,
+            )
+            .unwrap();
+        });
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let epoch = loop {
             if let Some(epoch) = events.take_reconnected_epoch() {
@@ -7811,6 +7836,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         };
+        responder.join().unwrap();
         assert_eq!(epoch, 1);
         assert_eq!(events.take_reconnected_epoch(), None);
 
