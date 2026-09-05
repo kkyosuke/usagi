@@ -13844,6 +13844,7 @@ mod tests {
         );
         assert_eq!(state.overlay(), Some(Overlay::Preview));
         assert!(state.preview_overlay().unwrap().is_loading());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
 
         // A file list for another target is ignored; unsafe backend paths are
         // rejected when the matching result lands.
@@ -13864,10 +13865,17 @@ mod tests {
         assert!(!state.preview_overlay().unwrap().is_loading());
         assert_eq!(state.preview_overlay().unwrap().visible_files().len(), 3);
 
-        // Filtering resets selection and uses fuzzy subsequence ranking. Paste
-        // drops terminal controls before the query reaches presentation.
+        // Finder navigation saturates, and filtering resets selection. A query
+        // with several matches also exercises fuzzy rank ordering.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('s')));
+        assert_eq!(state.preview_overlay().unwrap().visible_files().len(), 2);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert_eq!(state.preview_overlay().unwrap().selected(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        assert_eq!(state.preview_overlay().unwrap().selected(), 0);
+
+        // Paste drops terminal controls before the query reaches presentation.
         let _ = update(&mut state, AppEvent::Key(AppKey::Paste("s\u{1b}rm".into())));
         let overlay = state.preview_overlay().unwrap();
         assert_eq!(overlay.filter(), "srm");
@@ -13906,6 +13914,7 @@ mod tests {
             state.preview_overlay().unwrap().lines(),
             &["# Title", "�[31mred text"]
         );
+        assert!(update(&mut state, AppEvent::Key(AppKey::Home)).is_empty());
 
         // Down scrolls; Up saturates at the top.
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));

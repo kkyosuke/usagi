@@ -10129,6 +10129,21 @@ mod tests {
             ] if files == &["README.md"] && lines.is_empty()
         ));
 
+        composition.backend.dispatch(Effect::LoadPreview {
+            target: Target::Session(session_ids[0]),
+            path: None,
+        });
+        assert!(matches!(
+            composition.backend.drain_events().as_slice(),
+            [usagi_tui::usecase::application::controller::AppEvent::Backend(
+                BackendEvent::PreviewError {
+                    target: Target::Session(id),
+                    path: None,
+                    error,
+                }
+            )] if *id == session_ids[0] && error.error_id == "preview-files"
+        ));
+
         composition.backend.dispatch(Effect::SaveEnvironment {
             scope: EnvScope::Workspace,
             entries: vec![EnvironmentEntry {

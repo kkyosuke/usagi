@@ -119,6 +119,10 @@ pub(crate) fn read_file(root: &Path, relative: &str) -> Result<Vec<String>, File
                 .read_to_end(&mut bytes)
         })
         .map_err(|_| FilePreviewError::FileUnavailable)?;
+    decode_file(bytes)
+}
+
+fn decode_file(bytes: Vec<u8>) -> Result<Vec<String>, FilePreviewError> {
     if bytes.len() > MAX_PREVIEW_BYTES {
         return Err(FilePreviewError::TooLarge);
     }
@@ -237,6 +241,10 @@ mod tests {
         fs::write(root.path().join("large"), vec![b'x'; MAX_PREVIEW_BYTES + 1]).unwrap();
         assert_eq!(
             read_file(root.path(), "large"),
+            Err(FilePreviewError::TooLarge)
+        );
+        assert_eq!(
+            decode_file(vec![b'x'; MAX_PREVIEW_BYTES + 1]),
             Err(FilePreviewError::TooLarge)
         );
     }
