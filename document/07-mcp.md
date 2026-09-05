@@ -55,8 +55,9 @@ dispatch binding を照合する。手動の `usagi mcp`、sibling PID、偽造 
 environment から補完して認可することはない。
 
 Codex を daemon が起動するときは、注入した `usagi` stdio server に `USAGI_HOME` / runtime mode / workspace root
-だけを `env_vars` で forward し、credential 名は含めない。server の tool approval mode は `approve` にして
-各 MCP call の対話確認を省略する。
+だけを `env_vars` で forward し、credential 名は含めない。`usagi` は `required = true` とし、Codex が server の
+初期化完了を待つ。初期化できなければ Agent を tool contract が不完全なまま開始しない。server の tool approval mode は
+`approve` にして各 MCP call の対話確認を省略する。
 認可を省略するものではなく、daemon は credential、live runtime、dispatch
 binding と claimed peer PID を引き続き照合するため、credential の欠落・偽造・失効は state を変更せず拒否する。
 daemon-provisioned MCP child には同時に daemon が解決した workspace root を一時的に渡す。session worktree の
