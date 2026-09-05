@@ -72,9 +72,9 @@ record から生成する。CI は catalog の key/action 組と本書の worksp
 | `Ctrl-O d` | OpenDecisions | pending Decision一覧 |
 | `Ctrl-O s` | OpenNotes | Scratchpad |
 | `Ctrl-O ,` | OpenGarden | Session Garden |
-| `Ctrl-O g` | Director | Director drawer |
+| `Ctrl-O g` | Director | Director drawer toggle。初回は goal-driven = Work Runs / classic = Organization。同じ Workflow の再 open は直前 route |
 | `Ctrl-O b` | DirectorBack | Director 内で一階層戻る |
-| `Ctrl-O w` | WorkRuns | goal-driven workspace の Work Runs を直接開く |
+| `Ctrl-O w` | WorkRuns | daemon-owned Work Runs を直接開く。classic は既存 Run の観測・制御だけを行い、新規 Run は開始しない |
 | `Ctrl-O t` | RootTerminal | workspace root Shell drawer |
 | `Ctrl-O z` | RootTerminalFullHeight | Shell drawerの高さ切替 |
 | `Ctrl-O n` | DirectorNew | Director の New Conversation / Start Work Run。Shell 選択中は新しい terminal tab |
