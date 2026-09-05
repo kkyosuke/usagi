@@ -45,6 +45,9 @@ use usagi_core::{
     },
 };
 
+const MISSING_DISPATCH_ESCALATION_REASON: &str =
+    "no worker dispatch reservation was produced for a ready task";
+
 /// Redaction-safe input delivered to the parent-agent wake adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionWake {
@@ -953,22 +956,7 @@ impl SupervisorRuntime {
             }
             anyhow::bail!("supervisor root dispatch provenance conflicts with the existing run");
         }
-        if run.state == SupervisorRunState::Escalated
-            && let Some(escalation) = run.escalation.as_ref()
-            && escalation.blocking_task_id.as_ref() == Some(&root_id)
-            && escalation.reason == "no worker dispatch reservation was produced for a ready task"
-        {
-            let escalation_id = escalation.escalation_id;
-            run = self.apply(
-                &run,
-                now,
-                SupervisorEventSource::Admission,
-                SupervisorEventKind::ResolveEscalation {
-                    escalation_id,
-                    decision: EscalationDecision::Resume,
-                },
-            )?;
-        }
+        run = self.resume_pending_promotion_escalation(run, &root_id, now)?;
         run = self.apply(
             &run,
             now,
@@ -986,6 +974,38 @@ impl SupervisorRuntime {
         self.supervisor
             .load(id)?
             .ok_or_else(|| anyhow::anyhow!("supervisor run disappeared during root binding"))
+    }
+
+    /// Clears only the synthetic escalation produced by an older scheduler
+    /// while this exact task's durable Agent promotion was still pending.
+    /// Other human and policy escalations remain authoritative.
+    fn resume_pending_promotion_escalation(
+        &self,
+        run: SupervisorRun,
+        task_id: &TaskId,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRun> {
+        let Some(escalation_id) = run
+            .escalation
+            .as_ref()
+            .filter(|escalation| {
+                run.state == SupervisorRunState::Escalated
+                    && escalation.blocking_task_id.as_ref() == Some(task_id)
+                    && escalation.reason == MISSING_DISPATCH_ESCALATION_REASON
+            })
+            .map(|escalation| escalation.escalation_id)
+        else {
+            return Ok(run);
+        };
+        self.apply(
+            &run,
+            now,
+            SupervisorEventSource::Admission,
+            SupervisorEventKind::ResolveEscalation {
+                escalation_id,
+                decision: EscalationDecision::Resume,
+            },
+        )
     }
 
     fn load_indexed_runs(
@@ -1076,10 +1096,11 @@ impl SupervisorRuntime {
             .starts
             .get(operation_id)
             .ok_or_else(|| anyhow::anyhow!("supervisor goal reservation does not exist"))?;
-        let run = self.load_started_run(reservation.supervisor_run_id)?;
+        let mut run = self.load_started_run(reservation.supervisor_run_id)?;
+        let root_id = TaskId::new("root")?;
         let root = run
             .tasks
-            .get(&TaskId::new("root")?)
+            .get(&root_id)
             .ok_or_else(|| anyhow::anyhow!("supervisor root task is missing"))?;
         if root.required_artifact_contract != GOAL_REVIEW_READY_ARTIFACT_CONTRACT {
             anyhow::bail!("supervisor reservation is not a Goal run");
@@ -1087,6 +1108,7 @@ impl SupervisorRuntime {
         if run.state.is_finished() {
             return Ok(run.query());
         }
+        run = self.resume_pending_promotion_escalation(run, &root_id, now)?;
         Ok(self
             .apply(
                 &run,
@@ -1443,7 +1465,7 @@ impl SupervisorRuntime {
             let task = run.tasks.get(&task_id)?.clone();
             is_delegated_reservation(&task, operation).then_some((run, task))
         });
-        let Some((run, task)) = matches.next() else {
+        let Some((mut run, task)) = matches.next() else {
             return Ok(None);
         };
         if matches.next().is_some() {
@@ -1452,6 +1474,7 @@ impl SupervisorRuntime {
         if task.state.terminal() {
             return Ok(Some(run.query()));
         }
+        run = self.resume_pending_promotion_escalation(run, &task_id, now)?;
         let run = self.apply(
             &run,
             now,
@@ -1528,22 +1551,7 @@ impl SupervisorRuntime {
             .get(&parent_task_id)
             .ok_or_else(|| anyhow::anyhow!("delegated parent provenance is missing"))?
             .dispatch_run_id;
-        if run.state == SupervisorRunState::Escalated
-            && let Some(escalation) = run.escalation.as_ref()
-            && escalation.blocking_task_id.as_ref() == Some(&task_id)
-            && escalation.reason == "no worker dispatch reservation was produced for a ready task"
-        {
-            let escalation_id = escalation.escalation_id;
-            run = self.apply(
-                &run,
-                now,
-                SupervisorEventSource::Admission,
-                SupervisorEventKind::ResolveEscalation {
-                    escalation_id,
-                    decision: EscalationDecision::Resume,
-                },
-            )?;
-        }
+        run = self.resume_pending_promotion_escalation(run, &task_id, now)?;
         let provenance = RunProvenance {
             supervisor_run_id: run.supervisor_run_id,
             task_id: task_id.clone(),
@@ -2037,14 +2045,20 @@ impl SupervisorRuntime {
                 now,
                 SupervisorEventSource::Admission,
                 SupervisorEventKind::AddTask {
-                    task: task_node(
-                        &run,
-                        root_id,
-                        None,
-                        BTreeSet::new(),
-                        root_task,
-                        root_artifact_contract,
-                    ),
+                    task: {
+                        let mut task = task_node(
+                            &run,
+                            root_id,
+                            None,
+                            BTreeSet::new(),
+                            root_task,
+                            root_artifact_contract,
+                        );
+                        if root_artifact_contract == GOAL_REVIEW_READY_ARTIFACT_CONTRACT {
+                            task.promotion_reserved_at = Some(now);
+                        }
+                        task
+                    },
                 },
             )?;
         }
@@ -2672,8 +2686,14 @@ impl SupervisorRuntime {
         // escalation so callers can distinguish an actionable stop from a live
         // scheduler and inspect the exact blocking task.
         if run.state == SupervisorRunState::Running
-            && let Some((task_id, _)) = run.tasks.iter().find(|(_, task)| {
-                task.state == TaskState::Ready && task.assigned_dispatch_run.is_none()
+            && let Some((task_id, _)) = run.tasks.iter().find(|(task_id, task)| {
+                let legacy_goal_promotion = task_id.0 == "root"
+                    && task.required_artifact_contract == GOAL_REVIEW_READY_ARTIFACT_CONTRACT
+                    && !run.provenance.contains_key(*task_id);
+                task.state == TaskState::Ready
+                    && task.assigned_dispatch_run.is_none()
+                    && task.promotion_reserved_at.is_none()
+                    && !legacy_goal_promotion
             })
         {
             let _ = self.apply(
@@ -2682,7 +2702,7 @@ impl SupervisorRuntime {
                 SupervisorEventSource::DispatchFailure,
                 SupervisorEventKind::Escalate {
                     task_id: Some(task_id.clone()),
-                    reason: "no worker dispatch reservation was produced for a ready task".into(),
+                    reason: MISSING_DISPATCH_ESCALATION_REASON.into(),
                     safe_evidence:
                         "runtime/model selection or dispatch admission did not assign a run".into(),
                     choices: vec!["resume".into(), "cancel".into()],
@@ -4043,8 +4063,38 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            SupervisorRunState::Escalated
+            SupervisorRunState::Running
         );
+        assert!(
+            scheduler
+                .supervisor
+                .load(unbound.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .tasks[&TaskId::new("root").unwrap()]
+                .promotion_reserved_at
+                .is_some()
+        );
+        // A pre-fix daemon could persist this escalation between reservation
+        // and binding. The new binder must heal that exact legacy snapshot.
+        let reserved = scheduler
+            .supervisor
+            .load(unbound.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        scheduler
+            .apply(
+                &reserved,
+                now(),
+                SupervisorEventSource::DispatchFailure,
+                SupervisorEventKind::Escalate {
+                    task_id: Some(TaskId::new("root").unwrap()),
+                    reason: MISSING_DISPATCH_ESCALATION_REASON.into(),
+                    safe_evidence: "pre-fix snapshot".into(),
+                    choices: vec!["resume".into(), "cancel".into()],
+                },
+            )
+            .unwrap();
         let first = scheduler
             .start_for_workspace_root_dispatch(
                 "goal-composer",
@@ -4070,6 +4120,16 @@ mod tests {
         assert_eq!(replay, first);
         assert_eq!(first.tasks[0].state, TaskState::Dispatched);
         assert_eq!(first.tasks[0].assigned_dispatch_run, Some(operation));
+        assert_eq!(
+            scheduler
+                .supervisor
+                .load(first.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .tasks[&TaskId::new("root").unwrap()]
+                .promotion_reserved_at,
+            None
+        );
         assert_eq!(first.provenance[0].worker_session_id, None);
 
         scheduler
@@ -5067,8 +5127,23 @@ mod tests {
                 )
                 .unwrap();
             if escalate_before_binding {
+                let reserved = scheduler
+                    .supervisor
+                    .load(started.supervisor_run_id)
+                    .unwrap()
+                    .unwrap();
                 scheduler
-                    .tick(started.supervisor_run_id, now(), &mut Waker::default())
+                    .apply(
+                        &reserved,
+                        now(),
+                        SupervisorEventSource::DispatchFailure,
+                        SupervisorEventKind::Escalate {
+                            task_id: Some(TaskId::new("root").unwrap()),
+                            reason: MISSING_DISPATCH_ESCALATION_REASON.into(),
+                            safe_evidence: "pre-fix snapshot".into(),
+                            choices: vec!["resume".into(), "cancel".into()],
+                        },
+                    )
                     .unwrap();
             }
             scheduler.fail_apply_at(failed_apply);
@@ -5232,6 +5307,27 @@ mod tests {
                 reserved_at: now(),
             }]
         );
+
+        // A pre-fix scheduler could escalate the root during the promotion
+        // window. Definite failure must still close that durable reservation.
+        let reserved = scheduler
+            .supervisor
+            .load(goal_run.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        scheduler
+            .apply(
+                &reserved,
+                now(),
+                SupervisorEventSource::DispatchFailure,
+                SupervisorEventKind::Escalate {
+                    task_id: Some(TaskId::new("root").unwrap()),
+                    reason: MISSING_DISPATCH_ESCALATION_REASON.into(),
+                    safe_evidence: "pre-fix snapshot".into(),
+                    choices: vec!["resume".into(), "cancel".into()],
+                },
+            )
+            .unwrap();
 
         assert!(
             scheduler
@@ -5410,7 +5506,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            SupervisorRunState::Escalated
+            SupervisorRunState::Running
         );
         dispatch
             .upsert_run(DispatchRun {
@@ -6210,7 +6306,7 @@ mod tests {
                 status: RunStatus::Running,
             })
             .unwrap();
-        scheduler
+        let root = scheduler
             .start_for_workspace_root_dispatch(
                 "goal-composer",
                 workspace,
@@ -6230,6 +6326,30 @@ mod tests {
                 now(),
             )
             .unwrap()
+            .unwrap();
+
+        scheduler
+            .tick(root.supervisor_run_id, now(), &mut Waker::default())
+            .unwrap();
+        let reserved = scheduler
+            .supervisor
+            .load(root.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reserved.state, SupervisorRunState::Running);
+        let child_id = delegated_task_id(child_operation).unwrap();
+        scheduler
+            .apply(
+                &reserved,
+                now(),
+                SupervisorEventSource::DispatchFailure,
+                SupervisorEventKind::Escalate {
+                    task_id: Some(child_id),
+                    reason: MISSING_DISPATCH_ESCALATION_REASON.into(),
+                    safe_evidence: "pre-fix snapshot".into(),
+                    choices: vec!["resume".into(), "cancel".into()],
+                },
+            )
             .unwrap();
 
         let failed = scheduler
@@ -6357,8 +6477,23 @@ mod tests {
                 status: RunStatus::Running,
             })
             .unwrap();
+        let reserved = scheduler
+            .supervisor
+            .load(root.supervisor_run_id)
+            .unwrap()
+            .unwrap();
         scheduler
-            .tick(root.supervisor_run_id, now(), &mut Waker::default())
+            .apply(
+                &reserved,
+                now(),
+                SupervisorEventSource::DispatchFailure,
+                SupervisorEventKind::Escalate {
+                    task_id: Some(delegated_task_id(child_operation).unwrap()),
+                    reason: MISSING_DISPATCH_ESCALATION_REASON.into(),
+                    safe_evidence: "pre-fix snapshot".into(),
+                    choices: vec!["resume".into(), "cancel".into()],
+                },
+            )
             .unwrap();
         scheduler.fail_apply_at(scheduler.apply_calls.get());
         assert!(
