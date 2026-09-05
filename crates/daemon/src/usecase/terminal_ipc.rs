@@ -110,13 +110,33 @@ pub struct GenericTerminalRuntime<R, S, P, Q> {
 /// It is also the generic terminal capacity pool's global limit, which every
 /// retained generation shares and which is never implicitly summed with the Agent
 /// pool ([`crate::usecase::resources::allocator::CapacityPolicy`]).
-pub const GENERIC_TERMINAL_LIMIT: usize = 16;
+pub const GENERIC_TERMINAL_LIMIT: usize =
+    usagi_core::domain::settings::DEFAULT_TERMINAL_MAX_CONCURRENT as usize;
 
 impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
     pub fn new(generation: DaemonGeneration, resolver: R, store: S, pty: P, scope: Q) -> Self {
+        Self::new_with_limit(
+            generation,
+            resolver,
+            store,
+            pty,
+            scope,
+            GENERIC_TERMINAL_LIMIT,
+        )
+    }
+
+    /// Build a runtime with the configured generic Terminal PTY ceiling.
+    pub fn new_with_limit(
+        generation: DaemonGeneration,
+        resolver: R,
+        store: S,
+        pty: P,
+        scope: Q,
+        limit: usize,
+    ) -> Self {
         Self {
             generation,
-            coordinator: GenericTerminalCoordinator::new(GENERIC_TERMINAL_LIMIT, 64 * 1024, 64),
+            coordinator: GenericTerminalCoordinator::new(limit, 64 * 1024, 64),
             resolver,
             store,
             pty,
@@ -153,10 +173,35 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         snapshot: super::generic_terminal::TerminalStoreSnapshot,
         retention: SharedTerminalRetention,
     ) -> Result<Self, GenericTerminalError> {
+        Self::from_snapshot_with_retention_and_limit(
+            generation,
+            resolver,
+            store,
+            pty,
+            scope,
+            snapshot,
+            retention,
+            GENERIC_TERMINAL_LIMIT,
+        )
+    }
+
+    /// Restore a runtime with the configured generic Terminal PTY ceiling and
+    /// the daemon-wide retention authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_snapshot_with_retention_and_limit(
+        generation: DaemonGeneration,
+        resolver: R,
+        store: S,
+        pty: P,
+        scope: Q,
+        snapshot: super::generic_terminal::TerminalStoreSnapshot,
+        retention: SharedTerminalRetention,
+        limit: usize,
+    ) -> Result<Self, GenericTerminalError> {
         Ok(Self {
             generation,
             coordinator: GenericTerminalCoordinator::from_snapshot_with_retention(
-                GENERIC_TERMINAL_LIMIT,
+                limit,
                 64 * 1024,
                 64,
                 snapshot,
@@ -557,44 +602,72 @@ fn map_scope_failure(_: TerminalScopeResolveError) -> ProtocolError {
     )
 }
 fn map_error(error: GenericTerminalError) -> ProtocolError {
-    let code = match error {
-        GenericTerminalError::Terminal(RegistryError::ResyncRequired) => ErrorCode::ResyncRequired,
+    let (code, message) = match error {
+        GenericTerminalError::Terminal(RegistryError::ResyncRequired) => (
+            ErrorCode::ResyncRequired,
+            "terminal output must be resynchronized",
+        ),
         GenericTerminalError::Terminal(RegistryError::PtyResizeFailed)
-        | GenericTerminalError::SpawnFailed => ErrorCode::Unavailable,
-        // Screen/frame, concurrency, and final-retention bounds all refuse the
-        // effect before dropping protected state or emitting a partial result.
-        GenericTerminalError::Terminal(
-            RegistryError::CheckpointUnavailable | RegistryError::ScreenBudgetExceeded,
-        )
-        | GenericTerminalError::ConcurrencyExhausted
-        | GenericTerminalError::RetentionExhausted(_) => ErrorCode::ResourceExhausted,
+        | GenericTerminalError::SpawnFailed => (
+            ErrorCode::Unavailable,
+            "terminal PTY could not be started or resized",
+        ),
+        GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable) => (
+            ErrorCode::ResourceExhausted,
+            "terminal screen checkpoint does not fit the IPC frame budget",
+        ),
+        GenericTerminalError::Terminal(RegistryError::ScreenBudgetExceeded) => (
+            ErrorCode::ResourceExhausted,
+            "terminal screen retention budget is exhausted",
+        ),
+        GenericTerminalError::ConcurrencyExhausted => (
+            ErrorCode::ResourceExhausted,
+            "terminal PTY limit reached; close a Terminal or raise Terminal PTYs in Global Config",
+        ),
+        GenericTerminalError::RetentionExhausted(_) => (
+            ErrorCode::ResourceExhausted,
+            "daemon terminal history retention budget is exhausted",
+        ),
         // One durable operation identity presented for different bytes or
         // another terminal: nothing was written and nothing is replayed.
-        GenericTerminalError::Terminal(RegistryError::IdempotencyConflict) => {
-            ErrorCode::IdempotencyConflict
+        GenericTerminalError::Terminal(RegistryError::IdempotencyConflict) => (
+            ErrorCode::IdempotencyConflict,
+            "terminal operation conflicts with an earlier request",
+        ),
+        GenericTerminalError::Terminal(RegistryError::IdempotencyExpired) => (
+            ErrorCode::IdempotencyExpired,
+            "terminal operation result has expired",
+        ),
+        GenericTerminalError::Terminal(RegistryError::SequenceGap) => {
+            (ErrorCode::SequenceGap, "terminal input sequence has a gap")
         }
-        GenericTerminalError::Terminal(RegistryError::IdempotencyExpired) => {
-            ErrorCode::IdempotencyExpired
-        }
-        GenericTerminalError::Terminal(RegistryError::SequenceGap) => ErrorCode::SequenceGap,
         GenericTerminalError::UnknownTerminal
         | GenericTerminalError::TerminalGenerationMismatch
-        | GenericTerminalError::Terminal(_) => ErrorCode::StaleTarget,
+        | GenericTerminalError::Terminal(_) => (
+            ErrorCode::StaleTarget,
+            "terminal target is no longer current",
+        ),
         // Retention collected this terminal's final. The client is told the
         // history expired rather than being handed another terminal's.
-        GenericTerminalError::FinalEvicted(_) => ErrorCode::NotFound,
+        GenericTerminalError::FinalEvicted(_) => {
+            (ErrorCode::NotFound, "terminal history has expired")
+        }
         GenericTerminalError::ReconcileRequired(_)
         | GenericTerminalError::Store
-        | GenericTerminalError::InvalidSnapshot => ErrorCode::OwnershipUnknown,
-        GenericTerminalError::Launch(_) | GenericTerminalError::ScopeMismatch => {
-            ErrorCode::InvalidArgument
-        }
-        GenericTerminalError::TerminalAlreadyExists => ErrorCode::RevisionConflict,
+        | GenericTerminalError::InvalidSnapshot => (
+            ErrorCode::OwnershipUnknown,
+            "terminal ownership could not be verified safely",
+        ),
+        GenericTerminalError::Launch(_) | GenericTerminalError::ScopeMismatch => (
+            ErrorCode::InvalidArgument,
+            "terminal launch request is invalid",
+        ),
+        GenericTerminalError::TerminalAlreadyExists => (
+            ErrorCode::RevisionConflict,
+            "terminal already exists for this launch operation",
+        ),
     };
-    ProtocolError::new(
-        code,
-        "daemon terminal request could not be completed safely",
-    )
+    ProtocolError::new(code, message)
 }
 
 #[cfg(test)]
@@ -863,6 +936,24 @@ mod tests {
         )
     }
 
+    /// A runtime whose scope resolver and Terminal PTY ceiling are explicit.
+    fn runtime_for_limit(
+        scope: TerminalLaunchScope,
+        limit: usize,
+    ) -> GenericTerminalRuntime<Resolver, Store, Pty, Scope> {
+        GenericTerminalRuntime::new_with_limit(
+            DaemonGeneration::new(),
+            Resolver,
+            Store::default(),
+            Pty::default(),
+            Scope {
+                scope: scope.clone(),
+                working_directory: PathBuf::from("/available-worktree"),
+            },
+            limit,
+        )
+    }
+
     fn launch_request(
         scope: &TerminalLaunchScope,
         operation: Option<OperationId>,
@@ -886,6 +977,34 @@ mod tests {
             session_id: session,
             worktree_id: WorktreeId::new(),
         }
+    }
+
+    #[test]
+    fn configured_terminal_limit_refuses_the_next_pty_before_spawn() {
+        let scope = scope_of(Some(SessionId::new()));
+        let mut runtime = runtime_for_limit(scope.clone(), 1);
+        call(
+            &mut runtime,
+            ConnectionId::new(),
+            ClientId::new(),
+            TerminalAction::Launch,
+            launch_request(&scope, Some(OperationId::new()), 80),
+        );
+
+        let error = runtime
+            .request(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(launch_request(&scope, Some(OperationId::new()), 80)).unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ResourceExhausted);
+        assert!(error.message.contains("raise Terminal PTYs"));
+        assert_eq!(runtime.pty.spawned_directories.len(), 1);
     }
 
     #[test]

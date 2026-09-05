@@ -2,8 +2,9 @@
 //!
 //! The global, per-user preferences persisted as `settings.json` in the data
 //! directory, plus workspace settings persisted beside a project. Theme and
-//! modal interaction stay global; Agent, Workflow, Team, Issue, and Memory values are copied to
-//! a workspace when it is registered and may then be changed independently.
+//! modal interaction and the generic Terminal PTY ceiling stay global; Agent,
+//! Workflow, Team, Issue, and Memory values are copied to a workspace when it is
+//! registered and may then be changed independently.
 //! Environment bindings ([`env`]) exist in both scopes and merge, so a workspace
 //! adds to — or overrides — what every workspace inherits.
 //!
@@ -21,6 +22,78 @@ pub use env::{
 };
 
 use serde::{Deserialize, Serialize};
+
+/// Default number of daemon-owned generic Terminal PTYs admitted at once.
+pub const DEFAULT_TERMINAL_MAX_CONCURRENT: u16 = 64;
+/// Hard ceiling accepted from settings. This bounds PTYs and their file
+/// descriptors even when screen and journal usage remain small.
+pub const TERMINAL_MAX_CONCURRENT_MAX: u16 = 256;
+/// Values offered by the Config screen. Hand-edited settings may use any value
+/// in the supported range.
+pub const TERMINAL_CONCURRENCY_PRESETS: [u16; 5] = [16, 32, 64, 128, 256];
+
+/// Global safety ceiling for concurrently owned generic Terminal PTYs.
+///
+/// This is deliberately not the primary memory budget: terminal screens and
+/// journals are bounded from their actual retained usage. It remains as a last
+/// line of defence for OS PTYs, processes, threads, and file descriptors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct TerminalConcurrencyLimit(u16);
+
+impl TerminalConcurrencyLimit {
+    /// Build a supported limit.
+    #[must_use]
+    pub const fn new(value: u16) -> Option<Self> {
+        if value >= 1 && value <= TERMINAL_MAX_CONCURRENT_MAX {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// Return the configured PTY ceiling.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Move through the Config screen's bounded presets.
+    #[must_use]
+    pub fn cycle(self, forward: bool) -> Self {
+        let current = self.0;
+        let next = if forward {
+            TERMINAL_CONCURRENCY_PRESETS
+                .into_iter()
+                .find(|candidate| *candidate > current)
+                .unwrap_or(TERMINAL_CONCURRENCY_PRESETS[0])
+        } else {
+            TERMINAL_CONCURRENCY_PRESETS
+                .into_iter()
+                .rev()
+                .find(|candidate| *candidate < current)
+                .unwrap_or(TERMINAL_MAX_CONCURRENT_MAX)
+        };
+        Self(next)
+    }
+}
+
+impl Default for TerminalConcurrencyLimit {
+    fn default() -> Self {
+        Self(DEFAULT_TERMINAL_MAX_CONCURRENT)
+    }
+}
+
+impl<'de> Deserialize<'de> for TerminalConcurrencyLimit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u16::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "terminal_max_concurrent must be between 1 and {TERMINAL_MAX_CONCURRENT_MAX}"
+            ))
+        })
+    }
+}
 
 /// UI color theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -412,6 +485,9 @@ pub struct Settings {
     pub modal_selection_mode: ModalSelectionMode,
     /// Whether a newly detected PR opens its modal automatically.
     pub pr_auto_open: PrAutoOpen,
+    /// Global generic Terminal PTY safety ceiling. Actual screen and journal
+    /// memory are bounded independently by their retained usage.
+    pub terminal_max_concurrent: TerminalConcurrencyLimit,
     /// The provider used for Agent panes when no profile is selected explicitly.
     pub default_model: DefaultModel,
     /// Fully-qualified Git ref selected by default when creating a session.
@@ -439,6 +515,7 @@ impl Default for Settings {
             theme: Theme::default(),
             modal_selection_mode: ModalSelectionMode::default(),
             pr_auto_open: PrAutoOpen::default(),
+            terminal_max_concurrent: TerminalConcurrencyLimit::default(),
             default_model: DefaultModel::default(),
             default_branch: None,
             issue_enabled: true,
@@ -464,6 +541,7 @@ impl Settings {
         self.theme = settings.theme;
         self.modal_selection_mode = settings.modal_selection_mode;
         self.pr_auto_open = settings.pr_auto_open;
+        self.terminal_max_concurrent = settings.terminal_max_concurrent;
         self.default_model = settings.default_model;
         self.issue_enabled = settings.issue_enabled;
         self.memory_enabled = settings.memory_enabled;
@@ -473,8 +551,8 @@ impl Settings {
     }
 
     /// Apply workspace-owned Agent, Base branch, Workflow, Team, Issue, Memory, and
-    /// environment values over this global baseline. Theme and modal interaction
-    /// always remain global.
+    /// environment values over this global baseline. Theme, modal interaction,
+    /// and the generic Terminal PTY ceiling always remain global.
     ///
     /// Environment bindings accumulate rather than replace: the workspace map is
     /// layered on top of the global one, so a same-named binding takes the

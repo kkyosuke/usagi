@@ -89,7 +89,7 @@ stale / duplicate completion が別の draft や workspace を開くことはな
 worker 内の `git clone` 自体は強制終了しないため、処理が完了するまで新しい作成は開始しない。失敗・cancel のどちらでも
 既存 directory は削除せず、clone が途中まで作った destination も自動削除しない。`Ctrl+C` / `Ctrl+Q` は TUI を終了する。
 
-Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・PR auto-open・Environment、`Workspace init` 見出しに
+Welcome の Config は、`Global` 見出しに全体へ適用する Theme・Modal mode・Terminal PTYs・PR auto-open・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Workflow・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
 実行した場合は、Home 上の overlay modal に Agent・Base branch・Workflow・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
 `↑↓` で行を、`←→` で値を切り替える。Workflow 行は択一値として `< classic >` / `< goal-driven >` と表示する。
@@ -233,17 +233,17 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
-| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・PR auto-open・Environment はすべての workspace に適用する。Agent・Workflow・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
+| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・Terminal PTYs・PR auto-open・Environment はすべての workspace に適用する。Agent・Workflow・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
 | Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Workflow・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field は Global を継承する。Workflow の未知 token は自律実行を暗黙に有効化せず `classic` へ縮退する |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
-merge して atomic write する。Global Config は Theme・Modal mode・PR auto-open・Agent・Workflow・Team・Issue・Memory を所有し、Environment 行の
+merge して atomic write する。Global Config は Theme・Modal mode・Terminal PTYs・PR auto-open・Agent・Workflow・Team・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
 Workspace Config は Agent・Base branch・Workflow・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
-Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Workflow は `work_mode`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
+Terminal PTYs は global-only の `terminal_max_concurrent`、Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Workflow は `work_mode`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。Terminal PTYs は次の daemon generation の起動時に反映され、値域と resource policy は [daemon の capacity pool](05-daemon.md#capacity-pool) を正本とする。
 Workflow の `classic` は既定値で、従来どおり New が CLI picker を開き、選択した root Agent conversation を空の
 initial prompt で起動する。`goal-driven` は明示的な opt-in で、New を [Goal Composer](#goal-driven-workflow) に替える。
 Global / Workspace の field 欠落と Global の未知値は `classic`、Workspace の明示的な未知値も `classic` へ縮退するため、
@@ -997,7 +997,7 @@ command の subcommand picker を開き、`←` は閉じる。`Prompt` は入�
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
 `clean` は daemon lifecycle に紐付かない managed worktree / `usagi/*` branch と、dispatch run が既に failed なのに pre-spawn の `reserved` runtime だけが残った Agent reservation を dry-run で数える。daemon restart がその予約を `reconcile_required(identity_unknown)` へ変換した場合も同じ候補として数える。`clean --apply` は merged branch と clean worktree だけを削除し、dirty worktree、unmerged branch、失敗済み Agent reservation は `clean --apply --force` の二重の明示がある場合だけ回収する。Agent reservation は matching `OperationId` の dispatch run が failed、runtime が `reserved` または `reconcile_required(identity_unknown)`、process identity が未設定、という全条件を daemon が再確認し、running runtime や process identity を持つ曖昧な runtime を候補にしない。処理は workspace fence を保持する daemon 内で inventory と lifecycle を再照合して実行し、途中で session が active になった Git resource には作用しない。active daemon は保持中の全 workspace へ同じ non-force cleanup を 5 分ごとに適用するため、merged branch と clean worktree は手動実行なしでも回収される。dirty / unmerged resource と失敗済み Agent reservation は自動回収せず、引き続き明示的な `clean --apply --force` を必要とする。
 `session cleanup` は session として登録中の worktree を対象にする別の操作である。resident PR lane の snapshot に dismissed でない PR が1件以上あり、そのすべてが Merged、Agent phase が absent または done、daemon lifecycle が remove 可能な session だけを queue に並べる。Space で個別選択、`a` で全件選択、Enter で開始し、Esc は queue を閉じる。各 remove は force を付けず、daemon の削除結果から対象 `SessionId` が消えた snapshot を受け取った場合だけ、選択済みの次の identity を再検証して送る。PR が open / closed へ変わった row、Agent が再開した row、削除不能になった row は dispatch 前に候補から外す。dirty worktree、未マージ branch、稼働中 terminal など daemon が拒否した場合は安全な notice を queue に残して自動継続を止める。
-Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
+Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Terminal PTYs は次の daemon 起動から反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
 
 `session create <name>`、`session list`、`session overview`、`session resume <name>`、`session sleep <name>`、`session remove <name> [--force]` は

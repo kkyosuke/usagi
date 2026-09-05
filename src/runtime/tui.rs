@@ -9899,6 +9899,8 @@ mod tests {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Prompt,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
+            terminal_max_concurrent:
+                usagi_core::domain::settings::TerminalConcurrencyLimit::default(),
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: false,
