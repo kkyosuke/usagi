@@ -4875,6 +4875,7 @@ fn begin_next_remove(state: &mut AppState, continuing: bool) -> Vec<Effect> {
         session,
         force,
         force_delete_branch: force,
+        purge_orphan: false,
     }]
 }
 
@@ -6196,7 +6197,8 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
             name,
             force,
             force_delete_branch,
-        } => remove_named_session(state, &name, force, force_delete_branch),
+            purge_orphan,
+        } => remove_named_session(state, &name, force, force_delete_branch, purge_orphan),
     }
 }
 
@@ -6221,6 +6223,7 @@ fn remove_named_session(
     name: &str,
     force: bool,
     force_delete_branch: bool,
+    purge_orphan: bool,
 ) -> Vec<Effect> {
     let session = state
         .session_names
@@ -6243,6 +6246,7 @@ fn remove_named_session(
         session,
         force,
         force_delete_branch,
+        purge_orphan,
     }]
 }
 
@@ -10473,6 +10477,7 @@ mod tests {
                 session,
                 force: true,
                 force_delete_branch: true,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.overlay(), None);
@@ -12501,6 +12506,7 @@ mod tests {
                 session: first,
                 force: true,
                 force_delete_branch: true,
+                purge_orphan: false,
             }]
         );
 
@@ -12518,6 +12524,7 @@ mod tests {
                     session: second,
                     force: true,
                     force_delete_branch: true,
+                    purge_orphan: false,
                 },
             ]
         );
