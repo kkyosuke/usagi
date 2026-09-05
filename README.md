@@ -261,10 +261,12 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 
 `goal-driven` を選んだ workspace では `Ctrl-O n` または Director の `[ Start ]` から Goal Composer を開き、目的と
 provider を確定して Work Run を開始する。Director の初回表示は `goal-driven` では Work Runs、`classic` では
-Organization になり、同じ Workflow で閉じて開き直した場合は直前の画面へ戻る。`Ctrl-O w` は最大16件の Work Runs を直接開き、`Enter` で選択 Run の
-Run Overview へ進む。Work Runs / Run Overview の `Ctrl-C` は active Run の cancel 確認、`Ctrl-X` は終了済み Run の
-履歴削除確認で、確認中の `Ctrl-C` / `Esc` は取り消しになる。Workflow を `classic` へ切り替えても daemon 上の既存 Run は継続するため、
-`Ctrl-O w` から監視・停止できる（classic の New は Conversation のみで、新しい Work Run は開始しない）。一般の blocking choice は既存 Decision、成果 PR は既存 PR 一覧に表示する。
+Organization になり、同じ Workflow で閉じて開き直した場合は直前の画面へ戻る。Classic の Organization は Conversation 一覧と
+選択 Conversation の Agent / Session tree を表示し、goal-driven からは開かない。goal-driven の `Ctrl-O w` は最大16件の Work Runs を
+直接開き、`Enter` で選択 Run の Run Overview へ進む。Work Runs / Run Overview の `Ctrl-C` は active Run の cancel 確認、
+`Ctrl-X` は終了済み Run の履歴削除確認で、確認中の `Ctrl-C` / `Esc` は取り消しになる。Workflow を切り替えても daemon 上の
+Conversation / Work Run は継続するが、Director は選択中 Workflow の画面 tree だけを開く。一般の blocking choice は既存 Decision、
+成果 PR は既存 PR 一覧に表示する。
 詳細な操作と現行契約は [goal-driven workflow](document/03-tui.md#goal-driven-workflow)を参照する。
 
 環境変数は Config の `Env  [ N variables ]`、Overview の `env [workspace|global]`、Closeup の `env` で編集する。

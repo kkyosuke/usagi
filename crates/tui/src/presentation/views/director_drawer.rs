@@ -372,8 +372,13 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
         DirectorRoute::RunOverview(run_id) => {
             run_overview_body(width, height, rows, projection, run_id)
         }
-        DirectorRoute::Console(_) => {
-            let footer = "Ctrl-O b: back · Ctrl-O w: Work Runs · Ctrl-O g: close";
+        DirectorRoute::Console(parent) => {
+            let footer = match parent {
+                DirectorConsoleParent::Organization => "Ctrl-O b: Organization · Ctrl-O g: close",
+                DirectorConsoleParent::RunOverview(_) => {
+                    "Ctrl-O b: Run Overview · Ctrl-O w: Work Runs · Ctrl-O g: close"
+                }
+            };
             if let Some(view) = &projection.terminal_view {
                 return terminal_conversation_body(width, height, rows, view, footer);
             }
@@ -402,23 +407,25 @@ fn organization_body(
     projection: &DirectorDrawerProjection,
 ) -> Vec<String> {
     let footer_hint = if projection.work_run_control.mode == WorkRunControlMode::Submitting {
-        "Work Run action in progress · Ctrl-O w: Work Runs · Ctrl-O g: close"
-    } else if projection.goal_driven {
-        "Ctrl-O n Start · Ctrl-O w Runs · Enter Console · Esc close"
+        "Background action in progress · Ctrl-O g: close"
     } else {
-        "Ctrl-O n New · Ctrl-O w Runs · Enter Console · Esc close"
+        "Ctrl-O n New · Enter Console · Esc close"
     };
     let content_capacity = height.saturating_sub(rows.len() + 1);
     if !projection.conversations.is_empty() {
-        rows.push(Role::Accent.style().bold().paint("Directors"));
+        rows.push(Role::Accent.style().bold().paint("Conversations"));
         for conversation in &projection.conversations {
             let marker = if conversation.selected { "›" } else { " " };
             rows.push(format!("{marker} {}", conversation.label));
         }
         rows.push(String::new());
     }
-    if !projection.organization.is_empty() {
-        rows.push(Role::Accent.style().bold().paint("Organization"));
+    let selected_conversation = projection
+        .conversations
+        .iter()
+        .any(|conversation| conversation.selected);
+    if selected_conversation && !projection.organization.is_empty() {
+        rows.push(Role::Accent.style().bold().paint("Agent / Sessions"));
         for member in &projection.organization {
             let branch = if member.depth == 0 { "" } else { "└─ " };
             rows.push(format!(
@@ -430,7 +437,13 @@ fn organization_body(
             ));
         }
     } else if projection.conversations.is_empty() {
-        empty_conversation_rows(&mut rows, projection, content_capacity);
+        empty_conversation_rows(&mut rows, content_capacity);
+    } else if rows.len() < height.saturating_sub(1) {
+        rows.push(
+            Style::new()
+                .dim()
+                .paint("Select a Conversation to inspect its Agent / Session tree."),
+        );
     }
     rows.truncate(height.saturating_sub(1));
     rows.resize(height.saturating_sub(1), String::new());
@@ -605,15 +618,14 @@ fn work_run_list_body(
         .feedback
         .as_deref()
         .or(projection.feedback.as_deref());
-    let footer = feedback.unwrap_or(match (freshness, runs.is_empty(), projection.goal_driven) {
-        (WorkRunFreshness::Pending, true, _) => "Loading Work Runs · Ctrl-O g: close",
-        (WorkRunFreshness::Fresh, true, true) => "Ctrl-O n: Start Work Run · Ctrl-O g: close",
-        (WorkRunFreshness::Fresh, true, false) => "Ctrl-O b: Organization · Ctrl-O g: close",
-        (WorkRunFreshness::Unavailable, true, _) => "Waiting for daemon refresh · Ctrl-O g: close",
-        (WorkRunFreshness::Unavailable, false, _) => {
+    let footer = feedback.unwrap_or(match (freshness, runs.is_empty()) {
+        (WorkRunFreshness::Pending, true) => "Loading Work Runs · Ctrl-O g: close",
+        (WorkRunFreshness::Fresh, true) => "Ctrl-O n: Start Work Run · Ctrl-O g: close",
+        (WorkRunFreshness::Unavailable, true) => "Waiting for daemon refresh · Ctrl-O g: close",
+        (WorkRunFreshness::Unavailable, false) => {
             "Cached view · waiting for refresh · Ctrl-O g: close"
         }
-        (WorkRunFreshness::Pending | WorkRunFreshness::Fresh, false, _) => {
+        (WorkRunFreshness::Pending | WorkRunFreshness::Fresh, false) => {
             "↑↓ select · Enter Overview · Ctrl-C cancel · Ctrl-X delete"
         }
     });
@@ -645,22 +657,9 @@ fn work_run_list_body(
                 rows.push(Style::new().dim().paint("Loading Work Runs…"));
             }
             WorkRunFreshness::Fresh => {
-                rows.push(
-                    Role::Accent
-                        .style()
-                        .bold()
-                        .paint(if projection.goal_driven {
-                            "No Work Runs yet"
-                        } else {
-                            "No existing Work Runs"
-                        }),
-                );
+                rows.push(Role::Accent.style().bold().paint("No Work Runs yet"));
                 if capacity > 1 {
-                    rows.push(Style::new().dim().paint(if projection.goal_driven {
-                        "Start one with Ctrl-O n."
-                    } else {
-                        "Switch Workflow to goal-driven to start one."
-                    }));
+                    rows.push(Style::new().dim().paint("Start one with Ctrl-O n."));
                 }
             }
             WorkRunFreshness::Unavailable => {
@@ -712,7 +711,7 @@ fn run_overview_body(
         );
     };
     rows.extend(work_run_rows(width, run, projection.work_runs.freshness()));
-    rows.push(Role::Accent.style().bold().paint("Organization"));
+    rows.push(Role::Accent.style().bold().paint("Agent / Sessions"));
     let director_status = if run.root_agent_id.is_some() {
         "available"
     } else if run.state.is_finished() {
@@ -894,43 +893,27 @@ const fn task_state_label(state: TaskState) -> &'static str {
     }
 }
 
-fn empty_conversation_rows(
-    rows: &mut Vec<String>,
-    projection: &DirectorDrawerProjection,
-    content_capacity: usize,
-) {
+fn empty_conversation_rows(rows: &mut Vec<String>, content_capacity: usize) {
     let before = content_capacity.saturating_sub(3) / 2;
     rows.extend(std::iter::repeat_n(String::new(), before));
     if content_capacity > before {
-        rows.push(
-            Role::Accent
-                .style()
-                .bold()
-                .paint(if projection.goal_driven {
-                    "No organization activity yet"
-                } else {
-                    "No conversations yet"
-                }),
-        );
+        rows.push(Role::Accent.style().bold().paint("No conversations yet"));
     }
     if content_capacity > before + 1 {
-        rows.push(Style::new().dim().paint(if projection.goal_driven {
-            "Director conversations and delegated sessions appear here."
-        } else {
-            "Conversation inventory is not connected."
-        }));
+        rows.push(
+            Style::new()
+                .dim()
+                .paint("Conversation inventory is not connected."),
+        );
     }
     if content_capacity <= before + 2 {
         return;
     }
-    let detail = if projection.goal_driven && projection.work_runs.runs().is_empty() {
-        "Choose Start to begin a Work Run."
-    } else if projection.goal_driven {
-        "Ctrl-O w opens Work Runs; Start begins another."
-    } else {
-        "Choose New to start a conversation."
-    };
-    rows.push(Style::new().dim().paint(detail));
+    rows.push(
+        Style::new()
+            .dim()
+            .paint("Choose New to start a conversation."),
+    );
 }
 
 fn provider_picker_body(
@@ -1241,10 +1224,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_goal_driven_organization_does_not_infer_work_run_emptiness() {
+    fn organization_requires_a_selected_classic_conversation_for_its_tree() {
         let projection = DirectorDrawerProjection {
-            goal_driven: true,
-            work_runs: WorkRunProjection::fresh(vec![work_run()]),
+            conversations: vec![DirectorConversation {
+                label: "Agent 12345678".into(),
+                selected: false,
+            }],
+            organization: vec![DirectorOrganizationRow {
+                depth: 0,
+                label: "Director".into(),
+                status: "active".into(),
+            }],
             ..DirectorDrawerProjection::default()
         };
         let text = drawer_body(72, 10, &projection)
@@ -1253,10 +1243,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("No organization activity yet"));
-        assert!(text.contains("Director conversations and delegated sessions appear here."));
-        assert!(text.contains("Ctrl-O w opens Work Runs; Start begins another."));
-        assert!(!text.contains("No Work Runs yet"));
+        assert!(text.contains("Conversations"));
+        assert!(text.contains("Select a Conversation"));
+        assert!(!text.contains("Agent / Sessions"));
     }
 
     #[test]
@@ -1309,6 +1298,10 @@ mod tests {
     #[test]
     fn organization_projection_renders_depth_and_status() {
         let projection = DirectorDrawerProjection {
+            conversations: vec![DirectorConversation {
+                label: "Agent 12345678".into(),
+                selected: true,
+            }],
             organization: vec![
                 DirectorOrganizationRow {
                     depth: 0,
@@ -1333,7 +1326,8 @@ mod tests {
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(body.contains("Organization"));
+        assert!(body.contains("Conversations"));
+        assert!(body.contains("Agent / Sessions"));
         assert!(body.contains("triage (manager)"));
         assert!(body.contains("implement (executor)"));
         assert!(body.contains("stopped"));
@@ -1365,6 +1359,7 @@ mod tests {
     fn goal_driven_drawer_names_the_run_and_exposes_the_control_surface() {
         let projection = DirectorDrawerProjection {
             goal_driven: true,
+            route: DirectorRoute::WorkRuns,
             ..DirectorDrawerProjection::default()
         };
         let body = drawer_body(64, 8, &projection)
@@ -1373,37 +1368,37 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(body.contains("Director / Organization"));
+        assert!(body.contains("Director / Work Runs"));
         assert!(body.contains("[ Start ]"));
-        assert!(body.contains("Director conversations and delegated sessions appear here."));
-        assert!(body.contains("Ctrl-O w Runs"));
-        assert!(!body.contains("No Work Runs yet"));
+        assert!(body.contains("Loading Work Runs…"));
+        assert!(!body.contains("Conversations"));
+        assert!(!body.contains("Organization"));
         assert!(!body.contains("Choose New to start a conversation."));
     }
 
     #[test]
-    fn director_drawer_renders_daemon_owned_work_run_progress_in_both_modes() {
-        for goal_driven in [false, true] {
-            let run = work_run();
-            let projection = DirectorDrawerProjection {
-                goal_driven,
-                route: DirectorRoute::RunOverview(run.supervisor_run_id),
-                work_runs: WorkRunProjection::fresh(vec![run]),
-                ..DirectorDrawerProjection::default()
-            };
-            let body = drawer_body(72, 16, &projection)
-                .into_iter()
-                .map(|row| strip_ansi(&row))
-                .collect::<Vec<_>>()
-                .join("\n");
+    fn goal_driven_drawer_renders_daemon_owned_work_run_progress() {
+        let run = work_run();
+        let projection = DirectorDrawerProjection {
+            goal_driven: true,
+            route: DirectorRoute::RunOverview(run.supervisor_run_id),
+            work_runs: WorkRunProjection::fresh(vec![run]),
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(72, 16, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-            assert!(body.contains("Work Run  Review supervisor stability"));
-            assert!(body.contains("1/3 tasks"));
-            assert!(body.contains("Agents 1/4"));
-            assert!(body.contains("✓ task-0  done"));
-            assert!(body.contains("● task-1  working"));
-            assert!(body.contains("Stop reason: —"));
-        }
+        assert!(body.contains("Work Run  Review supervisor stability"));
+        assert!(body.contains("1/3 tasks"));
+        assert!(body.contains("Agents 1/4"));
+        assert!(body.contains("✓ task-0  done"));
+        assert!(body.contains("● task-1  working"));
+        assert!(body.contains("Stop reason: —"));
+        assert!(body.contains("Agent / Sessions"));
+        assert!(!body.contains("Organization"));
     }
 
     #[test]
@@ -1515,24 +1510,6 @@ mod tests {
         assert!(cached.contains("Review supervisor stability"));
         assert!(cached.contains("Cached view · waiting for refresh"));
         assert!(!cached.contains("No cached Work Runs to show"));
-
-        let classic_empty = DirectorDrawerProjection {
-            route: DirectorRoute::WorkRuns,
-            work_runs: WorkRunProjection::fresh(Vec::new()),
-            work_run_control: WorkRunControlProjection {
-                mode: WorkRunControlMode::List,
-                ..WorkRunControlProjection::default()
-            },
-            ..DirectorDrawerProjection::default()
-        };
-        let classic_empty = drawer_body(72, 12, &classic_empty)
-            .into_iter()
-            .map(|row| strip_ansi(&row))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(classic_empty.contains("No existing Work Runs"));
-        assert!(classic_empty.contains("Switch Workflow to goal-driven to start one."));
-        assert!(!classic_empty.contains("Start Work Run"));
     }
 
     #[test]
@@ -1786,7 +1763,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(background_submission.contains("Director / Organization"));
-        assert!(background_submission.contains("Work Run action in progress"));
+        assert!(background_submission.contains("Background action in progress"));
         assert!(!background_submission.contains("Applying the durable action"));
         assert!(!background_submission.contains("Ctrl-O n New"));
     }
