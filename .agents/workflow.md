@@ -11,6 +11,8 @@ The documentation index is [document/README.md](../document/README.md).
 この節が AI エージェントによる実装依頼の提出・レビュー手順の正本である。
 レビューサイクルは 1 件の実装依頼または追加修正ごとに数え、PR 作成後または追加修正の push 後の
 初回レビューを 1 回目とする。レビュー指摘による修正の push は同じサイクルに属し、回数をリセットしない。
+既存 PR への追加修正では、PR が Ready for review なら `gh pr ready <number> --undo` で Draft に戻してから
+修正を push し、更新後のレビューと CI が完了するまで Draft を保つ。
 
 ```text
 実装・ローカル検証 → Draft PR 作成 → サブエージェントレビュー・修正（最大 3 回） → CI 確認 → Ready for review
@@ -23,7 +25,8 @@ The documentation index is [document/README.md](../document/README.md).
   初回を含めて最大 3 回まで繰り返し、マージを妨げる指摘がなくなればレビューを終了する。
 - 3 回のレビュー後もマージを妨げる未解決事項が残る場合は、マージ可能とみなさず、PR を Draft のまま保って
   未解決事項をユーザーへ報告する。
-- レビュー終了後、必須 CI がすべて green、マージ競合なし、マージを妨げる未解決事項なしを確認してから
+- ベースブランチの最新状態を反映した差分についてレビューを終え、必須 CI がすべて green、
+  マージ競合なし、マージを妨げる未解決事項なしを確認してから
   PR を Ready for review にする。ここまでを「マージできるレベル」の完了条件とする。
 
 ## 新規作業（新しいタスクを始めるとき）
@@ -106,7 +109,7 @@ The documentation index is [document/README.md](../document/README.md).
 ```bash
 git push origin HEAD:refs/heads/<branch>
 gh pr create --head <branch> --draft --title "<type>: <説明>" --body "<概要>"
-# CI（fmt / clippy / full test / coverage 100%、documentation SSoT lint、該当時は Markdown link check）が green になったら:
+# 上記「実装依頼の完了条件」をすべて満たしたら:
 gh pr ready <number>
 ```
 
@@ -131,8 +134,9 @@ gh pr ready <number>
 
 追加した変更に合わせて `document/` および必要なら `README.md` を更新する。
 
-### 3. PR のタイトル・概要を更新する
+### 3. PR を Draft に戻し、タイトル・概要を更新する
 
+Draft に戻す条件と手順は [実装依頼の完了条件](#実装依頼の完了条件) を正本とする。
 変更によって PR のスコープが変わった場合は、タイトルと本文を実態に合わせて更新する。
 
 ```bash
