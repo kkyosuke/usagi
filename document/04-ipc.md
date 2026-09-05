@@ -1314,6 +1314,11 @@ connection の reader / writer / retirement descriptor と worker slot を保持
 worker を止めた後、最後の合流 wake を処理して live census が空の sweep を完了してから owner runtime を破棄するため、非同期化しても
 connection-local state を取り残さない。
 
+connection ID の登録直後から disconnect は RAII guard が所有する。clean EOF と protocol / transport error だけでなく、request dispatch
+または response observer が panic して unwind した場合も、generation routing ledger と live census から connection を外してから
+terminal owner を解放する。client / cleanup worker の panic から process-wide shutdown と workspace ownership 解放へ進む lifecycle は
+[daemon process lifecycle](05-daemon.md#daemon-process-lifecycle) を正本とする。
+
 | client 側の観測 | 共有 connection | 全 subscription | 次に送るもの |
 |---|---|---|---|
 | 完全に受信した error response（`resync_required` / `stale_target` など）、decode できない `Ok` body、非終端の `Accepted` | 保持する | 有効なまま | 当該 pane の resync / typed failure だけ |
