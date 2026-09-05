@@ -35,7 +35,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
-use usagi_core::domain::settings::WorkMode;
+use usagi_core::domain::settings::{IconMode, WorkMode};
 use usagi_core::domain::supervisor::{MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, SupervisorRunId};
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 use usagi_core::domain::user_decision::UserDecisionAnswer;
@@ -1446,6 +1446,7 @@ struct WorkspaceEntryPolicy {
     default_model: usagi_core::domain::settings::DefaultModel,
     default_branch: Option<String>,
     work_mode: usagi_core::domain::settings::WorkMode,
+    icon_mode: usagi_core::domain::settings::IconMode,
 }
 
 impl Default for WorkspaceEntryPolicy {
@@ -1455,6 +1456,7 @@ impl Default for WorkspaceEntryPolicy {
             default_model: usagi_core::domain::settings::DefaultModel::default(),
             default_branch: None,
             work_mode: usagi_core::domain::settings::WorkMode::default(),
+            icon_mode: usagi_core::domain::settings::IconMode::default(),
         }
     }
 }
@@ -4225,8 +4227,7 @@ fn project_controller_sessions(ui: &WorkspaceIoRuntime, state: &AppState) -> Vec
                 }
             }
             if let Some(prs) = state.session_prs(*id) {
-                projected.pr_summary =
-                    crate::presentation::views::workspace::pr_inventory_summary(prs);
+                projected.pr_count = crate::presentation::views::workspace::visible_pr_entries(prs);
             }
             projected
         })
@@ -4238,12 +4239,14 @@ fn project_controller_sessions(ui: &WorkspaceIoRuntime, state: &AppState) -> Vec
 ///
 /// This is the non-interactive `usagi open <path>` fallback (no terminal), so
 /// it shows the initial project bar and Home surface: root selected/active, the
-/// snapshot's sessions, and the `+ new session` row.
+/// snapshot's sessions, and the `+ new session` row. The composition root passes
+/// the resolved global icon preference just as it does for the interactive loop.
 #[must_use]
 pub fn render_home_snapshot(
     height: usize,
     width: usize,
     snapshot: &WorkspaceSnapshot,
+    icon_mode: IconMode,
 ) -> Vec<String> {
     let (height, width) = widgets::normalize_size(height, width);
     let workspace = WorkspaceView::with_runtime_ids(
@@ -4275,7 +4278,8 @@ pub fn render_home_snapshot(
         &snapshot.workspace.name,
         &snapshot.workspace.path,
         &sessions,
-    );
+    )
+    .with_icon_mode(icon_mode);
     let mut frame = Vec::with_capacity(height);
     frame.push(project_bar(&WorkspaceDeck::new(snapshot), width).line);
     frame.extend(render_home(
@@ -6074,6 +6078,7 @@ fn home_frame_material(
         root_terminal_view.as_deref(),
         create_pending,
         now,
+        usagi_core::domain::settings::IconMode::default(),
     )
     .with_garden_animation(
         widgets::garden::runtime_tick(runtime.state().mascot_tick()),
@@ -6095,6 +6100,7 @@ fn home_frame_material_shared(
     root_terminal_view: Option<&TerminalViewProjection>,
     create_pending: Option<&str>,
     now: DateTime<Utc>,
+    icon_mode: usagi_core::domain::settings::IconMode,
 ) -> HomeFrameMaterial {
     let force_remove_confirmation =
         runtime
@@ -6108,6 +6114,7 @@ fn home_frame_material_shared(
             });
     let root_terminal_projection = runtime.root_terminal_projection(root_terminal_view);
     let projection = HomeProjection::from_ordered_state(runtime.state(), workspace_name, sessions)
+        .with_icon_mode(icon_mode)
         .with_pane(runtime.preview_pane())
         .with_metrics(metrics)
         // Diagnostic-only material. It rides the frame material like every
@@ -7068,7 +7075,8 @@ fn cached_workspace_switch_frame(
             AppEvent::FocusSession(session),
         );
     }
-    let projection = HomeProjection::from_state(&state, slot.label(), slot.path(), &sessions);
+    let projection = HomeProjection::from_state(&state, slot.label(), slot.path(), &sessions)
+        .with_icon_mode(deck.icon_mode());
     let projection = if show_progress {
         projection.with_content_loading(status, frame)
     } else {
@@ -7561,7 +7569,9 @@ fn drive_workspace_controller(
         default_model,
         default_branch,
         work_mode,
+        icon_mode,
     } = entry_policy;
+    deck.set_icon_mode(icon_mode);
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
     let workspace_name = snapshot.workspace.name.clone();
@@ -8148,6 +8158,7 @@ fn drive_workspace_controller(
                     .as_ref()
                     .map(|create| create.name.as_str()),
                 now,
+                icon_mode,
             )
             .with_agent_inventory(ui.agent_inventory(), runtime.panes())
             .with_work_runs(work_runs.clone())
@@ -9054,6 +9065,7 @@ pub fn run_workspace_controller_with_backend_and_settings(
             default_model: settings.default_model,
             default_branch: settings.default_branch.clone(),
             work_mode: settings.work_mode,
+            icon_mode: settings.icon_mode,
             ..WorkspaceEntryPolicy::default()
         },
         None,
@@ -9091,6 +9103,7 @@ pub fn run_workspace_controller_with_backend_and_config(
             default_model: effective.default_model,
             default_branch: effective.default_branch.clone(),
             work_mode: effective.work_mode,
+            icon_mode: effective.icon_mode,
         },
         Some(WorkspaceConfigContext {
             settings,
@@ -9398,6 +9411,7 @@ fn open_snapshot_via_controller(
             default_model: effective.default_model,
             default_branch: effective.default_branch.clone(),
             work_mode: effective.work_mode,
+            icon_mode: effective.icon_mode,
         },
         Some(WorkspaceConfigContext {
             settings,
@@ -10435,7 +10449,7 @@ mod tests {
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session_lifecycle::AgentPhase;
-    use usagi_core::domain::settings::{AvailableModels, DefaultModel, Settings};
+    use usagi_core::domain::settings::{AvailableModels, DefaultModel, IconMode, Settings};
     use usagi_core::domain::supervisor::{
         ExecutionPolicy, RunProvenance, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
         TaskId,
@@ -12339,7 +12353,7 @@ mod tests {
         assert_eq!(rows[0].lifecycle, SessionLifecycle::Failed);
         assert_eq!(rows[0].failure_summary.as_deref(), Some("create failed"));
         assert!(!rows[0].removing);
-        assert!(rows[0].pr_summary.is_some());
+        assert!(rows[0].pr_count > 0);
 
         // The reducer receives the lifecycle so it can gate attach by capability.
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
@@ -14414,7 +14428,7 @@ mod tests {
             cwd: "/work/alpha".into(),
             last_modified: now(),
             has_notes: false,
-            pr_summary: None,
+            pr_count: 0,
             removing: false,
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
@@ -14622,7 +14636,7 @@ mod tests {
             cwd: "/work/alpha".into(),
             last_modified: now(),
             has_notes: false,
-            pr_summary: None,
+            pr_count: 0,
             removing: false,
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
@@ -27231,6 +27245,7 @@ mod tests {
         let beta = snapshot_with_sessions("beta", &["first", "remembered"]);
         let remembered = beta.session_ids[1];
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
+        deck.set_icon_mode(usagi_core::domain::settings::IconMode::Text);
         let mut previous = WorkspaceRuntime::new(beta.workspace_id, beta.session_ids.clone());
         let _ = previous.handle_key(Key::Down);
 
@@ -27646,14 +27661,14 @@ mod tests {
         );
 
         let mut team = Config::load(&mut settings);
-        for _ in 0..6 {
+        for _ in 0..7 {
             let _ = step_config(&mut team, Key::Down, &mut settings);
         }
         let _ = step_config(&mut team, Key::Enter, &mut settings);
         assert_eq!(super::config_help_context(&team), HelpContext::TeamPicker);
 
         let mut environment = Config::load(&mut settings);
-        for _ in 0..3 {
+        for _ in 0..4 {
             let _ = step_config(&mut environment, Key::Down, &mut settings);
         }
         let _ = step_config(&mut environment, Key::Enter, &mut settings);
@@ -27762,7 +27777,7 @@ mod tests {
 
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
-        for _ in 0..6 {
+        for _ in 0..7 {
             step_config(&mut config, Key::Down, &mut settings);
         }
         assert_eq!(config.field(), ConfigField::TeamTemplate);
@@ -27796,6 +27811,7 @@ mod tests {
 
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
@@ -27870,6 +27886,7 @@ mod tests {
             ConfigStep::Stay
         ));
         step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
@@ -28101,7 +28118,7 @@ mod tests {
         };
         let mut config = Config::load(&mut settings);
         let _ = step_config(&mut config, Key::Right, &mut settings);
-        for _ in 0..10 {
+        for _ in 0..11 {
             let _ = step_config(&mut config, Key::Down, &mut settings);
         }
         assert!(matches!(
@@ -28164,6 +28181,7 @@ mod tests {
         let _ = step_config(&mut environment, Key::Down, &mut inline);
         let _ = step_config(&mut environment, Key::Down, &mut inline);
         let _ = step_config(&mut environment, Key::Down, &mut inline);
+        let _ = step_config(&mut environment, Key::Down, &mut inline);
         let _ = step_config(&mut environment, Key::Enter, &mut inline);
         let _ = step_config(
             &mut environment,
@@ -28186,6 +28204,7 @@ mod tests {
             ..RecordingSettingsPort::default()
         };
         let mut config = Config::load(&mut settings);
+        let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Down, &mut settings);
         let _ = step_config(&mut config, Key::Down, &mut settings);
@@ -28244,6 +28263,7 @@ mod tests {
             Key::Down,
             Key::Down,
             Key::Down,
+            Key::Down,
             Key::Enter,
             Key::Paste("GLOBAL=1".to_owned()),
             Key::Management {
@@ -28272,10 +28292,11 @@ mod tests {
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Terminal PTYs → Environment → Agent model →
+    // Save (Theme → Icons → Modal mode → Terminal PTYs → Environment → Agent model →
     // Workflow → Team → Issue → Memory → PR → Save).
-    const CONFIG_SAVE_KEYS: [Key; 12] = [
+    const CONFIG_SAVE_KEYS: [Key; 13] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
@@ -30632,7 +30653,7 @@ mod tests {
             term.frames
                 .iter()
                 .flat_map(|frame| frame.iter())
-                .any(|line| line.contains('C') && line.contains('M'))
+                .any(|line| line.contains('\u{f2db}') && line.contains('\u{f233}'))
         );
     }
 
@@ -30674,7 +30695,7 @@ mod tests {
         // The non-interactive `usagi open <path>` fallback renders one static
         // project bar plus Home frame through the controller projection: the
         // workspace name, its sessions, and both creation affordances.
-        let rows = render_home_snapshot(30, 100, &snapshot("demo"));
+        let rows = render_home_snapshot(30, 100, &snapshot("demo"), IconMode::NerdFont);
         assert_eq!(rows.len(), 30);
         assert!(rows[0].contains("1 demo"));
         assert!(rows[0].contains("+ Open"));
@@ -30683,7 +30704,16 @@ mod tests {
         assert!(frame.contains("demo-session"));
         assert!(frame.contains("+ new session"));
         // A zero size safely falls back to the default geometry.
-        assert!(!render_home_snapshot(0, 0, &snapshot("demo")).is_empty());
+        assert!(!render_home_snapshot(0, 0, &snapshot("demo"), IconMode::NerdFont).is_empty());
+
+        let text = strip_ansi(
+            &render_home_snapshot(30, 100, &snapshot("demo"), IconMode::Text).join("\n"),
+        );
+        for nerd_font_glyph in ["\u{f0ec}", "\u{f00e}", "\u{f085}"] {
+            assert!(!text.contains(nerd_font_glyph));
+        }
+        assert!(text.contains("switch  closeup"));
+        assert!(text.contains("Agents"));
 
         // A Failed session in the snapshot renders with its failed treatment and
         // failure reason, so the initial fallback frame surfaces it too.
@@ -30697,7 +30727,8 @@ mod tests {
                 failure_summary: Some("branch exists".into()),
             },
         );
-        let failed_frame = render_home_snapshot(30, 100, &failed_snapshot).join("\n");
+        let failed_frame =
+            render_home_snapshot(30, 100, &failed_snapshot, IconMode::NerdFont).join("\n");
         assert!(failed_frame.contains("failed"));
         assert!(failed_frame.contains("branch exists"));
     }
