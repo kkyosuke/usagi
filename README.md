@@ -45,6 +45,10 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 最近使った workspace を **Recent** から直接開き、**New** で既存リポジトリの登録または clone、
 **Config** で全体設定の編集ができる。
 
+Home の compact な表示は Nerd Font アイコンが既定である。patched font を使えない端末では
+Global Config の `Icons` を `text` にすると、PR・Agents・CPU / memory・通知・session cursor などを
+`PR` / `Agents` / `CPU` / `MEM` / `!` / `>` の文字表示へ切り替えられる。
+
 workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
 選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。project を再選択すると、
 その project で最後にフォーカスしていた session へ Switch のカーソルが戻る。`+ Open` は左右の余白を
@@ -213,7 +217,8 @@ inventory refresh 自体は再開を発火しない。
 
 ### 4. 状態と PR を確認する
 
-session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。`Ctrl-O p`
+session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。
+`Icons: text` ではアイコンを `PR` label へ縮退する。`Ctrl-O p`
 （または `Ctrl-O Ctrl-P`）、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開く。
 Preview は `Ctrl-O v`、scratchpad は `Ctrl-O s` で開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
 検知した PR を選択した一覧を自動で開く。PR 一覧は repository 見出しの下へ番号・状態・title をまとめ、
@@ -250,7 +255,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 
 | 設定 | 内容 |
 |---|---|
-| Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
+| Theme / Icons / Modal mode / PR auto-open | TUI の配色、Nerd Font または text の表示、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | [Terminal PTYs](document/05-daemon.md#capacity-pool) | generic Terminal の同時 PTY 数に対する最後の安全上限。画面メモリは保持中の実セル数で別に制御する |
 | Agent | 新しい Agent pane の既定 CLI |
 | Base branch | workspace で新しい session を作るときの既定 branch |
