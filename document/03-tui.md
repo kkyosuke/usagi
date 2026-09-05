@@ -488,12 +488,11 @@ Home controller の management input では、Switch の `Ctrl-A` は新規 sess
 選択中の `Ctrl-X` は safe な `session remove` を実行する。plain `x` / `X` は session を削除しない。`+ new session`
 行では削除しない。削除要求後は対象の `deleting` 行に cursor を表示したままにし、削除完了で行が消えた時点で
 隣の surviving session（無ければ `+ new session`）へ移す。`deleting` 行での `Ctrl-X` は削除を再送しない。
-`Ctrl-X` は未コミット worktree と未マージ branch のどちらも破棄しない安全側で、daemon が拒否した場合は
+`Ctrl-X` は通常、未コミット worktree と未マージ branch のどちらも破棄しない安全側で、daemon が拒否した場合は
 session を `failed` として残す。force は delete failure の確認 modal、または明示的な `close --force` command だけが所有する。
-例外として、選択中の row が daemon 診断済みの `failed/integrity` orphan である場合だけ、`Ctrl-Shift-X` は
-`force: true, purge_orphan: true` を含む exact-target remove を直接送る。その他の lifecycle / failure stage、overlay
-表示中、または Shift modifier を識別できない terminal では purge を送らない。対応 terminal には拡張キーボード報告を
-要求するが、従来型 terminal が `Ctrl-X` と `Ctrl-Shift-X` を同じ raw `0x18` で送る場合は safe remove に倒す。
+例外として、選択中の row が daemon 診断済みの `failed/integrity` orphan である場合だけ、同じ `Ctrl-X` が
+`force: true, purge_orphan: true` を含む exact-target remove を直接送る。その他の lifecycle / failure stage、または overlay
+表示中は purge を送らない。
 `Ctrl-Q` は exit prompt を開く（離脱と終了の区別は
 [workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の generic terminal では、leader が
 待機していない `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。Agent pane の `Ctrl-C` は Agent CLI へ通常の SIGINT として渡す。`Ctrl-Q` / `Ctrl-D` / `Ctrl-X` は global control chord として入力 owner に渡す。Closeup の `Ctrl-O o` は
@@ -505,8 +504,8 @@ modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラー�
 
 daemon 未登録の `.usagi/sessions/<name>` が見つかった場合は、attach 不能・remove 可能な `failed` recovery row として
 sidebar に現れ、failure detail に actual branch、dirty、未統合 commit 件数を表示する。clean かつ基点へ統合済みなら `Ctrl-X` で
-安全に回収できる。dirty、未統合、detached、`usagi/` 外 branch、診断不能な entry は `Ctrl-X` で削除せず、
-commit/stash または PR の作成・merge を促す。内容を破棄すると確認できた exact orphan は `Ctrl-Shift-X` で
+安全に回収できる。dirty、未統合、detached、`usagi/` 外 branch、診断不能な entry は safe remove では削除せず、
+commit/stash または PR の作成・merge を促す。内容を破棄すると確認できた exact orphan は `Ctrl-X` で
 `--force --purge-orphan` 相当の回収を要求できる。
 
 左 sidebar は、実 session・`+ new session` の左クリックで cursor だけを移し、active session や mode を

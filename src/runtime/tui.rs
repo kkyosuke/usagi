@@ -4193,7 +4193,6 @@ fn classify_terminal_input(
             GlobalControlChord::CtrlQ => Key::CtrlQ,
             GlobalControlChord::CtrlD => Key::CtrlD,
             GlobalControlChord::CtrlX => Key::CtrlX,
-            GlobalControlChord::CtrlShiftX => Key::CtrlShiftX,
             GlobalControlChord::Help => Key::Help,
         }),
         LiveInputOutput::Swallowed => None,
@@ -4732,8 +4731,8 @@ fn run_in_terminal(
     if let Err(error) = execute!(
         setup,
         EnterAlternateScreen,
-        // Ask supporting terminals to preserve modifier identity so the
-        // destructive Ctrl-Shift-X chord is distinguishable from safe Ctrl-X.
+        // Ask supporting terminals to preserve modifier identity for shortcuts
+        // and selection-aware input.
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         EnableMouseCapture,
         // Capture pastes as a single `Event::Paste` so a multi-line paste reaches
@@ -8686,7 +8685,7 @@ mod tests {
     }
 
     #[test]
-    fn shifted_x_is_inert_ctrl_x_is_safe_and_ctrl_shift_x_purges_an_orphan() {
+    fn shifted_x_is_inert_and_ctrl_x_removes_or_purges_the_selected_session() {
         use crossterm::event::{
             KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
         };
@@ -8743,18 +8742,15 @@ mod tests {
                 },
             )]))),
         );
-        let ctrl_shift_x = classify_terminal_input(
+        let ctrl_x = classify_terminal_input(
             &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
             Duration::ZERO,
-            &LiveInput::Key(crate::tui_input::adapt_key(CrosstermKeyEvent::new(
-                CrosstermKeyCode::Char('x'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            ))),
+            &live_key(KeyCode::Char('x'), control()),
         )
-        .expect("Ctrl-Shift-X is a management key");
-        assert_eq!(ctrl_shift_x, Key::CtrlShiftX);
-        let event = usagi_tui::presentation::app_event_from_key(ctrl_shift_x)
-            .expect("Ctrl-Shift-X reaches the Home reducer");
+        .expect("Ctrl-X is a management key");
+        assert_eq!(ctrl_x, Key::CtrlX);
+        let event = usagi_tui::presentation::app_event_from_key(ctrl_x)
+            .expect("Ctrl-X reaches the Home reducer");
         assert_eq!(
             update(&mut state, event),
             vec![Effect::RemoveSession {
@@ -8778,10 +8774,7 @@ mod tests {
             (LiveInput::Raw(vec![4]), Key::CtrlD),
             (live_key(KeyCode::Char('x'), control()), Key::CtrlX),
             (LiveInput::Raw(vec![24]), Key::CtrlX),
-            (
-                live_key(KeyCode::Char('X'), control_shift()),
-                Key::CtrlShiftX,
-            ),
+            (live_key(KeyCode::Char('X'), control_shift()), Key::CtrlX),
             (live_key(KeyCode::Char('/'), control()), Key::Help),
             (LiveInput::Raw(vec![31]), Key::Help),
         ];
