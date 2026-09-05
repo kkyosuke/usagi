@@ -2649,7 +2649,12 @@ fn home_left_pane(
         if matches!(row, Selection::NewSession)
             && let Some(name) = home.create_pending.as_deref()
         {
-            lines.extend(create_skeleton_lines(width, name, home.mascot_tick));
+            lines.extend(create_skeleton_lines(
+                width,
+                name,
+                home.mascot_tick,
+                home.icon_mode,
+            ));
         }
         let row_lines = home_row_lines_at(width, home, *row, columns, pr_width, now);
         if row_line_count + row_lines.len() > viewport_capacity {
@@ -2713,7 +2718,7 @@ const CREATE_SKELETON_ROWS: usize = SESSION_ROW_LINES;
 /// (green), never Accent (cyan), and is never a cursor or current target. The
 /// final placeholder mirrors the landed session's Agent row so replacement does
 /// not move the rows below it.
-fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
+fn create_skeleton_lines(width: usize, name: &str, tick: u64, icon_mode: IconMode) -> Vec<String> {
     let wave = widgets::Shimmer {
         style: Role::Success.style().bold(),
         base_style: Role::Success.style().dim(),
@@ -2735,7 +2740,11 @@ fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
         widgets::pad_to_width(
             &format!(
                 "  {}",
-                widgets::shimmer_text_with(&format!("{AGENT_ICON} …"), frame, wave)
+                widgets::shimmer_text_with(
+                    &format!("{} …", icon_set(icon_mode).agents),
+                    frame,
+                    wave,
+                )
             ),
             width,
         ),
@@ -4944,7 +4953,7 @@ mod tests {
 
     #[test]
     fn create_skeleton_draws_three_padded_lines_that_wave_with_the_tick() {
-        let first = create_skeleton_lines(30, "atlas", 0);
+        let first = create_skeleton_lines(30, "atlas", 0, IconMode::NerdFont);
         assert_eq!(CREATE_SKELETON_ROWS, SESSION_ROW_LINES);
         assert_eq!(first.len(), CREATE_SKELETON_ROWS);
         // All lines are padded to the sidebar width and carry the typed name,
@@ -4956,9 +4965,13 @@ mod tests {
         assert!(strip(&first[2]).contains(AGENT_ICON));
         // The sweep is animated, not a static blink: a later tick paints a
         // different frame while keeping the same display width and text.
-        let later = create_skeleton_lines(30, "atlas", 12);
+        let later = create_skeleton_lines(30, "atlas", 12, IconMode::NerdFont);
         assert_ne!(first[0], later[0]);
         assert!(strip(&later[0]).contains("atlas"));
+
+        let text = create_skeleton_lines(30, "atlas", 0, IconMode::Text);
+        assert!(strip(&text[2]).contains("Agents …"));
+        assert!(!strip(&text[2]).contains(AGENT_ICON));
         assert_eq!(display_width(&later[0]), 30);
     }
 

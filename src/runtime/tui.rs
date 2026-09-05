@@ -5056,7 +5056,8 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
         })?;
     } else {
         let snapshot = loader.open(path)?;
-        for line in presentation::render_home_snapshot(0, 0, &snapshot) {
+        let icon_mode = settings.read(SettingsScope::Global)?.icon_mode;
+        for line in presentation::render_home_snapshot(0, 0, &snapshot, icon_mode) {
             writeln!(out, "{line}")?;
         }
     }

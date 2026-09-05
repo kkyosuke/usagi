@@ -35,7 +35,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
-use usagi_core::domain::settings::WorkMode;
+use usagi_core::domain::settings::{IconMode, WorkMode};
 use usagi_core::domain::supervisor::{MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, SupervisorRunId};
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 use usagi_core::domain::user_decision::UserDecisionAnswer;
@@ -4239,12 +4239,14 @@ fn project_controller_sessions(ui: &WorkspaceIoRuntime, state: &AppState) -> Vec
 ///
 /// This is the non-interactive `usagi open <path>` fallback (no terminal), so
 /// it shows the initial project bar and Home surface: root selected/active, the
-/// snapshot's sessions, and the `+ new session` row.
+/// snapshot's sessions, and the `+ new session` row. The composition root passes
+/// the resolved global icon preference just as it does for the interactive loop.
 #[must_use]
 pub fn render_home_snapshot(
     height: usize,
     width: usize,
     snapshot: &WorkspaceSnapshot,
+    icon_mode: IconMode,
 ) -> Vec<String> {
     let (height, width) = widgets::normalize_size(height, width);
     let workspace = WorkspaceView::with_runtime_ids(
@@ -4276,7 +4278,8 @@ pub fn render_home_snapshot(
         &snapshot.workspace.name,
         &snapshot.workspace.path,
         &sessions,
-    );
+    )
+    .with_icon_mode(icon_mode);
     let mut frame = Vec::with_capacity(height);
     frame.push(project_bar(&WorkspaceDeck::new(snapshot), width).line);
     frame.extend(render_home(
@@ -10446,7 +10449,7 @@ mod tests {
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session_lifecycle::AgentPhase;
-    use usagi_core::domain::settings::{AvailableModels, DefaultModel, Settings};
+    use usagi_core::domain::settings::{AvailableModels, DefaultModel, IconMode, Settings};
     use usagi_core::domain::supervisor::{
         ExecutionPolicy, RunProvenance, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
         TaskId,
@@ -30692,7 +30695,7 @@ mod tests {
         // The non-interactive `usagi open <path>` fallback renders one static
         // project bar plus Home frame through the controller projection: the
         // workspace name, its sessions, and both creation affordances.
-        let rows = render_home_snapshot(30, 100, &snapshot("demo"));
+        let rows = render_home_snapshot(30, 100, &snapshot("demo"), IconMode::NerdFont);
         assert_eq!(rows.len(), 30);
         assert!(rows[0].contains("1 demo"));
         assert!(rows[0].contains("+ Open"));
@@ -30701,7 +30704,16 @@ mod tests {
         assert!(frame.contains("demo-session"));
         assert!(frame.contains("+ new session"));
         // A zero size safely falls back to the default geometry.
-        assert!(!render_home_snapshot(0, 0, &snapshot("demo")).is_empty());
+        assert!(!render_home_snapshot(0, 0, &snapshot("demo"), IconMode::NerdFont).is_empty());
+
+        let text = strip_ansi(
+            &render_home_snapshot(30, 100, &snapshot("demo"), IconMode::Text).join("\n"),
+        );
+        for nerd_font_glyph in ["\u{f0ec}", "\u{f00e}", "\u{f085}"] {
+            assert!(!text.contains(nerd_font_glyph));
+        }
+        assert!(text.contains("switch  closeup"));
+        assert!(text.contains("Agents"));
 
         // A Failed session in the snapshot renders with its failed treatment and
         // failure reason, so the initial fallback frame surfaces it too.
@@ -30715,7 +30727,8 @@ mod tests {
                 failure_summary: Some("branch exists".into()),
             },
         );
-        let failed_frame = render_home_snapshot(30, 100, &failed_snapshot).join("\n");
+        let failed_frame =
+            render_home_snapshot(30, 100, &failed_snapshot, IconMode::NerdFont).join("\n");
         assert!(failed_frame.contains("failed"));
         assert!(failed_frame.contains("branch exists"));
     }
