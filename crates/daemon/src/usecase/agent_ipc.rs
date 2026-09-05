@@ -1461,7 +1461,7 @@ impl AgentRuntime {
         }
         if let Some(record) = live {
             let mut bytes = prompt.as_bytes().to_vec();
-            bytes.push(b'\n');
+            bytes.push(b'\r');
             self.pty.select_terminal(&record.runtime.terminal);
             self.pty.write_all(&bytes).map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed")
@@ -1507,7 +1507,7 @@ impl AgentRuntime {
                 ProtocolError::new(ErrorCode::Unavailable, "target agent run is no longer live")
             })?;
         let mut bytes = prompt.as_bytes().to_vec();
-        bytes.push(b'\n');
+        bytes.push(b'\r');
         self.pty.select_terminal(&live.runtime.terminal);
         self.pty.write_all(&bytes).map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed")
@@ -7955,10 +7955,10 @@ mod tests {
             .prompt(workspace, Some(session), "follow up", PromptMode::Live)
             .unwrap();
         assert_eq!(live.delivered_to, "live");
-        assert_eq!(pty(&runtime).writes, b"follow up\n");
+        assert_eq!(pty(&runtime).writes, b"follow up\r");
         let fenced = runtime.prompt_run(operation, "decision answer").unwrap();
         assert_eq!(fenced.delivered_to, "live");
-        assert_eq!(pty(&runtime).writes, b"follow up\ndecision answer\n");
+        assert_eq!(pty(&runtime).writes, b"follow up\rdecision answer\r");
         assert!(runtime.prompt_run(OperationId::new(), "late").is_err());
         assert_eq!(
             runtime.prompt_run(operation, "  ").unwrap_err().code,
@@ -8163,7 +8163,7 @@ mod tests {
             pty(&runtime).selected.as_ref().unwrap().workspace_id,
             second.workspace
         );
-        assert_eq!(pty(&runtime).writes, b"workspace two\n");
+        assert_eq!(pty(&runtime).writes, b"workspace two\r");
     }
 
     #[test]

@@ -165,7 +165,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_create` | daemon IPC を通じて session lifecycle store と worktree を操作する |
 | `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
-| `session_prompt` | `live`（既定）は handshake で fence した workspace と optional session が一致する live Agent PTY へ配送し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ durable queue へ配送する。停止中の Agent を起動する入口は `session_dispatch` とする |
+| `session_prompt` | `live`（既定）は handshake で fence した workspace と optional session が一致する live Agent PTY へ prompt と Enter キーを配送して即時実行し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ durable queue へ配送する。停止中の Agent を起動する入口は `session_dispatch` とする |
 | `agent_resume_inventory` | daemon の workspace-wide Agent inventory から provider ID を含まない safe metadata と opaque な exact resume target を列挙する |
 | `session_resume` | `agent_resume_inventory` が返した exact target を受け取り、新しい daemon-owned Agent runtime を明示的に起動する。`usagi session` の subcommand 名 `resume-inventory` / `resume-exact` とは wire 名が異なる |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
