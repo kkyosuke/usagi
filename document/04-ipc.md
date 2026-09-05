@@ -76,11 +76,22 @@ close する。hello をまだ読んでいない相手へ新しい error frame �
 peer data・credential・workspace を含まない `capacity exhausted` を記録する。
 
 handshake 成否にかかわらず、accept 済み worker の総数は generation ごとに process の `RLIMIT_NOFILE` から算出した上限に収める。
+daemon は起動時に、hard limit を越えない範囲で soft limit を最大 worker 数に必要な 896 まで引き上げ、OS が拒否した場合は
+取得済み soft limit から安全に縮退する。
 128 descriptor を PTY・store・wake pipe・listener・child 用に予約し、worker 1 件の reader / writer / retirement descriptor を 3 件として
 残りから上限を求め、thread 数を守るため最大 256 とする（limit を取得できない場合は 32）。finished worker を先に reap し、
 上限中は新しい socket を thread 作成前に close する。したがって正しい hello を送った後に idle し続ける同一 UID client も
 thread / socket descriptor を無制限には保持できない。この総数上限は established connection の時間制限ではなく、接続終了で枠を返す。
 capacity refusal の error log は飽和区間ごとに 1 回だけ記録し、reconnecting client 自身が log / disk pressure を増幅しない。
+
+bootstrap broker と TUI の再接続監視を含む内部 readiness probe も raw socket の open/close ではなく、`unbound` の
+`ClientHello` を送り、server hello または framed protocol refusal を受け取るまで接続を保持する。protocol refusal は endpoint
+への到達を証明するため「稼働中」とし、transport failure だけを「不在」とする。これにより probe 自身が handshake 前切断として
+daemon の failure log を汚さず、別 workspace を正当に serve している endpoint の重複起動も防ぐ。
+accept 時に全 connection が必須とする process metadata は kernel-authenticated peer PID までである。親 PID と process group は
+MCP child claim または bearer を持たない provider hook が Agent lineage を証明するときだけ要求し、取得不能ならその privileged
+request を `ownership_unknown` で拒否する。親 daemon の終了後に PID 1 配下へ reparent された bootstrap broker の readiness hello や、
+通常の同一 UID client を lineage 不在だけで handshake 前に拒否しない。
 
 admit した pre-handshake connection は、prefix read、body read、hello validation、reply write を合わせて 2 秒の単一の
 monotonic completion deadline を持つ。各 socket read / write はその絶対時刻までの残量だけで待つため、partial prefix や
@@ -1284,11 +1295,13 @@ attachment をすべて解放する。input ledger（`input_seq` の期待値）
 connection 上の全 subscription を同時に無効化**する。
 
 server は transport EOF を観測した connection worker から socket を先に解放し、connection-local な
-subscription / input ledger の削除は daemon-owned cleanup worker へ渡して直列化する。ledger の走査が長時間
-稼働した terminal の owner lock と競合しても、切断済み connection の reader / writer / retirement descriptor を
-保持しない。cleanup queue 自体も全 client worker 上限と同じ容量に制限し、consumer が owner lock を待つ場合でも
-queue memory と送信待ち worker の双方を有界にする。daemon shutdown は accept と全 connection worker を止めた後に cleanup queue を drain してから owner
-runtime を破棄するため、非同期化しても connection-local state を取り残さない。
+subscription / input ledger の削除と MCP child credential の解放は daemon-owned cleanup worker へ渡して直列化する。
+通知は owner lock と cleanup queue の容量を待たず、consumer は最大 client worker 上限ずつ batch にして owner lock を
+取得する。live client 上限は再利用される worker slot だけを数え、過去の disconnect 件数を制限しないため、同じ上限の
+bounded queue を使って connection worker へ backpressure を返してはならない。ledger の走査が長時間稼働した terminal の
+owner lock と競合しても、切断済み connection の reader / writer / retirement descriptor と worker slot を保持しない。
+daemon shutdown は accept と全 connection worker を止めた後に cleanup queue を drain してから owner runtime を破棄するため、
+非同期化しても connection-local state を取り残さない。
 
 | client 側の観測 | 共有 connection | 全 subscription | 次に送るもの |
 |---|---|---|---|

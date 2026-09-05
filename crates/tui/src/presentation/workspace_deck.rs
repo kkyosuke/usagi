@@ -191,6 +191,7 @@ pub struct WorkspaceDeck {
     overlay: Option<DeckOverlay>,
     notice: Option<String>,
     pending_garden_visit: Option<(PathBuf, GardenVisit)>,
+    pending_closeup_path: Option<PathBuf>,
 }
 
 /// Stable Garden target carried while the process replaces one workspace
@@ -212,6 +213,7 @@ impl WorkspaceDeck {
             overlay: None,
             notice: None,
             pending_garden_visit: None,
+            pending_closeup_path: None,
         }
     }
 
@@ -413,6 +415,9 @@ impl WorkspaceDeck {
         {
             self.pending_garden_visit = None;
         }
+        if self.pending_closeup_path.as_deref() == Some(path) {
+            self.pending_closeup_path = None;
+        }
     }
 
     /// Carry one identity-only Garden visit across the workspace composition
@@ -436,6 +441,35 @@ impl WorkspaceDeck {
             return self.pending_garden_visit.take().map(|(_, visit)| visit);
         }
         None
+    }
+
+    /// Preserve Closeup for one keyboard-driven project transition. The target
+    /// controller consumes the intent only after its lifecycle snapshot is in
+    /// the reducer, choosing the remembered usable session or the first usable
+    /// row when this project has not been visited yet.
+    pub fn schedule_closeup(&mut self, path: PathBuf) {
+        self.pending_closeup_path = Some(path);
+    }
+
+    #[must_use]
+    pub fn take_closeup_session(&mut self, active_path: &Path) -> Option<SessionId> {
+        if self.pending_closeup_path.as_deref() != Some(active_path) {
+            return None;
+        }
+        self.pending_closeup_path = None;
+        let slot = self.slot_for_path(active_path)?;
+        if let Some(focused) = slot.focused_session
+            && slot.sessions.iter().any(|session| {
+                session.projected.id == focused
+                    && session.projected.lifecycle.capabilities().can_use
+            })
+        {
+            return Some(focused);
+        }
+        slot.sessions
+            .iter()
+            .find(|session| session.projected.lifecycle.capabilities().can_use)
+            .map(|session| session.projected.id)
     }
 
     /// Remember the last stable session row focused by one workspace
@@ -1353,17 +1387,71 @@ mod tests {
     }
 
     #[test]
+    fn closeup_transition_prefers_remembered_then_first_usable_session() {
+        let alpha = snapshot_with_session("alpha", "/alpha", "alpha-session");
+        let mut beta = snapshot_with_sessions("beta", "/beta", &["failed", "first", "remembered"]);
+        let failed = beta.session_ids[0];
+        let first = beta.session_ids[1];
+        let remembered = beta.session_ids[2];
+        beta.session_lifecycles.insert(
+            failed,
+            usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+                lifecycle: SessionLifecycle::Failed,
+                failure_stage: None,
+                failure_summary: Some("unavailable".to_owned()),
+            },
+        );
+        let mut unavailable = snapshot_with_session("gamma", "/gamma", "failed");
+        unavailable.session_lifecycles.insert(
+            unavailable.session_ids[0],
+            usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+                lifecycle: SessionLifecycle::Failed,
+                failure_stage: None,
+                failure_summary: Some("unavailable".to_owned()),
+            },
+        );
+        let mut deck =
+            WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone(), unavailable.clone()])
+                .unwrap();
+
+        deck.schedule_closeup(beta.workspace.path.clone());
+        assert_eq!(
+            deck.take_closeup_session(&alpha.workspace.path),
+            None,
+            "another controller cannot consume the pending target"
+        );
+        assert_eq!(deck.take_closeup_session(&beta.workspace.path), Some(first));
+        assert_eq!(deck.take_closeup_session(&beta.workspace.path), None);
+
+        deck.schedule_closeup(unavailable.workspace.path.clone());
+        assert_eq!(
+            deck.take_closeup_session(&unavailable.workspace.path),
+            None,
+            "a project with no usable session stays in Switch"
+        );
+
+        deck.remember_session_focus(beta.workspace_id, remembered);
+        deck.schedule_closeup(beta.workspace.path.clone());
+        assert_eq!(
+            deck.take_closeup_session(&beta.workspace.path),
+            Some(remembered)
+        );
+    }
+
+    #[test]
     fn close_falls_right_then_left_and_last_has_no_replacement() {
         let alpha = snapshot("alpha", "/alpha");
         let beta = snapshot("beta", "/beta");
         let gamma = snapshot("gamma", "/gamma");
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone(), gamma]).unwrap();
         deck.activate_snapshot(&beta);
+        deck.schedule_closeup(beta.workspace.path.clone());
         assert_eq!(
             deck.replacement_path_after_close(Path::new("/beta")),
             Some(Path::new("/gamma"))
         );
         deck.close_path(Path::new("/beta"));
+        assert_eq!(deck.take_closeup_session(Path::new("/beta")), None);
         assert_eq!(deck.active_path(), Path::new("/gamma"));
         assert_eq!(
             deck.replacement_path_after_close(Path::new("/gamma")),

@@ -186,6 +186,14 @@ pub enum LiveTerminalAction {
     OpenWorkspaceSwitcher,
     /// Activate project tab 1 through 9 (`Ctrl-O 1` … `Ctrl-O 9`).
     ActivateWorkspace(u8),
+    /// Select the previous managed session (`Ctrl-Option-Up`).
+    PreviousSession,
+    /// Select the next managed session (`Ctrl-Option-Down`).
+    NextSession,
+    /// Activate the previous open workspace (`Ctrl-Option-Left`).
+    PreviousWorkspace,
+    /// Activate the next open workspace (`Ctrl-Option-Right`).
+    NextWorkspace,
     /// Return to Switch mode.
     Switch,
     /// Open the active target's Closeup modal.
@@ -393,10 +401,31 @@ impl LiveInputClassifier {
             self.leader_at = Some(now);
             return LiveInputOutput::Swallowed;
         }
+        if let Some(action) = session_workspace_navigation_action(key) {
+            return LiveInputOutput::Action(action);
+        }
         if let Some(control) = global_control_key(key) {
             return LiveInputOutput::GlobalControl(control);
         }
         LiveInputOutput::Passthrough(encode_key(key))
+    }
+}
+
+/// Resolve the exact modifier chord used to cross session/workspace boundaries.
+///
+/// Raw terminal bytes cannot reliably distinguish this chord, so only semantic
+/// key events whose backend preserves both Control and Alt (Option on macOS)
+/// claim the navigation action. Every other modified arrow remains PTY input.
+fn session_workspace_navigation_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
+    if !is_control_and_alt(key.modifiers) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Up => Some(LiveTerminalAction::PreviousSession),
+        KeyCode::Down => Some(LiveTerminalAction::NextSession),
+        KeyCode::Left => Some(LiveTerminalAction::PreviousWorkspace),
+        KeyCode::Right => Some(LiveTerminalAction::NextWorkspace),
+        _ => None,
     }
 }
 
@@ -447,6 +476,15 @@ fn is_only_control(modifiers: Modifiers) -> bool {
     modifiers.control
         && !modifiers.shift
         && !modifiers.alt
+        && !modifiers.super_
+        && !modifiers.hyper
+        && !modifiers.meta
+}
+
+fn is_control_and_alt(modifiers: Modifiers) -> bool {
+    modifiers.control
+        && modifiers.alt
+        && !modifiers.shift
         && !modifiers.super_
         && !modifiers.hyper
         && !modifiers.meta
@@ -900,6 +938,69 @@ mod tests {
             },
             KeyEventKind::Press,
         ))
+    }
+
+    fn ctrl_alt(code: KeyCode) -> LiveInput {
+        LiveInput::Key(KeyEvent::new(
+            code,
+            Modifiers {
+                control: true,
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ))
+    }
+
+    #[test]
+    fn ctrl_option_arrows_resolve_session_and_workspace_navigation() {
+        for (code, expected) in [
+            (KeyCode::Up, LiveTerminalAction::PreviousSession),
+            (KeyCode::Down, LiveTerminalAction::NextSession),
+            (KeyCode::Left, LiveTerminalAction::PreviousWorkspace),
+            (KeyCode::Right, LiveTerminalAction::NextWorkspace),
+        ] {
+            assert_eq!(
+                LiveInputClassifier::default().classify(T0, ctrl_alt(code)),
+                LiveInputOutput::Action(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_requires_exact_semantic_ctrl_option_arrows() {
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right] {
+            let shifted = LiveInput::Key(KeyEvent::new(
+                code,
+                Modifiers {
+                    control: true,
+                    alt: true,
+                    shift: true,
+                    ..Modifiers::default()
+                },
+                KeyEventKind::Press,
+            ));
+            assert!(matches!(
+                LiveInputClassifier::default().classify(T0, shifted),
+                LiveInputOutput::Passthrough(bytes) if !bytes.is_empty()
+            ));
+        }
+
+        assert!(matches!(
+            LiveInputClassifier::default().classify(T0, ctrl_alt(KeyCode::Char('x'))),
+            LiveInputOutput::Passthrough(bytes) if !bytes.is_empty()
+        ));
+
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), ctrl_alt(KeyCode::Down)),
+            LiveInputOutput::Swallowed,
+            "a pending leader keeps ownership of its modified follow-up"
+        );
     }
 
     #[test]

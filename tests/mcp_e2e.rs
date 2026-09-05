@@ -1497,17 +1497,21 @@ fn production_user_decision_round_trip_reaches_the_original_caller() {
 if [ "$1 $2" = "login status" ]; then exit 0; fi
 credential_excluded=false
 approval_disabled=false
+usagi_required=false
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]' ]; then
     credential_excluded=true
+  fi
+  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.required = true' ]; then
+    usagi_required=true
   fi
   if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.default_tools_approval_mode = "approve"' ]; then
     approval_disabled=true
   fi
   shift
 done
-if [ "$credential_excluded" != true ] || [ "$approval_disabled" != true ]; then
-  printf 'unsafe Codex MCP environment or non-interactive approval configuration\n' >> "$USAGI_MCP_FIXTURE_LOG"
+if [ "$credential_excluded" != true ] || [ "$approval_disabled" != true ] || [ "$usagi_required" != true ]; then
+  printf 'unsafe, optional, or interactive Codex MCP configuration\n' >> "$USAGI_MCP_FIXTURE_LOG"
   exit 1
 fi
 {{
