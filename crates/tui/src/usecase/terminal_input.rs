@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use usagi_core::domain::settings::WorkMode;
 use usagi_core::usecase::vt_screen::MouseProtocolEncoding;
 
 /// The longest interval in which a `Ctrl-O` leader accepts its follow-up.
@@ -268,6 +269,9 @@ pub enum GlobalControlChord {
     CtrlD,
     /// Remove or dismiss the selected management object (`Ctrl-X`).
     CtrlX,
+    /// Explicitly purge the selected integrity-orphan session
+    /// (`Ctrl-Shift-X`) when the terminal preserves the Shift modifier.
+    CtrlShiftX,
     /// Open contextual keyboard help (`Ctrl-?` / `Ctrl-/`).
     Help,
 }
@@ -410,6 +414,9 @@ fn global_control_key(key: &KeyEvent) -> Option<GlobalControlChord> {
         KeyCode::Char('c') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlC),
         KeyCode::Char('q') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlQ),
         KeyCode::Char('d') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlD),
+        KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => {
+            Some(GlobalControlChord::CtrlShiftX)
+        }
         KeyCode::Char('x') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlX),
         KeyCode::Char('/' | '7') if is_only_control(key.modifiers) => {
             Some(GlobalControlChord::Help)
@@ -445,6 +452,17 @@ fn is_only_control(modifiers: Modifiers) -> bool {
         && !modifiers.meta
 }
 
+/// Returns whether the modifiers contain exactly Control and Shift.
+#[must_use]
+pub(crate) fn is_control_and_shift(modifiers: Modifiers) -> bool {
+    modifiers.control
+        && modifiers.shift
+        && !modifiers.alt
+        && !modifiers.super_
+        && !modifiers.hyper
+        && !modifiers.meta
+}
+
 fn is_ctrl_o(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('\u{0f}'))
         || (matches!(key.code, KeyCode::Char('o')) && is_only_control(key.modifiers))
@@ -456,6 +474,43 @@ struct PrefixShortcut {
     control_byte: Option<u8>,
     allow_shift: bool,
     action: LiveTerminalAction,
+    help: Option<PrefixHelpEntry>,
+}
+
+/// Where a leader shortcut is relevant in contextual help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrefixHelpScope {
+    /// Available throughout the multi-workspace shell.
+    Workspace,
+    /// Available on an unobscured Switch, Closeup, or live terminal surface.
+    WorkspaceBase,
+}
+
+/// User-facing projection attached to the same record that drives input
+/// classification. Grouped labels may describe adjacent aliases from the same
+/// catalog (for example `1 … 9`) without creating a second key map in the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrefixHelpEntry {
+    pub keys: &'static str,
+    pub action: &'static str,
+    scope: PrefixHelpScope,
+    goal_driven_only: bool,
+}
+
+const fn with_help(
+    mut shortcut: PrefixShortcut,
+    scope: PrefixHelpScope,
+    goal_driven_only: bool,
+    keys: &'static str,
+    action: &'static str,
+) -> PrefixShortcut {
+    shortcut.help = Some(PrefixHelpEntry {
+        keys,
+        action,
+        scope,
+        goal_driven_only,
+    });
+    shortcut
 }
 
 macro_rules! prefix_shortcut {
@@ -465,6 +520,7 @@ macro_rules! prefix_shortcut {
             control_byte: None,
             allow_shift: false,
             action: $action,
+            help: None,
         }
     };
     ($code:expr, shifted => $action:expr) => {
@@ -473,6 +529,7 @@ macro_rules! prefix_shortcut {
             control_byte: None,
             allow_shift: true,
             action: $action,
+            help: None,
         }
     };
     ($code:expr, legacy = $control:expr => $action:expr) => {
@@ -481,6 +538,7 @@ macro_rules! prefix_shortcut {
             control_byte: Some($control),
             allow_shift: false,
             action: $action,
+            help: None,
         }
     };
     ($code:expr, shifted, legacy = $control:expr => $action:expr) => {
@@ -489,6 +547,7 @@ macro_rules! prefix_shortcut {
             control_byte: Some($control),
             allow_shift: true,
             action: $action,
+            help: None,
         }
     };
 }
@@ -501,9 +560,27 @@ macro_rules! prefix_shortcut {
 /// pressing the leader on any workspace surface.
 const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     prefix_shortcut!(KeyCode::Char('?'), shifted, legacy = 31 => LiveTerminalAction::KeyboardHelp),
-    prefix_shortcut!(KeyCode::Char('+'), shifted => LiveTerminalAction::OpenWorkspace),
-    prefix_shortcut!(KeyCode::Char('0') => LiveTerminalAction::OpenWorkspaceSwitcher),
-    prefix_shortcut!(KeyCode::Char('1') => LiveTerminalAction::ActivateWorkspace(1)),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('+'), shifted => LiveTerminalAction::OpenWorkspace),
+        PrefixHelpScope::Workspace,
+        false,
+        "Ctrl-O +",
+        "add workspace",
+    ),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('0') => LiveTerminalAction::OpenWorkspaceSwitcher),
+        PrefixHelpScope::Workspace,
+        false,
+        "Ctrl-O 0",
+        "project / session finder",
+    ),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('1') => LiveTerminalAction::ActivateWorkspace(1)),
+        PrefixHelpScope::Workspace,
+        false,
+        "Ctrl-O 1 … 9",
+        "activate project",
+    ),
     prefix_shortcut!(KeyCode::Char('2') => LiveTerminalAction::ActivateWorkspace(2)),
     prefix_shortcut!(KeyCode::Char('3') => LiveTerminalAction::ActivateWorkspace(3)),
     prefix_shortcut!(KeyCode::Char('4') => LiveTerminalAction::ActivateWorkspace(4)),
@@ -513,19 +590,49 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     prefix_shortcut!(KeyCode::Char('8') => LiveTerminalAction::ActivateWorkspace(8)),
     prefix_shortcut!(KeyCode::Char('9') => LiveTerminalAction::ActivateWorkspace(9)),
     prefix_shortcut!(KeyCode::Char('o'), legacy = 15 => LiveTerminalAction::Switch),
-    prefix_shortcut!(KeyCode::Char('a'), legacy = 1 => LiveTerminalAction::OpenCloseupModal),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('a'), legacy = 1 => LiveTerminalAction::OpenCloseupModal),
+        PrefixHelpScope::WorkspaceBase,
+        false,
+        "Ctrl-O a / n",
+        "actions / Director start",
+    ),
     prefix_shortcut!(KeyCode::Char('b'), legacy = 2 => LiveTerminalAction::DirectorBack),
     prefix_shortcut!(KeyCode::Char('['), legacy = 27 => LiveTerminalAction::PreviousTab),
     prefix_shortcut!(KeyCode::Char(']'), legacy = 29 => LiveTerminalAction::NextTab),
     prefix_shortcut!(KeyCode::Char('{'), shifted => LiveTerminalAction::MoveTabPrevious),
     prefix_shortcut!(KeyCode::Char('}'), shifted => LiveTerminalAction::MoveTabNext),
-    prefix_shortcut!(KeyCode::Char('p'), legacy = 16 => LiveTerminalAction::OpenPullRequests),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('p'), legacy = 16 => LiveTerminalAction::OpenPullRequests),
+        PrefixHelpScope::WorkspaceBase,
+        false,
+        "Ctrl-O p / v",
+        "Pull Requests / Preview",
+    ),
     prefix_shortcut!(KeyCode::Char('v'), legacy = 22 => LiveTerminalAction::OpenPreview),
-    prefix_shortcut!(KeyCode::Char('d'), legacy = 4 => LiveTerminalAction::OpenDecisions),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('d'), legacy = 4 => LiveTerminalAction::OpenDecisions),
+        PrefixHelpScope::WorkspaceBase,
+        false,
+        "Ctrl-O d / s",
+        "Decisions / Scratchpad",
+    ),
     prefix_shortcut!(KeyCode::Char('s'), legacy = 19 => LiveTerminalAction::OpenNotes),
-    prefix_shortcut!(KeyCode::Char(',') => LiveTerminalAction::OpenGarden),
+    with_help(
+        prefix_shortcut!(KeyCode::Char(',') => LiveTerminalAction::OpenGarden),
+        PrefixHelpScope::WorkspaceBase,
+        false,
+        "Ctrl-O , / g / t",
+        "Garden / Director / Shell",
+    ),
     prefix_shortcut!(KeyCode::Char('g'), legacy = 7 => LiveTerminalAction::Director),
-    prefix_shortcut!(KeyCode::Char('w'), legacy = 23 => LiveTerminalAction::WorkRuns),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('w'), legacy = 23 => LiveTerminalAction::WorkRuns),
+        PrefixHelpScope::WorkspaceBase,
+        true,
+        "Ctrl-O w",
+        "Work Runs",
+    ),
     prefix_shortcut!(KeyCode::Char('t'), legacy = 20 => LiveTerminalAction::RootTerminal),
     prefix_shortcut!(KeyCode::Char('z'), legacy = 26 => LiveTerminalAction::RootTerminalFullHeight),
     prefix_shortcut!(KeyCode::Char('n'), legacy = 14 => LiveTerminalAction::DirectorNew),
@@ -535,6 +642,19 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     prefix_shortcut!(KeyCode::Down => LiveTerminalAction::ScrollDown),
     prefix_shortcut!(KeyCode::End => LiveTerminalAction::ScrollBottom),
 ];
+
+/// Help rows projected from the executable leader-shortcut catalog.
+pub(crate) fn prefix_help_entries(
+    scope: PrefixHelpScope,
+    work_mode: WorkMode,
+) -> impl Iterator<Item = PrefixHelpEntry> {
+    PREFIX_SHORTCUTS
+        .iter()
+        .filter_map(|shortcut| shortcut.help)
+        .filter(move |entry| {
+            entry.scope == scope && (!entry.goal_driven_only || work_mode == WorkMode::GoalDriven)
+        })
+}
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     if let Some(byte) = control_byte_from_key_code(key.code) {
@@ -764,6 +884,18 @@ mod tests {
             KeyCode::Char(character),
             Modifiers {
                 control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ))
+    }
+
+    fn ctrl_shift(character: char) -> LiveInput {
+        LiveInput::Key(KeyEvent::new(
+            KeyCode::Char(character),
+            Modifiers {
+                control: true,
+                shift: true,
                 ..Modifiers::default()
             },
             KeyEventKind::Press,
@@ -1106,6 +1238,30 @@ mod tests {
     }
 
     #[test]
+    fn help_metadata_builder_enriches_the_executable_shortcut() {
+        let shortcut = with_help(
+            std::hint::black_box(prefix_shortcut!(
+                KeyCode::Char('q') => LiveTerminalAction::CloseTab
+            )),
+            PrefixHelpScope::WorkspaceBase,
+            true,
+            "Ctrl-O q",
+            "example action",
+        );
+
+        assert_eq!(shortcut.action, LiveTerminalAction::CloseTab);
+        assert_eq!(
+            shortcut.help,
+            Some(PrefixHelpEntry {
+                keys: "Ctrl-O q",
+                action: "example action",
+                scope: PrefixHelpScope::WorkspaceBase,
+                goal_driven_only: true,
+            })
+        );
+    }
+
+    #[test]
     fn every_semantic_prefix_shortcut_accepts_control_on_the_follow_up() {
         for shortcut in PREFIX_SHORTCUTS {
             let mut classifier = LiveInputClassifier::default();
@@ -1401,6 +1557,7 @@ mod tests {
             (key(KeyCode::Char('\u{4}')), GlobalControlChord::CtrlD),
             (LiveInput::Raw(vec![4]), GlobalControlChord::CtrlD),
             (ctrl('x'), GlobalControlChord::CtrlX),
+            (ctrl_shift('X'), GlobalControlChord::CtrlShiftX),
             (key(KeyCode::Char('\u{18}')), GlobalControlChord::CtrlX),
             (LiveInput::Raw(vec![24]), GlobalControlChord::CtrlX),
             (ctrl('/'), GlobalControlChord::Help),

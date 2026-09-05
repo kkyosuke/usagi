@@ -7,7 +7,7 @@ abort "usage: #{File.basename($PROGRAM_NAME)} JUNIT..." if ARGV.empty?
 
 runs = ARGV.map do |path|
   tests = {}
-  REXML::Document.new(File.read(path)).elements.each("//testcase") do |testcase|
+  REXML::Document.new(File.read(path, encoding: Encoding::UTF_8)).elements.each("//testcase") do |testcase|
     name = [testcase.attributes["classname"], testcase.attributes["name"]]
            .compact.map(&:to_s).join("::")
     tests[name] = testcase.attributes.fetch("time").to_s.to_f

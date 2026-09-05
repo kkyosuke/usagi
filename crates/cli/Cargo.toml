@@ -17,7 +17,6 @@ clap_complete.workspace = true
 # MCP サーバの stdio JSON-RPC 2.0 のパース・整形と、tool の入力スキーマ埋め込みに使う。
 serde_json.workspace = true
 serde.workspace = true
-toml.workspace = true
 # MCP store adapters bind the production clock and translate core usecase errors.
 chrono.workspace = true
 anyhow.workspace = true

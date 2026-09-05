@@ -17,6 +17,9 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pr_inventory::{PrEntry, PrState};
+use usagi_core::domain::presentation_text::{
+    presentation_character_is_safe, presentation_text_is_safe,
+};
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
@@ -30,7 +33,9 @@ use usagi_core::usecase::agent_phase::AgentPhaseAggregation;
 use usagi_core::usecase::env::EnvScope;
 
 use crate::usecase::application::environment_source::EnvironmentSourceEditor;
-use crate::usecase::terminal_input::{KeyCode, KeyEventKind, LiveInput, RuntimeEvent};
+use crate::usecase::terminal_input::{
+    KeyCode, KeyEventKind, LiveInput, RuntimeEvent, is_control_and_shift,
+};
 use crate::usecase::{agent_command, closeup, overview};
 
 /// Home の常駐 route。これ以外の常駐 mode は作らない。
@@ -75,6 +80,8 @@ pub enum Overlay {
     Decisions,
     /// Merge-confirmed sessions awaiting explicit, sequential cleanup.
     CleanupQueue,
+    /// Explicit session-removal checklist opened from `session remove --select`.
+    RemoveSessions,
     /// active target scope の Pull Request 一覧。素材は port から還流する。
     Prs,
     /// active target の Markdown preview。素材は port から還流する。
@@ -83,6 +90,8 @@ pub enum Overlay {
     CreateSessionError,
     /// terminal の起動要求が失敗したことを伝える dialog。表示は safe message だけ。
     TerminalLaunchError,
+    /// Agent の起動要求が失敗したことを伝える dialog。表示は safe message だけ。
+    AgentLaunchError,
     /// session を庭のうさぎとして眺める screen saver。読み取り専用で、最初の入力を
     /// wake-up として消費して Home へ戻る。
     Garden,
@@ -602,6 +611,66 @@ pub struct CleanupQueueState {
     feedback: Option<Notice>,
 }
 
+/// Stable identities selected for explicit session removal.
+///
+/// This is separate from [`CleanupQueueState`]: cleanup admits only completed
+/// sessions whose visible PRs are all merged, while the explicit selector lists
+/// every lifecycle row that the daemon says can be removed. Both queues dispatch
+/// one removal at a time so the workspace's bounded session-command lane never
+/// receives concurrent mutations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveQueueState {
+    candidates: Vec<SessionId>,
+    selected: BTreeSet<SessionId>,
+    cursor: usize,
+    in_flight: Option<SessionId>,
+    force: bool,
+    feedback: Option<Notice>,
+}
+
+impl RemoveQueueState {
+    fn new(candidates: Vec<SessionId>, cursor: usize, force: bool) -> Self {
+        Self {
+            cursor: cursor.min(candidates.len().saturating_sub(1)),
+            candidates,
+            selected: BTreeSet::new(),
+            in_flight: None,
+            force,
+            feedback: None,
+        }
+    }
+
+    #[must_use]
+    pub fn candidates(&self) -> &[SessionId] {
+        &self.candidates
+    }
+
+    #[must_use]
+    pub fn selected(&self) -> &BTreeSet<SessionId> {
+        &self.selected
+    }
+
+    #[must_use]
+    pub const fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    #[must_use]
+    pub const fn in_flight(&self) -> Option<SessionId> {
+        self.in_flight
+    }
+
+    #[must_use]
+    pub const fn force(&self) -> bool {
+        self.force
+    }
+
+    #[must_use]
+    pub fn feedback(&self) -> Option<&Notice> {
+        self.feedback.as_ref()
+    }
+}
+
 impl CleanupQueueState {
     fn new(candidates: Vec<SessionId>) -> Self {
         Self {
@@ -922,6 +991,48 @@ pub struct PendingOperation {
     pub interaction_at_accept: u64,
 }
 
+const MAX_PRESENTATION_MESSAGE_CHARS: usize = 240;
+
+/// Normalize untrusted detail into a bounded, one-line terminal-safe summary.
+///
+/// Control characters become a single separating space and bidi controls
+/// become a visible replacement character. This preserves useful wording
+/// without allowing terminal control flow or visual reordering. The frame is a
+/// second, fail-closed boundary for values which do not use these message types.
+fn sanitize_presentation_message(message: &str) -> String {
+    let mut sanitized = String::with_capacity(message.len().min(256));
+    let mut character_count = 0;
+    let mut previous_was_space = true;
+    let mut truncated = false;
+
+    for character in message.chars() {
+        let character = if presentation_character_is_safe(character) {
+            character
+        } else if character.is_control() {
+            ' '
+        } else {
+            '\u{fffd}'
+        };
+        if character == ' ' && previous_was_space {
+            continue;
+        }
+        if character_count == MAX_PRESENTATION_MESSAGE_CHARS - 1 {
+            truncated = true;
+            break;
+        }
+        sanitized.push(character);
+        character_count += 1;
+        previous_was_space = character == ' ';
+    }
+    while sanitized.ends_with(' ') {
+        sanitized.pop();
+    }
+    if truncated {
+        sanitized.push('…');
+    }
+    sanitized
+}
+
 /// 画面に安全に表示できる通知。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
@@ -933,8 +1044,9 @@ impl Notice {
     /// 表示用に検証済みの文言を作る。
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
-            message: message.into(),
+            message: sanitize_presentation_message(&message),
         }
     }
 }
@@ -998,15 +1110,19 @@ pub struct RuntimePhase {
     pub phase: AgentPhase,
 }
 
-/// A message which a backend adapter has explicitly classified as safe to show.
-/// No raw protocol error or detail field is representable by this type.
+/// A bounded, one-line message which is safe to show in a terminal.
+///
+/// Construction sanitizes defensively. Backend adapters must still map raw
+/// diagnostic detail to stable user-facing summaries so filesystem paths and
+/// credentials never become presentation content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeMessage(String);
 
 impl SafeMessage {
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        let message = message.into();
+        Self(sanitize_presentation_message(&message))
     }
 
     #[must_use]
@@ -1179,10 +1295,12 @@ pub struct AppState {
     decision_overlay: Option<DecisionOverlayState>,
     pr_overlay: Option<PrOverlay>,
     cleanup_queue: Option<CleanupQueueState>,
+    remove_queue: Option<RemoveQueueState>,
     preview_overlay: Option<PreviewOverlay>,
     create_session: Option<CreateSessionForm>,
     create_session_error: Option<Notice>,
     terminal_launch_error: Option<Notice>,
+    agent_launch_error: Option<Notice>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
@@ -1303,6 +1421,42 @@ pub enum DirectorRoute {
     Console(DirectorConsoleParent),
 }
 
+impl DirectorRoute {
+    /// Primary Director surface for one workspace interaction model.
+    ///
+    /// Classic work starts from the workspace organization, while goal-driven
+    /// work starts from its durable Work Run inventory. Retained routes still
+    /// win when the configured mode has not changed.
+    #[must_use]
+    const fn landing_for(mode: WorkMode) -> Self {
+        match mode {
+            WorkMode::Classic => Self::Organization,
+            WorkMode::GoalDriven => Self::WorkRuns,
+        }
+    }
+
+    /// Whether this retained route belongs to the selected workflow.
+    ///
+    /// Classic conversations and goal-driven Work Runs are separate screen
+    /// trees. A workflow switch keeps daemon-owned work alive, but never
+    /// exposes the previous workflow's route in the newly selected tree.
+    #[must_use]
+    const fn belongs_to(self, mode: WorkMode) -> bool {
+        matches!(
+            (mode, self),
+            (
+                WorkMode::Classic,
+                Self::Organization | Self::Console(DirectorConsoleParent::Organization)
+            ) | (
+                WorkMode::GoalDriven,
+                Self::WorkRuns
+                    | Self::RunOverview(_)
+                    | Self::Console(DirectorConsoleParent::RunOverview(_))
+            )
+        )
+    }
+}
+
 impl ExitChoice {
     /// The prompt's buttons in display order. `Stay` is the cancel button and is
     /// therefore last, matching the `[ yes ] [ no ]` ordering of the two-choice
@@ -1369,10 +1523,12 @@ impl AppState {
             decision_overlay: None,
             pr_overlay: None,
             cleanup_queue: None,
+            remove_queue: None,
             preview_overlay: None,
             create_session: None,
             create_session_error: None,
             terminal_launch_error: None,
+            agent_launch_error: None,
             workspace,
             sessions,
             session_names: Vec::new(),
@@ -1486,6 +1642,12 @@ impl AppState {
     pub fn terminal_launch_error(&self) -> Option<&Notice> {
         self.terminal_launch_error.as_ref()
     }
+    /// Safe message for the Agent-launch failure dialog, present exactly while
+    /// [`Overlay::AgentLaunchError`] is open.
+    #[must_use]
+    pub fn agent_launch_error(&self) -> Option<&Notice> {
+        self.agent_launch_error.as_ref()
+    }
     /// Open environment editor, including unsaved values after a save failure.
     #[must_use]
     pub fn environment_editor(&self) -> Option<&EnvironmentEditor> {
@@ -1524,6 +1686,11 @@ impl AppState {
     #[must_use]
     pub fn cleanup_queue(&self) -> Option<&CleanupQueueState> {
         self.cleanup_queue.as_ref()
+    }
+    /// Open explicit session-removal checklist, including stable selection.
+    #[must_use]
+    pub fn remove_queue(&self) -> Option<&RemoveQueueState> {
+        self.remove_queue.as_ref()
     }
     /// Open Markdown preview overlay state, including its scroll and any safe error.
     #[must_use]
@@ -1727,10 +1894,19 @@ impl AppState {
         self.default_model = default;
     }
 
-    /// Apply the effective workspace interaction setting. Returning to classic
-    /// drops a draft that was never submitted, but never touches a live Agent.
+    /// Apply the effective workspace interaction setting.
+    ///
+    /// A real mode transition selects that workflow's primary Director
+    /// surface. Re-applying the same effective setting preserves the retained
+    /// route used when the drawer is closed and reopened. Returning to classic
+    /// also drops a draft that was never submitted, but never touches a live
+    /// Agent or Work Run.
     pub fn set_work_mode(&mut self, mode: WorkMode) {
+        if self.work_mode == mode {
+            return;
+        }
         self.work_mode = mode;
+        self.director_route = DirectorRoute::landing_for(mode);
         if mode == WorkMode::Classic {
             self.director_goal.clear();
         }
@@ -2060,6 +2236,8 @@ pub enum AppKey {
     CtrlQ,
     /// Remove or dismiss the selected object from a management surface.
     CtrlX,
+    /// Explicitly purge the selected integrity-orphan session.
+    CtrlShiftX,
     /// Open the detach confirmation from a reserved live-pane action.
     OpenQuitConfirmation,
     /// Toggle the frontmost Director mode drawer. Opening is ignored while an
@@ -2076,7 +2254,7 @@ pub enum AppKey {
     OpenRootTerminal,
     /// Open the Director mode drawer and its explicit New CLI picker.
     OpenDirectorNew,
-    /// Open the workspace-wide Director Organization screen.
+    /// Open the classic Director Organization screen.
     OpenDirectorOrganization,
     /// Open the Work Run list directly.
     OpenDirectorWorkRuns,
@@ -2152,6 +2330,7 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         return None;
     }
     match key.code {
+        KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => Some(AppKey::CtrlShiftX),
         KeyCode::Char('s')
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
@@ -2265,6 +2444,10 @@ pub enum AppEvent {
     /// is presentation-safe and becomes a dismissible dialog when no other
     /// modal owns input; otherwise it remains available through the Home notice.
     TerminalLaunchFailed(Notice),
+    /// One Agent launch request failed after it left the reducer. The message
+    /// is presentation-safe and becomes a dismissible dialog when no other
+    /// modal owns input; otherwise it remains available through the Home notice.
+    AgentLaunchFailed(Notice),
     /// The runtime observed that the workspace-root Shell drawer owns no tabs.
     /// This is an explicit close rather than the user-facing toggle: both
     /// workspace drawers may be open while Director owns focus, and replaying a
@@ -2599,6 +2782,9 @@ pub enum Effect {
         force: bool,
         /// Whether the confirmed recovery may discard an unmerged session branch.
         force_delete_branch: bool,
+        /// Whether the exact target is a diagnosed integrity orphan whose
+        /// unregistered files and unmerged commits may be discarded.
+        purge_orphan: bool,
     },
     /// Open a workspace and request the Home snapshot for this exact incarnation.
     ///
@@ -2948,11 +3134,16 @@ pub enum NewRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewValidationError {
     RepositoryRequired,
+    RepositoryInvalid,
     LocationRequired,
+    LocationInvalid,
     DirectoryRequired,
     DirectoryInvalid,
+    BranchInvalid,
     PathRequired,
+    PathInvalid,
     NameRequired,
+    NameInvalid,
 }
 
 impl NewValidationError {
@@ -2960,11 +3151,16 @@ impl NewValidationError {
     pub const fn message(self) -> &'static str {
         match self {
             Self::RepositoryRequired => "repository URL is required",
+            Self::RepositoryInvalid => "repository URL must be a single safe line",
             Self::LocationRequired => "clone location is required",
+            Self::LocationInvalid => "clone location must be a single safe line",
             Self::DirectoryRequired => "directory name is required",
-            Self::DirectoryInvalid => "directory name must not contain path separators",
+            Self::DirectoryInvalid => "directory name must be a safe name without path separators",
+            Self::BranchInvalid => "branch name must be a single safe line",
             Self::PathRequired => "directory path is required",
+            Self::PathInvalid => "directory path must be a single safe line",
             Self::NameRequired => "workspace name is required",
+            Self::NameInvalid => "workspace name must be a single safe line",
         }
     }
 }
@@ -2979,22 +3175,33 @@ pub fn validate_new_form(mode: NewMode, form: &NewForm) -> Result<NewRequest, Ne
     match mode {
         NewMode::Clone => {
             let repository = required(&form.repository, NewValidationError::RepositoryRequired)?;
+            validate_presentation_field(&repository, NewValidationError::RepositoryInvalid)?;
             let location = required(&form.location, NewValidationError::LocationRequired)?;
+            validate_presentation_field(&location, NewValidationError::LocationInvalid)?;
             let directory = required(&form.directory, NewValidationError::DirectoryRequired)?;
             if is_invalid_directory_name(&directory) {
                 return Err(NewValidationError::DirectoryInvalid);
             }
             let branch = trimmed(&form.branch);
+            if let Some(branch) = &branch {
+                validate_presentation_field(branch, NewValidationError::BranchInvalid)?;
+            }
             Ok(NewRequest::Clone {
                 repository,
                 destination: PathBuf::from(location).join(directory),
                 branch,
             })
         }
-        NewMode::Existing => Ok(NewRequest::Existing {
-            path: PathBuf::from(required(&form.path, NewValidationError::PathRequired)?),
-            name: required(&form.name, NewValidationError::NameRequired)?,
-        }),
+        NewMode::Existing => {
+            let path = required(&form.path, NewValidationError::PathRequired)?;
+            validate_presentation_field(&path, NewValidationError::PathInvalid)?;
+            let name = required(&form.name, NewValidationError::NameRequired)?;
+            validate_presentation_field(&name, NewValidationError::NameInvalid)?;
+            Ok(NewRequest::Existing {
+                path: PathBuf::from(path),
+                name,
+            })
+        }
     }
 }
 
@@ -3002,12 +3209,22 @@ fn required(value: &str, error: NewValidationError) -> Result<String, NewValidat
     trimmed(value).ok_or(error)
 }
 
+fn validate_presentation_field(
+    value: &str,
+    error: NewValidationError,
+) -> Result<(), NewValidationError> {
+    presentation_text_is_safe(value).then_some(()).ok_or(error)
+}
+
 /// A clone destination is created as a single child directory under the chosen
 /// location, so its name must not traverse (`.`/`..`) or contain a path
 /// separator. Rejecting these before submit keeps `location.join(directory)`
 /// from escaping the location.
 fn is_invalid_directory_name(directory: &str) -> bool {
-    directory == "." || directory == ".." || directory.contains(['/', '\\'])
+    directory == "."
+        || directory == ".."
+        || directory.contains(['/', '\\'])
+        || !presentation_text_is_safe(directory)
 }
 
 fn trimmed(value: &str) -> Option<String> {
@@ -3456,6 +3673,14 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
+        AppEvent::AgentLaunchFailed(error) => {
+            state.notice = Some(error.clone());
+            if state.overlay.is_none() {
+                state.agent_launch_error = Some(error);
+                state.overlay = Some(Overlay::AgentLaunchError);
+            }
+            Vec::new()
+        }
         AppEvent::Resize { width, height } => {
             // The frame loop re-applies the real terminal size every frame, so
             // this arrives as a *level*. Only its edge closes the Garden: a
@@ -3543,6 +3768,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 sessions: state.sessions.clone(),
             }];
             effects.extend(continue_cleanup_after_snapshot(state));
+            effects.extend(continue_remove_after_snapshot(state));
             effects
         }
         AppEvent::Backend(BackendEvent::SessionNames(names)) => {
@@ -3577,7 +3803,28 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 queue.selected.remove(&failed);
                 queue.feedback = Some(Notice::new("cleanup paused after removal failed"));
             }
+            let failed = state
+                .remove_queue
+                .as_ref()
+                .and_then(RemoveQueueState::in_flight)
+                .filter(|session| {
+                    state
+                        .session_lifecycles
+                        .get(session)
+                        .is_some_and(|projection| {
+                            projection.lifecycle == SessionLifecycle::Failed
+                                && projection.failure_stage == Some(FailureStage::Delete)
+                        })
+                });
+            if let Some(failed) = failed
+                && let Some(queue) = state.remove_queue.as_mut()
+            {
+                queue.in_flight = None;
+                queue.selected.remove(&failed);
+                queue.feedback = Some(Notice::new("removal paused after a session failed"));
+            }
             reconcile_cleanup_queue(state);
+            reconcile_remove_queue(state);
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::SessionRoles(roles)) => {
@@ -3612,6 +3859,12 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
             if let Some(queue) = state.cleanup_queue.as_mut()
+                && let Some(failed) = queue.in_flight.take()
+            {
+                queue.selected.remove(&failed);
+                queue.feedback = Some(notice.clone());
+            }
+            if let Some(queue) = state.remove_queue.as_mut()
                 && let Some(failed) = queue.in_flight.take()
             {
                 queue.selected.remove(&failed);
@@ -3662,11 +3915,18 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         } => {
             if state.director_launching == Some(operation) {
                 state.director_launching = None;
-                if succeeded && let Some(run) = supervisor_run_id {
-                    state.director_route = DirectorRoute::RunOverview(run);
-                } else if succeeded && state.work_mode == WorkMode::Classic {
-                    state.director_route =
-                        DirectorRoute::Console(DirectorConsoleParent::Organization);
+                if succeeded {
+                    state.director_route = match (state.work_mode, supervisor_run_id) {
+                        (WorkMode::GoalDriven, Some(run)) => DirectorRoute::RunOverview(run),
+                        (WorkMode::Classic, None) => {
+                            DirectorRoute::Console(DirectorConsoleParent::Organization)
+                        }
+                        // The launch belongs to the workflow active when it
+                        // was submitted. A later workflow switch keeps the
+                        // daemon-owned result alive without crossing the two
+                        // Director screen trees.
+                        (mode, _) => DirectorRoute::landing_for(mode),
+                    };
                 }
             }
             Vec::new()
@@ -4226,7 +4486,7 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             Vec::new()
         }
         (DirectorNew::Idle, AppKey::Escape) => {
-            if state.director_route == DirectorRoute::Organization {
+            if state.director_route == DirectorRoute::landing_for(state.work_mode) {
                 state.director_drawer_open = false;
                 state.workspace_drawer_focus = state
                     .root_terminal_drawer_open
@@ -4327,6 +4587,9 @@ fn update_director_shell_key(state: &mut AppState, key: &AppKey) -> Option<Vec<E
 fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
     match key {
         AppKey::OpenDirectorOrganization => {
+            if state.work_mode != WorkMode::Classic {
+                return true;
+            }
             state.director_route = DirectorRoute::Organization;
             state.director_new = DirectorNew::Idle;
             state.director_goal.clear();
@@ -4345,19 +4608,28 @@ fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
             true
         }
         AppKey::OpenDirectorRunOverview(run) => {
+            if state.work_mode != WorkMode::GoalDriven {
+                return true;
+            }
             state.director_route = DirectorRoute::RunOverview(*run);
             state.director_new = DirectorNew::Idle;
             state.director_goal.clear();
             true
         }
         AppKey::OpenDirectorConsole(parent) => {
-            state.director_route = DirectorRoute::Console(*parent);
+            let route = DirectorRoute::Console(*parent);
+            if !route.belongs_to(state.work_mode) {
+                return true;
+            }
+            state.director_route = route;
             state.director_new = DirectorNew::Idle;
             state.director_goal.clear();
             true
         }
         AppKey::DirectorBack => {
-            director_back(state);
+            if state.director_launching.is_none() {
+                director_back(state);
+            }
             true
         }
         _ => false,
@@ -4370,16 +4642,18 @@ fn director_back(state: &mut AppState) {
         state.director_goal.clear();
         return;
     }
-    state.director_route = match state.director_route {
-        DirectorRoute::Organization
-        | DirectorRoute::WorkRuns
-        | DirectorRoute::Console(DirectorConsoleParent::Organization) => {
+    state.director_route = match (state.work_mode, state.director_route) {
+        (WorkMode::Classic, DirectorRoute::Console(DirectorConsoleParent::Organization)) => {
             DirectorRoute::Organization
         }
-        DirectorRoute::RunOverview(_) => DirectorRoute::WorkRuns,
-        DirectorRoute::Console(DirectorConsoleParent::RunOverview(run)) => {
+        (WorkMode::GoalDriven, DirectorRoute::RunOverview(_)) => DirectorRoute::WorkRuns,
+        (WorkMode::GoalDriven, DirectorRoute::Console(DirectorConsoleParent::RunOverview(run))) => {
             DirectorRoute::RunOverview(run)
         }
+        (mode, route) if route == DirectorRoute::landing_for(mode) => route,
+        // Normalize impossible or stale cross-workflow routes instead of
+        // exposing the other workflow's screen tree.
+        (mode, _) => DirectorRoute::landing_for(mode),
     };
 }
 
@@ -4441,6 +4715,7 @@ fn commit_force_remove(state: &mut AppState, confirmed: bool) -> Vec<Effect> {
         session,
         force: true,
         force_delete_branch: true,
+        purge_orphan: false,
     }]
 }
 
@@ -4534,6 +4809,7 @@ fn begin_next_cleanup(state: &mut AppState, continuing: bool) -> Vec<Effect> {
         session,
         force: false,
         force_delete_branch: false,
+        purge_orphan: false,
     }]
 }
 
@@ -4596,6 +4872,128 @@ fn continue_cleanup_after_snapshot(state: &mut AppState) -> Vec<Effect> {
     begin_next_cleanup(state, true)
 }
 
+fn remove_candidates(state: &AppState) -> Vec<SessionId> {
+    let in_flight = state
+        .remove_queue
+        .as_ref()
+        .and_then(RemoveQueueState::in_flight);
+    state
+        .sessions
+        .iter()
+        .copied()
+        .filter(|session| Some(*session) == in_flight || state.session_can_remove(*session))
+        .collect()
+}
+
+/// Rebuild explicit selector membership from the latest lifecycle snapshot.
+/// Checked stable identities survive only while the same session remains
+/// removable; a deleting in-flight target stays visible until completion.
+fn reconcile_remove_queue(state: &mut AppState) {
+    let candidates = remove_candidates(state);
+    let Some(queue) = state.remove_queue.as_mut() else {
+        return;
+    };
+    queue.candidates = candidates;
+    queue
+        .selected
+        .retain(|session| queue.candidates.contains(session));
+    queue.cursor = queue.cursor.min(queue.candidates.len().saturating_sub(1));
+}
+
+fn begin_next_remove(state: &mut AppState, continuing: bool) -> Vec<Effect> {
+    if let Some(queue) = state.remove_queue.as_mut()
+        && queue.in_flight.is_some()
+    {
+        queue.feedback = Some(Notice::new("waiting for the current removal"));
+        return Vec::new();
+    }
+    reconcile_remove_queue(state);
+    let next =
+        state.remove_queue.as_ref().and_then(|queue| {
+            queue.candidates.iter().copied().find(|session| {
+                queue.selected.contains(session) && state.session_can_remove(*session)
+            })
+        });
+    let Some(session) = next else {
+        if let Some(queue) = state.remove_queue.as_mut() {
+            queue.feedback = Some(Notice::new(if continuing {
+                "removal complete"
+            } else if queue.candidates.is_empty() {
+                "no sessions can be removed"
+            } else {
+                "select sessions with Space"
+            }));
+        }
+        return Vec::new();
+    };
+    let force = state
+        .remove_queue
+        .as_ref()
+        .is_some_and(RemoveQueueState::force);
+    if let Some(queue) = state.remove_queue.as_mut() {
+        queue.in_flight = Some(session);
+        queue.feedback = None;
+    }
+    vec![Effect::RemoveSession {
+        workspace: state.workspace,
+        session,
+        force,
+        force_delete_branch: force,
+        purge_orphan: false,
+    }]
+}
+
+fn update_remove_queue(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    let Some(queue) = state.remove_queue.as_mut() else {
+        state.overlay = None;
+        return Vec::new();
+    };
+    match key {
+        AppKey::Escape => {
+            state.overlay = None;
+            state.remove_queue = None;
+        }
+        AppKey::Up | AppKey::Char('k') if !queue.candidates.is_empty() => {
+            queue.cursor = queue
+                .cursor
+                .checked_sub(1)
+                .unwrap_or(queue.candidates.len() - 1);
+        }
+        AppKey::Down | AppKey::Char('j') if !queue.candidates.is_empty() => {
+            queue.cursor = (queue.cursor + 1) % queue.candidates.len();
+        }
+        AppKey::Char(' ') if queue.in_flight.is_none() => {
+            if let Some(session) = queue.candidates.get(queue.cursor).copied() {
+                if !queue.selected.insert(session) {
+                    queue.selected.remove(&session);
+                }
+                queue.feedback = None;
+            }
+        }
+        AppKey::Enter => return begin_next_remove(state, false),
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn continue_remove_after_snapshot(state: &mut AppState) -> Vec<Effect> {
+    let completed = state
+        .remove_queue
+        .as_ref()
+        .and_then(RemoveQueueState::in_flight)
+        .filter(|session| !state.sessions.contains(session));
+    let Some(completed) = completed else {
+        reconcile_remove_queue(state);
+        return Vec::new();
+    };
+    if let Some(queue) = state.remove_queue.as_mut() {
+        queue.in_flight = None;
+        queue.selected.remove(&completed);
+        queue.feedback = None;
+    }
+    begin_next_remove(state, true)
+}
+
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
     if let Some(effects) = update_overlay_control_chord(state, overlay, &key) {
         return effects;
@@ -4621,9 +5019,15 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         state.overlay = None;
         return Vec::new();
     }
+    if overlay == Overlay::AgentLaunchError && matches!(key, AppKey::Escape | AppKey::Enter) {
+        state.agent_launch_error = None;
+        state.overlay = None;
+        return Vec::new();
+    }
     match overlay {
         Overlay::Decisions => update_decisions_overlay(state, key),
         Overlay::CleanupQueue => update_cleanup_queue(state, &key),
+        Overlay::RemoveSessions => update_remove_queue(state, &key),
         Overlay::QuitConfirmation => match key {
             // Each answer has its own letter so leaving and quitting are never
             // the same keystroke: `w` returns to Welcome, `q`/`y` end the
@@ -4691,7 +5095,9 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             Vec::new()
         }
-        Overlay::CreateSessionError | Overlay::TerminalLaunchError => Vec::new(),
+        Overlay::CreateSessionError | Overlay::TerminalLaunchError | Overlay::AgentLaunchError => {
+            Vec::new()
+        }
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
     }
 }
@@ -4836,6 +5242,10 @@ fn update_overlay_control_chord(
                 }
                 Overlay::TerminalLaunchError => {
                     state.terminal_launch_error = None;
+                    state.overlay = None;
+                }
+                Overlay::AgentLaunchError => {
+                    state.agent_launch_error = None;
                     state.overlay = None;
                 }
                 _ => {}
@@ -5080,6 +5490,11 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         {
             remove_selected_session(state, false)
         }
+        AppKey::CtrlShiftX
+            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
+        {
+            purge_selected_orphan(state)
+        }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::OpenPrs => open_prs(state),
@@ -5105,6 +5520,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::CtrlN
         | AppKey::CtrlP
         | AppKey::CtrlX
+        | AppKey::CtrlShiftX
         | AppKey::Escape
         | AppKey::Tab
         | AppKey::Left
@@ -5174,7 +5590,10 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
             Vec::new()
         }
         AppKey::OpenDirectorWorkRuns => {
-            if state.work_mode != WorkMode::GoalDriven {
+            if state.work_mode != WorkMode::GoalDriven
+                || state.director_launching.is_some()
+                || !matches!(state.director_new, DirectorNew::Idle)
+            {
                 return Vec::new();
             }
             state.root_terminal_full_height = false;
@@ -5207,6 +5626,7 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::CtrlC
         | AppKey::CtrlQ
         | AppKey::CtrlX
+        | AppKey::CtrlShiftX
         | AppKey::OpenQuitConfirmation
         | AppKey::OpenOverview
         | AppKey::OpenDirectorOrganization
@@ -5261,6 +5681,33 @@ fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
         session,
         force,
         force_delete_branch: force,
+        purge_orphan: false,
+    }]
+}
+
+/// Purge only the exact selected integrity-orphan row. The dedicated chord is
+/// the destructive acknowledgement; ordinary failed/delete and available rows
+/// keep their existing safe/confirmed removal paths.
+fn purge_selected_orphan(state: &AppState) -> Vec<Effect> {
+    let Selection::Target(Target::Session(session)) = state.selected else {
+        return Vec::new();
+    };
+    let integrity_orphan = state
+        .session_lifecycles
+        .get(&session)
+        .is_some_and(|projection| {
+            projection.lifecycle == SessionLifecycle::Failed
+                && projection.failure_stage == Some(FailureStage::Integrity)
+        });
+    if !state.sessions.contains(&session) || !integrity_orphan {
+        return Vec::new();
+    }
+    vec![Effect::RemoveSession {
+        workspace: state.workspace,
+        session,
+        force: true,
+        force_delete_branch: true,
+        purge_orphan: true,
     }]
 }
 
@@ -5779,6 +6226,7 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
         overview::SessionCommand::Cleanup => {
             let candidates = cleanup_candidates(state);
             state.overlay = Some(Overlay::CleanupQueue);
+            state.remove_queue = None;
             state.cleanup_queue = Some(CleanupQueueState::new(candidates));
             state.notice = None;
             vec![Effect::SyncPullRequestTargets {
@@ -5820,19 +6268,62 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
                 session,
             }]
         }
-        overview::SessionCommand::SelectRemove { .. } => {
-            state.notice = Some(Notice::new(
-                "session selection is available in the live TUI",
-            ));
-            Vec::new()
-        }
-        overview::SessionCommand::Remove { .. } => {
-            state.notice = Some(Notice::new(
-                "named session removal is available in the live TUI",
-            ));
-            Vec::new()
-        }
+        overview::SessionCommand::SelectRemove { force } => open_remove_selector(state, force),
+        overview::SessionCommand::Remove {
+            name,
+            force,
+            force_delete_branch,
+            purge_orphan,
+        } => remove_named_session(state, &name, force, force_delete_branch, purge_orphan),
     }
+}
+
+fn open_remove_selector(state: &mut AppState, force: bool) -> Vec<Effect> {
+    let candidates = remove_candidates(state);
+    let cursor = match state.selected {
+        Selection::Target(Target::Session(selected)) => candidates
+            .iter()
+            .position(|candidate| *candidate == selected)
+            .unwrap_or_default(),
+        Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => 0,
+    };
+    state.overlay = Some(Overlay::RemoveSessions);
+    state.cleanup_queue = None;
+    state.remove_queue = Some(RemoveQueueState::new(candidates, cursor, force));
+    state.notice = None;
+    Vec::new()
+}
+
+fn remove_named_session(
+    state: &mut AppState,
+    name: &str,
+    force: bool,
+    force_delete_branch: bool,
+    purge_orphan: bool,
+) -> Vec<Effect> {
+    let session = state
+        .session_names
+        .iter()
+        .position(|candidate| candidate == name)
+        .and_then(|index| state.sessions.get(index).copied());
+    let Some(session) = session else {
+        state.notice = Some(Notice::new("session was not found"));
+        return Vec::new();
+    };
+    if !state.session_can_remove(session) {
+        state.notice = Some(Notice::new("session cannot be removed"));
+        return Vec::new();
+    }
+    state.overlay = None;
+    state.remove_queue = None;
+    state.notice = Some(Notice::new("Removing session"));
+    vec![Effect::RemoveSession {
+        workspace: state.workspace,
+        session,
+        force,
+        force_delete_branch,
+        purge_orphan,
+    }]
 }
 
 fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
@@ -5911,6 +6402,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                     session: active_session,
                     force,
                     force_delete_branch: force,
+                    purge_orphan: false,
                 })
             } else {
                 state.notice = Some(Notice::new("invalid close arguments"));
@@ -6232,6 +6724,24 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
     use crate::usecase::application::environment_source::parse_environment_source;
+
+    #[test]
+    fn presentation_messages_are_bounded_and_terminal_safe() {
+        let raw = format!("  failed\n\t\u{1b}[31m\u{202e}{}", "x".repeat(300));
+        let safe = SafeMessage::new(&raw);
+        let notice = Notice::new(raw);
+
+        for message in [safe.as_str(), notice.message.as_str()] {
+            assert!(presentation_text_is_safe(message));
+            assert!(!message.starts_with(' '));
+            assert!(message.chars().count() <= MAX_PRESENTATION_MESSAGE_CHARS);
+            assert!(message.contains('\u{fffd}'));
+            assert!(message.ends_with('…'));
+        }
+
+        assert_eq!(SafeMessage::new("  ready\n\t ").as_str(), "ready");
+        assert_eq!(Notice::new("\n\t ").message, "");
+    }
 
     #[test]
     fn terminal_arguments_normalize_open_and_reject_untrusted_input() {
@@ -6962,6 +7472,61 @@ mod tests {
         for code in [KeyCode::Char('\u{18}'), KeyCode::Char('x')] {
             assert_eq!(classify_management_input(ctrl_a(code)), Some(AppKey::CtrlX));
         }
+        assert_eq!(
+            classify_management_input(LiveInput::Key(
+                crate::usecase::terminal_input::KeyEvent::new(
+                    KeyCode::Char('X'),
+                    crate::usecase::terminal_input::Modifiers {
+                        control: true,
+                        shift: true,
+                        ..crate::usecase::terminal_input::Modifiers::default()
+                    },
+                    KeyEventKind::Press,
+                )
+            )),
+            Some(AppKey::CtrlShiftX)
+        );
+    }
+
+    #[test]
+    fn management_classifier_rejects_extra_modifiers_for_ctrl_shift_x() {
+        for modifiers in [
+            crate::usecase::terminal_input::Modifiers {
+                control: true,
+                shift: true,
+                alt: true,
+                ..crate::usecase::terminal_input::Modifiers::default()
+            },
+            crate::usecase::terminal_input::Modifiers {
+                control: true,
+                shift: true,
+                super_: true,
+                ..crate::usecase::terminal_input::Modifiers::default()
+            },
+            crate::usecase::terminal_input::Modifiers {
+                control: true,
+                shift: true,
+                hyper: true,
+                ..crate::usecase::terminal_input::Modifiers::default()
+            },
+            crate::usecase::terminal_input::Modifiers {
+                control: true,
+                shift: true,
+                meta: true,
+                ..crate::usecase::terminal_input::Modifiers::default()
+            },
+        ] {
+            assert_eq!(
+                classify_management_input(LiveInput::Key(
+                    crate::usecase::terminal_input::KeyEvent::new(
+                        KeyCode::Char('X'),
+                        modifiers,
+                        KeyEventKind::Press,
+                    )
+                )),
+                None
+            );
+        }
     }
 
     #[test]
@@ -7273,6 +7838,65 @@ mod tests {
     }
 
     #[test]
+    fn new_validation_rejects_terminal_and_direction_controls() {
+        let clone_cases = [
+            ("repository", NewValidationError::RepositoryInvalid),
+            ("location", NewValidationError::LocationInvalid),
+            ("directory", NewValidationError::DirectoryInvalid),
+            ("branch", NewValidationError::BranchInvalid),
+        ];
+        for (field, expected) in clone_cases {
+            let mut form = clone_form();
+            match field {
+                "repository" => form.repository = "https://example.com/unsafe\nrepo".to_owned(),
+                "location" => form.location = "/work\u{7}/child".to_owned(),
+                "directory" => form.directory = "app\u{202e}txt".to_owned(),
+                "branch" => form.branch = "feature/\u{2066}name".to_owned(),
+                _ => unreachable!(),
+            }
+            assert_eq!(validate_new_form(NewMode::Clone, &form), Err(expected));
+        }
+
+        let mut unsafe_path = existing_form();
+        unsafe_path.path = "/work\r/existing".to_owned();
+        assert_eq!(
+            validate_new_form(NewMode::Existing, &unsafe_path),
+            Err(NewValidationError::PathInvalid)
+        );
+        let mut unsafe_name = existing_form();
+        unsafe_name.name.push('\u{202e}');
+        assert_eq!(
+            validate_new_form(NewMode::Existing, &unsafe_name),
+            Err(NewValidationError::NameInvalid)
+        );
+
+        for (error, message) in [
+            (
+                NewValidationError::RepositoryInvalid,
+                "repository URL must be a single safe line",
+            ),
+            (
+                NewValidationError::LocationInvalid,
+                "clone location must be a single safe line",
+            ),
+            (
+                NewValidationError::BranchInvalid,
+                "branch name must be a single safe line",
+            ),
+            (
+                NewValidationError::PathInvalid,
+                "directory path must be a single safe line",
+            ),
+            (
+                NewValidationError::NameInvalid,
+                "workspace name must be a single safe line",
+            ),
+        ] {
+            assert_eq!(error.message(), message);
+        }
+    }
+
+    #[test]
     fn table_driven_mode_and_overlay_scenarios() {
         struct Case {
             name: &'static str,
@@ -7421,12 +8045,9 @@ mod tests {
         let workspace = WorkspaceId::new();
         let run = SupervisorRunId::new();
         let mut state = AppState::home(workspace, Vec::new());
-        assert_eq!(state.director_route(), DirectorRoute::Organization);
-        assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns)).is_empty());
-        assert!(!state.director_drawer_open(), "classic has no Work Runs");
-
         state.set_work_mode(WorkMode::GoalDriven);
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns)).is_empty());
         assert!(state.director_drawer_open());
         assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
         let _ = update(
@@ -7449,9 +8070,135 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-        assert_eq!(state.director_route(), DirectorRoute::Organization);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         assert!(!state.director_drawer_open());
+    }
+
+    #[test]
+    fn director_mode_transition_selects_its_landing_without_resetting_the_same_mode() {
+        let workspace = WorkspaceId::new();
+        let run = SupervisorRunId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+
+        assert_eq!(state.work_mode(), WorkMode::Classic);
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+        state.set_work_mode(WorkMode::Classic);
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+
+        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorConsole(DirectorConsoleParent::RunOverview(run)),
+        ));
+        let retained = DirectorRoute::Console(DirectorConsoleParent::RunOverview(run));
+        assert_eq!(state.director_route(), retained);
+
+        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(
+            state.director_route(),
+            retained,
+            "re-observing the same mode must preserve a retained deep route"
+        );
+
+        state.set_work_mode(WorkMode::Classic);
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+    }
+
+    #[test]
+    fn director_workflows_reject_each_others_routes() {
+        let workspace = WorkspaceId::new();
+        let run = SupervisorRunId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorWorkRuns,
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorRunOverview(run),
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorConsole(DirectorConsoleParent::RunOverview(run)),
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorConsole(DirectorConsoleParent::Organization),
+        ));
+        assert_eq!(
+            state.director_route(),
+            DirectorRoute::Console(DirectorConsoleParent::Organization)
+        );
+
+        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorOrganization,
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorConsole(DirectorConsoleParent::Organization),
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorRunOverview(run),
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+
+        // Defensive normalization also repairs state retained by an older
+        // binary or an asynchronous route change that crossed workflows.
+        state.director_route = DirectorRoute::Organization;
+        director_back(&mut state);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+    }
+
+    #[test]
+    fn director_launch_completion_after_mode_switch_stays_in_the_selected_workflow() {
+        let workspace = WorkspaceId::new();
+        let run = SupervisorRunId::new();
+
+        // A Goal launch may finish after the operator has returned to classic.
+        // The Run remains daemon-owned, but the classic tree stays visible.
+        let mut goal_state = AppState::home(workspace, Vec::new());
+        goal_state.set_work_mode(WorkMode::GoalDriven);
+        let goal_operation = OperationId::new();
+        goal_state.director_launching = Some(goal_operation);
+        goal_state.set_work_mode(WorkMode::Classic);
+        assert_eq!(goal_state.director_launching(), Some(goal_operation));
+        let _ = update(
+            &mut goal_state,
+            AppEvent::DirectorLaunchFinished {
+                operation: goal_operation,
+                supervisor_run_id: Some(run),
+                succeeded: true,
+            },
+        );
+        assert_eq!(goal_state.director_route(), DirectorRoute::Organization);
+
+        // Conversely, a classic launch completion must not expose Organization
+        // after the operator moved to the goal-driven tree.
+        let mut classic_state = AppState::home(workspace, Vec::new());
+        let classic_operation = OperationId::new();
+        classic_state.director_launching = Some(classic_operation);
+        classic_state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(classic_state.director_launching(), Some(classic_operation));
+        let _ = update(
+            &mut classic_state,
+            AppEvent::DirectorLaunchFinished {
+                operation: classic_operation,
+                supervisor_run_id: None,
+                succeeded: true,
+            },
+        );
+        assert_eq!(classic_state.director_route(), DirectorRoute::WorkRuns);
     }
 
     #[test]
@@ -7470,27 +8217,39 @@ mod tests {
         assert_eq!(state.director_new(), DirectorNew::Idle);
         assert!(state.director_goal().is_empty());
 
-        assert!(update_director_route_key(
-            &mut state,
-            &AppKey::OpenDirectorWorkRuns
-        ));
-        assert_eq!(state.director_route(), DirectorRoute::Organization);
-        state.set_work_mode(WorkMode::GoalDriven);
-        state.director_launching = Some(OperationId::new());
-        assert!(update_director_route_key(
-            &mut state,
-            &AppKey::OpenDirectorWorkRuns
-        ));
-        assert_eq!(state.director_route(), DirectorRoute::Organization);
-        state.director_launching = None;
-        state.director_new = DirectorNew::Empty;
+        // Classic consumes the Work Runs command without crossing workflows.
         assert!(update_director_route_key(
             &mut state,
             &AppKey::OpenDirectorWorkRuns
         ));
         assert_eq!(state.director_route(), DirectorRoute::Organization);
 
+        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorOrganization
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+
+        state.director_launching = Some(OperationId::new());
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorWorkRuns
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        state.director_route = DirectorRoute::RunOverview(run);
+        assert!(update_director_route_key(&mut state, &AppKey::DirectorBack));
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+
+        state.director_launching = None;
         state.director_new = DirectorNew::Empty;
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorWorkRuns
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+
         state.director_goal = "cancel me".into();
         director_back(&mut state);
         assert_eq!(state.director_new(), DirectorNew::Idle);
@@ -7498,10 +8257,18 @@ mod tests {
 
         let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
         assert!(state.root_terminal_drawer_open());
-        state.set_work_mode(WorkMode::Classic);
+        state.director_launching = Some(OperationId::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
         assert!(!state.director_drawer_open());
-        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+        state.director_launching = None;
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
+        assert!(state.director_drawer_open());
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
         state.director_goal = "clear on route".into();
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
         assert!(state.director_drawer_open());
@@ -7517,6 +8284,14 @@ mod tests {
             &AppKey::OpenDirectorRunOverview(run)
         ));
         assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+
+        state.set_work_mode(WorkMode::Classic);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
     }
 
     #[test]
@@ -8218,10 +8993,12 @@ mod tests {
             Overlay::CreateSession,
             Overlay::Decisions,
             Overlay::CleanupQueue,
+            Overlay::RemoveSessions,
             Overlay::Prs,
             Overlay::Preview,
             Overlay::CreateSessionError,
             Overlay::TerminalLaunchError,
+            Overlay::AgentLaunchError,
         ] {
             let mut state = AppState::home(workspace, vec![first]);
             state.overlay = Some(overlay);
@@ -8257,6 +9034,9 @@ mod tests {
                 Overlay::CleanupQueue => {
                     state.cleanup_queue = Some(CleanupQueueState::new(Vec::new()));
                 }
+                Overlay::RemoveSessions => {
+                    state.remove_queue = Some(RemoveQueueState::new(Vec::new(), 0, false));
+                }
                 Overlay::Overview
                 | Overlay::Daemon
                 | Overlay::Closeup
@@ -8264,6 +9044,7 @@ mod tests {
                 | Overlay::ForceRemoveConfirmation
                 | Overlay::CreateSessionError
                 | Overlay::TerminalLaunchError
+                | Overlay::AgentLaunchError
                 | Overlay::Garden => {}
             }
             for key in [AppKey::ToggleDirectorDrawer, AppKey::OpenDirectorNew] {
@@ -8481,6 +9262,7 @@ mod tests {
             (Overlay::Preview, true, true),
             (Overlay::CreateSessionError, false, true),
             (Overlay::TerminalLaunchError, false, true),
+            (Overlay::AgentLaunchError, false, true),
         ] {
             for (key, stays_open) in [
                 (AppKey::CtrlC, ctrl_c_stays_open),
@@ -8867,6 +9649,54 @@ mod tests {
     }
 
     #[test]
+    fn agent_launch_failure_opens_a_dismissible_error_dialog() {
+        let (workspace, session, _) = ids();
+        for dismiss in [AppKey::Escape, AppKey::Enter, AppKey::CtrlC] {
+            let mut state = AppState::home(workspace, vec![session]);
+            let effects = update(
+                &mut state,
+                AppEvent::AgentLaunchFailed(Notice::new("agent process could not be started")),
+            );
+
+            assert!(effects.is_empty());
+            assert_eq!(state.overlay(), Some(Overlay::AgentLaunchError));
+            assert_eq!(
+                state
+                    .agent_launch_error()
+                    .map(|notice| notice.message.as_str()),
+                Some("agent process could not be started")
+            );
+            assert_eq!(
+                state.notice().map(|notice| notice.message.as_str()),
+                Some("agent process could not be started")
+            );
+
+            assert!(update(&mut state, AppEvent::Key(dismiss)).is_empty());
+            assert_eq!(state.overlay(), None);
+            assert!(state.agent_launch_error().is_none());
+        }
+    }
+
+    #[test]
+    fn agent_launch_failure_does_not_replace_an_existing_modal() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.overlay = Some(Overlay::Overview);
+
+        let _ = update(
+            &mut state,
+            AppEvent::AgentLaunchFailed(Notice::new("daemon rejected the Agent")),
+        );
+
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.agent_launch_error().is_none());
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("daemon rejected the Agent")
+        );
+    }
+
+    #[test]
     fn a_create_failure_keeps_the_notice_fallback_while_another_overlay_is_open() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -9195,6 +10025,7 @@ mod tests {
                 session: first,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
@@ -9210,9 +10041,84 @@ mod tests {
                 session: second,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+    }
+
+    #[test]
+    fn switch_ctrl_shift_x_purges_only_the_selected_integrity_orphan() {
+        let (workspace, session, _) = ids();
+        let mut empty_state = AppState::home(workspace, Vec::new());
+        assert!(
+            update(&mut empty_state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "a non-session selection must not become a purge target"
+        );
+
+        let mut state = AppState::home(workspace, vec![session]);
+
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "an available session must not become a purge target"
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Delete),
+                    failure_summary: Some("remove failed".to_owned()),
+                },
+            )]))),
+        );
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "an ordinary delete failure keeps its confirmation path"
+        );
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Integrity),
+                    failure_summary: Some("orphan session".to_owned()),
+                },
+            )]))),
+        );
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+                force_delete_branch: true,
+                purge_orphan: true,
+            }]
+        );
+
+        state.sessions.clear();
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "a stale selected identity must not become a purge target"
+        );
+
+        state.sessions.push(session);
+        state.session_lifecycles.insert(
+            session,
+            SessionLifecycleProjection {
+                lifecycle: SessionLifecycle::Available,
+                failure_stage: Some(FailureStage::Integrity),
+                failure_summary: Some("incoherent projection".to_owned()),
+            },
+        );
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            "an integrity stage without the failed lifecycle must fail closed"
+        );
     }
 
     #[test]
@@ -9300,6 +10206,7 @@ mod tests {
                 session,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
     }
@@ -9332,6 +10239,7 @@ mod tests {
                 session,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.overlay(), None);
@@ -9395,6 +10303,7 @@ mod tests {
                 session,
                 force: true,
                 force_delete_branch: true,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.overlay(), None);
@@ -9708,7 +10617,6 @@ mod tests {
             Some("session was not found")
         );
 
-        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         assert_eq!(
             update(
@@ -9717,12 +10625,15 @@ mod tests {
                     "session remove feature-x --force".into(),
                 )),
             ),
-            Vec::new()
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+                force_delete_branch: true,
+                purge_orphan: false,
+            }]
         );
-        assert_eq!(
-            state.notice().map(|notice| notice.message.as_str()),
-            Some("named session removal is available in the live TUI")
-        );
+        assert_eq!(state.overlay(), None);
     }
 
     #[test]
@@ -9836,6 +10747,7 @@ mod tests {
                 session,
                 force: true,
                 force_delete_branch: true,
+                purge_orphan: false,
             }]
         );
 
@@ -11558,6 +12470,7 @@ mod tests {
                 session: first,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
             }]
         );
         assert_eq!(state.cleanup_queue().unwrap().in_flight(), Some(first));
@@ -11576,6 +12489,7 @@ mod tests {
                     session: second,
                     force: false,
                     force_delete_branch: false,
+                    purge_orphan: false,
                 },
             ]
         );
@@ -11707,6 +12621,252 @@ mod tests {
         state.cleanup_queue = Some(CleanupQueueState::new(Vec::new()));
         assert!(update_cleanup_queue(&mut state, &AppKey::Char(' ')).is_empty());
         assert!(state.cleanup_queue().unwrap().selected().is_empty());
+    }
+
+    #[test]
+    fn remove_selector_starts_at_the_current_row_and_serializes_forced_removals() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview(
+                    "session remove --select --force".to_owned()
+                ))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::RemoveSessions));
+        let queue = state.remove_queue().unwrap();
+        assert_eq!(queue.candidates(), &[first, second]);
+        assert_eq!(queue.cursor(), 1);
+        assert!(queue.force());
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('k')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        assert_eq!(
+            state.remove_queue().unwrap().selected(),
+            &BTreeSet::from([first, second])
+        );
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session: first,
+                force: true,
+                force_delete_branch: true,
+                purge_orphan: false,
+            }]
+        );
+
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Sessions(vec![second]))
+            ),
+            vec![
+                Effect::SyncPullRequestTargets {
+                    sessions: vec![second]
+                },
+                Effect::RemoveSession {
+                    workspace,
+                    session: second,
+                    force: true,
+                    force_delete_branch: true,
+                    purge_orphan: false,
+                },
+            ]
+        );
+        assert_eq!(state.remove_queue().unwrap().in_flight(), Some(second));
+
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Sessions(Vec::new()))
+            ),
+            vec![Effect::SyncPullRequestTargets {
+                sessions: Vec::new()
+            }]
+        );
+        let queue = state.remove_queue().unwrap();
+        assert!(queue.candidates().is_empty());
+        assert_eq!(queue.in_flight(), None);
+        assert_eq!(queue.feedback().unwrap().message, "removal complete");
+    }
+
+    #[test]
+    fn remove_selector_revalidates_lifecycle_and_pauses_after_failure() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session remove -s".to_owned())),
+        );
+
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            state.remove_queue().unwrap().feedback().unwrap().message,
+            "select sessions with Space"
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('j')));
+        assert_eq!(state.remove_queue().unwrap().cursor(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('k')));
+        assert_eq!(state.remove_queue().unwrap().cursor(), 0);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [Effect::RemoveSession {
+                session,
+                force: false,
+                force_delete_branch: false,
+                ..
+            }] if *session == first
+        ));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            state.remove_queue().unwrap().feedback().unwrap().message,
+            "waiting for the current removal"
+        );
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([
+                (
+                    first,
+                    SessionLifecycleProjection {
+                        lifecycle: SessionLifecycle::Failed,
+                        failure_stage: Some(FailureStage::Delete),
+                        failure_summary: Some("safe detail".to_owned()),
+                    },
+                ),
+                (second, lifecycle(SessionLifecycle::Deleting)),
+            ]))),
+        );
+        let queue = state.remove_queue().unwrap();
+        assert_eq!(queue.candidates(), &[first]);
+        assert_eq!(queue.in_flight(), None);
+        assert!(queue.selected().is_empty());
+        assert_eq!(
+            queue.feedback().unwrap().message,
+            "removal paused after a session failed"
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.remove_queue(), None);
+
+        state.overlay = Some(Overlay::RemoveSessions);
+        assert!(update_remove_queue(&mut state, &AppKey::Down).is_empty());
+        assert_eq!(state.overlay(), None);
+    }
+
+    #[test]
+    fn remove_selector_covers_empty_toggle_notice_and_deleting_refresh_paths() {
+        let (workspace, first, second) = ids();
+
+        let mut empty = AppState::home(workspace, Vec::new());
+        let _ = update(&mut empty, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut empty,
+            AppEvent::Key(AppKey::SubmitOverview("session remove -s".to_owned())),
+        );
+        for key in [
+            AppKey::Up,
+            AppKey::Down,
+            AppKey::Char('k'),
+            AppKey::Char('j'),
+            AppKey::Char(' '),
+            AppKey::Home,
+        ] {
+            assert!(update(&mut empty, AppEvent::Key(key)).is_empty());
+        }
+        assert!(update(&mut empty, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            empty.remove_queue().unwrap().feedback().unwrap().message,
+            "no sessions can be removed"
+        );
+
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session remove -s".to_owned())),
+        );
+        assert_eq!(state.remove_queue().unwrap().cursor(), 0);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        assert_eq!(state.remove_queue().unwrap().cursor(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.remove_queue().unwrap().cursor(), 0);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        assert!(state.remove_queue().unwrap().selected().is_empty());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([
+                (first, lifecycle(SessionLifecycle::Deleting)),
+                (second, lifecycle(SessionLifecycle::Available)),
+            ]))),
+        );
+        let queue = state.remove_queue().unwrap();
+        assert_eq!(queue.candidates(), &[first, second]);
+        assert_eq!(queue.in_flight(), Some(first));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Notice(Notice::new("remove refused"))),
+        );
+        let queue = state.remove_queue().unwrap();
+        assert_eq!(queue.in_flight(), None);
+        assert!(queue.selected().is_empty());
+        assert_eq!(queue.feedback().unwrap().message, "remove refused");
+
+        state.remove_queue = None;
+        assert!(begin_next_remove(&mut state, false).is_empty());
+    }
+
+    #[test]
+    fn named_remove_rejects_missing_and_non_removable_sessions() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionNames(vec!["kept".to_owned()])),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                lifecycle(SessionLifecycle::Deleting),
+            )]))),
+        );
+
+        for (command, message) in [
+            ("session remove missing", "session was not found"),
+            ("session remove kept", "session cannot be removed"),
+        ] {
+            state.overlay = Some(Overlay::Overview);
+            assert!(
+                update(
+                    &mut state,
+                    AppEvent::Key(AppKey::SubmitOverview(command.to_owned()))
+                )
+                .is_empty()
+            );
+            assert_eq!(
+                state.notice().map(|notice| notice.message.as_str()),
+                Some(message)
+            );
+        }
     }
 
     fn safe_error(message: &str) -> SafeError {
@@ -12556,7 +13716,7 @@ mod tests {
         );
         assert_eq!(
             NewValidationError::DirectoryInvalid.message(),
-            "directory name must not contain path separators"
+            "directory name must be a safe name without path separators"
         );
 
         let mut entry = EntryState::new(

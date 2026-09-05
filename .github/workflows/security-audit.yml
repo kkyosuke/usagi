@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: security-exceptions
         name: Validate RustSec exceptions
         run: ruby scripts/ci/security-audit-exceptions.rb >> "$GITHUB_OUTPUT"
@@ -23,7 +23,7 @@ jobs:
       - name: Install locked cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit Cargo.lock against RustSec
-        uses: rustsec/audit-check@v2.0.0
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           ignore: ${{ steps.security-exceptions.outputs.ignore }}

@@ -93,7 +93,10 @@ impl PtyTerminal {
             command.env(name, value);
         }
         command.cwd(directory);
-        let child = pair.slave.spawn_command(command).map_err(io_error)?;
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(|error| io_error_with_context("PTY child spawn failed", error))?;
         drop(pair.slave);
         let writer = pair.master.take_writer().map_err(io_error)?;
         Ok(Self {
@@ -183,6 +186,11 @@ impl PtyWriter for PtyTerminal {
 
 fn io_error(error: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(error.to_string())
+}
+
+fn io_error_with_context(context: &str, error: impl std::fmt::Display) -> std::io::Error {
+    let error = io_error(error);
+    std::io::Error::other(format!("{context}: {error}"))
 }
 
 #[cfg(test)]
@@ -311,6 +319,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(terminal.wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn spawn_failure_preserves_the_pty_stage_and_os_reason() {
+        let error = PtyTerminal::spawn(
+            "/usagi-test/missing-agent-executable",
+            std::path::Path::new("/"),
+            Geometry { cols: 80, rows: 24 },
+        )
+        .err()
+        .expect("missing executable must be rejected");
+
+        let message = error.to_string();
+        assert!(message.contains("PTY child spawn failed"));
+        assert!(message.len() > "PTY child spawn failed: ".len());
     }
 
     #[test]

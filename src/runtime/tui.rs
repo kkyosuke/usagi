@@ -14,6 +14,7 @@ use chrono::Utc;
 use crossterm::cursor;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -66,12 +67,12 @@ use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config}
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
-    self, AgentCommandPort, AgentPaneAdmission, BannerScreenRunner, ControllerBackendComposition,
-    ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
-    EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, MetricsPort,
-    RestoreConnectionPort, SerializedPaneLaunchPort, SessionCommandPort, SessionCommandResult,
-    SessionRefreshPort, Start, WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceLoader,
-    WorkspaceSnapshot,
+    self, BannerScreenRunner, ControllerBackendComposition, ControllerBackendFactory,
+    ControllerHost, Exit, MetricsPort, Start, WorkspaceCreateCompletion, WorkspaceCreateEffect,
+    WorkspaceLoader, WorkspaceSnapshot,
+};
+use usagi_tui::usecase::application::agent_runtime_ports::{
+    AgentCommandPort, AgentPaneAdmission, ExactAgentResume, SerializedPaneLaunchPort,
 };
 use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -89,6 +90,11 @@ use usagi_tui::usecase::application::daemon_backend::{
 };
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
+use usagi_tui::usecase::application::runtime_ports::{
+    DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
+    RestoreConnectionPort, SessionCommandPort, SessionCommandResult, SessionRefreshPort,
+    SessionWorktreeScanPort,
+};
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSubscription,
@@ -117,6 +123,20 @@ use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 /// Composition adapter for Overview's daemon-owned session lifecycle commands.
 #[derive(Default)]
 struct DaemonSessionCommandPort;
+
+fn remove_session_payload(
+    name: &str,
+    force: bool,
+    force_delete_branch: bool,
+    purge_orphan: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "force": force,
+        "force_delete_branch": force_delete_branch,
+        "purge_orphan": purge_orphan,
+    })
+}
 
 /// Production bridge for the controller's durable user-decision effects.
 /// The daemon remains the authority; this adapter only converts its safe
@@ -162,9 +182,9 @@ impl DaemonDecisionCommandPort {
         }
     }
 
-    fn safe_error(error: impl std::fmt::Display) -> SafeError {
+    fn safe_error(_error: impl std::fmt::Display) -> SafeError {
         SafeError {
-            message: SafeMessage::new(error.to_string()),
+            message: SafeMessage::new("User decisions are unavailable."),
             error_id: "decision-daemon-error".to_owned(),
         }
     }
@@ -193,7 +213,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
                 workspace,
                 decisions,
             },
-            Err(error) => BackendEvent::Notice(Notice::new(error)),
+            Err(_) => BackendEvent::Notice(Notice::new("User decisions are unavailable.")),
         }
     }
 
@@ -279,15 +299,18 @@ impl RepoEnvironmentStore {
         }
     }
 
-    fn safe_error(reason: impl std::fmt::Display) -> SafeError {
+    fn safe_error(_reason: impl std::fmt::Display) -> SafeError {
         SafeError {
-            message: SafeMessage::new(reason.to_string()),
+            message: SafeMessage::new("Workspace data is unavailable."),
             error_id: "target-store-error".to_owned(),
         }
     }
 
     fn stale_target() -> SafeError {
-        Self::safe_error("this session is no longer available")
+        SafeError {
+            message: SafeMessage::new("This session is no longer available."),
+            error_id: "target-store-error".to_owned(),
+        }
     }
 }
 
@@ -353,9 +376,9 @@ impl SettingsEnvironmentStore {
         Ok(())
     }
 
-    fn safe_error(reason: impl std::fmt::Display) -> SafeError {
+    fn safe_error(_reason: impl std::fmt::Display) -> SafeError {
         SafeError {
-            message: SafeMessage::new(reason.to_string()),
+            message: SafeMessage::new("Environment settings are unavailable."),
             error_id: "environment-settings-error".to_owned(),
         }
     }
@@ -594,9 +617,9 @@ impl ProductionDecisionPort {
                 }
             }
             Err(_) if self.reported_failure => return,
-            Err(error) => {
+            Err(_) => {
                 self.reported_failure = true;
-                BackendEvent::Notice(Notice::new(error))
+                BackendEvent::Notice(Notice::new("User decisions are unavailable."))
             }
         };
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
@@ -670,10 +693,10 @@ fn pr_snapshot_events(
                     revision: snapshot.revision,
                     prs: snapshot.entries,
                 },
-                Err(message) => BackendEvent::PullRequestsError {
+                Err(_) => BackendEvent::PullRequestsError {
                     target,
                     error: SafeError {
-                        message: SafeMessage::new(message),
+                        message: SafeMessage::new("Pull Requests are unavailable."),
                         error_id: "pr-load".to_owned(),
                     },
                 },
@@ -762,8 +785,8 @@ impl BackendOverlayPort for ProductionOverlayPort {
 
     fn open_pull_request(&mut self, url: String, completions: Completions) {
         let event = match usagi_tui::usecase::application::pr::canonical_browser_url(&url) {
-            Some(url) => self.browser.open(&url).err().map(|message| {
-                BackendEvent::Notice(Notice::new(format!("Could not open browser: {message}")))
+            Some(url) => self.browser.open(&url).err().map(|_| {
+                BackendEvent::Notice(Notice::new("Could not open the Pull Request in a browser."))
             }),
             None => Some(BackendEvent::Notice(Notice::new(
                 "Cannot open an invalid PR URL.",
@@ -779,9 +802,7 @@ impl BackendOverlayPort for ProductionOverlayPort {
         let event = match usagi_tui::usecase::application::pr::canonical_browser_url(&url) {
             Some(url) => match self.clipboard.write_text(&url) {
                 Ok(()) => BackendEvent::Notice(Notice::new("PR URL copied.")),
-                Err(message) => {
-                    BackendEvent::Notice(Notice::new(format!("Could not copy PR URL: {message}")))
-                }
+                Err(_) => BackendEvent::Notice(Notice::new("Could not copy the Pull Request URL.")),
             },
             None => BackendEvent::Notice(Notice::new("Cannot copy an invalid PR URL.")),
         };
@@ -810,10 +831,10 @@ impl BackendOverlayPort for ProductionOverlayPort {
                         }
                     })
                     .map_or_else(
-                        |message| BackendEvent::PullRequestsError {
+                        |_| BackendEvent::PullRequestsError {
                             target: Target::Session(session),
                             error: SafeError {
-                                message: SafeMessage::new(message),
+                                message: SafeMessage::new("Could not dismiss the Pull Request."),
                                 error_id: "pr-dismiss".to_owned(),
                             },
                         },
@@ -848,20 +869,12 @@ struct DaemonCommandOutput {
 
 type DaemonCommandRunner = fn(&Path, DaemonAction) -> std::io::Result<DaemonCommandOutput>;
 
-fn daemon_control_error(action: DaemonAction, bytes: &[u8]) -> SafeError {
-    const MAX_CHARS: usize = 240;
-    let raw = String::from_utf8_lossy(bytes);
-    let summary = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("daemon lifecycle command failed")
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(MAX_CHARS)
-        .collect::<String>();
+fn daemon_control_error(action: DaemonAction, _bytes: &[u8]) -> SafeError {
     SafeError {
-        message: SafeMessage::new(format!("{} failed: {summary}", action.label())),
+        message: SafeMessage::new(format!(
+            "Could not {} the daemon; inspect the daemon log for details.",
+            action.argument()
+        )),
         error_id: format!("daemon-{}-failed", action.argument()),
     }
 }
@@ -1013,7 +1026,9 @@ impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
                 })
             })();
             completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                result.unwrap_or_else(|error| format!("Clean failed: {error}")),
+                result.unwrap_or_else(|_| {
+                    "Clean failed; inspect the daemon log for details.".to_owned()
+                }),
             ))));
         });
     }
@@ -1043,7 +1058,7 @@ fn child_directory_names(parent: &Path) -> std::io::Result<Vec<String>> {
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
-impl presentation::SessionWorktreeScanPort for FsSessionWorktreeScanPort {
+impl SessionWorktreeScanPort for FsSessionWorktreeScanPort {
     fn scan(&mut self, workspace: &Path) -> Vec<String> {
         let sessions = workspace.join(".usagi").join("sessions");
         child_directory_names(&sessions).unwrap_or_default()
@@ -2140,7 +2155,9 @@ fn fetch_agent_inventory(
 struct DaemonGardenInventoryPort;
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=cli_tui_pty
-impl presentation::GardenInventoryPort for DaemonGardenInventoryPort {
+impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
+    for DaemonGardenInventoryPort
+{
     fn inventory(
         &mut self,
         workspace: WorkspaceId,
@@ -2455,22 +2472,37 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         session: Option<usagi_core::domain::id::SessionId>,
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let mut client = match crate::runtime::daemon::policy_client(
+            usagi_core::usecase::client::ClientPolicy::tui(),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("Agent launch connect", &error.to_string()));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
         let intent = AgentLaunchIntent {
             workspace,
             session,
             profile,
         };
-        let reply = client
-            .request(agent_launch_request(operation, intent.clone()))
+        let reply = match client.request(agent_launch_request(operation, intent.clone())) {
+            Ok(reply) => reply,
             // Protocol failures already carry a daemon-authored, safe recovery
             // reason (for example a missing Codex login). Preserve it so an
             // explicit `agent -m codex` refusal is not misreported as a broken
             // daemon connection.
-            .map_err(daemon_error_reason)?;
-        correlate_agent_launch(reply, operation, &intent)
+            Err(error) => {
+                let reason = daemon_error_reason(error);
+                ErrorLog::record(&tui_error_entry("Agent launch request", &reason));
+                return Err(reason);
+            }
+        };
+        let result = correlate_agent_launch(reply, operation, &intent);
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("Agent launch response", reason));
+        }
+        result
     }
 
     fn launch_goal(
@@ -2480,18 +2512,36 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
         goal: &str,
     ) -> Result<AgentPaneAdmission, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let mut client = match crate::runtime::daemon::policy_client(
+            usagi_core::usecase::client::ClientPolicy::tui(),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry(
+                    "Agent goal launch connect",
+                    &error.to_string(),
+                ));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
         let intent = AgentGoalIntent {
             workspace,
             profile,
             goal: goal.to_owned(),
         };
-        let reply = client
-            .request(agent_goal_request(operation, intent.clone()))
-            .map_err(daemon_error_reason)?;
-        correlate_agent_goal(reply, operation, &intent)
+        let reply = match client.request(agent_goal_request(operation, intent.clone())) {
+            Ok(reply) => reply,
+            Err(error) => {
+                let reason = daemon_error_reason(error);
+                ErrorLog::record(&tui_error_entry("Agent goal launch request", &reason));
+                return Err(reason);
+            }
+        };
+        let result = correlate_agent_goal(reply, operation, &intent);
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("Agent goal launch response", reason));
+        }
+        result
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=structured_codex_identity_enables_one_explicit_new_runtime_resume
@@ -2526,7 +2576,11 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         workspace: WorkspaceId,
     ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
-        fetch_agent_inventory(workspace)
+        let result = fetch_agent_inventory(workspace);
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("Agent resume inventory", reason));
+        }
+        result
     }
 
     fn resume_exact(
@@ -2534,17 +2588,31 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         target: usagi_core::domain::agent::AgentResumeTarget,
         operation_id: usagi_core::domain::id::OperationId,
     ) -> Result<ExactAgentResume, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        match client
-            .request(exact_agent_resume_request(operation_id, target))
-            .map_err(|_| "provider resume failed; refresh Agent inventory".to_owned())?
-        {
+        let mut client = match crate::runtime::daemon::policy_client(
+            usagi_core::usecase::client::ClientPolicy::tui(),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("Agent resume connect", &error.to_string()));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
+        let reply = match client.request(exact_agent_resume_request(operation_id, target)) {
+            Ok(reply) => reply,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("Agent resume request", &error.to_string()));
+                return Err("provider resume failed; refresh Agent inventory".to_owned());
+            }
+        };
+        let result = match reply {
             DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
                 decode_exact_agent_resume(&body)
             }
+        };
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("Agent resume response", reason));
         }
+        result
     }
 
     fn launch_terminal(
@@ -2558,22 +2626,33 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         if !matches!(arguments, "open" | "new") {
             return Err("terminal accepts only `open` or `new`".to_owned());
         }
-        if arguments == "open"
-            && let Some(existing) = self
-                .list_terminals()
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?
-                .into_iter()
-                .find(|entry| {
-                    entry.live
-                        && entry.kind == usagi_core::domain::terminal_launch::TerminalKind::Terminal
-                        && entry.terminal.workspace_id == workspace
-                        && entry.terminal.session_id == session
-                })
-        {
-            return Ok(existing.terminal);
+        if arguments == "open" {
+            let terminals = match self.list_terminals() {
+                Ok(terminals) => terminals,
+                Err(error) => {
+                    ErrorLog::record(&tui_error_entry(
+                        "terminal inventory",
+                        &format!("{error:?}"),
+                    ));
+                    return Err("daemon unavailable; reconnect to continue".to_owned());
+                }
+            };
+            if let Some(existing) = terminals.into_iter().find(|entry| {
+                entry.live
+                    && entry.kind == usagi_core::domain::terminal_launch::TerminalKind::Terminal
+                    && entry.terminal.workspace_id == workspace
+                    && entry.terminal.session_id == session
+            }) {
+                return Ok(existing.terminal);
+            }
         }
-        let lifecycle = request_lifecycle_snapshot()
-            .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let lifecycle = match request_lifecycle_snapshot() {
+            Ok(lifecycle) => lifecycle,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("terminal lifecycle", &error.reason()));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
         if lifecycle.workspace_id != workspace {
             return Err("workspace is no longer available".to_owned());
         }
@@ -2615,17 +2694,27 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             // a lost response or a reconnect replays the same terminal.
             launch_operation: Some(operation),
         };
-        let mut client = crate::runtime::daemon::policy_client(ClientPolicy::tui())
-            .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let mut client = match crate::runtime::daemon::policy_client(ClientPolicy::tui()) {
+            Ok(client) => client,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("terminal connect", &error.to_string()));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
         let payload = serde_json::to_value(TerminalRequest::Launch { intent })
             .expect("terminal request is serializable");
-        match client
-            .request(DaemonRequest::Terminal {
-                action: TerminalAction::Launch,
-                payload,
-            })
-            .map_err(daemon_error_reason)?
-        {
+        let reply = match client.request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload,
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                let reason = daemon_error_reason(error);
+                ErrorLog::record(&tui_error_entry("terminal launch request", &reason));
+                return Err(reason);
+            }
+        };
+        let result = match reply {
             DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body
                 .get("terminal")
                 .cloned()
@@ -2634,7 +2723,11 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                     serde_json::from_value(terminal)
                         .map_err(|_| "terminal launch returned an invalid terminal".to_owned())
                 }),
+        };
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("terminal launch response", reason));
         }
+        result
     }
 
     fn list_terminals(
@@ -3649,13 +3742,10 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 name,
                 force,
                 force_delete_branch,
+                purge_orphan,
             } => (
                 SessionAction::Remove,
-                serde_json::json!({
-                    "name": name,
-                    "force": force,
-                    "force_delete_branch": force_delete_branch,
-                }),
+                remove_session_payload(&name, force, force_delete_branch, purge_orphan),
             ),
         };
         let operation_id = usagi_core::domain::id::OperationId::new().to_string();
@@ -3865,6 +3955,10 @@ fn daemon_error_reason(error: ClientError) -> String {
             "another usagi process is establishing the daemon connection; retrying".to_owned()
         }
     }
+}
+
+fn tui_error_entry(action: &str, reason: &str) -> String {
+    format!("tui failed: action={action} error={reason}")
 }
 
 struct CrosstermTerminal {
@@ -4103,6 +4197,7 @@ fn classify_terminal_input(
             GlobalControlChord::CtrlQ => Key::CtrlQ,
             GlobalControlChord::CtrlD => Key::CtrlD,
             GlobalControlChord::CtrlX => Key::CtrlX,
+            GlobalControlChord::CtrlShiftX => Key::CtrlShiftX,
             GlobalControlChord::Help => Key::Help,
         }),
         LiveInputOutput::Swallowed => None,
@@ -4641,6 +4736,9 @@ fn run_in_terminal(
     if let Err(error) = execute!(
         setup,
         EnterAlternateScreen,
+        // Ask supporting terminals to preserve modifier identity so the
+        // destructive Ctrl-Shift-X chord is distinguishable from safe Ctrl-X.
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         EnableMouseCapture,
         // Capture pastes as a single `Event::Paste` so a multi-line paste reaches
         // the focused pane as one block instead of a key stream whose embedded
@@ -4653,6 +4751,7 @@ fn run_in_terminal(
             setup,
             cursor::Show,
             terminal::EnableLineWrap,
+            PopKeyboardEnhancementFlags,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -4679,6 +4778,7 @@ fn run_in_terminal(
         teardown,
         cursor::Show,
         terminal::EnableLineWrap,
+        PopKeyboardEnhancementFlags,
         DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
@@ -5023,7 +5123,11 @@ pub(crate) fn launch(
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             writeln!(std::io::stderr(), "{error}")
         }
-        other => other,
+        Err(error) => {
+            ErrorLog::record(&tui_error_entry("application", &error.to_string()));
+            Err(error)
+        }
+        Ok(()) => Ok(()),
     }
 }
 
@@ -5037,7 +5141,11 @@ pub(crate) fn launch_doctor(
     force: bool,
 ) -> std::io::Result<()> {
     if fix {
-        return repair_doctor(out, info, restart_agents, force);
+        let result = repair_doctor(out, info, restart_agents, force);
+        if let Err(error) = &result {
+            ErrorLog::record(&tui_error_entry("doctor repair", &error.to_string()));
+        }
+        return result;
     }
     launch(out, info, &EntryScreen::Doctor)
 }
@@ -5565,16 +5673,17 @@ mod tests {
         doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
         pr_snapshot_events, probe_path, provider_resume_projection,
-        reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
-        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
-        validate_workspace_directory, version_detail, version_result_from_observation,
-        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
+        reduced_motion_from_environment, remove_session_payload, reply_geometry,
+        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, tui_error_entry, validate_workspace_directory,
+        version_detail, version_result_from_observation, work_run_control_client_error,
+        workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use usagi_core::infrastructure::bounded_process::ChildObservation;
-    use usagi_tui::presentation::SessionWorktreeScanPort;
+    use usagi_tui::usecase::application::runtime_ports::SessionWorktreeScanPort;
 
     #[test]
     fn reduced_motion_environment_accepts_only_the_documented_opt_in() {
@@ -5587,19 +5696,21 @@ mod tests {
     }
 
     #[test]
-    fn daemon_control_errors_keep_one_bounded_display_safe_line() {
+    fn daemon_control_errors_hide_raw_process_detail() {
         let long = format!("\nrefused\u{7}: {}\nsecret detail", "x".repeat(300));
         let error = daemon_control_error(DaemonAction::Stop, long.as_bytes());
         assert_eq!(error.error_id, "daemon-stop-failed");
-        assert!(error.message.as_str().starts_with("Stop failed: refused:"));
-        assert!(!error.message.as_str().contains('\u{7}'));
+        assert_eq!(
+            error.message.as_str(),
+            "Could not stop the daemon; inspect the daemon log for details."
+        );
+        assert!(!error.message.as_str().contains("refused"));
         assert!(!error.message.as_str().contains("secret detail"));
-        assert!(error.message.as_str().chars().count() <= 253);
 
         let empty = daemon_control_error(DaemonAction::Start, b"\n\n");
         assert_eq!(
             empty.message.as_str(),
-            "Start failed: daemon lifecycle command failed"
+            "Could not start the daemon; inspect the daemon log for details."
         );
 
         let stderr = daemon_control_result(
@@ -5611,7 +5722,10 @@ mod tests {
             }),
         )
         .unwrap_err();
-        assert_eq!(stderr.message.as_str(), "Restart failed: restart refused");
+        assert_eq!(
+            stderr.message.as_str(),
+            "Could not restart the daemon; inspect the daemon log for details."
+        );
         let stdout = daemon_control_result(
             DaemonAction::Start,
             Ok(DaemonCommandOutput {
@@ -5621,13 +5735,19 @@ mod tests {
             }),
         )
         .unwrap_err();
-        assert_eq!(stdout.message.as_str(), "Start failed: start refused");
+        assert_eq!(
+            stdout.message.as_str(),
+            "Could not start the daemon; inspect the daemon log for details."
+        );
         let io = daemon_control_result(
             DaemonAction::Stop,
             Err(std::io::Error::other("process unavailable")),
         )
         .unwrap_err();
-        assert_eq!(io.message.as_str(), "Stop failed: process unavailable");
+        assert_eq!(
+            io.message.as_str(),
+            "Could not stop the daemon; inspect the daemon log for details."
+        );
     }
 
     #[allow(clippy::unnecessary_wraps)] // Matches the injected fallible runner signature.
@@ -6012,8 +6132,8 @@ mod tests {
     use usagi_tui::presentation::views::workspace::ProjectedSession;
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
     use usagi_tui::presentation::{
-        ControllerBackendFactory, ControllerHost, ControllerHostAction, RestoreConnectionPort,
-        WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
+        ControllerBackendFactory, ControllerHost, ControllerHostAction, WorkspaceCreateEffect,
+        WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
     };
     use usagi_tui::usecase::application::Key;
     use usagi_tui::usecase::application::controller::{
@@ -6021,6 +6141,7 @@ mod tests {
         NewEvent, NewForm, NewMode, NewRequest, NewState, Notice, Overlay, Target, update,
         update_entry, update_new,
     };
+    use usagi_tui::usecase::application::runtime_ports::RestoreConnectionPort;
     use usagi_tui::usecase::terminal_input::{
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers, PointerEvent, PointerKind,
     };
@@ -6046,6 +6167,38 @@ mod tests {
             control: true,
             ..Modifiers::default()
         }
+    }
+
+    /// The distinguishable Control+Shift modifier set reported by enhanced
+    /// keyboard protocols.
+    fn control_shift() -> Modifiers {
+        Modifiers {
+            control: true,
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    #[test]
+    fn orphan_purge_payload_keeps_both_destructive_acknowledgements() {
+        assert_eq!(
+            remove_session_payload("run", true, true, true),
+            json!({
+                "name": "run",
+                "force": true,
+                "force_delete_branch": true,
+                "purge_orphan": true,
+            })
+        );
+        assert_eq!(
+            remove_session_payload("safe", false, false, false),
+            json!({
+                "name": "safe",
+                "force": false,
+                "force_delete_branch": false,
+                "purge_orphan": false,
+            })
+        );
     }
 
     /// The serialized checkpoint a daemon at `rows`×`cols` produces after
@@ -6282,7 +6435,7 @@ mod tests {
     #[test]
     fn production_terminal_input_decodes_every_known_ack_outcome() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let (mut port, server) = terminal_input_port(vec![
             (ResponseOutcome::Ok, json!({ "ack": "Written" })),
@@ -6339,7 +6492,7 @@ mod tests {
     #[test]
     fn production_terminal_input_rejects_accepted_as_a_non_final_ack() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let (mut port, server) = terminal_input_port(vec![(
             ResponseOutcome::Accepted {
@@ -6378,7 +6531,7 @@ mod tests {
     fn production_terminal_input_carries_and_resolves_a_durable_operation() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
         use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
         use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
 
         let operation = OperationId::new();
@@ -6473,7 +6626,7 @@ mod tests {
             ResponseOutcome, TERMINAL_INPUT_OPERATION_CAPABILITY,
         };
         use usagi_core::usecase::client::{DaemonRequest, TerminalRequest};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
         use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
 
         let (mut port, server) = terminal_input_port_with(
@@ -6524,7 +6677,7 @@ mod tests {
         use usagi_core::infrastructure::ipc::{
             ErrorCode, ProtocolError, ResponseOutcome, SideEffect,
         };
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         for (side_effect, expected) in [
             (SideEffect::None, TerminalError::Unavailable),
@@ -6615,7 +6768,7 @@ mod tests {
     #[allow(clippy::too_many_lines)] // Two scripted connections are one epoch contract.
     fn production_shared_connection_epoch_survives_protocol_errors_and_invalidates_on_eof() {
         use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let geometry = Geometry { cols: 20, rows: 3 };
         let attach_body = |subscription: u64| {
@@ -6957,7 +7110,7 @@ mod tests {
     #[test]
     fn a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
         use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
 
         let (client, hung) = hung_terminal_connection(Vec::new());
@@ -7028,7 +7181,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_request_that_never_reached_the_daemon_reports_unknown_without_resending() {
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         // Answers nothing and closes without reading: dispatch never happened.
         let (client, server) = scripted_terminal_connection(Vec::new(), |_| {});
@@ -7069,7 +7222,7 @@ mod tests {
     #[test]
     fn a_lane_deadline_on_one_pane_reattaches_every_pane_through_the_epoch() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let geometry = Geometry { cols: 20, rows: 3 };
         let attach_body = |subscription: u64| {
@@ -7171,7 +7324,7 @@ mod tests {
     #[test]
     fn production_resize_lane_failure_keeps_the_shared_connection_and_epoch() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let geometry = Geometry { cols: 20, rows: 3 };
         let (mut port, server) =
@@ -7208,7 +7361,7 @@ mod tests {
     fn production_malformed_attach_on_same_socket_keeps_epoch_and_next_input_sequence() {
         use usagi_core::infrastructure::ipc::ResponseOutcome;
         use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let valid_attach = json!({
             "subscription": 8,
@@ -7273,7 +7426,7 @@ mod tests {
             ProtocolRange, ResponseOutcome, TERMINAL_SCREEN_CHECKPOINT_CAPABILITY,
             TERMINAL_WIRE_GENERATION,
         };
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         type Adjust = fn(&mut usagi_core::infrastructure::ipc::ServerProtocol);
 
@@ -7455,7 +7608,7 @@ mod tests {
         };
         use usagi_core::usecase::client::{ClientPolicy, IpcClient};
         use usagi_daemon::presentation::ipc::{handshake, server_protocol};
-        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
         let build = BuildIdentity {
@@ -8220,8 +8373,12 @@ mod tests {
         use usagi_core::usecase::client::ClientError;
 
         let safe = DaemonDecisionCommandPort::safe_error("decision failed");
-        assert_eq!(safe.message.as_str(), "decision failed");
+        assert_eq!(safe.message.as_str(), "User decisions are unavailable.");
         assert_eq!(safe.error_id, "decision-daemon-error");
+        assert_eq!(
+            tui_error_entry("Agent launch response", "uncorrelated reply"),
+            "tui failed: action=Agent launch response error=uncorrelated reply"
+        );
 
         for value in [
             json!(null),
@@ -8496,7 +8653,7 @@ mod tests {
     }
 
     #[test]
-    fn shifted_x_is_inert_and_ctrl_x_requests_safe_session_removal() {
+    fn shifted_x_is_inert_ctrl_x_is_safe_and_ctrl_shift_x_purges_an_orphan() {
         use crossterm::event::{
             KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
         };
@@ -8536,6 +8693,43 @@ mod tests {
                 session,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
+            }]
+        );
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(
+                        usagi_core::domain::session_lifecycle::FailureStage::Integrity,
+                    ),
+                    failure_summary: Some("orphan session".to_owned()),
+                },
+            )]))),
+        );
+        let ctrl_shift_x = classify_terminal_input(
+            &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
+            Duration::ZERO,
+            &LiveInput::Key(crate::tui_input::adapt_key(CrosstermKeyEvent::new(
+                CrosstermKeyCode::Char('x'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ))),
+        )
+        .expect("Ctrl-Shift-X is a management key");
+        assert_eq!(ctrl_shift_x, Key::CtrlShiftX);
+        let event = usagi_tui::presentation::app_event_from_key(ctrl_shift_x)
+            .expect("Ctrl-Shift-X reaches the Home reducer");
+        assert_eq!(
+            update(&mut state, event),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+                force_delete_branch: true,
+                purge_orphan: true,
             }]
         );
     }
@@ -8551,6 +8745,10 @@ mod tests {
             (LiveInput::Raw(vec![4]), Key::CtrlD),
             (live_key(KeyCode::Char('x'), control()), Key::CtrlX),
             (LiveInput::Raw(vec![24]), Key::CtrlX),
+            (
+                live_key(KeyCode::Char('X'), control_shift()),
+                Key::CtrlShiftX,
+            ),
             (live_key(KeyCode::Char('/'), control()), Key::Help),
             (LiveInput::Raw(vec![31]), Key::Help),
         ];
@@ -9209,7 +9407,7 @@ mod tests {
             RepoEnvironmentStore::safe_error(anyhow::anyhow!("state.json is unreadable"))
                 .message
                 .as_str()
-                .contains("state.json is unreadable")
+                .contains("Workspace data is unavailable")
         );
     }
 

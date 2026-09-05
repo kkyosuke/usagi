@@ -41,6 +41,7 @@ use crate::presentation::views::decision_modal;
 use crate::presentation::views::director_drawer::{self, DIRECTOR_ICON, DirectorDrawerProjection};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
+use crate::presentation::views::remove_modal::{self, RemoveEntry, RemoveModal};
 use crate::presentation::views::root_terminal_drawer::{
     self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
 };
@@ -75,14 +76,12 @@ const SESSION_ROW_LINES: usize = 3;
 const _: () = assert!(
     SESSION_ROW_LINES == crate::usecase::application::controller::SIDEBAR_SESSION_ROW_LINES
 );
-/// Nerd Font glyphs for processor and resident-memory server.
-const CPU_ICON: char = '\u{f2db}';
-const MEMORY_ICON: char = '\u{f233}';
-/// Nerd Font cogs: the Agent concurrency slots the daemon admits from.
-const AGENT_ICON: char = '\u{f085}';
-/// Nerd Font bell: pending user decisions. A font glyph keeps the Home chrome
-/// monochrome instead of asking terminals to render the coloured bell emoji.
-const DECISION_NOTICE_ICON: char = '\u{f0f3}';
+/// Plain-text labels keep operational metrics understandable without a patched
+/// font or an icon legend.
+const CPU_ICON: &str = "CPU";
+const MEMORY_ICON: &str = "MEM";
+const AGENT_ICON: &str = "Agents";
+const DECISION_NOTICE_ICON: char = '!';
 /// daemon が Agent concurrency を報告しない場合の表示。`0` と読み違えられない
 /// 1 文字にするため em dash を使う。
 const UNREPORTED: char = '—';
@@ -153,8 +152,8 @@ pub struct ProjectedSession {
     pub organization_depth: usize,
 }
 
-/// Nerd Font pull-request glyph for the right-aligned sidebar badge.
-const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
+/// Pull Request badge label; no patched-font dependency or icon legend.
+const PR_ICON: &str = "PR";
 /// Keep the common one-digit badge column stable even before a PR is detected.
 const PR_RESERVE_WIDTH: usize = 3;
 
@@ -252,7 +251,7 @@ pub(crate) fn pr_inventory_summary(prs: &[PrEntry]) -> Option<String> {
 }
 
 fn summary_for_visible(visible: usize) -> Option<String> {
-    (visible > 0).then(|| format!("{PR_ICON} {visible}"))
+    (visible > 0).then(|| format!("{PR_ICON}{visible}"))
 }
 
 fn short_id(id: &str) -> String {
@@ -331,6 +330,8 @@ pub struct HomeProjection {
     preview_overlay: Option<PreviewOverlay>,
     /// Merge-confirmed cleanup queue projected with current session labels.
     cleanup_queue: Option<CleanupModal>,
+    /// Explicit removal checklist projected with current session labels.
+    remove_queue: Option<RemoveModal>,
     /// Persisted Overview command-palette input, when its overlay is open. The
     /// runtime owns this so the caret and filter survive across frames.
     overview_modal: Option<OverviewModal>,
@@ -373,7 +374,8 @@ pub struct HomeProjection {
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
     /// Frontmost Director mode drawer material, including its explicit route,
-    /// Organization projection, Work Runs, and optional Console terminal.
+    /// Workflow-specific Organization or Work Runs projection and optional
+    /// Console terminal.
     director_drawer: Option<DirectorDrawerProjection>,
     work_runs: WorkRunProjection,
     /// Frontmost bottom-anchored workspace-root generic terminal drawer.
@@ -436,6 +438,28 @@ fn project_cleanup_queue(state: &AppState, sessions: &[ProjectedSession]) -> Opt
     Some(CleanupModal {
         entries,
         cursor: queue.cursor(),
+        feedback: queue.feedback().map(clone_notice_message),
+    })
+}
+
+fn project_remove_queue(state: &AppState, sessions: &[ProjectedSession]) -> Option<RemoveModal> {
+    let queue = state.remove_queue()?;
+    let entries = queue
+        .candidates()
+        .iter()
+        .filter_map(|session| {
+            let projected = sessions.iter().find(|entry| entry.id == *session)?;
+            Some(RemoveEntry {
+                label: projected.label.clone(),
+                selected: queue.selected().contains(session),
+                removing: queue.in_flight() == Some(*session),
+            })
+        })
+        .collect();
+    Some(RemoveModal {
+        entries,
+        cursor: queue.cursor(),
+        force: queue.force(),
         feedback: queue.feedback().map(clone_notice_message),
     })
 }
@@ -562,6 +586,7 @@ impl HomeProjection {
     ) -> Self {
         let create_draft = state.create_session_form().map(CreateDraft::from);
         let cleanup_queue = project_cleanup_queue(state, &sessions);
+        let remove_queue = project_remove_queue(state, &sessions);
         let create_role = state
             .create_session_form()
             .and_then(CreateSessionForm::selected_role)
@@ -631,6 +656,7 @@ impl HomeProjection {
             pr_overlay: state.pr_overlay().cloned(),
             preview_overlay: state.preview_overlay().cloned(),
             cleanup_queue,
+            remove_queue,
             overview_modal: None,
             daemon_overlay: (state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Daemon))
@@ -1059,6 +1085,7 @@ impl HomeProjection {
             && self.pr_overlay.is_none()
             && self.preview_overlay.is_none()
             && self.decision_overlay.is_none()
+            && self.remove_queue.is_none()
     }
 
     fn active_label(&self) -> &str {
@@ -1173,13 +1200,6 @@ impl Mode {
         match self {
             Self::Switch => "Switch",
             Self::Closeup => "Closeup",
-        }
-    }
-
-    fn icon(self) -> char {
-        match self {
-            Self::Switch => '\u{f0ec}',
-            Self::Closeup => '\u{f00e}',
         }
     }
 }
@@ -1374,12 +1394,12 @@ impl Workspace {
 
 // ── header ──────────────────────────────────────────────────────────────────
 
-/// アイコン付き mode 表示。現在の mode だけを accent で強調する。
+/// Plain-text mode labels; the active mode alone receives the accent style.
 fn mode_toggle(current: Mode) -> String {
     Mode::ALL
         .iter()
         .map(|mode| {
-            let label = format!("{} {}", mode.icon(), mode.label().to_ascii_lowercase());
+            let label = mode.label().to_ascii_lowercase();
             if *mode == current {
                 Role::Accent.style().bold().paint(&label)
             } else {
@@ -2251,6 +2271,8 @@ fn render_home_modals(
 ) -> Vec<String> {
     if let Some(modal) = &home.overview_modal {
         overview_modal::render_over(height, width, &frame, modal)
+    } else if let Some(modal) = &home.remove_queue {
+        remove_modal::render_over(height, width, &frame, modal)
     } else if let Some(modal) = &home.cleanup_queue {
         cleanup_modal::render_over(height, width, &frame, modal)
     } else if let Some(control) = &home.daemon_overlay {
@@ -2366,7 +2388,7 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     if let Some(decision) = decision {
         return widgets::clip_to_width(
             &format!(
-                "  {DECISION_NOTICE_ICON} {}: {}  (click bell to review)",
+                "  {DECISION_NOTICE_ICON} {}: {}  (click indicator to review)",
                 decision
                     .owner
                     .session_id
@@ -2871,7 +2893,11 @@ fn sidebar_agent_line(
     current: bool,
     inactive: bool,
 ) -> String {
-    let icon = Style::new().dim().paint(&AGENT_ICON.to_string());
+    // Preserve the phase symbols on unusually narrow panes. Normal geometry
+    // uses the self-explanatory label; the compact `A` is only a last-resort
+    // abbreviation when spelling it out would consume the useful content.
+    let agent_label = if width >= 16 { AGENT_ICON } else { "A" };
+    let icon = Style::new().dim().paint(agent_label);
     let prefix = format!(
         "{} {icon} ",
         home_session_continuation_marker(selected, current)
@@ -3000,7 +3026,7 @@ fn create_session_input_lines(
 fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     if selected {
         return match row {
-            Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint("\u{f0907}"),
+            Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint(">"),
             Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => {
                 " ".to_string()
             }
@@ -3502,6 +3528,43 @@ mod tests {
         assert!(text.contains("waiting for the current removal"));
     }
 
+    #[test]
+    fn remove_queue_projection_joins_stable_sessions_and_renders_force_warning() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview(
+                "session remove -s --force".to_owned(),
+            )),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        let sessions: Arc<[ProjectedSession]> = Arc::from([
+            projected_session(first, "first", "/work/first"),
+            projected_session(second, "second", "/work/second"),
+        ]);
+        let home = HomeProjection::from_ordered_state(&state, "work", sessions);
+        let queue = home.remove_queue.as_ref().unwrap();
+        assert_eq!(queue.cursor, 1);
+        assert_eq!(queue.entries.len(), 2);
+        assert!(!queue.entries[0].selected);
+        assert_eq!(queue.entries[1].label, "second");
+        assert!(queue.entries[1].selected);
+        assert!(queue.entries[1].removing);
+        assert!(queue.force);
+
+        let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
+        assert!(text.contains("Remove sessions"));
+        assert!(text.contains("second"));
+        assert!(text.contains("force removes dirty worktrees"));
+    }
+
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
@@ -3862,7 +3925,7 @@ mod tests {
             PR_RESERVE_WIDTH,
             now(),
         );
-        assert!(strip(&selected_lines[0]).starts_with('\u{f0907}'));
+        assert!(strip(&selected_lines[0]).starts_with('>'));
 
         let mut unselected_state = state;
         let _ = update(&mut unselected_state, AppEvent::Key(AppKey::Down));
@@ -3880,7 +3943,7 @@ mod tests {
             PR_RESERVE_WIDTH,
             now(),
         );
-        assert!(!strip(&unselected_lines[0]).starts_with('\u{f0907}'));
+        assert!(!strip(&unselected_lines[0]).starts_with('>'));
     }
 
     #[test]
@@ -6143,7 +6206,7 @@ mod tests {
             Path::new("/work"),
             &[projected_session(session, "session", "/work/session")],
         );
-        assert!(strip(&render_home(30, 100, &home).join("\n")).contains(&format!("{PR_ICON} 2")));
+        assert!(strip(&render_home(30, 100, &home).join("\n")).contains(&format!("{PR_ICON}2")));
     }
 
     #[test]
@@ -6282,7 +6345,7 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>();
         assert!(lines.iter().all(|line| !line.contains("| first")));
-        assert!(lines.iter().any(|line| line.contains("\u{f0907} second")));
+        assert!(lines.iter().any(|line| line.contains("> second")));
         let text = joined_home(&home);
         assert!(text.contains("a: agent / t: terminal / Enter: actions"));
     }
@@ -6332,7 +6395,7 @@ mod tests {
         let closeup = HomeProjection::from_state(&state, "work", Path::new("/work"), &snapshot);
         let closeup_text = joined_home(&closeup);
         assert!(closeup_text.contains("| 同じ名前"));
-        assert!(!closeup_text.contains("\u{f0907} 同じ名前"));
+        assert!(!closeup_text.contains("> 同じ名前"));
         assert!(closeup_text.contains("[closeup] a agent / t terminal"));
         let closeup_rendered = render_home(30, 100, &closeup).join("\n");
         assert!(closeup_rendered.contains("\u{1b}[1;36m同じ名前\u{1b}[0m"));
@@ -6343,7 +6406,7 @@ mod tests {
         let switch = HomeProjection::from_state(&state, "work", Path::new("/work"), &snapshot);
         let switch_text = joined_home(&switch);
         assert!(!switch_text.contains("| 同じ名前"));
-        assert!(switch_text.contains("\u{f0907} 同じ名前"));
+        assert!(switch_text.contains("> 同じ名前"));
         assert!(switch_text.contains("[switch] ←→ project / ↑↓ select"));
 
         for line in render_home(8, 7, &switch) {
@@ -6392,7 +6455,7 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
         let mut active_session = projected_session(active, "active", "/work/active");
         active_session.last_modified = Utc::now();
-        active_session.pr_summary = Some(format!("{PR_ICON} 2"));
+        active_session.pr_summary = Some(format!("{PR_ICON}2"));
         let home = HomeProjection::from_state(
             &state,
             "work",
@@ -6422,7 +6485,7 @@ mod tests {
         assert!(!metadata.contains("\u{1b}[1;32m|"));
         assert!(metadata.contains("\u{1b}[2;36m↑1"));
         assert!(metadata.contains("\u{1b}[2;35m↓2"));
-        assert!(metadata.contains(&format!("{PR_ICON} 2")));
+        assert!(metadata.contains(&format!("{PR_ICON}2")));
         assert!(metadata.contains("\u{1b}[2;32m+ 3"));
         assert!(metadata.contains("\u{1b}[2;31m- 4"));
         assert!(!metadata.contains("\u{1b}[0m now"));
@@ -6739,11 +6802,11 @@ mod tests {
 
         let controller_row = controller
             .iter()
-            .find(|line| line.contains('\u{f2db}'))
+            .find(|line| line.contains(CPU_ICON))
             .expect("daemon metric row beside usagi");
 
         // The row carries both glyphs and the CPU/memory summary text.
-        assert!(strip(controller_row).contains("\u{f2db} 1%    \u{f233} 45MB"));
+        assert!(strip(controller_row).contains("CPU 1%    MEM 45MB"));
 
         // The Agent concurrency the daemon admits from sits on its own row below,
         // as `in use / limit`.
@@ -6751,7 +6814,7 @@ mod tests {
             .iter()
             .find(|line| line.contains(AGENT_ICON))
             .expect("agent concurrency row beside usagi");
-        assert!(strip(concurrency_row).contains("\u{f085} 3/16"));
+        assert!(strip(concurrency_row).contains("Agents 3/16"));
     }
 
     /// The concurrency row reports the daemon's own admission level, so the three
@@ -6767,10 +6830,10 @@ mod tests {
                 in_use: 0,
                 limit: 16
             })),
-            "\u{f085} 0/16"
+            "Agents 0/16"
         );
         // A daemon that reports nothing is a dash, which cannot be read as zero.
-        assert_eq!(row(None), "\u{f085} —");
+        assert_eq!(row(None), "Agents —");
 
         // Colour escalates with the level and is strongest once the next launch
         // would be refused.
@@ -6786,11 +6849,11 @@ mod tests {
             in_use: 16,
             limit: 16,
         }));
-        assert_eq!(strip(&full), "\u{f085} 16/16");
+        assert_eq!(strip(&full), "Agents 16/16");
         assert_ne!(calm, busy);
         assert_ne!(busy, full);
-        assert!(full.contains(&Role::Danger.style().paint("\u{f085} 16/16")));
-        assert!(busy.contains(&Role::Warning.style().paint("\u{f085} 12/16")));
+        assert!(full.contains(&Role::Danger.style().paint("Agents 16/16")));
+        assert!(busy.contains(&Role::Warning.style().paint("Agents 12/16")));
         // The unreported dash stays as quiet as a calm level.
         assert_eq!(
             super::agent_concurrency_row(None).contains("\u{1b}[2m"),
@@ -6833,12 +6896,12 @@ mod tests {
             .iter()
             .find(|line| line.contains(AGENT_ICON))
             .expect("agent concurrency row is still drawn");
-        assert!(strip(row).contains("\u{f085} —"));
+        assert!(strip(row).contains("Agents —"));
         // The CPU/memory row is unaffected by the missing projection.
         assert!(
             unreported
                 .iter()
-                .any(|line| strip(line).contains("\u{f2db} 1%    \u{f233} 45MB"))
+                .any(|line| strip(line).contains("CPU 1%    MEM 45MB"))
         );
 
         // Reporting a level changes only that row's content, not the frame's shape.
@@ -6851,7 +6914,7 @@ mod tests {
         assert!(
             reported
                 .iter()
-                .any(|line| strip(line).contains("\u{f085} 2/16"))
+                .any(|line| strip(line).contains("Agents 2/16"))
         );
     }
 
@@ -6868,7 +6931,7 @@ mod tests {
                 in_use: 16,
                 limit: 16,
             })),
-            "\u{f2db} 1%    \u{f233} 45MB".to_owned(),
+            "CPU 1%    MEM 45MB".to_owned(),
         ];
         let block = sidebar_block_with_sidecar(SIDEBAR_MASCOT_MIN_LEFT, 0, None, &sidecar)
             .expect("the rabbit fits its minimum width");
@@ -6895,7 +6958,7 @@ mod tests {
         let with_none = home.clone().with_metrics(None);
         assert_eq!(render_home(30, 100, &with_none), baseline);
         assert!(
-            !baseline.iter().any(|line| line.contains('\u{f2db}')),
+            !baseline.iter().any(|line| line.contains(CPU_ICON)),
             "no daemon metric row without an observation"
         );
         assert!(strip(&baseline.join("\n")).contains("(o.o)?"));
@@ -7672,7 +7735,7 @@ mod tests {
             added: 3,
             removed: 1,
         };
-        let badge = format!("{PR_ICON} 2");
+        let badge = format!("{PR_ICON}2");
         let rendered = sidebar_metadata(
             "| 2h ago",
             Some(&diff),
@@ -7692,7 +7755,7 @@ mod tests {
 
     #[test]
     fn sidebar_metadata_prioritizes_the_pr_badge_when_too_narrow() {
-        let badge = format!("{PR_ICON} 2");
+        let badge = format!("{PR_ICON}2");
         let rendered = sidebar_metadata(
             "| 2h ago",
             Some(&GitDiff {
@@ -8037,14 +8100,14 @@ mod tests {
             ProjectedSession::from_record(SessionId::new(), &one)
                 .pr_summary
                 .as_deref(),
-            Some(format!("{PR_ICON} 1").as_str())
+            Some(format!("{PR_ICON}1").as_str())
         );
         one.prs.push(PrLink::new(2, "https://example.test/pull/2"));
         assert_eq!(
             ProjectedSession::from_record(SessionId::new(), &one)
                 .pr_summary
                 .as_deref(),
-            Some(format!("{PR_ICON} 2").as_str())
+            Some(format!("{PR_ICON}2").as_str())
         );
 
         let target = Target::Root(WorkspaceId::new());

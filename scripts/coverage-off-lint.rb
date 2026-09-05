@@ -22,6 +22,7 @@ Options = Struct.new(
   :today,
   :generate,
   :generate_budget,
+  :summary_markdown,
   keyword_init: true
 )
 
@@ -32,7 +33,8 @@ def parse_options
     budget: "coverage-off-budget.json",
     today: Date.today,
     generate: false,
-    generate_budget: false
+    generate_budget: false,
+    summary_markdown: false
   )
   OptionParser.new do |parser|
     parser.on("--root PATH") { |value| options.root = value }
@@ -41,6 +43,7 @@ def parse_options
     parser.on("--today YYYY-MM-DD") { |value| options.today = Date.iso8601(value) }
     parser.on("--generate") { options.generate = true }
     parser.on("--generate-budget") { options.generate_budget = true }
+    parser.on("--summary-markdown") { options.summary_markdown = true }
   end.parse!
   options
 rescue Date::Error => error
@@ -323,7 +326,26 @@ end
 
 errors = validate(options, records, scan_errors)
 if errors.empty?
-  puts "coverage-off-lint: ok (#{records.length} exclusions)"
+  if options.summary_markdown
+    manifest_path = File.expand_path(options.manifest, options.root)
+    manifest = JSON.parse(File.read(manifest_path, encoding: Encoding::UTF_8))
+    inventory = generated_budget(records, manifest.fetch("entries"))
+    puts "### Coverage exclusions"
+    puts
+    puts "Coverage measurement excludes **#{inventory['total']}** reviewed annotations."
+    puts "The exact owner/path inventory is budgeted in `coverage-off-budget.json`; any drift fails CI."
+    puts
+    puts "| Owner | Exclusions |"
+    puts "|---|---:|"
+    inventory["owners"].each { |owner, count| puts "| `#{owner}` | #{count} |" }
+    puts
+    puts "Largest paths:"
+    inventory["paths"].sort_by { |path, count| [-count, path] }.first(10).each do |path, count|
+      puts "- `#{path}`: #{count}"
+    end
+  else
+    puts "coverage-off-lint: ok (#{records.length} exclusions)"
+  end
 else
   warn errors.map { |error| "ERROR: #{error}" }.join("\n")
   warn "coverage-off-lint: failed (#{errors.length} errors)"

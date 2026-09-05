@@ -109,7 +109,7 @@ impl Memory {
     /// caller knows and the entity does not. Taking it as an argument keeps a
     /// summary from ever naming a file that does not exist.
     #[must_use]
-    pub fn summary(&self, file: &str) -> MemorySummary {
+    pub(crate) fn summary(&self, file: &str) -> MemorySummary {
         MemorySummary {
             name: self.name.clone(),
             title: self.title.clone(),

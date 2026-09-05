@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use crate::domain::issue::IssueStatus;
 use crate::domain::pullrequest::PrLink;
 use crate::domain::recent::{Recent, Unite, UniteOverview};
-use crate::domain::workspace::{Workspace, WorkspaceOverview};
+use crate::domain::workspace::{Workspace, WorkspaceOverview, validate_workspace_name};
 use crate::infrastructure::store::issue::IssueStore;
 use crate::infrastructure::store::state::WorkspaceStateStore;
 use crate::infrastructure::store::workspace::Storage;
@@ -89,7 +89,7 @@ fn register_resolved(
 ) -> Result<Workspace> {
     let _lock = storage.lock()?;
     let mut workspaces = storage.load_workspaces()?;
-    let (workspace, persist) = resolve_or_register(&mut workspaces, path, name, now);
+    let (workspace, persist) = resolve_or_register(&mut workspaces, path, name, now)?;
     if persist {
         storage.save_workspaces(&workspaces)?;
     }
@@ -312,13 +312,13 @@ fn resolve_or_register(
     path: &Path,
     name_override: Option<&str>,
     now: DateTime<Utc>,
-) -> (Workspace, bool) {
+) -> Result<(Workspace, bool)> {
     if let Some(workspace) = workspaces
         .iter_mut()
         .find(|workspace| workspace.path == path)
     {
         workspace.updated_at = now;
-        return (workspace.clone(), true);
+        return Ok((workspace.clone(), true));
     }
 
     let base_name = name_override.map_or_else(
@@ -330,6 +330,7 @@ fn resolve_or_register(
         },
         str::to_owned,
     );
+    validate_workspace_name(&base_name)?;
     let name = available_name(workspaces, &base_name);
     let workspace = Workspace {
         name,
@@ -341,7 +342,7 @@ fn resolve_or_register(
     if persist {
         workspaces.push(workspace.clone());
     }
-    (workspace, persist)
+    Ok((workspace, persist))
 }
 
 fn available_name(workspaces: &[Workspace], base: &str) -> String {
@@ -500,6 +501,22 @@ mod tests {
         let registered = register(&storage, &path, "   ", ts(10)).unwrap();
 
         assert_eq!(registered.name, "beta");
+    }
+
+    #[test]
+    fn register_rejects_unsafe_explicit_and_derived_names() {
+        let (tmp, storage) = storage();
+        assert!(
+            register(
+                &storage,
+                &tmp.path().join("checkout"),
+                "spoof\u{202e}txt",
+                ts(10),
+            )
+            .is_err()
+        );
+        assert!(open(&storage, &tmp.path().join("line\nbreak"), ts(10)).is_err());
+        assert!(storage.load_workspaces().unwrap().is_empty());
     }
 
     #[test]

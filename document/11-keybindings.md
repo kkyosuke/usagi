@@ -2,9 +2,11 @@
 
 > [ドキュメント目次](README.md) ｜ ← 前へ [10. session role](10-session-roles.md)
 
-TUI のキーバインド、入力所有権、割り振り規則の正本である。画面遷移と各操作の詳細は
-[3. TUI](03-tui.md)を参照する。本書はキーボード入力だけを対象とし、クリック、ドラッグ、ホイールは
-TUI 仕様を正本とする。
+TUI のキーバインド、入力所有権、割り振り規則について、利用者向け文書では本書だけを正本とする。
+実行時の正本は `terminal_input::PREFIX_SHORTCUTS` の実行可能 catalog であり、contextual help も同じ
+record から生成する。CI は catalog の key/action 組と本書の workspace 共通表を相互検査し、README や
+[3. TUI](03-tui.md)に対応表を複製しない。画面遷移と各操作の詳細は TUI 仕様を参照する。本書は
+キーボード入力だけを対象とし、クリック、ドラッグ、ホイールは TUI 仕様を正本とする。
 
 ## 目次
 
@@ -26,7 +28,7 @@ TUI 仕様を正本とする。
 | tab | `[` / `]` は前 / 次の選択、`{` / `}` は前 / 次への並べ替えとする |
 | 対象の除去 | `Ctrl-X` は選択中の対象を安全に remove / detach / dismiss する。plain `x` / `X` に副作用を割り当てない |
 | tab の終了 | `Ctrl-O x` は現在の pane tab を閉じる。`x` の「現在対象を閉じる」という意味を維持し、session remove とは入力 scope を分ける |
-| 強制削除 | 1 打鍵で実行しない。safe remove が拒否された session は確認 modal、command は明示的な `--force` を使う |
+| 強制削除 | 通常 session は確認 modal または command の明示的な `--force` を使う。daemon が診断した integrity orphan に限り、選択中の exact row で `Ctrl-Shift-X` を押すと `--force --purge-orphan` 相当を実行する |
 | modal 内操作 | `Enter` は決定、`Esc` は取消、矢印は選択、`Tab` は focus / mode 移動として再利用する |
 | 文字入力 | plain letter は入力欄と live terminal へ渡す。workspace 共通操作に plain letter を使わない |
 
@@ -70,12 +72,12 @@ TUI 仕様を正本とする。
 | `Ctrl-O d` | OpenDecisions | pending Decision一覧 |
 | `Ctrl-O s` | OpenNotes | Scratchpad |
 | `Ctrl-O ,` | OpenGarden | Session Garden |
-| `Ctrl-O g` | Director | Director drawer |
+| `Ctrl-O g` | Director | Director drawer toggle。初回は goal-driven = Work Runs / classic = Organization。同じ Workflow の再 open は直前 route |
 | `Ctrl-O b` | DirectorBack | Director 内で一階層戻る |
-| `Ctrl-O w` | WorkRuns | goal-driven workspace の Work Runs を直接開く |
-| `Ctrl-O t` | WorkspaceTerminal | workspace root Shell drawer |
-| `Ctrl-O z` | WorkspaceTerminalFullHeight | Shell drawerの高さ切替 |
-| `Ctrl-O n` | DirectorNew / NewRootTerminal | Director の New Conversation / Start Work Run。Shell 選択中は新しい terminal tab |
+| `Ctrl-O w` | WorkRuns | goal-driven の daemon-owned Work Runs を直接開く。classic では遷移しない |
+| `Ctrl-O t` | RootTerminal | workspace root Shell drawer |
+| `Ctrl-O z` | RootTerminalFullHeight | Shell drawerの高さ切替 |
+| `Ctrl-O n` | DirectorNew | Director の New Conversation / Start Work Run。Shell 選択中は新しい terminal tab |
 | `Ctrl-O x` | CloseTab | 選択中pane tabの終了／取消／dismiss |
 | `Ctrl-O r` | ResumeTab | 選択済み interrupted Agent tabの再開／再試行。resume不可なら削除確認 |
 | `Ctrl-O ↑` | ScrollUp | retained outputを1行上へ |
@@ -144,6 +146,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Switch | `:` | Overview palette |
 | Switch / live pane以外のCloseup | `?` | 現在のsurfaceで使えるキーボードショートカットを表示 |
 | Switch | `Ctrl-X` | 選択sessionのsafe remove |
+| Switch | `Ctrl-Shift-X` | 選択中の `failed/integrity` orphan sessionを明示破棄。その他のrowではno-op |
 | Switch | `Ctrl-Q` | workspace離脱／TUI終了確認 |
 | Switch | `Ctrl-C` | no-op |
 | management surface | `Ctrl-D` | no-op。EOTはlive terminalだけに送る |
@@ -204,11 +207,11 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Decision answer | `PgUp` / `PgDn` | prompt scroll |
 | Decision answer | 文字 / paste / `Backspace` | freeform編集 |
 | Decision answer | `Enter` / `Esc` | submit / listへ戻る |
-| Organization | `↑` / `↓` | root Director 選択 |
-| Organization | `Enter` | 選択 root Director の Director Console |
+| Organization | `↑` / `↓` | Conversation 選択 |
+| Organization | `Enter` | 選択 Conversation の Director Console |
 | Organization | `Esc` | Director を閉じる |
 | Work Runs | `↑` / `↓` | Run 選択 |
-| Work Runs | `Enter` / `Esc` | Run Overview / Organization |
+| Work Runs | `Enter` / `Esc` | Run Overview / Director を閉じる |
 | Work Runs | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の削除確認 |
 | Run Overview | `Enter` / `Esc` | root Director の Console / Work Runs |
 | Run Overview | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の削除確認 |
@@ -216,7 +219,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Director Console | `Ctrl-O x` / `Ctrl-O r` | close / resume |
 | Director Console | `Ctrl-O ↑` / `Ctrl-O ↓` / `Ctrl-O End` | scroll |
 | Director Console | 文字 / paste / `Enter` / `Esc` / 編集キー | selected Agent PTY へ直接送る |
-| Director Console | `Ctrl-O b` | Organization または Run Overview へ戻る |
+| Director Console | `Ctrl-O b` | classic は Organization、goal-driven は Run Overview へ戻る |
 | New Conversation / Start Work Run | `↑` / `↓` | provider 選択 |
 | Start Work Run | 文字 / paste / `Backspace` | Goal 編集 |
 | New Conversation / Start Work Run | `Enter` / `Esc` / `Ctrl-C` | launch / 開始前 route へ戻る |
@@ -237,12 +240,12 @@ Closeup paletteなどの文字入力中には入力文字として扱う。
 | 入力 | 動作 |
 |---|---|
 | 文字 / paste | caret位置へ挿入、選択中は置換 |
-| `←` / `→` | 1 Unicode scalar移動 |
+| `←` / `→` | 1 grapheme cluster（見た目上の1文字）移動 |
 | `Home` / `Ctrl-A` | 行頭 |
 | `End` / `Ctrl-E` | 行末 |
-| `Shift-←` / `Shift-→` | 1 scalarずつ選択 |
+| `Shift-←` / `Shift-→` | 1 grapheme clusterずつ選択 |
 | `Shift-Home` / `Shift-End` | 行頭 / 行末まで選択 |
-| `Backspace` / `Delete` | 前 / 後ろ、または選択範囲を削除 |
+| `Backspace` / `Delete` | 前 / 後ろの1 grapheme cluster、または選択範囲を削除 |
 
 画面固有の `Tab` / `Enter` / `Esc` は各表を優先する。`Ctrl-X` は入力欄のcutには使わず、一覧で選択中の対象を
 除く操作だけに使う。
@@ -257,8 +260,12 @@ leader待機中でない入力は、terminalが選択を保持している場合
 | `Ctrl-D` | EOT |
 | `Ctrl-Q` | byte `0x11` |
 | `Ctrl-X` | byte `0x18` |
+| `Ctrl-Shift-X` | live terminalではbyte `0x18`。SwitchではShiftを識別できた場合だけintegrity orphan purge |
 | generic shellの`Ctrl-L` | retained scrollbackと選択をclearし、同じbyteをPTYへ送る |
 | macOS `Command-C` | terminal選択をcopy |
 | Linux `Ctrl-Shift-C` | terminal選択をcopy |
 | Windows `Ctrl-C` | 選択中はcopy、未選択はinterrupt |
 | `Esc`、文字、Enter、Tab、Backspace、矢印 | PTYへ送る |
+
+TUI は対応 terminal に拡張キーボード報告を要求し、`Ctrl-Shift-X` と `Ctrl-X` を区別する。従来型 terminal が
+両方を raw `0x18` として送る場合は区別不能なので safe な `Ctrl-X` として扱い、orphan purge へ昇格しない。

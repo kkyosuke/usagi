@@ -150,4 +150,45 @@ run_case invalid-utf8-manifest 1 'allowlist.json:1: invalid UTF-8' invalid_utf8_
 run_budget_case exact-budget 0 'ok (1 exclusions)' exact_budget
 run_budget_case increased-budget 1 'coverage budget: total expected 0, scanned 1' increased_budget
 
+summary_root="$tmp/summary"
+mkdir -p "$summary_root/src"
+exact_budget "$summary_root"
+summary=$(ruby "$lint" --root "$summary_root" --manifest allowlist.json --budget budget.json --today 2026-07-21 --summary-markdown)
+grep -Fq 'Coverage measurement excludes **1** reviewed annotations.' <<<"$summary"
+grep -Fq '| `daemon` | 1 |' <<<"$summary"
+grep -Fq -- '- `src/lib.rs`: 1' <<<"$summary"
+
+coverage_bin="$tmp/coverage-bin"
+mkdir -p "$coverage_bin"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$coverage_bin/cargo-llvm-cov"
+chmod +x "$coverage_bin/cargo-llvm-cov"
+
+coverage_command() (
+  PATH="$coverage_bin:$PATH"
+  # shellcheck source=../../scripts/coverage.sh
+  . "$root/scripts/coverage.sh"
+  coverage_off_lint() { :; }
+  cargo() { printf '%s\n' "$*"; }
+  coverage_enforce "$@"
+)
+
+default_coverage=$(coverage_command)
+if [[ $default_coverage == *"--no-clean"* ]]; then
+  echo "FAIL: default coverage gate reused stale profiles" >&2
+  exit 1
+fi
+reused_coverage=$(coverage_command --no-clean)
+if [[ $reused_coverage != *"--workspace --no-clean"* ]]; then
+  echo "FAIL: explicit coverage reuse was not forwarded" >&2
+  exit 1
+fi
+set +e
+unknown_output=$(coverage_command --unknown 2>&1)
+unknown_status=$?
+set -e
+if [[ $unknown_status -ne 2 || $unknown_output != *"usage: coverage_enforce [--no-clean]"* ]]; then
+  echo "FAIL: unknown coverage option was not rejected" >&2
+  exit 1
+fi
+
 echo "coverage-off-lint: fixtures ok"

@@ -19,6 +19,8 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 pub mod agent_launch;
 /// v2 controller effect と daemon-owned Agent pane runtime を結合する host。
 pub mod agent_runtime;
+/// Runtime Agent/terminal launch and stream boundaries.
+pub mod agent_runtime_ports;
 /// Agent tab の表示 intent を daemon inventory と照合する純粋 reducer と永続化 port。
 pub mod agent_tab_intent;
 /// exited tombstone を read-only completed tab へ投影する純粋 reducer（#525）。
@@ -45,6 +47,8 @@ pub mod pane;
 pub mod pane_runtime;
 /// Daemon-backed PR projection and browser effect ports.
 pub mod pr;
+/// IO-free runtime boundaries used by the controller composition.
+pub mod runtime_ports;
 /// daemon-owned generic terminal launch / attach adapter for Closeup panes.
 pub mod terminal_launch;
 /// Pure http(s) URL detection and validation over the ANSI-free terminal grid.
@@ -443,6 +447,9 @@ pub enum Key {
     /// Ctrl-X removes or dismisses the selected management object. A focused
     /// live terminal receives the original control byte instead.
     CtrlX,
+    /// Ctrl-Shift-X explicitly purges a selected integrity-orphan session.
+    /// A focused live terminal receives the original control byte instead.
+    CtrlShiftX,
     /// Open contextual keyboard help (`Ctrl-?`, with `Ctrl-/` as the portable
     /// terminal alias). The presentation shell owns this globally so the chord
     /// never reaches a focused live terminal or a covered surface.
@@ -698,6 +705,7 @@ mod tests {
             Key::Quit,
             Key::CtrlD,
             Key::CtrlX,
+            Key::CtrlShiftX,
             Key::Help,
             Key::Char('o'),
             Key::Click { column: 3, row: 4 },

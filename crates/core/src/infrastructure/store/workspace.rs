@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::recent::Unite;
 use crate::domain::settings::Settings;
-use crate::domain::workspace::Workspace;
+use crate::domain::workspace::{Workspace, validate_workspace_name};
 use crate::infrastructure::paths::data_dir;
 use crate::infrastructure::persistence::json_file;
 use crate::infrastructure::persistence::store_lock::StoreLock;
@@ -101,7 +101,11 @@ impl Storage {
     pub fn load_workspaces(&self) -> Result<Vec<Workspace>> {
         let file: Option<WorkspacesOwned> =
             json_file::read_versioned(&self.dir.join(WORKSPACES_FILE))?;
-        Ok(file.map(|f| f.workspaces).unwrap_or_default())
+        let workspaces = file.map(|file| file.workspaces).unwrap_or_default();
+        for workspace in &workspaces {
+            validate_workspace_name(&workspace.name)?;
+        }
+        Ok(workspaces)
     }
 
     /// Write the whole workspace list to `workspaces.json`.
@@ -111,6 +115,9 @@ impl Storage {
     /// Returns an error when the data directory cannot be created or the file
     /// cannot be written.
     pub fn save_workspaces(&self, workspaces: &[Workspace]) -> Result<()> {
+        for workspace in workspaces {
+            validate_workspace_name(&workspace.name)?;
+        }
         json_file::write_versioned(
             &self.dir,
             &self.dir.join(WORKSPACES_FILE),
@@ -338,6 +345,32 @@ mod tests {
         let (_dir, storage) = temp_storage();
         fs::create_dir_all(storage.dir()).unwrap();
         fs::write(storage.dir().join(WORKSPACES_FILE), "{ broken").unwrap();
+        assert!(storage.load_workspaces().is_err());
+    }
+
+    #[test]
+    fn workspace_store_rejects_unsafe_names_on_write_and_read() {
+        let (_dir, storage) = temp_storage();
+        let invalid = Workspace {
+            name: "spoof\u{202e}txt".to_owned(),
+            path: PathBuf::from("/tmp/spoof"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert!(
+            storage
+                .save_workspaces(std::slice::from_ref(&invalid))
+                .is_err()
+        );
+
+        json_file::write_versioned(
+            storage.dir(),
+            &storage.dir().join(WORKSPACES_FILE),
+            &WorkspacesRef {
+                workspaces: &[invalid],
+            },
+        )
+        .unwrap();
         assert!(storage.load_workspaces().is_err());
     }
 

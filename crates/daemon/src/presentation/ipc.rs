@@ -374,6 +374,36 @@ pub fn handle_admitted_connection_with_terminal_and(
         usagi_core::domain::id::ClientId,
     ) -> Envelope,
 ) -> io::Result<()> {
+    handle_admitted_connection_with_terminal_and_observe(
+        reader,
+        writer,
+        admitted,
+        fence,
+        terminal,
+        dispatch_request,
+        &mut |_, _| {},
+    )
+}
+
+/// Serves an admitted connection and observes every completed response before
+/// it is written. The observer receives the request body and response envelope,
+/// allowing the composition root to persist abnormal failures without moving
+/// logging or filesystem dependencies into the presentation layer.
+pub fn handle_admitted_connection_with_terminal_and_observe(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    admitted: AdmittedConnection,
+    fence: &dyn ConnectionFence,
+    terminal: &mut dyn TerminalOwner,
+    dispatch_request: &mut dyn FnMut(
+        usagi_core::infrastructure::ipc::RequestId,
+        serde_json::Value,
+        &ServerHello,
+        usagi_core::domain::id::ConnectionId,
+        usagi_core::domain::id::ClientId,
+    ) -> Envelope,
+    observe_response: &mut dyn FnMut(&serde_json::Value, &Envelope),
+) -> io::Result<()> {
     let AdmittedConnection {
         hello,
         client_incarnation,
@@ -456,7 +486,7 @@ pub fn handle_admitted_connection_with_terminal_and(
                     Err(refusal) => Err(refusal),
                 }
             };
-            let (outcome, body) = match outcome_body {
+            let (outcome, response_body) = match outcome_body {
                 Ok((outcome, body)) => (outcome, body),
                 Err(error) => (ResponseOutcome::Error(error), json!(null)),
             };
@@ -466,9 +496,10 @@ pub fn handle_admitted_connection_with_terminal_and(
                 kind: EnvelopeKind::Response {
                     request_id,
                     outcome,
-                    body,
+                    body: response_body,
                 },
             };
+            observe_response(&body, &reply);
             write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
         }
         Ok(())
@@ -1265,6 +1296,52 @@ mod tests {
                 body,
                 ..
             } if body.is_null()
+        ));
+    }
+
+    #[test]
+    fn admitted_response_observer_sees_terminal_failures_before_write() {
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 4096).unwrap();
+        write_json_frame(
+            &mut input,
+            &terminal_request(usagi_core::domain::id::RequestId::new().to_string()),
+            4096,
+        )
+        .unwrap();
+        let mut reader = Cursor::new(input);
+        let mut output = Vec::new();
+        let admitted = handshake_admitted(&mut reader, &mut output, &server())
+            .unwrap()
+            .unwrap();
+        let mut terminal = RecordingTerminal {
+            fail: true,
+            ..RecordingTerminal::default()
+        };
+        let mut observed = Vec::new();
+
+        handle_admitted_connection_with_terminal_and_observe(
+            &mut reader,
+            &mut output,
+            admitted,
+            &UnfencedConnection,
+            &mut terminal,
+            &mut test_dispatch,
+            &mut |body, response| observed.push((body.clone(), response.clone())),
+        )
+        .unwrap();
+
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0["kind"], "terminal");
+        assert!(matches!(
+            &observed[0].1.kind,
+            EnvelopeKind::Response {
+                outcome: ResponseOutcome::Error(ProtocolError {
+                    code: ErrorCode::Unavailable,
+                    ..
+                }),
+                ..
+            }
         ));
     }
 

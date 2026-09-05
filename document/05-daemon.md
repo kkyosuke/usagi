@@ -1012,10 +1012,23 @@ schedule を回収する。PR snapshot の公開 field が変わる操作（失�
 
 ## failure logging
 
-daemon の最外周は返却された IO error を捕捉して `<data-dir>/logs/error-YYYY-MM-DD.log` に記録する。IPC、PTY、
-observer など daemon worker thread の panic は process-wide panic hook が payload、発生位置、backtrace とともに
-同じログへ記録する。main thread の panic はこの hook で記録した後に最外周で通常の process error に変換して終了する。
-これにより detached `serve` の標準エラーが破棄される場合でも、起動失敗や異常終了の原因を日次 error log から確認できる。
+daemon は想定外の失敗を検出した境界で `<data-dir>/logs/error-YYYY-MM-DD.log` に記録する。この節が daemon / TUI
+共通の日次 failure log に何を残すかの正本である。
+
+- IPC はすべての完成した response を送信前に観測する。`protocol_mismatch`、`capability_missing`、
+  `generation_mismatch`、認証・権限拒否、capacity / backpressure、deadline、ownership、`unavailable`、`internal`
+  を異常 response として、request surface、request ID、error code、retry、side effect、error ID、safe message とともに記録する。
+- 入力検証、not found / stale target、通常の rollover・revision / idempotency / sequence conflict、busy、cancel、resync は
+  client が処理する通常の制御結果であり、failure log へ記録しない。
+- accepted socket / handshake / connection worker の異常、PTY allocation 後の child spawn・PID 観測・reader 作成の失敗、
+  最外周へ返る IO error を記録する。Agent / terminal child の spawn 失敗は PTY stage、resource identity、OS の error reason
+  を保持するため、`agent process could not be started` のような安全な client message だけで原因が失われない。
+- IPC、PTY、observer など daemon worker thread の panic は process-wide panic hook が payload、発生位置、backtrace とともに
+  記録する。main thread の panic はこの hook で記録した後に最外周で通常の process error に変換して終了する。
+
+ログへ request / response body、argv、環境変数、secret、terminal / provider の raw output は記録しない。これにより detached
+`serve` の標準エラーが破棄される場合でも、起動失敗や異常終了の原因を日次 error log から確認でき、TUI は同じ失敗の
+daemon-authored safe message だけを画面へ表示する。TUI 側の記録・表示契約は [3. TUI](03-tui.md#closeup-pane) に従う。
 
 ## durable operation
 
@@ -1116,7 +1129,8 @@ dirty、未統合、detached、`usagi/` 外 branch、診断不能、linked workt
 通常の `force` では保護を解除しない。利用者は変更を commit/stash し、branch を PR で基点へ統合してから再実行する。
 内容を破棄すると確認できた integrity orphan だけは、CLI の
 `usagi session remove <name> --force --purge-orphan`、MCP `session_remove` の
-`force: true, purge_orphan: true`、または TUI の破棄確認付き force removal で exact session target を回収できる。
+`force: true, purge_orphan: true`、または TUI で exact integrity row を選択して `Ctrl-Shift-X` を押すことで
+exact session target を回収できる。
 `purge_orphan` は integrity failure 以外へ指定できず、`force` との対が必須である。effect 直前の canonical
 path confinement は通常 remove と同じく再検証し、session container 外や保護 root を削除対象にしない。
 
