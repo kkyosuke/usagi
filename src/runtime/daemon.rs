@@ -74,8 +74,8 @@ use usagi_daemon::presentation::{
     DaemonCommand as PresentationDaemonCommand, DaemonEnv, ServeRole,
 };
 use usagi_daemon::usecase::agent_ipc::{
-    AGENT_RUNTIME_LIMIT, AgentReadinessPreflight, AgentRuntime, AgentTerminalActor, PromptMode,
-    ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
+    AGENT_RUNTIME_LIMIT, AgentAdmission, AgentReadinessPreflight, AgentRuntime, AgentTerminalActor,
+    PromptMode, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
     TerminalOutcome,
 };
 use usagi_daemon::usecase::authority::activation::{
@@ -3231,7 +3231,6 @@ const CLIENT_NOFILE_TARGET: u64 =
 /// actually changed.
 const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
 const SUPERVISOR_RECOVERY_TICK: Duration = Duration::from_secs(1);
-const SUPERVISOR_PROMOTION_GRACE: chrono::Duration = chrono::Duration::seconds(30);
 struct ProductionRefreshClock {
     started: Instant,
 }
@@ -3749,12 +3748,12 @@ fn spawn_ipc_server(
     )?;
     reconcile_removed_session_agents(&data_dir.join("daemon"), &agent)?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
-    if let Err(error) = reconcile_pending_supervisor_promotions(&supervisor, &agent) {
+    if let Err(error) = reconcile_startup_supervisor_promotions(&supervisor, &agent) {
         ErrorLog::record(&format!(
             "supervisor promotion reconciliation deferred: {error}"
         ));
     }
-    if let Err(error) = reconcile_aborted_supervisor_workers(&supervisor, &agent) {
+    if let Err(error) = reconcile_startup_supervisor_workers(&supervisor, &agent) {
         ErrorLog::record(&format!(
             "supervisor worker termination reconciliation deferred: {error}"
         ));
@@ -6225,7 +6224,7 @@ fn dispatch_agent_tool(
                 };
                 let session_name = input.session.name;
                 let requested_role = input.session.role;
-                let supervised = supervisor
+                let supervision_at_preflight = supervisor
                     .lock()
                     .map_err(|_| {
                         ProtocolError::new(
@@ -6233,9 +6232,9 @@ fn dispatch_agent_tool(
                             "supervisor runtime is unavailable",
                         )
                     })?
-                    .supervises_dispatch(parent_dispatch_run)
+                    .supervision_fence(parent_dispatch_run)
                     .map_err(supervisor_error)?;
-                if supervised {
+                if supervision_at_preflight.is_some() {
                     agent
                         .lock()
                         .map_err(|_| {
@@ -6312,23 +6311,65 @@ fn dispatch_agent_tool(
                             "session parentage is unavailable",
                         )
                     })?;
+                let reserved_worker = if supervision_at_preflight.is_some() {
+                    Some(
+                        agent
+                            .lock()
+                            .map_err(|_| {
+                                ProtocolError::new(
+                                    ErrorCode::Unavailable,
+                                    "agent owner is unavailable",
+                                )
+                            })?
+                            .plan_dispatch_worker(workspace, session_id, &selected)?,
+                    )
+                } else {
+                    None
+                };
                 let scope = bound.scope_resolver();
                 let task_instruction = input.prompt.clone();
-                let reservation = supervisor
-                    .lock()
-                    .map_err(|_| {
+                let reservation = {
+                    let runtime = supervisor.lock().map_err(|_| {
                         ProtocolError::new(
                             ErrorCode::Unavailable,
                             "supervisor runtime is unavailable",
                         )
-                    })?
-                    .reserve_delegated_dispatch(
-                        parent_dispatch_run,
-                        &operation_id,
-                        task_instruction,
-                        chrono::Utc::now(),
-                    )
-                    .map_err(supervisor_error)?;
+                    })?;
+                    let supervision_before_reservation = runtime
+                        .supervision_fence(parent_dispatch_run)
+                        .map_err(supervisor_error)?;
+                    require_stable_supervisor_fence(
+                        supervision_at_preflight.as_ref(),
+                        supervision_before_reservation.as_ref(),
+                    )?;
+                    let reservation = if let Some(reserved_worker) = reserved_worker.as_ref() {
+                        runtime
+                            .reserve_delegated_dispatch_for_session(
+                                parent_dispatch_run,
+                                &operation_id,
+                                task_instruction,
+                                session_id,
+                                reserved_worker,
+                                &session_name,
+                                chrono::Utc::now(),
+                            )
+                            .map_err(supervisor_error)?
+                    } else {
+                        None
+                    };
+                    let supervision_after_reservation = runtime
+                        .supervision_fence(parent_dispatch_run)
+                        .map_err(supervisor_error)?;
+                    require_stable_supervisor_fence(
+                        supervision_at_preflight.as_ref(),
+                        supervision_after_reservation.as_ref(),
+                    )?;
+                    require_supervisor_reservation_presence(
+                        supervision_at_preflight.as_ref(),
+                        reservation.is_some(),
+                    )?;
+                    reservation
+                };
                 let supervised = reservation.is_some();
                 let prompt = reservation.map_or(input.prompt, |reservation| reservation.prompt);
                 let dispatch_intent = DispatchIntent {
@@ -6344,6 +6385,7 @@ fn dispatch_agent_tool(
                     &dispatch_intent,
                     session_id,
                     &scope,
+                    reserved_worker.as_ref(),
                 );
                 let admission = match admission {
                     Ok(admission) => admission,
@@ -6870,7 +6912,16 @@ fn reconcile_aborted_supervisor_workers(
     supervisor: &SharedSupervisorRuntime,
     agent: &SharedAgentRuntime,
 ) -> anyhow::Result<usize> {
-    reconcile_supervisor_workers(supervisor, agent, None)
+    reconcile_supervisor_workers(supervisor, agent, None, false)
+}
+
+fn reconcile_startup_supervisor_workers(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+) -> anyhow::Result<usize> {
+    // Socket admission has not started yet, so an operation missing from the
+    // hydrated Agent owner cannot appear later from a pre-crash request.
+    reconcile_supervisor_workers(supervisor, agent, None, true)
 }
 
 fn reconcile_supervisor_run_workers(
@@ -6878,14 +6929,17 @@ fn reconcile_supervisor_run_workers(
     agent: &SharedAgentRuntime,
     supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId,
 ) -> anyhow::Result<usize> {
-    reconcile_supervisor_workers(supervisor, agent, Some(supervisor_run_id))
+    reconcile_supervisor_workers(supervisor, agent, Some(supervisor_run_id), false)
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-08-31 tests=supervisor_worker_reconciliation_joins_bound_and_unbound_runs_exactly,workspace_control_is_durable_scoped_and_projects_exact_stop_obligations,supervisor_stop_validates_every_fence_and_retries_an_orphaned_process
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-08-31 tests=supervisor_worker_reconciliation_joins_bound_and_unbound_runs_exactly,workspace_control_is_durable_scoped_and_projects_exact_stop_obligations,supervisor_stop_validates_every_fence_and_retries_an_orphaned_process
+#[allow(clippy::too_many_lines)] // Root and recursive child obligations are reconciled in one ordered inventory pass.
 fn reconcile_supervisor_workers(
     supervisor: &SharedSupervisorRuntime,
     agent: &SharedAgentRuntime,
     selected_run: Option<usagi_core::domain::supervisor::SupervisorRunId>,
+    absence_is_final: bool,
 ) -> anyhow::Result<usize> {
     let (obligations, pending) = {
         let Ok(runtime) = supervisor.lock() else {
@@ -6905,13 +6959,93 @@ fn reconcile_supervisor_workers(
     let Ok(mut runtime) = agent.lock() else {
         anyhow::bail!("agent owner is unavailable");
     };
+    let mut first_failure = None;
     let mut pending_obligations = std::collections::BTreeMap::new();
     let mut acknowledged = Vec::new();
     for candidate in pending {
         let Some(worker) = runtime.runtime_for_operation(candidate.operation_id()) else {
-            acknowledged.push(candidate);
+            let operation_id = candidate.operation_id().to_string();
+            let outcome = runtime.operation_outcome(&operation_id);
+            if absence_is_final
+                || matches!(
+                outcome,
+                Some(Err(error))
+                    if error.code
+                        != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
+                )
+            {
+                // A durable definite admission failure proves that no worker
+                // can still appear. Startup absence has the same meaning after
+                // Agent hydration and before socket admission begins.
+                acknowledged.push(candidate);
+                continue;
+            }
+            // Goal admission may still be waiting for this Agent lock after
+            // reserving its Supervisor root. Absence is therefore not proof
+            // that no worker can appear; retain the stop fence for a later
+            // reconciliation pass.
             continue;
         };
+        if !candidate.matches_worker_scope(&worker) {
+            // The operation is durably occupied by another scope, so this
+            // Supervisor reservation can never acquire it. Never interrupt the
+            // unrelated Agent.
+            acknowledged.push(candidate);
+            continue;
+        }
+        if let Some(expected) = candidate.worker_agent_id() {
+            let actual = runtime
+                .dispatch_store()
+                .run(candidate.operation_id())?
+                .map(|dispatch| dispatch.agent_id);
+            let Some(actual) = actual else {
+                first_failure.get_or_insert_with(|| {
+                    anyhow::anyhow!("pending Supervisor worker Agent fence is unavailable")
+                });
+                continue;
+            };
+            if actual != expected {
+                acknowledged.push(candidate);
+                continue;
+            }
+        }
+        if let Some(expected) = candidate.worker_profile_id() {
+            let actual = match runtime.dispatch_store().run(candidate.operation_id())? {
+                Some(dispatch) => runtime
+                    .dispatch_store()
+                    .agent(dispatch.agent_id)?
+                    .map(|agent| agent.runtime),
+                None => None,
+            };
+            let Some(actual) = actual else {
+                first_failure.get_or_insert_with(|| {
+                    anyhow::anyhow!("pending Supervisor worker runtime profile is unavailable")
+                });
+                continue;
+            };
+            if &actual != expected {
+                acknowledged.push(candidate);
+                continue;
+            }
+        }
+        if let Some(expected) = candidate.worker_semantic_digest() {
+            let actual = runtime
+                .dispatch_store()
+                .admission(candidate.operation_id())?
+                .map(|admission| {
+                    usagi_core::infrastructure::ipc::agent_operation_digest(&admission.semantic_key)
+                });
+            let Some(actual) = actual else {
+                first_failure.get_or_insert_with(|| {
+                    anyhow::anyhow!("pending Supervisor worker semantic fence is unavailable")
+                });
+                continue;
+            };
+            if actual != expected {
+                acknowledged.push(candidate);
+                continue;
+            }
+        }
         let (provenance, candidates) = pending_obligations
             .entry(candidate.workspace_id())
             .or_insert((
@@ -6929,7 +7063,6 @@ fn reconcile_supervisor_workers(
             .push(provenance);
     }
     let mut interrupted = 0;
-    let mut first_failure = None;
     for (workspace, provenance) in by_workspace {
         match runtime.interrupt_supervisor_workers(workspace, &provenance) {
             Ok(count) => interrupted += count,
@@ -7118,13 +7251,20 @@ fn dispatch_supervisor_tool(
                         ));
                     }
                     runtime
-                        .start_for_workspace(
+                        .ensure_supervisor_start_dispatch_available(
+                            &operation_id,
+                            authenticated.dispatch_run_id,
+                        )
+                        .map_err(supervisor_error)?;
+                    runtime
+                        .start_for_workspace_caller_dispatch(
                             &caller,
                             workspace,
                             &operation_id,
                             input.root_task,
-                            Vec::new(),
                             input.policy_selector,
+                            authenticated.dispatch_run_id,
+                            &authenticated.runtime,
                             Utc::now(),
                         )
                         .map_err(supervisor_error)?;
@@ -7650,9 +7790,22 @@ fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::Pr
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     let message = error.to_string();
     drop(error);
-    let code = if message.contains("capacity is exhausted") {
+    let code = if message.contains("capacity is exhausted")
+        || message.contains("supervisor policy denied delegated dispatch")
+    {
         ErrorCode::ResourceExhausted
-    } else if message.contains("reused") || message.contains("conflicts with its reservation") {
+    } else if message.contains("already belongs to another retained supervisor run")
+        || message.contains("stale supervisor ownership")
+        || message.contains("conflicting retained supervisor ownership")
+        || message.contains("closed supervisor ownership")
+    {
+        ErrorCode::RevisionConflict
+    } else if message.contains("reused")
+        || message.contains("conflicts with its reservation")
+        || message.contains("conflicts with its existing supervisor task")
+        || message.contains("delegated dispatch operation is already in use")
+        || message.contains("delegated dispatch operation already owns a supervisor task")
+    {
         ErrorCode::IdempotencyConflict
     } else if message.contains("does not exist") || message.contains("does not belong") {
         ErrorCode::OwnershipUnknown
@@ -7665,6 +7818,32 @@ fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::Pr
         ErrorCode::InvalidArgument
     };
     ProtocolError::new(code, message)
+}
+
+fn require_stable_supervisor_fence<T: PartialEq>(
+    supervision_at_preflight: Option<&T>,
+    supervision_before_reservation: Option<&T>,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    if supervision_at_preflight != supervision_before_reservation {
+        return Err(usagi_core::infrastructure::ipc::ProtocolError::new(
+            usagi_core::infrastructure::ipc::ErrorCode::RevisionConflict,
+            "Supervisor ownership fence changed before delegated dispatch reservation",
+        ));
+    }
+    Ok(())
+}
+
+fn require_supervisor_reservation_presence<T>(
+    supervision_at_preflight: Option<&T>,
+    reservation_present: bool,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    if supervision_at_preflight.is_some() != reservation_present {
+        return Err(usagi_core::infrastructure::ipc::ProtocolError::new(
+            usagi_core::infrastructure::ipc::ErrorCode::RevisionConflict,
+            "Supervisor reservation disagrees with its ownership fence",
+        ));
+    }
+    Ok(())
 }
 
 fn supervisor_control_error(
@@ -8166,7 +8345,7 @@ fn dispatch_dispatch(
     })();
     let result = session_id.and_then(|session_id| {
         let scope = bound.scope_resolver();
-        dispatch_agent_after_preflight(agent, &operation_id, &intent, session_id, &scope)
+        dispatch_agent_after_preflight(agent, &operation_id, &intent, session_id, &scope, None)
     });
     match result {
         Ok(admission) => envelope(
@@ -9722,12 +9901,12 @@ fn delegate_brief(
             sessions.repository_root().to_path_buf(),
         )
     };
-    let supervised = supervisor
+    let supervision_at_preflight = supervisor
         .lock()
         .map_err(|_| SessionRuntimeError::Storage)?
-        .supervises_dispatch(parent_dispatch_run)
+        .supervision_fence(parent_dispatch_run)
         .map_err(|_| SessionRuntimeError::Storage)?;
-    if supervised {
+    if supervision_at_preflight.is_some() {
         agent
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?
@@ -9774,7 +9953,20 @@ fn delegate_brief(
             "creator_agent_id": caller.agent_id,
         }),
     )?;
-    let id = record_session_lineage(agent, workspace, &created.body, &name)?;
+    let id = session_id_by_name(&created.body, &name).ok_or(SessionRuntimeError::Storage)?;
+    if record_session_lineage(agent, workspace, &created.body, &name).is_err() {
+        return Err(compensate_delegation(
+            bound.sessions(),
+            teardown,
+            id,
+            &name,
+            operation_id,
+            usagi_core::infrastructure::ipc::ProtocolError::new(
+                usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
+                "session parentage is unavailable",
+            ),
+        ));
+    }
     if let Some(sessions) = created
         .body
         .get_mut("sessions")
@@ -9782,28 +9974,99 @@ fn delegate_brief(
     {
         sessions.retain(|session| session.get("session_id") == Some(&serde_json::json!(id)));
     }
+    let selected = DispatchAgentIntent::New {
+        runtime: runtime.clone(),
+        model: model.clone(),
+    };
+    let reserved_worker = if supervision_at_preflight.is_some() {
+        let planned = agent
+            .lock()
+            .map_err(|_| {
+                usagi_core::infrastructure::ipc::ProtocolError::new(
+                    usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
+                    "agent owner is unavailable",
+                )
+            })
+            .and_then(|runtime| runtime.plan_dispatch_worker(workspace, id, &selected));
+        match planned {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                return Err(compensate_delegation(
+                    bound.sessions(),
+                    teardown,
+                    id,
+                    &name,
+                    operation_id,
+                    error,
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let scope = bound.scope_resolver();
-    let reservation = supervisor
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .reserve_delegated_dispatch(
-            parent_dispatch_run,
-            operation_id,
-            prompt.clone(),
-            chrono::Utc::now(),
-        )
-        .map_err(|_| SessionRuntimeError::Storage)?;
+    let reservation = (|| {
+        let runtime = supervisor.lock().map_err(|_| {
+            usagi_core::infrastructure::ipc::ProtocolError::new(
+                usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
+                "supervisor runtime is unavailable",
+            )
+        })?;
+        let supervision_before_reservation = runtime
+            .supervision_fence(parent_dispatch_run)
+            .map_err(supervisor_error)?;
+        require_stable_supervisor_fence(
+            supervision_at_preflight.as_ref(),
+            supervision_before_reservation.as_ref(),
+        )?;
+        let reservation = if let Some(reserved_worker) = reserved_worker.as_ref() {
+            runtime
+                .reserve_delegated_dispatch_for_session(
+                    parent_dispatch_run,
+                    operation_id,
+                    prompt.clone(),
+                    id,
+                    reserved_worker,
+                    &name,
+                    chrono::Utc::now(),
+                )
+                .map_err(supervisor_error)?
+        } else {
+            None
+        };
+        let supervision_after_reservation = runtime
+            .supervision_fence(parent_dispatch_run)
+            .map_err(supervisor_error)?;
+        require_stable_supervisor_fence(
+            supervision_at_preflight.as_ref(),
+            supervision_after_reservation.as_ref(),
+        )?;
+        require_supervisor_reservation_presence(
+            supervision_at_preflight.as_ref(),
+            reservation.is_some(),
+        )?;
+        Ok(reservation)
+    })()
+    .map_err(|error| {
+        compensate_delegation(bound.sessions(), teardown, id, &name, operation_id, error)
+    })?;
     let supervised = reservation.is_some();
     let prompt = reservation.map_or(prompt, |reservation| reservation.prompt);
     let dispatch_intent = DispatchIntent {
         workspace,
         session_name: name.clone(),
         caller,
-        agent: DispatchAgentIntent::New { runtime, model },
+        agent: selected,
         prompt,
     };
-    let admission =
-        dispatch_agent_after_preflight(agent, operation_id, &dispatch_intent, id, &scope);
+    let admission = dispatch_agent_after_preflight(
+        agent,
+        operation_id,
+        &dispatch_intent,
+        id,
+        &scope,
+        reserved_worker.as_ref(),
+    );
     let admission = match admission {
         Ok(admission) => admission,
         Err(error) => {
@@ -9958,7 +10221,9 @@ enum AgentDispatchRequest {
     RepairResume(String, usagi_core::domain::agent::AgentResumeTarget, u32),
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
+#[allow(clippy::too_many_lines)] // Preflight, reservation, and Supervisor escalation are one fail-closed admission boundary.
 fn admit_agent_dispatch_request(
     agent: &SharedAgentRuntime,
     supervisor: &SharedSupervisorRuntime,
@@ -9989,6 +10254,17 @@ fn admit_agent_dispatch_request(
                 unreachable!("handled before readiness")
             }
         })?;
+    let goal_worker_profile = match request {
+        AgentDispatchRequest::Goal(_, intent) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })?
+                .goal_worker_profile(intent)?,
+        ),
+        _ => None,
+    };
     run_agent_readiness(agent, preflight.as_ref())?;
     let reserved_goal = match request {
         AgentDispatchRequest::Goal(operation_id, intent) => Some(
@@ -9997,6 +10273,9 @@ fn admit_agent_dispatch_request(
                 operation_id,
                 intent,
                 resolve_goal_artifact_repository(supervisor, scope, operation_id, intent)?,
+                goal_worker_profile
+                    .clone()
+                    .expect("Goal request resolved its worker profile"),
             )?
             .supervisor_run_id,
         ),
@@ -10079,6 +10358,7 @@ fn reserve_goal_supervisor_run(
     operation_id: &str,
     intent: &usagi_core::usecase::client::AgentGoalIntent,
     artifact_repository: usagi_core::domain::pr_inventory::GitHubRepository,
+    worker_profile_id: AgentProfileId,
 ) -> Result<
     usagi_core::domain::supervisor::SupervisorRunQuery,
     usagi_core::infrastructure::ipc::ProtocolError,
@@ -10091,13 +10371,17 @@ fn reserve_goal_supervisor_run(
         .map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
         })?
-        .reserve_goal_for_workspace(
+        .reserve_goal_for_workspace_with_profile(
             &goal_supervisor_caller(intent.workspace),
             intent.workspace,
             operation_id,
             usagi_daemon::usecase::supervisor_runtime::GoalSpecification::new(
                 intent.goal.clone(),
                 artifact_repository,
+            ),
+            worker_profile_id,
+            usagi_core::infrastructure::ipc::agent_operation_digest(
+                &usagi_core::usecase::client::agent_goal_semantic_key(intent),
             ),
             Some("standard".into()),
             Utc::now(),
@@ -10193,18 +10477,78 @@ fn start_goal_supervisor_run(
         intent,
         usagi_core::domain::pr_inventory::GitHubRepository::from_name_with_owner("acme/repo")
             .expect("test repository is valid"),
+        intent
+            .profile
+            .clone()
+            .unwrap_or_else(|| AgentProfileId::new("claude").unwrap()),
     )?;
     bind_goal_supervisor_run(supervisor, operation_id, worker)
 }
 
-/// Replays only durable, exact Goal promotions. Missing Agent outcomes remain
-/// pending; definite Agent failures close the reservation; successful outcomes
-/// bind the persisted runtime fence without spawning anything.
-fn promotion_grace_elapsed(
-    reserved_at: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    now.signed_duration_since(reserved_at) >= SUPERVISOR_PROMOTION_GRACE
+#[allow(clippy::too_many_arguments)] // Recovery compares every independently persisted Agent and Supervisor fence.
+fn promotion_admission_matches(
+    agent: &AgentRuntime,
+    operation_id: &str,
+    worker: &AgentRuntimeRef,
+    workspace_id: WorkspaceId,
+    requires_worker_session: bool,
+    worker_session_id: Option<SessionId>,
+    worker_runtime_id: Option<usagi_core::domain::id::AgentRuntimeId>,
+    worker_agent_id: Option<usagi_core::domain::id::AgentId>,
+    worker_profile_id: Option<&AgentProfileId>,
+    worker_semantic_digest: Option<&str>,
+) -> anyhow::Result<bool> {
+    let worker_session_matches = if requires_worker_session {
+        worker_session_id.map_or_else(
+            || worker.session_id.is_some() && worker.terminal.session_id.is_some(),
+            |expected| {
+                worker.session_id == Some(expected) && worker.terminal.session_id == Some(expected)
+            },
+        )
+    } else {
+        worker.session_id.is_none() && worker.terminal.session_id.is_none()
+    };
+    if worker.terminal.workspace_id != workspace_id
+        || !worker_session_matches
+        || worker_runtime_id.is_some_and(|expected| expected != worker.agent_runtime_id)
+    {
+        return Ok(false);
+    }
+    let operation = usagi_core::domain::id::OperationId::parse(operation_id)
+        .map_err(|_| anyhow::anyhow!("pending Supervisor operation is invalid"))?;
+    let dispatch = agent
+        .dispatch_store()
+        .run(operation)?
+        .ok_or_else(|| anyhow::anyhow!("pending Supervisor dispatch is unavailable"))?;
+    let dispatch_agent = agent
+        .dispatch_store()
+        .agent_in_workspace(workspace_id, dispatch.agent_id)?
+        .ok_or_else(|| anyhow::anyhow!("pending Supervisor Agent is unavailable"))?;
+    let agent_session_matches = if requires_worker_session {
+        worker_session_id.map_or(dispatch_agent.session_id.is_some(), |expected| {
+            dispatch_agent.session_id == Some(expected)
+        })
+    } else {
+        dispatch_agent.session_id.is_none()
+    };
+    if !agent_session_matches
+        || worker_agent_id.is_some_and(|expected| dispatch.agent_id != expected)
+        || worker_profile_id.is_some_and(|expected| &dispatch_agent.runtime != expected)
+    {
+        return Ok(false);
+    }
+    if let Some(expected) = worker_semantic_digest {
+        let admission = agent
+            .dispatch_store()
+            .admission(operation)?
+            .ok_or_else(|| anyhow::anyhow!("pending Supervisor admission is unavailable"))?;
+        if usagi_core::infrastructure::ipc::agent_operation_digest(&admission.semantic_key)
+            != expected
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[allow(clippy::too_many_lines)] // Root and delegated reservations share one best-effort reconciliation pass.
@@ -10213,164 +10557,309 @@ fn reconcile_pending_supervisor_promotions(
     supervisor: &SharedSupervisorRuntime,
     agent: &SharedAgentRuntime,
 ) -> anyhow::Result<usize> {
-    let now = chrono::Utc::now();
-    let pending = supervisor
+    reconcile_supervisor_promotions(supervisor, agent, false)
+}
+
+fn reconcile_startup_supervisor_promotions(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+) -> anyhow::Result<usize> {
+    // Agent hydration is complete and sockets are not accepting requests yet,
+    // so a missing outcome is a definitive pre-admission crash residue.
+    reconcile_supervisor_promotions(supervisor, agent, true)
+}
+
+enum PendingPromotionKind {
+    Caller { start_operation_id: String },
+    Goal,
+    Delegated,
+}
+
+struct PendingPromotionCandidate {
+    kind: PendingPromotionKind,
+    operation_id: String,
+    workspace_id: WorkspaceId,
+    requires_worker_session: bool,
+    worker_session_id: Option<SessionId>,
+    worker_runtime_id: Option<usagi_core::domain::id::AgentRuntimeId>,
+    worker_agent_id: Option<usagi_core::domain::id::AgentId>,
+    worker_profile_id: Option<AgentProfileId>,
+    worker_semantic_digest: Option<String>,
+}
+
+fn lock_supervisor_runtime(
+    supervisor: &SharedSupervisorRuntime,
+) -> anyhow::Result<MutexGuard<'_, SupervisorRuntime>> {
+    supervisor
         .lock()
-        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-        .pending_goal_promotions()?;
+        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))
+}
+
+fn lock_agent_runtime(agent: &SharedAgentRuntime) -> anyhow::Result<MutexGuard<'_, AgentRuntime>> {
+    agent
+        .owner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))
+}
+
+fn record_supervisor_promotion_result(
+    reconciled: &mut usize,
+    first_failure: &mut Option<anyhow::Error>,
+    operation_id: &str,
+    result: anyhow::Result<bool>,
+) {
+    match result {
+        Ok(true) => *reconciled += 1,
+        Err(error) if first_failure.is_none() => {
+            *first_failure = Some(anyhow::anyhow!(
+                "Supervisor promotion {operation_id} remains pending: {error}"
+            ));
+        }
+        Ok(false) | Err(_) => {}
+    }
+}
+
+fn finish_supervisor_promotion_reconciliation(
+    reconciled: usize,
+    first_failure: Option<anyhow::Error>,
+) -> anyhow::Result<usize> {
+    match first_failure {
+        Some(error) => Err(error),
+        None => Ok(reconciled),
+    }
+}
+
+fn reconcile_supervisor_promotions(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+    absence_is_final: bool,
+) -> anyhow::Result<usize> {
+    let runtime = lock_supervisor_runtime(supervisor)?;
+    let pending_callers = runtime.pending_caller_promotions()?;
+    let pending_goals = runtime.pending_goal_promotions()?;
+    let pending_delegated = runtime.pending_delegated_promotions()?;
+    drop(runtime);
+
+    let mut candidates =
+        Vec::with_capacity(pending_callers.len() + pending_goals.len() + pending_delegated.len());
+    for item in pending_callers {
+        candidates.push(PendingPromotionCandidate {
+            kind: PendingPromotionKind::Caller {
+                start_operation_id: item.start_operation_id,
+            },
+            operation_id: item.dispatch_operation_id,
+            workspace_id: item.workspace_id,
+            requires_worker_session: item.worker_session_id.is_some(),
+            worker_session_id: item.worker_session_id,
+            worker_runtime_id: Some(item.worker_runtime_id),
+            worker_agent_id: Some(item.worker_agent_id),
+            worker_profile_id: Some(item.worker_profile_id),
+            worker_semantic_digest: Some(item.worker_semantic_digest),
+        });
+    }
+    for item in pending_goals {
+        candidates.push(PendingPromotionCandidate {
+            kind: PendingPromotionKind::Goal,
+            operation_id: item.operation_id,
+            workspace_id: item.workspace_id,
+            requires_worker_session: false,
+            worker_session_id: None,
+            worker_runtime_id: None,
+            worker_agent_id: None,
+            worker_profile_id: item.worker_profile_id,
+            worker_semantic_digest: item.worker_semantic_digest,
+        });
+    }
+    for item in pending_delegated {
+        candidates.push(PendingPromotionCandidate {
+            kind: PendingPromotionKind::Delegated,
+            operation_id: item.operation_id,
+            workspace_id: item.workspace_id,
+            requires_worker_session: true,
+            worker_session_id: item.worker_session_id,
+            worker_runtime_id: None,
+            worker_agent_id: item.worker_agent_id,
+            worker_profile_id: item.worker_profile_id,
+            worker_semantic_digest: item.worker_semantic_digest,
+        });
+    }
+
     let mut reconciled = 0;
     let mut first_failure = None;
-    for item in pending {
-        let outcome = agent
-            .lock()
-            .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?
-            .operation_outcome(&item.operation_id);
-        match outcome {
-            Some(Ok(admission)) => {
-                let result = (|| {
-                    supervisor
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-                        .bind_reserved_workspace_root_dispatch(
-                            &item.operation_id,
-                            &admission.runtime,
-                            now,
-                        )?;
-                    Ok::<_, anyhow::Error>(())
-                })();
-                if let Err(error) = result {
-                    first_failure.get_or_insert_with(|| {
-                        anyhow::anyhow!(
-                            "Goal promotion {} remains pending: {error}",
-                            item.operation_id
-                        )
-                    });
-                } else {
-                    reconciled += 1;
+    for candidate in candidates {
+        let result = reconcile_supervisor_promotion(
+            supervisor,
+            agent,
+            &candidate,
+            absence_is_final,
+            chrono::Utc::now(),
+        );
+        record_supervisor_promotion_result(
+            &mut reconciled,
+            &mut first_failure,
+            &candidate.operation_id,
+            result,
+        );
+    }
+    finish_supervisor_promotion_reconciliation(reconciled, first_failure)
+}
+
+fn reconcile_supervisor_promotion(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+    candidate: &PendingPromotionCandidate,
+    absence_is_final: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<bool> {
+    let agent_runtime = lock_agent_runtime(agent)?;
+    let outcome = agent_runtime.operation_outcome(&candidate.operation_id);
+    drop(agent_runtime);
+
+    reconcile_supervisor_promotion_outcome(
+        supervisor,
+        agent,
+        candidate,
+        absence_is_final,
+        now,
+        outcome,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // The three durable promotion kinds share one explicit outcome state machine.
+fn reconcile_supervisor_promotion_outcome(
+    supervisor: &SharedSupervisorRuntime,
+    agent: &SharedAgentRuntime,
+    candidate: &PendingPromotionCandidate,
+    absence_is_final: bool,
+    now: chrono::DateTime<chrono::Utc>,
+    outcome: Option<Result<AgentAdmission, usagi_core::infrastructure::ipc::ProtocolError>>,
+) -> anyhow::Result<bool> {
+    match outcome {
+        Some(Ok(admission)) => {
+            let agent_runtime = lock_agent_runtime(agent)?;
+            let matches = promotion_admission_matches(
+                &agent_runtime,
+                &candidate.operation_id,
+                &admission.runtime,
+                candidate.workspace_id,
+                candidate.requires_worker_session,
+                candidate.worker_session_id,
+                candidate.worker_runtime_id,
+                candidate.worker_agent_id,
+                candidate.worker_profile_id.as_ref(),
+                candidate.worker_semantic_digest.as_deref(),
+            )?;
+            drop(agent_runtime);
+
+            match (&candidate.kind, matches) {
+                (PendingPromotionKind::Caller { start_operation_id }, true) => {
+                    let operation =
+                        usagi_core::domain::id::OperationId::parse(&candidate.operation_id)
+                            .expect("promotion admission matching validated the operation ID");
+                    let runtime = lock_supervisor_runtime(supervisor)?;
+                    runtime.bind_reserved_caller_dispatch(
+                        start_operation_id,
+                        operation,
+                        &admission.runtime,
+                        now,
+                    )?;
+                }
+                (PendingPromotionKind::Goal, true) => {
+                    let runtime = lock_supervisor_runtime(supervisor)?;
+                    runtime.bind_reserved_workspace_root_dispatch(
+                        &candidate.operation_id,
+                        &admission.runtime,
+                        now,
+                    )?;
+                }
+                (PendingPromotionKind::Delegated, true) => {
+                    bind_delegated_supervisor_dispatch(
+                        supervisor,
+                        &candidate.operation_id,
+                        &admission.runtime,
+                    )?;
+                }
+                (PendingPromotionKind::Caller { start_operation_id }, false) => {
+                    let runtime = lock_supervisor_runtime(supervisor)?;
+                    runtime.fail_reserved_caller_dispatch(
+                        start_operation_id,
+                        "Agent operation conflicted with its caller-root promotion".into(),
+                        now,
+                    )?;
+                }
+                (PendingPromotionKind::Goal, false) => {
+                    let runtime = lock_supervisor_runtime(supervisor)?;
+                    runtime.fail_reserved_goal(
+                        &candidate.operation_id,
+                        "Agent operation conflicted with its Goal promotion".into(),
+                        now,
+                    )?;
+                }
+                (PendingPromotionKind::Delegated, false) => {
+                    let runtime = lock_supervisor_runtime(supervisor)?;
+                    runtime.fail_reserved_delegated_dispatch(&candidate.operation_id, now)?;
                 }
             }
-            Some(Err(error))
-                if error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown =>
+            Ok(true)
+        }
+        Some(Err(error)) => {
+            if !absence_is_final
+                && error.code == usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
             {
-                let result = (|| {
-                    supervisor
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-                        .fail_reserved_goal(
-                            &item.operation_id,
-                            "Agent admission failed before Goal promotion".into(),
-                            now,
-                        )?;
-                    Ok::<_, anyhow::Error>(())
-                })();
-                if let Err(failure) = result {
-                    first_failure.get_or_insert_with(|| {
-                        anyhow::anyhow!(
-                            "Goal failure {} remains pending: {failure}",
-                            item.operation_id
-                        )
-                    });
-                } else {
-                    reconciled += 1;
+                return Ok(false);
+            }
+            let runtime = lock_supervisor_runtime(supervisor)?;
+            match &candidate.kind {
+                PendingPromotionKind::Caller { start_operation_id } => {
+                    runtime.fail_reserved_caller_dispatch(
+                        start_operation_id,
+                        "Agent admission failed before caller-root promotion".into(),
+                        now,
+                    )?;
+                }
+                PendingPromotionKind::Goal => {
+                    let reason = if error.code
+                        == usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
+                    {
+                        "Agent admission was not durably recorded before Goal promotion"
+                    } else {
+                        "Agent admission failed before Goal promotion"
+                    };
+                    runtime.fail_reserved_goal(&candidate.operation_id, reason.into(), now)?;
+                }
+                PendingPromotionKind::Delegated => {
+                    runtime.fail_reserved_delegated_dispatch(&candidate.operation_id, now)?;
                 }
             }
-            Some(Err(_)) | None if promotion_grace_elapsed(item.reserved_at, now) => {
-                let result = (|| {
-                    supervisor
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-                        .fail_reserved_goal(
-                            &item.operation_id,
-                            "Agent admission was not durably recorded before Goal promotion".into(),
-                            now,
-                        )?;
-                    Ok::<_, anyhow::Error>(())
-                })();
-                if let Err(failure) = result {
-                    first_failure.get_or_insert_with(|| {
-                        anyhow::anyhow!(
-                            "stale Goal reservation {} remains pending: {failure}",
-                            item.operation_id
-                        )
-                    });
-                } else {
-                    reconciled += 1;
+            Ok(true)
+        }
+        None => {
+            if !absence_is_final {
+                return Ok(false);
+            }
+            let runtime = lock_supervisor_runtime(supervisor)?;
+            match &candidate.kind {
+                PendingPromotionKind::Caller { start_operation_id } => {
+                    runtime.fail_reserved_caller_dispatch(
+                        start_operation_id,
+                        "Agent admission was absent at caller-root startup recovery".into(),
+                        now,
+                    )?;
+                }
+                PendingPromotionKind::Goal => {
+                    runtime.fail_reserved_goal(
+                        &candidate.operation_id,
+                        "Agent admission was not durably recorded before Goal promotion".into(),
+                        now,
+                    )?;
+                }
+                PendingPromotionKind::Delegated => {
+                    runtime.fail_reserved_delegated_dispatch(&candidate.operation_id, now)?;
                 }
             }
-            Some(Err(_)) | None => {}
+            Ok(true)
         }
     }
-    let pending = supervisor
-        .lock()
-        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-        .pending_delegated_promotions()?;
-    for item in pending {
-        let outcome = agent
-            .lock()
-            .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?
-            .operation_outcome(&item.operation_id);
-        match outcome {
-            Some(Ok(admission)) => {
-                let result = bind_delegated_supervisor_dispatch(
-                    supervisor,
-                    &item.operation_id,
-                    &admission.runtime,
-                );
-                if let Err(error) = result {
-                    first_failure.get_or_insert_with(|| {
-                        anyhow::anyhow!(
-                            "delegated promotion {} remains pending: {error}",
-                            item.operation_id
-                        )
-                    });
-                } else {
-                    reconciled += 1;
-                }
-            }
-            Some(Err(error))
-                if error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown =>
-            {
-                let result = (|| {
-                    supervisor
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-                        .fail_reserved_delegated_dispatch(&item.operation_id, now)?;
-                    Ok::<_, anyhow::Error>(())
-                })();
-                if let Err(failure) = result {
-                    first_failure.get_or_insert_with(|| {
-                        anyhow::anyhow!(
-                            "delegated failure {} remains pending: {failure}",
-                            item.operation_id
-                        )
-                    });
-                } else {
-                    reconciled += 1;
-                }
-            }
-            Some(Err(_)) | None if promotion_grace_elapsed(item.reserved_at, now) => {
-                let result = (|| {
-                    supervisor
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("supervisor runtime is unavailable"))?
-                        .fail_reserved_delegated_dispatch(&item.operation_id, now)?;
-                    Ok::<_, anyhow::Error>(())
-                })();
-                if let Err(failure) = result {
-                    first_failure.get_or_insert_with(|| {
-                        anyhow::anyhow!(
-                            "stale delegated reservation {} remains pending: {failure}",
-                            item.operation_id
-                        )
-                    });
-                } else {
-                    reconciled += 1;
-                }
-            }
-            Some(Err(_)) | None => {}
-        }
-    }
-    first_failure.map_or(Ok(reconciled), Err)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
@@ -10676,6 +11165,7 @@ fn dispatch_agent_after_preflight(
     intent: &usagi_core::usecase::client::DispatchIntent,
     session: SessionId,
     scope: &dyn SessionScopeResolver,
+    planned_worker: Option<&usagi_core::domain::agent::Agent>,
 ) -> Result<
     usagi_daemon::usecase::agent_ipc::AgentAdmission,
     usagi_core::infrastructure::ipc::ProtocolError,
@@ -10686,10 +11176,22 @@ fn dispatch_agent_after_preflight(
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
         .prepare_dispatch_readiness(operation_id, intent)?;
     run_agent_readiness(agent, preflight.as_ref())?;
-    agent
+    let mut agent = agent
         .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
-        .dispatch_after_readiness(operation_id, intent, session, scope, preflight.as_ref())
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?;
+    match planned_worker {
+        Some(worker) => agent.dispatch_planned_after_readiness(
+            operation_id,
+            intent,
+            session,
+            scope,
+            preflight.as_ref(),
+            worker,
+        ),
+        None => {
+            agent.dispatch_after_readiness(operation_id, intent, session, scope, preflight.as_ref())
+        }
+    }
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
@@ -16741,6 +17243,1171 @@ mod tests {
         })
     }
 
+    fn persist_supervisor_dispatch(
+        dispatch: &DispatchStore,
+        workspace: WorkspaceId,
+        operation: usagi_core::domain::id::OperationId,
+        agent_id: usagi_core::domain::id::AgentId,
+        worker: &AgentRuntimeRef,
+        semantic_key: String,
+    ) {
+        use usagi_core::domain::agent::{
+            Agent, AgentStatus, CallerRef, DispatchBinding, DispatchRun, ModelSelector, RunStatus,
+            WorkerRef,
+        };
+        use usagi_core::infrastructure::store::dispatch::{
+            AgentAdmissionReservation, CredentialProvenance,
+        };
+
+        dispatch
+            .reserve_admission_for_workspace(
+                workspace,
+                Agent {
+                    agent_id,
+                    session_id: worker.session_id,
+                    runtime: AgentProfileId::new("claude").unwrap(),
+                    model: ModelSelector::new("test").unwrap(),
+                    status: AgentStatus::Running,
+                    current_run: Some(operation),
+                },
+                DispatchRun {
+                    run_id: operation,
+                    agent_id,
+                    prompt: String::new(),
+                    started_at: chrono::Utc::now(),
+                    ended_at: None,
+                    status: RunStatus::Running,
+                },
+                DispatchBinding {
+                    run_id: operation,
+                    caller: CallerRef {
+                        session_id: worker.session_id,
+                        agent_id,
+                    },
+                    worker: WorkerRef {
+                        session_id: worker.session_id,
+                        agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: operation,
+                    semantic_key,
+                    credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .unwrap();
+    }
+
+    fn supervisor_admission(
+        operation: usagi_core::domain::id::OperationId,
+        worker: &AgentRuntimeRef,
+    ) -> AgentAdmission {
+        AgentAdmission {
+            operation_id: operation.to_string(),
+            revision: 1,
+            runtime: worker.clone(),
+            terminal: worker.terminal.clone(),
+            continuation: None,
+            resume_relation: None,
+            completed: false,
+            semantic_digest: None,
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One table-like fixture exercises every independent admission identity fence.
+    fn promotion_admission_matching_rejects_each_collision_fence() {
+        use usagi_core::domain::id::{AgentId, OperationId};
+
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let agent_id = AgentId::new();
+        let worker = AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: Some(session),
+                worktree_id: WorktreeId::new(),
+            },
+            Some(session),
+        )
+        .unwrap();
+        let semantic = "promotion-worker";
+        let digest = usagi_core::infrastructure::ipc::agent_operation_digest(semantic);
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            operation,
+            agent_id,
+            &worker,
+            semantic.into(),
+        );
+        let shared = empty_supervisor_agent(dispatch.clone());
+        let runtime = shared.owner.lock().unwrap();
+
+        assert!(
+            promotion_admission_matches(
+                &runtime,
+                &operation.to_string(),
+                &worker,
+                workspace,
+                true,
+                Some(session),
+                Some(worker.agent_runtime_id),
+                Some(agent_id),
+                Some(&AgentProfileId::new("claude").unwrap()),
+                Some(&digest),
+            )
+            .unwrap()
+        );
+        assert!(
+            promotion_admission_matches(
+                &runtime,
+                &operation.to_string(),
+                &worker,
+                workspace,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        );
+        for mismatch in [
+            promotion_admission_matches(
+                &runtime,
+                &operation.to_string(),
+                &worker,
+                WorkspaceId::new(),
+                true,
+                Some(session),
+                None,
+                None,
+                None,
+                None,
+            ),
+            promotion_admission_matches(
+                &runtime,
+                &operation.to_string(),
+                &worker,
+                workspace,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            promotion_admission_matches(
+                &runtime,
+                &operation.to_string(),
+                &worker,
+                workspace,
+                true,
+                Some(session),
+                Some(AgentRuntimeId::new()),
+                None,
+                None,
+                None,
+            ),
+            promotion_admission_matches(
+                &runtime,
+                &operation.to_string(),
+                &worker,
+                workspace,
+                true,
+                Some(session),
+                None,
+                Some(AgentId::new()),
+                None,
+                None,
+            ),
+            promotion_admission_matches(
+                &runtime,
+                &operation.to_string(),
+                &worker,
+                workspace,
+                true,
+                Some(session),
+                None,
+                None,
+                Some(&AgentProfileId::new("codex").unwrap()),
+                None,
+            ),
+            promotion_admission_matches(
+                &runtime,
+                &operation.to_string(),
+                &worker,
+                workspace,
+                true,
+                Some(session),
+                None,
+                None,
+                None,
+                Some("wrong-digest"),
+            ),
+        ] {
+            assert!(!mismatch.unwrap());
+        }
+        assert!(
+            promotion_admission_matches(
+                &runtime,
+                "invalid",
+                &worker,
+                workspace,
+                true,
+                Some(session),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("operation is invalid")
+        );
+        assert!(
+            promotion_admission_matches(
+                &runtime,
+                &OperationId::new().to_string(),
+                &worker,
+                workspace,
+                true,
+                Some(session),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("dispatch is unavailable")
+        );
+        drop(runtime);
+
+        let missing_agent_root = tempfile::tempdir().unwrap();
+        let missing_agent_dispatch = DispatchStore::new(missing_agent_root.path());
+        let missing_agent_operation = OperationId::new();
+        missing_agent_dispatch
+            .upsert_run(usagi_core::domain::agent::DispatchRun {
+                run_id: missing_agent_operation,
+                agent_id: AgentId::new(),
+                prompt: String::new(),
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+                status: usagi_core::domain::agent::RunStatus::Running,
+            })
+            .unwrap();
+        let missing_agent = empty_supervisor_agent(missing_agent_dispatch);
+        assert!(
+            promotion_admission_matches(
+                &missing_agent.owner.lock().unwrap(),
+                &missing_agent_operation.to_string(),
+                &worker,
+                workspace,
+                true,
+                Some(session),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("Agent is unavailable")
+        );
+
+        let missing_admission_root = tempfile::tempdir().unwrap();
+        let missing_admission_dispatch = DispatchStore::new(missing_admission_root.path());
+        let missing_admission_operation = OperationId::new();
+        let missing_admission_agent = AgentId::new();
+        missing_admission_dispatch
+            .upsert_agent(
+                workspace,
+                usagi_core::domain::agent::Agent {
+                    agent_id: missing_admission_agent,
+                    session_id: Some(session),
+                    runtime: AgentProfileId::new("claude").unwrap(),
+                    model: usagi_core::domain::agent::ModelSelector::new("test").unwrap(),
+                    status: usagi_core::domain::agent::AgentStatus::Running,
+                    current_run: Some(missing_admission_operation),
+                },
+            )
+            .unwrap();
+        missing_admission_dispatch
+            .upsert_run(usagi_core::domain::agent::DispatchRun {
+                run_id: missing_admission_operation,
+                agent_id: missing_admission_agent,
+                prompt: String::new(),
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+                status: usagi_core::domain::agent::RunStatus::Running,
+            })
+            .unwrap();
+        let missing_admission = empty_supervisor_agent(missing_admission_dispatch);
+        assert!(
+            promotion_admission_matches(
+                &missing_admission.owner.lock().unwrap(),
+                &missing_admission_operation.to_string(),
+                &worker,
+                workspace,
+                true,
+                Some(session),
+                None,
+                Some(missing_admission_agent),
+                None,
+                Some(&digest),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("admission is unavailable")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Caller, Goal, and delegated reservations must share the same live/startup boundary.
+    fn supervisor_promotion_reconciliation_distinguishes_live_and_startup_absence() {
+        use usagi_core::domain::{
+            agent::{Agent, AgentStatus, ModelSelector},
+            id::{AgentId, OperationId},
+            pr_inventory::GitHubRepository,
+            supervisor::SupervisorRunState,
+        };
+        use usagi_daemon::usecase::supervisor_runtime::GoalSpecification;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temp.path());
+        let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        let started = supervisor
+            .lock()
+            .unwrap()
+            .reserve_goal_for_workspace(
+                "goal",
+                workspace,
+                &operation.to_string(),
+                GoalSpecification::new(
+                    "finish".into(),
+                    GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+                ),
+                None,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+
+        let caller_operation = OperationId::new();
+        let caller_worker = AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            },
+            None,
+        )
+        .unwrap();
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            caller_operation,
+            AgentId::new(),
+            &caller_worker,
+            "caller-promotion".into(),
+        );
+        let caller_start = OperationId::new().to_string();
+        let caller_started = supervisor
+            .lock()
+            .unwrap()
+            .start_for_workspace_caller_dispatch(
+                "caller",
+                workspace,
+                &caller_start,
+                "caller root".into(),
+                None,
+                caller_operation,
+                &caller_worker,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+
+        let parent_operation = OperationId::new();
+        let parent_worker = AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            },
+            None,
+        )
+        .unwrap();
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            parent_operation,
+            AgentId::new(),
+            &parent_worker,
+            "parent-promotion".into(),
+        );
+        let parent_started = supervisor
+            .lock()
+            .unwrap()
+            .start_for_workspace_root_dispatch(
+                "goal",
+                workspace,
+                &parent_operation.to_string(),
+                GoalSpecification::new(
+                    "parent".into(),
+                    GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+                ),
+                None,
+                &parent_worker,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let child_operation = OperationId::new();
+        let child_session = SessionId::new();
+        let planned_child = Agent {
+            agent_id: AgentId::new(),
+            session_id: Some(child_session),
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: ModelSelector::new("test").unwrap(),
+            status: AgentStatus::Idle,
+            current_run: None,
+        };
+        supervisor
+            .lock()
+            .unwrap()
+            .reserve_delegated_dispatch_for_session(
+                parent_operation,
+                &child_operation.to_string(),
+                "child",
+                child_session,
+                &planned_child,
+                "child-session",
+                chrono::Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        let agent = empty_supervisor_agent(dispatch);
+
+        {
+            let runtime = supervisor.lock().unwrap();
+            assert_eq!(runtime.pending_caller_promotions().unwrap().len(), 1);
+            assert_eq!(runtime.pending_goal_promotions().unwrap().len(), 1);
+            assert_eq!(runtime.pending_delegated_promotions().unwrap().len(), 1);
+        }
+
+        assert_eq!(
+            reconcile_pending_supervisor_promotions(&supervisor, &agent).unwrap(),
+            0
+        );
+        assert_eq!(
+            supervisor
+                .lock()
+                .unwrap()
+                .get_for_workspace(workspace, started.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SupervisorRunState::Running
+        );
+        assert_eq!(
+            reconcile_startup_supervisor_promotions(&supervisor, &agent).unwrap(),
+            3
+        );
+        assert_eq!(
+            supervisor
+                .lock()
+                .unwrap()
+                .get_for_workspace(workspace, started.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SupervisorRunState::Failed
+        );
+        assert_eq!(
+            supervisor
+                .lock()
+                .unwrap()
+                .get_for_workspace(workspace, caller_started.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SupervisorRunState::Failed
+        );
+        let runtime = supervisor.lock().unwrap();
+        assert!(runtime.pending_delegated_promotions().unwrap().is_empty());
+        assert_eq!(
+            runtime
+                .get_for_workspace(workspace, parent_started.supervisor_run_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SupervisorRunState::Running
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One matrix proves every promotion kind binds and rejects an identity collision.
+    fn supervisor_promotion_outcomes_bind_or_close_every_reservation_kind() {
+        use usagi_core::domain::{
+            agent::{Agent, AgentStatus, ModelSelector},
+            id::{AgentId, OperationId},
+            pr_inventory::GitHubRepository,
+        };
+        use usagi_daemon::usecase::supervisor_runtime::GoalSpecification;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temp.path());
+        let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
+        let agent = empty_supervisor_agent(dispatch.clone());
+        let workspace = WorkspaceId::new();
+        let now = chrono::Utc::now();
+        let root_worker = |workspace_id| {
+            AgentRuntimeRef::new(
+                AgentRuntimeId::new(),
+                TerminalRef {
+                    daemon_generation: DaemonGeneration::new(),
+                    terminal_id: TerminalId::new(),
+                    workspace_id,
+                    session_id: None,
+                    worktree_id: WorktreeId::new(),
+                },
+                None,
+            )
+            .unwrap()
+        };
+        let session_worker = |workspace_id| {
+            let session = SessionId::new();
+            AgentRuntimeRef::new(
+                AgentRuntimeId::new(),
+                TerminalRef {
+                    daemon_generation: DaemonGeneration::new(),
+                    terminal_id: TerminalId::new(),
+                    workspace_id,
+                    session_id: Some(session),
+                    worktree_id: WorktreeId::new(),
+                },
+                Some(session),
+            )
+            .unwrap()
+        };
+
+        let goal_operation = OperationId::new();
+        let goal_worker = root_worker(workspace);
+        let goal_agent = AgentId::new();
+        let goal_semantic = "goal-success";
+        let goal_digest = usagi_core::infrastructure::ipc::agent_operation_digest(goal_semantic);
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            goal_operation,
+            goal_agent,
+            &goal_worker,
+            goal_semantic.into(),
+        );
+        supervisor
+            .lock()
+            .unwrap()
+            .reserve_goal_for_workspace_with_profile(
+                "goal",
+                workspace,
+                &goal_operation.to_string(),
+                GoalSpecification::new(
+                    "goal success".into(),
+                    GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+                ),
+                AgentProfileId::new("claude").unwrap(),
+                goal_digest.clone(),
+                None,
+                now,
+            )
+            .unwrap();
+        let goal_candidate = PendingPromotionCandidate {
+            kind: PendingPromotionKind::Goal,
+            operation_id: goal_operation.to_string(),
+            workspace_id: workspace,
+            requires_worker_session: false,
+            worker_session_id: None,
+            worker_runtime_id: None,
+            worker_agent_id: None,
+            worker_profile_id: Some(AgentProfileId::new("claude").unwrap()),
+            worker_semantic_digest: Some(goal_digest),
+        };
+        assert!(
+            reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &goal_candidate,
+                false,
+                now,
+                Some(Ok(supervisor_admission(goal_operation, &goal_worker))),
+            )
+            .unwrap()
+        );
+
+        let caller_operation = OperationId::new();
+        let caller_worker = root_worker(workspace);
+        let caller_agent = AgentId::new();
+        let caller_semantic = "caller-success";
+        let caller_digest =
+            usagi_core::infrastructure::ipc::agent_operation_digest(caller_semantic);
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            caller_operation,
+            caller_agent,
+            &caller_worker,
+            caller_semantic.into(),
+        );
+        let caller_start = OperationId::new().to_string();
+        supervisor
+            .lock()
+            .unwrap()
+            .start_for_workspace_caller_dispatch(
+                "caller",
+                workspace,
+                &caller_start,
+                "caller success".into(),
+                None,
+                caller_operation,
+                &caller_worker,
+                now,
+            )
+            .unwrap();
+        let caller_candidate = PendingPromotionCandidate {
+            kind: PendingPromotionKind::Caller {
+                start_operation_id: caller_start,
+            },
+            operation_id: caller_operation.to_string(),
+            workspace_id: workspace,
+            requires_worker_session: false,
+            worker_session_id: None,
+            worker_runtime_id: Some(caller_worker.agent_runtime_id),
+            worker_agent_id: Some(caller_agent),
+            worker_profile_id: Some(AgentProfileId::new("claude").unwrap()),
+            worker_semantic_digest: Some(caller_digest),
+        };
+        assert!(
+            reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &caller_candidate,
+                false,
+                now,
+                Some(Ok(supervisor_admission(caller_operation, &caller_worker,))),
+            )
+            .unwrap()
+        );
+
+        let child_operation = OperationId::new();
+        let child_worker = session_worker(workspace);
+        let planned_child = Agent {
+            agent_id: AgentId::new(),
+            session_id: child_worker.session_id,
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: ModelSelector::new("test").unwrap(),
+            status: AgentStatus::Idle,
+            current_run: None,
+        };
+        let reserved_child = supervisor
+            .lock()
+            .unwrap()
+            .reserve_delegated_dispatch_for_session(
+                goal_operation,
+                &child_operation.to_string(),
+                "child success",
+                child_worker.session_id.unwrap(),
+                &planned_child,
+                "child-session",
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        let child_semantic = usagi_core::usecase::client::agent_dispatch_semantic_key(
+            "child-session",
+            planned_child.agent_id,
+            &reserved_child.prompt,
+        );
+        let child_digest = usagi_core::infrastructure::ipc::agent_operation_digest(&child_semantic);
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            child_operation,
+            planned_child.agent_id,
+            &child_worker,
+            child_semantic,
+        );
+        let child_candidate = PendingPromotionCandidate {
+            kind: PendingPromotionKind::Delegated,
+            operation_id: child_operation.to_string(),
+            workspace_id: workspace,
+            requires_worker_session: true,
+            worker_session_id: child_worker.session_id,
+            worker_runtime_id: None,
+            worker_agent_id: Some(planned_child.agent_id),
+            worker_profile_id: Some(planned_child.runtime.clone()),
+            worker_semantic_digest: Some(child_digest),
+        };
+        assert!(
+            reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &child_candidate,
+                false,
+                now,
+                Some(Ok(supervisor_admission(child_operation, &child_worker))),
+            )
+            .unwrap()
+        );
+
+        let wrong_worker = root_worker(WorkspaceId::new());
+        for candidate in [&goal_candidate, &caller_candidate, &child_candidate] {
+            let collision = supervisor_admission(
+                OperationId::parse(&candidate.operation_id).unwrap(),
+                &wrong_worker,
+            );
+            assert!(
+                reconcile_supervisor_promotion_outcome(
+                    &supervisor,
+                    &agent,
+                    candidate,
+                    false,
+                    now,
+                    Some(Ok(collision)),
+                )
+                .unwrap()
+            );
+        }
+
+        let invalid_candidate = PendingPromotionCandidate {
+            operation_id: "invalid".into(),
+            ..goal_candidate
+        };
+        assert!(
+            reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &invalid_candidate,
+                false,
+                now,
+                Some(Ok(supervisor_admission(goal_operation, &goal_worker))),
+            )
+            .is_err()
+        );
+
+        let unreserved_operation = OperationId::new();
+        let unreserved_worker = session_worker(workspace);
+        let unreserved_agent = AgentId::new();
+        let unreserved_semantic = "unreserved-child";
+        let unreserved_digest =
+            usagi_core::infrastructure::ipc::agent_operation_digest(unreserved_semantic);
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            unreserved_operation,
+            unreserved_agent,
+            &unreserved_worker,
+            unreserved_semantic.into(),
+        );
+        let unreserved_candidate = PendingPromotionCandidate {
+            kind: PendingPromotionKind::Delegated,
+            operation_id: unreserved_operation.to_string(),
+            workspace_id: workspace,
+            requires_worker_session: true,
+            worker_session_id: unreserved_worker.session_id,
+            worker_runtime_id: None,
+            worker_agent_id: Some(unreserved_agent),
+            worker_profile_id: Some(AgentProfileId::new("claude").unwrap()),
+            worker_semantic_digest: Some(unreserved_digest),
+        };
+        assert!(
+            reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &unreserved_candidate,
+                false,
+                now,
+                Some(Ok(supervisor_admission(
+                    unreserved_operation,
+                    &unreserved_worker,
+                ))),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("reservation does not exist")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Failure outcomes share one matrix so every reservation kind remains explicit.
+    fn supervisor_promotion_failures_preserve_unknown_ownership_and_close_definite_errors() {
+        use usagi_core::domain::{
+            agent::{Agent, AgentStatus, ModelSelector},
+            id::{AgentId, OperationId},
+            pr_inventory::GitHubRepository,
+        };
+        use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+        use usagi_daemon::usecase::supervisor_runtime::GoalSpecification;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temp.path());
+        let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
+        let agent = empty_supervisor_agent(dispatch.clone());
+        let workspace = WorkspaceId::new();
+        let now = chrono::Utc::now();
+        let root_worker = |workspace_id| {
+            AgentRuntimeRef::new(
+                AgentRuntimeId::new(),
+                TerminalRef {
+                    daemon_generation: DaemonGeneration::new(),
+                    terminal_id: TerminalId::new(),
+                    workspace_id,
+                    session_id: None,
+                    worktree_id: WorktreeId::new(),
+                },
+                None,
+            )
+            .unwrap()
+        };
+
+        let unknown_goal = OperationId::new();
+        supervisor
+            .lock()
+            .unwrap()
+            .reserve_goal_for_workspace(
+                "goal",
+                workspace,
+                &unknown_goal.to_string(),
+                GoalSpecification::new(
+                    "unknown".into(),
+                    GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+                ),
+                None,
+                now,
+            )
+            .unwrap();
+        let unknown_candidate = PendingPromotionCandidate {
+            kind: PendingPromotionKind::Goal,
+            operation_id: unknown_goal.to_string(),
+            workspace_id: workspace,
+            requires_worker_session: false,
+            worker_session_id: None,
+            worker_runtime_id: None,
+            worker_agent_id: None,
+            worker_profile_id: None,
+            worker_semantic_digest: None,
+        };
+        let unknown = || {
+            Some(Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "ownership is unknown",
+            )))
+        };
+        assert!(
+            !reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &unknown_candidate,
+                false,
+                now,
+                unknown(),
+            )
+            .unwrap()
+        );
+        assert!(
+            reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &unknown_candidate,
+                true,
+                now,
+                unknown(),
+            )
+            .unwrap()
+        );
+
+        let failed_goal = OperationId::new();
+        supervisor
+            .lock()
+            .unwrap()
+            .reserve_goal_for_workspace(
+                "goal",
+                workspace,
+                &failed_goal.to_string(),
+                GoalSpecification::new(
+                    "failed".into(),
+                    GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+                ),
+                None,
+                now,
+            )
+            .unwrap();
+        let failed_goal_candidate = PendingPromotionCandidate {
+            operation_id: failed_goal.to_string(),
+            ..unknown_candidate
+        };
+        assert!(
+            reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &failed_goal_candidate,
+                false,
+                now,
+                Some(Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "definite failure",
+                ))),
+            )
+            .unwrap()
+        );
+
+        let caller_operation = OperationId::new();
+        let caller_worker = root_worker(workspace);
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            caller_operation,
+            AgentId::new(),
+            &caller_worker,
+            "caller-failure".into(),
+        );
+        let caller_start = OperationId::new().to_string();
+        supervisor
+            .lock()
+            .unwrap()
+            .start_for_workspace_caller_dispatch(
+                "caller",
+                workspace,
+                &caller_start,
+                "caller failure".into(),
+                None,
+                caller_operation,
+                &caller_worker,
+                now,
+            )
+            .unwrap();
+        let caller_candidate = PendingPromotionCandidate {
+            kind: PendingPromotionKind::Caller {
+                start_operation_id: caller_start,
+            },
+            operation_id: caller_operation.to_string(),
+            workspace_id: workspace,
+            requires_worker_session: false,
+            worker_session_id: None,
+            worker_runtime_id: Some(caller_worker.agent_runtime_id),
+            worker_agent_id: None,
+            worker_profile_id: None,
+            worker_semantic_digest: None,
+        };
+        assert!(
+            reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &caller_candidate,
+                false,
+                now,
+                Some(Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "definite failure",
+                ))),
+            )
+            .unwrap()
+        );
+
+        let parent_operation = OperationId::new();
+        let parent_worker = root_worker(workspace);
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            parent_operation,
+            AgentId::new(),
+            &parent_worker,
+            "parent".into(),
+        );
+        supervisor
+            .lock()
+            .unwrap()
+            .start_for_workspace_root_dispatch(
+                "goal",
+                workspace,
+                &parent_operation.to_string(),
+                GoalSpecification::new(
+                    "parent".into(),
+                    GitHubRepository::from_name_with_owner("acme/repo").unwrap(),
+                ),
+                None,
+                &parent_worker,
+                now,
+            )
+            .unwrap();
+        let child_operation = OperationId::new();
+        let child_session = SessionId::new();
+        let planned_child = Agent {
+            agent_id: AgentId::new(),
+            session_id: Some(child_session),
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: ModelSelector::new("test").unwrap(),
+            status: AgentStatus::Idle,
+            current_run: None,
+        };
+        supervisor
+            .lock()
+            .unwrap()
+            .reserve_delegated_dispatch_for_session(
+                parent_operation,
+                &child_operation.to_string(),
+                "child failure",
+                child_session,
+                &planned_child,
+                "child-session",
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        let child_candidate = PendingPromotionCandidate {
+            kind: PendingPromotionKind::Delegated,
+            operation_id: child_operation.to_string(),
+            workspace_id: workspace,
+            requires_worker_session: true,
+            worker_session_id: Some(child_session),
+            worker_runtime_id: None,
+            worker_agent_id: Some(planned_child.agent_id),
+            worker_profile_id: Some(planned_child.runtime),
+            worker_semantic_digest: None,
+        };
+        assert!(
+            reconcile_supervisor_promotion_outcome(
+                &supervisor,
+                &agent,
+                &child_candidate,
+                false,
+                now,
+                Some(Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "definite failure",
+                ))),
+            )
+            .unwrap()
+        );
+
+        let mut reconciled = 0;
+        let mut first_failure = None;
+        record_supervisor_promotion_result(
+            &mut reconciled,
+            &mut first_failure,
+            "accepted",
+            Ok(true),
+        );
+        record_supervisor_promotion_result(
+            &mut reconciled,
+            &mut first_failure,
+            "pending",
+            Ok(false),
+        );
+        record_supervisor_promotion_result(
+            &mut reconciled,
+            &mut first_failure,
+            "first",
+            Err(anyhow::anyhow!("first failure")),
+        );
+        record_supervisor_promotion_result(
+            &mut reconciled,
+            &mut first_failure,
+            "second",
+            Err(anyhow::anyhow!("second failure")),
+        );
+        assert_eq!(reconciled, 1);
+        assert!(
+            finish_supervisor_promotion_reconciliation(reconciled, first_failure)
+                .unwrap_err()
+                .to_string()
+                .contains("first failure")
+        );
+        assert_eq!(
+            finish_supervisor_promotion_reconciliation(2, None).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn supervisor_promotion_lock_failures_are_fail_closed() {
+        use usagi_core::domain::id::OperationId;
+
+        let startup_root = tempfile::tempdir().unwrap();
+        let startup_supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(startup_root.path())));
+        let startup_agent = empty_supervisor_agent(DispatchStore::new(startup_root.path()));
+        assert_eq!(
+            reconcile_startup_supervisor_workers(&startup_supervisor, &startup_agent).unwrap(),
+            0
+        );
+
+        let supervisor_root = tempfile::tempdir().unwrap();
+        let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(supervisor_root.path())));
+        let poisoned_supervisor = Arc::clone(&supervisor);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned_supervisor.lock().unwrap();
+                panic!("poison supervisor");
+            })
+            .join()
+            .is_err()
+        );
+        assert!(lock_supervisor_runtime(&supervisor).is_err());
+
+        let agent_root = tempfile::tempdir().unwrap();
+        let agent = empty_supervisor_agent(DispatchStore::new(agent_root.path()));
+        let poisoned_agent = Arc::clone(&agent);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned_agent.owner.lock().unwrap();
+                panic!("poison Agent");
+            })
+            .join()
+            .is_err()
+        );
+        assert!(lock_agent_runtime(&agent).is_err());
+        let candidate = PendingPromotionCandidate {
+            kind: PendingPromotionKind::Goal,
+            operation_id: OperationId::new().to_string(),
+            workspace_id: WorkspaceId::new(),
+            requires_worker_session: false,
+            worker_session_id: None,
+            worker_runtime_id: None,
+            worker_agent_id: None,
+            worker_profile_id: None,
+            worker_semantic_digest: None,
+        };
+        let healthy_supervisor_root = tempfile::tempdir().unwrap();
+        let healthy_supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(
+            healthy_supervisor_root.path(),
+        )));
+        assert!(
+            reconcile_supervisor_promotion(
+                &healthy_supervisor,
+                &agent,
+                &candidate,
+                false,
+                chrono::Utc::now(),
+            )
+            .is_err()
+        );
+        assert!(reconcile_supervisor_promotions(&supervisor, &agent, false).is_err());
+    }
+
     #[test]
     fn supervisor_control_errors_map_every_refusal_class() {
         use usagi_core::infrastructure::ipc::ErrorCode;
@@ -16775,6 +18442,38 @@ mod tests {
             assert_eq!(
                 supervisor_control_error(anyhow::anyhow!(message)).code,
                 code
+            );
+        }
+    }
+
+    #[test]
+    fn supervised_delegation_refuses_fence_changes_during_session_creation() {
+        use usagi_core::infrastructure::ipc::ErrorCode;
+
+        for fence in [None, Some("run-a/task-root/1")] {
+            require_stable_supervisor_fence(fence.as_ref(), fence.as_ref()).unwrap();
+        }
+        for changed in [
+            (None, Some("run-a/task-root/1")),
+            (Some("run-a/task-root/1"), None),
+            (Some("run-a/task-root/1"), Some("run-b/task-root/1")),
+        ] {
+            assert_eq!(
+                require_stable_supervisor_fence(changed.0.as_ref(), changed.1.as_ref())
+                    .unwrap_err()
+                    .code,
+                ErrorCode::RevisionConflict
+            );
+        }
+        for (fence, reservation_present) in [(None, false), (Some("fence"), true)] {
+            require_supervisor_reservation_presence(fence.as_ref(), reservation_present).unwrap();
+        }
+        for (fence, reservation_present) in [(None, true), (Some("fence"), false)] {
+            assert_eq!(
+                require_supervisor_reservation_presence(fence.as_ref(), reservation_present)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::RevisionConflict
             );
         }
     }
@@ -16842,7 +18541,6 @@ mod tests {
     #[allow(clippy::too_many_lines)] // One reconciliation fixture joins bound and unbound run obligations.
     fn supervisor_worker_reconciliation_joins_bound_and_unbound_runs_exactly() {
         use usagi_core::domain::{
-            agent::{DispatchRun, RunStatus},
             id::{AgentId, OperationId},
             pr_inventory::GitHubRepository,
             supervisor::{SupervisorRunState, SupervisorWorkspaceCommand},
@@ -16854,16 +18552,6 @@ mod tests {
         let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
         let workspace = WorkspaceId::new();
         let dispatch_run = OperationId::new();
-        dispatch
-            .upsert_run(DispatchRun {
-                run_id: dispatch_run,
-                agent_id: AgentId::new(),
-                prompt: String::new(),
-                started_at: chrono::Utc::now(),
-                ended_at: None,
-                status: RunStatus::Running,
-            })
-            .unwrap();
         let terminal = TerminalRef {
             daemon_generation: DaemonGeneration::new(),
             terminal_id: TerminalId::new(),
@@ -16872,6 +18560,14 @@ mod tests {
             worktree_id: WorktreeId::new(),
         };
         let worker = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal, None).unwrap();
+        persist_supervisor_dispatch(
+            &dispatch,
+            workspace,
+            dispatch_run,
+            AgentId::new(),
+            &worker,
+            "root-reconciliation".into(),
+        );
         let goal = || {
             GoalSpecification::new(
                 "finish the goal".into(),
@@ -16942,13 +18638,17 @@ mod tests {
                 .unwrap(),
             0
         );
-        assert!(
-            supervisor
-                .lock()
-                .unwrap()
-                .pending_worker_stops_for_run(unbound.supervisor_run_id)
-                .unwrap()
-                .is_empty()
+        let pending = supervisor
+            .lock()
+            .unwrap()
+            .pending_worker_stops_for_run(unbound.supervisor_run_id)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation_id(), unbound_operation);
+        assert_eq!(
+            reconcile_supervisor_run_workers(&supervisor, &agent, unbound.supervisor_run_id)
+                .unwrap(),
+            0
         );
         assert_eq!(
             reconcile_aborted_supervisor_workers(&supervisor, &agent).unwrap(),
@@ -16979,23 +18679,6 @@ mod tests {
         let post_commit = supervisor_control_unconfirmed("worker stop failed");
         assert_eq!(post_commit.side_effect, SideEffect::PartialOrUnknown);
         assert_eq!(post_commit.retry_mode, RetryMode::SameOperation);
-    }
-
-    #[test]
-    fn supervisor_promotion_grace_is_exact_and_future_safe() {
-        let reserved_at = chrono::Utc::now();
-        assert!(!promotion_grace_elapsed(
-            reserved_at,
-            reserved_at + SUPERVISOR_PROMOTION_GRACE - chrono::Duration::milliseconds(1)
-        ));
-        assert!(promotion_grace_elapsed(
-            reserved_at,
-            reserved_at + SUPERVISOR_PROMOTION_GRACE
-        ));
-        assert!(!promotion_grace_elapsed(
-            reserved_at + chrono::Duration::seconds(1),
-            reserved_at
-        ));
     }
 
     #[cfg(unix)]
@@ -17845,6 +19528,7 @@ mod tests {
         ensure_private_dir_all(&home.path().join(".usagi/daemon")).unwrap();
         let workspace = workspace_fence(home.path(), 4242);
         let instance_path = home.path().join(".usagi/daemon/daemon.lock");
+        assert!(lock_paths_alias(&instance_path, &instance_path));
         let instance = process_instance_lock(instance_path.clone(), &workspace);
 
         assert!(matches!(
@@ -25654,7 +27338,7 @@ instructions = "{instructions}"
     #[allow(clippy::too_many_lines)] // One matrix keeps every authority transition on one durable run.
     fn supervisor_authority_survives_reconnect_and_rollover_but_not_forgery_or_restart() {
         use usagi_core::domain::{
-            agent::{CallerRef, DispatchRun, RunStatus},
+            agent::CallerRef,
             id::AgentId,
             supervisor::{
                 EscalationDecision, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
@@ -25675,16 +27359,6 @@ instructions = "{instructions}"
         };
         let workspace = WorkspaceId::new();
         let caller_dispatch_run = usagi_core::domain::id::OperationId::new();
-        DispatchStore::new(temp.path())
-            .upsert_run(DispatchRun {
-                run_id: caller_dispatch_run,
-                agent_id: caller.agent_id,
-                prompt: "supervisor tool caller".into(),
-                started_at: chrono::Utc::now(),
-                ended_at: None,
-                status: RunStatus::Running,
-            })
-            .unwrap();
         let caller_runtime = AgentRuntimeRef::new(
             AgentRuntimeId::new(),
             TerminalRef {
@@ -25697,6 +27371,14 @@ instructions = "{instructions}"
             Some(caller_session),
         )
         .unwrap();
+        persist_supervisor_dispatch(
+            &DispatchStore::new(temp.path()),
+            workspace,
+            caller_dispatch_run,
+            caller.agent_id,
+            &caller_runtime,
+            "supervisor-tool-caller".into(),
+        );
         let hello = fence_client_hello(Vec::new());
         let first_generation = ipc_generation();
         let start = supervisor_request(
@@ -25725,6 +27407,31 @@ instructions = "{instructions}"
         );
         assert_eq!(retry_outcome, ResponseOutcome::Ok);
         let run_id = retry_body["supervisor_run_id"].as_str().unwrap();
+
+        let (duplicate_start, _) = serve_supervisor_request(
+            &runtime,
+            &first_generation,
+            &hello,
+            Some((&caller, caller_dispatch_run, &caller_runtime)),
+            workspace,
+            supervisor_request(
+                SupervisorToolAction::Start,
+                "second-live-operation",
+                serde_json::json!({"root_task":"another root"}),
+            ),
+        );
+        assert!(
+            matches!(duplicate_start, ResponseOutcome::Error(error) if error.code == ErrorCode::RevisionConflict)
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .list_workspace(workspace)
+                .unwrap()
+                .len(),
+            1
+        );
 
         // A generation rollover keeps the daemon-issued credential registry and
         // the process client incarnation, so every control surface remains owned.
@@ -26150,8 +27857,14 @@ instructions = "{instructions}"
         let reserved = Arc::new(Mutex::new(SupervisorRuntime::new(
             &temporary.path().join("reserved"),
         )));
-        reserve_goal_supervisor_run(&reserved, &reserved_operation, &intent, repository.clone())
-            .unwrap();
+        reserve_goal_supervisor_run(
+            &reserved,
+            &reserved_operation,
+            &intent,
+            repository.clone(),
+            AgentProfileId::new("claude").unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             resolve_goal_artifact_repository(
                 &reserved,
@@ -26262,12 +27975,9 @@ instructions = "{instructions}"
 
     #[test]
     fn goal_supervisor_promotion_maps_a_poisoned_owner_to_unavailable() {
-        use usagi_core::domain::{
-            agent::{DispatchRun, RunStatus},
-            id::AgentId,
-        };
+        use usagi_core::domain::id::AgentId;
         use usagi_core::infrastructure::store::dispatch::DispatchStore;
-        use usagi_core::usecase::client::AgentGoalIntent;
+        use usagi_core::usecase::client::{AgentGoalIntent, agent_goal_semantic_key};
 
         let temporary = tempfile::tempdir().unwrap();
         let workspace = WorkspaceId::new();
@@ -26290,16 +28000,14 @@ instructions = "{instructions}"
         )
         .unwrap();
         let healthy = Arc::new(Mutex::new(SupervisorRuntime::new(temporary.path())));
-        DispatchStore::new(temporary.path())
-            .upsert_run(DispatchRun {
-                run_id: usagi_core::domain::id::OperationId::parse(&operation).unwrap(),
-                agent_id: AgentId::new(),
-                prompt: String::new(),
-                started_at: chrono::Utc::now(),
-                ended_at: None,
-                status: RunStatus::Running,
-            })
-            .unwrap();
+        persist_supervisor_dispatch(
+            &DispatchStore::new(temporary.path()),
+            workspace,
+            usagi_core::domain::id::OperationId::parse(&operation).unwrap(),
+            AgentId::new(),
+            &worker,
+            agent_goal_semantic_key(&intent),
+        );
         let started = start_goal_supervisor_run(&healthy, &operation, &intent, &worker).unwrap();
         assert_eq!(
             started.tasks[0].state,
@@ -26335,6 +28043,34 @@ instructions = "{instructions}"
             ))
             .code,
             usagi_core::infrastructure::ipc::ErrorCode::ResourceExhausted
+        );
+        assert_eq!(
+            supervisor_error(anyhow::anyhow!(
+                "dispatch already belongs to another retained supervisor run"
+            ))
+            .code,
+            usagi_core::infrastructure::ipc::ErrorCode::RevisionConflict
+        );
+        assert_eq!(
+            supervisor_error(anyhow::anyhow!(
+                "parent dispatch has stale supervisor ownership"
+            ))
+            .code,
+            usagi_core::infrastructure::ipc::ErrorCode::RevisionConflict
+        );
+        assert_eq!(
+            supervisor_error(anyhow::anyhow!(
+                "parent dispatch has closed supervisor ownership"
+            ))
+            .code,
+            usagi_core::infrastructure::ipc::ErrorCode::RevisionConflict
+        );
+        assert_eq!(
+            supervisor_error(anyhow::anyhow!(
+                "delegated dispatch operation is already in use"
+            ))
+            .code,
+            usagi_core::infrastructure::ipc::ErrorCode::IdempotencyConflict
         );
     }
 

@@ -3,8 +3,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use usagi_core::{
     domain::{
         agent::{
-            CallerRef, DispatchBinding, DispatchRun, InboxKind, InboxMessage, RunStatus,
-            StructuredResult, WorkerRef,
+            Agent, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun, InboxKind,
+            InboxMessage, ModelSelector, RunStatus, StructuredResult, WorkerRef,
         },
         id::{
             AgentId, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId, SessionId,
@@ -51,6 +51,21 @@ fn worker(workspace_id: WorkspaceId, session_id: Option<SessionId>) -> AgentRunt
         session_id,
     )
     .unwrap()
+}
+
+fn dispatch_agent(
+    agent_id: AgentId,
+    session_id: Option<SessionId>,
+    operation_id: OperationId,
+) -> Agent {
+    Agent {
+        agent_id,
+        session_id,
+        runtime: AgentProfileId::new("claude").unwrap(),
+        model: ModelSelector::new("default").unwrap(),
+        status: AgentStatus::Running,
+        current_run: Some(operation_id),
+    }
 }
 
 fn mark_root_running(store: &SupervisorStore, supervisor_run_id: SupervisorRunId) {
@@ -124,10 +139,17 @@ fn capture_handoff(
     let dispatch = DispatchStore::new(temp.path());
     let workspace_id = WorkspaceId::new();
     let root_operation = OperationId::new();
+    let root_agent_id = AgentId::new();
+    dispatch
+        .upsert_agent(
+            workspace_id,
+            dispatch_agent(root_agent_id, None, root_operation),
+        )
+        .unwrap();
     dispatch
         .upsert_run(DispatchRun {
             run_id: root_operation,
-            agent_id: AgentId::new(),
+            agent_id: root_agent_id,
             prompt: "root".into(),
             started_at: now(),
             ended_at: None,
@@ -152,20 +174,19 @@ fn capture_handoff(
     mark_root_running(&supervisor, root.supervisor_run_id);
 
     let child_operation = OperationId::new();
-    let reservation = runtime
-        .reserve_delegated_dispatch(
-            root_operation,
-            &child_operation.to_string(),
-            "inspect the implementation",
-            now(),
+    let child_session = SessionId::new();
+    let child_agent_id = AgentId::new();
+    dispatch
+        .upsert_agent(
+            workspace_id,
+            dispatch_agent(child_agent_id, Some(child_session), child_operation),
         )
-        .unwrap()
         .unwrap();
     dispatch
         .upsert_run(DispatchRun {
             run_id: child_operation,
-            agent_id: AgentId::new(),
-            prompt: reservation.prompt,
+            agent_id: child_agent_id,
+            prompt: "inspect the implementation".into(),
             started_at: now(),
             ended_at: Some(now()),
             status: child_status,
@@ -179,7 +200,7 @@ fn capture_handoff(
             root_operation,
             &child_operation.to_string(),
             "inspect the implementation".into(),
-            &worker(workspace_id, Some(SessionId::new())),
+            &worker(workspace_id, Some(child_session)),
             now(),
         )
         .unwrap()
@@ -208,10 +229,14 @@ fn capture_verifying_goal_handoff() -> HandoffContextEntry {
     let dispatch = DispatchStore::new(temp.path());
     let workspace_id = WorkspaceId::new();
     let operation = OperationId::new();
+    let root_agent_id = AgentId::new();
+    dispatch
+        .upsert_agent(workspace_id, dispatch_agent(root_agent_id, None, operation))
+        .unwrap();
     dispatch
         .upsert_run(DispatchRun {
             run_id: operation,
-            agent_id: AgentId::new(),
+            agent_id: root_agent_id,
             prompt: "root".into(),
             started_at: now(),
             ended_at: Some(now()),
@@ -277,10 +302,20 @@ fn public_delegation_rejects_invalid_inputs_for_every_instruction_form() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = SupervisorRuntime::new(temp.path());
     let operation = OperationId::new();
+    let session_id = SessionId::new();
+    let planned = dispatch_agent(AgentId::new(), Some(session_id), operation);
 
     assert!(
         runtime
-            .reserve_delegated_dispatch(OperationId::new(), &operation.to_string(), "", now(),)
+            .reserve_delegated_dispatch_for_session(
+                OperationId::new(),
+                &operation.to_string(),
+                "",
+                session_id,
+                &planned,
+                "child",
+                now(),
+            )
             .unwrap_err()
             .to_string()
             .contains("expected 1..=")
@@ -288,17 +323,28 @@ fn public_delegation_rejects_invalid_inputs_for_every_instruction_form() {
 
     assert!(
         runtime
-            .reserve_delegated_dispatch(OperationId::new(), "invalid", "child", now())
+            .reserve_delegated_dispatch_for_session(
+                OperationId::new(),
+                "invalid",
+                "child",
+                session_id,
+                &planned,
+                "child",
+                now(),
+            )
             .unwrap_err()
             .to_string()
             .contains("operation is invalid")
     );
     assert!(
         runtime
-            .reserve_delegated_dispatch(
+            .reserve_delegated_dispatch_for_session(
                 OperationId::new(),
                 "invalid",
                 String::from("child"),
+                session_id,
+                &planned,
+                "child",
                 now(),
             )
             .unwrap_err()

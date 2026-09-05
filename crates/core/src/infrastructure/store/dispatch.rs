@@ -306,13 +306,6 @@ impl Registry {
         admission: AgentAdmissionReservation,
     ) -> AgentAdmissionReservation {
         if let Some(existing) = self
-            .admissions
-            .iter()
-            .find(|item| item.operation_id == admission.operation_id)
-        {
-            return existing.clone();
-        }
-        if let Some(existing) = self
             .agents
             .iter_mut()
             .find(|item| item.agent_id == agent.agent_id)
@@ -1200,13 +1193,84 @@ impl DispatchStore {
         binding: DispatchBinding,
         admission: AgentAdmissionReservation,
     ) -> Result<AgentAdmissionReservation> {
+        self.reserve_admission_inner(None, agent, run, binding, admission)
+    }
+
+    /// Atomically reserves an admission and the worker's workspace ownership.
+    /// This is used for a freshly planned Agent so a rejected preflight does
+    /// not need to publish an inert Agent before the dispatch is admitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation conflicts, workspace ownership is
+    /// foreign, or either durable registry cannot be updated.
+    pub fn reserve_admission_for_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        agent: Agent,
+        run: DispatchRun,
+        binding: DispatchBinding,
+        admission: AgentAdmissionReservation,
+    ) -> Result<AgentAdmissionReservation> {
+        self.reserve_admission_inner(Some(workspace_id), agent, run, binding, admission)
+    }
+
+    fn reserve_admission_inner(
+        &self,
+        workspace_id: Option<WorkspaceId>,
+        agent: Agent,
+        run: DispatchRun,
+        binding: DispatchBinding,
+        admission: AgentAdmissionReservation,
+    ) -> Result<AgentAdmissionReservation> {
+        if agent.agent_id != run.agent_id
+            || agent.agent_id != binding.worker.agent_id
+            || agent.session_id != binding.worker.session_id
+            || run.run_id != binding.run_id
+            || run.run_id != admission.operation_id
+        {
+            anyhow::bail!("dispatch admission facts do not share one worker operation fence");
+        }
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
-        let workspace_registry = self.load_workspace_registry()?;
-        workspace_registry
-            .agent_workspaces
-            .get(&binding.worker.agent_id)
-            .context("worker workspace ownership is unavailable")?;
+        if let Some(existing) = registry
+            .admissions
+            .iter()
+            .find(|item| item.operation_id == admission.operation_id)
+        {
+            if existing.semantic_key != admission.semantic_key {
+                anyhow::bail!("dispatch admission operation conflicts with existing semantics");
+            }
+            return Ok(existing.clone());
+        }
+        if registry
+            .runs
+            .iter()
+            .any(|existing| existing.run_id == admission.operation_id)
+        {
+            anyhow::bail!("dispatch operation has an incomplete existing reservation");
+        }
+        let mut workspace_registry = self.load_workspace_registry()?;
+        match workspace_id {
+            Some(workspace_id) => {
+                if workspace_registry
+                    .agent_workspaces
+                    .get(&binding.worker.agent_id)
+                    .is_some_and(|owner| *owner != workspace_id)
+                {
+                    anyhow::bail!("agent workspace ownership cannot be reassigned");
+                }
+                workspace_registry
+                    .agent_workspaces
+                    .insert(binding.worker.agent_id, workspace_id);
+            }
+            None => {
+                workspace_registry
+                    .agent_workspaces
+                    .get(&binding.worker.agent_id)
+                    .context("worker workspace ownership is unavailable")?;
+            }
+        }
         let reservation = registry.reserve_admission(agent, run, binding, admission);
         self.prepare_registry(&mut registry)?;
         self.validate_workspace_registry(&workspace_registry)?;
@@ -3255,6 +3319,108 @@ mod tests {
             .mutate_registry(|registry| registry.runs.clear())
             .unwrap();
         assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 0);
+    }
+
+    #[test]
+    fn admission_reservation_rejects_semantic_incomplete_and_workspace_conflicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let operation = OperationId::new();
+        let workspace = WorkspaceId::new();
+        let worker = agent(session, agent_id);
+        let run = DispatchRun {
+            run_id: operation,
+            agent_id,
+            prompt: "work".into(),
+            started_at: now(),
+            ended_at: None,
+            status: RunStatus::Preparing,
+        };
+        let binding = DispatchBinding {
+            run_id: operation,
+            caller,
+            worker: WorkerRef {
+                session_id: Some(session),
+                agent_id,
+            },
+        };
+        let reservation = AgentAdmissionReservation {
+            operation_id: operation,
+            semantic_key: "intent".into(),
+            credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+        };
+        store
+            .reserve_admission_for_workspace(
+                workspace,
+                worker.clone(),
+                run.clone(),
+                binding.clone(),
+                reservation,
+            )
+            .unwrap();
+        let conflicting = AgentAdmissionReservation {
+            operation_id: operation,
+            semantic_key: "different-intent".into(),
+            credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+        };
+        assert!(
+            store
+                .reserve_admission_for_workspace(
+                    workspace,
+                    worker.clone(),
+                    run.clone(),
+                    binding.clone(),
+                    conflicting,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with existing semantics")
+        );
+
+        let incomplete_tmp = tempfile::tempdir().unwrap();
+        let incomplete = DispatchStore::new(incomplete_tmp.path());
+        incomplete.upsert_run(run.clone()).unwrap();
+        assert!(
+            incomplete
+                .reserve_admission_for_workspace(
+                    workspace,
+                    worker.clone(),
+                    run.clone(),
+                    binding.clone(),
+                    AgentAdmissionReservation {
+                        operation_id: operation,
+                        semantic_key: "intent".into(),
+                        credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                    },
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete existing reservation")
+        );
+
+        let ownership_tmp = tempfile::tempdir().unwrap();
+        let ownership = DispatchStore::new(ownership_tmp.path());
+        ownership
+            .upsert_agent(WorkspaceId::new(), worker.clone())
+            .unwrap();
+        assert!(
+            ownership
+                .reserve_admission_for_workspace(
+                    workspace,
+                    worker,
+                    run,
+                    binding,
+                    AgentAdmissionReservation {
+                        operation_id: operation,
+                        semantic_key: "intent".into(),
+                        credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                    },
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("workspace ownership cannot be reassigned")
+        );
     }
 
     #[test]

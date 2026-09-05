@@ -36,9 +36,9 @@ use usagi_core::{
             RunStatus, WorkerRef, dominant_agent_status,
         },
         id::{
-            AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, CompletionFence, ConnectionId,
-            DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId,
-            WorktreeId,
+            AgentContinuationRef, AgentId, AgentRuntimeId, AgentRuntimeRef, CompletionFence,
+            ConnectionId, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
+            WorkspaceId, WorktreeId,
         },
         supervisor::RunProvenance,
         terminal_launch::TerminalLaunchScope,
@@ -518,6 +518,23 @@ impl AgentRuntime {
         self.readiness_ticket(profile).map(Some)
     }
 
+    /// Resolves the exact runtime family a Goal launch will use so Supervisor
+    /// reservation can pin the same semantic fence before Agent admission.
+    ///
+    /// # Errors
+    /// Returns an error when the Goal or selected profile is invalid.
+    pub fn goal_worker_profile(
+        &self,
+        intent: &AgentGoalIntent,
+    ) -> Result<AgentProfileId, ProtocolError> {
+        validate_goal(intent)?;
+        let profile = intent
+            .profile
+            .clone()
+            .unwrap_or_else(|| self.default_profile.clone());
+        self.readiness_ticket(profile).map(|ticket| ticket.profile)
+    }
+
     /// Captures the provider and owner generation for one exact resume without
     /// invoking an adapter or mutating durable state.
     pub fn prepare_resume_readiness(
@@ -672,6 +689,29 @@ impl AgentRuntime {
         let current = self.prepare_dispatch_readiness(operation_id, intent)?;
         self.validate_readiness(preflight, current.as_ref())?;
         self.dispatch(operation_id, intent, session, scope)
+    }
+
+    /// Dispatches with the exact read-only worker plan already fenced by a
+    /// Supervisor reservation. The worker is persisted atomically with Agent
+    /// admission, after readiness and idempotency checks have passed.
+    pub fn dispatch_planned_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &DispatchIntent,
+        session: SessionId,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        planned_worker: &usagi_core::domain::agent::Agent,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_dispatch_readiness(operation_id, intent)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.dispatch_with_planned_worker(
+            operation_id,
+            intent,
+            session,
+            scope,
+            Some(planned_worker),
+        )
     }
 
     fn readiness_ticket(
@@ -2308,40 +2348,48 @@ impl AgentRuntime {
         session: SessionId,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.dispatch_with_planned_worker(operation_id, intent, session, scope, None)
+    }
+
+    fn dispatch_with_planned_worker(
+        &mut self,
+        operation_id: &str,
+        intent: &DispatchIntent,
+        session: SessionId,
+        scope: &dyn SessionScopeResolver,
+        planned_worker: Option<&usagi_core::domain::agent::Agent>,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
         if intent.prompt.is_empty() {
             return Err(dispatch_empty_prompt());
         }
-        let worker = match &intent.agent {
-            DispatchAgentIntent::Existing { agent_id } => self
-                .dispatch
-                .agent_in_workspace(intent.workspace, *agent_id)
-                .map_err(map_dispatch_storage_error)?
-                .ok_or_else(dispatch_agent_not_found)?,
-            DispatchAgentIntent::New { runtime, model } => self
-                .dispatch
-                .upsert_agent_by_runtime_model(
-                    intent.workspace,
-                    Some(session),
-                    runtime.clone(),
-                    model.clone(),
-                )
-                .map_err(map_dispatch_storage_error)?,
+        let worker = match planned_worker {
+            Some(worker) => {
+                let selection_matches = match &intent.agent {
+                    DispatchAgentIntent::Existing { agent_id } => worker.agent_id == *agent_id,
+                    DispatchAgentIntent::New { runtime, model } => {
+                        worker.runtime == *runtime && worker.model == *model
+                    }
+                };
+                if worker.session_id != Some(session) || !selection_matches {
+                    return Err(ProtocolError::new(
+                        ErrorCode::RevisionConflict,
+                        "planned dispatch Agent no longer matches the request",
+                    ));
+                }
+                worker.clone()
+            }
+            None => self.plan_dispatch_worker(intent.workspace, session, &intent.agent)?,
         };
-        if worker.session_id != Some(session) {
-            return Err(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "dispatch agent does not belong to session",
-            ));
-        }
         let launch = AgentLaunchIntent {
             workspace: intent.workspace,
             session: Some(session),
             profile: Some(worker.runtime.clone()),
         };
-        let semantic = format!(
-            "dispatch:{}:{}:{}",
-            intent.session_name, worker.agent_id, intent.prompt
+        let semantic = usagi_core::usecase::client::agent_dispatch_semantic_key(
+            &intent.session_name,
+            worker.agent_id,
+            &intent.prompt,
         );
         if let Some(existing) = self.operations.get(operation_id) {
             if existing.conflicts_with(&semantic) {
@@ -2380,6 +2428,53 @@ impl AgentRuntime {
         );
         self.remember_operation(operation_id, Some(&semantic), outcome.clone());
         outcome
+    }
+
+    /// Resolves the exact session Agent selected by a dispatch without
+    /// publishing a new Agent. The subsequent admission atomically persists a
+    /// fresh planned identity together with its operation and workspace fence.
+    ///
+    /// # Errors
+    /// Returns an error when the selected Agent is absent, outside the managed
+    /// session, or dispatch storage is unavailable.
+    pub fn plan_dispatch_worker(
+        &self,
+        workspace: WorkspaceId,
+        session: SessionId,
+        selected: &DispatchAgentIntent,
+    ) -> Result<usagi_core::domain::agent::Agent, ProtocolError> {
+        let worker = match selected {
+            DispatchAgentIntent::Existing { agent_id } => self
+                .dispatch
+                .agent_in_workspace(workspace, *agent_id)
+                .map_err(map_dispatch_storage_error)?
+                .ok_or_else(dispatch_agent_not_found)?,
+            DispatchAgentIntent::New { runtime, model } => self
+                .dispatch
+                .agents_in_workspace(workspace)
+                .map_err(map_dispatch_storage_error)?
+                .into_iter()
+                .find(|agent| {
+                    agent.session_id == Some(session)
+                        && agent.runtime == *runtime
+                        && agent.model == *model
+                })
+                .unwrap_or_else(|| usagi_core::domain::agent::Agent {
+                    agent_id: AgentId::new(),
+                    session_id: Some(session),
+                    runtime: runtime.clone(),
+                    model: model.clone(),
+                    status: AgentStatus::Idle,
+                    current_run: None,
+                }),
+        };
+        if worker.session_id != Some(session) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "dispatch agent does not belong to session",
+            ));
+        }
+        Ok(worker)
     }
 
     #[allow(clippy::too_many_lines)] // Admission keeps its durable prepare/spawn/commit order visible.
@@ -2466,7 +2561,8 @@ impl AgentRuntime {
         reserved_worker.current_run = Some(operation);
         self.sleep_one_for_capacity()?;
         self.dispatch
-            .reserve_admission(
+            .reserve_admission_for_workspace(
+                launch.workspace,
                 reserved_worker,
                 DispatchRun {
                     run_id: operation,
@@ -5723,6 +5819,14 @@ mod tests {
         let launch = intent(None);
         assert_eq!(
             runtime
+                .prepare_launch_readiness(&OperationId::new().to_string(), &launch)
+                .unwrap()
+                .unwrap()
+                .product(),
+            "claude"
+        );
+        assert_eq!(
+            runtime
                 .prepare_launch_readiness("invalid", &launch)
                 .unwrap_err()
                 .code,
@@ -6003,6 +6107,75 @@ mod tests {
                 Some(&dispatch_ticket),
             )
             .unwrap();
+
+        let planned_session = SessionId::new();
+        let planned_operation = OperationId::new().to_string();
+        let planned_ticket = dispatch_runtime
+            .prepare_dispatch_readiness(&planned_operation, &dispatch)
+            .unwrap()
+            .unwrap();
+        let planned = dispatch_runtime
+            .plan_dispatch_worker(workspace, planned_session, &dispatch.agent)
+            .unwrap();
+        dispatch_runtime
+            .dispatch_planned_after_readiness(
+                &planned_operation,
+                &dispatch,
+                planned_session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+                Some(&planned_ticket),
+                &planned,
+            )
+            .unwrap();
+
+        let mut wrong_session = planned.clone();
+        wrong_session.session_id = Some(SessionId::new());
+        let wrong_session_operation = OperationId::new().to_string();
+        let wrong_session_ticket = dispatch_runtime
+            .prepare_dispatch_readiness(&wrong_session_operation, &dispatch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dispatch_runtime
+                .dispatch_planned_after_readiness(
+                    &wrong_session_operation,
+                    &dispatch,
+                    planned_session,
+                    &FakeScope(Ok(configured_scope(worktree.path()))),
+                    Some(&wrong_session_ticket),
+                    &wrong_session,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::RevisionConflict
+        );
+        let existing_selection = DispatchIntent {
+            agent: DispatchAgentIntent::Existing {
+                agent_id: planned.agent_id,
+            },
+            ..dispatch
+        };
+        let mut wrong_agent = planned.clone();
+        wrong_agent.agent_id = AgentId::new();
+        let wrong_agent_operation = OperationId::new().to_string();
+        let wrong_agent_ticket = dispatch_runtime
+            .prepare_dispatch_readiness(&wrong_agent_operation, &existing_selection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dispatch_runtime
+                .dispatch_planned_after_readiness(
+                    &wrong_agent_operation,
+                    &existing_selection,
+                    planned_session,
+                    &FakeScope(Ok(configured_scope(worktree.path()))),
+                    Some(&wrong_agent_ticket),
+                    &wrong_agent,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::RevisionConflict
+        );
     }
 
     #[test]
@@ -8156,6 +8329,22 @@ mod tests {
             profile: None,
             goal: "use the default profile".into(),
         };
+        assert_eq!(
+            runtime.goal_worker_profile(&intent).unwrap().as_str(),
+            "claude"
+        );
+        let mut explicit = intent.clone();
+        explicit.profile = Some(AgentProfileId::new("claude").unwrap());
+        assert_eq!(
+            runtime.goal_worker_profile(&explicit).unwrap().as_str(),
+            "claude"
+        );
+        let mut invalid = intent.clone();
+        invalid.goal = " ".into();
+        assert_eq!(
+            runtime.goal_worker_profile(&invalid).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
         let readiness = runtime
             .prepare_goal_launch_readiness(&operation, &intent)
             .unwrap()
