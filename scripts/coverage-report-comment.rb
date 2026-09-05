@@ -34,7 +34,7 @@ demangler = ENV.fetch("DEMANGLER", "c++filt")
 
 abort "coverage-report-comment: #{json_path} が見つかりません" unless File.file?(json_path)
 
-data = JSON.parse(File.read(json_path)).fetch("data").fetch(0)
+data = JSON.parse(File.read(json_path, encoding: Encoding::UTF_8)).fetch("data").fetch(0)
 
 root = (ENV["GITHUB_WORKSPACE"] || Dir.pwd).sub(%r{/*\z}, "") + "/"
 def rel(path, root)

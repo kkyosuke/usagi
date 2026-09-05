@@ -1,24 +1,10 @@
-//! Overview コマンド面の application interface。
+//! Overview command vocabulary and pure parsers.
 //!
-//! Overview のコマンド入力をトップレベルのコマンド名と未解釈の引数へ分け、
-//! コマンドごとのハンドラへ dispatch する。各ハンドラは実 IO や画面状態を直接操作せず、
-//! 純粋な [`CommandResult`] を返す。
-//! サブコマンド・オプションの文法は各ハンドラが所有するため、入口は引数を trim するだけで
-//! 内容を先回りして解釈しない。
-
-mod commands;
+//! The controller interprets this typed intent and dispatches real effects
+//! through its backend ports. There is deliberately no parallel stub-handler
+//! hierarchy: one executable path owns each command.
 
 use std::fmt;
-
-/// Overview コマンドを実行する共通 interface。
-///
-/// 解釈済みコマンドは [`Command::into_handler`] で個別ハンドラへ変換され、呼び出し側は
-/// コマンド型に依存せず一様に `run` できる。返り値は純粋な値なので terminal IO なしで
-/// テストできる。
-pub trait Run {
-    /// コマンドの実行結果を返す。
-    fn run(&self) -> CommandResult;
-}
 
 /// Overview に登録されるコマンドの表示用 metadata。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,41 +344,6 @@ impl Command {
             Self::Session { .. } => "session",
         }
     }
-    /// 解釈済みコマンドを、その実行方法を知る個別ハンドラへ変換する。
-    #[must_use]
-    pub fn into_handler(self) -> Box<dyn Run> {
-        use commands as h;
-
-        match self {
-            Self::Clean { arguments } => Box::new(h::Clean { arguments }),
-            Self::Config { arguments } => Box::new(h::Config { arguments }),
-            Self::Daemon { arguments } => Box::new(h::Daemon { arguments }),
-            Self::Env { arguments } => Box::new(h::Env { arguments }),
-            Self::Garden { arguments } => Box::new(h::Garden { arguments }),
-            Self::Issue { arguments } => Box::new(h::Issue { arguments }),
-            Self::Roles { arguments } => Box::new(h::Roles { arguments }),
-            Self::Session { arguments } => Box::new(h::Session { arguments }),
-        }
-    }
-}
-
-/// Overview コマンドの純粋な実行結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommandResult {
-    /// コマンド名と引数の IF は解釈済みだが、コマンド固有処理は持たない。
-    NotImplemented {
-        command: &'static str,
-        arguments: String,
-    },
-}
-
-impl CommandResult {
-    fn not_implemented(command: &'static str, arguments: &str) -> Self {
-        Self::NotImplemented {
-            command,
-            arguments: arguments.to_owned(),
-        }
-    }
 }
 
 /// Overview コマンド名を解釈できなかった理由。
@@ -440,22 +391,13 @@ pub fn interpret(input: &str) -> Result<Command, ParseError> {
         .ok_or_else(|| ParseError::Unknown(name.to_owned()))
 }
 
-/// Overview の入力を解釈し、個別ハンドラを一様に実行する。
-///
-/// # Errors
-///
-/// [`interpret`] が入力を解釈できなかった場合、その [`ParseError`] を返す。
-pub fn dispatch(input: &str) -> Result<CommandResult, ParseError> {
-    Ok(interpret(input)?.into_handler().run())
-}
-
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
-        CleanCommand, Command, CommandInfo, CommandRegistry, CommandResult, DefaultRegistry,
-        ParseError, SessionCommand, commands, complete, completion, dispatch, help, interpret,
-        parse_clean, parse_session,
+        CleanCommand, Command, CommandInfo, CommandRegistry, DefaultRegistry, ParseError,
+        SessionCommand, commands, complete, completion, help, interpret, parse_clean,
+        parse_session,
     };
 
     struct FakeRegistry(Vec<CommandInfo>);
@@ -719,27 +661,5 @@ mod tests {
         let unknown = interpret("bogus arg").unwrap_err();
         assert_eq!(unknown, ParseError::Unknown("bogus".to_owned()));
         assert_eq!(unknown.to_string(), "unknown overview command: \"bogus\"");
-    }
-
-    #[test]
-    fn dispatches_through_the_handler_interface() {
-        assert_eq!(
-            dispatch("roles global").unwrap(),
-            CommandResult::NotImplemented {
-                command: "roles",
-                arguments: "global".to_owned(),
-            }
-        );
-        assert_eq!(
-            dispatch("session list").unwrap(),
-            CommandResult::NotImplemented {
-                command: "session",
-                arguments: "list".to_owned(),
-            }
-        );
-        assert_eq!(
-            dispatch("bogus").unwrap_err(),
-            ParseError::Unknown("bogus".to_owned())
-        );
     }
 }

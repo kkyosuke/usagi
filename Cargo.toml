@@ -99,6 +99,8 @@ tempfile = "3"
 
 # 端末描画で表示桁数（CJK など全角を 2 桁と数える）を正しく測るため。
 unicode-width = "0.2"
+# 1 行入力の移動・選択・削除を Unicode extended grapheme cluster 単位にする。
+unicode-segmentation = "1.13"
 
 # 対話 TUI の実端末バックエンド。raw mode・代替スクリーン・キー/リサイズイベントの
 # 読み取りを担う。TUI 面（usagi-tui）はこれに依存させず、実装は合成ルート（ルートの

@@ -149,7 +149,7 @@ presentation / infrastructure へ依存しない。複数 surface が共有す�
 | 層（`crates/tui/src/`） | 置くもの |
 |---|---|
 | `presentation/` | 画面描画・キー入力マッピング。描画は自前の差分レンダリングで行い、UI フレームワークに依存しない。`frame` は ANSI/Unicode 幅を考慮して view の行を cell grid にし、row / column span の pure diff を返す。surface reset と geometry 変更は full clear と全行 repaint にし、実端末への cursor 移動・write は adapter に閉じる。内部は各画面の view（`views/`）・再利用 UI 部品（`widgets/`）・領域配置（`layouts/`）に分ける。process-level `workspace_deck` は ordered canonical path / active identity / Add・Switcher と project bar の identity-bearing hit geometry だけを所有し、workspace ごとの session / pane / modal state は共有しない。対話ループは active snapshot を先に prepare し、旧 composition を drop した後に次の factory を呼ぶため resident composition は常に 1 件である。 |
-| `usecase/` | TUI に閉じた application ロジック。起動画面の `EntryScreen`、それを具体的な描画・入力実装へ委譲する `ScreenRunner` 境界、管理画面用の端末ポート `Terminal` と入力語彙 `Key`、workspace 全 surface 共通の端末非依存入力語彙・`Ctrl-O` classifier・live pane bytes encoder、Welcome / Open / Recent の typed attach と Home の純粋 controller（state / event / effect reducer、TUI-local backend port と fake backend）。controller が返した全 `Effect` を daemon 所有のポート群（session command / agent / notes・environment store / workspace command / decision / PR・preview・browser）へ振り分ける本番 executor `daemon_backend`。実 IO ポートは合成ルートが 1 つの backend factory から注入し、`effect → 実行 → event → update()` の単方向ループを閉じる。Home は runtime ごとの phase を保持し、target ごとに `done > waiting > running > ready > absent` で集約する。progress・operation / terminal error・disconnect / reconnect / resync は safe message と error ID だけを TUI-local feedback として保持する。stable `TerminalRef` で tab / pending placeholder / attach policy を扱う Closeup pane reducer と、その reducer を daemon inventory / stream / resume / geometry dedupe へ結合する `pane_runtime`、Agent tab の order / selection / interrupted dismissal を還元する TUI-local `AgentTabIntent` domain と persistence port、Overview / Closeup コマンドの解釈・dispatch、画面グラフの遷移、イベント処理の状態機械 |
+| `usecase/` | TUI に閉じた application ロジック。起動画面の `EntryScreen`、それを具体的な描画・入力実装へ委譲する `ScreenRunner` 境界、管理画面用の端末ポート `Terminal` と入力語彙 `Key`、workspace 全 surface 共通の端末非依存入力語彙・leader classifier・live pane bytes encoder、Welcome / Open / Recent の typed attach と Home の純粋 controller（state / event / effect reducer、TUI-local backend port と fake backend）。runtime の Agent / terminal stream 境界は `application/agent_runtime_ports`、session / decision / environment / Garden / restore / worktree hint 境界は `application/runtime_ports` が所有し、presentation は互換 re-export だけを提供する。controller が返した全 `Effect` を daemon 所有のポート群へ振り分ける本番 executor `daemon_backend` により、`effect → 実行 → event → update()` の単方向ループを閉じる。Home は runtime ごとの phase を保持し、target ごとに `done > waiting > running > ready > absent` で集約する。progress・operation / terminal error・disconnect / reconnect / resync は safe message と error ID だけを TUI-local feedback として保持する。stable `TerminalRef` で tab / pending placeholder / attach policy を扱う Closeup pane reducer と、その reducer を daemon inventory / stream / resume / geometry dedupe へ結合する `pane_runtime`、Agent tab の order / selection / interrupted dismissal を還元する TUI-local `AgentTabIntent` domain と persistence port、Overview / Closeup コマンドの解釈、画面グラフの遷移、イベント処理の状態機械 |
 | `infrastructure/` | daemon 端末へ attach する IPC クライアント側と端末バックエンド（raw mode・端末制御・キー/ホイール読み取り・クリップボード）。daemon push adapter は phase、safe error、connection feedback を TUI-local projection に変換し、wire の detail を越境させない |
 
 `Terminal` は対話画面が使う端末の最小ポート（サイズ取得・フレーム描画・キー読み取り）で、`usecase` が
@@ -184,8 +184,10 @@ shell が transport として担い、daemon-authoritative な session 一覧を
 投影へ渡す。daemon metrics と session ごとの git diff は描画専用素材なので `AppState` に
 載せず、shell が `MetricsBackend` で port を poll して各観測を drain し、`MetricsProjection`
 キャッシュへ畳み込んでから `render_home` に渡す（`poll → drain → 反映 → 描画` の単方向）。
-Home の row state・selection・入力・描画は controller が単独で所有し、旧 `Workspace` view の
-二重定義は残さない。
+Home の row state・selection・入力・描画は controller が単独で所有する。daemon-authoritative cache、
+session / pane worker、live terminal stream は transport-only の `WorkspaceIoRuntime` が調停し、route や
+selection を持たない。旧 `WorkspaceUi` の二重state名は残さず、architecture test が application port の
+presentation 層への再定義とともに再導入を拒否する。
 
 production composition のデータフローは次の 1 経路だけである。direct workspace と
 Welcome / Open / Recent / New の各入口は、workspace snapshot ごとに同じ

@@ -100,10 +100,10 @@ fn heavy_e2e_lock_path() -> PathBuf {
 /// 重い E2E を**プロセスを跨いで**直列化する。
 ///
 /// test binary 内の `Mutex` は同じ process の thread しか直列化しない。`cargo test --workspace` は
-/// test binary を直列に実行するため 1 回の実行ではそれで足りるが、同じチェックアウトで
-/// `cargo test` と `cargo llvm-cov` を同時に走らせると、別 process の重い E2E が同時に実 daemon と
-/// 実 PTY を掴む。そのとき frame 待ちや readiness 待ちは product の失敗ではなく CPU 競合による
-/// timeout として落ち、無関係な変更の PR を落とす偽陽性になる。
+/// test binary を直列に実行するが、nextest は複数 binary を並行実行し、同じチェックアウトで
+/// `cargo test` と `cargo llvm-cov` が同時に走る場合も process は分かれる。process-local lock だけでは
+/// 重い E2E が同時に実 daemon と実 PTY を掴み、frame 待ちや readiness 待ちが product の失敗ではない
+/// CPU 競合 timeout として落ちるため、file lock で偽陽性を防ぐ。
 ///
 /// このロックは同じチェックアウトから走ったすべての重い E2E を 1 本の直列列に載せる
 /// （正本は [重い E2E の直列化](../../document/06-conventions.md#重い-e2e-の直列化)）。

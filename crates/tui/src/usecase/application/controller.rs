@@ -17,6 +17,9 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pr_inventory::{PrEntry, PrState};
+use usagi_core::domain::presentation_text::{
+    presentation_character_is_safe, presentation_text_is_safe,
+};
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
@@ -922,6 +925,48 @@ pub struct PendingOperation {
     pub interaction_at_accept: u64,
 }
 
+const MAX_PRESENTATION_MESSAGE_CHARS: usize = 240;
+
+/// Normalize untrusted detail into a bounded, one-line terminal-safe summary.
+///
+/// Control characters become a single separating space and bidi controls
+/// become a visible replacement character. This preserves useful wording
+/// without allowing terminal control flow or visual reordering. The frame is a
+/// second, fail-closed boundary for values which do not use these message types.
+fn sanitize_presentation_message(message: &str) -> String {
+    let mut sanitized = String::with_capacity(message.len().min(256));
+    let mut character_count = 0;
+    let mut previous_was_space = true;
+    let mut truncated = false;
+
+    for character in message.chars() {
+        let character = if presentation_character_is_safe(character) {
+            character
+        } else if character.is_control() {
+            ' '
+        } else {
+            '\u{fffd}'
+        };
+        if character == ' ' && previous_was_space {
+            continue;
+        }
+        if character_count == MAX_PRESENTATION_MESSAGE_CHARS - 1 {
+            truncated = true;
+            break;
+        }
+        sanitized.push(character);
+        character_count += 1;
+        previous_was_space = character == ' ';
+    }
+    while sanitized.ends_with(' ') {
+        sanitized.pop();
+    }
+    if truncated {
+        sanitized.push('…');
+    }
+    sanitized
+}
+
 /// 画面に安全に表示できる通知。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
@@ -933,8 +978,9 @@ impl Notice {
     /// 表示用に検証済みの文言を作る。
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
-            message: message.into(),
+            message: sanitize_presentation_message(&message),
         }
     }
 }
@@ -998,15 +1044,19 @@ pub struct RuntimePhase {
     pub phase: AgentPhase,
 }
 
-/// A message which a backend adapter has explicitly classified as safe to show.
-/// No raw protocol error or detail field is representable by this type.
+/// A bounded, one-line message which is safe to show in a terminal.
+///
+/// Construction sanitizes defensively. Backend adapters must still map raw
+/// diagnostic detail to stable user-facing summaries so filesystem paths and
+/// credentials never become presentation content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeMessage(String);
 
 impl SafeMessage {
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        let message = message.into();
+        Self(sanitize_presentation_message(&message))
     }
 
     #[must_use]
@@ -2972,11 +3022,16 @@ pub enum NewRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewValidationError {
     RepositoryRequired,
+    RepositoryInvalid,
     LocationRequired,
+    LocationInvalid,
     DirectoryRequired,
     DirectoryInvalid,
+    BranchInvalid,
     PathRequired,
+    PathInvalid,
     NameRequired,
+    NameInvalid,
 }
 
 impl NewValidationError {
@@ -2984,11 +3039,16 @@ impl NewValidationError {
     pub const fn message(self) -> &'static str {
         match self {
             Self::RepositoryRequired => "repository URL is required",
+            Self::RepositoryInvalid => "repository URL must be a single safe line",
             Self::LocationRequired => "clone location is required",
+            Self::LocationInvalid => "clone location must be a single safe line",
             Self::DirectoryRequired => "directory name is required",
-            Self::DirectoryInvalid => "directory name must not contain path separators",
+            Self::DirectoryInvalid => "directory name must be a safe name without path separators",
+            Self::BranchInvalid => "branch name must be a single safe line",
             Self::PathRequired => "directory path is required",
+            Self::PathInvalid => "directory path must be a single safe line",
             Self::NameRequired => "workspace name is required",
+            Self::NameInvalid => "workspace name must be a single safe line",
         }
     }
 }
@@ -3003,22 +3063,33 @@ pub fn validate_new_form(mode: NewMode, form: &NewForm) -> Result<NewRequest, Ne
     match mode {
         NewMode::Clone => {
             let repository = required(&form.repository, NewValidationError::RepositoryRequired)?;
+            validate_presentation_field(&repository, NewValidationError::RepositoryInvalid)?;
             let location = required(&form.location, NewValidationError::LocationRequired)?;
+            validate_presentation_field(&location, NewValidationError::LocationInvalid)?;
             let directory = required(&form.directory, NewValidationError::DirectoryRequired)?;
             if is_invalid_directory_name(&directory) {
                 return Err(NewValidationError::DirectoryInvalid);
             }
             let branch = trimmed(&form.branch);
+            if let Some(branch) = &branch {
+                validate_presentation_field(branch, NewValidationError::BranchInvalid)?;
+            }
             Ok(NewRequest::Clone {
                 repository,
                 destination: PathBuf::from(location).join(directory),
                 branch,
             })
         }
-        NewMode::Existing => Ok(NewRequest::Existing {
-            path: PathBuf::from(required(&form.path, NewValidationError::PathRequired)?),
-            name: required(&form.name, NewValidationError::NameRequired)?,
-        }),
+        NewMode::Existing => {
+            let path = required(&form.path, NewValidationError::PathRequired)?;
+            validate_presentation_field(&path, NewValidationError::PathInvalid)?;
+            let name = required(&form.name, NewValidationError::NameRequired)?;
+            validate_presentation_field(&name, NewValidationError::NameInvalid)?;
+            Ok(NewRequest::Existing {
+                path: PathBuf::from(path),
+                name,
+            })
+        }
     }
 }
 
@@ -3026,12 +3097,22 @@ fn required(value: &str, error: NewValidationError) -> Result<String, NewValidat
     trimmed(value).ok_or(error)
 }
 
+fn validate_presentation_field(
+    value: &str,
+    error: NewValidationError,
+) -> Result<(), NewValidationError> {
+    presentation_text_is_safe(value).then_some(()).ok_or(error)
+}
+
 /// A clone destination is created as a single child directory under the chosen
 /// location, so its name must not traverse (`.`/`..`) or contain a path
 /// separator. Rejecting these before submit keeps `location.join(directory)`
 /// from escaping the location.
 fn is_invalid_directory_name(directory: &str) -> bool {
-    directory == "." || directory == ".." || directory.contains(['/', '\\'])
+    directory == "."
+        || directory == ".."
+        || directory.contains(['/', '\\'])
+        || !presentation_text_is_safe(directory)
 }
 
 fn trimmed(value: &str) -> Option<String> {
@@ -6260,6 +6341,24 @@ mod tests {
     use crate::usecase::application::environment_source::parse_environment_source;
 
     #[test]
+    fn presentation_messages_are_bounded_and_terminal_safe() {
+        let raw = format!("  failed\n\t\u{1b}[31m\u{202e}{}", "x".repeat(300));
+        let safe = SafeMessage::new(&raw);
+        let notice = Notice::new(raw);
+
+        for message in [safe.as_str(), notice.message.as_str()] {
+            assert!(presentation_text_is_safe(message));
+            assert!(!message.starts_with(' '));
+            assert!(message.chars().count() <= MAX_PRESENTATION_MESSAGE_CHARS);
+            assert!(message.contains('\u{fffd}'));
+            assert!(message.ends_with('…'));
+        }
+
+        assert_eq!(SafeMessage::new("  ready\n\t ").as_str(), "ready");
+        assert_eq!(Notice::new("\n\t ").message, "");
+    }
+
+    #[test]
     fn terminal_arguments_normalize_open_and_reject_untrusted_input() {
         assert_eq!(terminal_arguments("").unwrap(), "open");
         assert_eq!(terminal_arguments(" open ").unwrap(), "open");
@@ -7295,6 +7394,65 @@ mod tests {
             assert_eq!(validate_new_form(mode, &form), Err(expected));
             assert!(!expected.message().is_empty());
             assert!(!format!("{expected:?}").is_empty());
+        }
+    }
+
+    #[test]
+    fn new_validation_rejects_terminal_and_direction_controls() {
+        let clone_cases = [
+            ("repository", NewValidationError::RepositoryInvalid),
+            ("location", NewValidationError::LocationInvalid),
+            ("directory", NewValidationError::DirectoryInvalid),
+            ("branch", NewValidationError::BranchInvalid),
+        ];
+        for (field, expected) in clone_cases {
+            let mut form = clone_form();
+            match field {
+                "repository" => form.repository = "https://example.com/unsafe\nrepo".to_owned(),
+                "location" => form.location = "/work\u{7}/child".to_owned(),
+                "directory" => form.directory = "app\u{202e}txt".to_owned(),
+                "branch" => form.branch = "feature/\u{2066}name".to_owned(),
+                _ => unreachable!(),
+            }
+            assert_eq!(validate_new_form(NewMode::Clone, &form), Err(expected));
+        }
+
+        let mut unsafe_path = existing_form();
+        unsafe_path.path = "/work\r/existing".to_owned();
+        assert_eq!(
+            validate_new_form(NewMode::Existing, &unsafe_path),
+            Err(NewValidationError::PathInvalid)
+        );
+        let mut unsafe_name = existing_form();
+        unsafe_name.name.push('\u{202e}');
+        assert_eq!(
+            validate_new_form(NewMode::Existing, &unsafe_name),
+            Err(NewValidationError::NameInvalid)
+        );
+
+        for (error, message) in [
+            (
+                NewValidationError::RepositoryInvalid,
+                "repository URL must be a single safe line",
+            ),
+            (
+                NewValidationError::LocationInvalid,
+                "clone location must be a single safe line",
+            ),
+            (
+                NewValidationError::BranchInvalid,
+                "branch name must be a single safe line",
+            ),
+            (
+                NewValidationError::PathInvalid,
+                "directory path must be a single safe line",
+            ),
+            (
+                NewValidationError::NameInvalid,
+                "workspace name must be a single safe line",
+            ),
+        ] {
+            assert_eq!(error.message(), message);
         }
     }
 
@@ -12707,7 +12865,7 @@ mod tests {
         );
         assert_eq!(
             NewValidationError::DirectoryInvalid.message(),
-            "directory name must not contain path separators"
+            "directory name must be a safe name without path separators"
         );
 
         let mut entry = EntryState::new(

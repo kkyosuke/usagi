@@ -12,7 +12,6 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +23,7 @@ jobs:
     outputs:
       rust: ${{ steps.classify.outputs.rust }}
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         fetch-depth: 0
     - id: classify
@@ -39,9 +38,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
 
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
     # exclusion lint と閾値は scripts/coverage.sh を SSoT とする。
     - name: Load coverage config (SSoT)
@@ -52,20 +54,20 @@ jobs:
     - name: Enforce coverage(off) policy
       run: |
         . ./scripts/coverage.sh
-        coverage_off_lint
+        coverage_off_lint --summary-markdown >> "$GITHUB_STEP_SUMMARY"
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@nightly
+      uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
       with:
         components: llvm-tools-preview
 
     - name: Rust Cache
-      uses: swatinem/rust-cache@v2
+      uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
         cache-on-failure: true
 
     - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@cargo-llvm-cov
+      uses: taiki-e/install-action@b1d53d4d726d74b5a950a5b3798a3c6ede4e0f64 # cargo-llvm-cov
 
     - name: Run tests with coverage
       run: cargo llvm-cov --workspace --lcov --output-path lcov.info
@@ -97,7 +99,7 @@ jobs:
         hashFiles('lcov.info') != '' &&
         github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
-      uses: marocchino/sticky-pull-request-comment@v3
+      uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
       with:
         header: coverage
         recreate: true
@@ -119,7 +121,7 @@ jobs:
     needs: [changes, coverage-run]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Report coverage result
       env:
         CHANGES_RESULT: ${{ needs.changes.result }}

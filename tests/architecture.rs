@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use syn::visit::{self, Visit};
-use syn::{Attribute, File, Item, Path as RustPath, UseTree};
+use syn::{Attribute, Expr, File, Item, Pat, Path as RustPath, Stmt, UseTree};
 use usagi_core::infrastructure::store::issue::IssueStore;
 
 const FACES: [(&str, &[&str]); 4] = [
@@ -345,6 +345,128 @@ fn source_layers_follow_the_documented_dependency_matrix() {
     assert!(
         violations.is_empty(),
         "source dependency matrix violations:\n{violations:#?}"
+    );
+}
+
+fn calls_heavy_e2e_lock(statement: &Stmt) -> bool {
+    let Stmt::Local(local) = statement else {
+        return false;
+    };
+    // A wildcard (`let _ = ...`) drops the guard at this statement and does not
+    // serialize the test body. Require a real binding so the RAII lock remains
+    // alive until the function scope ends.
+    if !matches!(local.pat, Pat::Ident(_)) {
+        return false;
+    }
+    let Some(initializer) = &local.init else {
+        return false;
+    };
+    let Expr::Call(call) = initializer.expr.as_ref() else {
+        return false;
+    };
+    let Expr::Path(path) = call.func.as_ref() else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "heavy_e2e_lock")
+}
+
+#[test]
+fn heavy_e2e_guard_must_be_retained_by_a_local_binding() {
+    let retained: Stmt = syn::parse_str("let _guard = daemon_fixture::heavy_e2e_lock();")
+        .expect("retained guard statement parses");
+    let discarded: Stmt = syn::parse_str("let _ = daemon_fixture::heavy_e2e_lock();")
+        .expect("discarded guard statement parses");
+
+    assert!(calls_heavy_e2e_lock(&retained));
+    assert!(!calls_heavy_e2e_lock(&discarded));
+}
+
+#[test]
+fn shipping_cli_integration_tests_enter_the_shared_e2e_lane_first() {
+    let source = fs::read_to_string(workspace_root().join("tests/cli_tui.rs"))
+        .expect("shipping CLI integration source is readable");
+    let syntax: File = syn::parse_file(&source).expect("shipping CLI integration source parses");
+    let unlocked = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(function)
+                if function
+                    .attrs
+                    .iter()
+                    .any(|attribute| attribute.path().is_ident("test")) =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .filter(|function| {
+            !function
+                .block
+                .stmts
+                .iter()
+                .find(|statement| !matches!(statement, Stmt::Item(_)))
+                .is_some_and(calls_heavy_e2e_lock)
+        })
+        .map(|function| function.sig.ident.to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        unlocked.is_empty(),
+        "every tests/cli_tui.rs test must acquire heavy_e2e_lock first: {unlocked:?}"
+    );
+}
+
+#[test]
+fn tui_application_runtime_ports_are_not_declared_by_presentation() {
+    let root = workspace_root();
+    let source = fs::read_to_string(root.join("crates/tui/src/presentation/mod.rs"))
+        .expect("TUI presentation source is readable");
+    let syntax: File = syn::parse_file(&source).expect("TUI presentation source parses");
+    let declared = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Trait(item) => Some(item.ident.to_string()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let application_ports = [
+        "AgentCommandPort",
+        "AgentCommandPortFactory",
+        "DecisionCommandPort",
+        "DesktopNotificationPort",
+        "EnvironmentStorePort",
+        "ExternalTerminalPort",
+        "GardenInventoryPort",
+        "PaneLaunchCommandPort",
+        "RestoreConnectionPort",
+        "SessionCommandPort",
+        "SessionCommandPortFactory",
+        "SessionRefreshPort",
+        "SessionWorktreeScanPort",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+
+    assert!(
+        declared.is_disjoint(&application_ports),
+        "application runtime ports belong in tui/usecase, not presentation: {:?}",
+        declared
+            .intersection(&application_ports)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        source.contains("struct WorkspaceIoRuntime"),
+        "the presentation loop must name its transport-only coordinator explicitly"
+    );
+    assert!(
+        !source.contains("WorkspaceUi"),
+        "the retired dual-state WorkspaceUi name must not return"
     );
 }
 
