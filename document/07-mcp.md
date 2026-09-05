@@ -247,6 +247,20 @@ inbox の完了報告は維持して retryable error を返す。同じ report �
 保存された outcome から run / agent status を冪等に収束させ、`Completed` result だけを読み直して投影するため、失敗への反転や別 URL への差し替えを許さず回復できる。late report と
 `agent_fail` は inventory を変更しない。payload の caller 名や cwd から identity を補完しない。
 
+Director Work からの `session_dispatch` / `session_delegate_brief` は、認証済み caller の profile runtime と同じ
+runtime の worker だけを受理する。この制約は prompt 上の指示ではなく daemon が session 作成前に検証する hard invariant
+であり、新規 selector の `runtime` と既存 Agent の保存済み runtime の両方へ適用する。model は同じ runtime 内で workspace
+allowlist に従って選択できる。各 child も自分の認証済み runtime を基準に同じ検証を受けるため、delegation の深さに関係なく
+異なる provider/runtime へ逸脱しない。Supervisor provenance のない classic caller はこの Work Run 固有の制約を受けず、
+従来どおり workspace allowlist 内の runtime を選べる。
+
+MCP credential の transport authority は PID 単体ではなく、kernel から得た PID・process start identity・現在の
+`ConnectionId` の lease である。transport 切断は一致する connection lease だけを外し、exact process claim と credential は
+live Agent runtime の間保持する。同じ MCP process の resilient client は credential を再送して新しい connection へ
+再 bind でき、旧 connection の遅延 cleanup は新 lease を解除しない。別 process からの claim は、kernel が以前の exact process
+identity の終了を確認できた場合だけ置き換えられる。PID が再利用されても start identity が一致しない request は
+`ownership_unknown` へ fail closed する。Agent runtime の終了または daemon restart では process-local credential 自体が失効する。
+
 callerのcurrent runが`SupervisorRun`へ束縛されている`session_dispatch` / `session_delegate_brief`では、daemonが
 root goalと確定済みchild completionのbounded handoff contextを今回のtask instructionへ前置する。raw conversationや
 terminal transcriptは含めず、workerが明示したsummaryとstructured artifact参照だけを使う。snapshotはchild operationの
