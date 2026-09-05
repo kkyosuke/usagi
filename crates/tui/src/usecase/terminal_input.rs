@@ -452,7 +452,9 @@ fn is_only_control(modifiers: Modifiers) -> bool {
         && !modifiers.meta
 }
 
-fn is_control_and_shift(modifiers: Modifiers) -> bool {
+/// Returns whether the modifiers contain exactly Control and Shift.
+#[must_use]
+pub(crate) fn is_control_and_shift(modifiers: Modifiers) -> bool {
     modifiers.control
         && modifiers.shift
         && !modifiers.alt
