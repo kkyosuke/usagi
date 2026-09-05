@@ -33,7 +33,7 @@ use usagi_core::domain::session_lifecycle::{
     AgentPhase, ManagedSession, SessionLifecycleProjection,
 };
 use usagi_core::domain::settings::{
-    EnvBindings, LocalSettings, Settings, format_env_bindings, parse_env_bindings,
+    EnvBindings, IconMode, LocalSettings, Settings, format_env_bindings, parse_env_bindings,
 };
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
@@ -5056,12 +5056,18 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
         })?;
     } else {
         let snapshot = loader.open(path)?;
-        let icon_mode = settings.read(SettingsScope::Global)?.icon_mode;
+        let icon_mode = global_icon_mode(settings.read(SettingsScope::Global));
         for line in presentation::render_home_snapshot(0, 0, &snapshot, icon_mode) {
             writeln!(out, "{line}")?;
         }
     }
     Ok(())
+}
+
+/// Resolve the non-interactive Home icon preference without allowing a corrupt
+/// settings file to prevent a workspace from opening.
+fn global_icon_mode(settings: std::io::Result<Settings>) -> IconMode {
+    settings.unwrap_or_default().icon_mode
 }
 
 /// Opening a workspace is the only entry that needs a daemon before the screen
@@ -5667,9 +5673,9 @@ mod tests {
         decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         decode_work_run_control_reply, decode_work_run_snapshot_reply, doctor_diagnosis_io_error,
-        doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
-        pr_snapshot_events, probe_path, provider_resume_projection,
+        doctor_reply_body, exact_agent_resume_request, global_icon_mode, lifecycle_snapshot,
+        load_screen_graph_data, load_workspace_state, map_terminal_error, metrics_cadence,
+        passthrough_key, pr_cadence, pr_snapshot_events, probe_path, provider_resume_projection,
         reduced_motion_from_environment, remove_session_payload, reply_geometry,
         resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
         terminal_inventory_matches_scope, tui_error_entry, validate_workspace_directory,
@@ -9656,6 +9662,18 @@ mod tests {
                 .modal_selection_mode,
             ModalSelectionMode::Prompt
         );
+    }
+
+    #[test]
+    fn noninteractive_icon_mode_uses_configured_value_or_safe_default() {
+        let configured = global_icon_mode(Ok(Settings {
+            icon_mode: usagi_core::domain::settings::IconMode::Text,
+            ..Settings::default()
+        }));
+        assert_eq!(configured, usagi_core::domain::settings::IconMode::Text);
+
+        let unreadable = global_icon_mode(Err(std::io::Error::other("broken settings")));
+        assert_eq!(unreadable, usagi_core::domain::settings::IconMode::NerdFont);
     }
 
     #[test]
