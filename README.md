@@ -50,10 +50,10 @@ workspace を開くと Home へ移る。最上段の project tab bar には同�
 その project で最後にフォーカスしていた session へ Switch のカーソルが戻る。`+ Open` は左右の余白を
 含めてクリックでき、登録済み workspace の複数選択に加えて `Tab` から既存ディレクトリを直接追加できる。overlay を
 開いている間は別の usagi が追加した workspace も自動で一覧へ反映される。Session Garden では開いている全 project の
-session を巣穴として、Agent のうさぎが池・餌場・木陰を行き来する共有の庭を見渡せる。Garden は pending decision、
-失敗、waiting / interrupted Agent のある区画を Action Center として集約する。右の `Agents` は Garden の
-viewport と独立して全 project の Agent を session ごとにまとめ、1 runtime 1 行で状態を表示する。session 見出しや
-Agent 行をクリックすると、その project の Closeup または該当 Agent tab へ移動する。workspace root の shell は header の
+session を区画として、観測済みの全 Agent を 1 runtime 1 うさぎで表示する。Garden は pending decision、失敗、
+waiting / interrupted Agent のある区画を Action Center として集約する。端末の広さと件数に合わせて大きな区画から
+Agent ごとの card / glyph まで密度を自動調整し、横移動なしで 1 画面へ収める。うさぎをクリックすると、その project の
+Closeup と該当 Agent tab へ移動する。workspace root の shell は header の
 `[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。
 
 ```text

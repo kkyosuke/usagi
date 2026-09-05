@@ -65,8 +65,8 @@ use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::work_run::WorkRunProjection;
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, garden_click_at, garden_fits, garden_scroll_action,
-    home_header_action_at, render_home, render_home_at, right_pane_tab_at, terminal_point_at,
+    Workspace as WorkspaceView, garden_click_at, garden_fits, home_header_action_at, render_home,
+    render_home_at, right_pane_tab_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_deck::{
@@ -808,17 +808,6 @@ fn route_garden_input(
             *pointer_gesture = true;
             GardenClick::Dismiss
         }
-        Key::Left | Key::Right => material
-            .and_then(|material| {
-                garden_scroll_action(
-                    material.height,
-                    material.width,
-                    &material.projection,
-                    material.now,
-                    matches!(key, Key::Right),
-                )
-            })
-            .unwrap_or(GardenClick::Dismiss),
         _ => GardenClick::Dismiss,
     };
     let effects = runtime.apply_event(AppEvent::GardenClick(pointer));
@@ -11063,7 +11052,7 @@ mod tests {
         assert_eq!(rows.len(), 24);
         assert!(
             text.contains("Garden Action Center · click a usagi")
-                && text.contains("any key · wake")
+                && text.contains("any key · return")
         );
         assert!(text.contains("alpha"));
 
@@ -11273,7 +11262,7 @@ mod tests {
         );
         let observed = render_home_material(&material);
         assert!(!observed.iter().any(|row| row.contains("project inactive")));
-        assert!(observed.iter().any(|row| row.contains("2 plots")));
+        assert!(observed.iter().any(|row| row.contains("2 sessions")));
         assert!(observed.iter().any(|row| row.contains("1 usagi")));
         assert!(observed.iter().any(|row| row.contains("-.-")));
         assert!(observed.iter().any(|row| row.contains("completed")));
@@ -11281,7 +11270,7 @@ mod tests {
     }
 
     #[test]
-    fn garden_arrow_scrolls_one_drawn_column_without_waking_home() {
+    fn garden_arrow_wakes_home_without_reaching_the_surface_behind_it() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
@@ -11335,8 +11324,7 @@ mod tests {
             ),
             Some(GardenInputRoute::Local(Vec::new())),
         );
-        assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
-        assert_eq!(runtime.state().garden_scroll(), 1);
+        assert_eq!(runtime.state().overlay(), None);
     }
 
     #[test]

@@ -26,7 +26,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [session garden](#session-garden)
   - [Garden Action Center](#garden-action-center)
-  - [Agent panel](#agent-panel)
+  - [responsive layout](#responsive-layout)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
   - [daemon health indicator](#daemon-health-indicator)
@@ -1107,8 +1107,8 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 
 ## session garden
 
-session を庭の巣穴、その session に属する Agent runtime を庭を歩くうさぎとして眺める screen saver である。
-Home の一時的な全幅レイヤーで、開いている project tab 全件の session を tab 順に横長の仮想世界へ置く。active project は daemon 権威の
+session を庭の巣穴、その session に属する Agent runtime をうさぎとして眺める screen saver である。
+Home の一時的な全幅レイヤーで、開いている project tab 全件の session と観測済み Agent を 1 画面へ置く。active project は daemon 権威の
 lifecycle・最新の coherent Agent inventory・controller が runtime ごとに保持する Agent phase を写す。inactive project は
 session / lifecycle を最後に準備または active だった daemon snapshot の cache として保持し、Agent membership だけは
 [cross-project 観測](#inactive-project-の-agent-観測)で daemon から読み直してうさぎを描く。inactive controller は
@@ -1116,17 +1116,9 @@ resident にせず、観測できていない membership を推測もしない�
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
-Garden 本体は左、`Agents` panel は右に分ける。panel は端末幅の 3 分の 1 を基準に 24〜36 桁を使い、
-左の Garden は残りの幅を使う。左領域が 80 桁 × 18 行以上（通常の panel 幅では端末全体が 120 桁 × 18 行以上）なら、
-横方向に広い仮想世界を描く。session 順に 96 cell の地域を割り当て、立札と巣穴を home にし、その周囲へ池・餌場・
-木陰と小道を置く。viewport より広い分は footer の `← Pan` / `Pan →` button または `←` / `→` key で 16 cell ずつ
-camera を動かす。footer は現在見えている world cell 範囲と全幅を示し、最後の project を含む全 session の home へ
-Garden 内から到達できる。pan button は左右 1 cell の padding を含む描画範囲全体を click target にし、左右端の
-無効な方向を押しても Garden を閉じない。
-
-左領域がこの寸法に満たないが Garden 全体の最小寸法を満たす端末では、固定 plot を compact fallback として描く。
-左領域の縦方向へ収まる数を 1 列として tab 順に上から下、次に右へ並べ、`← Scroll` / `Scroll →` で 1 plot 列ずつ
-動かす。先頭 plot は左端へ固定し、狭い端末でも一覧性と click target を失わない。
+Garden は header と footer を 1 つずつ持つ固定 viewport で、横移動を持たない。全 session の区画と全 Agent のうさぎが
+同時に収まるよう、端末寸法と件数から表示密度を自動選択する。専用の Agent panel は置かず、同じ Agent を一覧と庭へ
+重複表示しない。情報量が多いときも `more` や移動操作へ逃がさず、うさぎそのものを小さくして 1 画面へ残す。
 
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
 自動で開く。
@@ -1134,7 +1126,7 @@ Garden 内から到達できる。pan button は左右 1 cell の padding を含
 ### Garden Action Center
 
 Garden は独立した通知画面を開かず、区画そのものを Action Center として使う。header は session 数と
-うさぎの数に加えて、対応が必要な session 数を `N need attention` で表示する。対象が無ければ
+うさぎの数に加えて、対応が必要な session 数を `1 needs attention` / `N need attention` で表示する。対象が無ければ
 `all clear` と表示する。1 session に pending decision と waiting Agent が同時にあっても 1 件として数え、
 同じ対応先を症状の数だけ重複計上しない。
 
@@ -1144,40 +1136,34 @@ Garden は独立した通知画面を開かず、区画そのものを Action Ce
 | session lifecycle または dispatch の failure | failure pose / `failed` status を保ち、header の attention 件数へ加える |
 | `waiting` / `interrupted` Agent | 既存のうさぎの pose と status を保ち、header の attention 件数へ加える |
 
-区画、うさぎ、`Agents` panel の session 見出しまたは Agent 行の click は該当 project / session の Closeup へ移動する。
-Agent 行からは対応する Agent tab まで選択する。Action Center は
+区画またはうさぎの click は該当 project / session の Closeup へ移動する。
+うさぎからは対応する Agent tab まで選択する。Action Center は
 別の route、modal、永続 unread store を持たず、daemon / controller の現在の projection から毎 frame 導出する。
 inactive project の pending decision は resident controller がなく観測していないため 0 件と断定せず、attention
 件数にも加えない。inactive project で観測できる Agent membership と cached lifecycle だけを従来どおり使う。
 
-### Agent panel
+### responsive layout
 
-右 panel は左の Garden viewport と独立して、開いている全 project の全 session を project tab / session 順で投影する。
-session label を group 見出しとして 1 行置き、観測済みの Agent runtime をその下へ 1 runtime 1 行で並べる。Agent 行は
-短縮した stable runtime ID、phase glyph、`waiting` / `running` / `ready` / `interrupted` / `sleeping` / `idle` /
-`completed` の明示的な状態を持つ。1 Agent の session では daemon の terminal dispatch status を優先し、`starting` /
-`completed` / `stopped` / `failed` と stale な coarse phase を上書きする。縦幅に収まらない行は末尾の `+N more rows` に畳む。
+全 session が収まり、各 session の Agent が 3 体以下なら、session 名・状態・大きなうさぎ・草地を持つ 28 桁 × 8 行の
+区画を行優先で中央へ並べる。それ以外は 1 Agent を 1 項目へ平坦化し、まず 14 桁 × 2 行の card、次に状態 glyph・`兎`・
+session 名を持つ 8 桁 × 1 行の line、最後に 2 桁 × 1 行の `兎` glyph の順で、その frame に全 Agent が収まる最も読みやすい密度を選ぶ。card は
+session 名、同じ session 内の何体目か、状態 glyph、短い状態語を持つ。Agent がいない session も安全な session summary
+の項目として残すが、最終 glyph 容量を超える異常な件数では Agent のうさぎを優先する。
 
-session 見出しの click はその session の Closeup、Agent 行の click は stable `AgentRuntimeId` が一致する Agent tab へ移動する。
-inactive project の行も同じ target を持ち、project を activate / restore してから runtime ID を照合する。restore 中に Agent が
-閉じた場合は session の Closeup へ安全に留まり、並び位置が同じ別 Agent を選ばない。
-
-Agent がいない session は group を消さず、lifecycle、pending decision、PR merge、dispatch status から導く従来の安全な
-session summary を 1 行置く。inactive project をまだ観測していない場合は `Status is unavailable.` とし、状態を推測しない。
-panel は Garden と同じ safe projection のみを使い、raw error、prompt、terminal output、provider-native ID を受け取らない。
+どの密度でも観測済み Agent は 1 runtime 1 うさぎ・1 hitbox であり、省略数には畳まない。session lifecycle や dispatch が
+`starting` / `completed` / `stopped` / `failed` でも runtime identity は失わず、姿と状態だけを変える。inactive project の
+項目も同じ target を持ち、project を activate / restore してから stable `AgentRuntimeId` を照合する。restore 中に Agent が
+閉じた場合は session の Closeup へ安全に留まり、並び位置が同じ別 Agent を選ばない。renderer は raw error、prompt、
+terminal output、provider-native ID を受け取らない。
 
 ### 区画とうさぎ
 
-1 巣穴は 1 session、1 うさぎは 1 Agent runtime である。巣穴は session の home であって囲いではなく、うさぎは同じ地域の
-池・餌場・木陰まで左右・上下に移動して戻る。project が複数なら立札の先頭へ `project /` を置き、その後を
-`role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は立札・巣穴とその近くの pose、Agent
-phase は各うさぎの pose と巣穴の状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の巣穴を
-描く。inactive project も観測できた `Available` の session は同じ規則で描き、観測していない間（daemon が答える前・
-daemon が居ない・観測できる project 数の上限を超えた分）は `no agents` と断定せず `project inactive` と表示する。
-遷移中または失敗した cached lifecycle は `cached · creating` / `cached · deleting` / `cached · failed` と表示する。
-cached lifecycle は live の進行状況ではないため、Agent を観測できていてもうさぎを描かず、animation させない。
-spacious world は session ごとに注目順の最大 6 羽を描き、それより後ろの runtime も巣穴の状態内訳には残す。compact
-fallback は固定幅のため最大 3 羽を並べる。
+1 区画は 1 session、1 うさぎは 1 Agent runtime である。project が複数なら session label の先頭へ `project /` を置く。
+session lifecycle は区画と各うさぎの姿、Agent phase は各うさぎの姿と状態へ投影する。利用可能な session に runtime が
+無ければ `no agents`、inactive project をまだ観測していなければ `project inactive` と表示する。遷移中または失敗した
+cached lifecycle は `cached · creating` / `cached · deleting` / `cached · failed` と明示する。Agent membership を観測済みなら
+cached lifecycle にかかわらず全 runtime をうさぎとして保ち、lifecycle は各うさぎの `starting` / `closing` / `failed` の
+姿へ反映する。
 
 **どの runtime が居るかは最新の coherent Agent inventory が決める**。Closeup の tab strip と同じ observation を
 membership の権威にするので、庭のうさぎは常に「開ける tab を持つ Agent」と一致する。inventory が
@@ -1195,31 +1181,27 @@ dispatch status も区画へ重ねる。active project は `session list`、inac
 `AgentWorkspaceObservation.session_statuses` を使い、どちらも全 Agent を
 `running > starting > failed > idle > exited` の共通順位で
 決定的に集約する。record の挿入順や「current run がある最初の1件」で結果を変えない。`starting` / `idle` /
-`exited` / `failed` は inventory の粗い `live → running` より強く、区画全体を calm / stopped / failed の静止 pose に
-する。この pose は個別 runtime を表さないため、うさぎ単位の animation と hitbox を置かない。通常動作は絵を見れば
-分かるため `starting` / `idle` / `stopped` の action caption は重ねず、見逃せない `failed` だけを文字でも表示する。
-dispatch が `running` の間だけは runtime-local の `waiting` / `interrupted` pose と各うさぎの hitbox を保ち、より粗い
-running pose で潰さない。
+`exited` / `failed` は inventory の粗い `live → running` より強く、全うさぎの姿と状態を starting / calm / stopped /
+failed にする。ただし観測済み runtime の数と stable identity は変えず、各うさぎの hitbox も保つ。dispatch が `running`
+の間は runtime-local の `waiting` / `interrupted` pose をより粗い running pose で潰さない。
 
 複数 runtime は注目順（`waiting → running → ready → interrupted → sleep → idle → done`）に並べ、同 phase の
 tie-break を stable `AgentRuntimeId` 順にする。この順序と状態内訳の語彙は
 [Session sidebar rows](#session-sidebar-rows) の agent 行と共有する（同じ session の Agent が
-2 つの surface で違う数・違う順に見えることが無いよう、投影も 1 つに束ねる）。描画上限以降は末尾から畳む。
-compact fallback は畳んだ runtime も phase glyph に残し、右の Agent panel は描画できる高さまで runtime を 1 行ずつ示す。
-うさぎの上や巣穴には pose と重複する `walking` / `4 wait · 1 run` のような action caption を表示しない。
+2 つの surface で違う数・違う順に見えることが無いよう、投影も 1 つに束ねる）。Garden 内では描画上限を設けず、
+responsive layout が全 runtime をより小さい表現へ切り替える。うさぎの上や区画には pose と重複する `walking` のような
+action caption を表示しない。
 controller が runtime の `Ended` / `Exited` を観測した runtime（tab は残っており、inventory も保持している）は
 瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さないため描かない。
-巣穴の幅と hitbox は羽数で変えず、うさぎ 1 羽ぶんの hitbox は実際の移動先へ別に置く。session の選択状態は Garden に装飾せず、
+詳細区画の幅と hitbox は羽数で変えず、うさぎ 1 羽ぶんの hitbox は実際の描画位置へ別に置く。dense 表示では card / line /
+glyph の全範囲をそのうさぎの hitbox にする。session の選択状態は Garden に装飾せず、
 すべて同じ dim の立札で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
-spacious world の `Running` / `Ready` / `Absent` は 100 tick の生活 cycle を持つ。`Sleeping` は木陰で静止する。
-生活 cycle は巣穴から池へ歩く → 水を飲む →
-餌場へ歩く → carrot を食べる → 木陰へ歩く → 眠る → 巣穴へ戻る、の順で移動し、帰路では左向き、往路では右向きの
-sprite を使う。各 runtime の stable `AgentRuntimeId` から cycle の開始位置をずらすため、同じ phase のうさぎも一斉に
-同じ場所へ移動しない。compact fallback の `Running` は従来どおり hop・bound・sniff・dig・look の 5 動作を使う。
-うさぎ本体の色は ID から 5 色の palette の 1 色を選ぶ。
-同じ ID・tick・size・camera offset なら同じ位置・色・pose になり、refresh で見た目が飛ぶことはない。
+詳細区画の `Running` は hop・bound・sniff・dig・look の 5 動作を繰り返す。各 runtime の stable `AgentRuntimeId` から
+動作順と開始位置をずらすため、同じ phase のうさぎも一斉に同じ動きをしない。うさぎ本体の色は ID から 5 色の palette の
+1 色を選び、同じ ID・tick・size なら同じ色と pose になって refresh で見た目が飛ばない。dense 表示ではうさぎを静止させ、
+背景だけをゆっくり動かして大量の Agent がいる画面のちらつきを抑える。
 `Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
 土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は相対時刻ラベルの分単位の壁時計から
 分離し、shell の monotonic な 16 ms logical clock を 8 tick ずつ保持する約 8 fps の Garden clock で進める。同じ pose を
@@ -1228,11 +1210,10 @@ key に入れないため、通常 Home は Garden のために毎秒再構築�
 composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
 うさぎ・空・草の全 pose を静止姿勢に固定する。
 
-spacious world の背景は workspace 名と world 座標から決定的に配置した `.` / `*` / `v`、session の立札と巣穴、
-`~` の池、`Y` の餌場、`&` の木、小道で構成する。compact fallback は左の庭領域へ続く草地と薄い土の 2 層を使う。
+背景は workspace 名から決定的に配置した `.` / `*` の空と、詳細区画の草地・薄い土の 2 層で構成する。
 星は同じ cell で明滅し、草は同じ根元で小さく向きを変えるため、Agent の稼働状態を偽らず背景だけに ambient motion を足す。
 うさぎの各行は pose 全体で耳と顔の中心軸を揃え、左向き・右向き・各 lifecycle を切り替えても耳だけ横へずれない。
-compact fallback は `Ready` に足元の草、`Done` に `z`、`Failed` に枯れ草を小さく添える。通常動作は action caption を
+詳細区画は `Ready` に足元の草、`Done` に `z`、`Failed` に枯れ草を小さく添える。通常動作は action caption を
 反復せず pose・顔・phase glyph で伝える。footer は左にうさぎの click 操作、右に任意キーで起こす操作を分けて表示する。
 
 ### inactive project の Agent 観測
@@ -1256,8 +1237,9 @@ active project だけである。
 
 **session と lifecycle は cache のままである**。inactive project の session 一覧・lifecycle・failure summary は、
 その tab が最後に active だったときの daemon snapshot で、そこで新しく生まれた session は tab を開くまで区画にならない。
-だから cached lifecycle が `Available` でない区画は Agent を観測できていてもうさぎを描かず、`cached · creating` などの
-静止表示にとどめる（[区画とうさぎ](#区画とうさぎ)）。
+cached lifecycle が `Available` でなくても、Agent membership を観測できていれば runtime ごとのうさぎを描き、各うさぎを
+`starting` / `closing` / `failed` の姿にする。membership が未観測なら `cached · creating` などの session summary だけを
+表示する（[区画とうさぎ](#区画とうさぎ)）。
 
 ### 自動表示
 
@@ -1286,9 +1268,7 @@ notice に表示するため、見えない overlay が入力だけを所有す�
 
 | 入力 | 挙動 |
 |---|---|
-| `←` / `→` | spacious world は camera を16 cell、compact fallback は1 plot列ずつ横へ動かす。左右端では現在位置に留まり、Gardenを閉じない |
-| footer の `← Pan` / `Pan →` または `← Scroll` / `Scroll →` を click | buttonの左右paddingを含む範囲で同じ単位だけ横へ動かす。無効な方向は現在位置に留まる |
-| 上記以外の key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
+| key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。矢印 key も含め、背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
 | active project のうさぎを single click | 移動中の hitbox に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
 | inactive project の巣穴・うさぎを click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く。押した相手が[観測されたうさぎ](#inactive-project-の-agent-観測)でも Agent tab の選択までは運ばない（その project の controller はまだ存在しない） |
@@ -1296,12 +1276,11 @@ notice に表示するため、見えない overlay が入力だけを所有す�
 | 巣穴・うさぎの外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
 
 click は frame を描いたのと同じ layout 関数が返す rectangle に当てて解決する。rectangle は巣穴に stable
-`WorkspaceId` / `SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛する。うさぎの rectangle は現在の world 座標を
-camera へ射影して毎 frame 作り、他のうさぎや巣穴より手前へ描いた順を click 優先順にも使う。
+`WorkspaceId` / `SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛する。詳細区画ではうさぎの rectangle を
+session 区画より先に解決し、dense 表示では項目全体をそのうさぎへ束縛する。
 controller は画面座標から session 順や羽の順を再計算しないため、CJK label・terminal resize・表示上限で click target が
-ずれない。session の lifecycle pose（`creating` / `deleting` / `failed`）は agent 1 体に対応しないため、
-`AgentRuntimeId` を束縛せず session の訪問だけになる。PR merge 時は spacious world の既存うさぎが runtime identity を
-保ったまま祝う。compact fallback の session-wide celebration は従来どおり session の訪問だけになる。
+ずれない。Agent が観測済みなら session lifecycle や PR merge の表示中も runtime identity を保つ。Agent がいない session の
+lifecycle pose と PR merge 表示だけは `AgentRuntimeId` を束縛せず、session の訪問になる。
 
 tab の選択も stable identity だけで引く。押されたうさぎの runtime が持つ terminal incarnation（live tab）、
 または会話 lineage（中断 tab）と一致する tab を選び、一致する tab が無ければ（押した瞬間に終了した、pane を
