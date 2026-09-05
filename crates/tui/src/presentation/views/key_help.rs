@@ -178,6 +178,7 @@ impl Context {
                 (":", "Overview commands"),
                 ("?", "keyboard shortcuts"),
                 ("Ctrl-X", "safe-remove session"),
+                ("Ctrl-Shift-X", "purge integrity orphan"),
                 ("Ctrl-Q", "leave / quit prompt"),
             ],
             Self::Closeup => &[

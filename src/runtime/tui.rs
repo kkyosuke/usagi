@@ -14,6 +14,7 @@ use chrono::Utc;
 use crossterm::cursor;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -122,6 +123,20 @@ use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 /// Composition adapter for Overview's daemon-owned session lifecycle commands.
 #[derive(Default)]
 struct DaemonSessionCommandPort;
+
+fn remove_session_payload(
+    name: &str,
+    force: bool,
+    force_delete_branch: bool,
+    purge_orphan: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "force": force,
+        "force_delete_branch": force_delete_branch,
+        "purge_orphan": purge_orphan,
+    })
+}
 
 /// Production bridge for the controller's durable user-decision effects.
 /// The daemon remains the authority; this adapter only converts its safe
@@ -3651,13 +3666,10 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 name,
                 force,
                 force_delete_branch,
+                purge_orphan,
             } => (
                 SessionAction::Remove,
-                serde_json::json!({
-                    "name": name,
-                    "force": force,
-                    "force_delete_branch": force_delete_branch,
-                }),
+                remove_session_payload(&name, force, force_delete_branch, purge_orphan),
             ),
         };
         let operation_id = usagi_core::domain::id::OperationId::new().to_string();
@@ -4105,6 +4117,7 @@ fn classify_terminal_input(
             GlobalControlChord::CtrlQ => Key::CtrlQ,
             GlobalControlChord::CtrlD => Key::CtrlD,
             GlobalControlChord::CtrlX => Key::CtrlX,
+            GlobalControlChord::CtrlShiftX => Key::CtrlShiftX,
             GlobalControlChord::Help => Key::Help,
         }),
         LiveInputOutput::Swallowed => None,
@@ -4643,6 +4656,9 @@ fn run_in_terminal(
     if let Err(error) = execute!(
         setup,
         EnterAlternateScreen,
+        // Ask supporting terminals to preserve modifier identity so the
+        // destructive Ctrl-Shift-X chord is distinguishable from safe Ctrl-X.
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         EnableMouseCapture,
         // Capture pastes as a single `Event::Paste` so a multi-line paste reaches
         // the focused pane as one block instead of a key stream whose embedded
@@ -4655,6 +4671,7 @@ fn run_in_terminal(
             setup,
             cursor::Show,
             terminal::EnableLineWrap,
+            PopKeyboardEnhancementFlags,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -4681,6 +4698,7 @@ fn run_in_terminal(
         teardown,
         cursor::Show,
         terminal::EnableLineWrap,
+        PopKeyboardEnhancementFlags,
         DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
@@ -5567,10 +5585,11 @@ mod tests {
         doctor_reply_body, exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
         pr_snapshot_events, probe_path, provider_resume_projection,
-        reduced_motion_from_environment, reply_geometry, resolve_workspace_path, session_cadence,
-        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
-        validate_workspace_directory, version_detail, version_result_from_observation,
-        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
+        reduced_motion_from_environment, remove_session_payload, reply_geometry,
+        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
+        version_result_from_observation, work_run_control_client_error,
+        workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -6060,6 +6079,38 @@ mod tests {
             control: true,
             ..Modifiers::default()
         }
+    }
+
+    /// The distinguishable Control+Shift modifier set reported by enhanced
+    /// keyboard protocols.
+    fn control_shift() -> Modifiers {
+        Modifiers {
+            control: true,
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    #[test]
+    fn orphan_purge_payload_keeps_both_destructive_acknowledgements() {
+        assert_eq!(
+            remove_session_payload("run", true, true, true),
+            json!({
+                "name": "run",
+                "force": true,
+                "force_delete_branch": true,
+                "purge_orphan": true,
+            })
+        );
+        assert_eq!(
+            remove_session_payload("safe", false, false, false),
+            json!({
+                "name": "safe",
+                "force": false,
+                "force_delete_branch": false,
+                "purge_orphan": false,
+            })
+        );
     }
 
     /// The serialized checkpoint a daemon at `rows`×`cols` produces after
@@ -8510,7 +8561,7 @@ mod tests {
     }
 
     #[test]
-    fn shifted_x_is_inert_and_ctrl_x_requests_safe_session_removal() {
+    fn shifted_x_is_inert_ctrl_x_is_safe_and_ctrl_shift_x_purges_an_orphan() {
         use crossterm::event::{
             KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
         };
@@ -8550,6 +8601,43 @@ mod tests {
                 session,
                 force: false,
                 force_delete_branch: false,
+                purge_orphan: false,
+            }]
+        );
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(
+                        usagi_core::domain::session_lifecycle::FailureStage::Integrity,
+                    ),
+                    failure_summary: Some("orphan session".to_owned()),
+                },
+            )]))),
+        );
+        let ctrl_shift_x = classify_terminal_input(
+            &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
+            Duration::ZERO,
+            &LiveInput::Key(crate::tui_input::adapt_key(CrosstermKeyEvent::new(
+                CrosstermKeyCode::Char('x'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ))),
+        )
+        .expect("Ctrl-Shift-X is a management key");
+        assert_eq!(ctrl_shift_x, Key::CtrlShiftX);
+        let event = usagi_tui::presentation::app_event_from_key(ctrl_shift_x)
+            .expect("Ctrl-Shift-X reaches the Home reducer");
+        assert_eq!(
+            update(&mut state, event),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+                force_delete_branch: true,
+                purge_orphan: true,
             }]
         );
     }
@@ -8565,6 +8653,10 @@ mod tests {
             (LiveInput::Raw(vec![4]), Key::CtrlD),
             (live_key(KeyCode::Char('x'), control()), Key::CtrlX),
             (LiveInput::Raw(vec![24]), Key::CtrlX),
+            (
+                live_key(KeyCode::Char('X'), control_shift()),
+                Key::CtrlShiftX,
+            ),
             (live_key(KeyCode::Char('/'), control()), Key::Help),
             (LiveInput::Raw(vec![31]), Key::Help),
         ];

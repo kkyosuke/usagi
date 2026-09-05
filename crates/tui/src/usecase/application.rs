@@ -447,6 +447,9 @@ pub enum Key {
     /// Ctrl-X removes or dismisses the selected management object. A focused
     /// live terminal receives the original control byte instead.
     CtrlX,
+    /// Ctrl-Shift-X explicitly purges a selected integrity-orphan session.
+    /// A focused live terminal receives the original control byte instead.
+    CtrlShiftX,
     /// Open contextual keyboard help (`Ctrl-?`, with `Ctrl-/` as the portable
     /// terminal alias). The presentation shell owns this globally so the chord
     /// never reaches a focused live terminal or a covered surface.
@@ -702,6 +705,7 @@ mod tests {
             Key::Quit,
             Key::CtrlD,
             Key::CtrlX,
+            Key::CtrlShiftX,
             Key::Help,
             Key::Char('o'),
             Key::Click { column: 3, row: 4 },
