@@ -9923,6 +9923,7 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let initial = Settings {
             theme: Theme::Dark,
+            icon_mode: usagi_core::domain::settings::IconMode::Text,
             modal_selection_mode: ModalSelectionMode::Prompt,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             terminal_max_concurrent:
@@ -10201,7 +10202,7 @@ mod tests {
             cwd: std::path::PathBuf::from("/tmp/demo"),
             last_modified: Utc::now(),
             has_notes: true,
-            pr_summary: None,
+            pr_count: 0,
             removing: false,
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,

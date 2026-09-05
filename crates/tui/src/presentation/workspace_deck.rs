@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
 use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
+use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::workspace::Workspace;
 
 use crate::presentation::theme::{Role, Style};
@@ -192,6 +193,8 @@ pub struct WorkspaceDeck {
     notice: Option<String>,
     pending_garden_visit: Option<(PathBuf, GardenVisit)>,
     pending_closeup_path: Option<PathBuf>,
+    /// Global terminal icon preference used by cached transition frames.
+    icon_mode: IconMode,
 }
 
 /// Stable Garden target carried while the process replaces one workspace
@@ -214,7 +217,19 @@ impl WorkspaceDeck {
             notice: None,
             pending_garden_visit: None,
             pending_closeup_path: None,
+            icon_mode: IconMode::default(),
         }
+    }
+
+    /// Keep cached project-switch frames in the same icon mode as the active
+    /// workspace frame.
+    pub fn set_icon_mode(&mut self, icon_mode: IconMode) {
+        self.icon_mode = icon_mode;
+    }
+
+    #[must_use]
+    pub const fn icon_mode(&self) -> IconMode {
+        self.icon_mode
     }
 
     /// Start a deck from an ordered, non-empty group of prepared snapshots.

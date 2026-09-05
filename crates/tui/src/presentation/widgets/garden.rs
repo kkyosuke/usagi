@@ -283,6 +283,32 @@ fn garden_viewport(
     }
 }
 
+/// Animation, viewport, and chrome options that vary between Garden callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GardenRenderOptions<'a> {
+    requested_scroll: usize,
+    tick: u64,
+    reduced_motion: bool,
+    agent_heading: &'a str,
+}
+
+impl<'a> GardenRenderOptions<'a> {
+    #[must_use]
+    pub const fn new(
+        requested_scroll: usize,
+        tick: u64,
+        reduced_motion: bool,
+        agent_heading: &'a str,
+    ) -> Self {
+        Self {
+            requested_scroll,
+            tick,
+            reduced_motion,
+            agent_heading,
+        }
+    }
+}
+
 /// Garden を描画する。最小サイズに満たない場合は `None` を返す。
 #[must_use]
 pub fn render(
@@ -315,29 +341,45 @@ pub fn render_scrolled(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
+    render_scrolled_with_options(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        GardenRenderOptions::new(requested_scroll, tick, reduced_motion, "Agents"),
+    )
+}
+
+/// Garden を指定した plot 列と Agent panel 見出しで描画する。
+#[must_use]
+pub fn render_scrolled_with_options(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    options: GardenRenderOptions<'_>,
+) -> Option<GardenFrame> {
     let layout = garden_layout(height, width)?;
     if let Some(mut frame) = garden_world::render(
         height,
         layout.garden_width,
         workspace_name,
         sessions,
-        requested_scroll,
-        tick,
-        reduced_motion,
+        options.requested_scroll,
+        options.tick,
+        options.reduced_motion,
     ) {
-        frame.panel_hitboxes =
-            attach_world_agent_panel(&mut frame.rows, width, layout, workspace_name, sessions);
+        frame.panel_hitboxes = attach_world_agent_panel(
+            &mut frame.rows,
+            width,
+            layout,
+            workspace_name,
+            sessions,
+            options.agent_heading,
+        );
         return Some(frame);
     }
-    render_compact_scrolled(
-        height,
-        width,
-        workspace_name,
-        sessions,
-        requested_scroll,
-        tick,
-        reduced_motion,
-    )
+    render_compact_scrolled(height, width, workspace_name, sessions, options)
 }
 
 fn attach_world_agent_panel(
@@ -346,6 +388,7 @@ fn attach_world_agent_panel(
     layout: GardenLayout,
     workspace_name: &str,
     sessions: &[GardenSession],
+    agent_heading: &str,
 ) -> Vec<GardenHitbox> {
     let footer_start = rows.len().saturating_sub(FOOTER_ROWS);
     let body_height = footer_start.saturating_sub(1);
@@ -355,6 +398,7 @@ fn attach_world_agent_panel(
         sessions,
         layout.garden_width + AGENT_PANEL_SEPARATOR_WIDTH,
         1,
+        agent_heading,
     );
     rows[0] = header_line(width, workspace_name, sessions);
     for (row, panel_row) in rows[1..footer_start].iter_mut().zip(panel.rows) {
@@ -375,9 +419,7 @@ fn render_compact_scrolled(
     width: usize,
     workspace_name: &str,
     sessions: &[GardenSession],
-    requested_scroll: usize,
-    tick: u64,
-    reduced_motion: bool,
+    options: GardenRenderOptions<'_>,
 ) -> Option<GardenFrame> {
     let layout = garden_layout(height, width)?;
     let GardenViewport {
@@ -389,15 +431,12 @@ fn render_compact_scrolled(
         used_columns,
         grid_top,
         row_left,
-    } = garden_viewport(layout, sessions.len(), requested_scroll);
+    } = garden_viewport(layout, sessions.len(), options.requested_scroll);
     let visible_sessions = &sessions[visible_start..visible_end];
     let visible = visible_sessions.len();
     let hidden_sessions = sessions.len().saturating_sub(visible);
 
-    let mut rows = Vec::with_capacity(height);
-    rows.push(header_line(width, workspace_name, sessions));
-    rows.push(sky_line(width, workspace_name, tick, reduced_motion));
-    rows.push(" ".repeat(width));
+    let mut rows = compact_initial_rows(height, width, workspace_name, sessions, options);
 
     // 使う plot 行数だけを縦中央へ寄せ、庭の下側だけが大きく空くのを避ける。
     rows.resize_with(grid_top, || " ".repeat(layout.garden_width));
@@ -405,7 +444,7 @@ fn render_compact_scrolled(
     let mut hitboxes = Vec::with_capacity(visible * (1 + MAX_VISIBLE_AGENTS));
     let plots = visible_sessions
         .iter()
-        .map(|session| plot(session, tick, reduced_motion))
+        .map(|session| plot(session, options.tick, options.reduced_motion))
         .collect::<Vec<_>>();
     for plot_row in 0..used_rows {
         for local_row in 0..PLOT_CONTENT_ROWS {
@@ -422,7 +461,7 @@ fn render_compact_scrolled(
         }
         // 地面は plot の下だけでなく庭の幅いっぱいに敷く。うさぎの数で地面が途切れると
         // 中央の島のように見えるため。
-        rows.extend(ground_rows(layout, tick, reduced_motion));
+        rows.extend(ground_rows(layout, options.tick, options.reduced_motion));
         for column in 0..used_columns {
             let index = column * layout.plot_rows + plot_row;
             let Some((session, plot)) = visible_sessions.get(index).zip(plots.get(index)) else {
@@ -468,6 +507,7 @@ fn render_compact_scrolled(
         layout,
         sessions,
         HEADER_ROWS,
+        options.agent_heading,
     );
     let (scroll_footer, scroll_hitboxes) = scroll_footer(
         width,
@@ -492,12 +532,32 @@ fn render_compact_scrolled(
     })
 }
 
+fn compact_initial_rows(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    options: GardenRenderOptions<'_>,
+) -> Vec<String> {
+    let mut rows = Vec::with_capacity(height);
+    rows.push(header_line(width, workspace_name, sessions));
+    rows.push(sky_line(
+        width,
+        workspace_name,
+        options.tick,
+        options.reduced_motion,
+    ));
+    rows.push(" ".repeat(width));
+    rows
+}
+
 fn attach_agent_panel(
     body: &mut [String],
     width: usize,
     layout: GardenLayout,
     sessions: &[GardenSession],
     first_row: usize,
+    agent_heading: &str,
 ) -> Vec<GardenHitbox> {
     let panel = agent_panel(
         layout.garden_height,
@@ -505,6 +565,7 @@ fn attach_agent_panel(
         sessions,
         layout.garden_width + AGENT_PANEL_SEPARATOR_WIDTH,
         first_row,
+        agent_heading,
     );
     for (row, panel_row) in body.iter_mut().zip(panel.rows) {
         attach_panel_row(row, width, layout, &panel_row);
@@ -549,6 +610,7 @@ fn agent_panel(
     sessions: &[GardenSession],
     column: usize,
     first_row: usize,
+    heading: &str,
 ) -> AgentPanel {
     let mut all_rows = Vec::new();
     for session in sessions {
@@ -581,7 +643,7 @@ fn agent_panel(
         Role::Feature
             .style()
             .bold()
-            .paint(&clip_to_width("Agents", width)),
+            .paint(&clip_to_width(heading, width)),
         Style::new().dim().paint(&"─".repeat(width)),
     ];
     let available = height.saturating_sub(rows.len());
@@ -1466,9 +1528,7 @@ mod tests {
             width,
             workspace_name,
             sessions,
-            0,
-            tick,
-            reduced_motion,
+            super::GardenRenderOptions::new(0, tick, reduced_motion, "Agents"),
         )
     }
 
@@ -1486,9 +1546,7 @@ mod tests {
             width,
             workspace_name,
             sessions,
-            scroll,
-            tick,
-            reduced_motion,
+            super::GardenRenderOptions::new(scroll, tick, reduced_motion, "Agents"),
         )
     }
 
@@ -1876,7 +1934,9 @@ mod tests {
 
     #[test]
     fn agent_panel_reports_empty_and_overflow_states() {
-        let empty = super::agent_panel(8, 24, &[], 0, 0).rows.join("\n");
+        let empty = super::agent_panel(8, 24, &[], 0, 0, "Agents")
+            .rows
+            .join("\n");
         assert!(empty.contains("No sessions in open projects"));
 
         let sessions = (0..4)
@@ -1889,7 +1949,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let panel = super::agent_panel(8, 24, &sessions, 30, 1);
+        let panel = super::agent_panel(8, 24, &sessions, 30, 1, "Agents");
         let overflow = plain_rows(&panel.rows).join("\n");
         assert!(overflow.contains("session-0"));
         assert!(overflow.contains("session-1"));
