@@ -244,6 +244,7 @@ mod tests {
             theme: crate::domain::settings::Theme::Dark,
             modal_selection_mode: crate::domain::settings::ModalSelectionMode::Prompt,
             pr_auto_open: crate::domain::settings::PrAutoOpen::Always,
+            terminal_max_concurrent: crate::domain::settings::TerminalConcurrencyLimit::default(),
             default_model: crate::domain::settings::DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: false,

@@ -411,13 +411,14 @@ fn open_runtime_state(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
     children: &Arc<SpawnedChildren>,
+    terminal_limit: usize,
 ) -> std::io::Result<ShardedRuntimeState> {
     let state = ShardedRuntimeState::new(
         generation,
         GenerationRole::Active,
         ResourceAllocator::new(
             AllocatorFile::new(data_dir)?,
-            CapacityPolicy::new(AGENT_RUNTIME_LIMIT, GENERIC_TERMINAL_LIMIT),
+            CapacityPolicy::new(AGENT_RUNTIME_LIMIT, terminal_limit),
         ),
         Box::new(ShardArchiveFiles::new(data_dir)?),
         Box::new(ObservedChildren(Arc::clone(children))),
@@ -429,6 +430,19 @@ fn open_runtime_state(
         Some(registered) => state.with_registered_generations(registered),
         None => state,
     })
+}
+
+/// Resolve the daemon-generation-wide generic Terminal PTY ceiling.
+///
+/// A malformed settings document must not make the daemon itself unavailable;
+/// Config and doctor still surface that document error, while daemon admission
+/// remains bounded by the compiled default.
+fn terminal_capacity_limit(data_dir: &Path) -> usize {
+    Storage::new(data_dir)
+        .load_settings()
+        .map_or(GENERIC_TERMINAL_LIMIT, |settings| {
+            settings.terminal_max_concurrent.get()
+        })
 }
 
 /// The generations `generations.json` still lists, plus this one.
@@ -3525,6 +3539,11 @@ fn spawn_ipc_server(
     // The children this process observes while spawning them. It is the only proof
     // that a durable record describes a child this generation owns (#562).
     let children = Arc::new(SpawnedChildren::default());
+    // Terminal PTY capacity is global because one daemon owns every workspace
+    // tenant and every retained generation shares the allocator. A malformed
+    // settings file keeps the daemon available under the bounded default and is
+    // already surfaced by `usagi doctor`.
+    let terminal_limit = terminal_capacity_limit(data_dir);
     // Deferred PR detection. The observers submit committed bytes here after
     // releasing the runtime lock, so no scan and no durable write happens inside
     // it (#555).
@@ -3563,6 +3582,7 @@ fn spawn_ipc_server(
         retention.clone(),
         &children,
         hydrate_retained,
+        terminal_limit,
     )?;
     background_workers.push(start_terminal_observer(
         Arc::downgrade(&terminal),
@@ -3592,6 +3612,7 @@ fn spawn_ipc_server(
         agent_concurrency.clone(),
         &children,
         hydrate_retained,
+        terminal_limit,
     )?;
     reconcile_removed_session_agents(&data_dir.join("daemon"), &agent)?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
@@ -3690,11 +3711,11 @@ fn spawn_ipc_server(
     background_workers.push(start_retention_gc_worker(
         Arc::clone(&terminal),
         Arc::clone(&agent),
-        open_runtime_state(data_dir, daemon_generation, &children)?,
+        open_runtime_state(data_dir, daemon_generation, &children, terminal_limit)?,
         Arc::clone(&shutdown),
     )?);
     background_workers.push(start_draining_collection_worker(
-        open_runtime_state(data_dir, daemon_generation, &children)?,
+        open_runtime_state(data_dir, daemon_generation, &children, terminal_limit)?,
         GenerationRegistry::new(
             GenerationRegistryFile::new(data_dir)?,
             DEFAULT_GENERATION_LIMIT,
@@ -4672,8 +4693,9 @@ fn open_agent_runtime(
     concurrency: AgentConcurrencyGauge,
     children: &Arc<SpawnedChildren>,
     hydrate_retained: bool,
+    terminal_limit: usize,
 ) -> std::io::Result<SharedAgentRuntime> {
-    let state = open_runtime_state(data_dir, generation, children)?;
+    let state = open_runtime_state(data_dir, generation, children, terminal_limit)?;
     let snapshot = if hydrate_retained {
         hydrate_runtime_state(&state, "agent runtime")?.agents
     } else {
@@ -4974,15 +4996,16 @@ fn new_terminal_runtime(
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     children: &Arc<SpawnedChildren>,
     hydrate_retained: bool,
+    terminal_limit: usize,
 ) -> std::io::Result<SharedTerminalRuntime> {
-    let state = open_runtime_state(data_dir, generation, children)?;
+    let state = open_runtime_state(data_dir, generation, children, terminal_limit)?;
     let snapshot = if hydrate_retained {
         hydrate_runtime_state(&state, "generic terminal")?.terminals
     } else {
         TerminalStoreSnapshot::default()
     };
     let store = ShardedTerminalStore::new(state);
-    let runtime = GenericTerminalRuntime::from_snapshot_with_retention(
+    let runtime = GenericTerminalRuntime::from_snapshot_with_retention_and_limit(
         generation,
         TrustedLoginShell {
             // The launch cwd is replaced by the authoritative resolved scope, so
@@ -4997,6 +5020,7 @@ fn new_terminal_runtime(
         SharedTerminalScopeResolver(workspaces),
         snapshot,
         retention,
+        terminal_limit,
     )
     .map_err(|_| std::io::Error::other("invalid generic terminal snapshot"))?;
     Ok(Arc::new(Mutex::new(runtime)))
@@ -15433,6 +15457,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn terminal_capacity_uses_the_global_setting_and_falls_back_safely() {
+        let temporary = tempfile::tempdir().unwrap();
+        assert_eq!(
+            terminal_capacity_limit(temporary.path()),
+            GENERIC_TERMINAL_LIMIT
+        );
+
+        let configured =
+            usagi_core::domain::settings::Settings {
+                terminal_max_concurrent:
+                    usagi_core::domain::settings::TerminalConcurrencyLimit::new(128).unwrap(),
+                ..usagi_core::domain::settings::Settings::default()
+            };
+        Storage::new(temporary.path())
+            .save_settings(&configured)
+            .unwrap();
+        assert_eq!(terminal_capacity_limit(temporary.path()), 128);
+
+        std::fs::write(
+            temporary.path().join("settings.json"),
+            br#"{"terminal_max_concurrent":0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            terminal_capacity_limit(temporary.path()),
+            GENERIC_TERMINAL_LIMIT
+        );
+    }
+
     #[derive(Default)]
     struct SupervisorAgentStore;
 
@@ -16905,6 +16959,7 @@ mod tests {
                 usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new(),
                 &children,
                 false,
+                GENERIC_TERMINAL_LIMIT,
             )
             .unwrap(),
             agent: open_agent_runtime(
@@ -16918,6 +16973,7 @@ mod tests {
                 AgentConcurrencyGauge::default(),
                 &children,
                 false,
+                GENERIC_TERMINAL_LIMIT,
             )
             .unwrap(),
             supervisor: Arc::new(Mutex::new(SupervisorRuntime::new(&data.join("daemon")))),
@@ -23514,7 +23570,13 @@ instructions = "{instructions}"
         data_dir: &Path,
         generation: DaemonGeneration,
     ) -> usagi_daemon::usecase::resources::durable::ShardedRuntimeState {
-        open_runtime_state(data_dir, generation, &Arc::new(SpawnedChildren::default())).unwrap()
+        open_runtime_state(
+            data_dir,
+            generation,
+            &Arc::new(SpawnedChildren::default()),
+            GENERIC_TERMINAL_LIMIT,
+        )
+        .unwrap()
     }
 
     /// The shard document one generation wrote, as raw bytes.

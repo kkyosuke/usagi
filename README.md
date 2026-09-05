@@ -251,6 +251,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | 設定 | 内容 |
 |---|---|
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
+| [Terminal PTYs](document/05-daemon.md#capacity-pool) | generic Terminal の同時 PTY 数に対する最後の安全上限。画面メモリは保持中の実セル数で別に制御する |
 | Agent | 新しい Agent pane の既定 CLI |
 | Base branch | workspace で新しい session を作るときの既定 branch |
 | Workflow | 択一の `< classic >`（既定）または `< goal-driven >`。前者は New Conversation、後者は Start Work Run を開き、Goal Composer で目的を一度入力して review-ready PR または明示判断まで継続する固定指示と Goal を root Agent へ渡す |

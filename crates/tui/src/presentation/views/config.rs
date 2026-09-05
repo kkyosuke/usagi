@@ -124,6 +124,7 @@ pub enum Field {
     #[default]
     Theme,
     ModalSelectionMode,
+    TerminalLimit,
     PrAutoOpen,
     Environment,
     DefaultModel,
@@ -266,7 +267,8 @@ impl Config {
         self.field = match self.scope {
             SettingsScope::Global => match self.field {
                 Field::Theme => Field::ModalSelectionMode,
-                Field::ModalSelectionMode => Field::Environment,
+                Field::ModalSelectionMode => Field::TerminalLimit,
+                Field::TerminalLimit => Field::Environment,
                 Field::Environment => Field::DefaultModel,
                 Field::DefaultModel | Field::DefaultBranch => Field::WorkMode,
                 Field::WorkMode => Field::TeamTemplate,
@@ -284,9 +286,11 @@ impl Config {
                 Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::Save,
-                Field::Save | Field::Theme | Field::ModalSelectionMode | Field::PrAutoOpen => {
-                    Field::DefaultModel
-                }
+                Field::Save
+                | Field::Theme
+                | Field::ModalSelectionMode
+                | Field::TerminalLimit
+                | Field::PrAutoOpen => Field::DefaultModel,
             },
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
@@ -304,7 +308,8 @@ impl Config {
             SettingsScope::Global => match self.field {
                 Field::Theme => Field::Save,
                 Field::ModalSelectionMode => Field::Theme,
-                Field::Environment => Field::ModalSelectionMode,
+                Field::TerminalLimit => Field::ModalSelectionMode,
+                Field::Environment => Field::TerminalLimit,
                 Field::DefaultModel | Field::DefaultBranch => Field::Environment,
                 Field::Issue => Field::TeamTemplate,
                 Field::TeamTemplate => Field::WorkMode,
@@ -324,6 +329,7 @@ impl Config {
                 Field::DefaultModel
                 | Field::Theme
                 | Field::ModalSelectionMode
+                | Field::TerminalLimit
                 | Field::PrAutoOpen => Field::Save,
             },
         };
@@ -373,6 +379,13 @@ impl Config {
             ModalSelectionMode::Action => ModalSelectionMode::Prompt,
             ModalSelectionMode::Prompt => ModalSelectionMode::Action,
         };
+        self.notice = None;
+    }
+
+    /// Cycle the global generic Terminal PTY safety ceiling.
+    pub fn cycle_terminal_limit(&mut self, forward: bool) {
+        let limit = &mut self.current_mut().draft.terminal_max_concurrent;
+        *limit = limit.cycle(forward);
         self.notice = None;
     }
 
@@ -495,6 +508,7 @@ impl Config {
         match self.field {
             Field::Theme => self.cycle_theme(forward),
             Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
+            Field::TerminalLimit => self.cycle_terminal_limit(forward),
             Field::PrAutoOpen => self.cycle_pr_auto_open(forward),
             Field::DefaultModel => self.cycle_default_model(),
             Field::DefaultBranch => self.cycle_default_branch(forward),
@@ -959,6 +973,13 @@ fn global_rows(config: &Config) -> Vec<String> {
             modal_selection_mode_name(config.settings().modal_selection_mode),
             config.field() == Field::ModalSelectionMode,
             config.settings().modal_selection_mode != config.current().saved.modal_selection_mode,
+        ),
+        select::render(
+            "Terminal PTYs",
+            &config.settings().terminal_max_concurrent.get().to_string(),
+            config.field() == Field::TerminalLimit,
+            config.settings().terminal_max_concurrent
+                != config.current().saved.terminal_max_concurrent,
         ),
     ];
     lines.push(environment_row(config));
@@ -1425,6 +1446,7 @@ mod tests {
         let mut config = Config::load(&mut port);
         config.next_field();
         config.next_field();
+        config.next_field();
         assert_eq!(config.field(), Field::Environment);
         assert!(config.open_environment(&mut port));
         assert!(config.is_editing_environment());
@@ -1529,6 +1551,7 @@ mod tests {
         let mut config = Config::load(&mut port);
         config.next_field();
         config.next_field();
+        config.next_field();
         assert!(config.open_environment(&mut port));
         config.type_environment("A=1");
         assert!(!config.save_environment(&mut port));
@@ -1551,6 +1574,7 @@ mod tests {
     fn global_environment_validation_error_does_not_shift_the_modal() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
+        config.next_field();
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
@@ -1576,6 +1600,7 @@ mod tests {
         let mut config = Config::load(&mut port);
         config.next_field();
         config.next_field();
+        config.next_field();
         port.global.env = [("FRESH".to_owned(), "value".to_owned())]
             .into_iter()
             .collect();
@@ -1594,6 +1619,7 @@ mod tests {
     fn multiline_environment_text_keeps_invalid_input_for_retry() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
+        config.next_field();
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
@@ -1643,6 +1669,7 @@ mod tests {
             ..FakeSettingsPort::default()
         };
         let mut config = Config::load(&mut port);
+        config.next_field();
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
@@ -1747,7 +1774,7 @@ mod tests {
             .unwrap();
         assert_eq!(column_of(&dirty, "●"), changed_column);
 
-        for _ in 0..9 {
+        for _ in 0..10 {
             config.next_field();
         }
         let save_frame = render(24, 80, &config)
@@ -1911,7 +1938,7 @@ mod tests {
     fn pr_auto_open_cycles_all_safe_modes_from_global_config() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        for _ in 0..8 {
+        for _ in 0..9 {
             config.next_field();
         }
         assert_eq!(config.field(), Field::PrAutoOpen);
@@ -1934,9 +1961,38 @@ mod tests {
     }
 
     #[test]
+    fn terminal_limit_cycles_and_is_saved_only_by_global_config() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::TerminalLimit);
+        assert_eq!(config.settings().terminal_max_concurrent.get(), 64);
+        assert!(render(24, 80, &config).join("\n").contains("Terminal PTYs"));
+
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.settings().terminal_max_concurrent.get(), 128);
+        for _ in 0..8 {
+            config.next_field();
+        }
+        assert!(config.begin_save());
+        assert!(config.commit_save(&mut port));
+        assert_eq!(port.global.terminal_max_concurrent.get(), 128);
+
+        let workspace =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        assert!(
+            !render(24, 80, &workspace)
+                .join("\n")
+                .contains("Terminal PTYs")
+        );
+    }
+
+    #[test]
     fn save_is_selectable_only_with_an_unsaved_change() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1957,6 +2013,7 @@ mod tests {
         config.previous_field();
         config.previous_field();
         config.previous_field();
+        config.previous_field();
         config.cycle_modal_selection_mode();
         config.cycle_modal_selection_mode();
         config.cycle_selected(true);
@@ -1964,6 +2021,7 @@ mod tests {
             config.settings().modal_selection_mode,
             ModalSelectionMode::Prompt
         );
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -2004,9 +2062,12 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Environment);
         config.previous_field();
+        assert_eq!(config.field(), Field::TerminalLimit);
+        config.previous_field();
         assert_eq!(config.field(), Field::ModalSelectionMode);
         config.previous_field();
         assert_eq!(config.field(), Field::Theme);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -2024,6 +2085,7 @@ mod tests {
     fn default_model_cycles_and_is_saved_with_the_global_settings() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -2107,6 +2169,7 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
+        config.next_field();
         assert_eq!(config.field(), Field::WorkMode);
         config.next_field();
         assert_eq!(config.field(), Field::TeamTemplate);
@@ -2177,6 +2240,7 @@ mod tests {
     fn issue_and_memory_availability_toggle_independently() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -2316,6 +2380,7 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
+        config.next_field();
         assert_eq!(config.field(), Field::Save);
         assert!(config.can_save());
         config
@@ -2367,6 +2432,7 @@ mod tests {
         let mut config = {
             let mut base = Config::load(&mut port);
             base.cycle_theme(true);
+            base.next_field();
             base.next_field();
             base.next_field();
             base.next_field();

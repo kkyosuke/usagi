@@ -1,6 +1,7 @@
 use super::{
     AgentReadinessCommand, AvailableModels, DefaultModel, EnvBindings, LocalSettings,
-    ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme, WorkMode,
+    ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, TerminalConcurrencyLimit, Theme,
+    WorkMode,
 };
 
 fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
@@ -46,6 +47,7 @@ fn settings_default_uses_the_system_theme() {
     assert_eq!(settings.theme, Theme::System);
     assert_eq!(settings.modal_selection_mode, ModalSelectionMode::Action);
     assert_eq!(settings.default_model, DefaultModel::OpenAi);
+    assert_eq!(settings.terminal_max_concurrent.get(), 64);
     assert!(settings.issue_enabled);
     assert!(settings.memory_enabled);
     assert!(settings.env.is_empty());
@@ -83,6 +85,7 @@ fn settings_round_trip_through_json() {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Prompt,
         pr_auto_open: PrAutoOpen::Always,
+        terminal_max_concurrent: TerminalConcurrencyLimit::new(128).unwrap(),
         default_model: DefaultModel::Claude,
         default_branch: Some("refs/heads/main".to_owned()),
         issue_enabled: false,
@@ -95,6 +98,7 @@ fn settings_round_trip_through_json() {
     assert!(json.contains("\"env\":{\"GH_TOKEN\":\"op://Private/GitHub/token\"}"));
     assert!(json.contains("\"theme\":\"dark\""));
     assert!(json.contains("\"modal_selection_mode\":\"prompt\""));
+    assert!(json.contains("\"terminal_max_concurrent\":128"));
     assert!(json.contains("\"default_model\":\"claude\""));
     assert!(json.contains("\"default_branch\":\"refs/heads/main\""));
     assert!(json.contains("\"issue_enabled\":false"));
@@ -104,6 +108,44 @@ fn settings_round_trip_through_json() {
     // Exercise the derived Clone / Debug.
     assert_eq!(settings.clone(), settings);
     assert!(format!("{settings:?}").contains("Dark"));
+}
+
+#[test]
+fn terminal_concurrency_limit_is_bounded_and_cycles_config_presets() {
+    assert!(TerminalConcurrencyLimit::new(0).is_none());
+    assert!(TerminalConcurrencyLimit::new(257).is_none());
+    assert_eq!(TerminalConcurrencyLimit::new(1).unwrap().get(), 1);
+    assert_eq!(TerminalConcurrencyLimit::new(256).unwrap().get(), 256);
+
+    let custom = TerminalConcurrencyLimit::new(100).unwrap();
+    assert_eq!(custom.cycle(true).get(), 128);
+    assert_eq!(custom.cycle(false).get(), 64);
+    assert_eq!(TerminalConcurrencyLimit::default().cycle(true).get(), 128);
+    assert_eq!(TerminalConcurrencyLimit::default().cycle(false).get(), 32);
+    assert_eq!(
+        TerminalConcurrencyLimit::new(256)
+            .unwrap()
+            .cycle(true)
+            .get(),
+        16
+    );
+    assert_eq!(
+        TerminalConcurrencyLimit::new(16)
+            .unwrap()
+            .cycle(false)
+            .get(),
+        256
+    );
+}
+
+#[test]
+fn terminal_concurrency_limit_rejects_out_of_range_persisted_values() {
+    for value in [0, 257] {
+        let error =
+            serde_json::from_str::<Settings>(&format!("{{\"terminal_max_concurrent\":{value}}}"))
+                .unwrap_err();
+        assert!(error.to_string().contains("terminal_max_concurrent"));
+    }
 }
 
 #[test]
@@ -397,6 +439,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Action,
         pr_auto_open: PrAutoOpen::SwitchOnly,
+        terminal_max_concurrent: TerminalConcurrencyLimit::default(),
         default_model: DefaultModel::Claude,
         default_branch: None,
         issue_enabled: true,
@@ -419,6 +462,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Action,
             pr_auto_open: PrAutoOpen::SwitchOnly,
+            terminal_max_concurrent: TerminalConcurrencyLimit::default(),
             default_model: DefaultModel::OpenAi,
             default_branch: Some("refs/remotes/origin/main".to_owned()),
             issue_enabled: false,
@@ -499,6 +543,7 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Prompt,
         pr_auto_open: PrAutoOpen::NotifyOnly,
+        terminal_max_concurrent: TerminalConcurrencyLimit::new(128).unwrap(),
         default_model: DefaultModel::Claude,
         default_branch: Some("refs/heads/main".to_owned()),
         issue_enabled: false,
@@ -509,6 +554,7 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
     let saved = latest.clone().with_config(&config_draft);
     assert_eq!(saved.theme, Theme::Dark);
     assert_eq!(saved.modal_selection_mode, ModalSelectionMode::Prompt);
+    assert_eq!(saved.terminal_max_concurrent.get(), 128);
     assert_eq!(saved.default_model, DefaultModel::Claude);
     assert_eq!(saved.default_branch, None);
     assert!(!saved.issue_enabled);
@@ -541,6 +587,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         theme: Theme::Light,
         modal_selection_mode: ModalSelectionMode::Prompt,
         pr_auto_open: PrAutoOpen::NotifyOnly,
+        terminal_max_concurrent: TerminalConcurrencyLimit::new(128).unwrap(),
         default_model: DefaultModel::Claude,
         default_branch: Some("refs/heads/main".to_owned()),
         issue_enabled: false,
@@ -556,6 +603,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
             theme: Theme::System,
             modal_selection_mode: ModalSelectionMode::Action,
             pr_auto_open: PrAutoOpen::SwitchOnly,
+            terminal_max_concurrent: TerminalConcurrencyLimit::default(),
             default_model: DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: false,

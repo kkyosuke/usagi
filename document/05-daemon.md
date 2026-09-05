@@ -1171,8 +1171,10 @@ cursor、sequence gap、epoch mismatch は resync を要求する。
 registry は terminal grid / scrollback の唯一の権威でもある。terminal ごとに VT screen を 1 つ持ち、
 受理した全 byte を feed し、resize で screen を reshape するため、attach / resync / resize の snapshot は
 bounded journal の先頭位置に依存しない完全な screen state を返せる（wire 表現と revision の正本は
-[4. IPC](04-ipc.md#snapshot-payload-と-revision)）。screen の retention は per-terminal の cell budget と
-process-local の aggregate cell budget で bound する。新規登録と resize は可視 grid がいずれかの予算を
+[4. IPC](04-ipc.md#snapshot-payload-と-revision)）。screen の retention は per-terminal 524,288 cell（概算 16 MiB）と
+process-local 2,097,152 cell（概算 64 MiB）の実使用量 budget で bound する。この値は事前確保量ではない。例えば
+80×24 の新規 terminal が最初に保持するのは可視 grid の 1,920 cell で、出力により scrollback が生じた分だけ増える。
+新規登録と resize は可視 grid がいずれかの予算を
 超える geometry を cell 確保と PTY effect の前に拒否し、出力で増えた超過分は古い scrollback から trim して
 trim 行数を counter に計上する。checkpoint payload が frame budget を超える場合も payload 側の古い scrollback を
 落として収め、可視 grid だけでも収まらないときは部分的な screen を返さず fail closed とする。
@@ -2203,6 +2205,13 @@ allocator は resource kind ごとに独立した pool を持ち、Agent と gen
 claim は `reserved` → `live` → `released` の 3 状態で、`released` は capacity を保持しない。全 retained generation
 （active と draining の両方）の claim が同じ pool を消費するため、rollover 中も設定上限を超えない。pool 満杯の
 reservation failure は spawn effect zero である。
+
+generic Terminal pool は現在所有している PTY claim の実数を数える最後の OS resource safety ceiling であり、画面メモリの
+代理値にはしない。既定値は 64。Global Config の `Terminal PTYs` は 16 / 32 / 64 / 128 / 256 を選択でき、保存 field
+`terminal_max_concurrent` を直接編集する場合は 1〜256 を受け付ける。daemon は generation 起動時にこの値を読み、次の
+起動から適用する。上限を下げたときも既存 PTY は破棄せず、新規 reservation を使用数が上限未満になるまで拒否する。
+screen は [terminal ownership](#terminal-ownership) の保持中 cell 数、raw journal は terminal ごとの保持中 byte 数で独立して
+bound するため、上限を64へ上げても64台分の画面を予約しない。
 
 ### launch の書き込み順序
 
