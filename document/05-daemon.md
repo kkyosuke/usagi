@@ -1032,6 +1032,8 @@ daemon は想定外の失敗を検出した境界で `<data-dir>/logs/error-YYYY
   を保持するため、`agent process could not be started` のような安全な client message だけで原因が失われない。
 - IPC、PTY、observer など daemon worker thread の panic は process-wide panic hook が payload、発生位置、backtrace とともに
   記録する。main thread の panic はこの hook で記録した後に最外周で通常の process error に変換して終了する。
+- 周期的な Supervisor recovery は lane ごとに同じ safe error が続く間は最初の 1 件だけを記録する。成功を一度観測した後の
+  再発、または error 内容が変化した場合は新しい transition として記録する。
 
 ログへ request / response body、argv、環境変数、secret、terminal / provider の raw output は記録しない。これにより detached
 `serve` の標準エラーが破棄される場合でも、起動失敗や異常終了の原因を日次 error log から確認でき、TUI は同じ失敗の
@@ -1487,8 +1489,9 @@ truth である（[3. TUI](03-tui.md#workspace-open-時の-pane-復元) を正�
 Codex / Claude の Agent launch は `McpWiring` capability を要求し、daemon 自身の絶対パスで `usagi mcp` を
 子 MCP server として起動する。製品ごとの MCP 設定は adapter provision が spawn 時だけに渡すため、設定 payload は
 public launch plan、durable snapshot、IPC response に残らない。注入した usagi MCP tool は agent が確認なしで
-呼べる。Codex は spawn 時に `mcp_servers.usagi.default_tools_approval_mode = "approve"` を渡し、注入した
-`usagi` server を事前許可する。子 server には daemon 接続に必要な環境だけを forward する。
+呼べる。Codex は spawn 時に `mcp_servers.usagi.required = true` を渡し、usagi tool を欠いた起動を拒否する。
+`mcp_servers.usagi.default_tools_approval_mode = "approve"` で注入した `usagi` server を事前許可する。子 server には
+daemon 接続に必要な環境だけを forward する。
 詳細な MCP caller contract は [7. MCP サーバ](07-mcp.md#起動と経路) を正本とする。Claude も
 `--allowedTools mcp__usagi` で同じ server のツールを事前許可する。Agent launch に配線するのはこの `usagi`
 server だけである。それ以外の MCP server・shell・ファイル編集・network の permission model は通常どおり維持され、
@@ -1746,7 +1749,10 @@ runのreconcileは同じentryへ収束する。handoff contextはinternal durabl
 tick 時点で `Ready` task に dispatch reservation が無い場合は、scheduler が生存しているように見える
 `Running` を維持しない。runtime/model selector または admission が worker run を割り当てなかったことを示す
 `DispatchFailure` event と resume/cancel の durable escalation を保存する。operator は events/get から停止理由を
-観測でき、selector を修復するまで自動 retry は行わない。
+観測でき、selector を修復するまで自動 retry は行わない。ただし Goal root と delegated Agent の spawn 前に durable 保存した
+promotion reservation は未割り当て task ではなく、束縛または確定失敗を待つ task なのでこの escalation から除外する。
+旧 daemon がこの promotion window で作った同じ task/reason の synthetic escalation だけは、success/failure reconciliation が
+resume してから束縛または終端化する。human/policy escalation は自動解除しない。
 
 `supervisor-scheduler.json` は16 MiBのserialized/read上限を持ち、start reservation の semantic material は固定長の
 SHA-256 digestだけを保存する。旧形式の可変長semantic keyはbounded read後にdigestへ一度だけ移行する。
@@ -2299,6 +2305,8 @@ outbox を経由して exactly-once に解放する契約を維持する。回�
 active daemon は 5 分ごとに保持中 workspace の orphan Git resource を再棚卸しし、merged branch と clean
 worktree だけを自動回収する。draining generation はこの effect を実行しない。dirty worktree、未マージ branch、
 failed Agent reservation など force を要する候補は自動回収せず、`usagi clean --apply --force` の明示を必要とする。
+保持中 workspace が Git repository でない場合は Git inventory を空として扱い、この周期処理自体は成功させる。Git worktree / branch
+候補は作らない一方、Git に依存しない durable reservation の検査を妨げない。
 
 ### child identity
 
