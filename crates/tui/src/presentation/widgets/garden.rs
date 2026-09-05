@@ -1,7 +1,8 @@
 //! Session Garden の純粋な描画サンプル。
 //!
-//! daemon の状態を所有せず、表示用に閉じた [`GardenSession`] を広い world または
-//! compact plot に並べる。frame と同じ layout から [`GardenHitbox`] も返すため、
+//! daemon の状態を所有せず、表示用に閉じた [`GardenSession`] を画面内へ並べる。
+//! 通常は大きな plot、件数が増えたら Agent ごとの compact card へ密度を切り替える。
+//! frame と同じ layout から [`GardenHitbox`] も返すため、
 //! 後続実装は座標から session identity を再計算せず click target を解決できる。
 
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
@@ -10,8 +11,6 @@ use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 use crate::presentation::theme::{Role, Style, garden_rabbit_style};
 
 use super::agent_status;
-use super::button::InlineButton;
-use super::garden_world;
 use super::{clip_to_width, display_width, pad_to_width};
 use usagi_core::domain::agent::AgentStatus as DispatchAgentStatus;
 
@@ -21,12 +20,9 @@ pub const MIN_WIDTH: usize = 64;
 pub const MIN_HEIGHT: usize = 13;
 
 const SIDE_PADDING: usize = 2;
-const HEADER_ROWS: usize = 3;
-const FOOTER_ROWS: usize = 2;
+const HEADER_ROWS: usize = 2;
+const FOOTER_ROWS: usize = 1;
 const PLOT_WIDTH: usize = 28;
-const AGENT_PANEL_MIN_WIDTH: usize = 24;
-const AGENT_PANEL_MAX_WIDTH: usize = 36;
-const AGENT_PANEL_SEPARATOR_WIDTH: usize = 2;
 const GROUND_ROWS: usize = 2;
 const PLOT_HEIGHT: usize = 8;
 /// plot のうち、うさぎと label が占める行数（残り 2 行が草地と土）。
@@ -38,6 +34,9 @@ const COMPACT_RABBIT_WIDTH: usize = 8;
 /// この行から [`SPRITE_ROWS`] 行ぶんで、nameplate と status 行は区画のままにする。
 const SPRITE_TOP_ROW: usize = PLOT_CONTENT_ROWS - SPRITE_ROWS;
 const MAX_VISIBLE_AGENTS: usize = PLOT_WIDTH / COMPACT_RABBIT_WIDTH;
+const DENSE_CARD_HEIGHT: usize = 2;
+const DENSE_CARD_MIN_WIDTH: usize = 14;
+const TINY_CARD_MIN_WIDTH: usize = 8;
 /// The interactive shell advances its logical clock every 16 ms. Holding one
 /// Garden frame for eight of those ticks yields a brisk ~8 fps terminal
 /// animation without rebuilding at the 62.5 Hz input-pump cadence.
@@ -149,26 +148,6 @@ impl GardenHitbox {
     }
 }
 
-/// Garden footer の横スクロール button と、押したときの列 offset。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GardenScrollHitbox {
-    pub scroll: usize,
-    pub column: usize,
-    pub row: usize,
-    pub width: usize,
-    pub height: usize,
-}
-
-impl GardenScrollHitbox {
-    #[must_use]
-    pub const fn contains(self, column: usize, row: usize) -> bool {
-        column >= self.column
-            && column < self.column + self.width
-            && row >= self.row
-            && row < self.row + self.height
-    }
-}
-
 /// Garden の描画結果と、同じ layout から得た click target。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GardenFrame {
@@ -177,19 +156,6 @@ pub struct GardenFrame {
     /// click 解決は最初に当たったものを採るため、重なった絵では最後に描いた
     /// うさぎが優先し、すべてのうさぎは巣穴／区画に優先する。
     pub hitboxes: Vec<GardenHitbox>,
-    /// 右の Agent 一覧に描いた session 見出しと Agent 行の click target。
-    /// plot の hitbox と分けることで、うさぎの重なり順と一覧の行 hit-test を
-    /// それぞれ描画と同じ構造のまま保つ。
-    pub panel_hitboxes: Vec<GardenHitbox>,
-    /// Footer の左 / 右 scroll button。描画した span と click 範囲を共有する。
-    pub scroll_hitboxes: Vec<GardenScrollHitbox>,
-    /// 描画した 0-based 横位置。world では 16 cell 単位、compact 表示では区画列単位。
-    /// 要求値が範囲外なら末尾へ clamp する。
-    pub scroll: usize,
-    /// 左端にできる最大の横位置 offset。
-    pub max_scroll: usize,
-    /// 端末に収まらず描画しなかった session 数。
-    pub hidden_sessions: usize,
 }
 
 /// 1 区画の描画結果と、その中に置いたうさぎの横位置。
@@ -213,100 +179,26 @@ struct PlacedRabbit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GardenLayout {
-    garden_width: usize,
     content_width: usize,
-    agent_panel_width: usize,
     columns: usize,
     plot_rows: usize,
-    garden_height: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GardenViewport {
-    scroll: usize,
-    max_scroll: usize,
-    visible_start: usize,
-    visible_end: usize,
-    used_rows: usize,
-    used_columns: usize,
-    grid_top: usize,
-    row_left: usize,
+    body_height: usize,
 }
 
 fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
     if height < MIN_HEIGHT || width < MIN_WIDTH {
         return None;
     }
-    let agent_panel_width = (width / 3).clamp(AGENT_PANEL_MIN_WIDTH, AGENT_PANEL_MAX_WIDTH);
-    let garden_width =
-        width.saturating_sub(agent_panel_width + AGENT_PANEL_SEPARATOR_WIDTH + SIDE_PADDING);
-    let content_width = garden_width.saturating_sub(SIDE_PADDING * 2);
+    let content_width = width.saturating_sub(SIDE_PADDING * 2);
     let columns = (content_width / PLOT_WIDTH).max(1);
-    let garden_height = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
-    let plot_rows = (garden_height / PLOT_HEIGHT).max(1);
+    let body_height = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
+    let plot_rows = (body_height / PLOT_HEIGHT).max(1);
     Some(GardenLayout {
-        garden_width,
         content_width,
-        agent_panel_width,
         columns,
         plot_rows,
-        garden_height,
+        body_height,
     })
-}
-
-fn garden_viewport(
-    layout: GardenLayout,
-    session_count: usize,
-    requested_scroll: usize,
-) -> GardenViewport {
-    let total_columns = session_count.div_ceil(layout.plot_rows);
-    let max_scroll = total_columns.saturating_sub(layout.columns);
-    let scroll = requested_scroll.min(max_scroll);
-    let visible_start = scroll.saturating_mul(layout.plot_rows).min(session_count);
-    let visible_end = (scroll + layout.columns)
-        .saturating_mul(layout.plot_rows)
-        .min(session_count);
-    let visible = visible_end.saturating_sub(visible_start);
-    let used_rows = visible.min(layout.plot_rows);
-    let used_columns = visible.div_ceil(layout.plot_rows);
-    GardenViewport {
-        scroll,
-        max_scroll,
-        visible_start,
-        visible_end,
-        used_rows,
-        used_columns,
-        grid_top: HEADER_ROWS + layout.garden_height.saturating_sub(used_rows * PLOT_HEIGHT) / 2,
-        // The Garden now owns the left side of the screen. Keep the first plot
-        // anchored to that edge instead of centering a partly-filled row.
-        row_left: SIDE_PADDING,
-    }
-}
-
-/// Animation, viewport, and chrome options that vary between Garden callers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GardenRenderOptions<'a> {
-    requested_scroll: usize,
-    tick: u64,
-    reduced_motion: bool,
-    agent_heading: &'a str,
-}
-
-impl<'a> GardenRenderOptions<'a> {
-    #[must_use]
-    pub const fn new(
-        requested_scroll: usize,
-        tick: u64,
-        reduced_motion: bool,
-        agent_heading: &'a str,
-    ) -> Self {
-        Self {
-            requested_scroll,
-            tick,
-            reduced_motion,
-            agent_heading,
-        }
-    }
 }
 
 /// Garden を描画する。最小サイズに満たない場合は `None` を返す。
@@ -319,154 +211,81 @@ pub fn render(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    render_scrolled(
+    let layout = garden_layout(height, width)?;
+    let detailed_capacity = layout.columns.saturating_mul(layout.plot_rows);
+    if sessions.len() <= detailed_capacity
+        && sessions
+            .iter()
+            .all(|session| session.agents.len() <= MAX_VISIBLE_AGENTS)
+    {
+        return render_detailed(
+            height,
+            width,
+            workspace_name,
+            sessions,
+            tick,
+            reduced_motion,
+        );
+    }
+    render_dense(
         height,
         width,
         workspace_name,
         sessions,
-        0,
         tick,
         reduced_motion,
     )
 }
 
-/// Garden を指定した plot 列から描画する。offset は現在の session 数に合わせて clamp する。
-#[must_use]
-pub fn render_scrolled(
+/// Render roomy session plots when every plot and every Agent rabbit fits at once.
+fn render_detailed(
     height: usize,
     width: usize,
     workspace_name: &str,
     sessions: &[GardenSession],
-    requested_scroll: usize,
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    render_scrolled_with_options(
-        height,
-        width,
-        workspace_name,
-        sessions,
-        GardenRenderOptions::new(requested_scroll, tick, reduced_motion, "Agents"),
-    )
-}
-
-/// Garden を指定した plot 列と Agent panel 見出しで描画する。
-#[must_use]
-pub fn render_scrolled_with_options(
-    height: usize,
-    width: usize,
-    workspace_name: &str,
-    sessions: &[GardenSession],
-    options: GardenRenderOptions<'_>,
-) -> Option<GardenFrame> {
     let layout = garden_layout(height, width)?;
-    if let Some(mut frame) = garden_world::render(
-        height,
-        layout.garden_width,
-        workspace_name,
-        sessions,
-        options.requested_scroll,
-        options.tick,
-        options.reduced_motion,
-    ) {
-        frame.panel_hitboxes = attach_world_agent_panel(
-            &mut frame.rows,
-            width,
-            layout,
-            workspace_name,
-            sessions,
-            options.agent_heading,
-        );
-        return Some(frame);
-    }
-    render_compact_scrolled(height, width, workspace_name, sessions, options)
-}
+    let used_rows = sessions
+        .len()
+        .div_ceil(layout.columns)
+        .min(layout.plot_rows);
+    let grid_top = HEADER_ROWS + layout.body_height.saturating_sub(used_rows * PLOT_HEIGHT) / 2;
 
-fn attach_world_agent_panel(
-    rows: &mut [String],
-    width: usize,
-    layout: GardenLayout,
-    workspace_name: &str,
-    sessions: &[GardenSession],
-    agent_heading: &str,
-) -> Vec<GardenHitbox> {
-    let footer_start = rows.len().saturating_sub(FOOTER_ROWS);
-    let body_height = footer_start.saturating_sub(1);
-    let panel = agent_panel(
-        body_height,
-        layout.agent_panel_width,
-        sessions,
-        layout.garden_width + AGENT_PANEL_SEPARATOR_WIDTH,
-        1,
-        agent_heading,
-    );
-    rows[0] = header_line(width, workspace_name, sessions);
-    for (row, panel_row) in rows[1..footer_start].iter_mut().zip(panel.rows) {
-        attach_panel_row(row, width, layout, &panel_row);
-    }
-    for row in &mut rows[footer_start..] {
-        *row = pad_to_width(row, width);
-    }
-    panel.hitboxes
-}
-
-/// Fixed-plot fallback kept for terminals that cannot hold the roaming world.
-///
-/// The compact renderer remains separately testable because it is a real production
-/// fallback, not a historical implementation hidden behind test-only cfg.
-fn render_compact_scrolled(
-    height: usize,
-    width: usize,
-    workspace_name: &str,
-    sessions: &[GardenSession],
-    options: GardenRenderOptions<'_>,
-) -> Option<GardenFrame> {
-    let layout = garden_layout(height, width)?;
-    let GardenViewport {
-        scroll,
-        max_scroll,
-        visible_start,
-        visible_end,
-        used_rows,
-        used_columns,
-        grid_top,
-        row_left,
-    } = garden_viewport(layout, sessions.len(), options.requested_scroll);
-    let visible_sessions = &sessions[visible_start..visible_end];
-    let visible = visible_sessions.len();
-    let hidden_sessions = sessions.len().saturating_sub(visible);
-
-    let mut rows = compact_initial_rows(height, width, workspace_name, sessions, options);
+    let mut rows = Vec::with_capacity(height);
+    rows.push(header_line(width, workspace_name, sessions));
+    rows.push(sky_line(width, workspace_name, tick, reduced_motion));
 
     // 使う plot 行数だけを縦中央へ寄せ、庭の下側だけが大きく空くのを避ける。
-    rows.resize_with(grid_top, || " ".repeat(layout.garden_width));
+    rows.resize_with(grid_top, || " ".repeat(width));
 
-    let mut hitboxes = Vec::with_capacity(visible * (1 + MAX_VISIBLE_AGENTS));
-    let plots = visible_sessions
+    let mut hitboxes = Vec::with_capacity(sessions.len() * (1 + MAX_VISIBLE_AGENTS));
+    let plots = sessions
         .iter()
-        .map(|session| plot(session, options.tick, options.reduced_motion))
+        .map(|session| plot(session, tick, reduced_motion))
         .collect::<Vec<_>>();
     for plot_row in 0..used_rows {
+        let row_start = plot_row * layout.columns;
+        let row_columns = sessions.len().saturating_sub(row_start).min(layout.columns);
+        let row_width = row_columns.saturating_mul(PLOT_WIDTH);
+        let row_left = SIDE_PADDING + layout.content_width.saturating_sub(row_width) / 2;
         for local_row in 0..PLOT_CONTENT_ROWS {
             let mut line = " ".repeat(row_left);
-            for column in 0..used_columns {
-                let index = column * layout.plot_rows + plot_row;
-                if let Some(plot) = plots.get(index) {
-                    line.push_str(&pad_to_width(&plot.rows[local_row], PLOT_WIDTH));
-                } else {
-                    line.push_str(&" ".repeat(PLOT_WIDTH));
-                }
+            for column in 0..row_columns {
+                let index = row_start + column;
+                let plot = &plots[index];
+                line.push_str(&pad_to_width(&plot.rows[local_row], PLOT_WIDTH));
             }
-            rows.push(pad_to_width(&line, layout.garden_width));
+            rows.push(pad_to_width(&line, width));
         }
         // 地面は plot の下だけでなく庭の幅いっぱいに敷く。うさぎの数で地面が途切れると
         // 中央の島のように見えるため。
-        rows.extend(ground_rows(layout, options.tick, options.reduced_motion));
-        for column in 0..used_columns {
-            let index = column * layout.plot_rows + plot_row;
-            let Some((session, plot)) = visible_sessions.get(index).zip(plots.get(index)) else {
-                continue;
-            };
+        rows.extend(ground_rows(layout, tick, reduced_motion));
+        for column in 0..row_columns {
+            let index = row_start + column;
+            let session = &sessions[index];
+            let plot = &plots[index];
             let plot_column = row_left + column * PLOT_WIDTH;
             let plot_row_top = grid_top + plot_row * PLOT_HEIGHT;
             // うさぎは区画の内側にあるので、区画より先に積む（click 解決は最初に
@@ -492,241 +311,289 @@ fn render_compact_scrolled(
         }
     }
 
-    if visible == 0 {
+    if sessions.is_empty() {
         rows.push(centered(
-            layout.garden_width,
+            width,
             &Style::new().dim().paint("No sessions in the garden"),
         ));
     }
 
     let footer_start = height - FOOTER_ROWS;
-    rows.resize_with(footer_start, || " ".repeat(layout.garden_width));
-    let panel_hitboxes = attach_agent_panel(
-        &mut rows[HEADER_ROWS..footer_start],
-        width,
-        layout,
-        sessions,
-        HEADER_ROWS,
-        options.agent_heading,
-    );
-    let (scroll_footer, scroll_hitboxes) = scroll_footer(
-        width,
-        footer_start,
-        scroll,
-        max_scroll,
-        visible_start,
-        visible_end,
-        sessions.len(),
-    );
-    rows.push(scroll_footer);
-    rows.push(footer_line(width, max_scroll > 0));
+    rows.resize_with(footer_start, || " ".repeat(width));
+    rows.push(footer_line(width));
 
-    Some(GardenFrame {
-        rows,
-        hitboxes,
-        panel_hitboxes,
-        scroll_hitboxes,
-        scroll,
-        max_scroll,
-        hidden_sessions,
-    })
+    Some(GardenFrame { rows, hitboxes })
 }
 
-fn compact_initial_rows(
+#[derive(Debug, Clone, Copy)]
+struct DenseItem<'a> {
+    session: &'a GardenSession,
+    agent: Option<GardenAgent>,
+    ordinal: usize,
+    total: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DenseMode {
+    Card,
+    Line,
+    Glyph,
+}
+
+impl DenseMode {
+    const fn height(self) -> usize {
+        match self {
+            Self::Card => DENSE_CARD_HEIGHT,
+            Self::Line | Self::Glyph => 1,
+        }
+    }
+
+    const fn minimum_width(self) -> usize {
+        match self {
+            Self::Card => DENSE_CARD_MIN_WIDTH,
+            Self::Line => TINY_CARD_MIN_WIDTH,
+            Self::Glyph => 2,
+        }
+    }
+}
+
+fn dense_items(sessions: &[GardenSession]) -> Vec<DenseItem<'_>> {
+    sessions
+        .iter()
+        .flat_map(|session| {
+            let agents = if session.agents_observed {
+                agent_status::ordered(&session.agents)
+            } else {
+                Vec::new()
+            };
+            let total = agents.len();
+            if agents.is_empty() {
+                vec![DenseItem {
+                    session,
+                    agent: None,
+                    ordinal: 0,
+                    total: 0,
+                }]
+            } else {
+                agents
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, agent)| DenseItem {
+                        session,
+                        agent: Some(agent),
+                        ordinal: index + 1,
+                        total,
+                    })
+                    .collect()
+            }
+        })
+        .collect()
+}
+
+fn dense_mode(layout: GardenLayout, item_count: usize) -> DenseMode {
+    for mode in [DenseMode::Card, DenseMode::Line, DenseMode::Glyph] {
+        let columns = layout.content_width / mode.minimum_width();
+        let rows = layout.body_height / mode.height();
+        if item_count <= columns.saturating_mul(rows) {
+            return mode;
+        }
+    }
+    DenseMode::Glyph
+}
+
+/// Fit every observed Agent into one frame. Each Agent owns one card and one
+/// rabbit hitbox; sessions without observed Agents retain a quiet status card.
+fn render_dense(
     height: usize,
     width: usize,
     workspace_name: &str,
     sessions: &[GardenSession],
-    options: GardenRenderOptions<'_>,
-) -> Vec<String> {
-    let mut rows = Vec::with_capacity(height);
-    rows.push(header_line(width, workspace_name, sessions));
-    rows.push(sky_line(
-        width,
-        workspace_name,
-        options.tick,
-        options.reduced_motion,
-    ));
-    rows.push(" ".repeat(width));
-    rows
-}
-
-fn attach_agent_panel(
-    body: &mut [String],
-    width: usize,
-    layout: GardenLayout,
-    sessions: &[GardenSession],
-    first_row: usize,
-    agent_heading: &str,
-) -> Vec<GardenHitbox> {
-    let panel = agent_panel(
-        layout.garden_height,
-        layout.agent_panel_width,
-        sessions,
-        layout.garden_width + AGENT_PANEL_SEPARATOR_WIDTH,
-        first_row,
-        agent_heading,
-    );
-    for (row, panel_row) in body.iter_mut().zip(panel.rows) {
-        attach_panel_row(row, width, layout, &panel_row);
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<GardenFrame> {
+    let layout = garden_layout(height, width)?;
+    let mut items = dense_items(sessions);
+    let glyph_capacity = layout
+        .body_height
+        .saturating_mul(layout.content_width / DenseMode::Glyph.minimum_width());
+    if items.len() > glyph_capacity {
+        // Empty session cards are useful context, but never displace an Agent
+        // rabbit. The daemon's Agent capacity is far below this final glyph
+        // capacity; retaining Agents here makes that product bound explicit in
+        // the presentation fallback instead of panicking on stale empty sessions.
+        items.retain(|item| item.agent.is_some());
     }
-    panel.hitboxes
-}
+    let mode = dense_mode(layout, items.len());
+    let card_height = mode.height();
+    let max_columns = (layout.content_width / mode.minimum_width()).max(1);
+    let columns = items.len().min(max_columns).max(1);
+    let card_width = (layout.content_width / columns).max(1);
+    let used_rows = items.len().div_ceil(columns).min(layout.body_height);
+    let grid_height = used_rows.saturating_mul(card_height);
+    let grid_top = HEADER_ROWS + layout.body_height.saturating_sub(grid_height) / 2;
+    let grid_width = columns.saturating_mul(card_width);
+    let grid_left = SIDE_PADDING + layout.content_width.saturating_sub(grid_width) / 2;
+    let mut rows = vec![" ".repeat(width); height];
+    rows[0] = header_line(width, workspace_name, sessions);
+    rows[1] = sky_line(width, workspace_name, tick, reduced_motion);
+    rows[height - FOOTER_ROWS] = footer_line(width);
+    let mut hitboxes = Vec::with_capacity(items.len());
 
-fn attach_panel_row(row: &mut String, width: usize, layout: GardenLayout, panel_row: &str) {
-    let garden = pad_to_width(row, layout.garden_width);
-    let separator = Style::new().dim().paint("│");
-    *row = pad_to_width(
-        &format!(
-            "{garden}{separator} {}{}",
-            pad_to_width(panel_row, layout.agent_panel_width),
-            " ".repeat(SIDE_PADDING)
-        ),
-        width,
-    );
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentPanel {
-    rows: Vec<String>,
-    hitboxes: Vec<GardenHitbox>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentPanelRow {
-    content: String,
-    target: Option<(SessionId, Option<AgentRuntimeId>)>,
-}
-
-/// Render every open project's session groups independently of the Garden viewport.
-///
-/// A session always owns one heading row. Every runtime below it owns exactly one
-/// row carrying its explicit status and stable click identity. This is intentionally
-/// not derived from the horizontally visible plots: the list remains a process-level
-/// overview even before the user pans to another project.
-fn agent_panel(
-    height: usize,
-    width: usize,
-    sessions: &[GardenSession],
-    column: usize,
-    first_row: usize,
-    heading: &str,
-) -> AgentPanel {
-    let mut all_rows = Vec::new();
-    for session in sessions {
-        all_rows.push(AgentPanelRow {
-            content: session_group_line(session, width),
-            target: Some((session.id, None)),
-        });
-        let agents = agent_status::ordered(&session.agents);
-        if agents.is_empty() {
-            let (style, message) = session_summary(session);
-            all_rows.push(AgentPanelRow {
-                content: format!(
-                    "  {}",
-                    style.paint(&clip_to_width(&message, width.saturating_sub(2)))
-                ),
-                target: Some((session.id, None)),
-            });
-        } else {
-            let dispatch_status = (agents.len() == 1)
-                .then_some(session.agent_status)
-                .flatten();
-            all_rows.extend(agents.into_iter().map(|agent| AgentPanelRow {
-                content: agent_panel_line(agent, dispatch_status, width),
-                target: Some((session.id, Some(agent.runtime_id))),
-            }));
-        }
-    }
-
-    let mut rows = vec![
-        Role::Feature
-            .style()
-            .bold()
-            .paint(&clip_to_width(heading, width)),
-        Style::new().dim().paint(&"─".repeat(width)),
-    ];
-    let available = height.saturating_sub(rows.len());
-    let visible = if all_rows.len() > available {
-        available.saturating_sub(1)
-    } else {
-        all_rows.len()
-    };
-    let mut hitboxes = Vec::new();
-    for (index, panel_row) in all_rows.iter().take(visible).enumerate() {
-        rows.push(panel_row.content.clone());
-        if let Some((session_id, agent)) = panel_row.target {
+    for row_index in 0..used_rows {
+        let mut card_rows = vec![" ".repeat(grid_left); card_height];
+        for column_index in 0..columns {
+            let index = row_index * columns + column_index;
+            let Some(item) = items.get(index).copied() else {
+                for row in &mut card_rows {
+                    row.push_str(&" ".repeat(card_width));
+                }
+                continue;
+            };
+            // Cards and one-line summaries keep one unpainted column between
+            // neighbours. The glyph grid already has a full two-cell tile per
+            // usagi and must retain both cells for the wide `兎` character.
+            let content_width = if mode == DenseMode::Glyph {
+                card_width
+            } else {
+                card_width.saturating_sub(1).max(1)
+            };
+            let card = dense_item_rows(item, content_width, mode);
+            for (row, content) in card_rows.iter_mut().zip(card) {
+                row.push_str(&pad_to_width(
+                    &clip_to_width(&content, card_width),
+                    card_width,
+                ));
+            }
             hitboxes.push(GardenHitbox {
-                session_id,
-                agent,
-                column,
-                row: first_row + 2 + index,
-                width,
-                height: 1,
+                session_id: item.session.id,
+                agent: item.agent.map(|agent| agent.runtime_id),
+                column: grid_left + column_index * card_width,
+                row: grid_top + row_index * card_height,
+                width: card_width,
+                height: card_height,
             });
         }
+        for (offset, content) in card_rows.into_iter().enumerate() {
+            rows[grid_top + row_index * card_height + offset] = pad_to_width(&content, width);
+        }
     }
-    if visible < all_rows.len() {
-        rows.push(
-            Style::new()
-                .dim()
-                .paint(&format!("+{} more rows", all_rows.len() - visible)),
-        );
-    } else if sessions.is_empty() {
-        rows.push(Style::new().dim().paint("No sessions in open projects"));
-    }
-    rows.resize_with(height, String::new);
-    AgentPanel { rows, hitboxes }
+    Some(GardenFrame { rows, hitboxes })
 }
 
-fn session_group_line(session: &GardenSession, width: usize) -> String {
-    let marker = if needs_attention(session) {
-        Role::Warning.style().bold().paint("◆")
-    } else {
-        Role::Feature.style().paint("▾")
+fn dense_item_rows(item: DenseItem<'_>, width: usize, mode: DenseMode) -> Vec<String> {
+    match mode {
+        DenseMode::Card => {
+            let title = dense_title(item, width);
+            let activity = item.agent.map_or_else(
+                || {
+                    let (style, summary) = session_summary(item.session);
+                    centered(width, &style.paint(&summary))
+                },
+                |agent| centered(width, &dense_rabbit(item.session, agent)),
+            );
+            vec![title, activity]
+        }
+        DenseMode::Line => {
+            let content = item.agent.map_or_else(
+                || format!("· {}", item.session.label),
+                |agent| {
+                    let (style, glyph, _, _) = dense_agent_appearance(item.session, agent);
+                    style.paint(&format!("{glyph}兎 {}", item.session.label))
+                },
+            );
+            vec![pad_to_width(&clip_to_width(&content, width), width)]
+        }
+        DenseMode::Glyph => {
+            let content = item.agent.map_or_else(
+                || Style::new().dim().paint("·"),
+                |agent| {
+                    let (style, _, _, _) = dense_agent_appearance(item.session, agent);
+                    style.paint("兎")
+                },
+            );
+            vec![centered(width, &content)]
+        }
+    }
+}
+
+fn dense_title(item: DenseItem<'_>, width: usize) -> String {
+    let prefix = (item.total > 1).then(|| format!("{}/{} ", item.ordinal, item.total));
+    let label = format!("{}{}", prefix.as_deref().unwrap_or(""), item.session.label);
+    let Some(agent) = item.agent else {
+        return centered(width, &Role::Feature.style().bold().paint(&label));
     };
-    format!(
-        "{marker} {}",
-        Role::Feature
-            .style()
-            .bold()
-            .paint(&clip_to_width(&session.label, width.saturating_sub(2)))
-    )
+    let (style, glyph, _, _) = dense_agent_appearance(item.session, agent);
+    let marker = style.paint(glyph);
+    let label_width = width.saturating_sub(display_width(&marker) + 1);
+    let label = Role::Feature
+        .style()
+        .bold()
+        .paint(&clip_to_width(&label, label_width));
+    pad_to_width(&format!("{marker} {label}"), width)
 }
 
-fn agent_panel_line(
+fn dense_rabbit(session: &GardenSession, agent: GardenAgent) -> String {
+    let (style, _, status, face) = dense_agent_appearance(session, agent);
+    let short = match status {
+        "starting" => "start",
+        "completed" => "done",
+        "stopped" => "stop",
+        "failed" => "fail",
+        "running" => "run",
+        "waiting" => "wait",
+        "interrupted" => "pause",
+        "sleeping" => "sleep",
+        "closing" => "close",
+        _ => status,
+    };
+    style.paint(&format!("/)/){face} {short}"))
+}
+
+fn dense_agent_appearance(
+    session: &GardenSession,
     agent: GardenAgent,
-    dispatch_status: Option<DispatchAgentStatus>,
-    width: usize,
-) -> String {
-    let (style, glyph, label) = match dispatch_status {
-        Some(DispatchAgentStatus::Starting) => (Role::Accent.style(), "○", "starting"),
-        Some(DispatchAgentStatus::Idle) => (Role::Success.style(), "◦", "completed"),
-        Some(DispatchAgentStatus::Exited) => (Style::new().dim(), "◦", "stopped"),
-        Some(DispatchAgentStatus::Failed) => (Role::Danger.style().bold(), "◆", "failed"),
-        Some(DispatchAgentStatus::Running) | None => (
-            agent_status::style(agent.phase),
-            agent_status::glyph(agent.phase),
-            agent_status::label(agent.phase),
-        ),
-    };
-    let status = style.paint(label);
-    let status_width = display_width(&status);
-    let left_width = width.saturating_sub(status_width + 1);
-    let runtime = agent.runtime_id.as_str();
-    let short = runtime.chars().take(8).collect::<String>();
-    let left = format!("  {} agent {short}", style.paint(glyph));
-    format!(
-        "{} {status}",
-        pad_to_width(&clip_to_width(&left, left_width), left_width)
-    )
+) -> (Style, &'static str, &'static str, &'static str) {
+    match session.lifecycle {
+        SessionLifecycle::Creating | SessionLifecycle::Initializing => {
+            return (Role::Accent.style(), "○", "starting", "(. .)");
+        }
+        SessionLifecycle::Deleting => {
+            return (Style::new().dim(), "◦", "closing", "(-.-)");
+        }
+        SessionLifecycle::Failed => {
+            return (Role::Danger.style().bold(), "◆", "failed", "(x.x)");
+        }
+        SessionLifecycle::Available => {}
+    }
+    match session.agent_status {
+        Some(DispatchAgentStatus::Starting) => (Role::Accent.style(), "○", "starting", "(. .)"),
+        Some(DispatchAgentStatus::Idle) => (Style::new().dim(), "◦", "completed", "(-.-)"),
+        Some(DispatchAgentStatus::Exited) => (Style::new().dim(), "◦", "stopped", "(-.-)"),
+        Some(DispatchAgentStatus::Failed) => (Role::Danger.style().bold(), "◆", "failed", "(x.x)"),
+        Some(DispatchAgentStatus::Running) | None => {
+            let face = match agent.phase {
+                AgentPhase::Waiting => "(o.o)?",
+                AgentPhase::Interrupted => "(-.-)!",
+                AgentPhase::Sleeping | AgentPhase::Ended | AgentPhase::Exited => "(-.-)",
+                AgentPhase::Absent | AgentPhase::Ready => "(. .)",
+                AgentPhase::Running => "(o.o)",
+            };
+            (
+                agent_status::style(agent.phase),
+                agent_status::glyph(agent.phase),
+                agent_status::label(agent.phase),
+                face,
+            )
+        }
+    }
 }
 
 fn pending_decision_summary(count: usize) -> (Style, String) {
     let noun = if count == 1 { "decision" } else { "decisions" };
+    let verb = if count == 1 { "needs" } else { "need" };
     (
         Role::Warning.style(),
-        format!("{count} {noun} need your input."),
+        format!("{count} {noun} {verb} your input."),
     )
 }
 
@@ -777,82 +644,6 @@ pub const fn runtime_tick(shell_tick: u64) -> u64 {
     shell_tick / RUNTIME_TICKS_PER_ANIMATION_FRAME
 }
 
-fn scroll_footer(
-    width: usize,
-    row: usize,
-    scroll: usize,
-    max_scroll: usize,
-    visible_start: usize,
-    visible_end: usize,
-    session_count: usize,
-) -> (String, Vec<GardenScrollHitbox>) {
-    if max_scroll == 0 {
-        return (" ".repeat(width), Vec::new());
-    }
-
-    let previous = InlineButton::new("← Scroll");
-    let next = InlineButton::new("Scroll →");
-    let previous_rendered = previous.render(
-        width,
-        if scroll == 0 {
-            Style::new().dim()
-        } else {
-            Role::Feature.style()
-        },
-    );
-    let next_rendered = next.render(
-        width,
-        if scroll == max_scroll {
-            Style::new().dim()
-        } else {
-            Role::Feature.style()
-        },
-    );
-    let indicator = Style::new().dim().paint(&format!(
-        "· {}-{} / {} ·",
-        visible_start + 1,
-        visible_end,
-        session_count
-    ));
-    let content_width = previous_rendered
-        .width
-        .saturating_add(display_width(&indicator))
-        .saturating_add(next_rendered.width);
-    let left = width.saturating_sub(content_width) / 2;
-    let next_column = left
-        .saturating_add(previous_rendered.width)
-        .saturating_add(display_width(&indicator));
-    let line = pad_to_width(
-        &format!(
-            "{}{}{}{}",
-            " ".repeat(left),
-            previous_rendered.line,
-            indicator,
-            next_rendered.line
-        ),
-        width,
-    );
-    (
-        line,
-        vec![
-            GardenScrollHitbox {
-                scroll: scroll.saturating_sub(1),
-                column: left,
-                row,
-                width: previous_rendered.width,
-                height: 1,
-            },
-            GardenScrollHitbox {
-                scroll: (scroll + 1).min(max_scroll),
-                column: next_column,
-                row,
-                width: next_rendered.width,
-                height: 1,
-            },
-        ],
-    )
-}
-
 /// First tick of the current run of identical visible Garden plots.
 /// Folding onto this representative lets frame material equality suppress a redraw when a slow
 /// animation holds its current pose. The search normally checks only a handful of preceding ticks,
@@ -866,36 +657,19 @@ pub fn canonical_tick(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<u64> {
-    canonical_tick_scrolled(height, width, sessions, 0, tick, reduced_motion)
-}
-
-/// [`canonical_tick`] for the horizontally scrolled Garden viewport.
-#[must_use]
-pub fn canonical_tick_scrolled(
-    height: usize,
-    width: usize,
-    sessions: &[GardenSession],
-    requested_scroll: usize,
-    tick: u64,
-    reduced_motion: bool,
-) -> Option<u64> {
     let layout = garden_layout(height, width)?;
-    if let Some(canonical) = garden_world::canonical_tick(
-        height,
-        layout.garden_width,
-        sessions,
-        requested_scroll,
-        tick,
-        reduced_motion,
-    ) {
-        return Some(canonical);
-    }
-    let viewport = garden_viewport(layout, sessions.len(), requested_scroll);
-    let sessions = &sessions[viewport.visible_start..viewport.visible_end];
     if reduced_motion {
         return Some(0);
     }
     let tick = tick % ANIMATION_CYCLE_TICKS;
+    let detailed_capacity = layout.columns.saturating_mul(layout.plot_rows);
+    if sessions.len() > detailed_capacity
+        || sessions
+            .iter()
+            .any(|session| session.agents.len() > MAX_VISIBLE_AGENTS)
+    {
+        return Some(tick - tick % AMBIENT_PHASE_TICKS);
+    }
     let expected_ambient = ambient_phase(tick, false);
     let expected = sessions
         .iter()
@@ -920,9 +694,7 @@ pub fn canonical_tick_scrolled(
 fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -> String {
     let rabbits = sessions
         .iter()
-        .filter(|session| {
-            session.lifecycle == SessionLifecycle::Available && session.agents_observed
-        })
+        .filter(|session| session.agents_observed)
         .map(|session| session.agents.len())
         .sum::<usize>();
     let attention = sessions
@@ -936,16 +708,22 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
     let attention = if attention == 0 {
         Role::Success.style().paint("all clear")
     } else {
+        let verb = if attention == 1 { "needs" } else { "need" };
         Role::Warning
             .style()
             .bold()
-            .paint(&format!("{attention} need attention"))
+            .paint(&format!("{attention} {verb} attention"))
+    };
+    let session_noun = if sessions.len() == 1 {
+        "session"
+    } else {
+        "sessions"
     };
     let right = format!(
         "{} · {attention} · {} ",
         Style::new()
             .dim()
-            .paint(&format!("{} plots", sessions.len())),
+            .paint(&format!("{} {session_noun}", sessions.len())),
         Style::new().dim().paint(&format!("{rabbits} usagi"))
     );
     let gap = width.saturating_sub(display_width(&left) + display_width(&right));
@@ -982,15 +760,9 @@ fn sky_line(width: usize, workspace_name: &str, tick: u64, reduced_motion: bool)
     )
 }
 
-fn footer_line(width: usize, scrollable: bool) -> String {
-    let (left, right) = if scrollable {
-        (
-            " Garden Action Center · ←/→ scroll · click",
-            "Esc · return ",
-        )
-    } else {
-        (" Garden Action Center · click a usagi", "any key · wake ")
-    };
+fn footer_line(width: usize) -> String {
+    let left = " Garden Action Center · click a usagi";
+    let right = "any key · wake ";
     let left = Role::Feature.style().paint(left);
     let right = Style::new().dim().paint(right);
     let gap = width.saturating_sub(display_width(&left) + display_width(&right));
@@ -999,28 +771,29 @@ fn footer_line(width: usize, scrollable: bool) -> String {
 
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     let label = signpost(&session.label);
-    let ([mut status, ears, head, body, feet], rabbits) = if session.agents_observed {
-        match session.lifecycle {
-            SessionLifecycle::Available if session.pr_merged => {
-                available_plot(session, tick, reduced_motion)
-            }
-            SessionLifecycle::Available => match session.agent_status {
-                Some(
-                    status @ (DispatchAgentStatus::Starting
-                    | DispatchAgentStatus::Idle
-                    | DispatchAgentStatus::Exited
-                    | DispatchAgentStatus::Failed),
-                ) => (dispatch_plot(session, status), Vec::new()),
-                Some(DispatchAgentStatus::Running) | None => {
-                    available_plot(session, tick, reduced_motion)
+    let ([mut status, ears, head, body, feet], rabbits) =
+        if session.agents_observed && !session.agents.is_empty() {
+            agent_plot(session, tick, reduced_motion)
+        } else if session.agents_observed {
+            match session.lifecycle {
+                SessionLifecycle::Available if session.pr_merged => {
+                    (celebration_plot(tick, reduced_motion), Vec::new())
                 }
-            },
-            // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
-            _ => (lifecycle_plot(session, tick, reduced_motion), Vec::new()),
-        }
-    } else {
-        (inactive_plot(session), Vec::new())
-    };
+                SessionLifecycle::Available => match session.agent_status {
+                    Some(
+                        status @ (DispatchAgentStatus::Starting
+                        | DispatchAgentStatus::Idle
+                        | DispatchAgentStatus::Exited
+                        | DispatchAgentStatus::Failed),
+                    ) => (dispatch_plot(session, status), Vec::new()),
+                    Some(DispatchAgentStatus::Running) | None => (empty_plot(), Vec::new()),
+                },
+                // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
+                _ => (lifecycle_plot(session, tick, reduced_motion), Vec::new()),
+            }
+        } else {
+            (inactive_plot(session), Vec::new())
+        };
     if session.pending_decisions > 0 {
         let noun = if session.pending_decisions == 1 {
             "decision"
@@ -1041,9 +814,8 @@ fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     }
 }
 
-/// A non-running dispatch state is session-level availability, not one
-/// runtime's phase. Render one static session pose rather than relabeling a
-/// coarse running rabbit and leaving its animation and hitbox live.
+/// Explain daemon dispatch state when no Agent runtime is present to own a
+/// rabbit. Observed runtimes instead keep their identity in [`agent_plot`].
 fn dispatch_plot(
     session: &GardenSession,
     status: DispatchAgentStatus,
@@ -1158,7 +930,7 @@ fn ground_rows(layout: GardenLayout, tick: u64, reduced_motion: bool) -> [String
                 " ".repeat(SIDE_PADDING),
                 Style::new().dim().paint(&layer)
             ),
-            layout.garden_width,
+            layout.content_width + SIDE_PADDING * 2,
         )
     })
 }
@@ -1255,60 +1027,50 @@ fn lifecycle_plot(
     ]
 }
 
-/// `Available` な区画の status 行 + sprite 4 行と、その中のうさぎの横位置。
-fn available_plot(
+/// Agent のいる区画の status 行 + sprite 4 行と、その中のうさぎの横位置。
+fn agent_plot(
     session: &GardenSession,
     tick: u64,
     reduced_motion: bool,
 ) -> ([String; PLOT_CONTENT_ROWS - 1], Vec<PlacedRabbit>) {
-    if session.pr_merged {
-        let rabbit = if reduced_motion || tick.is_multiple_of(2) {
-            ["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"]
+    let agents = agent_status::ordered(&session.agents);
+    debug_assert!(!agents.is_empty());
+
+    let session_status =
+        if session.pr_merged {
+            Some(Role::Success.style().bold().paint("PR merged! *"))
+        } else if session.lifecycle == SessionLifecycle::Failed {
+            Some(Role::Danger.style().bold().paint(
+                &session.failure_summary.as_deref().map_or_else(
+                    || "failed".to_owned(),
+                    |summary| format!("failed · {summary}"),
+                ),
+            ))
+        } else if session.agent_status == Some(DispatchAgentStatus::Failed) {
+            Some(Role::Danger.style().bold().paint("failed"))
         } else {
-            [" *  . *", "  /)/)", " \\(^o^)/", " c(\")(\")"]
+            None
         };
-        let [ears, head, body, feet] = sprite(rabbit, Role::Feature.style().bold(), PLOT_WIDTH);
-        // celebration は session の祝いの姿で、特定の agent ではない。
+
+    if agents.len() == 1 {
+        let agent = agents[0];
+        let (status, status_style, rabbit_style, rabbit) =
+            detailed_agent_appearance(session, agent, tick, reduced_motion);
+        let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
+        // 1 羽だけの区画はうさぎを大きく描くので、その 1 体が sprite 行の全幅を持つ。
         return (
             [
                 centered(
                     PLOT_WIDTH,
-                    &Role::Success.style().bold().paint("PR merged! *"),
+                    session_status
+                        .as_deref()
+                        .unwrap_or(&status_style.paint(status)),
                 ),
                 ears,
                 head,
                 body,
                 feet,
             ],
-            Vec::new(),
-        );
-    }
-    let agents = agent_status::ordered(&session.agents);
-    if agents.is_empty() {
-        return (
-            [
-                centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
-                " ".repeat(PLOT_WIDTH),
-                " ".repeat(PLOT_WIDTH),
-                " ".repeat(PLOT_WIDTH),
-                " ".repeat(PLOT_WIDTH),
-            ],
-            Vec::new(),
-        );
-    }
-
-    if agents.len() == 1 {
-        let agent = agents[0];
-        let (_status, _status_style, rabbit_style, rabbit) = agent_appearance(
-            agent.phase,
-            tick,
-            reduced_motion,
-            &agent.runtime_id.as_str(),
-        );
-        let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
-        // 1 羽だけの区画はうさぎを大きく描くので、その 1 体が sprite 行の全幅を持つ。
-        return (
-            [" ".repeat(PLOT_WIDTH), ears, head, body, feet],
             vec![PlacedRabbit {
                 runtime_id: agent.runtime_id,
                 offset: 0,
@@ -1318,18 +1080,11 @@ fn available_plot(
     }
 
     let visible = &agents[..agents.len().min(MAX_VISIBLE_AGENTS)];
-    // うさぎは plot 幅の都合で先頭数体しか置けないので、status 行は **全** agent の
-    // phase glyph だけを示す。pose で分かる action caption や件数の読み上げは重ねず、
-    // 畳まれた Agent の存在だけを静かな記号列として残す。
-    let status = agent_status::glyph_strip(&agents, PLOT_WIDTH);
+    let status = session_status.unwrap_or_else(|| agent_status::status_line(&agents, PLOT_WIDTH));
     let mut rows: [String; SPRITE_ROWS] = std::array::from_fn(|_| String::new());
     for agent in visible {
-        let (_, _, style, rabbit) = agent_appearance(
-            agent.phase,
-            tick,
-            reduced_motion,
-            &agent.runtime_id.as_str(),
-        );
+        let (_, _, style, rabbit) =
+            detailed_agent_appearance(session, *agent, tick, reduced_motion);
         let compact = sprite(rabbit, style, COMPACT_RABBIT_WIDTH);
         for (row, part) in rows.iter_mut().zip(compact) {
             row.push_str(&part);
@@ -1352,6 +1107,100 @@ fn available_plot(
         [centered(PLOT_WIDTH, &status), ears, head, body, feet],
         placed,
     )
+}
+
+fn detailed_agent_appearance(
+    session: &GardenSession,
+    agent: GardenAgent,
+    tick: u64,
+    reduced_motion: bool,
+) -> (&'static str, Style, Style, [&'static str; 4]) {
+    let stable_id = agent.runtime_id.as_str();
+    match session.lifecycle {
+        SessionLifecycle::Creating | SessionLifecycle::Initializing => {
+            return (
+                "starting",
+                Role::Accent.style(),
+                rabbit_style(&stable_id).bold(),
+                ["", " /)/)", "( . .)", "c(\")(\")v"],
+            );
+        }
+        SessionLifecycle::Deleting => {
+            return (
+                "closing",
+                Style::new().dim(),
+                rabbit_style(&stable_id).dim(),
+                [" z", " /)/)", "( -.-)", "c(\")(\")"],
+            );
+        }
+        SessionLifecycle::Failed => {
+            return (
+                "failed",
+                Role::Danger.style().bold(),
+                Role::Danger.style(),
+                ["", " /)/)", "( x.x)", "c(\")(\")/"],
+            );
+        }
+        SessionLifecycle::Available => {}
+    }
+    match session.agent_status {
+        Some(DispatchAgentStatus::Starting) => (
+            "starting",
+            Role::Accent.style(),
+            rabbit_style(&stable_id).bold(),
+            ["", " /)/)", "( . .)", "c(\")(\")v"],
+        ),
+        Some(DispatchAgentStatus::Idle) => (
+            "completed",
+            Style::new().dim(),
+            rabbit_style(&stable_id).dim(),
+            [" z", " /)/)", "( -.-)", "c(\")(\")"],
+        ),
+        Some(DispatchAgentStatus::Exited) => (
+            "stopped",
+            Style::new().dim(),
+            rabbit_style(&stable_id).dim(),
+            [" z", " /)/)", "( -.-)", "c(\")(\")"],
+        ),
+        Some(DispatchAgentStatus::Failed) => (
+            "failed",
+            Role::Danger.style().bold(),
+            Role::Danger.style(),
+            ["", " /)/)", "( x.x)", "c(\")(\")/"],
+        ),
+        Some(DispatchAgentStatus::Running) | None => {
+            agent_appearance(agent.phase, tick, reduced_motion, &stable_id)
+        }
+    }
+}
+
+fn celebration_plot(tick: u64, reduced_motion: bool) -> [String; PLOT_CONTENT_ROWS - 1] {
+    let rabbit = if reduced_motion || tick.is_multiple_of(2) {
+        ["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"]
+    } else {
+        [" *  . *", "  /)/)", " \\(^o^)/", " c(\")(\")"]
+    };
+    let [ears, head, body, feet] = sprite(rabbit, Role::Feature.style().bold(), PLOT_WIDTH);
+    [
+        centered(
+            PLOT_WIDTH,
+            &Role::Success.style().bold().paint("PR merged! *"),
+        ),
+        ears,
+        head,
+        body,
+        feet,
+    ]
+}
+
+fn empty_plot() -> [String; PLOT_CONTENT_ROWS - 1] {
+    [
+        centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
+        " ".repeat(PLOT_WIDTH),
+        " ".repeat(PLOT_WIDTH),
+        " ".repeat(PLOT_WIDTH),
+        " ".repeat(PLOT_WIDTH),
+    ]
 }
 
 fn agent_appearance(
@@ -1523,30 +1372,13 @@ mod tests {
         tick: u64,
         reduced_motion: bool,
     ) -> Option<super::GardenFrame> {
-        super::render_compact_scrolled(
+        super::render(
             height,
             width,
             workspace_name,
             sessions,
-            super::GardenRenderOptions::new(0, tick, reduced_motion, "Agents"),
-        )
-    }
-
-    fn render_scrolled(
-        height: usize,
-        width: usize,
-        workspace_name: &str,
-        sessions: &[GardenSession],
-        scroll: usize,
-        tick: u64,
-        reduced_motion: bool,
-    ) -> Option<super::GardenFrame> {
-        super::render_compact_scrolled(
-            height,
-            width,
-            workspace_name,
-            sessions,
-            super::GardenRenderOptions::new(scroll, tick, reduced_motion, "Agents"),
+            tick,
+            reduced_motion,
         )
     }
 
@@ -1587,10 +1419,6 @@ mod tests {
         out
     }
 
-    fn plain_rows(rows: &[String]) -> Vec<String> {
-        rows.iter().map(|row| plain_row(row)).collect()
-    }
-
     fn plain(frame: &super::GardenFrame) -> Vec<String> {
         frame.rows.iter().map(|row| plain_row(row)).collect()
     }
@@ -1606,8 +1434,8 @@ mod tests {
         let frame = super::render(24, 120, "atlas", &[session], 0, false).expect("garden fits");
         let text = plain(&frame).join("\n");
         assert!(text.contains("click a usagi"));
-        assert!(text.contains("Agents"));
-        assert!(text.contains('~'));
+        assert!(text.contains("world"));
+        assert!(!text.contains("scroll"));
     }
 
     fn grass_row(rows: &[String]) -> &str {
@@ -1648,12 +1476,12 @@ mod tests {
     }
 
     #[test]
-    fn non_running_dispatch_status_replaces_the_coarse_live_running_rabbit() {
-        for status in [
-            DispatchAgentStatus::Starting,
-            DispatchAgentStatus::Idle,
-            DispatchAgentStatus::Exited,
-            DispatchAgentStatus::Failed,
+    fn non_running_dispatch_status_restyles_each_observed_agent_rabbit() {
+        for (status, label) in [
+            (DispatchAgentStatus::Starting, "starting"),
+            (DispatchAgentStatus::Idle, "completed"),
+            (DispatchAgentStatus::Exited, "stopped"),
+            (DispatchAgentStatus::Failed, "failed"),
         ] {
             let mut session = session(
                 STEADY_ID,
@@ -1668,23 +1496,14 @@ mod tests {
                 "{status:?} must use a static session pose"
             );
             let frame = render(24, 100, "x", &[session], 17, false).expect("garden fits");
-            assert!(rabbits(&frame).is_empty(), "{status:?} has no Agent hitbox");
+            assert_eq!(rabbits(&frame).len(), 1, "{status:?} keeps its Agent usagi");
             let rows = plain(&frame);
             let text = rows.join("\n");
-            assert!(text.contains("1 plots"), "{status:?}: {text}");
+            assert!(text.contains("1 session"), "{status:?}: {text}");
             assert!(text.contains("1 usagi"), "{status:?}: {text}");
-            if status == DispatchAgentStatus::Failed {
-                assert!(text.contains("failed"), "{status:?}: {text}");
-            } else {
-                assert!(
-                    !rows
-                        .iter()
-                        .any(|row| ["starting", "idle", "stopped"].contains(&row.trim())),
-                    "{status:?}: {text}"
-                );
-            }
+            assert!(text.contains(label), "{status:?}: {text}");
             let attention = if status == DispatchAgentStatus::Failed {
-                "1 need attention"
+                "1 needs attention"
             } else {
                 "all clear"
             };
@@ -1702,7 +1521,7 @@ mod tests {
         let text = plain(&frame).join("\n");
         assert!(text.contains("( o.o)?"));
         assert!(text.contains("waiting"));
-        assert!(text.contains("1 need attention"));
+        assert!(text.contains("1 needs attention"));
     }
 
     #[test]
@@ -1727,8 +1546,8 @@ mod tests {
 
         let frame = render(24, 100, "x", &[waiting, clear], 0, true).expect("garden fits");
         let text = plain(&frame).join("\n");
-        assert!(text.contains("2 plots"));
-        assert!(text.contains("1 need attention"));
+        assert!(text.contains("2 sessions"));
+        assert!(text.contains("1 needs attention"));
         assert!(text.contains("2 usagi"));
         assert!(text.contains("action · 2 decisions"));
 
@@ -1844,7 +1663,7 @@ mod tests {
     }
 
     #[test]
-    fn rabbits_are_left_of_the_session_grouped_agent_panel() {
+    fn garden_uses_its_full_width_without_a_duplicate_agent_panel() {
         let sessions = vec![
             session(
                 STEADY_ID,
@@ -1860,23 +1679,15 @@ mod tests {
             ),
         ];
         let frame = render(24, 100, "my-project", &sessions, 0, true).expect("garden fits");
-        let rows = plain(&frame);
-        let separator = rows
-            .iter()
-            .find_map(|row| row.find('│'))
-            .expect("the Agent panel has a separator");
-        assert!(plots(&frame).iter().all(|plot| {
-            plot.column == super::SIDE_PADDING && plot.column + plot.width <= separator
-        }));
-        let text = rows.join("\n");
-        assert!(text.contains("Agents"), "{text}");
+        let text = plain(&frame).join("\n");
+        assert!(!text.contains("Agents"), "{text}");
+        assert!(!text.contains("scroll"), "{text}");
         assert!(text.contains("completed-work"), "{text}");
         assert!(text.contains("completed"), "{text}");
         assert!(text.contains("waiting"), "{text}");
-        assert_eq!(frame.panel_hitboxes.len(), 4);
         assert_eq!(
             frame
-                .panel_hitboxes
+                .hitboxes
                 .iter()
                 .filter(|hitbox| hitbox.agent.is_some())
                 .count(),
@@ -1896,7 +1707,7 @@ mod tests {
         fixture.agents.clear();
 
         fixture.pending_decisions = 1;
-        assert_eq!(message(&fixture), "1 decision need your input.");
+        assert_eq!(message(&fixture), "1 decision needs your input.");
         fixture.pending_decisions = 2;
         assert_eq!(message(&fixture), "2 decisions need your input.");
         fixture.pending_decisions = 0;
@@ -1933,13 +1744,53 @@ mod tests {
     }
 
     #[test]
-    fn agent_panel_reports_empty_and_overflow_states() {
-        let empty = super::agent_panel(8, 24, &[], 0, 0, "Agents")
-            .rows
-            .join("\n");
-        assert!(empty.contains("No sessions in open projects"));
+    fn empty_agent_sessions_keep_state_specific_illustrations() {
+        let mut fixture = session(
+            STEADY_ID,
+            "state",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        );
+        fixture.agents.clear();
 
-        let sessions = (0..4)
+        fixture.pr_merged = true;
+        let calm_celebration = super::plot(&fixture, 0, true).rows.join("\n");
+        let lively_celebration = super::plot(&fixture, 1, false).rows.join("\n");
+        assert!(calm_celebration.contains("PR merged"));
+        assert!(calm_celebration.contains("^.^"));
+        assert!(lively_celebration.contains("^o^"));
+
+        fixture.pr_merged = false;
+        for (status, expected) in [
+            (DispatchAgentStatus::Starting, r#"c(")(")v"#),
+            (DispatchAgentStatus::Idle, "( -.-)"),
+            (DispatchAgentStatus::Exited, "( -.-)"),
+            (DispatchAgentStatus::Failed, "( x.x)"),
+        ] {
+            fixture.agent_status = Some(status);
+            let text = super::plot(&fixture, 0, true).rows.join("\n");
+            assert!(text.contains(expected), "{status:?}: {text}");
+        }
+        fixture.agent_status = Some(DispatchAgentStatus::Running);
+        assert!(
+            super::plot(&fixture, 0, true)
+                .rows
+                .join("\n")
+                .contains("no agents")
+        );
+
+        fixture.agent_status = None;
+        fixture.lifecycle = SessionLifecycle::Failed;
+        let generic_failure = super::plot(&fixture, 0, true).rows.join("\n");
+        assert!(generic_failure.contains("failed"));
+        fixture.failure_summary = Some("safe reason".to_owned());
+        let explained_failure = super::plot(&fixture, 0, true).rows.join("\n");
+        assert!(explained_failure.contains("failed · safe reason"));
+    }
+
+    #[test]
+    fn dense_garden_draws_every_session_and_agent_without_overflow_copy() {
+        let sessions = (0..20)
             .map(|index| {
                 session(
                     &format!("{index:08x}-0000-4000-8000-000000000001"),
@@ -1949,46 +1800,138 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let panel = super::agent_panel(8, 24, &sessions, 30, 1, "Agents");
-        let overflow = plain_rows(&panel.rows).join("\n");
-        assert!(overflow.contains("session-0"));
-        assert!(overflow.contains("session-1"));
-        assert!(overflow.contains("session-2"));
-        assert!(!overflow.contains("session-3"));
-        assert!(overflow.contains("+3 more rows"));
-        assert_eq!(panel.hitboxes.len(), 5);
-        assert!(
-            panel
-                .hitboxes
-                .iter()
-                .all(|hitbox| hitbox.column == 30 && hitbox.height == 1)
-        );
+        let frame = render(14, 64, "all sessions", &sessions, 0, true).expect("fits");
+        assert_eq!(frame.hitboxes.len(), sessions.len());
+        assert_eq!(rabbits(&frame).len(), sessions.len());
+        let text = plain(&frame).join("\n");
+        assert!(!text.contains("more"), "{text}");
+        assert!(!text.contains("scroll"), "{text}");
     }
 
     #[test]
-    fn agent_panel_lists_sessions_beyond_the_plot_viewport() {
-        let sessions = (0..5)
+    fn dense_layout_uses_lines_then_glyphs_before_losing_an_agent() {
+        let sessions = (0..80)
             .map(|index| {
                 session(
                     &format!("{index:08x}-0000-4000-8000-000000000001"),
-                    &format!("project-{index} / session-{index}"),
+                    &format!("session-{index}"),
                     SessionLifecycle::Available,
                     AgentPhase::Running,
                 )
             })
             .collect::<Vec<_>>();
-        let frame = render(24, 100, "5 open projects", &sessions, 0, true).expect("fits");
 
-        assert_eq!(plots(&frame).len(), 4, "the fifth plot starts off screen");
-        let last = sessions[4].id;
-        assert!(
-            frame
-                .panel_hitboxes
-                .iter()
-                .any(|hitbox| hitbox.session_id == last && hitbox.agent.is_some()),
-            "the Agent list must not be limited to the Garden viewport"
+        let mut cards = sessions[..3].to_vec();
+        cards[2].agents.clear();
+        let cards = render(14, 64, "many", &cards, 0, true).expect("cards fit");
+        assert_eq!(rabbits(&cards).len(), 2);
+        assert!(plain(&cards).join("\n").contains("No agent activity."));
+
+        let mut line_sessions = sessions[..22].to_vec();
+        line_sessions[21].agents.clear();
+        let lines = render(14, 64, "many", &line_sessions, 0, true).expect("lines fit");
+        let line_text = plain(&lines).join("\n");
+        assert_eq!(rabbits(&lines).len(), 21);
+        assert!(lines.hitboxes.iter().all(|hitbox| hitbox.height == 1));
+        assert!(lines.hitboxes.iter().any(|hitbox| hitbox.agent.is_none()));
+        assert_eq!(line_text.matches('兎').count(), 21, "{line_text}");
+        assert!(line_text.contains("sessi"), "{line_text}");
+        assert!(!line_text.contains("(o.o)"), "{line_text}");
+
+        let mut glyph_sessions = sessions.clone();
+        glyph_sessions[79].agents.clear();
+        let glyphs = render(14, 64, "many", &glyph_sessions, 0, true).expect("glyphs fit");
+        let glyph_text = plain(&glyphs).join("\n");
+        assert_eq!(rabbits(&glyphs).len(), sessions.len() - 1);
+        assert!(glyphs.hitboxes.iter().all(|hitbox| hitbox.height == 1));
+        assert!(glyphs.hitboxes.iter().any(|hitbox| hitbox.agent.is_none()));
+        assert!(glyph_text.contains('兎'), "{glyph_text}");
+        assert!(glyph_text.contains('·'), "{glyph_text}");
+
+        let layout = super::garden_layout(14, 64).expect("minimum layout");
+        assert_eq!(super::dense_mode(layout, 20), super::DenseMode::Card);
+        assert_eq!(super::dense_mode(layout, 21), super::DenseMode::Line);
+        assert_eq!(super::dense_mode(layout, 78), super::DenseMode::Glyph);
+        assert_eq!(
+            super::dense_mode(layout, usize::MAX),
+            super::DenseMode::Glyph
         );
-        assert!(plain(&frame).join("\n").contains("project-4 / session-4"));
+    }
+
+    #[test]
+    fn dense_layout_keeps_agent_rabbits_ahead_of_idle_session_cards() {
+        let mut sessions = (0..331)
+            .map(|index| {
+                let mut session = session(
+                    &format!("{index:08x}-0000-4000-8000-000000000001"),
+                    &format!("idle-{index}"),
+                    SessionLifecycle::Available,
+                    AgentPhase::Ready,
+                );
+                session.agents.clear();
+                session
+            })
+            .collect::<Vec<_>>();
+        sessions.push(session(
+            "ffff0000-0000-4000-8000-000000000001",
+            "active-agent",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        ));
+
+        let frame = render(14, 64, "overflow", &sessions, 0, true).expect("fallback fits");
+        assert_eq!(frame.hitboxes.len(), 1);
+        assert_eq!(rabbits(&frame).len(), 1);
+        let text = plain(&frame).join("\n");
+        assert!(text.contains("active-agent"), "{text}");
+        assert!(text.contains("332 sessions"), "{text}");
+    }
+
+    #[test]
+    fn dense_rabbits_keep_identity_while_status_changes() {
+        let mut fixture = session(
+            STEADY_ID,
+            "state",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        let mut rabbit = fixture.agents[0];
+
+        for (lifecycle, expected) in [
+            (SessionLifecycle::Creating, "start"),
+            (SessionLifecycle::Initializing, "start"),
+            (SessionLifecycle::Deleting, "close"),
+            (SessionLifecycle::Failed, "fail"),
+        ] {
+            fixture.lifecycle = lifecycle;
+            assert!(super::dense_rabbit(&fixture, rabbit).contains(expected));
+        }
+
+        fixture.lifecycle = SessionLifecycle::Available;
+        for (status, expected) in [
+            (DispatchAgentStatus::Starting, "start"),
+            (DispatchAgentStatus::Idle, "done"),
+            (DispatchAgentStatus::Exited, "stop"),
+            (DispatchAgentStatus::Failed, "fail"),
+        ] {
+            fixture.agent_status = Some(status);
+            assert!(super::dense_rabbit(&fixture, rabbit).contains(expected));
+        }
+
+        fixture.agent_status = None;
+        for (phase, expected) in [
+            (AgentPhase::Waiting, "wait"),
+            (AgentPhase::Running, "run"),
+            (AgentPhase::Ready, "ready"),
+            (AgentPhase::Interrupted, "pause"),
+            (AgentPhase::Sleeping, "sleep"),
+            (AgentPhase::Absent, "idle"),
+            (AgentPhase::Ended, "done"),
+            (AgentPhase::Exited, "done"),
+        ] {
+            rabbit.phase = phase;
+            assert!(super::dense_rabbit(&fixture, rabbit).contains(expected));
+        }
     }
 
     #[test]
@@ -2011,109 +1954,39 @@ mod tests {
         let frame = render(24, 100, "my-project", &[], 0, false).expect("garden fits");
         assert!(frame.rows.join("\n").contains("No sessions in the garden"));
         assert!(frame.hitboxes.is_empty());
-        assert_eq!(frame.hidden_sessions, 0);
     }
 
     #[test]
-    fn overflow_scrolls_one_column_at_a_time_and_every_session_is_reachable() {
-        let sessions = (0..20)
+    fn one_busy_session_keeps_every_agent_as_a_usagi() {
+        let mut busy = session(
+            STEADY_ID,
+            "busy",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        busy.agents = (0..16)
             .map(|index| {
-                session(
+                agent(
                     &format!("{index:08x}-0000-4000-8000-000000000001"),
-                    &format!("session-{index}"),
-                    SessionLifecycle::Available,
-                    AgentPhase::Ready,
+                    if index == 0 {
+                        AgentPhase::Waiting
+                    } else {
+                        AgentPhase::Running
+                    },
                 )
             })
-            .collect::<Vec<_>>();
-        let first = render_scrolled(14, 64, "x", &sessions, 0, 3, false).expect("garden fits");
-        let second = render_scrolled(14, 64, "x", &sessions, 0, 3, false).expect("garden fits");
-        assert_eq!(first, second);
-        assert_eq!(first.scroll, 0);
-        assert_eq!(first.max_scroll, 19);
-        assert!(first.rows.join("\n").contains("1-1 / 20"));
-        assert_eq!(plots(&first)[0].session_id, sessions[0].id);
-
-        let shifted =
-            render_scrolled(14, 64, "x", &sessions, 1, 3, false).expect("shifted viewport fits");
-        assert_eq!(plots(&shifted)[0].session_id, sessions[1].id);
-
-        let last = render_scrolled(14, 64, "x", &sessions, usize::MAX, 3, false)
-            .expect("last viewport fits");
-        assert_eq!(last.scroll, 19);
-        assert!(last.rows.join("\n").contains("20-20 / 20"));
-        assert_eq!(plots(&last)[0].session_id, sessions[19].id);
-        assert_eq!(last.scroll_hitboxes.len(), 2);
-        assert_eq!(last.scroll_hitboxes[0].scroll, 18);
-        assert_eq!(last.scroll_hitboxes[1].scroll, 19);
-        for hitbox in &last.scroll_hitboxes {
-            assert!(hitbox.contains(hitbox.column, hitbox.row));
-            assert!(!hitbox.contains(hitbox.column + hitbox.width, hitbox.row));
-        }
-
-        let reachable = (0..=first.max_scroll)
-            .flat_map(|scroll| {
-                let frame = render_scrolled(14, 64, "x", &sessions, scroll, 3, false)
-                    .expect("every viewport fits");
-                plots(&frame)
-                    .into_iter()
-                    .map(|hitbox| hitbox.session_id)
-                    .collect::<Vec<_>>()
-            })
-            .collect::<std::collections::BTreeSet<_>>();
+            .collect();
+        let frame = render(14, 64, "x", &[busy], 3, false).expect("garden fits");
+        assert_eq!(rabbits(&frame).len(), 16);
         assert_eq!(
-            reachable,
-            sessions
-                .iter()
-                .map(|session| session.id)
-                .collect::<std::collections::BTreeSet<_>>()
-        );
-    }
-
-    #[test]
-    fn a_tall_garden_keeps_each_vertical_column_together_while_scrolling() {
-        let sessions = (0..5)
-            .map(|index| {
-                session(
-                    &format!("{index:08x}-0000-4000-8000-000000000001"),
-                    &format!("session-{index}"),
-                    SessionLifecycle::Available,
-                    AgentPhase::Ready,
-                )
-            })
-            .collect::<Vec<_>>();
-        let first = render_scrolled(23, 80, "x", &sessions, 0, 3, false).expect("garden fits");
-        let shifted = render_scrolled(23, 80, "x", &sessions, 1, 3, false).expect("garden scrolls");
-        let plot_for = |frame: &super::GardenFrame, id| {
-            plots(frame)
+            rabbits(&frame)
                 .into_iter()
-                .find(|plot| plot.session_id == id)
-                .expect("session is visible")
-        };
-
-        assert_eq!(first.max_scroll, 2);
-        assert!(first.rows.join("\n").contains("1-2 / 5"));
-        assert!(shifted.rows.join("\n").contains("3-4 / 5"));
-        let first_column = sessions[..2]
-            .iter()
-            .map(|session| plot_for(&first, session.id))
-            .collect::<Vec<_>>();
-        let shifted_column = sessions[2..4]
-            .iter()
-            .map(|session| plot_for(&shifted, session.id))
-            .collect::<Vec<_>>();
-        assert_eq!(first_column[0].column, first_column[1].column);
-        assert_eq!(shifted_column[0].column, shifted_column[1].column);
-        assert_eq!(first_column[0].column, shifted_column[0].column);
-        assert_eq!(first_column[0].row, shifted_column[0].row);
-        assert_eq!(first_column[1].row, shifted_column[1].row);
-
-        let last = render_scrolled(23, 80, "x", &sessions, 2, 3, false).expect("last column");
-        assert!(
-            plots(&last)
-                .iter()
-                .any(|plot| plot.session_id == sessions[4].id)
+                .map(|rabbit| rabbit.agent.expect("rabbit owns an Agent"))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            16
         );
+        assert!(!plain(&frame).join("\n").contains("scroll"));
     }
 
     #[test]
@@ -2178,18 +2051,16 @@ mod tests {
         let second = render(24, 100, "x", &[make_session(reversed)], 2, false).expect("fits");
         assert_eq!(first, second);
         let text = plain(&first).join("\n");
-        // status 行は sidebar と同じ記号列で、うさぎに置けなかった 2 体を含む
-        // **全** agent の phase を注意順に並べる。
-        assert!(text.contains("◆ ● ● ○ ◦"), "{text}");
-        assert!(
-            text.contains("( o.o)?"),
-            "the waiting agent must stay visible"
-        );
-        assert_eq!(text.matches("o.o").count(), super::MAX_VISIBLE_AGENTS);
+        assert!(text.contains("wait"), "{text}");
+        assert!(text.contains("run"), "{text}");
+        assert!(text.contains("ready"), "{text}");
+        assert!(text.contains("done"), "{text}");
+        assert_eq!(rabbits(&first).len(), 5);
+        assert_eq!(text.matches("o.o").count(), 3);
     }
 
-    /// うさぎ 1 羽は 1 agent なので、羽ごとに hitbox を返す。box は必ず区画の内側で、
-    /// 描かれたうさぎの絵に重なり、注意順（`Waiting` が先頭）と同じ並びになる。
+    /// うさぎ 1 羽は 1 agent なので、羽ごとに hitbox を返す。dense card へ
+    /// 切り替わっても注意順と stable identity を保つ。
     #[test]
     fn every_visible_rabbit_owns_the_cells_it_is_drawn_in() {
         let waiting = agent("f0000000-0000-4000-8000-000000000001", AgentPhase::Waiting);
@@ -2211,26 +2082,24 @@ mod tests {
         }];
         let frame = render(24, 100, "x", &sessions, 0, true).expect("garden fits");
         let rabbits = rabbits(&frame);
-        // 区画に置けるのは MAX_VISIBLE_AGENTS 羽までで、畳まれた分は box を持たない
-        // （status 行の記号列だけが残る）。
-        assert_eq!(rabbits.len(), super::MAX_VISIBLE_AGENTS);
+        assert_eq!(rabbits.len(), 5);
         assert_eq!(
             rabbits
                 .iter()
                 .map(|rabbit| rabbit.agent.expect("a rabbit names its runtime"))
                 .collect::<Vec<_>>(),
-            vec![waiting.runtime_id, running.runtime_id, ready.runtime_id],
+            vec![
+                waiting.runtime_id,
+                running.runtime_id,
+                ready.runtime_id,
+                folded.runtime_id,
+                hidden.runtime_id,
+            ],
         );
-        let plot = plots(&frame)[0];
         let rows = plain(&frame);
         for rabbit in &rabbits {
-            assert_eq!(rabbit.session_id, plot.session_id);
-            assert_eq!(rabbit.width, super::COMPACT_RABBIT_WIDTH);
-            // 区画の内側、かつ nameplate / status 行より下（地面より上）。
-            assert!(rabbit.column >= plot.column);
-            assert!(rabbit.column + rabbit.width <= plot.column + plot.width);
-            assert!(rabbit.row > plot.row);
-            assert!(rabbit.row + rabbit.height < plot.row + plot.height);
+            assert_eq!(rabbit.session_id, sessions[0].id);
+            assert_eq!(rabbit.height, super::DENSE_CARD_HEIGHT);
             // box の中に、そのうさぎの絵がある。
             let drawn = (rabbit.row..rabbit.row + rabbit.height).any(|row| {
                 rows[row]
@@ -2267,10 +2136,10 @@ mod tests {
         assert_eq!(rabbits[0].row, plot.row + super::SPRITE_TOP_ROW);
     }
 
-    /// lifecycle の pose と celebration は session そのものの姿で、agent 1 体に
-    /// 対応しない。押しても訪問先は session だけになる。
+    /// lifecycle や celebration が session-wide でも、観測済み Agent はその
+    /// runtime identity を持つうさぎとして残る。
     #[test]
-    fn a_session_pose_names_no_agent() {
+    fn lifecycle_and_celebration_keep_their_agent_usagi() {
         for lifecycle in [
             SessionLifecycle::Creating,
             SessionLifecycle::Initializing,
@@ -2279,7 +2148,7 @@ mod tests {
         ] {
             let sessions = vec![session(STEADY_ID, "one", lifecycle, AgentPhase::Running)];
             let frame = render(24, 100, "x", &sessions, 0, true).expect("garden fits");
-            assert!(rabbits(&frame).is_empty(), "{lifecycle:?}");
+            assert_eq!(rabbits(&frame).len(), 1, "{lifecycle:?}");
             assert_eq!(plots(&frame).len(), 1);
         }
         let mut celebrating = session(
@@ -2290,7 +2159,8 @@ mod tests {
         );
         celebrating.pr_merged = true;
         let frame = render(24, 100, "x", &[celebrating], 0, true).expect("garden fits");
-        assert!(rabbits(&frame).is_empty());
+        assert_eq!(rabbits(&frame).len(), 1);
+        assert!(plain(&frame).join("\n").contains("PR merged"));
     }
 
     #[test]
@@ -2441,7 +2311,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_actions_use_the_pose_instead_of_a_caption() {
+    fn ordinary_actions_avoid_long_narrative_captions() {
         for (lifecycle, phase) in [
             (SessionLifecycle::Creating, AgentPhase::Absent),
             (SessionLifecycle::Initializing, AgentPhase::Absent),
@@ -2457,17 +2327,7 @@ mod tests {
         ] {
             let session = session(STEADY_ID, "one", lifecycle, phase);
             let text = super::plot(&session, 0, false).rows.join("\n");
-            for caption in [
-                "growing",
-                "heading home",
-                "walking",
-                "running",
-                "waiting",
-                "interrupted",
-                "sleeping",
-                "available",
-                "done",
-            ] {
+            for caption in ["growing", "heading home", "walking"] {
                 assert!(
                     !text.contains(caption),
                     "{lifecycle:?}/{phase:?} repeated its pose as {caption:?}: {text}"
@@ -2565,42 +2425,35 @@ mod tests {
         assert!(waiting.contains("/)/)"));
         assert!(waiting_flop.contains("/)(/"));
 
-        let growing = only(SessionLifecycle::Creating, AgentPhase::Absent, 0).join("\n");
-        let emerged = only(SessionLifecycle::Creating, AgentPhase::Absent, 3).join("\n");
+        let lifecycle_rows = |lifecycle, tick, reduced_motion| {
+            let mut session = session(STEADY_ID, "one", lifecycle, AgentPhase::Absent);
+            session.agents.clear();
+            plain(&render(24, 100, "x", &[session], tick, reduced_motion).expect("fits")).join("\n")
+        };
+        let growing = lifecycle_rows(SessionLifecycle::Creating, 0, false);
+        let emerged = lifecycle_rows(SessionLifecycle::Creating, 3, false);
         assert_ne!(growing, emerged);
         assert!(growing.contains("__(_ _)__"));
         assert!(emerged.contains("_( . .)_"));
 
-        let deleting = session(
-            STEADY_ID,
-            "leaving",
-            SessionLifecycle::Deleting,
-            AgentPhase::Ended,
+        assert_ne!(
+            lifecycle_rows(SessionLifecycle::Deleting, 0, false),
+            lifecycle_rows(SessionLifecycle::Deleting, 2, false)
         );
-        let frame = |tick, reduced_motion| {
-            render(
-                24,
-                100,
-                "x",
-                std::slice::from_ref(&deleting),
-                tick,
-                reduced_motion,
-            )
-            .expect("fits")
-            .rows
-        };
-        assert_ne!(frame(0, false), frame(2, false));
-        assert_ne!(frame(2, false), frame(4, false));
+        assert_ne!(
+            lifecycle_rows(SessionLifecycle::Deleting, 2, false),
+            lifecycle_rows(SessionLifecycle::Deleting, 4, false)
+        );
 
-        for (lifecycle, phase) in [
-            (SessionLifecycle::Available, AgentPhase::Waiting),
-            (SessionLifecycle::Creating, AgentPhase::Absent),
-            (SessionLifecycle::Deleting, AgentPhase::Ended),
-        ] {
+        assert_eq!(
+            only_with_motion(SessionLifecycle::Available, AgentPhase::Waiting, 0, true),
+            only_with_motion(SessionLifecycle::Available, AgentPhase::Waiting, 5, true)
+        );
+        for lifecycle in [SessionLifecycle::Creating, SessionLifecycle::Deleting] {
             assert_eq!(
-                only_with_motion(lifecycle, phase, 0, true),
-                only_with_motion(lifecycle, phase, 5, true),
-                "{lifecycle:?}/{phase:?} must be static with reduced motion"
+                lifecycle_rows(lifecycle, 0, true),
+                lifecycle_rows(lifecycle, 5, true),
+                "{lifecycle:?} must be static with reduced motion"
             );
         }
     }
@@ -2706,7 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_tick_ignores_sessions_outside_the_visible_capacity() {
+    fn canonical_tick_for_a_dense_garden_tracks_the_ambient_frame() {
         let mut sessions = vec![
             session(
                 STEADY_ID,
@@ -2728,21 +2581,13 @@ mod tests {
             AgentPhase::Running,
         ));
 
-        let visible_only = &sessions[..2];
         for tick in 0..super::ANIMATION_CYCLE_TICKS {
             assert_eq!(
                 super::canonical_tick(14, 64, &sessions, tick, false),
-                super::canonical_tick(14, 64, visible_only, tick, false),
-                "a hidden plot affected tick {tick}"
+                Some(tick - tick % super::AMBIENT_PHASE_TICKS),
+                "dense cards are static while the sky keeps its cadence"
             );
         }
-        assert!(
-            (1..super::ANIMATION_CYCLE_TICKS).any(|tick| {
-                super::canonical_tick_scrolled(14, 64, &sessions, 2, tick, false)
-                    != super::canonical_tick_scrolled(14, 64, visible_only, 0, tick, false)
-            }),
-            "scrolling the running rabbit into view must expose its motion"
-        );
     }
 
     #[test]
@@ -2777,7 +2622,7 @@ mod tests {
     }
 
     #[test]
-    fn the_status_line_keeps_a_glyph_for_agents_the_plot_cannot_draw() {
+    fn dense_cards_keep_each_agents_status_and_rabbit() {
         let waiting = (0..4)
             .map(|index| {
                 agent(
@@ -2802,14 +2647,9 @@ mod tests {
         let all_waiting =
             render(24, 100, "x", &[make_session(waiting.clone())], 0, false).expect("fits");
         let all_waiting_text = plain(&all_waiting).join("\n");
-        // うさぎは 3 体までだが、plot の記号列と右 panel の1行ずつの状態は
-        // 4 体すべてを示す。
-        assert!(all_waiting_text.contains("◆ ◆ ◆ ◆"), "{all_waiting_text}");
-        assert_eq!(all_waiting_text.matches("waiting").count(), 4);
-        assert_eq!(
-            all_waiting_text.matches("( o.o)?").count(),
-            super::MAX_VISIBLE_AGENTS
-        );
+        assert_eq!(rabbits(&all_waiting).len(), 4);
+        assert_eq!(all_waiting_text.matches("wait").count(), 4);
+        assert_eq!(all_waiting_text.matches("(o.o)?").count(), 4);
 
         let mut mixed = waiting;
         mixed.push(agent(
@@ -2818,16 +2658,23 @@ mod tests {
         ));
         let mixed = render(24, 100, "x", &[make_session(mixed)], 0, false).expect("fits");
         let mixed_text = plain(&mixed).join("\n");
-        assert!(mixed_text.contains("◆ ◆ ◆ ◆ ●"), "{mixed_text}");
-        assert_eq!(mixed_text.matches("waiting").count(), 4);
-        assert_eq!(mixed_text.matches("running").count(), 1);
+        assert_eq!(rabbits(&mixed).len(), 5);
+        assert_eq!(mixed_text.matches("wait").count(), 4);
+        assert_eq!(mixed_text.matches("run").count(), 1);
     }
 
     #[test]
     fn a_pose_keeps_its_ears_over_its_head() {
         // 行ごとの中央寄せは、行幅が違う pose の耳を頭から横へずらしてしまう。
         // 最も差が出る `Creating`（耳 `/)/)` と頭 `__(_ _)__`）で崩れないことを固定する。
-        let rows = only(SessionLifecycle::Creating, AgentPhase::Absent, 0);
+        let mut creating = session(
+            STEADY_ID,
+            "one",
+            SessionLifecycle::Creating,
+            AgentPhase::Absent,
+        );
+        creating.agents.clear();
+        let rows = plain(&render(24, 100, "x", &[creating], 0, false).expect("fits"));
         let ears = rows
             .iter()
             .find_map(|row| row.find("/)/)"))
@@ -2890,23 +2737,29 @@ mod tests {
     }
 
     #[test]
-    fn a_partly_filled_column_stays_left_of_the_agent_panel_in_compact_garden() {
-        // World を置けない幅でも、2 羽の 1 列は左端へ固定し、右の Agent panel
-        // panel と視線が混ざらないようにする。
-        let sessions = fixtures()[..2].to_vec();
-        let frame = render(41, 79, "x", &sessions, 1, false).expect("garden fits");
+    fn a_partly_filled_row_is_centered_in_the_full_width_garden() {
+        let mut sessions = fixtures();
+        sessions.push(session(
+            "04000000-0000-4000-8000-000000000001",
+            "last",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        ));
+        let frame = render(24, 120, "x", &sessions, 1, false).expect("garden fits");
         let plots = plots(&frame);
-        assert_eq!(plots.len(), 2);
-        assert_eq!(plots[0].column, plots[1].column);
-        assert_eq!(plots[0].column, super::SIDE_PADDING);
+        assert_eq!(plots.len(), 5);
+        assert_eq!(plots[0].row, plots[3].row);
+        assert_ne!(plots[3].row, plots[4].row);
+        assert!(plots[0].column >= super::SIDE_PADDING);
+        assert_eq!(plots[0].column + super::PLOT_WIDTH, plots[1].column);
+        assert_eq!(plots[4].column, (120 - super::PLOT_WIDTH) / 2);
 
         // 地面は左の庭領域いっぱいに伸び、うさぎの数で途切れない。
         let rows = plain(&frame);
         let ground = grass_row(&rows);
-        assert_eq!(display_width(ground), 79);
-        let garden = ground.split('│').next().expect("left Garden region");
-        assert!(garden.trim_start().starts_with("--"));
-        assert!(!garden.trim().contains("  "));
+        assert_eq!(display_width(ground), 120);
+        assert!(ground.trim_start().starts_with("--"));
+        assert!(!ground.trim().contains("  "));
     }
 
     #[test]
@@ -2927,16 +2780,14 @@ mod tests {
         let frame = render(17, 100, "x", &sessions, 0, false).expect("garden fits");
         let rows = plain(&frame);
         let ground = grass_row(&rows);
-        // 左の庭領域では、隣り合う plot の地面が途切れずにつながる。
-        let garden = ground.split('│').next().expect("left Garden region");
-        assert!(!garden.trim().contains("  "), "ground broke: {garden:?}");
+        assert!(!ground.trim().contains("  "), "ground broke: {ground:?}");
     }
 
     #[test]
     fn ambient_motion_twinkles_in_place_and_reduced_motion_is_static() {
         let sessions = fixtures();
-        let first = render(17, 100, "my-project", &sessions, 0, true).expect("fits");
-        let second = render(17, 100, "my-project", &sessions, 5, true).expect("fits");
+        let first = render(24, 100, "my-project", &sessions, 0, true).expect("fits");
+        let second = render(24, 100, "my-project", &sessions, 5, true).expect("fits");
         let rows = plain(&first);
         assert_eq!(
             rows[1],
@@ -2951,8 +2802,8 @@ mod tests {
             .expect("grass layer");
         assert!(rows[grass + 1].contains('.'), "soil follows the grass");
 
-        let moving_first = plain(&render(17, 100, "my-project", &sessions, 0, false).unwrap());
-        let moving_second = plain(&render(17, 100, "my-project", &sessions, 2, false).unwrap());
+        let moving_first = plain(&render(24, 100, "my-project", &sessions, 0, false).unwrap());
+        let moving_second = plain(&render(24, 100, "my-project", &sessions, 2, false).unwrap());
         assert_ne!(moving_first[1], moving_second[1], "the sky should twinkle");
         assert_ne!(
             grass_row(&moving_first),
@@ -2983,7 +2834,7 @@ mod tests {
     }
 
     #[test]
-    fn a_merged_pr_gives_its_session_a_short_reduced_motion_safe_celebration() {
+    fn a_merged_pr_keeps_the_agent_usagi_and_marks_the_session() {
         let mut merged = session(
             STEADY_ID,
             "merged",
@@ -2996,8 +2847,8 @@ mod tests {
         let next = plain(&render(24, 100, "x", &[merged.clone()], 2, false).unwrap()).join("\n");
         let reduced = plain(&render(24, 100, "x", &[merged], 1, true).unwrap()).join("\n");
         assert!(animated.contains("PR merged!"));
-        assert!(animated.contains("^o^"));
         assert_ne!(animated, next);
-        assert!(reduced.contains("^.^"));
+        assert!(reduced.contains("PR merged!"));
+        assert!(reduced.contains("/)/)"));
     }
 }
