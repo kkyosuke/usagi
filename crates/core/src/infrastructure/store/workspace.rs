@@ -242,6 +242,7 @@ mod tests {
         let (_dir, storage) = temp_storage();
         let settings = crate::domain::settings::Settings {
             theme: crate::domain::settings::Theme::Dark,
+            icon_mode: crate::domain::settings::IconMode::Text,
             modal_selection_mode: crate::domain::settings::ModalSelectionMode::Prompt,
             pr_auto_open: crate::domain::settings::PrAutoOpen::Always,
             terminal_max_concurrent: crate::domain::settings::TerminalConcurrencyLimit::default(),

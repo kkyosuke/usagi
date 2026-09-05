@@ -12,7 +12,7 @@
 //! bounded raw journal stays: it serves the incremental `Resume` suffix a
 //! client feeds into the screen restored from the checkpoint.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{
     Mutex, MutexGuard, PoisonError,
     atomic::{AtomicU64, Ordering},
@@ -943,6 +943,31 @@ impl TerminalRegistry {
             // operation finals are unaffected: they are what a reconnecting
             // client still has to be able to resolve.
             entry.inputs.retain(|(owner, _), _| *owner != connection);
+        }
+    }
+
+    /// Releases every connection-local attachment and input epoch which is no
+    /// longer present in the daemon's bounded live-connection census.
+    ///
+    /// This is the bulk form of [`Self::disconnect`]. It lets the composition
+    /// root coalesce an arbitrary number of historical disconnect notifications
+    /// into one sweep without retaining one queue item per old connection.
+    pub fn retain_live_connections(
+        &mut self,
+        live: &BTreeSet<ConnectionId>,
+        writer: &mut dyn PtyWriter,
+    ) {
+        let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
+        let budgets = self.screen_budgets();
+        for entry in self.entries.values_mut() {
+            let before = entry.attachments.len();
+            entry
+                .attachments
+                .retain(|_, attachment| live.contains(&attachment.connection));
+            if entry.attachments.len() != before {
+                reconcile_geometry(entry, None, writer, budgets);
+            }
+            entry.inputs.retain(|(owner, _), _| live.contains(owner));
         }
     }
 
@@ -2268,6 +2293,57 @@ mod tests {
             registry.detach(&r, attached.subscription, c, &mut Writer::default()),
             Err(RegistryError::UnknownSubscription)
         );
+    }
+
+    #[test]
+    fn live_connection_sweep_coalesces_stale_attachments_and_input_epochs() {
+        let r = reference();
+        let mut registry = registry(r.clone());
+        let stale_connection = ConnectionId::new();
+        let stale_client = ClientId::new();
+        let live_connection = ConnectionId::new();
+        let live_client = ClientId::new();
+        let mut writer = Writer::default();
+        let stale = registry
+            .attach_for_client(&r, stale_connection, stale_client, None, &mut writer)
+            .unwrap();
+        let live = registry
+            .attach_for_client(&r, live_connection, live_client, None, &mut writer)
+            .unwrap();
+        for (attached, connection, client, bytes) in [
+            (&stale, stale_connection, stale_client, b"stale".as_slice()),
+            (&live, live_connection, live_client, b"live".as_slice()),
+        ] {
+            registry
+                .write_input(
+                    &r,
+                    input(
+                        attached.subscription,
+                        connection,
+                        client,
+                        RequestId::new(),
+                        0,
+                    ),
+                    bytes,
+                    0,
+                    &mut writer,
+                )
+                .unwrap();
+        }
+
+        registry
+            .retain_live_connections(&BTreeSet::from([live_connection]), &mut Writer::default());
+
+        let reattached_live = registry
+            .attach_for_client(&r, live_connection, live_client, None, &mut writer)
+            .unwrap();
+        assert_eq!(reattached_live.subscription, live.subscription);
+        assert_eq!(reattached_live.next_input_seq, Some(1));
+        let reattached_stale = registry
+            .attach_for_client(&r, stale_connection, stale_client, None, &mut writer)
+            .unwrap();
+        assert_ne!(reattached_stale.subscription, stale.subscription);
+        assert_eq!(reattached_stale.next_input_seq, Some(0));
     }
     #[test]
     fn duplicate_registration_and_exact_detach_are_fenced() {
