@@ -940,7 +940,7 @@ Success（緑）で描き、入力中の名前と block caret は白で描く。
 skeleton には Accent（青）を使わないため、静的行から入力欄へ移っても affordance の緑が途切れない。
 入力欄はその行が入力を所有しているため、選択を表す `>` chevron は描かず、空のマーカー列で affordance を静的
 ラベルと揃える。名前を入力して Enter を押すと通常の `session create <name>` と同じ daemon
-request を非同期に開始し、完了まで行の直前に 2 行の skeleton を表示する。skeleton の activity glyph と session 名は Success（緑）で同じ
+request を非同期に開始し、完了まで行の直前に 3 行の skeleton を表示する。skeleton の activity glyph、session 名、Agent placeholder は Success（緑）で同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。IME に依存しない `Ctrl-A` も
 同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前、read-only base branch picker、read-only role picker を受け取り、profile / model は指定せず daemon の workspace default policy に委ねる。base picker は local branch と remote-tracking branch を `local:<name>` / `remote:<remote>/<name>` と表示し、remote の symbolic `HEAD` は `remote:<remote>/(default)` と表示する。Config の Base branch が現在の inventory にあればそれを、なければ現在 checkout 中の local branch を初期選択する。remote の `HEAD` 以外の symbolic alias は候補に含めない。`↑↓` で base、Tab で role を切り替え、daemon へは選択した fully-qualified ref と role ID だけを送る。branch inventory または role catalog を読めない場合は対応する picker を空に縮退させ、base が空なら従来どおり `HEAD` を使う。入力中は英数字・`-`・`_` 以外、64 文字超過、または daemon snapshot で表示中の session と、read-only に検出した `.usagi/sessions/` の既存 worktree と同じ名前を caret 行の下に error として表示し、空の名前は Enter 時に error を表示する。未マージ branch の安全な削除に失敗した session も `failed` 行として snapshot に残るため、その branch が所有する名前には入力中から `session name already exists` を表示する。error は caret 行と同じ 1 行に詰めて末尾を切り捨てるのではなく、sidebar 幅（`unicode-width` 準拠の表示桁数）に合わせて caret 行の**下へ折り返して**表示するため、CJK を含む長い安全文でも切れずに読める。折り返した行数は `+ new session` 行の高さ計上（viewport の scroll 起点と footer）と一致させ、error が伸びてもレイアウトがずれない。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
@@ -975,7 +975,7 @@ GIF はこの projection に含めない。diff の詳細表示や実行 shortcu
 
 狭幅では cursor / active marker、表示名、note icon を優先し、補足行を ANSI-safe・Unicode display width 準拠で
 clip する。viewport は session ごとの 3 行 footprint を使い、mascot の予約より選択中 row を優先する。作成中
-skeleton は session 行ではなく作成中の 2 行として、選択できる row の予算の外に確保する。
+skeleton は session 行と同じ 3 行として、選択できる row の予算の外に確保する。
 
 ## Overview と modal
 

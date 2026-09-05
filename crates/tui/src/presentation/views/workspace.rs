@@ -371,7 +371,7 @@ pub struct HomeProjection {
     create_draft: Option<CreateDraft>,
     create_role: Option<String>,
     /// Name of a create request the daemon is still fulfilling. Present exactly
-    /// while a create worker owns the port; the sidebar draws it as a two-line
+    /// while a create worker owns the port; the sidebar draws it as a three-line
     /// loading skeleton just above `+ new session` (`document/03-tui.md`) until
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
@@ -2607,15 +2607,17 @@ fn home_viewport_start(
 /// Rows the create loading skeleton occupies, matching a session row's height so
 /// the daemon's landed `session.created` row replaces it without shifting the
 /// sidebar.
-const CREATE_SKELETON_ROWS: usize = 2;
+const CREATE_SKELETON_ROWS: usize = SESSION_ROW_LINES;
 
-/// Two-line loading skeleton for a create the daemon is still fulfilling, drawn
+/// Three-line loading skeleton for a create the daemon is still fulfilling, drawn
 /// just above `+ new session` (`document/03-tui.md`). The activity glyph and the
 /// typed name share one slow left-to-right wave — the same [`widgets::Shimmer`]
 /// sweep the removal skeleton and pending tabs use — so a pending create reads as
 /// loading, not a static row. `tick` is the shared sidebar mascot frame, so the
 /// wave advances only on `AppEvent::Tick`. New-session feedback uses Success
-/// (green), never Accent (cyan), and is never a cursor or current target.
+/// (green), never Accent (cyan), and is never a cursor or current target. The
+/// final placeholder mirrors the landed session's Agent row so replacement does
+/// not move the rows below it.
 fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
     let wave = widgets::Shimmer {
         style: Role::Success.style().bold(),
@@ -2633,6 +2635,13 @@ fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
         ),
         widgets::pad_to_width(
             &format!("  {}", widgets::shimmer_text_with("creating…", frame, wave)),
+            width,
+        ),
+        widgets::pad_to_width(
+            &format!(
+                "  {}",
+                widgets::shimmer_text_with(&format!("{AGENT_ICON} …"), frame, wave)
+            ),
             width,
         ),
     ]
@@ -3052,7 +3061,7 @@ fn create_session_input_lines(
 /// Sidebar marker with explicit precedence.
 ///
 /// A selected session starts with the usagi glyph and uses a red `|` continuation;
-/// in Closeup its active two-line stack is green. Switch does not retain a rail
+/// in Closeup its active three-line stack is green. Switch does not retain a rail
 /// for the previous target because its cursor is the sole selection indicator.
 /// The action row remains chevron-free even while it owns the Switch cursor.
 fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
@@ -4797,14 +4806,17 @@ mod tests {
     }
 
     #[test]
-    fn create_skeleton_draws_two_padded_lines_that_wave_with_the_tick() {
+    fn create_skeleton_draws_three_padded_lines_that_wave_with_the_tick() {
         let first = create_skeleton_lines(30, "atlas", 0);
+        assert_eq!(CREATE_SKELETON_ROWS, SESSION_ROW_LINES);
         assert_eq!(first.len(), CREATE_SKELETON_ROWS);
-        // Both lines are padded to the sidebar width and carry the typed name /
-        // the loading caption, so the skeleton reads as a session-height row.
+        // All lines are padded to the sidebar width and carry the typed name,
+        // loading caption, and Agent placeholder, so the skeleton reads as a
+        // session-height row.
         assert!(first.iter().all(|line| display_width(line) == 30));
         assert!(strip(&first[0]).contains("atlas"));
         assert!(strip(&first[1]).contains("creating"));
+        assert!(strip(&first[2]).contains(AGENT_ICON));
         // The sweep is animated, not a static blink: a later tick paints a
         // different frame while keeping the same display width and text.
         let later = create_skeleton_lines(30, "atlas", 12);
@@ -4833,7 +4845,7 @@ mod tests {
             .position(|line| line.contains("+ new session"))
             .expect("the new-session affordance is still drawn");
         // The skeleton sits just above `+ new session` and never replaces it.
-        assert!(skeleton < new_session);
+        assert_eq!(new_session - skeleton, SESSION_ROW_LINES);
         assert!(lines[skeleton].contains("creating") || lines[skeleton + 1].contains("creating"));
 
         // Absent a pending create, no skeleton or loading caption is drawn.
@@ -8441,7 +8453,7 @@ mod tests {
         let sessions = [projected_session(session, "session", "/work/session")];
         let home = HomeProjection::from_state(&state, "repo", Path::new("/repo"), &sessions);
 
-        // One content line cannot fit the first two-line session row; the footer
+        // One content line cannot fit the first three-line session row; the footer
         // still occupies the final line without partial-row rendering.
         let pane = home_left_pane(2, LEFT_WIDTH, &home, now());
         assert_eq!(pane.len(), 2);
