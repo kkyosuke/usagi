@@ -82,6 +82,8 @@ pub struct RemoveSessionRequest {
     pub force: bool,
     /// Whether a confirmed recovery may discard the session's unmerged branch.
     pub force_delete_branch: bool,
+    /// Whether a diagnosed integrity orphan may be discarded.
+    pub purge_orphan: bool,
 }
 
 /// A non-destructive Agent sleep request for one retained session.
@@ -474,12 +476,14 @@ impl DaemonBackend {
                 session,
                 force,
                 force_delete_branch,
+                purge_orphan,
             } => self.sessions.remove(
                 RemoveSessionRequest {
                     workspace,
                     session,
                     force,
                     force_delete_branch,
+                    purge_orphan,
                 },
                 self.completions(),
             ),
@@ -1051,6 +1055,7 @@ mod tests {
             session: SessionId::new(),
             force: true,
             force_delete_branch: false,
+            purge_orphan: false,
         });
         assert_eq!(flow, Flow::Continue);
         assert!(matches!(
@@ -1444,6 +1449,7 @@ mod tests {
             session,
             force: false,
             force_delete_branch: false,
+            purge_orphan: false,
         };
         assert_eq!(remove.clone(), remove);
         assert!(format!("{remove:?}").contains("RemoveSessionRequest"));

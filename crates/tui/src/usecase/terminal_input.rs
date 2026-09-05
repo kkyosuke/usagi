@@ -269,6 +269,9 @@ pub enum GlobalControlChord {
     CtrlD,
     /// Remove or dismiss the selected management object (`Ctrl-X`).
     CtrlX,
+    /// Explicitly purge the selected integrity-orphan session
+    /// (`Ctrl-Shift-X`) when the terminal preserves the Shift modifier.
+    CtrlShiftX,
     /// Open contextual keyboard help (`Ctrl-?` / `Ctrl-/`).
     Help,
 }
@@ -411,6 +414,9 @@ fn global_control_key(key: &KeyEvent) -> Option<GlobalControlChord> {
         KeyCode::Char('c') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlC),
         KeyCode::Char('q') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlQ),
         KeyCode::Char('d') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlD),
+        KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => {
+            Some(GlobalControlChord::CtrlShiftX)
+        }
         KeyCode::Char('x') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlX),
         KeyCode::Char('/' | '7') if is_only_control(key.modifiers) => {
             Some(GlobalControlChord::Help)
@@ -440,6 +446,17 @@ fn is_control_without_alt_or_meta(modifiers: Modifiers) -> bool {
 fn is_only_control(modifiers: Modifiers) -> bool {
     modifiers.control
         && !modifiers.shift
+        && !modifiers.alt
+        && !modifiers.super_
+        && !modifiers.hyper
+        && !modifiers.meta
+}
+
+/// Returns whether the modifiers contain exactly Control and Shift.
+#[must_use]
+pub(crate) fn is_control_and_shift(modifiers: Modifiers) -> bool {
+    modifiers.control
+        && modifiers.shift
         && !modifiers.alt
         && !modifiers.super_
         && !modifiers.hyper
@@ -867,6 +884,18 @@ mod tests {
             KeyCode::Char(character),
             Modifiers {
                 control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ))
+    }
+
+    fn ctrl_shift(character: char) -> LiveInput {
+        LiveInput::Key(KeyEvent::new(
+            KeyCode::Char(character),
+            Modifiers {
+                control: true,
+                shift: true,
                 ..Modifiers::default()
             },
             KeyEventKind::Press,
@@ -1528,6 +1557,7 @@ mod tests {
             (key(KeyCode::Char('\u{4}')), GlobalControlChord::CtrlD),
             (LiveInput::Raw(vec![4]), GlobalControlChord::CtrlD),
             (ctrl('x'), GlobalControlChord::CtrlX),
+            (ctrl_shift('X'), GlobalControlChord::CtrlShiftX),
             (key(KeyCode::Char('\u{18}')), GlobalControlChord::CtrlX),
             (LiveInput::Raw(vec![24]), GlobalControlChord::CtrlX),
             (ctrl('/'), GlobalControlChord::Help),
