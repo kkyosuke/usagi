@@ -12115,6 +12115,75 @@ mod tests {
     }
 
     #[test]
+    fn remove_selector_covers_empty_toggle_notice_and_deleting_refresh_paths() {
+        let (workspace, first, second) = ids();
+
+        let mut empty = AppState::home(workspace, Vec::new());
+        let _ = update(&mut empty, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut empty,
+            AppEvent::Key(AppKey::SubmitOverview("session remove -s".to_owned())),
+        );
+        for key in [
+            AppKey::Up,
+            AppKey::Down,
+            AppKey::Char('k'),
+            AppKey::Char('j'),
+            AppKey::Char(' '),
+            AppKey::Home,
+        ] {
+            assert!(update(&mut empty, AppEvent::Key(key)).is_empty());
+        }
+        assert!(update(&mut empty, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            empty.remove_queue().unwrap().feedback().unwrap().message,
+            "no sessions can be removed"
+        );
+
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session remove -s".to_owned())),
+        );
+        assert_eq!(state.remove_queue().unwrap().cursor(), 0);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        assert_eq!(state.remove_queue().unwrap().cursor(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.remove_queue().unwrap().cursor(), 0);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        assert!(state.remove_queue().unwrap().selected().is_empty());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([
+                (first, lifecycle(SessionLifecycle::Deleting)),
+                (second, lifecycle(SessionLifecycle::Available)),
+            ]))),
+        );
+        let queue = state.remove_queue().unwrap();
+        assert_eq!(queue.candidates(), &[first, second]);
+        assert_eq!(queue.in_flight(), Some(first));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Notice(Notice::new("remove refused"))),
+        );
+        let queue = state.remove_queue().unwrap();
+        assert_eq!(queue.in_flight(), None);
+        assert!(queue.selected().is_empty());
+        assert_eq!(queue.feedback().unwrap().message, "remove refused");
+
+        state.remove_queue = None;
+        assert!(begin_next_remove(&mut state, false).is_empty());
+    }
+
+    #[test]
     fn named_remove_rejects_missing_and_non_removable_sessions() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);

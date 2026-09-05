@@ -139,5 +139,19 @@ mod tests {
         let text = strip_ansi(&render_over(24, 80, &frame, &empty).join("\n"));
         assert!(text.contains("no sessions can be removed"));
         assert!(text.contains("removal complete"));
+
+        let normal = RemoveModal {
+            entries: vec![RemoveEntry {
+                label: "safe".to_owned(),
+                selected: false,
+                removing: false,
+            }],
+            cursor: 0,
+            force: false,
+            feedback: None,
+        };
+        let text = strip_ansi(&render_over(24, 80, &frame, &normal).join("\n"));
+        assert!(text.contains("safe"));
+        assert!(!text.contains("force removes"));
     }
 }
