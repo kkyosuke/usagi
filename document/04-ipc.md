@@ -97,8 +97,12 @@ admit した pre-handshake connection は、prefix read、body read、hello vali
 monotonic completion deadline を持つ。各 socket read / write はその絶対時刻までの残量だけで待つため、partial prefix や
 partial body の到着で deadline は延長されない。timeout、truncated frame、invalid hello、reply write failure は socket を
 close して permit、thread、複製 FD を回収し、理由を秘密を含まない `deadline exceeded` または
-`invalid or incomplete hello` として記録する。handshake が成功した時点で permit と socket deadline を外すため、admit 済みの
-subscription / terminal lane の寿命や idle policy にはならない。shutdown / generation retirement は
+`invalid or incomplete hello` として記録する。handshake が成功した時点で permit と pre-handshake deadline を外すため、admit 済みの
+subscription / terminal lane の寿命や read idle policy にはならない。一方、established connection の response write は
+**frame ごとに 2 秒の absolute monotonic deadline** を持つ。prefix の最初の byte で開始し、payload 全体を書き終えた時だけ
+次の frame 用に reset するため、partial write で期限は延長されない。client が response を読まず socket buffer を詰まらせても
+connection worker は timeout で socket と connection-local state を回収し、idle で次の request を待つ connection には作用しない。
+shutdown / generation retirement は
 [5. daemon の client worker barrier](05-daemon.md#client-worker-の保持)で pre-handshake を含む全 worker を unblock / join する。
 
 `ClientPolicy.timeout_ms` / `reconnect_attempts` は surface 別（TUI 2s/3、CLI 10s/1、MCP 30s/1）の policy であり、
@@ -1289,6 +1293,8 @@ close も pending retry を解除する。どの失敗経路も replacement laun
 
 ### stream connection の共有と subscription の無効化
 
+この節を connection-local state の所有・切断 cleanup 契約の正本とする。
+
 daemon は subscription を `attach` した connection に所有させ、connection が終わるとその connection の
 attachment をすべて解放する。input ledger（`input_seq` の期待値）も connection ごとの client identity に
 紐づく。したがって 1 本の connection を複数 pane で共有する client では、connection の入れ替えが**その
@@ -1296,12 +1302,15 @@ connection 上の全 subscription を同時に無効化**する。
 
 server は transport EOF を観測した connection worker から socket を先に解放し、connection-local な
 subscription / input ledger の削除と MCP child credential の解放は daemon-owned cleanup worker へ渡して直列化する。
-通知は owner lock と cleanup queue の容量を待たず、consumer は最大 client worker 上限ずつ batch にして owner lock を
-取得する。live client 上限は再利用される worker slot だけを数え、過去の disconnect 件数を制限しないため、同じ上限の
-bounded queue を使って connection worker へ backpressure を返してはならない。ledger の走査が長時間稼働した terminal の
-owner lock と競合しても、切断済み connection の reader / writer / retirement descriptor と worker slot を保持しない。
-daemon shutdown は accept と全 connection worker を止めた後に cleanup queue を drain してから owner runtime を破棄するため、
-非同期化しても connection-local state を取り残さない。
+daemon は admit 済み connection ID と kernel-authenticated peer PID だけを **live census** に保持する。その件数は client worker
+上限以下であり、disconnect は census から削除して容量 1 の wake channel へ `try_send` する。既に wake があれば合流するため、
+過去の disconnect 件数に比例する backlog は存在せず、owner lock と consumer の進行を connection worker が待つこともない。
+cleanup worker は wake ごとに各 owner lock の内側で live census を snapshot し、そこに無い attachment / input epoch と MCP child
+binding を一括して除く。この lock 順序により、snapshot 後に admit された connection は sweep が owner lock を解放するまで state を
+作れず、古い snapshot に誤って消されない。ledger の走査が長時間稼働した terminal の owner lock と競合しても、切断済み
+connection の reader / writer / retirement descriptor と worker slot を保持しない。daemon shutdown は accept と全 connection
+worker を止めた後、最後の合流 wake を処理して live census が空の sweep を完了してから owner runtime を破棄するため、非同期化しても
+connection-local state を取り残さない。
 
 | client 側の観測 | 共有 connection | 全 subscription | 次に送るもの |
 |---|---|---|---|

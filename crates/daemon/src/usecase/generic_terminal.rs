@@ -14,7 +14,7 @@
     clippy::unused_self
 )] // Injected daemon ports make these boundary signatures part of the contract.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -392,6 +392,24 @@ impl GenericTerminalCoordinator {
     pub fn disconnect(&mut self, connection: ConnectionId, writer: &mut dyn PtyWriter) {
         self.terminals.disconnect(connection, writer);
         // Finals this connection was draining are no longer pinned.
+        for record in self.records.values() {
+            if record.state == TerminalRuntimeState::Exited {
+                self.retention.set_pinned(
+                    &record.terminal,
+                    self.terminals.is_attached(&record.terminal),
+                );
+            }
+        }
+    }
+
+    /// Coalesces cleanup for every connection absent from the daemon's current
+    /// live census, without retaining historical disconnect notifications.
+    pub fn retain_live_connections(
+        &mut self,
+        live: &BTreeSet<ConnectionId>,
+        writer: &mut dyn PtyWriter,
+    ) {
+        self.terminals.retain_live_connections(live, writer);
         for record in self.records.values() {
             if record.state == TerminalRuntimeState::Exited {
                 self.retention.set_pinned(
@@ -2075,7 +2093,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disconnect_releases_the_protection_of_every_final_it_was_draining() {
+    fn a_live_connection_sweep_releases_every_stale_generic_final() {
         let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
         let mut coordinator =
             GenericTerminalCoordinator::with_retention(4, 64, 1, retention.clone());
@@ -2097,6 +2115,8 @@ mod tests {
         coordinator.attach(&terminal, connection).unwrap();
         coordinator.exit(&terminal, 0, &mut store).unwrap();
         clock.advance(1000);
+        coordinator.retain_live_connections(&BTreeSet::new(), &mut Writer::default());
+        // The exact path remains idempotent after a coalesced sweep.
         coordinator.disconnect(connection, &mut Writer::default());
         retention.collect();
         assert_eq!(coordinator.collect_garbage(&mut store), 1);
