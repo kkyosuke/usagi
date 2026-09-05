@@ -2145,11 +2145,18 @@ pre-handshake と established を合わせた worker 総数は generation ごと
 制限する（算出規則は [4. daemon IPC](04-ipc.md#frame-と-handshake) が正本）。これは connection の idle timeoutではなく、
 同一 UID の正規 hello を使う peer による thread / FD 枯渇も有界にする admission limit である。Agent runtime 上限までの
 長寿命 MCP connection と複数 TUI の resident lane は、process に十分な descriptor 予算がある限り固定値 32 を奪い合わない。
+established connection は read idle timeout を持たない一方、response は frame ごとの absolute write deadline を持つ。したがって
+request を送らず待つ正規 lane は維持し、response を読まない peer が send buffer と worker を無期限に保持する経路だけを閉じる。
+期限と frame reset の契約は [4. IPC#frame と handshake](04-ipc.md#frame-と-handshake) を正本とする。
 
 descriptor を複製できなかった connection は worker を起動せず、**request を読む前に close する**。unblock 手段の無い thread を
 serve させると retirement が join できず、資源枯渇時に未回収 worker を増やすためである。長命な generation が歴史上の全 connection を持ち続けない
 ように、新しい connection を保持する前に **finished な worker だけを join して回収する**。この回収は live な
 connection の stream に触らない（`shutdown` を行うのは retirement だけである）。
+
+connection-local ledger の後処理は client worker では owner lock を取らず、owner が一時的に busy でも finished worker の
+descriptor と slot の回収を backpressure しない。live census と合流 wake による cleanup 契約は
+[4. IPC#stream connection の共有と subscription の無効化](04-ipc.md#stream-connection-の共有と-subscription-の無効化)を正本とする。
 
 retirement が worker set を seal した瞬間に accept loop が最後の connection worker を spawn 済みである race も閉じる。
 seal 後の `register` は worker を set へ追加せず、その場で stream を shutdown して JoinHandle を join する。

@@ -7,6 +7,7 @@
     clippy::too_many_lines
 )] // IPC actor signatures deliberately carry the complete fencing vocabulary.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
@@ -277,6 +278,16 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
     {
         self.coordinator.retention().collect();
         self.coordinator.collect_garbage(&mut self.store)
+    }
+
+    /// Removes connection-local state absent from the daemon's bounded live
+    /// census in one coalesced pass.
+    pub fn retain_live_connections(&mut self, live: &BTreeSet<ConnectionId>)
+    where
+        P: PtyWriter,
+    {
+        self.coordinator
+            .retain_live_connections(live, &mut self.pty);
     }
 
     /// The resource ids this owner still answers for.
@@ -2100,8 +2111,10 @@ mod tests {
             "Written"
         );
 
-        // The connection dies before the client sees the acknowledgement.
-        TerminalOwner::disconnect(&mut runtime, first);
+        // The connection dies before the client sees the acknowledgement. The
+        // daemon may coalesce this with many other disconnects into one live-set
+        // sweep.
+        runtime.retain_live_connections(&BTreeSet::new());
         let second = ConnectionId::new();
         let fresh = call(
             &mut runtime,
