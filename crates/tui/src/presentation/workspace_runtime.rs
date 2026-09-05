@@ -3603,10 +3603,7 @@ mod tests {
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkRuns));
         assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorBack));
-        assert_eq!(
-            runtime.state().director_route(),
-            DirectorRoute::Organization
-        );
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkRuns));
         assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
 

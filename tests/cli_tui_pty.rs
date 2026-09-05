@@ -1153,11 +1153,11 @@ fn select_tab_by_label(
     }
 }
 
-/// Director / Organization の Director 行を実キーで巡回する。
+/// Director / Organization の Conversation 行を実キーで巡回する。
 ///
-/// Organization は全 Director を同時に表示し、`↑` / `↓` で選択する。
+/// Organization は全 Conversation を同時に表示し、`↑` / `↓` で選択する。
 /// 画面上の `›` を観測するため、永続化された順序には依存しない。
-fn select_organization_director_by_label(
+fn select_organization_conversation_by_label(
     master: &mut File,
     output: &Arc<Mutex<Vec<u8>>>,
     baseline: usize,
@@ -1172,37 +1172,41 @@ fn select_organization_director_by_label(
         }
         assert!(
             Instant::now() < deadline,
-            "Organization Director {label} was never selected; screen={screen:?}"
+            "Organization Conversation {label} was never selected; screen={screen:?}"
         );
         send(master, b"\x1b[B");
         thread::sleep(Duration::from_millis(150));
     }
 }
 
-/// Select one Organization Director and enter its direct-input Console.
-fn open_director_console_by_label(
+/// Select one Organization Conversation and enter its direct-input Console.
+fn open_conversation_console_by_label(
     master: &mut File,
     output: &Arc<Mutex<Vec<u8>>>,
     baseline: usize,
     label: &str,
 ) {
-    select_organization_director_by_label(master, output, baseline, label);
+    select_organization_conversation_by_label(master, output, baseline, label);
     send(master, b"\r");
     wait_for_screen_since(output, baseline, "Director / Organization / Console");
 }
 
-/// Wait until Organization has projected the expected number of root Directors.
+/// Wait until Organization has projected the expected number of Conversations.
 /// This fences Enter against the asynchronous inventory append performed after
 /// a fresh TUI open.
-fn wait_for_organization_directors(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, expected: usize) {
+fn wait_for_organization_conversations(
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    expected: usize,
+) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let screen = screen_since(output, baseline).unwrap_or_default();
         let count = screen
             .lines()
-            .skip_while(|line| !line.contains("Directors"))
+            .skip_while(|line| !line.contains("Conversations"))
             .skip(1)
-            .take_while(|line| !line.contains("Organization"))
+            .take_while(|line| !line.contains("Agent / Sessions"))
             .filter(|line| line.contains("Agent ") || line.contains("(interrupted)"))
             .count();
         if count >= expected {
@@ -1210,7 +1214,7 @@ fn wait_for_organization_directors(output: &Arc<Mutex<Vec<u8>>>, baseline: usize
         }
         assert!(
             Instant::now() < deadline,
-            "Organization never projected {expected} Directors; screen={screen:?}"
+            "Organization never projected {expected} Conversations; screen={screen:?}"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -2521,7 +2525,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     open_registered_workspace(&mut master, &captured, reopened_baseline);
     wait_for_screen_since(&captured, reopened_baseline, &session_claude_ready);
     toggle_director_with_key(&mut master);
-    wait_for_organization_directors(&captured, reopened_baseline, 2);
+    wait_for_organization_conversations(&captured, reopened_baseline, 2);
     let observed = wait_for_agent_tabs(home.path(), 3);
     send(&mut master, b"\r");
     wait_for_screen_since(
@@ -2656,7 +2660,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     open_registered_workspace(&mut master, &captured, reopened_for_kill_baseline);
     wait_for_screen_since(&captured, reopened_for_kill_baseline, &session_claude_ready);
     toggle_director_with_key(&mut master);
-    wait_for_organization_directors(&captured, reopened_for_kill_baseline, 2);
+    wait_for_organization_conversations(&captured, reopened_for_kill_baseline, 2);
     send(&mut master, b"\r");
     wait_for_screen_since(
         &captured,
@@ -2749,7 +2753,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
         "claude-input:claude-session-reopened",
     );
     toggle_director_with_key(&mut master);
-    wait_for_organization_directors(&captured, after_kill_baseline, 2);
+    wait_for_organization_conversations(&captured, after_kill_baseline, 2);
     send(&mut master, b"\r");
     wait_for_screen_since(
         &captured,
@@ -2787,7 +2791,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
         "claude-input:claude-session-after-kill",
     );
     toggle_director_with_key(&mut master);
-    wait_for_organization_directors(&captured, second_reopen_baseline, 2);
+    wait_for_organization_conversations(&captured, second_reopen_baseline, 2);
     send(&mut master, b"\r");
     wait_for_screen_since(
         &captured,
@@ -3117,13 +3121,13 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     // Wait for the fresh daemon inventory to replace stale live intent with
     // provider-safe interrupted history before selecting an Organization row.
     wait_for_screen_since(&captured, cold_baseline, "Codex (interrupted)");
-    select_organization_director_by_label(
+    select_organization_conversation_by_label(
         &mut master,
         &captured,
         cold_baseline,
         "Codex (interrupted)",
     );
-    select_organization_director_by_label(
+    select_organization_conversation_by_label(
         &mut master,
         &captured,
         cold_baseline,
@@ -3158,7 +3162,12 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     // ── 4. The root drawer is already open. Select the Codex history with real
     // keys and press `Ctrl-O r` twice. The double activation must converge onto
     // one operation, one child, and one live tab for that lineage alone.
-    open_director_console_by_label(&mut master, &captured, cold_baseline, "Codex (interrupted)");
+    open_conversation_console_by_label(
+        &mut master,
+        &captured,
+        cold_baseline,
+        "Codex (interrupted)",
+    );
     wait_for_screen_since(
         &captured,
         cold_baseline,
@@ -3209,7 +3218,7 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
         cold_baseline,
         "Director / Organization / Console",
     );
-    open_director_console_by_label(
+    open_conversation_console_by_label(
         &mut master,
         &captured,
         cold_baseline,
@@ -3508,7 +3517,7 @@ fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
     // The root conversation is restored into Organization. Enter moves to its
     // Console, which then owns ordinary PTY input.
     toggle_director_with_key(&mut master);
-    wait_for_organization_directors(&captured, baseline, 1);
+    wait_for_organization_conversations(&captured, baseline, 1);
     send(&mut master, b"\r");
     wait_for_screen_since(&captured, baseline, "Director / Organization / Console");
     wait_for_screen_since(&captured, baseline, "claude-ready-unique:");

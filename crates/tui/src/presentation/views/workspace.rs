@@ -374,7 +374,8 @@ pub struct HomeProjection {
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
     /// Frontmost Director mode drawer material, including its explicit route,
-    /// Organization projection, Work Runs, and optional Console terminal.
+    /// Workflow-specific Organization or Work Runs projection and optional
+    /// Console terminal.
     director_drawer: Option<DirectorDrawerProjection>,
     work_runs: WorkRunProjection,
     /// Frontmost bottom-anchored workspace-root generic terminal drawer.

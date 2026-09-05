@@ -455,6 +455,7 @@ fn handle_work_run_control_input_with_ui(
     key: &Key,
 ) -> Option<WorkRunControlInput> {
     let can_activate = runtime.state().overlay().is_none()
+        && runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven
         && runtime.state().director_launching().is_none()
         && matches!(runtime.state().director_new(), DirectorNew::Idle);
     let direct_work_runs = matches!(key, Key::Live(LiveTerminalAction::WorkRuns));
@@ -584,6 +585,9 @@ fn handle_work_run_list_input(
             }
             DirectorRoute::Organization | DirectorRoute::Console(_) => {}
         },
+        Key::Escape if route == DirectorRoute::WorkRuns => {
+            effects.extend(runtime.apply_event(AppEvent::Key(AppKey::Escape)));
+        }
         Key::Escape | Key::Live(LiveTerminalAction::DirectorBack) => {
             effects.extend(runtime.apply_event(AppEvent::Key(AppKey::DirectorBack)));
         }
@@ -4518,13 +4522,26 @@ fn director_drawer_projection(
     // fail while an older live Director remains selected. Keep the pane-safe
     // reason at the route level as well as in the Console terminal projection.
     let feedback = pane.error().map(str::to_owned);
+    let goal_driven =
+        runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven;
+    let organization = if !goal_driven
+        && conversations
+            .iter()
+            .any(|conversation| conversation.selected)
+    {
+        director_organization(ui)
+    } else {
+        Vec::new()
+    };
+    if goal_driven {
+        conversations.clear();
+    }
     DirectorDrawerProjection {
         focused: runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director),
         route: runtime.state().director_route(),
-        goal_driven: runtime.state().work_mode()
-            == usagi_core::domain::settings::WorkMode::GoalDriven,
+        goal_driven,
         conversations,
-        organization: director_organization(ui),
+        organization,
         terminal_view,
         interrupted_detail,
         feedback,
@@ -4623,9 +4640,6 @@ fn director_organization(ui: &WorkspaceIoRuntime) -> Vec<DirectorOrganizationRow
                 .and_then(|role| role.parent_session_id),
             row,
         ));
-    }
-    if members.is_empty() {
-        return Vec::new();
     }
     let mut rows = vec![DirectorOrganizationRow {
         depth: 0,
@@ -7372,7 +7386,12 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
                 DirectorRoute::Organization => KeyHelpContext::Organization,
                 DirectorRoute::WorkRuns => KeyHelpContext::WorkRuns,
                 DirectorRoute::RunOverview(_) => KeyHelpContext::RunOverview,
-                DirectorRoute::Console(_) => KeyHelpContext::DirectorConsole,
+                DirectorRoute::Console(DirectorConsoleParent::Organization) => {
+                    KeyHelpContext::DirectorConsole
+                }
+                DirectorRoute::Console(DirectorConsoleParent::RunOverview(_)) => {
+                    KeyHelpContext::WorkRunConsole
+                }
             };
         }
         Some(WorkspaceDrawerFocus::Terminal) => return KeyHelpContext::RootShell,
@@ -12275,7 +12294,7 @@ mod tests {
             WorkspaceView::with_runtime_ids(ws("empty"), empty_state, Vec::new()),
             Box::new(UnavailableSessionCommandPort),
         );
-        assert!(director_organization(&empty_ui).is_empty());
+        assert_eq!(director_organization(&empty_ui)[0].label, "♛ Director");
 
         let director_child = SessionId::new();
         let manager_child = SessionId::new();
@@ -19299,8 +19318,16 @@ mod tests {
         let projected = super::director_drawer_projection(&ui, &runtime, Some(&terminal_view));
         assert_eq!(projected.conversations.len(), 2);
         assert!(projected.conversations[0].selected);
+        assert!(!projected.organization.is_empty());
+        assert_eq!(projected.organization[0].label, "♛ Director");
         assert_eq!(projected.terminal_view, Some(terminal_view));
         assert_eq!(projected.interrupted_detail, None);
+
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        let goal_projection = super::director_drawer_projection(&ui, &runtime, None);
+        assert!(goal_projection.conversations.is_empty());
+        assert!(goal_projection.organization.is_empty());
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
 
         // A live projection without control feedback still crosses the seam as
         // a projection; the adapter never converts its rows into drawer lines.
@@ -24401,7 +24428,7 @@ mod tests {
     }
 
     #[test]
-    fn work_run_chord_opens_the_existing_run_control_in_both_workflows() {
+    fn work_run_chord_opens_only_the_goal_driven_run_control() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
@@ -24469,17 +24496,54 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
-        let classic = super::handle_work_run_control_input(
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut control,
+                &runs,
+                &Key::Live(LiveTerminalAction::WorkRuns),
+            )
+            .is_none()
+        );
+        assert!(!runtime.state().director_drawer_open());
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        assert_eq!(control.mode(), super::WorkRunControlMode::Closed);
+    }
+
+    #[test]
+    fn goal_driven_work_runs_escape_closes_the_director_while_back_stays_at_root() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
+        let runs = super::WorkRunProjection::fresh(Vec::new());
+        let mut control = super::WorkRunControl::default();
+        let _ = super::handle_work_run_control_input(
             &mut runtime,
             &mut control,
             &runs,
             &Key::Live(LiveTerminalAction::WorkRuns),
+        );
+
+        let back = super::handle_work_run_control_input(
+            &mut runtime,
+            &mut control,
+            &runs,
+            &Key::Live(LiveTerminalAction::DirectorBack),
         )
-        .expect("classic keeps existing Work Runs reachable");
-        assert_eq!(classic.outcome, super::WorkRunControlOutcome::Consumed);
+        .expect("Work Runs owns Director back");
+        assert_eq!(back.outcome, super::WorkRunControlOutcome::Consumed);
         assert!(runtime.state().director_drawer_open());
         assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
-        assert_eq!(control.mode(), super::WorkRunControlMode::List);
+
+        let escape =
+            super::handle_work_run_control_input(&mut runtime, &mut control, &runs, &Key::Escape)
+                .expect("Work Runs owns Escape");
+        assert_eq!(escape.outcome, super::WorkRunControlOutcome::Consumed);
+        assert!(!runtime.state().director_drawer_open());
+        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
     }
 
     #[test]
@@ -24539,7 +24603,7 @@ mod tests {
         .expect("a durable action in flight owns Director New");
         assert_eq!(blocked.outcome, super::WorkRunControlOutcome::Consumed);
         assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorOrganization));
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
         assert_eq!(
             runtime.state().director_route(),
             DirectorRoute::Organization
@@ -24712,7 +24776,7 @@ mod tests {
             super::WorkRunControlMode::ConfirmCancel
         );
 
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorOrganization));
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
         let mut suspended = super::WorkRunControl::default();
         suspended.open(runs.runs());
         assert!(
@@ -24720,6 +24784,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(suspended.mode(), super::WorkRunControlMode::Closed);
+        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
 
         let terminal = scoped_terminal_ref(workspace, None);
         let operation = OperationId::new();
@@ -24759,6 +24824,17 @@ mod tests {
             runtime.state().director_route(),
             DirectorRoute::Console(DirectorConsoleParent::RunOverview(run_id))
         );
+        assert!(
+            super::handle_work_run_control_input(
+                &mut runtime,
+                &mut overview_control,
+                &overview_runs,
+                &Key::Other,
+            )
+            .is_none(),
+            "the Console owns input after leaving the Run Overview"
+        );
+        assert_eq!(overview_control.mode(), super::WorkRunControlMode::Closed);
 
         let no_root = observed_work_run(SupervisorRunState::Running);
         let no_root_id = no_root.supervisor_run_id;
@@ -30023,6 +30099,10 @@ mod tests {
             (
                 DirectorRoute::Console(DirectorConsoleParent::Organization),
                 HelpContext::DirectorConsole,
+            ),
+            (
+                DirectorRoute::Console(DirectorConsoleParent::RunOverview(SupervisorRunId::new())),
+                HelpContext::WorkRunConsole,
             ),
             (
                 DirectorRoute::RunOverview(SupervisorRunId::new()),

@@ -74,7 +74,7 @@ record から生成する。CI は catalog の key/action 組と本書の worksp
 | `Ctrl-O ,` | OpenGarden | Session Garden |
 | `Ctrl-O g` | Director | Director drawer toggle。初回は goal-driven = Work Runs / classic = Organization。同じ Workflow の再 open は直前 route |
 | `Ctrl-O b` | DirectorBack | Director 内で一階層戻る |
-| `Ctrl-O w` | WorkRuns | daemon-owned Work Runs を直接開く。classic は既存 Run の観測・制御だけを行い、新規 Run は開始しない |
+| `Ctrl-O w` | WorkRuns | goal-driven の daemon-owned Work Runs を直接開く。classic では遷移しない |
 | `Ctrl-O t` | RootTerminal | workspace root Shell drawer |
 | `Ctrl-O z` | RootTerminalFullHeight | Shell drawerの高さ切替 |
 | `Ctrl-O n` | DirectorNew | Director の New Conversation / Start Work Run。Shell 選択中は新しい terminal tab |
@@ -207,11 +207,11 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Decision answer | `PgUp` / `PgDn` | prompt scroll |
 | Decision answer | 文字 / paste / `Backspace` | freeform編集 |
 | Decision answer | `Enter` / `Esc` | submit / listへ戻る |
-| Organization | `↑` / `↓` | root Director 選択 |
-| Organization | `Enter` | 選択 root Director の Director Console |
+| Organization | `↑` / `↓` | Conversation 選択 |
+| Organization | `Enter` | 選択 Conversation の Director Console |
 | Organization | `Esc` | Director を閉じる |
 | Work Runs | `↑` / `↓` | Run 選択 |
-| Work Runs | `Enter` / `Esc` | Run Overview / Organization |
+| Work Runs | `Enter` / `Esc` | Run Overview / Director を閉じる |
 | Work Runs | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の削除確認 |
 | Run Overview | `Enter` / `Esc` | root Director の Console / Work Runs |
 | Run Overview | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の削除確認 |
@@ -219,7 +219,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Director Console | `Ctrl-O x` / `Ctrl-O r` | close / resume |
 | Director Console | `Ctrl-O ↑` / `Ctrl-O ↓` / `Ctrl-O End` | scroll |
 | Director Console | 文字 / paste / `Enter` / `Esc` / 編集キー | selected Agent PTY へ直接送る |
-| Director Console | `Ctrl-O b` | Organization または Run Overview へ戻る |
+| Director Console | `Ctrl-O b` | classic は Organization、goal-driven は Run Overview へ戻る |
 | New Conversation / Start Work Run | `↑` / `↓` | provider 選択 |
 | Start Work Run | 文字 / paste / `Backspace` | Goal 編集 |
 | New Conversation / Start Work Run | `Enter` / `Esc` / `Ctrl-C` | launch / 開始前 route へ戻る |

@@ -1431,6 +1431,27 @@ impl DirectorRoute {
             WorkMode::GoalDriven => Self::WorkRuns,
         }
     }
+
+    /// Whether this retained route belongs to the selected workflow.
+    ///
+    /// Classic conversations and goal-driven Work Runs are separate screen
+    /// trees. A workflow switch keeps daemon-owned work alive, but never
+    /// exposes the previous workflow's route in the newly selected tree.
+    #[must_use]
+    const fn belongs_to(self, mode: WorkMode) -> bool {
+        matches!(
+            (mode, self),
+            (
+                WorkMode::Classic,
+                Self::Organization | Self::Console(DirectorConsoleParent::Organization)
+            ) | (
+                WorkMode::GoalDriven,
+                Self::WorkRuns
+                    | Self::RunOverview(_)
+                    | Self::Console(DirectorConsoleParent::RunOverview(_))
+            )
+        )
+    }
 }
 
 impl ExitChoice {
@@ -2223,7 +2244,7 @@ pub enum AppKey {
     OpenRootTerminal,
     /// Open the Director mode drawer and its explicit New CLI picker.
     OpenDirectorNew,
-    /// Open the workspace-wide Director Organization screen.
+    /// Open the classic Director Organization screen.
     OpenDirectorOrganization,
     /// Open the Work Run list directly.
     OpenDirectorWorkRuns,
@@ -3872,11 +3893,18 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         } => {
             if state.director_launching == Some(operation) {
                 state.director_launching = None;
-                if succeeded && let Some(run) = supervisor_run_id {
-                    state.director_route = DirectorRoute::RunOverview(run);
-                } else if succeeded {
-                    state.director_route =
-                        DirectorRoute::Console(DirectorConsoleParent::Organization);
+                if succeeded {
+                    state.director_route = match (state.work_mode, supervisor_run_id) {
+                        (WorkMode::GoalDriven, Some(run)) => DirectorRoute::RunOverview(run),
+                        (WorkMode::Classic, None) => {
+                            DirectorRoute::Console(DirectorConsoleParent::Organization)
+                        }
+                        // The launch belongs to the workflow active when it
+                        // was submitted. A later workflow switch keeps the
+                        // daemon-owned result alive without crossing the two
+                        // Director screen trees.
+                        (mode, _) => DirectorRoute::landing_for(mode),
+                    };
                 }
             }
             Vec::new()
@@ -4243,6 +4271,7 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         return Vec::new();
     }
     if matches!(key, AppKey::OpenDirectorWorkRuns)
+        && state.work_mode == WorkMode::GoalDriven
         && state.director_launching.is_none()
         && matches!(state.director_new, DirectorNew::Idle)
     {
@@ -4435,7 +4464,7 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             Vec::new()
         }
         (DirectorNew::Idle, AppKey::Escape) => {
-            if state.director_route == DirectorRoute::Organization {
+            if state.director_route == DirectorRoute::landing_for(state.work_mode) {
                 state.director_drawer_open = false;
                 state.workspace_drawer_focus = state
                     .root_terminal_drawer_open
@@ -4536,13 +4565,17 @@ fn update_director_shell_key(state: &mut AppState, key: &AppKey) -> Option<Vec<E
 fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
     match key {
         AppKey::OpenDirectorOrganization => {
+            if state.work_mode != WorkMode::Classic {
+                return true;
+            }
             state.director_route = DirectorRoute::Organization;
             state.director_new = DirectorNew::Idle;
             state.director_goal.clear();
             true
         }
         AppKey::OpenDirectorWorkRuns => {
-            if state.director_launching.is_some()
+            if state.work_mode != WorkMode::GoalDriven
+                || state.director_launching.is_some()
                 || !matches!(state.director_new, DirectorNew::Idle)
             {
                 return true;
@@ -4553,13 +4586,20 @@ fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
             true
         }
         AppKey::OpenDirectorRunOverview(run) => {
+            if state.work_mode != WorkMode::GoalDriven {
+                return true;
+            }
             state.director_route = DirectorRoute::RunOverview(*run);
             state.director_new = DirectorNew::Idle;
             state.director_goal.clear();
             true
         }
         AppKey::OpenDirectorConsole(parent) => {
-            state.director_route = DirectorRoute::Console(*parent);
+            let route = DirectorRoute::Console(*parent);
+            if !route.belongs_to(state.work_mode) {
+                return true;
+            }
+            state.director_route = route;
             state.director_new = DirectorNew::Idle;
             state.director_goal.clear();
             true
@@ -4580,16 +4620,18 @@ fn director_back(state: &mut AppState) {
         state.director_goal.clear();
         return;
     }
-    state.director_route = match state.director_route {
-        DirectorRoute::Organization
-        | DirectorRoute::WorkRuns
-        | DirectorRoute::Console(DirectorConsoleParent::Organization) => {
+    state.director_route = match (state.work_mode, state.director_route) {
+        (WorkMode::Classic, DirectorRoute::Console(DirectorConsoleParent::Organization)) => {
             DirectorRoute::Organization
         }
-        DirectorRoute::RunOverview(_) => DirectorRoute::WorkRuns,
-        DirectorRoute::Console(DirectorConsoleParent::RunOverview(run)) => {
+        (WorkMode::GoalDriven, DirectorRoute::RunOverview(_)) => DirectorRoute::WorkRuns,
+        (WorkMode::GoalDriven, DirectorRoute::Console(DirectorConsoleParent::RunOverview(run))) => {
             DirectorRoute::RunOverview(run)
         }
+        (mode, route) if route == DirectorRoute::landing_for(mode) => route,
+        // Normalize impossible or stale cross-workflow routes instead of
+        // exposing the other workflow's screen tree.
+        (mode, _) => DirectorRoute::landing_for(mode),
     };
 }
 
@@ -5515,7 +5557,8 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
             Vec::new()
         }
         AppKey::OpenDirectorWorkRuns => {
-            if state.director_launching.is_some()
+            if state.work_mode != WorkMode::GoalDriven
+                || state.director_launching.is_some()
                 || !matches!(state.director_new, DirectorNew::Idle)
             {
                 return Vec::new();
@@ -7969,7 +8012,8 @@ mod tests {
         let workspace = WorkspaceId::new();
         let run = SupervisorRunId::new();
         let mut state = AppState::home(workspace, Vec::new());
-        assert_eq!(state.director_route(), DirectorRoute::Organization);
+        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
         assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns)).is_empty());
         assert!(state.director_drawer_open());
         assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
@@ -7992,8 +8036,6 @@ mod tests {
         assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-        assert_eq!(state.director_route(), DirectorRoute::Organization);
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         assert!(!state.director_drawer_open());
     }
@@ -8030,7 +8072,7 @@ mod tests {
     }
 
     #[test]
-    fn classic_director_keeps_existing_work_run_routes_available() {
+    fn director_workflows_reject_each_others_routes() {
         let workspace = WorkspaceId::new();
         let run = SupervisorRunId::new();
         let mut state = AppState::home(workspace, Vec::new());
@@ -8039,20 +8081,17 @@ mod tests {
             &mut state,
             &AppKey::OpenDirectorWorkRuns,
         ));
-        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
         assert!(update_director_route_key(
             &mut state,
             &AppKey::OpenDirectorRunOverview(run),
         ));
-        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
         assert!(update_director_route_key(
             &mut state,
             &AppKey::OpenDirectorConsole(DirectorConsoleParent::RunOverview(run)),
         ));
-        assert_eq!(
-            state.director_route(),
-            DirectorRoute::Console(DirectorConsoleParent::RunOverview(run))
-        );
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
 
         assert!(update_director_route_key(
             &mut state,
@@ -8062,15 +8101,39 @@ mod tests {
             state.director_route(),
             DirectorRoute::Console(DirectorConsoleParent::Organization)
         );
+
+        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorOrganization,
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorConsole(DirectorConsoleParent::Organization),
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorRunOverview(run),
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+
+        // Defensive normalization also repairs state retained by an older
+        // binary or an asynchronous route change that crossed workflows.
+        state.director_route = DirectorRoute::Organization;
+        director_back(&mut state);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
     }
 
     #[test]
-    fn director_launch_completion_after_mode_switch_opens_the_created_identity() {
+    fn director_launch_completion_after_mode_switch_stays_in_the_selected_workflow() {
         let workspace = WorkspaceId::new();
         let run = SupervisorRunId::new();
 
         // A Goal launch may finish after the operator has returned to classic.
-        // The matching completion still owns the exact Run it created.
+        // The Run remains daemon-owned, but the classic tree stays visible.
         let mut goal_state = AppState::home(workspace, Vec::new());
         goal_state.set_work_mode(WorkMode::GoalDriven);
         let goal_operation = OperationId::new();
@@ -8085,10 +8148,10 @@ mod tests {
                 succeeded: true,
             },
         );
-        assert_eq!(goal_state.director_route(), DirectorRoute::RunOverview(run));
+        assert_eq!(goal_state.director_route(), DirectorRoute::Organization);
 
-        // Conversely, a classic launch completion has no Run identity and
-        // opens the root Agent under Organization even if the mode changed.
+        // Conversely, a classic launch completion must not expose Organization
+        // after the operator moved to the goal-driven tree.
         let mut classic_state = AppState::home(workspace, Vec::new());
         let classic_operation = OperationId::new();
         classic_state.director_launching = Some(classic_operation);
@@ -8102,10 +8165,7 @@ mod tests {
                 succeeded: true,
             },
         );
-        assert_eq!(
-            classic_state.director_route(),
-            DirectorRoute::Console(DirectorConsoleParent::Organization)
-        );
+        assert_eq!(classic_state.director_route(), DirectorRoute::WorkRuns);
     }
 
     #[test]
@@ -8124,36 +8184,39 @@ mod tests {
         assert_eq!(state.director_new(), DirectorNew::Idle);
         assert!(state.director_goal().is_empty());
 
-        assert!(update_director_route_key(
-            &mut state,
-            &AppKey::OpenDirectorWorkRuns
-        ));
-        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
-        state.set_work_mode(WorkMode::GoalDriven);
-        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
-        assert!(update_director_route_key(
-            &mut state,
-            &AppKey::OpenDirectorOrganization
-        ));
-        state.director_launching = Some(OperationId::new());
-        assert!(update_director_route_key(
-            &mut state,
-            &AppKey::OpenDirectorWorkRuns
-        ));
-        assert_eq!(state.director_route(), DirectorRoute::Organization);
-        state.director_route = DirectorRoute::RunOverview(run);
-        assert!(update_director_route_key(&mut state, &AppKey::DirectorBack));
-        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
-        state.director_route = DirectorRoute::Organization;
-        state.director_launching = None;
-        state.director_new = DirectorNew::Empty;
+        // Classic consumes the Work Runs command without crossing workflows.
         assert!(update_director_route_key(
             &mut state,
             &AppKey::OpenDirectorWorkRuns
         ));
         assert_eq!(state.director_route(), DirectorRoute::Organization);
 
+        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorOrganization
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+
+        state.director_launching = Some(OperationId::new());
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorWorkRuns
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        state.director_route = DirectorRoute::RunOverview(run);
+        assert!(update_director_route_key(&mut state, &AppKey::DirectorBack));
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+
+        state.director_launching = None;
         state.director_new = DirectorNew::Empty;
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorWorkRuns
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+
         state.director_goal = "cancel me".into();
         director_back(&mut state);
         assert_eq!(state.director_new(), DirectorNew::Idle);
@@ -8161,8 +8224,6 @@ mod tests {
 
         let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
         assert!(state.root_terminal_drawer_open());
-        state.set_work_mode(WorkMode::Classic);
-        state.director_route = DirectorRoute::RunOverview(run);
         state.director_launching = Some(OperationId::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
         assert!(!state.director_drawer_open());
@@ -8190,6 +8251,14 @@ mod tests {
             &AppKey::OpenDirectorRunOverview(run)
         ));
         assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+
+        state.set_work_mode(WorkMode::Classic);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
     }
 
     #[test]
