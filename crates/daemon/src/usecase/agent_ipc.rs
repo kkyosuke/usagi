@@ -245,17 +245,7 @@ impl Default for AgentOperationBounds {
 struct McpCaller {
     runtime: AgentRuntimeRef,
     operation: OperationId,
-    child: Option<McpChildLease>,
-}
-
-/// Exact process and connection currently holding one daemon-minted MCP
-/// credential. The process identity survives a transport disconnect so the
-/// same child can reconnect; only the connection association is released.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct McpChildLease {
-    pid: u32,
-    process_start_identity: String,
-    connection: Option<ConnectionId>,
+    child_pid: Option<u32>,
 }
 
 /// Dispatch authority derived from one live daemon-minted MCP credential.
@@ -1017,34 +1007,29 @@ impl AgentRuntime {
     /// Claims the one MCP child slot whose OS parent is the live Agent process
     /// and whose process group is inherited or self-led. The bearer crosses
     /// only this authenticated IPC response and is thereafter fenced to the
-    /// claiming process-start identity and its renewable connection lease.
+    /// claiming PID.
     pub fn claim_mcp_child(
         &mut self,
         child_pid: u32,
-        process_start_identity: &str,
         parent_pid: u32,
         process_group: u32,
-        connection: ConnectionId,
-        existing_process_is_live: &dyn Fn(u32, &str) -> bool,
     ) -> Result<String, ProtocolError> {
         let mut matches = self.mcp_callers.iter_mut().filter(|(_, caller)| {
-            caller.child.as_ref().is_none_or(|child| {
-                (child.pid == child_pid && child.process_start_identity == process_start_identity)
-                    || !existing_process_is_live(child.pid, &child.process_start_identity)
-            }) && self
-                .coordinator
-                .record_for(&caller.runtime)
-                .is_ok_and(|record| {
-                    record.state == super::runtime::RuntimeState::Running
-                        && record.process.as_ref().is_some_and(|process| {
-                            process.pid == parent_pid
-                                && mcp_child_process_group_matches(
-                                    process.process_group,
-                                    child_pid,
-                                    process_group,
-                                )
-                        })
-                })
+            caller.child_pid.is_none()
+                && self
+                    .coordinator
+                    .record_for(&caller.runtime)
+                    .is_ok_and(|record| {
+                        record.state == super::runtime::RuntimeState::Running
+                            && record.process.as_ref().is_some_and(|process| {
+                                process.pid == parent_pid
+                                    && mcp_child_process_group_matches(
+                                        process.process_group,
+                                        child_pid,
+                                        process_group,
+                                    )
+                            })
+                    })
         });
         let Some((credential, caller)) = matches.next() else {
             return Err(ProtocolError::new(
@@ -1058,114 +1043,26 @@ impl AgentRuntime {
                 "MCP child process ownership is ambiguous",
             ));
         }
-        caller.child = Some(McpChildLease {
-            pid: child_pid,
-            process_start_identity: process_start_identity.to_owned(),
-            connection: Some(connection),
-        });
+        caller.child_pid = Some(child_pid);
         Ok(credential.clone())
     }
 
     #[must_use]
-    pub fn authenticate_mcp_child_connection(
-        &mut self,
-        credential: &str,
-        child_pid: u32,
-        process_start_identity: &str,
-        connection: ConnectionId,
-    ) -> bool {
-        if self.mcp_caller(credential).is_none() {
-            return false;
-        }
-        let Some(child) = self
-            .mcp_callers
-            .get_mut(credential)
-            .and_then(|caller| caller.child.as_mut())
-        else {
-            return false;
-        };
-        if child.pid != child_pid || child.process_start_identity != process_start_identity {
-            return false;
-        }
-        child.connection = Some(connection);
-        true
+    pub fn authenticates_mcp_child(&self, credential: &str, child_pid: u32) -> bool {
+        self.mcp_callers
+            .get(credential)
+            .is_some_and(|caller| caller.child_pid == Some(child_pid))
+            && self.mcp_caller(credential).is_some()
     }
 
-    /// Releases only the active transport lease owned by this connection.
-    ///
-    /// The exact process claim remains so a policy client may reconnect with
-    /// the same credential. Cleanup from an older connection cannot clear a
-    /// newer connection lease, and a reused PID cannot acquire the claim.
-    pub fn release_mcp_connection(&mut self, connection: ConnectionId) {
+    /// Releases only the credential slot owned by the disconnecting MCP PID.
+    /// A sibling cannot clear another live child's binding.
+    pub fn release_mcp_child(&mut self, child_pid: u32) {
         for caller in self.mcp_callers.values_mut() {
-            if caller
-                .child
-                .as_ref()
-                .is_some_and(|child| child.connection == Some(connection))
-                && let Some(child) = caller.child.as_mut()
-            {
-                child.connection = None;
+            if caller.child_pid == Some(child_pid) {
+                caller.child_pid = None;
             }
         }
-    }
-
-    /// Releases stale transport leases against the daemon's bounded live
-    /// connection census while retaining each exact process claim.
-    pub fn retain_live_mcp_connections(&mut self, live: &BTreeSet<ConnectionId>) {
-        for caller in self.mcp_callers.values_mut() {
-            if let Some(child) = caller.child.as_mut()
-                && child
-                    .connection
-                    .is_some_and(|connection| !live.contains(&connection))
-            {
-                child.connection = None;
-            }
-        }
-    }
-
-    /// Coalesces terminal attachment and input-epoch cleanup against the
-    /// daemon's bounded live-connection census.
-    pub fn retain_live_connections(&mut self, live: &BTreeSet<ConnectionId>) {
-        self.coordinator
-            .retain_live_connections(live, &mut *self.pty);
-    }
-
-    /// Enforces Director Work's transitive provider/runtime invariant before
-    /// session creation or Agent admission performs any side effect.
-    pub fn require_same_dispatch_runtime(
-        &self,
-        workspace: WorkspaceId,
-        caller: &CallerRef,
-        selected: &DispatchAgentIntent,
-    ) -> Result<(), ProtocolError> {
-        let caller_runtime = self
-            .dispatch
-            .agent_in_workspace(workspace, caller.agent_id)
-            .map_err(map_dispatch_storage_error)?
-            .ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "delegating Agent runtime is unavailable",
-                )
-            })?
-            .runtime;
-        let selected_runtime = match selected {
-            DispatchAgentIntent::New { runtime, .. } => runtime.clone(),
-            DispatchAgentIntent::Existing { agent_id } => {
-                self.dispatch
-                    .agent_in_workspace(workspace, *agent_id)
-                    .map_err(map_dispatch_storage_error)?
-                    .ok_or_else(dispatch_agent_not_found)?
-                    .runtime
-            }
-        };
-        if selected_runtime != caller_runtime {
-            return Err(ProtocolError::new(
-                ErrorCode::PermissionDenied,
-                "delegated Agent runtime must match the authenticated caller runtime",
-            ));
-        }
-        Ok(())
     }
 
     /// Resolves a short-lived provider hook from authenticated OS process identity.
@@ -1460,24 +1357,13 @@ impl AgentRuntime {
             ));
         }
         if let Some(record) = live {
-            let mut bytes = prompt.as_bytes().to_vec();
-            bytes.push(b'\r');
-            self.pty.select_terminal(&record.runtime.terminal);
-            self.pty.write_all(&bytes).map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed")
-            })?;
+            self.submit_live_prompt(&record.runtime.terminal, prompt)?;
             return Ok(PromptDelivery {
                 delivered_to: "live",
                 queued: false,
             });
         }
-        self.dispatch
-            .queue_prompt(workspace, session, prompt.to_owned(), Utc::now())
-            .map_err(map_dispatch_storage_error)?;
-        Ok(PromptDelivery {
-            delivered_to: "queue",
-            queued: true,
-        })
+        self.queue_prompt_for_next_launch(workspace, session, prompt)
     }
 
     /// Delivers a continuation only to the exact live operation that created
@@ -1506,15 +1392,50 @@ impl AgentRuntime {
             .ok_or_else(|| {
                 ProtocolError::new(ErrorCode::Unavailable, "target agent run is no longer live")
             })?;
-        let mut bytes = prompt.as_bytes().to_vec();
-        bytes.push(b'\r');
-        self.pty.select_terminal(&live.runtime.terminal);
-        self.pty.write_all(&bytes).map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed")
-        })?;
+        self.submit_live_prompt(&live.runtime.terminal, prompt)?;
         Ok(PromptDelivery {
             delivered_to: "live",
             queued: false,
+        })
+    }
+
+    /// Writes one complete prompt submission to a live Agent. All prompt paths
+    /// use this boundary so none can leave text in the provider's input editor
+    /// without the same carriage return emitted by the TUI Enter key.
+    fn submit_live_prompt(
+        &mut self,
+        terminal: &TerminalRef,
+        prompt: &str,
+    ) -> Result<(), ProtocolError> {
+        let mut bytes = prompt.as_bytes().to_vec();
+        bytes.push(b'\r');
+        self.pty.select_terminal(terminal);
+        self.pty
+            .write_all(&bytes)
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed"))
+    }
+
+    /// Persists a prompt for the next launch even while a runtime is still
+    /// recorded as live. This is reserved for internal wake delivery after a
+    /// live PTY write failed; public queue mode keeps rejecting live targets.
+    pub fn queue_prompt_for_next_launch(
+        &mut self,
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+        prompt: &str,
+    ) -> Result<PromptDelivery, ProtocolError> {
+        if prompt.trim().is_empty() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "prompt must not be empty",
+            ));
+        }
+        self.dispatch
+            .queue_prompt(workspace, session, prompt.to_owned(), Utc::now())
+            .map_err(map_dispatch_storage_error)?;
+        Ok(PromptDelivery {
+            delivered_to: "queue",
+            queued: true,
         })
     }
 
@@ -1656,7 +1577,7 @@ impl AgentRuntime {
         let outdated_mcp_children = self
             .mcp_callers
             .values()
-            .filter(|caller| caller.child.is_some())
+            .filter(|caller| caller.child_pid.is_some())
             .filter(|caller| {
                 outdated
                     .iter()
@@ -1704,7 +1625,7 @@ impl AgentRuntime {
         diagnosis.outdated_mcp_children = self
             .mcp_callers
             .values()
-            .filter(|caller| caller.child.is_some())
+            .filter(|caller| caller.child_pid.is_some())
             .filter(|caller| selected_ids.contains(&caller.runtime.agent_runtime_id))
             .count();
         if diagnosis
@@ -2462,7 +2383,7 @@ impl AgentRuntime {
             McpCaller {
                 runtime: authorization.runtime.clone(),
                 operation,
-                child: None,
+                child_pid: None,
             },
         );
         if let Err(error) = self.orchestrator.launch_with_semantic(
@@ -2697,7 +2618,7 @@ impl AgentRuntime {
             McpCaller {
                 runtime: authorization.runtime.clone(),
                 operation,
-                child: None,
+                child_pid: None,
             },
         );
         if let Err(error) = self.orchestrator.resume_with_semantic(
@@ -2900,7 +2821,7 @@ impl AgentRuntime {
             McpCaller {
                 runtime: authorization.runtime.clone(),
                 operation,
-                child: None,
+                child_pid: None,
             },
         );
         if let Err(error) = self.orchestrator.launch_with_semantic(
@@ -3250,12 +3171,8 @@ impl AgentRuntime {
                 )
                 .is_err()
             {
-                let _ = self.prompt(
-                    workspace,
-                    delivered_to.session_id,
-                    &notice,
-                    PromptMode::Queue,
-                );
+                let _ =
+                    self.queue_prompt_for_next_launch(workspace, delivered_to.session_id, &notice);
             }
         }
         Ok(ReportDelivery {
@@ -4986,16 +4903,12 @@ mod tests {
             .runtime_for_terminal(&admission.terminal)
             .unwrap()
             .agent_runtime_id;
-        let mcp_caller = agent
+        agent
             .mcp_callers
             .values_mut()
             .next()
-            .expect("launch registers one MCP caller");
-        mcp_caller.child = Some(McpChildLease {
-            pid: 9001,
-            process_start_identity: "process-9001".into(),
-            connection: Some(ConnectionId::new()),
-        });
+            .expect("launch registers one MCP caller")
+            .child_pid = Some(9001);
         let mut snapshot = agent.coordinator.snapshot();
         snapshot.records[0].launch.plan.profile_revision = 1;
         snapshot.records[0]
@@ -7956,9 +7869,9 @@ mod tests {
             .unwrap();
         assert_eq!(live.delivered_to, "live");
         assert_eq!(pty(&runtime).writes, b"follow up\r");
-        let fenced = runtime.prompt_run(operation, "decision answer").unwrap();
+        let fenced = runtime.prompt_run(operation, "decision\nanswer\n").unwrap();
         assert_eq!(fenced.delivered_to, "live");
-        assert_eq!(pty(&runtime).writes, b"follow up\rdecision answer\r");
+        assert_eq!(pty(&runtime).writes, b"follow up\rdecision\nanswer\n\r");
         assert!(runtime.prompt_run(OperationId::new(), "late").is_err());
         assert_eq!(
             runtime.prompt_run(operation, "  ").unwrap_err().code,
@@ -8316,9 +8229,8 @@ mod tests {
             },
             SnapshotWire::RawTail,
         ));
-        // A coalesced live-set sweep drops only subscriptions; the process/PTY
-        // stay alive.
-        runtime.retain_live_connections(&BTreeSet::new());
+        // A disconnect drops only subscriptions; the process/PTY stay alive.
+        runtime.disconnect(connection);
 
         let reattached = handled(runtime.handle_terminal(
             connection,
@@ -8553,7 +8465,7 @@ mod tests {
             McpCaller {
                 runtime: runtime_ref.clone(),
                 operation: fence.operation_id,
-                child: None,
+                child_pid: None,
             },
         );
         assert_eq!(
@@ -8730,91 +8642,6 @@ mod tests {
     }
 
     #[test]
-    fn delegated_dispatch_requires_the_authenticated_callers_runtime() {
-        let runtime = runtime();
-        let workspace = WorkspaceId::new();
-        let caller_agent = runtime
-            .dispatch
-            .upsert_agent_by_runtime_model(
-                workspace,
-                Some(SessionId::new()),
-                AgentProfileId::new("claude").unwrap(),
-                ModelSelector::new("manager").unwrap(),
-            )
-            .unwrap();
-        let same_runtime_agent = runtime
-            .dispatch
-            .upsert_agent_by_runtime_model(
-                workspace,
-                Some(SessionId::new()),
-                AgentProfileId::new("claude").unwrap(),
-                ModelSelector::new("worker").unwrap(),
-            )
-            .unwrap();
-        let other_runtime_agent = runtime
-            .dispatch
-            .upsert_agent_by_runtime_model(
-                workspace,
-                Some(SessionId::new()),
-                AgentProfileId::new("codex").unwrap(),
-                ModelSelector::new("worker").unwrap(),
-            )
-            .unwrap();
-        let caller = CallerRef {
-            session_id: caller_agent.session_id,
-            agent_id: caller_agent.agent_id,
-        };
-
-        for selected in [
-            DispatchAgentIntent::New {
-                runtime: AgentProfileId::new("claude").unwrap(),
-                model: ModelSelector::new("different-model-is-allowed").unwrap(),
-            },
-            DispatchAgentIntent::Existing {
-                agent_id: same_runtime_agent.agent_id,
-            },
-        ] {
-            runtime
-                .require_same_dispatch_runtime(workspace, &caller, &selected)
-                .unwrap();
-        }
-        for selected in [
-            DispatchAgentIntent::New {
-                runtime: AgentProfileId::new("codex").unwrap(),
-                model: ModelSelector::new("worker").unwrap(),
-            },
-            DispatchAgentIntent::Existing {
-                agent_id: other_runtime_agent.agent_id,
-            },
-        ] {
-            assert_eq!(
-                runtime
-                    .require_same_dispatch_runtime(workspace, &caller, &selected)
-                    .unwrap_err()
-                    .code,
-                ErrorCode::PermissionDenied
-            );
-        }
-        assert_eq!(
-            runtime
-                .require_same_dispatch_runtime(
-                    workspace,
-                    &CallerRef {
-                        session_id: None,
-                        agent_id: usagi_core::domain::id::AgentId::new(),
-                    },
-                    &DispatchAgentIntent::New {
-                        runtime: AgentProfileId::new("claude").unwrap(),
-                        model: ModelSelector::new("worker").unwrap(),
-                    },
-                )
-                .unwrap_err()
-                .code,
-            ErrorCode::OwnershipUnknown
-        );
-    }
-
-    #[test]
     fn hook_identity_accepts_exec_form_direct_children_and_legacy_inherited_groups() {
         let mut runtime = runtime();
         runtime
@@ -8840,7 +8667,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // One dispatch lifetime exercises claim, reconnect, PID reuse, replay, and exit invalidation.
     fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
         let fixture = tempfile::tempdir().unwrap();
         std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
@@ -8879,115 +8705,34 @@ mod tests {
             runtime.mcp_caller(&credential),
             Some(OperationId::parse(&operation).unwrap())
         );
-        let first_connection = ConnectionId::new();
-        let second_connection = ConnectionId::new();
-        assert!(!runtime.authenticate_mcp_child_connection(
-            &credential,
-            9001,
-            "start-a",
-            first_connection
-        ));
-        assert!(
-            runtime
-                .claim_mcp_child(9001, "start-a", 9998, 4321, first_connection, &|_, _| true)
-                .is_err()
-        );
+        assert!(!runtime.authenticates_mcp_child(&credential, 9001));
+        assert!(runtime.claim_mcp_child(9001, 9998, 4321).is_err());
         let ambiguous = runtime.mcp_callers[&credential].clone();
         runtime
             .mcp_callers
             .insert("ambiguous-runtime".into(), ambiguous);
         assert_eq!(
-            runtime
-                .claim_mcp_child(9001, "start-a", 4321, 4321, first_connection, &|_, _| true)
-                .unwrap_err()
-                .code,
+            runtime.claim_mcp_child(9001, 4321, 4321).unwrap_err().code,
             ErrorCode::OwnershipUnknown
         );
         runtime.mcp_callers.remove("ambiguous-runtime");
         assert_eq!(
-            runtime
-                .claim_mcp_child(9001, "start-a", 4321, 4321, first_connection, &|_, _| true)
-                .unwrap(),
+            runtime.claim_mcp_child(9001, 4321, 4321).unwrap(),
             credential
         );
-        assert!(runtime.authenticate_mcp_child_connection(
-            &credential,
-            9001,
-            "start-a",
-            second_connection
-        ));
-        assert!(!runtime.authenticate_mcp_child_connection(
-            &credential,
-            9002,
-            "start-a",
-            second_connection
-        ));
-        assert!(!runtime.authenticate_mcp_child_connection(
-            &credential,
-            9001,
-            "reused-pid",
-            second_connection
-        ));
-        assert!(
-            runtime
-                .claim_mcp_child(9002, "start-b", 4321, 4321, second_connection, &|_, _| true)
-                .is_err()
-        );
-        assert!(
-            runtime
-                .claim_mcp_child(9001, "start-a", 4321, 9999, second_connection, &|_, _| true)
-                .is_err()
-        );
-        runtime.release_mcp_connection(first_connection);
+        assert!(runtime.authenticates_mcp_child(&credential, 9001));
+        assert!(!runtime.authenticates_mcp_child(&credential, 9002));
+        assert!(runtime.claim_mcp_child(9002, 4321, 4321).is_err());
+        assert!(runtime.claim_mcp_child(9001, 4321, 9999).is_err());
+        runtime.release_mcp_child(9002);
+        assert!(runtime.authenticates_mcp_child(&credential, 9001));
+        runtime.release_mcp_child(9001);
+        assert!(!runtime.authenticates_mcp_child(&credential, 9001));
         assert_eq!(
-            runtime.mcp_callers[&credential]
-                .child
-                .as_ref()
-                .and_then(|child| child.connection),
-            Some(second_connection)
+            runtime.claim_mcp_child(9003, 4321, 4321).unwrap(),
+            credential
         );
-        runtime.retain_live_mcp_connections(&BTreeSet::from([second_connection]));
-        assert_eq!(
-            runtime.mcp_callers[&credential]
-                .child
-                .as_ref()
-                .and_then(|child| child.connection),
-            Some(second_connection)
-        );
-        runtime.retain_live_mcp_connections(&BTreeSet::new());
-        assert_eq!(
-            runtime.mcp_callers[&credential]
-                .child
-                .as_ref()
-                .and_then(|child| child.connection),
-            None
-        );
-        let reconnect = ConnectionId::new();
-        assert!(runtime.authenticate_mcp_child_connection(&credential, 9001, "start-a", reconnect));
-        runtime.release_mcp_connection(reconnect);
-        assert!(
-            runtime
-                .claim_mcp_child(9003, "start-c", 4321, 4321, reconnect, &|_, _| true)
-                .is_err(),
-            "a live exact-process claim must not be reassigned after disconnect"
-        );
-        assert!(!runtime.authenticate_mcp_child_connection(
-            &credential,
-            9003,
-            "start-c",
-            reconnect
-        ));
-        assert_eq!(
-            runtime
-                .claim_mcp_child(9003, "start-c", 4321, 4321, reconnect, &|pid, identity| {
-                    assert_eq!((pid, identity), (9001, "start-a"));
-                    false
-                })
-                .unwrap(),
-            credential,
-            "a replacement MCP process may claim only after exact death proof"
-        );
-        assert!(runtime.authenticate_mcp_child_connection(&credential, 9003, "start-c", reconnect));
+        assert!(runtime.authenticates_mcp_child(&credential, 9003));
         assert_eq!(runtime.mcp_caller("forged"), None);
         let run_id = OperationId::parse(&operation).unwrap();
         assert_eq!(
@@ -9013,15 +8758,93 @@ mod tests {
         );
         runtime.exit(&admission.terminal, 0).unwrap();
         assert_eq!(runtime.mcp_caller(&credential), None);
-        assert!(!runtime.authenticate_mcp_child_connection(
-            &credential,
-            9003,
-            "start-c",
-            reconnect
-        ));
+        assert!(!runtime.authenticates_mcp_child(&credential, 9003));
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::NoReport);
+    }
+
+    #[test]
+    fn completion_wake_queues_after_live_prompt_write_failure() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let workspace = WorkspaceId::new();
+        let parent_session = SessionId::new();
+        let parent = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("manager").unwrap(),
+            )
+            .unwrap();
+        let caller = CallerRef {
+            session_id: Some(parent_session),
+            agent_id: parent.agent_id,
+        };
+        let operation = OperationId::new();
+        let worker_session = SessionId::new();
+        runtime
+            .dispatch(
+                &operation.to_string(),
+                &DispatchIntent {
+                    workspace,
+                    session_name: "worker".into(),
+                    caller,
+                    agent: DispatchAgentIntent::New {
+                        runtime: AgentProfileId::new("claude").unwrap(),
+                        model: ModelSelector::new("test").unwrap(),
+                    },
+                    prompt: "finish".into(),
+                },
+                worker_session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        let credential = runtime
+            .mcp_callers
+            .iter()
+            .find(|(_, caller)| caller.operation == operation)
+            .map(|(credential, _)| credential.clone())
+            .unwrap();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(parent_session),
+                    profile: None,
+                },
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        assert!(
+            runtime
+                .prompt(
+                    workspace,
+                    Some(parent_session),
+                    "public queue",
+                    PromptMode::Queue,
+                )
+                .is_err(),
+            "public queue mode must still reject a live target"
+        );
+
+        pty_mut(&mut runtime).write_failure = true;
+        runtime
+            .report_from_mcp(&credential, None, InboxKind::Completed, "done".into(), None)
+            .unwrap();
+
+        let wake = runtime
+            .dispatch_store()
+            .queued_prompt(workspace, Some(parent_session))
+            .unwrap()
+            .expect("failed live wake must remain durable for the next launch");
+        assert!(wake.prompt.contains("A child report is ready"));
+        assert!(wake.prompt.contains("done"));
     }
 
     #[test]

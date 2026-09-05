@@ -2539,12 +2539,7 @@ impl DecisionWaker for AgentDecisionWaker<'_> {
             return Ok(());
         }
         runtime
-            .prompt(
-                workspace,
-                binding.worker.session_id,
-                &prompt,
-                PromptMode::Queue,
-            )
+            .queue_prompt_for_next_launch(workspace, binding.worker.session_id, &prompt)
             .map_err(|error| anyhow::anyhow!(error.message))?;
         Ok(())
     }
@@ -21286,7 +21281,7 @@ instructions = "{instructions}"
         let codex = codex_developer_instructions_arguments(prompt);
         assert_eq!(codex[0], "-c");
         assert!(codex[1].contains(r#"\"quotes\""#));
-        assert!(codex[1].contains(r"C:\\work\nnext\tline\u0000\u007F"));
+        assert!(codex[1].contains(r"C:\\work\nnext\tline^@\u007F"));
         let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
         assert_eq!(parsed["developer_instructions"].as_str(), Some(prompt));
     }

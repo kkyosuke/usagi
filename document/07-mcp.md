@@ -247,20 +247,6 @@ inbox の完了報告は維持して retryable error を返す。同じ report �
 保存された outcome から run / agent status を冪等に収束させ、`Completed` result だけを読み直して投影するため、失敗への反転や別 URL への差し替えを許さず回復できる。late report と
 `agent_fail` は inventory を変更しない。payload の caller 名や cwd から identity を補完しない。
 
-Director Work からの `session_dispatch` / `session_delegate_brief` は、認証済み caller の profile runtime と同じ
-runtime の worker だけを受理する。この制約は prompt 上の指示ではなく daemon が session 作成前に検証する hard invariant
-であり、新規 selector の `runtime` と既存 Agent の保存済み runtime の両方へ適用する。model は同じ runtime 内で workspace
-allowlist に従って選択できる。各 child も自分の認証済み runtime を基準に同じ検証を受けるため、delegation の深さに関係なく
-異なる provider/runtime へ逸脱しない。Supervisor provenance のない classic caller はこの Work Run 固有の制約を受けず、
-従来どおり workspace allowlist 内の runtime を選べる。
-
-MCP credential の transport authority は PID 単体ではなく、kernel から得た PID・process start identity・現在の
-`ConnectionId` の lease である。transport 切断は一致する connection lease だけを外し、exact process claim と credential は
-live Agent runtime の間保持する。同じ MCP process の resilient client は credential を再送して新しい connection へ
-再 bind でき、旧 connection の遅延 cleanup は新 lease を解除しない。別 process からの claim は、kernel が以前の exact process
-identity の終了を確認できた場合だけ置き換えられる。PID が再利用されても start identity が一致しない request は
-`ownership_unknown` へ fail closed する。Agent runtime の終了または daemon restart では process-local credential 自体が失効する。
-
 callerのcurrent runが`SupervisorRun`へ束縛されている`session_dispatch` / `session_delegate_brief`では、daemonが
 root goalと確定済みchild completionのbounded handoff contextを今回のtask instructionへ前置する。raw conversationや
 terminal transcriptは含めず、workerが明示したsummaryとstructured artifact参照だけを使う。snapshotはchild operationの
@@ -361,11 +347,11 @@ sibling も衝突判定には含め、重複番号を参照する依存は `unme
 TUI の人間回答面は MCP caller credential を持たない。daemon は agent 用 `DispatchTool` と別の型付き IPC
 request として workspace-scoped な `get` / `list` / `resolve` / `cancel` だけを受け付け、`request` と
 `expire` は credential 付き agent 面に限定する。`resolve` は回答と delivery outbox を atomic に保存してから
-`tools/call` の成功応答を返す。consumer は outbox、durable decision の owner・回答、live runtime の operation
-fence、dispatch binding を照合し、すべて一致するときだけ同じ run の PTY へ continuation prompt を送って event を
-ack する。PTY delivery failure や MCP client disconnect では event を残して再試行し、daemon restart で runtime
-identity を復元できない場合は fail-closed で配送しない。期限切れ、cancel、expire は terminal record のみを残し、
-回答 notification を作らない。deadline maintenance は接続や次の MCP call を待たずに期限を terminal 化する。
+`tools/call` の成功応答を返す。agent caller は同じ credential と `decision_id` で `get` を polling し、daemon は
+durable decision の owner と caller scope を照合して terminal decision を返した時点で event を ack する。回答を
+Agent PTY へ自動配送する経路は持たないため、MCP client disconnect では event を残し、同じ caller の次の `get` で
+収束する。期限切れ、cancel、expire は terminal record のみを残し、回答 event を作らない。deadline maintenance は
+接続や次の MCP call を待たずに期限を terminal 化する。
 
 ## tool descriptor と追加手順
 
