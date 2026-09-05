@@ -2472,22 +2472,37 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         session: Option<usagi_core::domain::id::SessionId>,
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let mut client = match crate::runtime::daemon::policy_client(
+            usagi_core::usecase::client::ClientPolicy::tui(),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("Agent launch connect", &error.to_string()));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
         let intent = AgentLaunchIntent {
             workspace,
             session,
             profile,
         };
-        let reply = client
-            .request(agent_launch_request(operation, intent.clone()))
+        let reply = match client.request(agent_launch_request(operation, intent.clone())) {
+            Ok(reply) => reply,
             // Protocol failures already carry a daemon-authored, safe recovery
             // reason (for example a missing Codex login). Preserve it so an
             // explicit `agent -m codex` refusal is not misreported as a broken
             // daemon connection.
-            .map_err(daemon_error_reason)?;
-        correlate_agent_launch(reply, operation, &intent)
+            Err(error) => {
+                let reason = daemon_error_reason(error);
+                ErrorLog::record(&tui_error_entry("Agent launch request", &reason));
+                return Err(reason);
+            }
+        };
+        let result = correlate_agent_launch(reply, operation, &intent);
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("Agent launch response", reason));
+        }
+        result
     }
 
     fn launch_goal(
@@ -2497,18 +2512,36 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
         goal: &str,
     ) -> Result<AgentPaneAdmission, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let mut client = match crate::runtime::daemon::policy_client(
+            usagi_core::usecase::client::ClientPolicy::tui(),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry(
+                    "Agent goal launch connect",
+                    &error.to_string(),
+                ));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
         let intent = AgentGoalIntent {
             workspace,
             profile,
             goal: goal.to_owned(),
         };
-        let reply = client
-            .request(agent_goal_request(operation, intent.clone()))
-            .map_err(daemon_error_reason)?;
-        correlate_agent_goal(reply, operation, &intent)
+        let reply = match client.request(agent_goal_request(operation, intent.clone())) {
+            Ok(reply) => reply,
+            Err(error) => {
+                let reason = daemon_error_reason(error);
+                ErrorLog::record(&tui_error_entry("Agent goal launch request", &reason));
+                return Err(reason);
+            }
+        };
+        let result = correlate_agent_goal(reply, operation, &intent);
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("Agent goal launch response", reason));
+        }
+        result
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=structured_codex_identity_enables_one_explicit_new_runtime_resume
@@ -2543,7 +2576,11 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         workspace: WorkspaceId,
     ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
-        fetch_agent_inventory(workspace)
+        let result = fetch_agent_inventory(workspace);
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("Agent resume inventory", reason));
+        }
+        result
     }
 
     fn resume_exact(
@@ -2551,17 +2588,31 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         target: usagi_core::domain::agent::AgentResumeTarget,
         operation_id: usagi_core::domain::id::OperationId,
     ) -> Result<ExactAgentResume, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        match client
-            .request(exact_agent_resume_request(operation_id, target))
-            .map_err(|_| "provider resume failed; refresh Agent inventory".to_owned())?
-        {
+        let mut client = match crate::runtime::daemon::policy_client(
+            usagi_core::usecase::client::ClientPolicy::tui(),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("Agent resume connect", &error.to_string()));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
+        let reply = match client.request(exact_agent_resume_request(operation_id, target)) {
+            Ok(reply) => reply,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("Agent resume request", &error.to_string()));
+                return Err("provider resume failed; refresh Agent inventory".to_owned());
+            }
+        };
+        let result = match reply {
             DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
                 decode_exact_agent_resume(&body)
             }
+        };
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("Agent resume response", reason));
         }
+        result
     }
 
     fn launch_terminal(
@@ -2575,22 +2626,33 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         if !matches!(arguments, "open" | "new") {
             return Err("terminal accepts only `open` or `new`".to_owned());
         }
-        if arguments == "open"
-            && let Some(existing) = self
-                .list_terminals()
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?
-                .into_iter()
-                .find(|entry| {
-                    entry.live
-                        && entry.kind == usagi_core::domain::terminal_launch::TerminalKind::Terminal
-                        && entry.terminal.workspace_id == workspace
-                        && entry.terminal.session_id == session
-                })
-        {
-            return Ok(existing.terminal);
+        if arguments == "open" {
+            let terminals = match self.list_terminals() {
+                Ok(terminals) => terminals,
+                Err(error) => {
+                    ErrorLog::record(&tui_error_entry(
+                        "terminal inventory",
+                        &format!("{error:?}"),
+                    ));
+                    return Err("daemon unavailable; reconnect to continue".to_owned());
+                }
+            };
+            if let Some(existing) = terminals.into_iter().find(|entry| {
+                entry.live
+                    && entry.kind == usagi_core::domain::terminal_launch::TerminalKind::Terminal
+                    && entry.terminal.workspace_id == workspace
+                    && entry.terminal.session_id == session
+            }) {
+                return Ok(existing.terminal);
+            }
         }
-        let lifecycle = request_lifecycle_snapshot()
-            .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let lifecycle = match request_lifecycle_snapshot() {
+            Ok(lifecycle) => lifecycle,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("terminal lifecycle", &error.reason()));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
         if lifecycle.workspace_id != workspace {
             return Err("workspace is no longer available".to_owned());
         }
@@ -2632,17 +2694,27 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             // a lost response or a reconnect replays the same terminal.
             launch_operation: Some(operation),
         };
-        let mut client = crate::runtime::daemon::policy_client(ClientPolicy::tui())
-            .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let mut client = match crate::runtime::daemon::policy_client(ClientPolicy::tui()) {
+            Ok(client) => client,
+            Err(error) => {
+                ErrorLog::record(&tui_error_entry("terminal connect", &error.to_string()));
+                return Err("daemon unavailable; reconnect to continue".to_owned());
+            }
+        };
         let payload = serde_json::to_value(TerminalRequest::Launch { intent })
             .expect("terminal request is serializable");
-        match client
-            .request(DaemonRequest::Terminal {
-                action: TerminalAction::Launch,
-                payload,
-            })
-            .map_err(daemon_error_reason)?
-        {
+        let reply = match client.request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload,
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                let reason = daemon_error_reason(error);
+                ErrorLog::record(&tui_error_entry("terminal launch request", &reason));
+                return Err(reason);
+            }
+        };
+        let result = match reply {
             DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body
                 .get("terminal")
                 .cloned()
@@ -2651,7 +2723,11 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                     serde_json::from_value(terminal)
                         .map_err(|_| "terminal launch returned an invalid terminal".to_owned())
                 }),
+        };
+        if let Err(reason) = &result {
+            ErrorLog::record(&tui_error_entry("terminal launch response", reason));
         }
+        result
     }
 
     fn list_terminals(
@@ -3881,6 +3957,10 @@ fn daemon_error_reason(error: ClientError) -> String {
     }
 }
 
+fn tui_error_entry(action: &str, reason: &str) -> String {
+    format!("tui failed: action={action} error={reason}")
+}
+
 struct CrosstermTerminal {
     out: std::io::Stdout,
     input: EventPump<CrosstermSource, NoBackend<()>>,
@@ -5043,7 +5123,11 @@ pub(crate) fn launch(
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             writeln!(std::io::stderr(), "{error}")
         }
-        other => other,
+        Err(error) => {
+            ErrorLog::record(&tui_error_entry("application", &error.to_string()));
+            Err(error)
+        }
+        Ok(()) => Ok(()),
     }
 }
 
@@ -5057,7 +5141,11 @@ pub(crate) fn launch_doctor(
     force: bool,
 ) -> std::io::Result<()> {
     if fix {
-        return repair_doctor(out, info, restart_agents, force);
+        let result = repair_doctor(out, info, restart_agents, force);
+        if let Err(error) = &result {
+            ErrorLog::record(&tui_error_entry("doctor repair", &error.to_string()));
+        }
+        return result;
     }
     launch(out, info, &EntryScreen::Doctor)
 }
@@ -5587,8 +5675,8 @@ mod tests {
         pr_snapshot_events, probe_path, provider_resume_projection,
         reduced_motion_from_environment, remove_session_payload, reply_geometry,
         resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
-        version_result_from_observation, work_run_control_client_error,
+        terminal_inventory_matches_scope, tui_error_entry, validate_workspace_directory,
+        version_detail, version_result_from_observation, work_run_control_client_error,
         workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
@@ -8287,6 +8375,10 @@ mod tests {
         let safe = DaemonDecisionCommandPort::safe_error("decision failed");
         assert_eq!(safe.message.as_str(), "User decisions are unavailable.");
         assert_eq!(safe.error_id, "decision-daemon-error");
+        assert_eq!(
+            tui_error_entry("Agent launch response", "uncorrelated reply"),
+            "tui failed: action=Agent launch response error=uncorrelated reply"
+        );
 
         for value in [
             json!(null),
