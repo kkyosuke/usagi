@@ -161,8 +161,11 @@ impl TerminalSelection {
         })
     }
 
-    /// Returns selected text, joined by newlines. Endpoints are inclusive so a
-    /// click selects the cell under the pointer (or the nearest valid cell).
+    /// Returns selected text, joined at PTY hard line boundaries. Endpoints are
+    /// inclusive so a click selects the cell under the pointer (or the nearest
+    /// valid cell). Blank grid padding is removed before a hard newline, while
+    /// explicitly selected spaces at the final endpoint and spaces across a
+    /// soft-wrap boundary are preserved.
     #[must_use]
     pub fn text(&self) -> String {
         let (start, end) = ordered(self.anchor, self.focus);
@@ -180,16 +183,17 @@ impl TerminalSelection {
             .collect::<Vec<_>>();
         let mut text = String::new();
         for (offset, row) in rows.iter().enumerate() {
-            if offset > 0
+            text.push_str(row);
+            if offset + 1 < rows.len()
                 && !self
                     .soft_wraps
-                    .get(start.row + offset - 1)
+                    .get(start.row + offset)
                     .copied()
                     .unwrap_or(false)
             {
+                text.truncate(text.trim_end_matches(' ').len());
                 text.push('\n');
             }
-            text.push_str(row);
         }
         text
     }
@@ -250,14 +254,34 @@ mod tests {
     use usagi_core::usecase::vt_screen::{ActiveBuffer, RetainedRowMotion};
 
     #[test]
-    fn extracts_multiple_lines_and_preserves_selected_spaces() {
+    fn extracts_multiple_lines_without_hard_line_padding() {
         let selection = TerminalSelection::begin(
             vec!["hello  ".into(), "  world".into()],
             TerminalPoint { row: 0, column: 3 },
         );
         let mut selection = selection;
         selection.extend(TerminalPoint { row: 1, column: 3 });
-        assert_eq!(selection.text(), "lo  \n  wo");
+        assert_eq!(selection.text(), "lo\n  wo");
+    }
+
+    #[test]
+    fn preserves_spaces_at_an_explicit_final_endpoint() {
+        let mut selection = TerminalSelection::begin(
+            vec!["first  ".into(), "next  ".into()],
+            TerminalPoint { row: 0, column: 0 },
+        );
+        selection.extend(TerminalPoint { row: 1, column: 5 });
+        assert_eq!(selection.text(), "first\nnext  ");
+    }
+
+    #[test]
+    fn hard_line_padding_becomes_an_empty_selected_line() {
+        let mut selection = TerminalSelection::begin(
+            vec!["first  ".into(), "      ".into(), "third".into()],
+            TerminalPoint { row: 0, column: 0 },
+        );
+        selection.extend(TerminalPoint { row: 2, column: 4 });
+        assert_eq!(selection.text(), "first\n\nthird");
     }
 
     #[test]
@@ -284,7 +308,7 @@ mod tests {
             TerminalPoint { row: 0, column: 0 },
         );
         selection.extend(TerminalPoint { row: 2, column: 3 });
-        assert_eq!(selection.text(), "wrapped text    \nnext");
+        assert_eq!(selection.text(), "wrapped text\nnext");
     }
 
     #[test]
