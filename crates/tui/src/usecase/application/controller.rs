@@ -1337,11 +1337,6 @@ pub struct AppState {
     /// behind an invisible overlay. The renderer injects this layout fact; the
     /// reducer uses it to admit both automatic and manual opening consistently.
     garden_available: bool,
-    /// Renderer-owned zero-based horizontal Garden position selected through scroll controls.
-    /// Presentation clamps it to the current range before drawing, and
-    /// sends the exact resulting target back instead of asking the reducer to
-    /// derive terminal-dependent capacity.
-    garden_scroll: usize,
     /// Last session press eligible to become the first half of a double click.
     /// The controller owns this stable identity after hit-testing; the shell
     /// supplies only coordinates and a monotonic timestamp.
@@ -1551,7 +1546,6 @@ impl AppState {
             mascot_tick: 0,
             size: None,
             garden_available: true,
-            garden_scroll: 0,
             pending_session_click: None,
             has_live_pane: false,
             has_pane_tab: false,
@@ -1829,11 +1823,6 @@ impl AppState {
     #[must_use]
     pub const fn size(&self) -> Option<(u16, u16)> {
         self.size
-    }
-    /// Renderer-owned zero-based horizontal position requested for the open Garden.
-    #[must_use]
-    pub const fn garden_scroll(&self) -> usize {
-        self.garden_scroll
     }
     /// Whether the current Home projection has a live terminal or Agent pane.
     #[must_use]
@@ -2487,8 +2476,8 @@ pub enum AppEvent {
     /// the garden once its *user* has stopped touching the keyboard.
     IdleElapsed(std::time::Duration),
     /// An interaction with the open Garden, already resolved against the
-    /// frame's own plot/viewport layout by presentation. The reducer never sees a
-    /// cell or terminal capacity, so CJK labels, resize, and scrolling cannot
+    /// frame's own plot layout by presentation. The reducer never sees a cell or
+    /// terminal capacity, so CJK labels and resize cannot
     /// move a rabbit away from the session it draws.
     GardenClick(GardenClick),
     /// Focus one stable session row without activating its Closeup. The process
@@ -2509,10 +2498,6 @@ pub enum AppEvent {
 /// rectangles the garden renderer returns for the frame currently on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GardenClick {
-    /// A horizontal scroll control or arrow key. The renderer has already clamped
-    /// the target against the frame currently on screen, so this keeps the Garden
-    /// open and replaces the requested horizontal position exactly.
-    Scroll(usize),
     /// A session's plot. Its stable project/session pair becomes the process
     /// shell's visit target; this reducer activates it only when `workspace`
     /// names its own Home.
@@ -5089,13 +5074,10 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             Vec::new()
         }
         Overlay::Daemon => update_daemon_control(state, &key),
-        // Scroll arrows are resolved against the drawn frame by presentation.
-        // Every other first input remains a wake-up consumed before Home.
+        // The Garden has no hidden viewport. Every key is a wake-up consumed
+        // before Home, including the arrow keys used by other surfaces.
         Overlay::Garden => {
-            if !matches!(key, AppKey::Left | AppKey::Right) {
-                state.overlay = None;
-                state.garden_scroll = 0;
-            }
+            state.overlay = None;
             Vec::new()
         }
         Overlay::CreateSessionError | Overlay::TerminalLaunchError | Overlay::AgentLaunchError => {
@@ -6167,7 +6149,6 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             if arguments.trim().is_empty() {
                 if state.garden_available {
                     state.overlay = Some(Overlay::Garden);
-                    state.garden_scroll = 0;
                     state.notice = None;
                 } else {
                     state.overlay = None;
@@ -6554,7 +6535,6 @@ fn update_pointer(
 fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect> {
     if elapsed >= GARDEN_IDLE_THRESHOLD && garden_may_auto_open(state) {
         state.overlay = Some(Overlay::Garden);
-        state.garden_scroll = 0;
     }
     Vec::new()
 }
@@ -6579,20 +6559,14 @@ fn garden_may_auto_open(state: &AppState) -> bool {
 /// Reduce a click the presentation layer already resolved against the garden's
 /// own hitboxes.
 ///
-/// Scroll controls retain the Garden and replace its requested horizontal offset. Every other
-/// click closes it; only a rabbit also activates a session. A session that
+/// Every click closes the Garden; only a rabbit also activates a session. A session that
 /// disappeared from the snapshot between the frame and the press is a stale
 /// target, so it closes the garden and does nothing else.
 fn update_garden_click(state: &mut AppState, click: GardenClick) -> Vec<Effect> {
     if state.overlay != Some(Overlay::Garden) {
         return Vec::new();
     }
-    if let GardenClick::Scroll(scroll) = click {
-        state.garden_scroll = scroll;
-        return Vec::new();
-    }
     state.overlay = None;
-    state.garden_scroll = 0;
     let GardenClick::Visit {
         workspace, session, ..
     } = click
@@ -11621,7 +11595,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_garden_opens_a_screen_saver_that_non_scroll_keys_wake() {
+    fn overview_garden_opens_a_screen_saver_that_any_key_wakes() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
         state.overlay = Some(Overlay::Overview);
@@ -11636,10 +11610,12 @@ mod tests {
         assert_eq!(state.overlay(), Some(Overlay::Garden));
         assert!(state.notice().is_none());
 
-        // 横スクロール矢印以外の最初の入力は wake-up として消費され Home へ戻る。
-        // Escape 専用ではなく、drawer を開く key でも背面へ渡らない。
+        // 最初の入力は wake-up として消費され Home へ戻る。Escape 専用ではなく、
+        // 矢印や drawer を開く key も背面へ渡らない。
         for key in [
             AppKey::Escape,
+            AppKey::Left,
+            AppKey::Right,
             AppKey::Down,
             AppKey::ToggleDirectorDrawer,
             AppKey::OpenDirectorNew,
@@ -11667,24 +11643,17 @@ mod tests {
     }
 
     #[test]
-    fn garden_scroll_actions_keep_the_overlay_and_dismiss_resets_the_offset() {
+    fn garden_click_and_arrow_keys_wake_the_overlay() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
         state.overlay = Some(Overlay::Garden);
 
-        assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Scroll(3))).is_empty());
-        assert_eq!(state.overlay(), Some(Overlay::Garden));
-        assert_eq!(state.garden_scroll(), 3);
-
-        // Reducer-only arrow delivery is consumed without waking the Garden;
-        // the composition shell supplies the exact scroll action in production.
         assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
-        assert_eq!(state.overlay(), Some(Overlay::Garden));
-        assert_eq!(state.garden_scroll(), 3);
+        assert_eq!(state.overlay(), None);
 
+        state.overlay = Some(Overlay::Garden);
         assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)).is_empty());
         assert_eq!(state.overlay(), None);
-        assert_eq!(state.garden_scroll(), 0);
     }
 
     #[test]
@@ -11976,7 +11945,6 @@ mod tests {
         let route = state.route();
 
         for click in [
-            GardenClick::Scroll(1),
             GardenClick::Visit {
                 workspace,
                 session,
