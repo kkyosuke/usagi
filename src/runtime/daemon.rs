@@ -3478,8 +3478,12 @@ fn start_connection_cleanup_worker(
     agent: SharedAgentRuntime,
     terminal: SharedTerminalRuntime,
     disconnected: ConnectionCleanupInbox,
+    shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     start_connection_cleanup_worker_with(disconnected, move |disconnected| {
+        let _panic = ShutdownOnWorkerPanic {
+            shutdown: Arc::clone(&shutdown),
+        };
         if let Ok(mut agent) = agent.lock() {
             // The snapshot is taken while this owner is locked. A newly
             // registered connection cannot add owner state until after the
@@ -3760,8 +3764,12 @@ fn spawn_ipc_server(
     // coalesce a wake. The single consumer sweeps stale ledger state without a
     // disconnect storm retaining historical queue entries or socket triplets.
     let (disconnected, disconnects) = connection_cleanup_channel();
-    let connection_cleanup =
-        start_connection_cleanup_worker(Arc::clone(&agent), Arc::clone(&terminal), disconnects)?;
+    let connection_cleanup = start_connection_cleanup_worker(
+        Arc::clone(&agent),
+        Arc::clone(&terminal),
+        disconnects,
+        Arc::clone(&shutdown),
+    )?;
     background_workers.push(start_pr_projection_worker(
         Arc::clone(&pr_inventory),
         Arc::clone(&projection),
@@ -5377,6 +5385,7 @@ fn start_ipc_accept_loop(
                         let connection_fence = Arc::clone(&fence);
                         let connection_data_dir = data_dir.clone();
                         let connection_cleanup = disconnected.clone();
+                        let connection_shutdown = Arc::clone(&shutdown);
                         // A worker without a shutdown half cannot participate in
                         // the generation retirement barrier, so descriptor
                         // duplication failure refuses the connection before a
@@ -5395,6 +5404,9 @@ fn start_ipc_accept_loop(
                         let spawned = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
+                                let _panic = ShutdownOnWorkerPanic {
+                                    shutdown: connection_shutdown,
+                                };
                                 // The retained shutdown descriptor must not keep
                                 // the peer apparently open after this worker has
                                 // returned. Completion shuts the shared socket on
@@ -5769,6 +5781,24 @@ struct ShutdownOnIpcWorkerExit {
 impl Drop for ShutdownOnIpcWorkerExit {
     fn drop(&mut self) {
         self.shutdown.request();
+    }
+}
+
+/// Prevents an unwinding daemon worker from leaving an unusable process alive.
+///
+/// Request dispatch can hold a shared runtime mutex when it panics. Continuing
+/// to serve after that unwind would keep the workspace fence while subsequent
+/// clients see only a poisoned, unavailable runtime. Normal worker completion
+/// does not request shutdown.
+struct ShutdownOnWorkerPanic {
+    shutdown: Arc<ShutdownRequest>,
+}
+
+impl Drop for ShutdownOnWorkerPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.shutdown.request();
+        }
     }
 }
 
@@ -20513,6 +20543,28 @@ mod tests {
             );
             assert_eq!(shutdown.background_worker_health().failed_count(), 1);
         }
+    }
+
+    #[test]
+    fn an_unwinding_worker_requests_shutdown_but_a_clean_exit_does_not() {
+        let failed = Arc::new(ShutdownRequest::new());
+        let panic = panic::catch_unwind(AssertUnwindSafe({
+            let failed = Arc::clone(&failed);
+            move || {
+                let _guard = ShutdownOnWorkerPanic { shutdown: failed };
+                panic!("injected connection worker panic");
+            }
+        }));
+        assert!(panic.is_err());
+        assert!(failed.is_requested());
+
+        let completed = Arc::new(ShutdownRequest::new());
+        {
+            let _guard = ShutdownOnWorkerPanic {
+                shutdown: Arc::clone(&completed),
+            };
+        }
+        assert!(!completed.is_requested());
     }
 
     #[test]

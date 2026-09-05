@@ -415,8 +415,13 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
     // peer without one gets a connection-local identity, which keeps its
     // sequence ledger working and leaves it unable to replay anything.
     let client = client_incarnation.unwrap_or_else(usagi_core::domain::id::ClientId::new);
-    fence.admitted(connection, &client_hello);
-    let result = (|| {
+    let lifetime = ConnectionLifetime {
+        fence,
+        terminal,
+        connection,
+    };
+    lifetime.fence.admitted(connection, &client_hello);
+    (|| {
         while let Some(envelope) =
             read_json_frame::<Envelope>(reader, hello.limits.max_frame_bytes as usize)?
         {
@@ -429,6 +434,7 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
                     "client may only send request envelopes",
                 ));
             };
+            let mut request_lease = None;
             let outcome_body = if envelope.protocol != hello.protocol
                 || envelope.daemon_generation != hello.daemon_generation
             {
@@ -441,10 +447,10 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
                 ))
             } else {
                 match fence.admit(&body) {
-                    // `_lease` is bound for the whole arm, so it is released only
-                    // after the effect below has finished — never between the
-                    // authority check and the effect it authorized.
-                    Ok(_lease) => {
+                    Ok(lease) => {
+                        // Store the lease outside the match arm before dispatch so
+                        // response observation and writing remain inside its lifetime.
+                        request_lease = lease;
                         if let Ok(usagi_core::usecase::client::DaemonRequest::Terminal {
                             action,
                             payload,
@@ -452,7 +458,7 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
                         {
                             match usagi_core::domain::id::RequestId::parse(&request_id.0) {
                                 Ok(owner_request_id) => dispatch_terminal_request(
-                                    terminal,
+                                    &mut *lifetime.terminal,
                                     TerminalRequestContext {
                                         connection,
                                         client,
@@ -501,15 +507,35 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
             };
             observe_response(&body, &reply);
             write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
+            // The reply is part of the admitted request's lifetime: a rollover
+            // must not commit between its effect and the client's observation of
+            // that effect. Error returns and unwinds drop the lease as well.
+            drop(request_lease);
         }
         Ok(())
-    })();
-    terminal.disconnect(connection);
-    // A connection that has gone away must stop blocking a rollover, so the fence
-    // forgets it on every exit from the loop — a clean end, a protocol error, and
-    // a transport failure alike.
-    fence.disconnected(connection);
-    result
+    })()
+}
+
+/// Releases every connection-scoped owner even when request dispatch unwinds.
+///
+/// The generation/census fence goes first so a panic in an injected terminal
+/// owner's cleanup cannot leave a connection permanently live in daemon-wide
+/// routing or cleanup state. Production terminal cleanup is derived later from
+/// that census and does not run synchronously on the socket worker.
+struct ConnectionLifetime<'a> {
+    fence: &'a dyn ConnectionFence,
+    terminal: &'a mut dyn TerminalOwner,
+    connection: usagi_core::domain::id::ConnectionId,
+}
+
+impl Drop for ConnectionLifetime<'_> {
+    fn drop(&mut self) {
+        // A connection that has gone away must stop blocking a rollover and
+        // must leave the live census on every exit: clean EOF, protocol/IO
+        // failure, and unwind alike.
+        self.fence.disconnected(self.connection);
+        self.terminal.disconnect(self.connection);
+    }
 }
 
 /// Whether a terminal payload asks for cross-connection operation semantics.
@@ -1033,6 +1059,83 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct AdmittingConnection {
+        admitted: std::cell::Cell<usize>,
+        disconnected: std::cell::Cell<usize>,
+    }
+
+    impl ConnectionFence for AdmittingConnection {
+        fn admitted(
+            &self,
+            _connection: usagi_core::domain::id::ConnectionId,
+            _hello: &ClientHello,
+        ) {
+            self.admitted.set(self.admitted.get() + 1);
+        }
+
+        fn admit(
+            &self,
+            _body: &serde_json::Value,
+        ) -> Result<Option<crate::usecase::authority::admission::AdmissionLease>, ProtocolError>
+        {
+            Ok(None)
+        }
+
+        fn disconnected(&self, _connection: usagi_core::domain::id::ConnectionId) {
+            self.disconnected.set(self.disconnected.get() + 1);
+        }
+    }
+
+    struct LeasingConnection {
+        gate: crate::usecase::authority::admission::AdmissionGate,
+    }
+
+    impl ConnectionFence for LeasingConnection {
+        fn admitted(
+            &self,
+            _connection: usagi_core::domain::id::ConnectionId,
+            _hello: &ClientHello,
+        ) {
+        }
+
+        fn admit(
+            &self,
+            _body: &serde_json::Value,
+        ) -> Result<Option<crate::usecase::authority::admission::AdmissionLease>, ProtocolError>
+        {
+            Ok(Some(
+                self.gate
+                    .acquire(crate::usecase::authority::admission::LeaseClass::ActiveControl)
+                    .expect("active test gate admits one request"),
+            ))
+        }
+
+        fn disconnected(&self, _connection: usagi_core::domain::id::ConnectionId) {}
+    }
+
+    struct LeaseWitnessWriter {
+        gate: crate::usecase::authority::admission::AdmissionGate,
+        writes: usize,
+    }
+
+    impl Write for LeaseWitnessWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            assert_eq!(
+                self.gate
+                    .outstanding(crate::usecase::authority::admission::LeaseClass::ActiveControl),
+                1,
+                "request lease was released before its reply write"
+            );
+            self.writes += 1;
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// A refused request is answered with the fence's own typed error and reaches
     /// **neither** the terminal owner nor the dispatcher.
     ///
@@ -1115,6 +1218,73 @@ mod tests {
         assert_eq!(fence.admitted.get(), 1);
         assert_eq!(fence.disconnected.get(), 1);
         assert_eq!(terminal.disconnects, 1);
+    }
+
+    #[test]
+    fn a_panicked_request_still_disconnects_every_connection_owner() {
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        write_json_frame(&mut input, &request(), 1024).unwrap();
+        let mut reader = Cursor::new(input);
+        let admitted = handshake_admitted(&mut reader, &mut Vec::new(), &server())
+            .unwrap()
+            .unwrap();
+        let mut terminal = RecordingTerminal::default();
+        let fence = AdmittingConnection::default();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_admitted_connection_with_terminal_and(
+                &mut reader,
+                &mut Vec::new(),
+                admitted,
+                &fence,
+                &mut terminal,
+                &mut |_, _, _, _, _| panic!("injected request panic"),
+            )
+            .unwrap();
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(fence.admitted.get(), 1);
+        assert_eq!(fence.disconnected.get(), 1);
+        assert_eq!(terminal.disconnects, 1);
+    }
+
+    #[test]
+    fn an_admitted_request_holds_its_lease_through_the_reply_write() {
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        write_json_frame(&mut input, &request(), 1024).unwrap();
+        let mut reader = Cursor::new(input);
+        let admitted = handshake_admitted(&mut reader, &mut Vec::new(), &server())
+            .unwrap()
+            .unwrap();
+        let gate = crate::usecase::authority::admission::AdmissionGate::new(
+            usagi_core::domain::id::DaemonGeneration::new(),
+            crate::usecase::generation::GenerationRole::Active,
+        );
+        let fence = LeasingConnection { gate: gate.clone() };
+        let mut writer = LeaseWitnessWriter {
+            gate: gate.clone(),
+            writes: 0,
+        };
+
+        handle_admitted_connection_with_terminal_and(
+            &mut reader,
+            &mut writer,
+            admitted,
+            &fence,
+            &mut RecordingTerminal::default(),
+            &mut test_dispatch,
+        )
+        .unwrap();
+
+        writer.flush().unwrap();
+        assert!(writer.writes > 0);
+        assert_eq!(
+            gate.outstanding(crate::usecase::authority::admission::LeaseClass::ActiveControl),
+            0
+        );
     }
 
     #[test]
