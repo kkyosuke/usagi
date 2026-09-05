@@ -19299,6 +19299,16 @@ mod tests {
             ),
             Some(AppKey::ToggleDirectorDrawer)
         );
+        assert_eq!(workspace_drawer_header_key(&Key::Other, 100, &home), None);
+        let background_click = Key::Click { column: 0, row: 1 };
+        assert_eq!(
+            workspace_drawer_header_key(&background_click, 100, &home),
+            None
+        );
+        assert_eq!(
+            apply_drawer_header_while_director_open(&mut runtime, &background_click, 100, &home),
+            None
+        );
 
         let shell_column = (0..100)
             .find(|column| {
