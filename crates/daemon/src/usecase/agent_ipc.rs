@@ -1065,6 +1065,26 @@ impl AgentRuntime {
         }
     }
 
+    /// Retains MCP child bindings only while at least one live daemon
+    /// connection still belongs to that kernel-authenticated PID.
+    pub fn retain_live_mcp_children(&mut self, live_child_pids: &BTreeSet<u32>) {
+        for caller in self.mcp_callers.values_mut() {
+            if caller
+                .child_pid
+                .is_some_and(|pid| !live_child_pids.contains(&pid))
+            {
+                caller.child_pid = None;
+            }
+        }
+    }
+
+    /// Coalesces terminal attachment and input-epoch cleanup against the
+    /// daemon's bounded live-connection census.
+    pub fn retain_live_connections(&mut self, live: &BTreeSet<ConnectionId>) {
+        self.coordinator
+            .retain_live_connections(live, &mut *self.pty);
+    }
+
     /// Resolves a short-lived provider hook from authenticated OS process identity.
     ///
     /// Claude uses exec-form hooks, so the hook is a direct child of the live
@@ -8209,8 +8229,9 @@ mod tests {
             },
             SnapshotWire::RawTail,
         ));
-        // A disconnect drops only subscriptions; the process/PTY stay alive.
-        runtime.disconnect(connection);
+        // A coalesced live-set sweep drops only subscriptions; the process/PTY
+        // stay alive.
+        runtime.retain_live_connections(&BTreeSet::new());
 
         let reattached = handled(runtime.handle_terminal(
             connection,
@@ -8704,9 +8725,11 @@ mod tests {
         assert!(!runtime.authenticates_mcp_child(&credential, 9002));
         assert!(runtime.claim_mcp_child(9002, 4321, 4321).is_err());
         assert!(runtime.claim_mcp_child(9001, 4321, 9999).is_err());
+        runtime.retain_live_mcp_children(&BTreeSet::from([9001]));
+        assert!(runtime.authenticates_mcp_child(&credential, 9001));
         runtime.release_mcp_child(9002);
         assert!(runtime.authenticates_mcp_child(&credential, 9001));
-        runtime.release_mcp_child(9001);
+        runtime.retain_live_mcp_children(&BTreeSet::new());
         assert!(!runtime.authenticates_mcp_child(&credential, 9001));
         assert_eq!(
             runtime.claim_mcp_child(9003, 4321, 4321).unwrap(),

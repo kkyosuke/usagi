@@ -1576,6 +1576,27 @@ impl RuntimeCoordinator {
         }
     }
 
+    /// Coalesces cleanup for every connection absent from the daemon's current
+    /// live census. This has the same ownership semantics as repeated
+    /// [`Self::disconnect`] calls without retaining historical connection IDs.
+    pub fn retain_live_connections(
+        &mut self,
+        live: &BTreeSet<ConnectionId>,
+        writer: &mut dyn PtyWriter,
+    ) {
+        self.terminals.retain_live_connections(live, writer);
+        let exited: Vec<TerminalRef> = self
+            .records
+            .values()
+            .filter(|record| record.state == RuntimeState::Exited)
+            .map(|record| record.runtime.terminal.clone())
+            .collect();
+        for terminal in exited {
+            let attached = self.terminals.is_attached(&terminal);
+            self.retention.set_pinned(&terminal, attached);
+        }
+    }
+
     /// Resolves the fenced runtime that currently owns `terminal`.  IPC terminal
     /// requests address a terminal only by its `TerminalRef`; this maps that ref
     /// back to the owning runtime without a name or PID fallback.
@@ -4377,7 +4398,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disconnect_releases_every_agent_final_it_was_draining() {
+    fn a_live_connection_sweep_releases_every_stale_agent_final() {
         let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
         let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
         let mut store = Store::default();
@@ -4399,7 +4420,7 @@ mod tests {
         coordinator.attach(&runtime, connection).unwrap();
         coordinator.exit(&runtime, 0, &mut store).unwrap();
         clock.advance(1000);
-        coordinator.disconnect(connection, &mut Writer::default());
+        coordinator.retain_live_connections(&BTreeSet::new(), &mut Writer::default());
         retention.collect();
         assert_eq!(coordinator.collect_garbage(&mut store), 1);
     }
