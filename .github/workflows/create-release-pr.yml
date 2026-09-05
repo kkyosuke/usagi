@@ -30,12 +30,12 @@ jobs:
           fi
 
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # ビルドは rust-toolchain.toml が pin した nightly で走るため、component も
       # そちらへ届く前提で入れる（正本は document/06-conventions.md）。
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
 
       - name: Update version in Cargo.toml
         id: version
@@ -57,7 +57,7 @@ jobs:
 
       - name: Create Pull Request
         id: create-pr
-        uses: peter-evans/create-pull-request@v8
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
         with:
           # GITHUB_TOKEN で生成した PR の workflow は承認待ちになるため、
           # 専用 token で PR event と merge 後の push event を発火させる。

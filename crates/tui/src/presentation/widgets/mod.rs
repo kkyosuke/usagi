@@ -27,7 +27,9 @@ pub mod text_input;
 pub use text_input::TextInput;
 
 use chrono::{DateTime, Utc};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
+use usagi_core::domain::presentation_text::presentation_character_is_safe;
 
 use super::theme::{Role, Style};
 
@@ -139,10 +141,10 @@ fn floor_boundary(value: &str, mut offset: usize) -> usize {
 
 /// `value` の byte-offset `cursor` に block cursor を描く。
 ///
-/// キャレット直後の Unicode scalar を base style の reverse-video で反転し、文字を
-/// 横へ押し出さない。空文字列・行末では反転空白を 1 セル描く。`cursor` は
-/// [`TextInput`] が保証する char 境界を受け取るが、外部 caller にも安全なよう
-/// value の範囲へ飽和する。
+/// キャレット直後の extended grapheme cluster を base style の reverse-video で
+/// 反転し、結合文字や ZWJ sequence の途中へ ANSI SGR を挿入しない。空文字列・行末では
+/// 反転空白を 1 セル描く。`cursor` は [`TextInput`] が保証する書記素境界を受け取るが、
+/// 外部 caller にも安全なよう value の範囲へ飽和する。
 #[must_use]
 pub fn block_caret(value: &str, cursor: usize, base: &Style) -> String {
     let mut cursor = cursor.min(value.len());
@@ -150,8 +152,8 @@ pub fn block_caret(value: &str, cursor: usize, base: &Style) -> String {
         cursor -= 1;
     }
     let (before, after) = value.split_at(cursor);
-    let (caret, rest) = match after.chars().next() {
-        Some(character) => after.split_at(character.len_utf8()),
+    let (caret, rest) = match after.graphemes(true).next() {
+        Some(grapheme) => after.split_at(grapheme.len()),
         None => (" ", ""),
     };
     format!(
@@ -189,6 +191,9 @@ pub fn display_width(text: &str) -> usize {
             }
             continue;
         }
+        if !presentation_character_is_safe(ch) {
+            continue;
+        }
         width += UnicodeWidthChar::width(ch).unwrap_or(0);
     }
     width
@@ -199,14 +204,12 @@ pub fn display_width(text: &str) -> usize {
 /// そのまま持ち越し、切断が色を開いたままにするときは末尾を [`RESET`] で閉じる。
 #[must_use]
 pub fn clip_to_width(text: &str, max: usize) -> String {
-    if display_width(text) <= max {
-        return text.to_string();
-    }
     if max == 0 {
         return String::new();
     }
+    let truncated = display_width(text) > max;
     // 省略記号 `…` に 1 桁を残す。
-    let budget = max - 1;
+    let budget = if truncated { max - 1 } else { max };
     let mut out = String::with_capacity(text.len());
     let mut width = 0usize;
     // 切断がスタイル（SGR エスケープ）を持ち越したか。持ち越したら末尾を
@@ -225,6 +228,9 @@ pub fn clip_to_width(text: &str, max: usize) -> String {
             }
             continue;
         }
+        if !presentation_character_is_safe(ch) {
+            continue;
+        }
         let w = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width + w > budget {
             break;
@@ -232,8 +238,10 @@ pub fn clip_to_width(text: &str, max: usize) -> String {
         width += w;
         out.push(ch);
     }
-    out.push('…');
-    if carried_escape {
+    if truncated {
+        out.push('…');
+    }
+    if truncated && carried_escape {
         out.push_str(RESET);
     }
     out
@@ -251,6 +259,9 @@ pub fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     let mut current = String::new();
     let mut current_w = 0usize;
     for ch in text.chars() {
+        if !presentation_character_is_safe(ch) {
+            continue;
+        }
         let w = UnicodeWidthChar::width(ch).unwrap_or(0);
         if current_w + w > width && !current.is_empty() {
             lines.push(std::mem::take(&mut current));
@@ -493,6 +504,7 @@ mod tests {
         assert_eq!(display_width("あい"), 4); // 全角 2 文字 = 4 桁
         // SGR カラー（赤）は 0 桁。見た目の "hi" は 2 桁。
         assert_eq!(display_width("\u{1b}[31mhi\u{1b}[0m"), 2);
+        assert_eq!(display_width("a\nb\t\u{202e}c"), 3);
     }
 
     #[test]
@@ -510,6 +522,20 @@ mod tests {
         let clamped = block_caret("あ", 2, &accent);
         assert_eq!(display_width(&clamped), 2);
         assert!(clamped.contains("\u{1b}[1;7;36mあ\u{1b}[0m"));
+    }
+
+    #[test]
+    fn block_caret_keeps_combining_and_zwj_graphemes_inside_one_style_span() {
+        let accent = Role::Accent.style().bold();
+        for grapheme in ["e\u{301}", "👩‍👩‍👧‍👦"] {
+            let value = format!("{grapheme}x");
+            let rendered = block_caret(&value, 0, &accent);
+            assert!(
+                rendered.contains(&format!("\u{1b}[1;7;36m{grapheme}\u{1b}[0m")),
+                "{rendered:?}"
+            );
+            assert_eq!(strip_ansi(&rendered), value);
+        }
     }
 
     #[test]
@@ -589,6 +615,7 @@ mod tests {
     fn clip_to_width_returns_text_unchanged_when_it_fits() {
         assert_eq!(clip_to_width("abc", 3), "abc");
         assert_eq!(clip_to_width("abc", 10), "abc");
+        assert_eq!(clip_to_width("a\nb\t\u{202e}c", 10), "abc");
     }
 
     #[test]
@@ -688,6 +715,7 @@ mod tests {
         assert_eq!(wrap_to_width("abcde", 2), vec!["ab", "cd", "e"]);
         // 幅 1 の行に全角: 各文字が単独行で溢れる（落とさない）。
         assert_eq!(wrap_to_width("あい", 1), vec!["あ", "い"]);
+        assert_eq!(wrap_to_width("a\nb\t\u{202e}c", 2), vec!["ab", "c"]);
     }
 
     #[test]

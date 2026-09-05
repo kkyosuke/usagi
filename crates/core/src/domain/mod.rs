@@ -11,6 +11,7 @@ pub mod issue;
 pub mod memory;
 pub mod note;
 pub mod pr_inventory;
+pub mod presentation_text;
 pub mod pullrequest;
 pub mod recent;
 pub mod role;

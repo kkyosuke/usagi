@@ -6,6 +6,8 @@
 
 use crate::presentation::theme::{Color, Style};
 use crate::presentation::widgets::modal;
+use crate::usecase::terminal_input::{PrefixHelpScope, prefix_help_entries};
+use usagi_core::domain::settings::WorkMode;
 
 /// Frontmost interaction surface whose commands should be shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +49,7 @@ pub enum Context {
     DirectorNew,
     WorkRuns,
     WorkRunConfirmation,
+    WorkRunSubmitting,
     WorkRunEscalation,
     RootShell,
     Garden,
@@ -92,6 +95,7 @@ impl Context {
             Self::DirectorNew => "New Conversation / Start Work Run",
             Self::WorkRuns => "Work Runs",
             Self::WorkRunConfirmation => "Work Run confirmation",
+            Self::WorkRunSubmitting => "Work Run action in progress",
             Self::WorkRunEscalation => "Work Run escalation",
             Self::RootShell => "Workspace Shell",
             Self::Garden => "Session Garden",
@@ -292,20 +296,23 @@ impl Context {
             Self::Organization => &[
                 ("↑ / ↓", "select root Director"),
                 ("Enter", "open Director Console"),
-                ("Ctrl-O w / n", "Work Runs / start"),
+                ("Ctrl-O w", "open Work Runs"),
+                ("Ctrl-O n", "new conversation / Work Run"),
                 ("Esc", "close Director"),
             ],
             Self::RunOverview => &[
                 ("Enter", "open Director Console"),
                 ("Ctrl-C / Ctrl-X", "cancel / delete run"),
                 ("Esc / Ctrl-O b", "back to Work Runs"),
-                ("Ctrl-O w / n", "Work Runs / start"),
+                ("Ctrl-O w", "open Work Runs"),
+                ("Ctrl-O n", "new conversation / Work Run"),
             ],
             Self::DirectorConsole => &[
                 ("type / paste / Enter / Esc", "send directly to Agent PTY"),
                 ("Ctrl-O [ / ]", "select conversation"),
                 ("Ctrl-O b", "back to parent overview"),
-                ("Ctrl-O w / n", "Work Runs / start"),
+                ("Ctrl-O w", "open Work Runs"),
+                ("Ctrl-O n", "new conversation / Work Run"),
                 ("Ctrl-O x / r", "close / resume"),
                 ("Ctrl-O ↑ / ↓ / End", "scroll / live bottom"),
                 ("Ctrl-O g", "close Director"),
@@ -319,9 +326,14 @@ impl Context {
                 ("↑ / ↓", "select run"),
                 ("Enter", "open Run Overview"),
                 ("Ctrl-C / Ctrl-X", "cancel / delete run"),
+                ("Ctrl-O n", "new conversation / Work Run"),
                 ("Esc / Ctrl-O b", "back to Organization"),
             ],
             Self::WorkRunConfirmation => &[("Enter / Esc / Ctrl-C", "confirm / back")],
+            Self::WorkRunSubmitting => &[
+                ("Ctrl-O w", "show Work Run status"),
+                ("Ctrl-O g", "close Director"),
+            ],
             Self::WorkRunEscalation => &[
                 ("arrows", "select resolution"),
                 ("Enter / Esc", "confirm / back"),
@@ -344,33 +356,66 @@ impl Context {
     }
 }
 
-const WORKSPACE_COMMANDS: &[(&str, &str)] = &[
-    ("Ctrl-O +", "add workspace"),
-    ("Ctrl-O 0", "project / session finder"),
-    ("Ctrl-O 1 … 9", "activate project"),
-];
+/// Stable state for a keyboard-help overlay. The context and feature mode are
+/// captured when Help opens so background updates cannot change its contents;
+/// only the reader-controlled viewport offset changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct State {
+    context: Context,
+    work_mode: WorkMode,
+    offset: usize,
+}
 
-const WORKSPACE_BASE_COMMANDS: &[(&str, &str)] = &[
-    ("Ctrl-O a / n", "actions / Director start"),
-    ("Ctrl-O p / v", "Pull Requests / Preview"),
-    ("Ctrl-O d / s", "Decisions / Scratchpad"),
-    (
-        "Ctrl-O , / g / w / t",
-        "Garden / Director / Work Runs / Shell",
-    ),
-];
+impl State {
+    #[must_use]
+    pub const fn new(context: Context, work_mode: WorkMode) -> Self {
+        Self {
+            context,
+            work_mode,
+            offset: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn context(self) -> Context {
+        self.context
+    }
+
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.offset = self.offset.saturating_sub(lines);
+    }
+
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.offset = self.offset.saturating_add(lines);
+    }
+
+    pub fn scroll_home(&mut self) {
+        self.offset = 0;
+    }
+
+    pub fn scroll_end(&mut self) {
+        self.offset = usize::MAX;
+    }
+}
 
 /// Render contextual commands over `base` without changing the described
 /// surface. ANSI-safe compositing and narrow-terminal clipping are delegated to
 /// the shared modal widget.
 #[must_use]
-pub fn render_over(height: usize, width: usize, base: &[String], context: Context) -> Vec<String> {
+pub fn render_over(height: usize, width: usize, base: &[String], state: State) -> Vec<String> {
+    let context = state.context;
     let mut commands = context.entries().to_vec();
     if context.workspace() {
-        commands.extend_from_slice(WORKSPACE_COMMANDS);
+        commands.extend(
+            prefix_help_entries(PrefixHelpScope::Workspace, state.work_mode)
+                .map(|entry| (entry.keys, entry.action)),
+        );
     }
     if context.workspace_base() {
-        commands.extend_from_slice(WORKSPACE_BASE_COMMANDS);
+        commands.extend(
+            prefix_help_entries(PrefixHelpScope::WorkspaceBase, state.work_mode)
+                .map(|entry| (entry.keys, entry.action)),
+        );
     }
     let key_width = commands
         .iter()
@@ -378,7 +423,7 @@ pub fn render_over(height: usize, width: usize, base: &[String], context: Contex
         .max()
         .unwrap_or(0)
         .min(22);
-    let mut body = commands
+    let command_rows = commands
         .into_iter()
         .map(|(keys, action)| {
             format!(
@@ -391,26 +436,71 @@ pub fn render_over(height: usize, width: usize, base: &[String], context: Contex
             )
         })
         .collect::<Vec<_>>();
-    body.push(String::new());
+    let body_capacity = modal::reserved_body_height(height, width, command_rows.len() + 2);
+    let command_capacity = body_capacity.saturating_sub(2);
+    let mut body = bounded_command_rows(&command_rows, state.offset, command_capacity);
+    if body_capacity > 1 {
+        body.push(String::new());
+    }
     let close_hint = match context {
         Context::Switch | Context::Closeup => "? / Ctrl-? / Ctrl-/ or Esc: close help",
         Context::LiveTerminal => "Ctrl-O ? / Ctrl-? / Ctrl-/ or Esc: close help",
         _ => "Ctrl-? / Ctrl-/ or Esc: close help",
     };
-    body.push(Style::new().fg(Color::White).dim().paint(close_hint));
+    if body_capacity > 0 {
+        let close_hint = if command_rows.len() > command_capacity {
+            format!("↑/↓ PgUp/PgDn: scroll · {close_hint}")
+        } else {
+            close_hint.to_owned()
+        };
+        body.push(Style::new().fg(Color::White).dim().paint(&close_hint));
+    }
     modal::render_over(
         height,
         width,
         base,
         &format!("Keyboard help · {}", context.title()),
-        66,
+        84,
         &body,
     )
 }
 
+fn bounded_command_rows(rows: &[String], offset: usize, capacity: usize) -> Vec<String> {
+    if capacity == 0 || rows.is_empty() {
+        return Vec::new();
+    }
+    // End/PageDown must land on a full final page. Reserving one row for the
+    // "above" indicator leaves `capacity - 1` data rows at the bottom.
+    let max_start = if rows.len() > capacity {
+        rows.len().saturating_sub(capacity.saturating_sub(1))
+    } else {
+        0
+    };
+    let start = offset.min(max_start);
+    let above = usize::from(start > 0);
+    let available_after_above = capacity.saturating_sub(above);
+    let below = usize::from(rows.len().saturating_sub(start) > available_after_above);
+    let data_capacity = capacity.saturating_sub(above + below);
+    let end = start.saturating_add(data_capacity).min(rows.len());
+    let mut visible = Vec::with_capacity(capacity);
+    if above > 0 {
+        visible.push(modal::scroll_above(start));
+    }
+    visible.extend(rows[start..end].iter().cloned());
+    if end < rows.len() {
+        visible.push(modal::scroll_below(rows.len() - end));
+    }
+    visible
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Context, render_over};
+    use super::{Context, State, bounded_command_rows, render_over};
+    use usagi_core::domain::settings::WorkMode;
+
+    fn help(context: Context) -> State {
+        State::new(context, WorkMode::GoalDriven)
+    }
 
     #[test]
     fn every_context_has_a_renderable_title_and_command_catalog() {
@@ -452,6 +542,7 @@ mod tests {
             Context::DirectorNew,
             Context::WorkRuns,
             Context::WorkRunConfirmation,
+            Context::WorkRunSubmitting,
             Context::WorkRunEscalation,
             Context::RootShell,
             Context::Garden,
@@ -459,14 +550,19 @@ mod tests {
             assert!(!context.title().is_empty(), "{context:?}");
             assert!(!context.entries().is_empty(), "{context:?}");
 
-            let rendered = render_over(96, 120, &vec![String::new(); 96], context).join("\n");
+            let rendered = render_over(96, 120, &vec![String::new(); 96], help(context)).join("\n");
             assert!(rendered.contains(context.title()), "{context:?}");
         }
     }
 
     #[test]
     fn renders_only_the_frontmost_context_with_portable_close_hint() {
-        let frame = render_over(24, 100, &vec!["base".to_owned(); 24], Context::PullRequests);
+        let frame = render_over(
+            24,
+            100,
+            &vec!["base".to_owned(); 24],
+            help(Context::PullRequests),
+        );
         let rendered = frame.join("\n");
 
         assert!(rendered.contains("Keyboard help · Pull Requests"));
@@ -478,7 +574,7 @@ mod tests {
 
     #[test]
     fn entry_help_omits_workspace_only_commands() {
-        let frame = render_over(18, 80, &vec![String::new(); 18], Context::Welcome);
+        let frame = render_over(18, 80, &vec![String::new(); 18], help(Context::Welcome));
         let rendered = frame.join("\n");
 
         assert!(rendered.contains("open Recent card"));
@@ -487,9 +583,14 @@ mod tests {
 
     #[test]
     fn workspace_base_help_includes_launchers_but_modal_help_does_not() {
-        let base = render_over(30, 100, &vec![String::new(); 30], Context::Switch).join("\n");
-        let modal =
-            render_over(30, 100, &vec![String::new(); 30], Context::PullRequests).join("\n");
+        let base = render_over(30, 100, &vec![String::new(); 30], help(Context::Switch)).join("\n");
+        let modal = render_over(
+            30,
+            100,
+            &vec![String::new(); 30],
+            help(Context::PullRequests),
+        )
+        .join("\n");
 
         assert!(base.contains("Pull Requests / Preview"));
         assert!(modal.contains("activate project"));
@@ -502,11 +603,68 @@ mod tests {
             30,
             100,
             &vec![String::new(); 30],
-            Context::WorkspaceEnvironmentEditor,
+            help(Context::WorkspaceEnvironmentEditor),
         )
         .join("\n");
 
         assert!(frame.contains("edit source"));
         assert!(frame.contains("project / session finder"));
+    }
+
+    #[test]
+    fn classic_help_omits_goal_only_work_runs() {
+        let classic = render_over(
+            40,
+            120,
+            &vec![String::new(); 40],
+            State::new(Context::Switch, WorkMode::Classic),
+        )
+        .join("\n");
+        let goal_driven = render_over(
+            40,
+            120,
+            &vec![String::new(); 40],
+            State::new(Context::Switch, WorkMode::GoalDriven),
+        )
+        .join("\n");
+
+        assert!(!classic.contains("Work Runs"));
+        assert!(goal_driven.contains("Work Runs"));
+    }
+
+    #[test]
+    fn short_help_keeps_close_and_scroll_controls_visible() {
+        let mut state = help(Context::Switch);
+        let first = render_over(18, 80, &vec![String::new(); 18], state).join("\n");
+        assert!(first.contains("close help"));
+        assert!(first.contains("↓"));
+        assert!(first.contains("PgUp/PgDn"));
+
+        state.scroll_end();
+        let last = render_over(18, 80, &vec![String::new(); 18], state).join("\n");
+        assert!(last.contains("close help"));
+        assert!(last.contains("↑"));
+        assert!(last.contains("Work Runs"));
+    }
+
+    #[test]
+    fn zero_capacity_help_omits_body_rows_without_panicking() {
+        assert!(bounded_command_rows(&["row".to_owned()], 0, 0).is_empty());
+        assert!(bounded_command_rows(&[], 0, 3).is_empty());
+
+        let rendered = render_over(5, 80, &vec![String::new(); 5], help(Context::Switch));
+        assert!(!rendered.join("\n").contains("close help"));
+    }
+
+    #[test]
+    fn end_scroll_fills_the_last_page_instead_of_showing_only_the_last_row() {
+        let rows = (0..8)
+            .map(|index| format!("row {index}"))
+            .collect::<Vec<_>>();
+        let visible = bounded_command_rows(&rows, usize::MAX, 4);
+
+        assert_eq!(visible.len(), 4);
+        assert!(visible[0].contains('↑'));
+        assert_eq!(&visible[1..], &["row 5", "row 6", "row 7"]);
     }
 }

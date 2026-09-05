@@ -22,10 +22,7 @@ pub const MIN_DRAWER_WIDTH: usize = 56;
 pub const MAX_DRAWER_WIDTH: usize = 96;
 /// Minimum background strip kept visible beside a non-full-width drawer.
 const MIN_BACKGROUND_WIDTH: usize = 24;
-/// Material Design robot glyph from the repository's Nerd Font vocabulary.
-///
-/// Like the existing CPU/memory/mode glyphs, unsupported fonts may render a
-/// missing-glyph cell; Unicode-width clipping keeps layout and hit-testing safe.
+/// Standard Unicode Director marker; it requires no private-use patched font.
 pub const DIRECTOR_ICON: char = '♛';
 /// Rows of drawer chrome the launch picker's candidate rows never get: the Home
 /// header row above the drawer, the panel's two borders and two vertical padding
@@ -349,8 +346,17 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
     {
         return goal_composer_body(width, height, rows, candidates, *selected, goal);
     }
+    if matches!(projection.new, DirectorNewProjection::Launching) {
+        return launching_body(width, height, rows);
+    }
+    if matches!(projection.new, DirectorNewProjection::Empty) {
+        return empty_provider_body(width, height, rows);
+    }
 
     if matches!(
+        projection.route,
+        DirectorRoute::WorkRuns | DirectorRoute::RunOverview(_)
+    ) && matches!(
         projection.work_run_control.mode,
         WorkRunControlMode::ConfirmCancel
             | WorkRunControlMode::ConfirmDelete
@@ -395,52 +401,36 @@ fn organization_body(
     mut rows: Vec<String>,
     projection: &DirectorDrawerProjection,
 ) -> Vec<String> {
-    let footer_hint = if projection.goal_driven {
-        "↑↓ select · Enter: Console · Ctrl-O w: Work Runs · Ctrl-O n: Start · Esc: close"
+    let footer_hint = if projection.work_run_control.mode == WorkRunControlMode::Submitting {
+        "Work Run action in progress · Ctrl-O w: Work Runs · Ctrl-O g: close"
+    } else if projection.goal_driven {
+        "Ctrl-O n Start · Ctrl-O w Runs · Enter Console · Esc close"
     } else {
-        "↑↓ select · Enter: Console · Ctrl-O n: New · Esc: close"
+        "Ctrl-O n New · Ctrl-O w Runs · Enter Console · Esc close"
     };
     let content_capacity = height.saturating_sub(rows.len() + 1);
-    if matches!(projection.new, DirectorNewProjection::Empty) {
-        let before = content_capacity.saturating_sub(3) / 2;
-        rows.extend(std::iter::repeat_n(String::new(), before));
-        if content_capacity > before {
-            rows.push(Role::Accent.style().bold().paint("No Agent CLI installed"));
+    if !projection.conversations.is_empty() {
+        rows.push(Role::Accent.style().bold().paint("Directors"));
+        for conversation in &projection.conversations {
+            let marker = if conversation.selected { "›" } else { " " };
+            rows.push(format!("{marker} {}", conversation.label));
         }
-        if content_capacity > before + 1 {
-            rows.push(
-                Style::new()
-                    .dim()
-                    .paint("Install claude, codex, or sakana.ai and check Config."),
-            );
+        rows.push(String::new());
+    }
+    if !projection.organization.is_empty() {
+        rows.push(Role::Accent.style().bold().paint("Organization"));
+        for member in &projection.organization {
+            let branch = if member.depth == 0 { "" } else { "└─ " };
+            rows.push(format!(
+                "{}{}{}  {}",
+                "  ".repeat(member.depth),
+                branch,
+                member.label,
+                Style::new().dim().paint(&member.status)
+            ));
         }
-        if content_capacity > before + 2 {
-            rows.push(Style::new().dim().paint("Esc returns to conversations."));
-        }
-    } else {
-        if !projection.conversations.is_empty() {
-            rows.push(Role::Accent.style().bold().paint("Directors"));
-            for conversation in &projection.conversations {
-                let marker = if conversation.selected { "›" } else { " " };
-                rows.push(format!("{marker} {}", conversation.label));
-            }
-            rows.push(String::new());
-        }
-        if !projection.organization.is_empty() {
-            rows.push(Role::Accent.style().bold().paint("Organization"));
-            for member in &projection.organization {
-                let branch = if member.depth == 0 { "" } else { "└─ " };
-                rows.push(format!(
-                    "{}{}{}  {}",
-                    "  ".repeat(member.depth),
-                    branch,
-                    member.label,
-                    Style::new().dim().paint(&member.status)
-                ));
-            }
-        } else if projection.conversations.is_empty() {
-            empty_conversation_rows(&mut rows, projection, content_capacity);
-        }
+    } else if projection.conversations.is_empty() {
+        empty_conversation_rows(&mut rows, projection, content_capacity);
     }
     rows.truncate(height.saturating_sub(1));
     rows.resize(height.saturating_sub(1), String::new());
@@ -476,6 +466,50 @@ fn terminal_conversation_body(
             .paint(view.feedback.as_deref().unwrap_or(footer_hint)),
     );
     rows
+}
+
+fn launching_body(width: usize, height: usize, mut rows: Vec<String>) -> Vec<String> {
+    let content_capacity = height.saturating_sub(rows.len() + 1);
+    let before = content_capacity.saturating_sub(2) / 2;
+    rows.extend(std::iter::repeat_n(String::new(), before));
+    if content_capacity > before {
+        rows.push(Role::Accent.style().bold().paint("Starting…"));
+    }
+    if content_capacity > before + 1 {
+        rows.push(Style::new().dim().paint("Waiting for daemon confirmation."));
+    }
+    rows.truncate(height.saturating_sub(1));
+    rows.resize(height.saturating_sub(1), String::new());
+    rows.push(
+        Style::new()
+            .dim()
+            .paint("Launch in progress · Ctrl-O g: close"),
+    );
+    rows.into_iter()
+        .map(|row| widgets::clip_to_width(&row, width))
+        .collect()
+}
+
+fn empty_provider_body(width: usize, height: usize, mut rows: Vec<String>) -> Vec<String> {
+    let content_capacity = height.saturating_sub(rows.len() + 1);
+    let before = content_capacity.saturating_sub(2) / 2;
+    rows.extend(std::iter::repeat_n(String::new(), before));
+    if content_capacity > before {
+        rows.push(Role::Accent.style().bold().paint("No Agent CLI installed"));
+    }
+    if content_capacity > before + 1 {
+        rows.push(
+            Style::new()
+                .dim()
+                .paint("Install claude, codex, or sakana.ai and check Config."),
+        );
+    }
+    rows.truncate(height.saturating_sub(1));
+    rows.resize(height.saturating_sub(1), String::new());
+    rows.push(Style::new().dim().paint("Esc: back · Ctrl-O g: close"));
+    rows.into_iter()
+        .map(|row| widgets::clip_to_width(&row, width))
+        .collect()
 }
 
 fn work_run_control_body(
@@ -565,12 +599,25 @@ fn work_run_list_body(
     projection: &DirectorDrawerProjection,
 ) -> Vec<String> {
     let control = &projection.work_run_control;
-    let footer = control
+    let runs = projection.work_runs.runs();
+    let freshness = projection.work_runs.freshness();
+    let feedback = control
         .feedback
         .as_deref()
-        .unwrap_or("↑↓ select · Enter Overview · Ctrl-C cancel · Ctrl-X delete");
+        .or(projection.feedback.as_deref());
+    let footer = feedback.unwrap_or(match (freshness, runs.is_empty(), projection.goal_driven) {
+        (WorkRunFreshness::Pending, true, _) => "Loading Work Runs · Ctrl-O g: close",
+        (WorkRunFreshness::Fresh, true, true) => "Ctrl-O n: Start Work Run · Ctrl-O g: close",
+        (WorkRunFreshness::Fresh, true, false) => "Ctrl-O b: Organization · Ctrl-O g: close",
+        (WorkRunFreshness::Unavailable, true, _) => "Waiting for daemon refresh · Ctrl-O g: close",
+        (WorkRunFreshness::Unavailable, false, _) => {
+            "Cached view · waiting for refresh · Ctrl-O g: close"
+        }
+        (WorkRunFreshness::Pending | WorkRunFreshness::Fresh, false, _) => {
+            "↑↓ select · Enter Overview · Ctrl-C cancel · Ctrl-X delete"
+        }
+    });
     let capacity = height.saturating_sub(rows.len() + 1);
-    let runs = projection.work_runs.runs();
     let selected = control
         .selected
         .and_then(|id| runs.iter().position(|run| run.supervisor_run_id == id))
@@ -593,11 +640,37 @@ fn work_run_list_body(
         ));
     }
     if runs.is_empty() && capacity > 0 {
-        rows.push(Style::new().dim().paint("No Work Runs yet"));
+        match freshness {
+            WorkRunFreshness::Pending => {
+                rows.push(Style::new().dim().paint("Loading Work Runs…"));
+            }
+            WorkRunFreshness::Fresh => {
+                rows.push(
+                    Role::Accent
+                        .style()
+                        .bold()
+                        .paint(if projection.goal_driven {
+                            "No Work Runs yet"
+                        } else {
+                            "No existing Work Runs"
+                        }),
+                );
+                if capacity > 1 {
+                    rows.push(Style::new().dim().paint(if projection.goal_driven {
+                        "Start one with Ctrl-O n."
+                    } else {
+                        "Switch Workflow to goal-driven to start one."
+                    }));
+                }
+            }
+            WorkRunFreshness::Unavailable => {
+                rows.push(Style::new().dim().paint("No cached Work Runs to show"));
+            }
+        }
     }
     rows.truncate(height.saturating_sub(1));
     rows.resize(height.saturating_sub(1), String::new());
-    rows.push(if control.feedback.is_some() {
+    rows.push(if feedback.is_some() {
         Role::Warning.style().paint(footer)
     } else {
         Style::new().dim().paint(footer)
@@ -634,6 +707,7 @@ fn run_overview_body(
                 .work_run_control
                 .feedback
                 .as_deref()
+                .or(projection.feedback.as_deref())
                 .unwrap_or("Esc / Ctrl-O b: Work Runs"),
         );
     };
@@ -650,16 +724,16 @@ fn run_overview_body(
         "› {DIRECTOR_ICON} Director  {}",
         Style::new().dim().paint(director_status)
     ));
-    let footer =
-        projection
-            .work_run_control
-            .feedback
-            .as_deref()
-            .unwrap_or(if run.root_agent_id.is_some() {
-                "Enter: Console · Esc: Work Runs · Ctrl-C cancel · Ctrl-X delete"
-            } else {
-                "Esc: Work Runs · Ctrl-C cancel · Ctrl-X delete"
-            });
+    let footer = projection
+        .work_run_control
+        .feedback
+        .as_deref()
+        .or(projection.feedback.as_deref())
+        .unwrap_or(if run.root_agent_id.is_some() {
+            "Enter: Console · Esc: Work Runs · Ctrl-C cancel · Ctrl-X delete"
+        } else {
+            "Esc: Work Runs · Ctrl-C cancel · Ctrl-X delete"
+        });
     finish_overview_rows(width, height, rows, footer)
 }
 
@@ -833,7 +907,7 @@ fn empty_conversation_rows(
                 .style()
                 .bold()
                 .paint(if projection.goal_driven {
-                    "No Work Runs yet"
+                    "No organization activity yet"
                 } else {
                     "No conversations yet"
                 }),
@@ -841,7 +915,7 @@ fn empty_conversation_rows(
     }
     if content_capacity > before + 1 {
         rows.push(Style::new().dim().paint(if projection.goal_driven {
-            "Work Run output and stop reasons appear here."
+            "Director conversations and delegated sessions appear here."
         } else {
             "Conversation inventory is not connected."
         }));
@@ -849,14 +923,10 @@ fn empty_conversation_rows(
     if content_capacity <= before + 2 {
         return;
     }
-    let detail = if matches!(projection.new, DirectorNewProjection::Launching) {
-        if projection.goal_driven {
-            "Waiting for the daemon to start the Work Run."
-        } else {
-            "Waiting for the daemon to start the conversation."
-        }
+    let detail = if projection.goal_driven && projection.work_runs.runs().is_empty() {
+        "Choose Start to begin a Work Run."
     } else if projection.goal_driven {
-        "Choose New, enter one goal, and start the Work Run."
+        "Ctrl-O w opens Work Runs; Start begins another."
     } else {
         "Choose New to start a conversation."
     };
@@ -962,6 +1032,8 @@ fn picker_rows(candidates: &[String], selected: usize, capacity: usize) -> Vec<S
 fn breadcrumb_row(width: usize, projection: &DirectorDrawerProjection) -> String {
     let new = if matches!(projection.new, DirectorNewProjection::Launching) {
         Style::new().dim().paint("[ Starting… ]")
+    } else if projection.work_run_control.mode == WorkRunControlMode::Submitting {
+        Style::new().dim().paint("[ Busy… ]")
     } else if projection.goal_driven {
         Role::Accent.style().bold().paint("[ Start ]")
     } else {
@@ -995,6 +1067,8 @@ fn breadcrumb_row(width: usize, projection: &DirectorDrawerProjection) -> String
                 format!("Director / {parent} / Console")
             }
         }
+    } else if matches!(projection.new, DirectorNewProjection::Launching) {
+        "Director / Starting".to_owned()
     } else if projection.goal_driven {
         "Director / Start Work Run".to_owned()
     } else {
@@ -1159,11 +1233,30 @@ mod tests {
         assert!(text.contains("Director / Organization"));
         assert!(text.contains("[ New ]"));
         assert!(text.contains("No conversations yet"));
-        assert!(text.contains("Ctrl-O n: New"));
+        assert!(text.contains("Ctrl-O n New"));
         assert!(frame[1].contains("\u{1b}[2m"));
         assert!(!frame[0].contains("\u{1b}[2m"));
         assert!(strip_ansi(&frame[23]).contains('└'));
         assert!(strip_ansi(&frame[23]).ends_with('┘'));
+    }
+
+    #[test]
+    fn empty_goal_driven_organization_does_not_infer_work_run_emptiness() {
+        let projection = DirectorDrawerProjection {
+            goal_driven: true,
+            work_runs: WorkRunProjection::fresh(vec![work_run()]),
+            ..DirectorDrawerProjection::default()
+        };
+        let text = drawer_body(72, 10, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("No organization activity yet"));
+        assert!(text.contains("Director conversations and delegated sessions appear here."));
+        assert!(text.contains("Ctrl-O w opens Work Runs; Start begins another."));
+        assert!(!text.contains("No Work Runs yet"));
     }
 
     #[test]
@@ -1282,8 +1375,9 @@ mod tests {
 
         assert!(body.contains("Director / Organization"));
         assert!(body.contains("[ Start ]"));
-        assert!(body.contains("Work Run output and stop reasons appear here."));
-        assert!(body.contains("Ctrl-O w: Work Runs"));
+        assert!(body.contains("Director conversations and delegated sessions appear here."));
+        assert!(body.contains("Ctrl-O w Runs"));
+        assert!(!body.contains("No Work Runs yet"));
         assert!(!body.contains("Choose New to start a conversation."));
     }
 
@@ -1340,6 +1434,105 @@ mod tests {
             .join("\n");
         assert!(unavailable.contains("Work Run progress unavailable"));
         assert!(!unavailable.contains("Active work"));
+    }
+
+    #[test]
+    fn work_run_list_distinguishes_loading_empty_unavailable_and_cached_states() {
+        let render_list = |work_runs| {
+            let projection = DirectorDrawerProjection {
+                goal_driven: true,
+                route: DirectorRoute::WorkRuns,
+                work_runs,
+                work_run_control: WorkRunControlProjection {
+                    mode: WorkRunControlMode::List,
+                    ..WorkRunControlProjection::default()
+                },
+                ..DirectorDrawerProjection::default()
+            };
+            drawer_body(72, 12, &projection)
+                .into_iter()
+                .map(|row| strip_ansi(&row))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let pending = render_list(WorkRunProjection::default());
+        assert!(pending.contains("Loading Work Runs…"));
+        assert!(!pending.contains("No Work Runs yet"));
+        assert!(!pending.contains("Work Run progress unavailable"));
+
+        let fresh_empty = render_list(WorkRunProjection::fresh(Vec::new()));
+        assert!(fresh_empty.contains("No Work Runs yet"));
+        assert!(fresh_empty.contains("Start one with Ctrl-O n."));
+        assert!(fresh_empty.contains("Ctrl-O n: Start Work Run"));
+        assert!(!fresh_empty.contains("Loading Work Runs"));
+
+        let compact_empty = DirectorDrawerProjection {
+            goal_driven: true,
+            route: DirectorRoute::WorkRuns,
+            work_runs: WorkRunProjection::fresh(Vec::new()),
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::List,
+                ..WorkRunControlProjection::default()
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        let compact_empty = drawer_body(72, 5, &compact_empty)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(compact_empty.contains("No Work Runs yet"));
+        assert!(!compact_empty.contains("Start one with Ctrl-O n."));
+
+        let failed_launch = DirectorDrawerProjection {
+            goal_driven: true,
+            route: DirectorRoute::WorkRuns,
+            feedback: Some("safe Agent launch failure".into()),
+            work_runs: WorkRunProjection::fresh(Vec::new()),
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::List,
+                ..WorkRunControlProjection::default()
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        let failed_launch = drawer_body(72, 12, &failed_launch)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(failed_launch.contains("safe Agent launch failure"));
+        assert!(!failed_launch.contains("Ctrl-O n: Start Work Run"));
+
+        let unavailable_empty = render_list(WorkRunProjection::default().unavailable());
+        assert!(unavailable_empty.contains("Work Run progress unavailable"));
+        assert!(unavailable_empty.contains("No cached Work Runs to show"));
+        assert!(unavailable_empty.contains("Waiting for daemon refresh"));
+        assert!(!unavailable_empty.contains("No Work Runs yet"));
+
+        let cached = render_list(WorkRunProjection::fresh(vec![work_run()]).unavailable());
+        assert!(cached.contains("Cached · refresh required before actions"));
+        assert!(cached.contains("Review supervisor stability"));
+        assert!(cached.contains("Cached view · waiting for refresh"));
+        assert!(!cached.contains("No cached Work Runs to show"));
+
+        let classic_empty = DirectorDrawerProjection {
+            route: DirectorRoute::WorkRuns,
+            work_runs: WorkRunProjection::fresh(Vec::new()),
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::List,
+                ..WorkRunControlProjection::default()
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        let classic_empty = drawer_body(72, 12, &classic_empty)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(classic_empty.contains("No existing Work Runs"));
+        assert!(classic_empty.contains("Switch Workflow to goal-driven to start one."));
+        assert!(!classic_empty.contains("Start Work Run"));
     }
 
     #[test]
@@ -1561,7 +1754,9 @@ mod tests {
         assert!(retry.contains("retry same operation"));
 
         let empty = DirectorDrawerProjection {
+            goal_driven: true,
             route: DirectorRoute::WorkRuns,
+            work_runs: WorkRunProjection::fresh(Vec::new()),
             ..DirectorDrawerProjection::default()
         }
         .with_work_run_control(WorkRunControlProjection {
@@ -1574,6 +1769,26 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(empty.contains("No Work Runs yet"));
+        assert!(empty.contains("Ctrl-O n: Start Work Run"));
+
+        let background_submission = DirectorDrawerProjection {
+            route: DirectorRoute::Organization,
+            work_run_control: WorkRunControlProjection {
+                mode: WorkRunControlMode::Submitting,
+                selected: Some(selected),
+                ..WorkRunControlProjection::default()
+            },
+            ..DirectorDrawerProjection::default()
+        };
+        let background_submission = drawer_body(60, 12, &background_submission)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(background_submission.contains("Director / Organization"));
+        assert!(background_submission.contains("Work Run action in progress"));
+        assert!(!background_submission.contains("Applying the durable action"));
+        assert!(!background_submission.contains("Ctrl-O n New"));
     }
 
     #[test]
@@ -1704,14 +1919,41 @@ mod tests {
     }
 
     #[test]
-    fn closed_work_run_control_renders_a_safe_empty_list() {
+    fn closed_work_run_control_renders_a_safe_loading_list() {
         let projection = DirectorDrawerProjection::default();
         let rows = work_run_control_body(60, 12, vec![], &projection);
-        assert!(rows.join("\n").contains("No Work Runs yet"));
+        let text = rows.join("\n");
+        assert!(text.contains("Loading Work Runs…"));
+        assert!(!text.contains("No Work Runs yet"));
     }
 
     #[test]
     fn goal_driven_empty_and_launching_states_render_their_distinct_guidance() {
+        let empty = DirectorDrawerProjection {
+            goal_driven: true,
+            route: DirectorRoute::WorkRuns,
+            new: DirectorNewProjection::Empty,
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(52, 8, &empty)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>();
+        assert!(
+            body.iter()
+                .any(|row| row.contains("Director / Start Work Run"))
+        );
+        assert!(
+            body.iter()
+                .any(|row| row.contains("No Agent CLI installed"))
+        );
+        assert!(
+            body.iter()
+                .any(|row| row.contains("Install claude, codex, or sakana.ai"))
+        );
+        assert!(body.iter().any(|row| row.contains("Esc: back")));
+        assert!(!body.iter().any(|row| row.contains("Loading Work Runs")));
+
         let composer = DirectorDrawerProjection {
             goal_driven: true,
             new: DirectorNewProjection::GoalComposer {
@@ -1729,6 +1971,7 @@ mod tests {
 
         let launching = DirectorDrawerProjection {
             goal_driven: true,
+            route: DirectorRoute::WorkRuns,
             new: DirectorNewProjection::Launching,
             ..DirectorDrawerProjection::default()
         };
@@ -1736,10 +1979,16 @@ mod tests {
             .into_iter()
             .map(|row| strip_ansi(&row))
             .collect::<Vec<_>>();
+        assert!(body.iter().any(|row| row.contains("Starting…")));
+        assert!(body.iter().any(|row| row.contains("Director / Starting")));
         assert!(
             body.iter()
-                .any(|row| row.contains("Waiting for the daemon to start the Work Run."))
+                .any(|row| row.contains("Waiting for daemon confirmation."))
         );
+        assert!(body.iter().any(|row| row.contains("Launch in progress")));
+        assert!(!body.iter().any(|row| row.contains("Start Work Run ·")));
+        assert!(!body.iter().any(|row| row.contains("New Conversation")));
+        assert!(!body.iter().any(|row| row.contains("Enter Overview")));
     }
 
     #[test]
@@ -1973,7 +2222,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("[ Starting… ]"));
-        assert!(text.contains("Waiting for the daemon to start the conversation."));
+        assert!(text.contains("Director / Starting"));
+        assert!(text.contains("Starting…"));
+        assert!(text.contains("Waiting for daemon confirmation."));
+        assert!(!text.contains("New Conversation"));
+        assert!(!text.contains("Start Work Run"));
     }
 
     fn picker_of(candidates: &[&str], selected: usize) -> DirectorDrawerProjection {

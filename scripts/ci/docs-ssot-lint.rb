@@ -16,7 +16,7 @@ read = lambda do |relative|
     failures << "missing #{relative}"
     next ""
   end
-  File.read(path)
+  File.read(path, encoding: Encoding::UTF_8)
 end
 
 overview = read.call("document/01-overview.md")
@@ -113,7 +113,7 @@ numbered_docs = Dir.glob(File.join(root, "document/[0-9][0-9]-*.md")).sort
 index = read.call("document/README.md")
 numbered_docs.each_with_index do |path, position|
   basename = File.basename(path)
-  content = File.read(path)
+  content = File.read(path, encoding: Encoding::UTF_8)
   failures << "document/README.md does not list #{basename}" unless index.include?("(#{basename})")
   contents_labels = content[/^## 目次\n(.*?)(?=^## )/m, 1].to_s.lines.map do |line|
     line[/^- \[(.*?)\]/, 1]
@@ -152,15 +152,73 @@ work_run_client = read.call("crates/core/src/usecase/client.rs")
 tui_spec = read.call("document/03-tui.md")
 ipc_spec = read.call("document/04-ipc.md")
 root_readme = read.call("README.md")
+keybinding_spec = read.call("document/11-keybindings.md")
 work_run_history = read.call("document/proposals/18-goal-driven-work-run.md")
 
-if work_run_input.match?(/^\s*WorkRuns,\s*$/)
-  unless tui_spec.include?("| `Ctrl-O` `w` | WorkRuns |")
-    failures << "document/03-tui.md is missing the implemented WorkRuns shortcut"
+shortcut_catalog = work_run_input[/const PREFIX_SHORTCUTS:.*?= &\[(.*?)^\];/m, 1].to_s
+implemented_shortcut_actions = shortcut_catalog.scan(/LiveTerminalAction::([A-Z][A-Za-z0-9]*)/)
+  .flatten.to_set
+runtime_shortcut_pairs = shortcut_catalog.scan(
+  /prefix_shortcut!\(\s*KeyCode::(?:Char\('([^']+)'\)|([A-Za-z]+)).*?=>\s*LiveTerminalAction::([A-Z][A-Za-z0-9]*)/m
+).each_with_object(Set.new) do |(character, named_key, action), pairs|
+  key = character || {
+    "Up" => "↑",
+    "Down" => "↓",
+    "End" => "End"
+  }[named_key]
+  if key
+    pairs << [key, action]
+  else
+    failures << "cannot project executable leader key #{named_key.inspect} into documentation"
   end
-  unless root_readme.include?("| `Ctrl-O w` / `Ctrl-O Ctrl-W` |")
-    failures << "README.md is missing the implemented WorkRuns shortcut"
+end
+workspace_key_table = keybinding_spec[/^## workspace 共通コマンド\n(.*?)(?=^## )/m, 1].to_s
+documented_shortcut_pairs = []
+documented_shortcut_actions = workspace_key_table.lines.each_with_object([]) do |line, actions|
+  cells = line.split("|").map(&:strip)
+  next unless cells.fetch(1, "").start_with?("`Ctrl-O")
+
+  action = cells.fetch(2, "")[/^([A-Z][A-Za-z0-9]*)$/, 1]
+  next unless action
+
+  actions << action
+  input = cells.fetch(1)
+  range = input.match(/`Ctrl-O ([1-9])`\s*…\s*`([1-9])`/)
+  keys = if range
+           (range[1].to_i..range[2].to_i).map(&:to_s)
+         else
+           input.scan(/`Ctrl-O ([^`]+)`/).flatten
+         end
+  keys.each { |key| documented_shortcut_pairs << [key, action] }
+end.to_set
+failures << "cannot extract executable leader shortcuts from terminal_input.rs" if implemented_shortcut_actions.empty?
+(implemented_shortcut_actions - documented_shortcut_actions).sort.each do |action|
+  failures << "document/11-keybindings.md is missing implemented leader action #{action}"
+end
+(documented_shortcut_actions - implemented_shortcut_actions).sort.each do |action|
+  failures << "document/11-keybindings.md documents stale leader action #{action}"
+end
+documented_shortcut_pair_set = documented_shortcut_pairs.to_set
+if documented_shortcut_pair_set.length != documented_shortcut_pairs.length
+  failures << "document/11-keybindings.md contains duplicate leader shortcut rows"
+end
+(runtime_shortcut_pairs - documented_shortcut_pair_set).sort.each do |key, action|
+  failures << "document/11-keybindings.md is missing implemented leader shortcut `Ctrl-O #{key}` (#{action})"
+end
+(documented_shortcut_pair_set - runtime_shortcut_pairs).sort.each do |key, action|
+  failures << "document/11-keybindings.md documents stale leader shortcut `Ctrl-O #{key}` (#{action})"
+end
+
+{
+  "README.md" => root_readme,
+  "document/03-tui.md" => tui_spec
+}.each do |path, content|
+  if content.lines.any? { |line| line.start_with?("|") && line.include?("Ctrl-O") }
+    failures << "#{path} duplicates the leader shortcut table owned by document/11-keybindings.md"
   end
+end
+
+if implemented_shortcut_actions.include?("WorkRuns")
   if work_run_history.lines.first(24).join.match?(/選択可能な複数\s+run\s+一覧/i)
     failures << "proposal 18 classifies the implemented Work Run list as future work"
   end
@@ -217,7 +275,7 @@ rust_sources = [
   *Dir.glob(File.join(root, "crates/**/*.rs"))
 ]
 rust_sources.each do |path|
-  File.read(path).scan(%r{document/[A-Za-z0-9_./-]+\.md}).uniq.each do |reference|
+  File.read(path, encoding: Encoding::UTF_8).scan(%r{document/[A-Za-z0-9_./-]+\.md}).uniq.each do |reference|
     next if File.file?(File.join(root, reference))
 
     failures << "#{path.delete_prefix("#{root}/")} references missing documentation #{reference}"
@@ -228,7 +286,7 @@ proposal_index = read.call("document/proposals/README.md")
 proposal_files = Dir.glob(File.join(root, "document/proposals/[0-9][0-9]-*.md")).sort
 proposal_files.each do |path|
   basename = File.basename(path)
-  content = File.read(path)
+  content = File.read(path, encoding: Encoding::UTF_8)
   failures << "document/proposals/README.md does not list #{basename}" unless proposal_index.include?("(#{basename})")
   failures << "#{basename} is missing a machine-visible history status" unless content.lines.first(10).join.include?("> **Status:**")
   baseline = content.lines.first(10).join[/^> \*\*Baseline:\*\*(.*)$/m, 1]
@@ -242,7 +300,7 @@ failures << "document/proposals/README.md must explain the reserved proposal num
 agents_index = read.call(".agents/README.md")
 Dir.glob(File.join(root, ".agents/designs/*.md")).sort.each do |path|
   basename = File.basename(path)
-  content = File.read(path)
+  content = File.read(path, encoding: Encoding::UTF_8)
   failures << ".agents/README.md does not list designs/#{basename}" unless agents_index.include?("(./designs/#{basename})")
   failures << "#{path.delete_prefix("#{root}/")} is missing a machine-visible history status" unless content.lines.first(10).join.include?("> **Status:**")
   baseline = content.lines.first(10).join[/^> \*\*Baseline:\*\*(.*)$/m, 1]
@@ -265,7 +323,7 @@ current_markdown = [
 }.each do |token, description|
   current_markdown.each do |path|
     next unless File.file?(path)
-    next unless File.read(path).include?(token)
+    next unless File.read(path, encoding: Encoding::UTF_8).include?(token)
 
     failures << "#{path.delete_prefix("#{root}/")} contains #{description}: #{token}"
   end
@@ -277,7 +335,7 @@ end
   "usagi issue " => "nonexistent issue CLI"
 }.each do |token, description|
   rust_sources.each do |path|
-    next unless File.read(path).include?(token)
+    next unless File.read(path, encoding: Encoding::UTF_8).include?(token)
 
     failures << "#{path.delete_prefix("#{root}/")} contains #{description}: #{token}"
   end

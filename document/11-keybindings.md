@@ -2,9 +2,11 @@
 
 > [ドキュメント目次](README.md) ｜ ← 前へ [10. session role](10-session-roles.md)
 
-TUI のキーバインド、入力所有権、割り振り規則の正本である。画面遷移と各操作の詳細は
-[3. TUI](03-tui.md)を参照する。本書はキーボード入力だけを対象とし、クリック、ドラッグ、ホイールは
-TUI 仕様を正本とする。
+TUI のキーバインド、入力所有権、割り振り規則について、利用者向け文書では本書だけを正本とする。
+実行時の正本は `terminal_input::PREFIX_SHORTCUTS` の実行可能 catalog であり、contextual help も同じ
+record から生成する。CI は catalog の key/action 組と本書の workspace 共通表を相互検査し、README や
+[3. TUI](03-tui.md)に対応表を複製しない。画面遷移と各操作の詳細は TUI 仕様を参照する。本書は
+キーボード入力だけを対象とし、クリック、ドラッグ、ホイールは TUI 仕様を正本とする。
 
 ## 目次
 
@@ -70,12 +72,12 @@ TUI 仕様を正本とする。
 | `Ctrl-O d` | OpenDecisions | pending Decision一覧 |
 | `Ctrl-O s` | OpenNotes | Scratchpad |
 | `Ctrl-O ,` | OpenGarden | Session Garden |
-| `Ctrl-O g` | Director | Director drawer |
+| `Ctrl-O g` | Director | Director drawer toggle。初回は goal-driven = Work Runs / classic = Organization。同じ Workflow の再 open は直前 route |
 | `Ctrl-O b` | DirectorBack | Director 内で一階層戻る |
-| `Ctrl-O w` | WorkRuns | goal-driven workspace の Work Runs を直接開く |
-| `Ctrl-O t` | WorkspaceTerminal | workspace root Shell drawer |
-| `Ctrl-O z` | WorkspaceTerminalFullHeight | Shell drawerの高さ切替 |
-| `Ctrl-O n` | DirectorNew / NewRootTerminal | Director の New Conversation / Start Work Run。Shell 選択中は新しい terminal tab |
+| `Ctrl-O w` | WorkRuns | daemon-owned Work Runs を直接開く。classic は既存 Run の観測・制御だけを行い、新規 Run は開始しない |
+| `Ctrl-O t` | RootTerminal | workspace root Shell drawer |
+| `Ctrl-O z` | RootTerminalFullHeight | Shell drawerの高さ切替 |
+| `Ctrl-O n` | DirectorNew | Director の New Conversation / Start Work Run。Shell 選択中は新しい terminal tab |
 | `Ctrl-O x` | CloseTab | 選択中pane tabの終了／取消／dismiss |
 | `Ctrl-O r` | ResumeTab | 選択済み interrupted Agent tabの再開／再試行。resume不可なら削除確認 |
 | `Ctrl-O ↑` | ScrollUp | retained outputを1行上へ |
@@ -237,12 +239,12 @@ Closeup paletteなどの文字入力中には入力文字として扱う。
 | 入力 | 動作 |
 |---|---|
 | 文字 / paste | caret位置へ挿入、選択中は置換 |
-| `←` / `→` | 1 Unicode scalar移動 |
+| `←` / `→` | 1 grapheme cluster（見た目上の1文字）移動 |
 | `Home` / `Ctrl-A` | 行頭 |
 | `End` / `Ctrl-E` | 行末 |
-| `Shift-←` / `Shift-→` | 1 scalarずつ選択 |
+| `Shift-←` / `Shift-→` | 1 grapheme clusterずつ選択 |
 | `Shift-Home` / `Shift-End` | 行頭 / 行末まで選択 |
-| `Backspace` / `Delete` | 前 / 後ろ、または選択範囲を削除 |
+| `Backspace` / `Delete` | 前 / 後ろの1 grapheme cluster、または選択範囲を削除 |
 
 画面固有の `Tab` / `Enter` / `Esc` は各表を優先する。`Ctrl-X` は入力欄のcutには使わず、一覧で選択中の対象を
 除く操作だけに使う。

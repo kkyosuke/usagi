@@ -10,6 +10,9 @@ concurrency:
   group: test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -20,7 +23,7 @@ jobs:
     outputs:
       rust: ${{ steps.classify.outputs.rust }}
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         fetch-depth: 0
     - id: classify
@@ -37,15 +40,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@nightly
+      uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
       with:
         components: rustfmt, clippy
 
     - name: Rust Cache
-      uses: swatinem/rust-cache@v2
+      uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
         cache-on-failure: true
         shared-key: rust-lint
@@ -63,15 +66,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@nightly
+      uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
       with:
         components: llvm-tools-preview
 
     - name: Rust Cache
-      uses: swatinem/rust-cache@v2
+      uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
         cache-on-failure: true
         shared-key: rust-full-test
@@ -126,13 +129,13 @@ jobs:
         runner: [macos-15-intel, macos-latest]
 
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@nightly
+      uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
 
     - name: Rust Cache
-      uses: swatinem/rust-cache@v2
+      uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
         cache-on-failure: true
         shared-key: rust-agent-ipc-${{ matrix.runner }}
@@ -145,7 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         fetch-depth: 0
 
@@ -175,6 +178,12 @@ jobs:
     - name: Enforce documentation SSoT boundaries
       run: ruby scripts/ci/docs-ssot-lint.rb
 
+    - name: Test GitHub Actions policy checker
+      run: bash scripts/tests/github-actions-policy.sh
+
+    - name: Enforce GitHub Actions policy
+      run: ruby scripts/ci/github-actions-policy.rb
+
     - id: security-exceptions
       name: Validate RustSec exceptions
       run: ruby scripts/ci/security-audit-exceptions.rb >> "$GITHUB_OUTPUT"
@@ -189,7 +198,7 @@ jobs:
       run: cargo install cargo-audit --version 0.22.2 --locked
 
     - name: Audit Cargo.lock against RustSec
-      uses: rustsec/audit-check@v2.0.0
+      uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         ignore: ${{ steps.security-exceptions.outputs.ignore }}
@@ -200,7 +209,7 @@ jobs:
     needs: [changes, rust-lint, policy-checks]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Report Rust lint result
       env:
         CHANGES_RESULT: ${{ needs.changes.result }}
@@ -219,7 +228,7 @@ jobs:
     needs: [changes, full-test-run, agent-ipc-macos, policy-checks]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Report full test result
       env:
         CHANGES_RESULT: ${{ needs.changes.result }}

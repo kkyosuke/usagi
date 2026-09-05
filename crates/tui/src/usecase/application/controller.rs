@@ -17,6 +17,9 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pr_inventory::{PrEntry, PrState};
+use usagi_core::domain::presentation_text::{
+    presentation_character_is_safe, presentation_text_is_safe,
+};
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
@@ -984,6 +987,48 @@ pub struct PendingOperation {
     pub interaction_at_accept: u64,
 }
 
+const MAX_PRESENTATION_MESSAGE_CHARS: usize = 240;
+
+/// Normalize untrusted detail into a bounded, one-line terminal-safe summary.
+///
+/// Control characters become a single separating space and bidi controls
+/// become a visible replacement character. This preserves useful wording
+/// without allowing terminal control flow or visual reordering. The frame is a
+/// second, fail-closed boundary for values which do not use these message types.
+fn sanitize_presentation_message(message: &str) -> String {
+    let mut sanitized = String::with_capacity(message.len().min(256));
+    let mut character_count = 0;
+    let mut previous_was_space = true;
+    let mut truncated = false;
+
+    for character in message.chars() {
+        let character = if presentation_character_is_safe(character) {
+            character
+        } else if character.is_control() {
+            ' '
+        } else {
+            '\u{fffd}'
+        };
+        if character == ' ' && previous_was_space {
+            continue;
+        }
+        if character_count == MAX_PRESENTATION_MESSAGE_CHARS - 1 {
+            truncated = true;
+            break;
+        }
+        sanitized.push(character);
+        character_count += 1;
+        previous_was_space = character == ' ';
+    }
+    while sanitized.ends_with(' ') {
+        sanitized.pop();
+    }
+    if truncated {
+        sanitized.push('…');
+    }
+    sanitized
+}
+
 /// 画面に安全に表示できる通知。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
@@ -995,8 +1040,9 @@ impl Notice {
     /// 表示用に検証済みの文言を作る。
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
-            message: message.into(),
+            message: sanitize_presentation_message(&message),
         }
     }
 }
@@ -1060,15 +1106,19 @@ pub struct RuntimePhase {
     pub phase: AgentPhase,
 }
 
-/// A message which a backend adapter has explicitly classified as safe to show.
-/// No raw protocol error or detail field is representable by this type.
+/// A bounded, one-line message which is safe to show in a terminal.
+///
+/// Construction sanitizes defensively. Backend adapters must still map raw
+/// diagnostic detail to stable user-facing summaries so filesystem paths and
+/// credentials never become presentation content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeMessage(String);
 
 impl SafeMessage {
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        let message = message.into();
+        Self(sanitize_presentation_message(&message))
     }
 
     #[must_use]
@@ -1364,6 +1414,21 @@ pub enum DirectorRoute {
     WorkRuns,
     RunOverview(SupervisorRunId),
     Console(DirectorConsoleParent),
+}
+
+impl DirectorRoute {
+    /// Primary Director surface for one workspace interaction model.
+    ///
+    /// Classic work starts from the workspace organization, while goal-driven
+    /// work starts from its durable Work Run inventory. Retained routes still
+    /// win when the configured mode has not changed.
+    #[must_use]
+    const fn landing_for(mode: WorkMode) -> Self {
+        match mode {
+            WorkMode::Classic => Self::Organization,
+            WorkMode::GoalDriven => Self::WorkRuns,
+        }
+    }
 }
 
 impl ExitChoice {
@@ -1796,10 +1861,19 @@ impl AppState {
         self.default_model = default;
     }
 
-    /// Apply the effective workspace interaction setting. Returning to classic
-    /// drops a draft that was never submitted, but never touches a live Agent.
+    /// Apply the effective workspace interaction setting.
+    ///
+    /// A real mode transition selects that workflow's primary Director
+    /// surface. Re-applying the same effective setting preserves the retained
+    /// route used when the drawer is closed and reopened. Returning to classic
+    /// also drops a draft that was never submitted, but never touches a live
+    /// Agent or Work Run.
     pub fn set_work_mode(&mut self, mode: WorkMode) {
+        if self.work_mode == mode {
+            return;
+        }
         self.work_mode = mode;
+        self.director_route = DirectorRoute::landing_for(mode);
         if mode == WorkMode::Classic {
             self.director_goal.clear();
         }
@@ -3017,11 +3091,16 @@ pub enum NewRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewValidationError {
     RepositoryRequired,
+    RepositoryInvalid,
     LocationRequired,
+    LocationInvalid,
     DirectoryRequired,
     DirectoryInvalid,
+    BranchInvalid,
     PathRequired,
+    PathInvalid,
     NameRequired,
+    NameInvalid,
 }
 
 impl NewValidationError {
@@ -3029,11 +3108,16 @@ impl NewValidationError {
     pub const fn message(self) -> &'static str {
         match self {
             Self::RepositoryRequired => "repository URL is required",
+            Self::RepositoryInvalid => "repository URL must be a single safe line",
             Self::LocationRequired => "clone location is required",
+            Self::LocationInvalid => "clone location must be a single safe line",
             Self::DirectoryRequired => "directory name is required",
-            Self::DirectoryInvalid => "directory name must not contain path separators",
+            Self::DirectoryInvalid => "directory name must be a safe name without path separators",
+            Self::BranchInvalid => "branch name must be a single safe line",
             Self::PathRequired => "directory path is required",
+            Self::PathInvalid => "directory path must be a single safe line",
             Self::NameRequired => "workspace name is required",
+            Self::NameInvalid => "workspace name must be a single safe line",
         }
     }
 }
@@ -3048,22 +3132,33 @@ pub fn validate_new_form(mode: NewMode, form: &NewForm) -> Result<NewRequest, Ne
     match mode {
         NewMode::Clone => {
             let repository = required(&form.repository, NewValidationError::RepositoryRequired)?;
+            validate_presentation_field(&repository, NewValidationError::RepositoryInvalid)?;
             let location = required(&form.location, NewValidationError::LocationRequired)?;
+            validate_presentation_field(&location, NewValidationError::LocationInvalid)?;
             let directory = required(&form.directory, NewValidationError::DirectoryRequired)?;
             if is_invalid_directory_name(&directory) {
                 return Err(NewValidationError::DirectoryInvalid);
             }
             let branch = trimmed(&form.branch);
+            if let Some(branch) = &branch {
+                validate_presentation_field(branch, NewValidationError::BranchInvalid)?;
+            }
             Ok(NewRequest::Clone {
                 repository,
                 destination: PathBuf::from(location).join(directory),
                 branch,
             })
         }
-        NewMode::Existing => Ok(NewRequest::Existing {
-            path: PathBuf::from(required(&form.path, NewValidationError::PathRequired)?),
-            name: required(&form.name, NewValidationError::NameRequired)?,
-        }),
+        NewMode::Existing => {
+            let path = required(&form.path, NewValidationError::PathRequired)?;
+            validate_presentation_field(&path, NewValidationError::PathInvalid)?;
+            let name = required(&form.name, NewValidationError::NameRequired)?;
+            validate_presentation_field(&name, NewValidationError::NameInvalid)?;
+            Ok(NewRequest::Existing {
+                path: PathBuf::from(path),
+                name,
+            })
+        }
     }
 }
 
@@ -3071,12 +3166,22 @@ fn required(value: &str, error: NewValidationError) -> Result<String, NewValidat
     trimmed(value).ok_or(error)
 }
 
+fn validate_presentation_field(
+    value: &str,
+    error: NewValidationError,
+) -> Result<(), NewValidationError> {
+    presentation_text_is_safe(value).then_some(()).ok_or(error)
+}
+
 /// A clone destination is created as a single child directory under the chosen
 /// location, so its name must not traverse (`.`/`..`) or contain a path
 /// separator. Rejecting these before submit keeps `location.join(directory)`
 /// from escaping the location.
 fn is_invalid_directory_name(directory: &str) -> bool {
-    directory == "." || directory == ".." || directory.contains(['/', '\\'])
+    directory == "."
+        || directory == ".."
+        || directory.contains(['/', '\\'])
+        || !presentation_text_is_safe(directory)
 }
 
 fn trimmed(value: &str) -> Option<String> {
@@ -3761,7 +3866,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 state.director_launching = None;
                 if succeeded && let Some(run) = supervisor_run_id {
                     state.director_route = DirectorRoute::RunOverview(run);
-                } else if succeeded && state.work_mode == WorkMode::Classic {
+                } else if succeeded {
                     state.director_route =
                         DirectorRoute::Console(DirectorConsoleParent::Organization);
                 }
@@ -4130,7 +4235,6 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         return Vec::new();
     }
     if matches!(key, AppKey::OpenDirectorWorkRuns)
-        && state.work_mode == WorkMode::GoalDriven
         && state.director_launching.is_none()
         && matches!(state.director_new, DirectorNew::Idle)
     {
@@ -4430,8 +4534,7 @@ fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
             true
         }
         AppKey::OpenDirectorWorkRuns => {
-            if state.work_mode != WorkMode::GoalDriven
-                || state.director_launching.is_some()
+            if state.director_launching.is_some()
                 || !matches!(state.director_new, DirectorNew::Idle)
             {
                 return true;
@@ -4454,7 +4557,9 @@ fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
             true
         }
         AppKey::DirectorBack => {
-            director_back(state);
+            if state.director_launching.is_none() {
+                director_back(state);
+            }
             true
         }
         _ => false,
@@ -5393,7 +5498,9 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
             Vec::new()
         }
         AppKey::OpenDirectorWorkRuns => {
-            if state.work_mode != WorkMode::GoalDriven {
+            if state.director_launching.is_some()
+                || !matches!(state.director_new, DirectorNew::Idle)
+            {
                 return Vec::new();
             }
             state.root_terminal_full_height = false;
@@ -6494,6 +6601,24 @@ mod tests {
     use crate::usecase::application::environment_source::parse_environment_source;
 
     #[test]
+    fn presentation_messages_are_bounded_and_terminal_safe() {
+        let raw = format!("  failed\n\t\u{1b}[31m\u{202e}{}", "x".repeat(300));
+        let safe = SafeMessage::new(&raw);
+        let notice = Notice::new(raw);
+
+        for message in [safe.as_str(), notice.message.as_str()] {
+            assert!(presentation_text_is_safe(message));
+            assert!(!message.starts_with(' '));
+            assert!(message.chars().count() <= MAX_PRESENTATION_MESSAGE_CHARS);
+            assert!(message.contains('\u{fffd}'));
+            assert!(message.ends_with('…'));
+        }
+
+        assert_eq!(SafeMessage::new("  ready\n\t ").as_str(), "ready");
+        assert_eq!(Notice::new("\n\t ").message, "");
+    }
+
+    #[test]
     fn terminal_arguments_normalize_open_and_reject_untrusted_input() {
         assert_eq!(terminal_arguments("").unwrap(), "open");
         assert_eq!(terminal_arguments(" open ").unwrap(), "open");
@@ -7533,6 +7658,65 @@ mod tests {
     }
 
     #[test]
+    fn new_validation_rejects_terminal_and_direction_controls() {
+        let clone_cases = [
+            ("repository", NewValidationError::RepositoryInvalid),
+            ("location", NewValidationError::LocationInvalid),
+            ("directory", NewValidationError::DirectoryInvalid),
+            ("branch", NewValidationError::BranchInvalid),
+        ];
+        for (field, expected) in clone_cases {
+            let mut form = clone_form();
+            match field {
+                "repository" => form.repository = "https://example.com/unsafe\nrepo".to_owned(),
+                "location" => form.location = "/work\u{7}/child".to_owned(),
+                "directory" => form.directory = "app\u{202e}txt".to_owned(),
+                "branch" => form.branch = "feature/\u{2066}name".to_owned(),
+                _ => unreachable!(),
+            }
+            assert_eq!(validate_new_form(NewMode::Clone, &form), Err(expected));
+        }
+
+        let mut unsafe_path = existing_form();
+        unsafe_path.path = "/work\r/existing".to_owned();
+        assert_eq!(
+            validate_new_form(NewMode::Existing, &unsafe_path),
+            Err(NewValidationError::PathInvalid)
+        );
+        let mut unsafe_name = existing_form();
+        unsafe_name.name.push('\u{202e}');
+        assert_eq!(
+            validate_new_form(NewMode::Existing, &unsafe_name),
+            Err(NewValidationError::NameInvalid)
+        );
+
+        for (error, message) in [
+            (
+                NewValidationError::RepositoryInvalid,
+                "repository URL must be a single safe line",
+            ),
+            (
+                NewValidationError::LocationInvalid,
+                "clone location must be a single safe line",
+            ),
+            (
+                NewValidationError::BranchInvalid,
+                "branch name must be a single safe line",
+            ),
+            (
+                NewValidationError::PathInvalid,
+                "directory path must be a single safe line",
+            ),
+            (
+                NewValidationError::NameInvalid,
+                "workspace name must be a single safe line",
+            ),
+        ] {
+            assert_eq!(error.message(), message);
+        }
+    }
+
+    #[test]
     fn table_driven_mode_and_overlay_scenarios() {
         struct Case {
             name: &'static str,
@@ -7683,10 +7867,6 @@ mod tests {
         let mut state = AppState::home(workspace, Vec::new());
         assert_eq!(state.director_route(), DirectorRoute::Organization);
         assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns)).is_empty());
-        assert!(!state.director_drawer_open(), "classic has no Work Runs");
-
-        state.set_work_mode(WorkMode::GoalDriven);
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
         assert!(state.director_drawer_open());
         assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
         let _ = update(
@@ -7715,6 +7895,116 @@ mod tests {
     }
 
     #[test]
+    fn director_mode_transition_selects_its_landing_without_resetting_the_same_mode() {
+        let workspace = WorkspaceId::new();
+        let run = SupervisorRunId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+
+        assert_eq!(state.work_mode(), WorkMode::Classic);
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+        state.set_work_mode(WorkMode::Classic);
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+
+        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorConsole(DirectorConsoleParent::RunOverview(run)),
+        ));
+        let retained = DirectorRoute::Console(DirectorConsoleParent::RunOverview(run));
+        assert_eq!(state.director_route(), retained);
+
+        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(
+            state.director_route(),
+            retained,
+            "re-observing the same mode must preserve a retained deep route"
+        );
+
+        state.set_work_mode(WorkMode::Classic);
+        assert_eq!(state.director_route(), DirectorRoute::Organization);
+    }
+
+    #[test]
+    fn classic_director_keeps_existing_work_run_routes_available() {
+        let workspace = WorkspaceId::new();
+        let run = SupervisorRunId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorWorkRuns,
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorRunOverview(run),
+        ));
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorConsole(DirectorConsoleParent::RunOverview(run)),
+        ));
+        assert_eq!(
+            state.director_route(),
+            DirectorRoute::Console(DirectorConsoleParent::RunOverview(run))
+        );
+
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorConsole(DirectorConsoleParent::Organization),
+        ));
+        assert_eq!(
+            state.director_route(),
+            DirectorRoute::Console(DirectorConsoleParent::Organization)
+        );
+    }
+
+    #[test]
+    fn director_launch_completion_after_mode_switch_opens_the_created_identity() {
+        let workspace = WorkspaceId::new();
+        let run = SupervisorRunId::new();
+
+        // A Goal launch may finish after the operator has returned to classic.
+        // The matching completion still owns the exact Run it created.
+        let mut goal_state = AppState::home(workspace, Vec::new());
+        goal_state.set_work_mode(WorkMode::GoalDriven);
+        let goal_operation = OperationId::new();
+        goal_state.director_launching = Some(goal_operation);
+        goal_state.set_work_mode(WorkMode::Classic);
+        assert_eq!(goal_state.director_launching(), Some(goal_operation));
+        let _ = update(
+            &mut goal_state,
+            AppEvent::DirectorLaunchFinished {
+                operation: goal_operation,
+                supervisor_run_id: Some(run),
+                succeeded: true,
+            },
+        );
+        assert_eq!(goal_state.director_route(), DirectorRoute::RunOverview(run));
+
+        // Conversely, a classic launch completion has no Run identity and
+        // opens the root Agent under Organization even if the mode changed.
+        let mut classic_state = AppState::home(workspace, Vec::new());
+        let classic_operation = OperationId::new();
+        classic_state.director_launching = Some(classic_operation);
+        classic_state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(classic_state.director_launching(), Some(classic_operation));
+        let _ = update(
+            &mut classic_state,
+            AppEvent::DirectorLaunchFinished {
+                operation: classic_operation,
+                supervisor_run_id: None,
+                succeeded: true,
+            },
+        );
+        assert_eq!(
+            classic_state.director_route(),
+            DirectorRoute::Console(DirectorConsoleParent::Organization)
+        );
+    }
+
+    #[test]
     fn director_route_commands_are_guarded_and_open_from_the_root_shell() {
         let workspace = WorkspaceId::new();
         let run = SupervisorRunId::new();
@@ -7734,14 +8024,23 @@ mod tests {
             &mut state,
             &AppKey::OpenDirectorWorkRuns
         ));
-        assert_eq!(state.director_route(), DirectorRoute::Organization);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
         state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
+        assert!(update_director_route_key(
+            &mut state,
+            &AppKey::OpenDirectorOrganization
+        ));
         state.director_launching = Some(OperationId::new());
         assert!(update_director_route_key(
             &mut state,
             &AppKey::OpenDirectorWorkRuns
         ));
         assert_eq!(state.director_route(), DirectorRoute::Organization);
+        state.director_route = DirectorRoute::RunOverview(run);
+        assert!(update_director_route_key(&mut state, &AppKey::DirectorBack));
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+        state.director_route = DirectorRoute::Organization;
         state.director_launching = None;
         state.director_new = DirectorNew::Empty;
         assert!(update_director_route_key(
@@ -7759,9 +8058,19 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
         assert!(state.root_terminal_drawer_open());
         state.set_work_mode(WorkMode::Classic);
+        state.director_route = DirectorRoute::RunOverview(run);
+        state.director_launching = Some(OperationId::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
         assert!(!state.director_drawer_open());
-        state.set_work_mode(WorkMode::GoalDriven);
+        assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+        state.director_launching = None;
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
+        assert!(state.director_drawer_open());
+        assert_eq!(state.director_route(), DirectorRoute::WorkRuns);
         state.director_goal = "clear on route".into();
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorWorkRuns));
         assert!(state.director_drawer_open());
@@ -13065,7 +13374,7 @@ mod tests {
         );
         assert_eq!(
             NewValidationError::DirectoryInvalid.message(),
-            "directory name must not contain path separators"
+            "directory name must be a safe name without path separators"
         );
 
         let mut entry = EntryState::new(

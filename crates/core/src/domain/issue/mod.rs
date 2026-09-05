@@ -135,7 +135,7 @@ impl Issue {
     /// caller knows and the entity does not. Taking it as an argument keeps a
     /// summary from ever naming a file that does not exist.
     #[must_use]
-    pub fn summary(&self, file: &str) -> IssueSummary {
+    pub(crate) fn summary(&self, file: &str) -> IssueSummary {
         IssueSummary {
             number: self.number,
             title: self.title.clone(),

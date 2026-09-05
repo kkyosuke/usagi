@@ -8,6 +8,8 @@ use unicode_width::UnicodeWidthChar;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use usagi_core::domain::presentation_text::presentation_character_is_safe;
+
 const ESC: char = '\u{1b}';
 const RESET: &str = "\u{1b}[0m";
 
@@ -175,6 +177,9 @@ impl Frame {
                 {
                     let _ = chars.next();
                 }
+                continue;
+            }
+            if !presentation_character_is_safe(character) {
                 continue;
             }
 
@@ -778,6 +783,31 @@ mod tests {
 
         assert!(!text.contains("\u{1b}[?1049l"));
         assert!(text.contains("\u{1b}[31m"));
+    }
+
+    #[test]
+    fn set_line_drops_terminal_and_bidirectional_controls() {
+        let frame = Frame::from_lines(16, 1, ["a\nb\rc\td\u{7}e\u{202e}f\u{2066}g\u{2069}"]);
+        let visible = (0..frame.width())
+            .filter_map(|column| match frame.cell(0, column) {
+                Some(Cell::Glyph { scalar, .. }) => Some(*scalar),
+                Some(Cell::Empty | Cell::Continuation) | None => None,
+            })
+            .collect::<String>();
+        assert_eq!(visible, "abcdefg");
+
+        let rendered = FrameRenderer::new().render(frame);
+        let text = rendered
+            .spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert!(text.contains("abcdefg"));
+        for control in [
+            '\n', '\r', '\t', '\u{7}', '\u{202e}', '\u{2066}', '\u{2069}',
+        ] {
+            assert!(!text.contains(control));
+        }
     }
 
     #[test]

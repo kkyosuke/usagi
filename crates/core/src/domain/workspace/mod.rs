@@ -7,9 +7,48 @@
 //! persist it as JSON without the domain knowing where or how it is stored.
 
 use std::path::PathBuf;
+use std::{error::Error, fmt};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::domain::presentation_text::presentation_text_is_safe;
+
+/// Why a workspace display name cannot enter the domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceNameError {
+    /// Whitespace-only names cannot identify a workspace in the UI.
+    Empty,
+    /// Terminal control or bidirectional-control characters are forbidden.
+    UnsafePresentation,
+}
+
+impl fmt::Display for WorkspaceNameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Empty => "workspace name must not be empty",
+            Self::UnsafePresentation => "workspace name contains unsafe presentation characters",
+        })
+    }
+}
+
+impl Error for WorkspaceNameError {}
+
+/// Validate a workspace display name at an input or persistence boundary.
+///
+/// # Errors
+///
+/// Returns [`WorkspaceNameError`] for a whitespace-only name or text which can
+/// alter terminal control flow or bidirectional display order.
+pub fn validate_workspace_name(name: &str) -> Result<(), WorkspaceNameError> {
+    if name.trim().is_empty() {
+        return Err(WorkspaceNameError::Empty);
+    }
+    if !presentation_text_is_safe(name) {
+        return Err(WorkspaceNameError::UnsafePresentation);
+    }
+    Ok(())
+}
 
 /// A workspace registered with usagi.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,11 +66,21 @@ pub struct Workspace {
 impl Workspace {
     /// Build a workspace, stamping `created_at` and `updated_at` with the current
     /// time (both equal at creation).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `name` is empty or unsafe to present. External and persisted
+    /// names must pass [`validate_workspace_name`] before this constructor.
     #[must_use]
     pub fn new(name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        let name = name.into();
+        assert!(
+            validate_workspace_name(&name).is_ok(),
+            "workspace display name must be non-empty and presentation-safe"
+        );
         let now = Utc::now();
         Self {
-            name: name.into(),
+            name,
             path: path.into(),
             created_at: now,
             updated_at: now,
