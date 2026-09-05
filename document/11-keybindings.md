@@ -29,7 +29,7 @@ record から生成する。CI は catalog の key/action 組と本書の worksp
 | tab | `[` / `]` は前 / 次の選択、`{` / `}` は前 / 次への並べ替えとする |
 | 対象の除去 | `Ctrl-X` は選択中の対象を安全に remove / detach / dismiss する。plain `x` / `X` に副作用を割り当てない |
 | tab の終了 | `Ctrl-O x` は現在の pane tab を閉じる。`x` の「現在対象を閉じる」という意味を維持し、session remove とは入力 scope を分ける |
-| 強制削除 | 通常 session は確認 modal または command の明示的な `--force` を使う。daemon が診断した integrity orphan に限り、選択中の exact row で `Ctrl-Shift-X` を押すと `--force --purge-orphan` 相当を実行する |
+| 強制削除 | 通常 session は確認 modal または command の明示的な `--force` を使う。daemon が診断した integrity orphan に限り、選択中の exact row で `Ctrl-X` を押すと `--force --purge-orphan` 相当を実行する |
 | modal 内操作 | `Enter` は決定、`Esc` は取消、矢印は選択、`Tab` は focus / mode 移動として再利用する |
 | 文字入力 | plain letter は入力欄と live terminal へ渡す。workspace 共通操作に plain letter を使わない |
 
@@ -157,8 +157,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Switch | `Ctrl-A` / `Home` | new session form |
 | Switch | `:` | Overview palette |
 | Switch / live pane以外のCloseup | `?` | 現在のsurfaceで使えるキーボードショートカットを表示 |
-| Switch | `Ctrl-X` | 選択sessionのsafe remove |
-| Switch | `Ctrl-Shift-X` | 選択中の `failed/integrity` orphan sessionを明示破棄。その他のrowではno-op |
+| Switch | `Ctrl-X` | 選択sessionのsafe remove。選択中の `failed/integrity` orphan sessionだけは明示破棄 |
 | Switch | `Ctrl-Q` | workspace離脱／TUI終了確認 |
 | Switch | `Ctrl-C` | no-op |
 | management surface | `Ctrl-D` | no-op。EOTはlive terminalだけに送る |
@@ -271,13 +270,12 @@ leader待機中でない入力は、terminalが選択を保持している場合
 | `Ctrl-C` | AgentではSIGINT。generic shellではinterrupt後にretained scrollbackをclear |
 | `Ctrl-D` | EOT |
 | `Ctrl-Q` | byte `0x11` |
-| `Ctrl-X` | byte `0x18` |
-| `Ctrl-Shift-X` | live terminalではbyte `0x18`。SwitchではShiftを識別できた場合だけintegrity orphan purge |
+| `Ctrl-X` | live terminalではbyte `0x18`。Switchでは通常はsafe remove、選択中のintegrity orphanだけはpurge |
 | generic shellの`Ctrl-L` | retained scrollbackと選択をclearし、同じbyteをPTYへ送る |
 | macOS `Command-C` | terminal選択をcopy |
 | Linux `Ctrl-Shift-C` | terminal選択をcopy |
 | Windows `Ctrl-C` | 選択中はcopy、未選択はinterrupt |
 | `Esc`、文字、Enter、Tab、Backspace、矢印 | PTYへ送る |
 
-TUI は対応 terminal に拡張キーボード報告を要求し、`Ctrl-Shift-X` と `Ctrl-X` を区別する。従来型 terminal が
-両方を raw `0x18` として送る場合は区別不能なので safe な `Ctrl-X` として扱い、orphan purge へ昇格しない。
+TUI は semantic な `Ctrl-X` と raw `0x18` を同じ入力として扱い、Switch では選択中の exact lifecycle を見て
+safe remove または integrity orphan purge を決める。

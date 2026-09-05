@@ -2238,10 +2238,9 @@ pub enum AppKey {
     CtrlC,
     /// Management-screen Ctrl-Q. Live Ctrl-Q is likewise PTY passthrough.
     CtrlQ,
-    /// Remove or dismiss the selected object from a management surface.
+    /// Remove the selected session, purging it when it is a diagnosed integrity
+    /// orphan, or dismiss the selected object from another management surface.
     CtrlX,
-    /// Explicitly purge the selected integrity-orphan session.
-    CtrlShiftX,
     /// Open the detach confirmation from a reserved live-pane action.
     OpenQuitConfirmation,
     /// Toggle the frontmost Director mode drawer. Opening is ignored while an
@@ -2334,7 +2333,7 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         return None;
     }
     match key.code {
-        KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => Some(AppKey::CtrlShiftX),
+        KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => Some(AppKey::CtrlX),
         KeyCode::Char('s')
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
@@ -5533,19 +5532,16 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 direction: TabDirection::Previous,
             }]
         }
-        // Ctrl-X removes only the cursor's session. Keep this unavailable while
-        // an overlay owns input, and never turn the workspace root, the new-session
-        // row, or a lifecycle that cannot be removed into a deletion target.
-        // A rejected safe removal opens the existing explicit force confirmation.
+        // Ctrl-X removes only the cursor's session. A diagnosed integrity orphan
+        // is the sole direct purge target; every other row keeps the safe removal
+        // path. Keep this unavailable while an overlay owns input, and never turn
+        // the workspace root, the new-session row, or an ineligible lifecycle into
+        // a deletion target. A rejected safe removal opens the existing explicit
+        // force confirmation.
         AppKey::CtrlX
             if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
         {
-            remove_selected_session(state, false)
-        }
-        AppKey::CtrlShiftX
-            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
-        {
-            purge_selected_orphan(state)
+            remove_selected_session(state)
         }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
@@ -5572,7 +5568,6 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::CtrlN
         | AppKey::CtrlP
         | AppKey::CtrlX
-        | AppKey::CtrlShiftX
         | AppKey::Escape
         | AppKey::Tab
         | AppKey::Left
@@ -5680,7 +5675,6 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::CtrlC
         | AppKey::CtrlQ
         | AppKey::CtrlX
-        | AppKey::CtrlShiftX
         | AppKey::OpenQuitConfirmation
         | AppKey::OpenOverview
         | AppKey::OpenDirectorOrganization
@@ -5720,29 +5714,11 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
 /// stable identity while the presentation turns the row into a loading skeleton.
 /// Snapshot reconciliation moves it only after the daemon removes the row.
 ///
-/// `force` is the whole forced removal, not just the dirty-worktree half: it
-/// also discards an unmerged session branch. The keyboard never supplies it
-/// directly; only the failed-delete confirmation or an explicit command does.
-fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
-    let Selection::Target(Target::Session(session)) = state.selected else {
-        return Vec::new();
-    };
-    if !state.session_can_remove(session) {
-        return Vec::new();
-    }
-    vec![Effect::RemoveSession {
-        workspace: state.workspace,
-        session,
-        force,
-        force_delete_branch: force,
-        purge_orphan: false,
-    }]
-}
-
-/// Purge only the exact selected integrity-orphan row. The dedicated chord is
-/// the destructive acknowledgement; ordinary failed/delete and available rows
-/// keep their existing safe/confirmed removal paths.
-fn purge_selected_orphan(state: &AppState) -> Vec<Effect> {
+/// A diagnosed integrity orphan is already an unusable recovery row, so Ctrl-X
+/// acknowledges the whole destructive removal for that exact identity. Every
+/// other removable row stays on the safe path; ordinary force removal still
+/// requires the failed-delete confirmation or an explicit command.
+fn remove_selected_session(state: &AppState) -> Vec<Effect> {
     let Selection::Target(Target::Session(session)) = state.selected else {
         return Vec::new();
     };
@@ -5753,15 +5729,18 @@ fn purge_selected_orphan(state: &AppState) -> Vec<Effect> {
             projection.lifecycle == SessionLifecycle::Failed
                 && projection.failure_stage == Some(FailureStage::Integrity)
         });
-    if !state.sessions.contains(&session) || !integrity_orphan {
+    if !state.sessions.contains(&session) {
+        return Vec::new();
+    }
+    if !integrity_orphan && !state.session_can_remove(session) {
         return Vec::new();
     }
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
-        force: true,
-        force_delete_branch: true,
-        purge_orphan: true,
+        force: integrity_orphan,
+        force_delete_branch: integrity_orphan,
+        purge_orphan: integrity_orphan,
     }]
 }
 
@@ -7538,12 +7517,12 @@ mod tests {
                     KeyEventKind::Press,
                 )
             )),
-            Some(AppKey::CtrlShiftX)
+            Some(AppKey::CtrlX)
         );
     }
 
     #[test]
-    fn management_classifier_rejects_extra_modifiers_for_ctrl_shift_x() {
+    fn management_classifier_rejects_extra_modifiers_for_ctrl_x() {
         for modifiers in [
             crate::usecase::terminal_input::Modifiers {
                 control: true,
@@ -10191,19 +10170,26 @@ mod tests {
     }
 
     #[test]
-    fn switch_ctrl_shift_x_purges_only_the_selected_integrity_orphan() {
+    fn switch_ctrl_x_safely_removes_regular_sessions_and_purges_integrity_orphans() {
         let (workspace, session, _) = ids();
         let mut empty_state = AppState::home(workspace, Vec::new());
         assert!(
-            update(&mut empty_state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            update(&mut empty_state, AppEvent::Key(AppKey::CtrlX)).is_empty(),
             "a non-session selection must not become a purge target"
         );
 
         let mut state = AppState::home(workspace, vec![session]);
 
-        assert!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
-            "an available session must not become a purge target"
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: false,
+                force_delete_branch: false,
+                purge_orphan: false,
+            }],
+            "an available session stays on the safe removal path"
         );
         let _ = update(
             &mut state,
@@ -10216,9 +10202,16 @@ mod tests {
                 },
             )]))),
         );
-        assert!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
-            "an ordinary delete failure keeps its confirmation path"
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: false,
+                force_delete_branch: false,
+                purge_orphan: false,
+            }],
+            "an ordinary delete failure keeps the safe removal path"
         );
 
         let _ = update(
@@ -10233,7 +10226,7 @@ mod tests {
             )]))),
         );
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)),
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
             vec![Effect::RemoveSession {
                 workspace,
                 session,
@@ -10245,7 +10238,7 @@ mod tests {
 
         state.sessions.clear();
         assert!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)).is_empty(),
             "a stale selected identity must not become a purge target"
         );
 
@@ -10258,9 +10251,16 @@ mod tests {
                 failure_summary: Some("incoherent projection".to_owned()),
             },
         );
-        assert!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlShiftX)).is_empty(),
-            "an integrity stage without the failed lifecycle must fail closed"
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlX)),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: false,
+                force_delete_branch: false,
+                purge_orphan: false,
+            }],
+            "an integrity stage without the failed lifecycle stays safe"
         );
     }
 
