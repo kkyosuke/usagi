@@ -1,13 +1,13 @@
 ---
 number: 733
 title: "fix(tui): Director の Goal 入力に ANSI SGR が可視表示される回帰を直す"
-status: in-progress
+status: done
 priority: high
 labels: [v2, tui, fix, render]
 dependson: []
 related: [375]
 created_at: 2026-09-05T00:00:00+00:00
-updated_at: 2026-09-05T08:21:32.638382+00:00
+updated_at: 2026-09-05T08:45:56.838224+00:00
 ---
 
 ## 問題
