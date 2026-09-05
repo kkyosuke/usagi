@@ -5252,15 +5252,24 @@ fn start_ipc_accept_loop(
                             drop(stream);
                             continue;
                         }
-                        let Ok(peer_process) = peer_pid(&stream).and_then(|pid| {
-                            let parent = parent_pid(pid)?;
-                            process_group(pid).map(|process_group| (pid, parent, process_group))
-                        }) else {
+                        let Ok(peer_pid) = peer_pid(&stream) else {
                             ErrorLog::record(
                                 "daemon connection refused: peer process identity unavailable",
                             );
                             continue;
                         };
+                        // Parent and process-group identity is authority only
+                        // for credential bootstrap and bearer-less hooks. An
+                        // ordinary same-UID client (including an orphaned
+                        // bootstrap broker reparented to PID 1) needs only its
+                        // kernel-authenticated peer PID to complete hello.
+                        let peer_process = (
+                            peer_pid,
+                            parent_pid(peer_pid).and_then(|parent| {
+                                process_group(peer_pid)
+                                    .map(|process_group| (parent, process_group))
+                            }).ok(),
+                        );
                         let Some(pre_handshake_permit) = pre_handshake.try_admit() else {
                             // No hello has been read, so sending a framed protocol
                             // error here would invent a new wire state. Closing the
@@ -8160,7 +8169,7 @@ fn dispatch_mcp_child_claim(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     data_dir: &Path,
-    peer_process: (u32, u32, u32),
+    peer_process: (u32, Option<(u32, u32)>),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -8182,8 +8191,13 @@ fn dispatch_mcp_child_claim(
             let mut runtime = agent.lock().map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
             })?;
-            let credential =
-                runtime.claim_mcp_child(peer_process.0, peer_process.1, peer_process.2)?;
+            let (parent_pid, process_group) = peer_process.1.ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "MCP child process lineage is unavailable",
+                )
+            })?;
+            let credential = runtime.claim_mcp_child(peer_process.0, parent_pid, process_group)?;
             let session_id = runtime.caller_session(&credential);
             (credential, session_id)
         };
@@ -10193,7 +10207,7 @@ fn dispatch_agent_after_preflight(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
-    peer_process: (u32, u32, u32),
+    peer_process: (u32, Option<(u32, u32)>),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -10220,7 +10234,10 @@ fn dispatch_codex_session_capture(
                 .as_ref()
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
-                .or_else(|| agent.hook_credential(peer_process.0, peer_process.1, peer_process.2))
+                .or_else(|| {
+                    let (parent_pid, process_group) = peer_process.1?;
+                    agent.hook_credential(peer_process.0, parent_pid, process_group)
+                })
                 .map(str::to_owned)
                 .ok_or_else(|| {
                     ProtocolError::new(
@@ -10254,7 +10271,7 @@ fn dispatch_codex_session_capture(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_agent_phase_report_without_a_live_credential_fails_closed
 fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
-    peer_process: (u32, u32, u32),
+    peer_process: (u32, Option<(u32, u32)>),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -10282,7 +10299,10 @@ fn dispatch_agent_phase_report(
                 .as_ref()
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
-                .or_else(|| agent.hook_credential(peer_process.0, peer_process.1, peer_process.2))
+                .or_else(|| {
+                    let (parent_pid, process_group) = peer_process.1?;
+                    agent.hook_credential(peer_process.0, parent_pid, process_group)
+                })
                 .map(str::to_owned)
                 .ok_or_else(|| {
                     ProtocolError::new(

@@ -88,6 +88,10 @@ bootstrap broker と TUI の再接続監視を含む内部 readiness probe も r
 `ClientHello` を送り、server hello または framed protocol refusal を受け取るまで接続を保持する。protocol refusal は endpoint
 への到達を証明するため「稼働中」とし、transport failure だけを「不在」とする。これにより probe 自身が handshake 前切断として
 daemon の failure log を汚さず、別 workspace を正当に serve している endpoint の重複起動も防ぐ。
+accept 時に全 connection が必須とする process metadata は kernel-authenticated peer PID までである。親 PID と process group は
+MCP child claim または bearer を持たない provider hook が Agent lineage を証明するときだけ要求し、取得不能ならその privileged
+request を `ownership_unknown` で拒否する。親 daemon の終了後に PID 1 配下へ reparent された bootstrap broker の readiness hello や、
+通常の同一 UID client を lineage 不在だけで handshake 前に拒否しない。
 
 admit した pre-handshake connection は、prefix read、body read、hello validation、reply write を合わせて 2 秒の単一の
 monotonic completion deadline を持つ。各 socket read / write はその絶対時刻までの残量だけで待つため、partial prefix や

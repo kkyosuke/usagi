@@ -19,6 +19,8 @@ Supervisor tick が未割り当て `Ready` task を即座に escalate する。a
 同じ運用ログには、product 自身の raw socket readiness probe が handshake 前に切断されることで生じる
 `peer process identity unavailable`、明示的に開いた non-Git tenant を Git orphan cleanup に渡す周期エラー、
 低い `RLIMIT_NOFILE` 下での established client capacity 枯渇も記録されている。
+さらに daemon は全 connection で親 PID / process group まで hello 前に必須化しているため、親 daemon の終了後に
+PID 1 配下へ reparent された bootstrap broker は完全な hello を送っても同じ拒否を受ける。
 
 ## 受入条件
 
@@ -26,6 +28,7 @@ Supervisor tick が未割り当て `Ready` task を即座に escalate する。a
 - [x] admission success は予約印を消費し、admission failure は旧版が作った matching escalation からも終端へ収束する。
 - [x] reserve → tick → success/failure と、既存 escalated snapshot の回帰テストがある。
 - [x] daemon の内部 readiness probe は必須 hello を送り、protocol error 応答も endpoint 到達として扱う。
+- [x] 通常 client は peer PID だけで hello を完了でき、lineage を要する privileged request は取得不能時も fail-closed である。
 - [x] 明示的に開いた non-Git tenant の orphan cleanup は Git 候補なしとして成功する。
 - [x] daemon は許可された hard limit まで descriptor soft limit を引き上げ、失敗時は従来上限へ安全に fallback する。
 - [x] 周期 Supervisor reconciliation の同一エラーは状態が変わるまで一度だけ記録する。
