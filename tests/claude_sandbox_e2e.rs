@@ -231,6 +231,19 @@ fn wait_for_broker_socket(data: &Path) -> Vec<PathBuf> {
     panic!("the daemon never published a bootstrap broker endpoint");
 }
 
+fn assert_daemon_log_excludes(data: &Path, excluded: &str) {
+    let entries = fs::read_dir(data.join("logs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .collect::<String>();
+    assert!(
+        !entries.contains(excluded),
+        "daemon log contains {excluded}: {entries}"
+    );
+}
+
 fn retire_bootstrap_brokers(repo: &Path, data: &Path, fixture: &Path) {
     let _ = fs::remove_dir_all(repo);
     let sockets = bootstrap_broker_sockets(data);
@@ -650,6 +663,7 @@ fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
     let mut reply = [0_u8; 1];
     broker.read_exact(&mut reply).unwrap();
     assert_eq!(reply, [b'O']);
+    assert_daemon_log_excludes(&data, "peer process identity unavailable");
     drop(idle);
 
     // Leave the workspace daemonless again so the root-scope client below has to
