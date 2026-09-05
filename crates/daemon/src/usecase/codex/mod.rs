@@ -65,8 +65,8 @@ pub trait CodexProvisioner {
 
 /// Render daemon-owned MCP servers as Codex `-c` overrides.
 ///
-/// Every value is a TOML basic string rendered through `serde_json`'s compatible
-/// string escaping, so a command path cannot create another override.
+/// Caller-supplied values are TOML basic strings rendered through `serde_json`'s
+/// compatible string escaping, so a command path cannot create another override.
 #[must_use]
 pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
     fn assignment(key: &str, value: &str) -> [String; 2] {
@@ -87,6 +87,11 @@ pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
     }
 
     let mut arguments = Vec::new();
+    // Managed Agents must start with the complete tool catalog. Codex otherwise
+    // gives all optional MCP servers one shared one-second grace period; a slow
+    // sibling such as codex_apps can consume it before this local server is
+    // initialized. Zero restores each server's own startup timeout.
+    arguments.extend(assignment("mcp_optional_startup_grace_ms", "0"));
     arguments.extend(assignment(
         "mcp_servers.usagi.command",
         &string(usagi_command),
@@ -96,6 +101,7 @@ pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
         "mcp_servers.usagi.env_vars",
         &array(&["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]),
     ));
+    arguments.extend(assignment("mcp_servers.usagi.required", "true"));
     arguments.extend(assignment(
         "mcp_servers.usagi.default_tools_approval_mode",
         &string("approve"),
@@ -343,11 +349,15 @@ mod wiring_tests {
             arguments,
             [
                 "-c",
+                "mcp_optional_startup_grace_ms = 0",
+                "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi\"",
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
                 "-c",
                 "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\"]",
+                "-c",
+                "mcp_servers.usagi.required = true",
                 "-c",
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
             ]
@@ -363,10 +373,10 @@ mod wiring_tests {
                 .iter()
                 .filter(|value| value.starts_with("mcp_servers."))
                 .count(),
-            4
+            5
         );
         assert_eq!(
-            arguments[1],
+            arguments[3],
             r#"mcp_servers.usagi.command = "/opt/\"usagi""#
         );
     }

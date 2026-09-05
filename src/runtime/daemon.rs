@@ -20488,8 +20488,10 @@ mod tests {
 
         let codex = codex_integration_arguments(command).unwrap();
         assert_eq!(
-            &codex[..10],
+            &codex[..14],
             [
+                "-c",
+                "mcp_optional_startup_grace_ms = 0",
                 "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
                 "-c",
@@ -20497,12 +20499,14 @@ mod tests {
                 "-c",
                 "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\"]",
                 "-c",
+                "mcp_servers.usagi.required = true",
+                "-c",
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
                 "-c",
                 "features.hooks = true",
             ]
         );
-        assert_eq!(codex.len(), 22);
+        assert_eq!(codex.len(), 26);
         for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
             if matches!(event, "Notification" | "PermissionRequest") {
                 assert!(
