@@ -1354,8 +1354,9 @@ session checklist を開く。`↑`/`↓` または `j`/`k` で cursor を移動
 選んだ session の削除を開始する。選択済み候補と `Enter: remove` action は Danger（赤）で描き、未選択候補と
 `Esc: cancel` は破壊的でない表現を保つ。Esc は選択を捨てて元の Switch / Closeup surface に戻る。空一覧、未選択の
 Enter、modal 表示中の背景入力は安全な no-op であり、追加の確認 step はない。modal は開いた snapshot の
-`name`、`root`、`created_at` を entry の incarnation fence として保持する。refresh により一致しない entry は
-request 前に除外するため、同名再作成や一覧更新で別の session を削除しない。
+stable `SessionId` を entry の incarnation fence として保持する。refresh により削除不能または消失した entry は
+request 前に除外するため、同名再作成や一覧更新で別の session を削除しない。`--force` は dirty worktree と
+未マージの session branch の両方を破棄するため、modal 内にも警告を表示する。指定しなければ safe remove である。
 
 modal の共通枠は本文の上下左右に 1 セル分の内側余白を持つ。短い端末でも overlay は上下に Home 背景を1行ずつ残す。
 modal は view ごとに予約した body 行数で描画する。候補数、empty state、result、error、loading、editor の
