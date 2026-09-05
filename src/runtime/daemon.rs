@@ -10,7 +10,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -2562,7 +2562,8 @@ impl DecisionWaker for DeferredDecisionWaker {
 /// safe unavailable error rather than a client-side fallback.
 struct SharedAgent {
     runtime: SharedAgentRuntime,
-    disconnected: SyncSender<ConnectionId>,
+    disconnected: Sender<ConnectionCleanup>,
+    mcp_child_pid: u32,
 }
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 impl AgentTerminalActor for SharedAgent {
@@ -2612,7 +2613,10 @@ impl AgentTerminalActor for SharedAgent {
         // output/input, so serialize it on the daemon-owned cleanup worker
         // instead of leaving one blocked worker (and three socket descriptors)
         // behind for every short-lived client.
-        let _ = self.disconnected.send(connection);
+        let _ = self.disconnected.send(ConnectionCleanup {
+            connection,
+            mcp_child_pid: self.mcp_child_pid,
+        });
     }
 }
 
@@ -3371,34 +3375,64 @@ impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
 /// worker retains the accepted reader, writer, and retirement descriptor until
 /// the mutex is acquired. One daemon-owned consumer bounds the contention and
 /// lets the connection worker close all three descriptors immediately.
+#[derive(Clone, Copy)]
+struct ConnectionCleanup {
+    connection: ConnectionId,
+    mcp_child_pid: u32,
+}
+
+/// Cleanup is intentionally a non-blocking producer path. A bounded channel
+/// cannot bound pending historical disconnects by the live-client limit: worker
+/// slots are reused while the cleanup consumer waits for an owner lock. Making
+/// those workers wait would retain their socket triplets and exhaust the live
+/// connection limit before the consumer can recover.
+fn connection_cleanup_channel() -> (Sender<ConnectionCleanup>, Receiver<ConnectionCleanup>) {
+    mpsc::channel()
+}
+
+const CONNECTION_CLEANUP_BATCH_ITEMS: usize = CLIENT_CONNECTION_LIMIT_CEILING;
+
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=drawer_close_reopen_continues_input_on_the_same_daemon_connection
 fn start_connection_cleanup_worker(
     agent: SharedAgentRuntime,
     terminal: SharedTerminalRuntime,
-    disconnected: Receiver<ConnectionId>,
+    disconnected: Receiver<ConnectionCleanup>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    start_connection_cleanup_worker_with(disconnected, move |connection| {
+    start_connection_cleanup_worker_with(disconnected, move |batch| {
         if let Ok(mut agent) = agent.lock() {
-            AgentTerminalActor::disconnect(&mut *agent, connection);
+            for cleanup in batch {
+                AgentTerminalActor::disconnect(&mut *agent, cleanup.connection);
+                agent.release_mcp_child(cleanup.mcp_child_pid);
+            }
         }
         if let Ok(mut terminal) = terminal.lock() {
-            usagi_daemon::usecase::terminal_owner::TerminalOwner::disconnect(
-                &mut *terminal,
-                connection,
-            );
+            for cleanup in batch {
+                usagi_daemon::usecase::terminal_owner::TerminalOwner::disconnect(
+                    &mut *terminal,
+                    cleanup.connection,
+                );
+            }
         }
     })
 }
 
 fn start_connection_cleanup_worker_with(
-    disconnected: Receiver<ConnectionId>,
-    mut cleanup: impl FnMut(ConnectionId) + Send + 'static,
+    disconnected: Receiver<ConnectionCleanup>,
+    mut cleanup: impl FnMut(&[ConnectionCleanup]) + Send + 'static,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("usagi-connection-cleanup".to_string())
         .spawn(move || {
-            while let Ok(connection) = disconnected.recv() {
-                cleanup(connection);
+            while let Ok(first) = disconnected.recv() {
+                let mut batch = Vec::with_capacity(CONNECTION_CLEANUP_BATCH_ITEMS);
+                batch.push(first);
+                while batch.len() < CONNECTION_CLEANUP_BATCH_ITEMS {
+                    match disconnected.try_recv() {
+                        Ok(next) => batch.push(next),
+                        Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+                cleanup(&batch);
             }
         })
 }
@@ -3652,7 +3686,7 @@ fn spawn_ipc_server(
     // Socket workers only enqueue connection-local ledger cleanup. The single
     // consumer prevents a disconnect storm from retaining one accepted socket
     // triplet per worker while all of them contend on the terminal owners.
-    let (disconnected, disconnects) = mpsc::sync_channel(client_connection_limit());
+    let (disconnected, disconnects) = connection_cleanup_channel();
     let connection_cleanup =
         start_connection_cleanup_worker(Arc::clone(&agent), Arc::clone(&terminal), disconnects)?;
     background_workers.push(start_pr_projection_worker(
@@ -5111,7 +5145,7 @@ fn start_ipc_accept_loop(
     supervisor: SharedSupervisorRuntime,
     fence: Arc<GenerationFence>,
     workers: Arc<ClientWorkers>,
-    disconnected: SyncSender<ConnectionId>,
+    disconnected: Sender<ConnectionCleanup>,
     connection_cleanup: std::thread::JoinHandle<()>,
     mut background_workers: DaemonBackgroundWorkers,
     shutdown: Arc<ShutdownRequest>,
@@ -5241,7 +5275,7 @@ fn start_ipc_accept_loop(
                                 // every early-return and established-connection
                                 // exit; ClientWorkers still owns the handle needed
                                 // to join the finished thread exactly once.
-                                let _completion =
+                                let completion_guard =
                                     ShutdownAcceptedStreamOnDrop(worker_completion);
                                 if let Err(error) = stream.set_nonblocking(false) {
                                     ErrorLog::record(&format!(
@@ -5344,6 +5378,7 @@ fn start_ipc_accept_loop(
                                         SharedAgent {
                                             runtime: agent_owner,
                                             disconnected: connection_disconnected,
+                                            mcp_child_pid: peer_process.0,
                                         },
                                         SharedTerminal(Arc::clone(&terminal)),
                                         visibility,
@@ -5405,13 +5440,18 @@ fn start_ipc_accept_loop(
                                         }
                                     },
                                 );
+                                // No disconnect-side bookkeeping may extend the
+                                // accepted connection's lifetime. Close the reader,
+                                // writer, and retained retirement descriptor before
+                                // touching any daemon-wide runtime.
+                                drop(owner);
+                                drop(reader);
+                                drop(writer);
+                                drop(completion_guard);
                                 if let Some(observer) = metrics_observer
-                                    && let Ok(mut broker) = metrics.lock()
+                                    && let Ok(mut broker) = metrics.try_lock()
                                 {
                                     broker.unsubscribe(observer.subscription());
-                                }
-                                if let Ok(mut agent) = agent_launch.lock() {
-                                    agent.release_mcp_child(peer_process.0);
                                 }
                                 if let Err(error) = result
                                     && !expected_client_disconnect(error.kind())
@@ -25359,22 +25399,82 @@ instructions = "{instructions}"
 
     #[test]
     fn connection_cleanup_worker_drains_disconnects_in_order_before_shutdown() {
-        let (disconnected, disconnects) = mpsc::channel();
+        let (disconnected, disconnects) = connection_cleanup_channel();
         let cleaned = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&cleaned);
-        let worker = start_connection_cleanup_worker_with(disconnects, move |connection| {
-            observed.lock().unwrap().push(connection);
+        let worker = start_connection_cleanup_worker_with(disconnects, move |batch| {
+            observed
+                .lock()
+                .unwrap()
+                .extend(batch.iter().map(|cleanup| cleanup.connection));
         })
         .unwrap();
         let first = ConnectionId::new();
         let second = ConnectionId::new();
 
-        disconnected.send(first).unwrap();
-        disconnected.send(second).unwrap();
+        disconnected
+            .send(ConnectionCleanup {
+                connection: first,
+                mcp_child_pid: 41,
+            })
+            .unwrap();
+        disconnected
+            .send(ConnectionCleanup {
+                connection: second,
+                mcp_child_pid: 42,
+            })
+            .unwrap();
         drop(disconnected);
         worker.join().unwrap();
 
         assert_eq!(*cleaned.lock().unwrap(), vec![first, second]);
+    }
+
+    #[test]
+    fn connection_cleanup_submission_does_not_wait_for_a_stalled_consumer() {
+        let (disconnected, disconnects) = connection_cleanup_channel();
+        let (entered, observed_entry) = mpsc::sync_channel(0);
+        let (release, wait_for_release) = mpsc::sync_channel(0);
+        let mut first_batch = true;
+        let worker = start_connection_cleanup_worker_with(disconnects, move |_| {
+            if first_batch {
+                entered.send(()).unwrap();
+                wait_for_release.recv().unwrap();
+                first_batch = false;
+            }
+        })
+        .unwrap();
+        disconnected
+            .send(ConnectionCleanup {
+                connection: ConnectionId::new(),
+                mcp_child_pid: 40,
+            })
+            .unwrap();
+        observed_entry.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let producer = disconnected.clone();
+        let (completion_notice, submission_complete) = mpsc::channel();
+        let producer_worker = std::thread::spawn(move || {
+            for _ in 0..=client_connection_limit() {
+                producer
+                    .send(ConnectionCleanup {
+                        connection: ConnectionId::new(),
+                        mcp_child_pid: 40,
+                    })
+                    .unwrap();
+            }
+            completion_notice.send(()).unwrap();
+        });
+        let submission = submission_complete.recv_timeout(Duration::from_secs(1));
+
+        release.send(()).unwrap();
+        producer_worker.join().unwrap();
+        drop(disconnected);
+        worker.join().unwrap();
+        assert!(
+            submission.is_ok(),
+            "disconnect notification inherited cleanup backpressure"
+        );
     }
 
     #[test]

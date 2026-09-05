@@ -1284,11 +1284,13 @@ attachment をすべて解放する。input ledger（`input_seq` の期待値）
 connection 上の全 subscription を同時に無効化**する。
 
 server は transport EOF を観測した connection worker から socket を先に解放し、connection-local な
-subscription / input ledger の削除は daemon-owned cleanup worker へ渡して直列化する。ledger の走査が長時間
-稼働した terminal の owner lock と競合しても、切断済み connection の reader / writer / retirement descriptor を
-保持しない。cleanup queue 自体も全 client worker 上限と同じ容量に制限し、consumer が owner lock を待つ場合でも
-queue memory と送信待ち worker の双方を有界にする。daemon shutdown は accept と全 connection worker を止めた後に cleanup queue を drain してから owner
-runtime を破棄するため、非同期化しても connection-local state を取り残さない。
+subscription / input ledger の削除と MCP child credential の解放は daemon-owned cleanup worker へ渡して直列化する。
+通知は owner lock と cleanup queue の容量を待たず、consumer は最大 client worker 上限ずつ batch にして owner lock を
+取得する。live client 上限は再利用される worker slot だけを数え、過去の disconnect 件数を制限しないため、同じ上限の
+bounded queue を使って connection worker へ backpressure を返してはならない。ledger の走査が長時間稼働した terminal の
+owner lock と競合しても、切断済み connection の reader / writer / retirement descriptor と worker slot を保持しない。
+daemon shutdown は accept と全 connection worker を止めた後に cleanup queue を drain してから owner runtime を破棄するため、
+非同期化しても connection-local state を取り残さない。
 
 | client 側の観測 | 共有 connection | 全 subscription | 次に送るもの |
 |---|---|---|---|
