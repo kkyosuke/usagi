@@ -2453,10 +2453,15 @@ impl AgentRuntime {
             ));
         }
         if let Some(replacement_id) = source.superseded_by {
-            let replacement = records
+            let Some(replacement) = records
                 .iter()
                 .find(|record| record.runtime.agent_runtime_id == replacement_id)
-                .expect("validated resume source retains its replacement relation");
+            else {
+                return Err(ProtocolError::new(
+                    ErrorCode::StaleTarget,
+                    "agent resume replacement history was collected",
+                ));
+            };
             debug_assert_eq!(replacement.resumed_from, Some(target.source));
             debug_assert_eq!(replacement.continuation, Some(target.continuation));
             return durable_operation_outcome(replacement);
@@ -7090,6 +7095,47 @@ mod tests {
     }
 
     #[test]
+    fn a_source_tombstone_refuses_replay_after_replacement_history_is_collected() {
+        let mut runtime = runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let launched = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        runtime.exit(&launched.terminal, 0).unwrap();
+        let target = runtime.inventory(workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        let mut snapshot = runtime.coordinator.snapshot();
+        snapshot.records[0].superseded_by = Some(AgentRuntimeId::new());
+        runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+
+        let error = runtime
+            .resume_exact(
+                &OperationId::new().to_string(),
+                &target,
+                &FakeScope(Ok(resolved)),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::StaleTarget);
+        assert_eq!(
+            error.message,
+            "agent resume replacement history was collected"
+        );
+    }
+
+    #[test]
     fn runtime_inventory_states_and_live_fences_cover_every_durable_variant() {
         use super::super::runtime::{ReconcileState, RuntimeState};
 
@@ -7247,6 +7293,11 @@ mod tests {
                 .as_ref()
                 .map(|relation| relation.replacement_runtime)
         );
+        assert!(matches!(
+            second.coordinator.retention().lookup(&initial.terminal),
+            usagi_core::domain::terminal_retention::FinalLookup::Retained(_)
+        ));
+        second.coordinator.snapshot().validate_ownership().unwrap();
 
         let (reconciled_again, interrupted_again) = second
             .coordinator

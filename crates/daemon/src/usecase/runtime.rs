@@ -214,7 +214,7 @@ impl RuntimeStoreSnapshot {
                 !self.generation.terminals.iter().any(|ownership| {
                     ownership.terminal.fences(&record.runtime.terminal)
                         && ownership.process == record.process
-                        && ownership.state == terminal_ownership_state(record.state)
+                        && terminal_ownership_matches(record.state, ownership.state.clone())
                 })
             })
         {
@@ -515,7 +515,7 @@ impl RuntimeCoordinator {
         let records = hydrated_records(snapshot)?;
         let restored_at = retention.now();
         for record in records.values() {
-            if record.state == RuntimeState::Exited {
+            if matches!(record.state, RuntimeState::Exited | RuntimeState::Reclaimed) {
                 let mut final_record = RetainedFinal::new(
                     record.runtime.terminal.clone(),
                     TerminalKind::Agent,
@@ -603,9 +603,9 @@ impl RuntimeCoordinator {
         )
     }
 
-    /// Reserves a replacement runtime while superseding interrupted runtime
-    /// incarnations in the same durable snapshot. Exited/reclaimed sources stay
-    /// as history; only `identity_unknown` sources release occupied capacity.
+    /// Reserves a replacement runtime while superseding a non-live runtime
+    /// incarnation in the same durable snapshot. The source becomes bounded
+    /// history, and states that still occupy capacity release their slot.
     pub fn resume_with_semantic(
         &mut self,
         request: &LaunchRequest,
@@ -776,18 +776,54 @@ impl RuntimeCoordinator {
             // A replaced source is the least valuable history in its lineage:
             // it keeps its minimum TTL but is collected before anything else.
             let source_terminal = record.runtime.terminal.clone();
-            if matches!(
+            let reclaimed = matches!(
                 record.state,
                 RuntimeState::Interrupted
+                    | RuntimeState::Sleeping
                     | RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
-            ) {
+            );
+            if reclaimed {
                 record.state = RuntimeState::Reclaimed;
                 if let Some(provider) = &mut record.provider_resume {
                     provider.last_known_status = ProviderResumeStatus::Exited;
                     provider.last_known_phase = Some(ProviderResumePhase::Ended);
                 }
             }
-            self.retention.mark_superseded(&source_terminal);
+            if reclaimed {
+                // Exact resume is the explicit acknowledgement that closes this
+                // already non-live incarnation. Keep generation ownership in
+                // lock-step with the Reclaimed runtime record so later bounded
+                // GC can forget both halves atomically.
+                self.generation
+                    .resolve_orphan(&source_terminal, ProcessObservation::Unknown, true)
+                    .map_err(RuntimeError::Generation)?;
+                if record.process.is_none() {
+                    self.generation
+                        .forget_resolved_process(&source_terminal)
+                        .map_err(RuntimeError::Generation)?;
+                }
+            }
+            if !self.retention.mark_superseded(&source_terminal)
+                && matches!(
+                    self.retention.lookup(&source_terminal),
+                    FinalLookup::Unknown
+                )
+            {
+                // A restart-interrupted source has no in-memory final ledger
+                // entry. Once a successful resume reclaims it, import the
+                // bounded tombstone so the durable source can age out exactly
+                // like a normally exited source instead of living forever. An
+                // existing eviction marker remains authoritative and is never
+                // resurrected by resume.
+                let mut final_record = RetainedFinal::new(
+                    source_terminal.clone(),
+                    TerminalKind::Agent,
+                    RESTORED_FINAL_BYTES,
+                    self.retention.now(),
+                );
+                final_record.superseded = true;
+                self.retention.import_existing(final_record);
+            }
             self.retention.set_pinned(&source_terminal, false);
         }
         self.records.insert(
@@ -888,6 +924,7 @@ impl RuntimeCoordinator {
                 ProcessObservation::Unknown,
                 true,
             );
+            let _ = self.generation.forget_resolved_process(&runtime.terminal);
         }
         let record = self
             .record_mut(runtime)
@@ -1010,7 +1047,7 @@ impl RuntimeCoordinator {
     }
 
     /// Applies the aggregate retention authority's decisions to this owner:
-    /// every exited runtime whose final the authority collected loses its
+    /// every terminal runtime whose final the authority collected loses its
     /// durable record and its output journal, and the store is rewritten once.
     ///
     /// Only a final the authority evicted with a typed marker is removed, so a
@@ -1020,10 +1057,12 @@ impl RuntimeCoordinator {
     /// bounded by the collection batch, and a failed store write leaves the
     /// removal to converge on a later pass or the next startup import.
     pub fn collect_garbage(&mut self, store: &mut dyn RuntimeStore) -> usize {
-        let collected: Vec<(String, TerminalRef)> = self
+        let candidates: Vec<(String, TerminalRef)> = self
             .records
             .iter()
-            .filter(|(_, record)| record.state == RuntimeState::Exited)
+            .filter(|(_, record)| {
+                matches!(record.state, RuntimeState::Exited | RuntimeState::Reclaimed)
+            })
             .filter(|(_, record)| {
                 matches!(
                     self.retention.lookup(&record.runtime.terminal),
@@ -1032,14 +1071,22 @@ impl RuntimeCoordinator {
             })
             .map(|(key, record)| (key.clone(), record.runtime.terminal.clone()))
             .collect();
-        for (key, terminal) in &collected {
+        let mut collected = 0;
+        for (key, terminal) in &candidates {
+            if self.generation.forget_terminal(terminal).is_err() {
+                // The generation half is the safety fence. An inconsistent or
+                // unexpectedly live owner keeps the runtime record for a later
+                // reconcile instead of turning GC into a process panic.
+                continue;
+            }
             self.records.remove(key);
             self.terminals.forget(terminal);
+            collected += 1;
         }
-        if !collected.is_empty() {
+        if collected != 0 {
             let _ = self.persist(store);
         }
-        collected.len()
+        collected
     }
 
     /// Terminates and forgets every Agent runtime owned by one managed session.
@@ -1100,6 +1147,9 @@ impl RuntimeCoordinator {
                 self.generation
                     .resolve_orphan(&record.runtime.terminal, ProcessObservation::Gone, false)
                     .map_err(RuntimeError::Generation)?;
+                self.generation
+                    .forget_resolved_process(&record.runtime.terminal)
+                    .map_err(RuntimeError::Generation)?;
                 let retained = self.record_mut(&record.runtime)?;
                 retained.state = RuntimeState::Reclaimed;
                 retained.process = None;
@@ -1119,6 +1169,9 @@ impl RuntimeCoordinator {
         for (_, record) in &targets {
             self.generation
                 .resolve_orphan(&record.runtime.terminal, ProcessObservation::Unknown, true)
+                .map_err(RuntimeError::Generation)?;
+            self.generation
+                .forget_resolved_process(&record.runtime.terminal)
                 .map_err(RuntimeError::Generation)?;
             let retained = self.record_mut(&record.runtime)?;
             retained.state = RuntimeState::Reclaimed;
@@ -1196,6 +1249,9 @@ impl RuntimeCoordinator {
             self.generation
                 .resolve_orphan(&record.runtime.terminal, ProcessObservation::Unknown, true)
                 .map_err(RuntimeError::Generation)?;
+            self.generation
+                .forget_resolved_process(&record.runtime.terminal)
+                .map_err(RuntimeError::Generation)?;
             let retained = self.records.get_mut(&key).expect("selected runtime exists");
             retained.state = RuntimeState::Exited;
             retained.process = None;
@@ -1242,6 +1298,9 @@ impl RuntimeCoordinator {
             }
             self.generation
                 .resolve_orphan(&record.runtime.terminal, ProcessObservation::Unknown, true)
+                .map_err(RuntimeError::Generation)?;
+            self.generation
+                .forget_resolved_process(&record.runtime.terminal)
                 .map_err(RuntimeError::Generation)?;
             let retained = self.records.get_mut(&key).expect("selected runtime exists");
             retained.state = RuntimeState::Sleeping;
@@ -1322,6 +1381,9 @@ impl RuntimeCoordinator {
         self.generation
             .resolve_orphan(&runtime.terminal, ProcessObservation::Gone, false)
             .map_err(RuntimeError::Generation)?;
+        self.generation
+            .forget_resolved_process(&runtime.terminal)
+            .map_err(RuntimeError::Generation)?;
         let record = self.record_mut(runtime)?;
         record.state = RuntimeState::SpawnFailed;
         record.outcome = DurableOperationOutcome::SpawnUnavailable;
@@ -1352,6 +1414,9 @@ impl RuntimeCoordinator {
         let acknowledged = matches!(observation, ProcessObservation::Unknown);
         self.generation
             .resolve_orphan(&runtime.terminal, observation, acknowledged)
+            .map_err(RuntimeError::Generation)?;
+        self.generation
+            .forget_resolved_process(&runtime.terminal)
             .map_err(RuntimeError::Generation)?;
         let record = self.record_mut(runtime)?;
         record.state = RuntimeState::SpawnFailed;
@@ -1819,6 +1884,11 @@ fn terminal_ownership_state(state: RuntimeState) -> TerminalState {
     }
 }
 
+fn terminal_ownership_matches(state: RuntimeState, ownership: TerminalState) -> bool {
+    ownership == terminal_ownership_state(state)
+        || (state == RuntimeState::Reclaimed && ownership == TerminalState::Terminated)
+}
+
 #[inline(never)]
 fn hydrated_records(
     snapshot: RuntimeStoreSnapshot,
@@ -1858,6 +1928,7 @@ fn hydrated_records(
     // its retired source can live in a foreign shard. Rebuild that derived
     // back-reference only across that generation boundary; a one-sided relation
     // inside one atomic owner shard remains corruption and fails closed.
+    let mut replacement_sources = std::collections::BTreeSet::new();
     let source_backrefs = records
         .values()
         .filter_map(|record| {
@@ -1874,11 +1945,18 @@ fn hydrated_records(
         .collect::<Vec<_>>();
     for (source_id, replacement_id, replacement_generation, continuation, scope) in source_backrefs
     {
+        if !replacement_sources.insert(source_id) {
+            return Err(RuntimeSnapshotError::ResumeRelation);
+        }
         let Some(source) = records
             .values_mut()
             .find(|candidate| candidate.resume_source == Some(source_id))
         else {
-            return Err(RuntimeSnapshotError::ResumeRelation);
+            // `resumed_from` is historical evidence, not ownership authority.
+            // Its retired source shard may already have passed bounded
+            // retention; keep the exact source id as a tombstone without
+            // pinning that shard or refusing startup.
+            continue;
         };
         if source.continuation != continuation || source.launch.request.scope != scope {
             return Err(RuntimeSnapshotError::ResumeRelation);
@@ -1903,7 +1981,9 @@ fn hydrated_records(
                 .values()
                 .find(|candidate| candidate.runtime.agent_runtime_id == replacement_id)
             else {
-                return Err(RuntimeSnapshotError::ResumeRelation);
+                // The source remains a no-double-resume tombstone even after
+                // bounded retention collects the replacement history.
+                continue;
             };
             if replacement.resumed_from != Some(source_id)
                 || replacement.continuation != record.continuation
@@ -1930,9 +2010,10 @@ fn validate_acyclic_resume_lineage(
             let Some(replacement_id) = cursor.superseded_by else {
                 break;
             };
-            cursor = records
-                .get(&replacement_id.as_str())
-                .expect("validated replacement remains present");
+            let Some(replacement) = records.get(&replacement_id.as_str()) else {
+                break;
+            };
+            cursor = replacement;
         }
         acyclic.extend(seen);
     }
@@ -2495,6 +2576,17 @@ mod tests {
                 .superseded_by,
             Some(foreign_replacement.runtime.agent_runtime_id)
         );
+        let mut conflicting_source = lineage_source.clone();
+        conflicting_source.superseded_by = Some(AgentRuntimeId::new());
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![conflicting_source, foreign_replacement.clone()],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ResumeRelation
+        );
         let (competing_runtime, competing_operation) = refs(&request);
         let mut competing_replacement = DurableRuntimeRecord {
             runtime: competing_runtime,
@@ -2525,8 +2617,10 @@ mod tests {
                 records: vec![unknown_replacement],
                 generation: GenerationSnapshot::default(),
             })
-            .unwrap_err(),
-            RuntimeSnapshotError::ResumeRelation
+            .unwrap()
+            .len(),
+            1,
+            "a superseded source remains a no-double-resume tombstone after replacement GC"
         );
         let mut missing_replacement_backref = replacement.clone();
         missing_replacement_backref.resumed_from = None;
@@ -2606,8 +2700,10 @@ mod tests {
                 records: vec![broken_relation],
                 generation: GenerationSnapshot::default(),
             })
-            .unwrap_err(),
-            RuntimeSnapshotError::ResumeRelation
+            .unwrap()
+            .len(),
+            1,
+            "a replacement may outlive its bounded source shard"
         );
 
         let mut legacy = record;
@@ -3098,7 +3194,7 @@ mod tests {
     }
 
     #[test]
-    fn sleeping_an_agent_releases_its_slot_and_retains_resume_metadata() {
+    fn sleeping_an_agent_releases_its_slot_and_becomes_bounded_resume_history() {
         let request = request();
         let (runtime, fence) = refs(&request);
         let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
@@ -3157,6 +3253,37 @@ mod tests {
             ),
             Ok(0)
         );
+
+        let (replacement, replacement_fence) = refs(&request);
+        coordinator
+            .resume_with_semantic(
+                &request,
+                replacement.clone(),
+                replacement_fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver::default(),
+                &mut store,
+                &mut spawner,
+                None,
+                "resume-sleeping".into(),
+                std::slice::from_ref(&runtime),
+            )
+            .unwrap();
+
+        let snapshot = coordinator.snapshot();
+        let source = snapshot
+            .records
+            .iter()
+            .find(|record| record.runtime == runtime)
+            .unwrap();
+        assert_eq!(source.state, RuntimeState::Reclaimed);
+        assert_eq!(source.superseded_by, Some(replacement.agent_runtime_id));
+        assert!(matches!(
+            coordinator.retention().lookup(&runtime.terminal),
+            FinalLookup::Retained(_)
+        ));
+        assert_eq!(coordinator.occupied_slots(), 1);
+        snapshot.validate_ownership().unwrap();
     }
 
     #[test]
@@ -4165,6 +4292,53 @@ mod tests {
     }
 
     #[test]
+    fn resume_does_not_resurrect_a_source_final_already_marked_evicted() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
+        let request = request();
+        let (source, source_fence) = refs(&request);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut coordinator,
+            &request,
+            source.clone(),
+            source_fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        coordinator.exit(&source, 0, &mut store).unwrap();
+        clock.advance(1000);
+        retention.collect();
+        assert!(matches!(
+            retention.lookup(&source.terminal),
+            FinalLookup::Evicted(_)
+        ));
+
+        let (replacement, replacement_fence) = refs(&request);
+        coordinator
+            .resume_with_semantic(
+                &request,
+                replacement,
+                replacement_fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver::default(),
+                &mut store,
+                &mut spawner,
+                None,
+                "resume-evicted".into(),
+                std::slice::from_ref(&source),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            retention.lookup(&source.terminal),
+            FinalLookup::Evicted(_)
+        ));
+    }
+
+    #[test]
     fn an_agent_final_a_client_is_draining_is_protected_until_it_detaches() {
         let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
         let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
@@ -4256,5 +4430,49 @@ mod tests {
         let mut store = Store::default();
         assert_eq!(restarted.collect_garbage(&mut store), 1);
         assert!(restored.lookup(&runtime.terminal).marker().is_some());
+    }
+
+    #[test]
+    fn a_reclaimed_resume_source_ages_out_without_leaving_generation_ownership() {
+        let (retention, _clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention);
+        let mut store = Store::default();
+        let runtime = run_agent(&mut coordinator, &mut store, b"superseded");
+        let mut snapshot = coordinator.snapshot();
+        snapshot.records[0].state = RuntimeState::Reclaimed;
+        snapshot.records[0].superseded_by = Some(AgentRuntimeId::new());
+        snapshot.generation.terminals[0].state = terminal_ownership_state(RuntimeState::Reclaimed);
+
+        let (restored, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut restarted =
+            RuntimeCoordinator::hydrate_with_retention(snapshot, 8, 64, 1, restored.clone())
+                .unwrap();
+        let imported = restored.lookup(&runtime.terminal).retained().unwrap();
+        assert!(imported.superseded);
+
+        clock.advance(1000);
+        restored.collect();
+        assert_eq!(restarted.collect_garbage(&mut store), 1);
+        let collected = restarted.snapshot();
+        assert!(collected.records.is_empty());
+        assert!(collected.generation.terminals.is_empty());
+        collected.validate_ownership().unwrap();
+    }
+
+    #[test]
+    fn garbage_collection_keeps_a_record_while_generation_ownership_is_live() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let runtime = run_agent(&mut coordinator, &mut store, b"still-owned");
+        coordinator
+            .generation
+            .record_spawn(&runtime.terminal, process())
+            .unwrap();
+        clock.advance(1000);
+        retention.collect();
+
+        assert_eq!(coordinator.collect_garbage(&mut store), 0);
+        assert_eq!(coordinator.snapshot().records.len(), 1);
     }
 }

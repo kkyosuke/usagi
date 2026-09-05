@@ -140,7 +140,7 @@ impl std::fmt::Display for AdoptError {
                 owner: Some(owner),
             } => write!(
                 formatter,
-                "another daemon already owns this workspace ({workspace}, pid {owner})"
+                "another daemon already owns this workspace ({workspace}; unverified owner pid hint {owner})"
             ),
             Self::Owned {
                 workspace,
@@ -162,8 +162,8 @@ impl std::error::Error for AdoptError {}
 
 impl From<AdoptError> for io::Error {
     /// The composition root speaks `io::Error`, and every adoption failure is
-    /// safe to show: the refusals name a workspace and a pid, and the storage
-    /// one names paths.
+    /// safe to show: the refusals name a workspace and an explicitly unverified
+    /// pid hint, and the storage one names paths.
     fn from(error: AdoptError) -> Self {
         Self::other(error.to_string())
     }
@@ -850,7 +850,10 @@ mod tests {
                 owner: Some(4242)
             }
         );
-        assert!(error.to_string().contains("pid 4242"), "{error}, {error:?}");
+        assert_eq!(
+            error.to_string(),
+            "another daemon already owns this workspace (/workspace/two; unverified owner pid hint 4242)"
+        );
         // The composition root speaks `io::Error`; the message survives.
         assert_eq!(
             io::Error::from(error.clone()).to_string(),

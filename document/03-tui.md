@@ -2247,6 +2247,12 @@ saved 表示順（[workspace open 時の two-source reconciliation](#workspace-o
 持つ lineage はその位置を保ち、local state に無い lineage だけが決定的な順序でその後に続く。したがって local state を
 失っても inventory から安全に再構成でき、provider ID を推測しない。
 
+sidebar の Agent 件数と Garden のうさぎは、この reducer が pane registry に残した exact
+`(AgentContinuationRef, TerminalRef)` 集合を membership の正本にする。raw inventory に interrupted record があっても、
+live lineage、dismissal、workspace / allowed session、session identity の fence で tab が落ちた場合は件数にも加えない。
+したがって表示された interrupted Agent には必ず選択・resume・Remove / Keep の操作経路がある。daemon status modal は
+診断面なので raw inventory row を引き続き表示できるが、actionable な sidebar / Garden membership には使わない。
+
 ### 明示 resume の検証
 
 resume は利用者の明示操作だけが発火する。tab click、next / previous、Garden のうさぎ選択、または選択済み tab の

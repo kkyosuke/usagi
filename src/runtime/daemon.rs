@@ -11008,7 +11008,7 @@ struct IpcReady<'a> {
     /// The single-instance lock this daemon holds. Publication reads the locked
     /// inode from it so the custody supervisor can prove, on every tick, that
     /// this process is still the singleton for `data_dir`.
-    instance_lock: &'a FileInstanceLock,
+    instance_lock: &'a dyn InstanceLockCustody,
     build: BuildIdentity,
     shutdown: Arc<ShutdownRequest>,
     published: AtomicBool,
@@ -11023,7 +11023,7 @@ impl<'a> IpcReady<'a> {
     fn new(
         data_dir: &'a Path,
         workspace_root: &'a Path,
-        instance_lock: &'a FileInstanceLock,
+        instance_lock: &'a dyn InstanceLockCustody,
     ) -> Self {
         Self {
             data_dir,
@@ -13367,6 +13367,15 @@ struct FileInstanceLock {
     path: PathBuf,
     held: RefCell<Option<std::fs::File>>,
 }
+
+/// The descriptor identity behind the singleton guard. Normally this is the
+/// data-home lock itself. When the selected workspace is the data home's parent
+/// (the default home-directory case), the workspace fence and singleton lock
+/// are the same inode and one held descriptor supplies both invariants.
+trait InstanceLockCustody {
+    fn locked_inode(&self) -> Option<NodeIdentity>;
+}
+
 impl FileInstanceLock {
     /// Identity of the inode this process locked, read from the held descriptor
     /// rather than the pathname, so a later replacement of the pathname cannot
@@ -13379,6 +13388,12 @@ impl FileInstanceLock {
         let held = self.held.borrow();
         let metadata = held.as_ref()?.metadata().ok()?;
         Some(node_identity(&metadata))
+    }
+}
+
+impl InstanceLockCustody for FileInstanceLock {
+    fn locked_inode(&self) -> Option<NodeIdentity> {
+        Self::locked_inode(self)
     }
 }
 /// The workspace-scoped fence: an exclusive `flock` on
@@ -13402,6 +13417,77 @@ struct FileWorkspaceFence {
     /// handshake, which has its own deadline, so it refuses quickly instead.
     patience: Duration,
     held: RefCell<Option<std::fs::File>>,
+}
+
+/// Startup's singleton guard. Distinct nodes use the ordinary data-home lock;
+/// a path alias to the workspace fence reuses its already-acquired descriptor.
+/// Opening the aliased path a second time would make `flock` contend with this
+/// process's own descriptor on Unix and reject every start from `$HOME`.
+enum ProcessInstanceLock<'a> {
+    Independent(FileInstanceLock),
+    WorkspaceAlias {
+        path: PathBuf,
+        workspace: &'a FileWorkspaceFence,
+    },
+}
+
+fn process_instance_lock(path: PathBuf, workspace: &FileWorkspaceFence) -> ProcessInstanceLock<'_> {
+    if lock_paths_alias(&path, &workspace.path) {
+        ProcessInstanceLock::WorkspaceAlias { path, workspace }
+    } else {
+        ProcessInstanceLock::Independent(FileInstanceLock {
+            path,
+            held: RefCell::new(None),
+        })
+    }
+}
+
+fn lock_paths_alias(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    if left.file_name() != right.file_name() {
+        return false;
+    }
+    match (
+        left.parent().and_then(|parent| parent.canonicalize().ok()),
+        right.parent().and_then(|parent| parent.canonicalize().ok()),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        (None, _) | (_, None) => false,
+    }
+}
+
+impl InstanceLockCustody for ProcessInstanceLock<'_> {
+    fn locked_inode(&self) -> Option<NodeIdentity> {
+        match self {
+            Self::Independent(lock) => lock.locked_inode(),
+            Self::WorkspaceAlias { workspace, .. } => {
+                let held = workspace.held.borrow();
+                let metadata = held.as_ref()?.metadata().ok()?;
+                Some(node_identity(&metadata))
+            }
+        }
+    }
+}
+
+impl InstanceLock for ProcessInstanceLock<'_> {
+    fn acquire(&self) -> std::io::Result<bool> {
+        match self {
+            Self::Independent(lock) => lock.acquire(),
+            Self::WorkspaceAlias { path, workspace } => {
+                let held = workspace.held.borrow();
+                let file = held.as_ref().ok_or_else(|| {
+                    std::io::Error::other(
+                        "daemon workspace fence must be acquired before its aliased instance lock",
+                    )
+                })?;
+                verify_private_lock_path(&workspace.path, file, "aliased daemon instance lock")?;
+                verify_private_lock_path(path, file, "aliased daemon instance lock")?;
+                Ok(true)
+            }
+        }
+    }
 }
 
 /// How long a `serve` start waits for a departing owner to release a workspace.
@@ -13754,14 +13840,13 @@ fn run_inner(
             // The workspace matters as much as the data home: a daemon binds the
             // workspace its startup directory names, and a supervisor's default
             // directory is the user's home (systemd user units) or `/` (launchd) —
-            // neither of which is the workspace anyone meant. Worse, when the
-            // workspace resolves to the home directory, the workspace fence
-            // (`<workspace>/.usagi/daemon/daemon.lock`) and the single-instance
-            // lock (`<data-dir>/daemon/daemon.lock`) name the same file under the
-            // default `~/.usagi` data home, and the daemon refuses its own start
-            // as "already running". `lifecycle_command` already pins the
-            // directory for a cold start from a client; a supervised start needs
-            // the same pin.
+            // neither of which is the workspace anyone meant. When the workspace
+            // resolves to the home directory, both logical fences name the same
+            // inode under the default `~/.usagi` data home and deliberately share
+            // one held descriptor. That makes the start safe, but it still binds
+            // the daemon to the wrong workspace. `lifecycle_command` already pins
+            // the directory for a cold start from a client; a supervised start
+            // needs the same pin.
             let data_home = paths::DataHome::from_selected(&data_dir, paths::runtime_mode());
             let workspace = bound_workspace_root(&daemon_dir, &std::env::current_dir()?)?;
             let path = install_service(&std::env::current_exe()?, &data_home, &workspace)?;
@@ -13823,10 +13908,6 @@ fn run_inner(
         data_dir: &data_dir,
         launcher: &launcher,
     };
-    let lock = FileInstanceLock {
-        path: daemon_dir.join("daemon.lock"),
-        held: RefCell::new(None),
-    };
     // One resolution of the workspace identity for the whole process: the fence
     // that guards the workspace and the runtime that owns it must key on the same
     // path, or a daemon could fence one workspace and then take authority over
@@ -13840,6 +13921,7 @@ fn run_inner(
         patience: WORKSPACE_FENCE_PATIENCE,
         held: RefCell::new(None),
     };
+    let lock = process_instance_lock(daemon_dir.join("daemon.lock"), &workspace);
     let ready = IpcReady::new(&data_dir, &workspace_root, &lock);
     let shutdown = SignalShutdown::new(Arc::clone(&ready.shutdown));
     let census = DurableResourceCensus {
@@ -15050,8 +15132,8 @@ fn lifecycle_command(exe: &Path, args: &[&str], opened: Option<PathBuf>) -> std:
     child
         .args(args)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     if let Some(opened) = opened {
         child.current_dir(opened);
     }
@@ -15070,11 +15152,26 @@ fn run_lifecycle_with(
     command: &str,
     workspace: &Path,
 ) -> std::io::Result<()> {
-    let status = lifecycle_command(exe, args, Some(workspace.to_path_buf())).status()?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| std::io::Error::other(format!("daemon {command} failed")))
+    let output = lifecycle_command(exe, args, Some(workspace.to_path_buf())).output()?;
+    output.status.success().then_some(()).ok_or_else(|| {
+        std::io::Error::other(lifecycle_failure_message(
+            command,
+            &output.stderr,
+            &output.stdout,
+        ))
+    })
+}
+
+fn lifecycle_failure_message(command: &str, stderr: &[u8], stdout: &[u8]) -> String {
+    let detail = [stderr, stdout]
+        .into_iter()
+        .map(|bytes| String::from_utf8_lossy(bytes))
+        .map(|message| message.trim().to_owned())
+        .find(|message| !message.is_empty());
+    detail.map_or_else(
+        || format!("daemon {command} failed"),
+        |detail| format!("daemon {command} failed: {detail}"),
+    )
 }
 /// Enters the cross-process bootstrap section under a bounded wait.
 ///
@@ -16472,6 +16569,74 @@ mod tests {
         drop(owner);
         let third = workspace_fence(workspace.path(), 6262);
         assert_eq!(third.acquire().unwrap(), WorkspaceFenceOutcome::Acquired);
+    }
+
+    #[test]
+    fn a_home_workspace_reuses_its_fence_as_the_instance_lock() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        ensure_private_dir_all(&home.path().join(".usagi/daemon")).unwrap();
+        let workspace = workspace_fence(home.path(), 4242);
+        let instance_path = home.path().join(".usagi/daemon/daemon.lock");
+        let instance = process_instance_lock(instance_path.clone(), &workspace);
+
+        assert!(matches!(
+            &instance,
+            ProcessInstanceLock::WorkspaceAlias { .. }
+        ));
+        assert_eq!(
+            instance.acquire().unwrap_err().to_string(),
+            "daemon workspace fence must be acquired before its aliased instance lock"
+        );
+        assert_eq!(
+            workspace.acquire().unwrap(),
+            WorkspaceFenceOutcome::Acquired
+        );
+        assert!(instance.acquire().unwrap());
+        assert!(instance.locked_inode().is_some());
+
+        let alias = home.path().join("daemon-alias");
+        std::os::unix::fs::symlink(home.path().join(".usagi/daemon"), &alias).unwrap();
+        assert!(lock_paths_alias(&alias.join("daemon.lock"), &instance_path));
+        let replaced_alias = process_instance_lock(alias.join("daemon.lock"), &workspace);
+        assert!(matches!(
+            &replaced_alias,
+            ProcessInstanceLock::WorkspaceAlias { .. }
+        ));
+        std::fs::remove_file(&alias).unwrap();
+        assert!(replaced_alias.acquire().is_err());
+        assert!(!lock_paths_alias(
+            &home.path().join(".usagi/daemon/other.lock"),
+            &instance_path
+        ));
+        assert!(!lock_paths_alias(
+            &home.path().join("missing/daemon.lock"),
+            &instance_path
+        ));
+
+        let independent_path = home.path().join(".usagi/local/daemon/daemon.lock");
+        ensure_private_dir_all(independent_path.parent().unwrap()).unwrap();
+        let independent = process_instance_lock(independent_path, &workspace);
+        assert!(matches!(&independent, ProcessInstanceLock::Independent(_)));
+        assert!(independent.acquire().unwrap());
+        assert!(independent.locked_inode().is_some());
+        if let ProcessInstanceLock::Independent(lock) = &independent {
+            assert!(InstanceLockCustody::locked_inode(lock).is_some());
+        }
+
+        // The shared descriptor still excludes another process description; it
+        // only prevents this process from contending with itself.
+        let mut second = workspace_fence(home.path(), 5252);
+        second.patience = Duration::ZERO;
+        assert_eq!(
+            second.acquire().unwrap(),
+            WorkspaceFenceOutcome::Held {
+                workspace: paths::canonical_workspace_root(home.path())
+                    .unwrap()
+                    .display()
+                    .to_string(),
+                owner: Some(4242),
+            }
+        );
     }
 
     #[test]
@@ -18129,6 +18294,26 @@ mod tests {
         assert_eq!(
             restart.get_args().collect::<Vec<_>>(),
             vec!["daemon", "restart"]
+        );
+    }
+
+    #[test]
+    fn a_lifecycle_failure_preserves_the_childs_diagnostic() {
+        assert_eq!(
+            lifecycle_failure_message(
+                "start",
+                b"error: workspace fence is already held\n",
+                b"ignored fallback\n",
+            ),
+            "daemon start failed: error: workspace fence is already held"
+        );
+        assert_eq!(
+            lifecycle_failure_message("restart", b"", b""),
+            "daemon restart failed"
+        );
+        assert_eq!(
+            lifecycle_failure_message("start", b"", b"refused on stdout\n"),
+            "daemon start failed: refused on stdout"
         );
     }
 
