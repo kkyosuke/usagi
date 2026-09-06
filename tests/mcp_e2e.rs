@@ -15,8 +15,11 @@ use fs2::FileExt;
 use serde_json::json;
 use support::mcp::{FixtureArgv, McpHarness};
 use usagi_core::domain::{
-    agent::{AgentProfileId, CallerRef, ModelSelector},
-    id::{AgentId, OperationId, UserDecisionId, WorkspaceId},
+    agent::{AgentProfileId, AgentResumeTarget, CallerRef, ModelSelector},
+    id::{
+        AgentContinuationRef, AgentId, AgentResumeSourceId, AgentRuntimeId, OperationId, SessionId,
+        UserDecisionId, WorkspaceId, WorktreeId,
+    },
     role::RoleId,
     user_decision::UserDecision,
 };
@@ -393,9 +396,11 @@ fn production_session_pr_resolves_the_authenticated_caller_when_name_is_omitted(
     assert_eq!(current["name"], "mcp-caller");
     assert_eq!(current["pr"], json!([]));
 
-    // Credential injection does not change the explicit-name branch.
-    let explicit = tool_text(&mcp.tool("session_pr", &json!({"name":"named-pr-target"})));
-    assert_eq!(explicit["name"], "named-pr-target");
+    // Once the request comes from an Agent, an explicit name is constrained to
+    // sessions that exact caller created.
+    let explicit = mcp.tool("session_pr", &json!({"name":"named-pr-target"}));
+    assert_eq!(explicit["error"]["code"], -32603, "{explicit}");
+    assert!(has_permission_denied(&explicit));
 }
 
 #[test]
@@ -434,6 +439,9 @@ printf '%s\n%s\n%s\n' \
     assert_eq!(delegated["name"], "brief-target");
     assert!(delegated["run_id"].is_string());
     assert!(delegated["terminal"].is_object());
+    let returned_sessions = delegated["created"]["sessions"].as_array().unwrap();
+    assert_eq!(returned_sessions.len(), 1);
+    assert_eq!(returned_sessions[0]["name"], "brief-target");
     assert!(
         mcp.workspace()
             .join(".usagi/sessions/brief-target/.git")
@@ -1112,6 +1120,10 @@ enabled = false
         &json!({"number":1, "name":"queued-one", "role":"coder"}),
     );
     assert!(first.get("error").is_none(), "{first}");
+    let first = tool_text(&first);
+    let returned_sessions = first["created"]["sessions"].as_array().unwrap();
+    assert_eq!(returned_sessions.len(), 1);
+    assert_eq!(returned_sessions[0]["name"], "queued-one");
     let second = mcp.tool(
         "session_delegate_issue",
         &json!({"number":2, "name":"queued-two", "role":"coder"}),
@@ -1130,6 +1142,17 @@ enabled = false
 fn tool_text(response: &serde_json::Value) -> serde_json::Value {
     assert!(response.get("error").is_none(), "{response}");
     serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+fn has_permission_denied(response: &serde_json::Value) -> bool {
+    response["error"]["message"]
+        .as_str()
+        .is_some_and(|message| {
+            message
+                .replace('_', "")
+                .to_ascii_lowercase()
+                .contains("permissiondenied")
+        })
 }
 
 fn write_session_role_catalog(mcp: &McpHarness, id: &str, summary: &str, instructions: &str) {
@@ -1705,7 +1728,8 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
-fn production_dispatch_into_an_existing_session_does_not_reparent_it() {
+#[allow(clippy::too_many_lines)] // One authenticated boundary covers every session-targeting MCP family.
+fn production_agent_session_tools_only_reach_sessions_created_by_the_caller() {
     let mut mcp = McpHarness::start();
     write_session_role_catalog(&mcp, "coder", "Dispatch coder", "DISPATCH_ROLE_SECRET");
     let created = mcp.tool(
@@ -1713,6 +1737,19 @@ fn production_dispatch_into_an_existing_session_does_not_reparent_it() {
         &json!({"name":"existing-top-level", "role":"coder"}),
     );
     assert!(created.get("error").is_none(), "{created}");
+    let top_level = tool_text(&mcp.tool("session_list", &json!({})));
+    let workspace_id: WorkspaceId =
+        serde_json::from_value(top_level["workspace_id"].clone()).unwrap();
+    let top_level_session: SessionId = serde_json::from_value(
+        top_level["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["name"] == "existing-top-level")
+            .unwrap()["session_id"]
+            .clone(),
+    )
+    .unwrap();
 
     let caller_credential = mcp.launch_caller();
     mcp.restart_with_credential(&caller_credential);
@@ -1723,30 +1760,131 @@ if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
 exit 0
 "#,
     );
+    let delegated_issue = tool_text(&mcp.tool(
+        "issue_create",
+        &json!({"title":"must not reuse another creator's session"}),
+    ));
+
+    let list = tool_text(&mcp.tool("session_list", &json!({})));
+    assert!(list["sessions"].as_array().unwrap().is_empty());
+    assert!(
+        tool_text(&mcp.tool("session_status", &json!({})))["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let inventory = tool_text(&mcp.tool(
+        "agent_resume_inventory",
+        &json!({"workspace_id":workspace_id}),
+    ));
+    assert!(inventory["runtimes"].as_array().unwrap().is_empty());
+    assert!(inventory["resumable"].as_array().unwrap().is_empty());
+
+    for (tool, arguments) in [
+        (
+            "session_create",
+            json!({"name":"existing-top-level", "role":"coder"}),
+        ),
+        (
+            "session_dispatch",
+            json!({
+                "session":{"name":"existing-top-level", "role":"coder"},
+                "agent":{"runtime":"codex","model":"fixture-codex"},
+                "prompt":"must not enter another creator's session"
+            }),
+        ),
+        (
+            "session_delegate_issue",
+            json!({"number":delegated_issue["number"], "name":"existing-top-level", "role":"coder"}),
+        ),
+        (
+            "session_delegate_brief",
+            json!({
+                "name":"existing-top-level",
+                "role":"coder",
+                "brief":"must not reuse another creator's session",
+                "agent":{"runtime":"codex","model":"fixture-codex"}
+            }),
+        ),
+        ("session_get", json!({"name":"existing-top-level"})),
+        ("agent_list", json!({"session":"existing-top-level"})),
+        (
+            "session_prompt",
+            json!({"name":"existing-top-level","prompt":"must not be delivered","mode":"queue"}),
+        ),
+        ("session_pr", json!({"name":"existing-top-level"})),
+        ("session_remove", json!({"name":"existing-top-level"})),
+    ] {
+        let refused = mcp.tool(tool, &arguments);
+        assert_eq!(refused["error"]["code"], -32603, "{tool}: {refused}");
+        assert!(has_permission_denied(&refused), "{tool}: {refused}");
+    }
+    let refused_resume = mcp.tool(
+        "session_resume",
+        &json!({
+            "target": AgentResumeTarget {
+                continuation: AgentContinuationRef::new(),
+                source: AgentResumeSourceId::new(),
+                workspace_id,
+                session_id: Some(top_level_session),
+                worktree_id: WorktreeId::new(),
+                runtime_id: AgentRuntimeId::new(),
+                adapter_revision: 1,
+            }
+        }),
+    );
+    assert_eq!(refused_resume["error"]["code"], -32603, "{refused_resume}");
+    assert!(has_permission_denied(&refused_resume), "{refused_resume}");
+    assert!(
+        mcp.workspace()
+            .join(".usagi/sessions/existing-top-level")
+            .exists()
+    );
+
+    let owned = mcp.tool(
+        "session_create",
+        &json!({"name":"caller-owned", "role":"coder"}),
+    );
+    assert!(owned.get("error").is_none(), "{owned}");
+    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
+    let visible = sessions["sessions"].as_array().unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0]["name"], "caller-owned");
+    assert_eq!(visible[0]["parent_session_name"], "mcp-caller");
+
     let dispatched = mcp.tool(
         "session_dispatch",
         &json!({
-            "session":{"name":"existing-top-level", "role":"coder"},
+            "session":{"name":"caller-owned", "role":"coder"},
             "agent":{"runtime":"codex","model":"fixture-codex"},
-            "prompt":"work in an existing top-level session"
+            "prompt":"work in the caller-owned session"
         }),
     );
     assert!(dispatched.get("error").is_none(), "{dispatched}");
+    let admission = tool_text(&dispatched);
+    let agents = tool_text(&mcp.tool("agent_list", &json!({})));
+    assert_eq!(agents["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(agents["agents"][0]["agent_id"], admission["agent_id"]);
+    assert!(
+        mcp.tool(
+            "agent_get",
+            &json!({"agent_id":admission["agent_id"].clone()}),
+        )
+        .get("error")
+        .is_none()
+    );
 
-    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
-    let existing = sessions["sessions"]
+    let lifecycle: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::daemon::lifecycle_state_path(&mcp.data_dir())).unwrap(),
+    )
+    .unwrap();
+    let durable = lifecycle["state"]["sessions"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|session| session["name"] == "existing-top-level")
+        .find(|session| session["name"] == "caller-owned")
         .unwrap();
-    assert!(existing["parent_session_id"].is_null());
-    assert!(existing["parent_session_name"].is_null());
-    assert_eq!(existing["organization_depth"], 1);
-    assert_eq!(
-        existing["organization_path"],
-        json!(["Director", "existing-top-level"])
-    );
+    assert!(durable["creator_agent_id"].is_string());
 }
 
 #[test]

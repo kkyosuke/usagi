@@ -54,6 +54,12 @@ create の重い Git worktree 構築（`git worktree add`）は**共有 session 
 
 各 managed session は `SessionId` と `WorktreeId` を同時に永続化する。agent / delegation が必要とする path は、available の workspace / session / worktree identity がすべて一致する場合だけ daemon が返す。creating、deleting、failed、stale identity、表示名・path-only の指定は scope に解決しない。
 
+認証済み Agent が session を作成した場合、lifecycle record は作成時の `parent_session_id` と
+`creator_agent_id` も固定する。Agent 向け session 操作の認可はこの 2 field と credential から復元した exact caller の
+一致を使い、dispatch history や session 名から補完しない。field を持たない human/legacy record を Agent 所有とは
+みなさない。公開 projection と人間向け管理面を広げず durable authority だけに使う（tool ごとの契約は
+[7. MCP サーバ#Agent が作成した session の authority](07-mcp.md#agent-が作成した-session-の-authority)）。
+
 workspace root（`⌂ root`）も一つの scope として同じ仕組みで解決する。root scope は `session_id` を持たず（`None`）、workspace ごとに一度だけ生成して永続化した **root `WorktreeId`** で識別する。daemon は snapshot でこの root worktree id を公開し、launch 時に要求された workspace / root worktree identity が自分のものと一致する場合だけ、cwd を **trusted repository root** に解決する。root scope の cwd は常に daemon が持つ trusted root であり、client 供給の path は使わない。session scope の fence（`session_id` 必須の completion）はこの追加で回帰しない。詳細な設計根拠は [proposals/10-workspace-root-scope.md](proposals/10-workspace-root-scope.md)。
 
 client に返す session 一覧は、使用可能な `available` に加えて、名前を占有し続ける `failed`（作成に失敗した reservation と中断後に reconcile された record）と、teardown が進行中の `deleting` も lifecycle と失敗理由付きで投影する。`deleting` を出すのは、remove が受理を返してから worker が撤去を終えるまでの間（巨大な `target/` では分オーダー）が client から見える状態だからである（[session teardown worker](#session-teardown-worker)）。reservation 状態（`creating` / `initializing`）は 1 request で完結し、client 側に固有の pending 表現があるため一覧に出さない。各行の可否（attach / remove など）は wire に載る lifecycle から client 側で導出する（`SessionLifecycle::capabilities` が正本）。`failed` 行は使用不可（attach を提示しない）だが削除可能で、削除すると worktree 未作成でも名前が解放されて同名 create が再び通る。`deleting` 行は使用不可かつ削除不可で、同じ session の teardown が二重に走らない。一覧への投影は attach 対象を広げない: scope 解決は引き続き `available` だけを対象とする（前述）。
@@ -675,7 +681,7 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `shards/<generation>.lock` | lock file | 対応する shard の read・compare-and-swap を直列化する |
 | `generations/<generation>/sock` | Unix domain socket | generation ごとの IPC endpoint。socket と locator は所有者・permission・symlink を検証して利用する |
 | `w/<digest>/root.json` | JSON | その subtree が属する canonical workspace root。subtree 名は短縮 digest なので、名前だけでは所属を証明できない。読み手は必ずこのファイルと突き合わせ、不一致は miss として次の候補（`<digest>-1`, `-2` …）を見る（[workspace state subtree](#workspace-state-subtree)） |
-| `w/<digest>/sessions.json` | JSON | その workspace の managed session の lifecycle、operation journal、stable identity と trusted repository root。daemon restart をまたいで共有する |
+| `w/<digest>/sessions.json` | JSON | その workspace の managed session の lifecycle、operation journal、stable identity、Agent 作成時の exact creator、trusted repository root。daemon restart をまたいで共有する |
 | `lifecycle-migration.json` | JSON | legacy layout（`daemon/sessions.json`）から subtree へ document を移した一方向 migration の記録。移した root・移動先・retire したかを持つ |
 | `sessions.json.migrated` | 退役した legacy JSON | 移行時に subtree が既に authoritative な document を持っていた場合、legacy の bytes をここへ退役させる。調査用に残るが、どの build も再び読まない |
 | `runtime-migration.json` | durable atomic JSON | legacy store から shard への一方向 migration の記録。schema、移行した generation、adopt 件数、証明不能だった件数を持つ（[legacy record の adoption](#legacy-record-の-adoption)） |

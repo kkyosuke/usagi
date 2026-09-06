@@ -694,7 +694,12 @@ fn execute_tool(
             };
             daemon_body_response(
                 id,
-                client.request(DaemonRequest::AgentInventory { workspace }),
+                client.request(DaemonRequest::AgentInventory {
+                    workspace,
+                    caller_context: caller_credential.map(|credential| McpCallerContext {
+                        credential: credential.to_owned(),
+                    }),
+                }),
             )
         }
         ToolRoute::AgentResume => {
@@ -716,6 +721,9 @@ fn execute_tool(
             let request = DaemonRequest::ResumeAgent {
                 operation_id,
                 target,
+                caller_context: caller_credential.map(|credential| McpCallerContext {
+                    credential: credential.to_owned(),
+                }),
             };
             daemon_body_response(id, client.request(request))
         }
@@ -933,8 +941,9 @@ mod tests {
         ServerCapabilities, ServerState, agent_selector_schema, apply_caller_policy,
         daemon_error_data, execute_tool, handle_line, handle_line_with_client,
         normalize_caller_credential, read_bounded_line, resolve_workspace_root,
-        runtime_model_snapshot, serve, serve_with_client, serve_with_client_and_features,
-        serve_with_client_and_snapshot, session_tool_response, tools_call, tools_list_result,
+        runtime_model_snapshot, serve, serve_with_client_and_caller,
+        serve_with_client_and_features, serve_with_client_and_snapshot, session_tool_response,
+        tools_call, tools_list_result,
     };
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
@@ -1931,14 +1940,21 @@ mod tests {
                 reply: Ok(DaemonReply::Ok(serde_json::json!({"safe":true}))),
                 requests: vec![],
             };
-            serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
+            serve_with_client_and_caller(
+                input.as_bytes(),
+                &mut out,
+                "9.9.9",
+                &mut client,
+                "resume-secret",
+            )
+            .unwrap();
             assert_eq!(client.requests.len(), 1);
             let actual = &client.requests[0];
             assert!(
                 (name == "agent_resume_inventory"
-                    && matches!(actual, DaemonRequest::AgentInventory { workspace: actual } if *actual == workspace))
+                    && matches!(actual, DaemonRequest::AgentInventory { workspace: actual, caller_context: Some(context) } if *actual == workspace && context.credential == "resume-secret"))
                     || (arguments.get("target").is_some()
-                        && matches!(actual, DaemonRequest::ResumeAgent { target: actual, .. } if actual == &target))
+                        && matches!(actual, DaemonRequest::ResumeAgent { target: actual, caller_context: Some(context), .. } if actual == &target && context.credential == "resume-secret"))
             );
             assert!(String::from_utf8(out).unwrap().contains("safe"));
         }

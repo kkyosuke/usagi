@@ -5,13 +5,15 @@
 //! injected Git and filesystem ports, then applies the exact completion fence
 //! captured from the reservation.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use serde_json::{Value, json};
+use usagi_core::domain::agent::CallerRef;
 use usagi_core::domain::id::{
-    CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
+    AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
@@ -53,6 +55,7 @@ pub enum SessionRuntimeError {
     DurableFailure(String),
     UnknownSession,
     ScopeUnavailable,
+    PermissionDenied,
     AgentFailure { code: ErrorCode, message: String },
     Delivery(String),
     AmbiguousIssue(AmbiguousIssueNumber),
@@ -199,6 +202,7 @@ impl SessionRuntimeError {
             Self::Delegation(failure) => failure.message.clone(),
             Self::UnknownSession => "session was not found".into(),
             Self::ScopeUnavailable => "session scope is not available".into(),
+            Self::PermissionDenied => "caller did not create the target session".into(),
             Self::Rejected => {
                 "could not create the session worktree; see the daemon log for details".into()
             }
@@ -1005,6 +1009,118 @@ impl SessionRuntime {
         Err(SessionRuntimeError::UnknownSession)
     }
 
+    /// Returns the sessions created by one exact authenticated Agent caller.
+    /// Legacy and human-created sessions have no creator Agent and therefore
+    /// never become implicitly owned by an Agent after an upgrade.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when lifecycle state cannot be read.
+    pub fn created_session_ids(
+        &self,
+        caller: &CallerRef,
+    ) -> Result<BTreeSet<SessionId>, SessionRuntimeError> {
+        Ok(self
+            .state()?
+            .sessions
+            .into_iter()
+            .filter(|session| {
+                session.parent_session_id == caller.session_id
+                    && session.creator_agent_id == Some(caller.agent_id)
+            })
+            .map(|session| session.session_id)
+            .collect())
+    }
+
+    /// Proves that one available named session was created by the exact
+    /// authenticated Agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnknownSession` for an absent name and `PermissionDenied` when
+    /// the durable creator does not match.
+    pub fn created_session_id(
+        &self,
+        name: &str,
+        caller: &CallerRef,
+    ) -> Result<SessionId, SessionRuntimeError> {
+        let session = self
+            .state()?
+            .sessions
+            .into_iter()
+            .find(|session| session.name == name)
+            .ok_or(SessionRuntimeError::UnknownSession)?;
+        if session.parent_session_id == caller.session_id
+            && session.creator_agent_id == Some(caller.agent_id)
+        {
+            if session.lifecycle
+                == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            {
+                Ok(session.session_id)
+            } else {
+                Err(SessionRuntimeError::UnknownSession)
+            }
+        } else {
+            Err(SessionRuntimeError::PermissionDenied)
+        }
+    }
+
+    /// Proves ownership of a named durable lifecycle record regardless of its
+    /// state. Removal uses this form because a creator must be able to clean up
+    /// its own failed record without making that record usable by other tools.
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnknownSession` for an absent name and `PermissionDenied` when
+    /// the durable creator does not match.
+    pub fn created_session_record_id(
+        &self,
+        name: &str,
+        caller: &CallerRef,
+    ) -> Result<SessionId, SessionRuntimeError> {
+        let session = self
+            .state()?
+            .sessions
+            .into_iter()
+            .find(|session| session.name == name)
+            .ok_or(SessionRuntimeError::UnknownSession)?;
+        if session.parent_session_id == caller.session_id
+            && session.creator_agent_id == Some(caller.agent_id)
+        {
+            Ok(session.session_id)
+        } else {
+            Err(SessionRuntimeError::PermissionDenied)
+        }
+    }
+
+    /// Allows a new name, or proves that an existing record belongs to the
+    /// exact Agent. This is the pre-effect guard for create-or-reuse tools.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PermissionDenied` when another creator already owns the name.
+    pub fn authorize_create_or_reuse(
+        &self,
+        name: &str,
+        caller: &CallerRef,
+    ) -> Result<(), SessionRuntimeError> {
+        let Some(session) = self
+            .state()?
+            .sessions
+            .into_iter()
+            .find(|session| session.name == name)
+        else {
+            return Ok(());
+        };
+        if session.parent_session_id == caller.session_id
+            && session.creator_agent_id == Some(caller.agent_id)
+        {
+            Ok(())
+        } else {
+            Err(SessionRuntimeError::PermissionDenied)
+        }
+    }
+
     /// Resolves the stable identity and current branch HEAD used to authorize a
     /// squash-merged removal. Failed rows remain resolvable so a retry can
     /// finish a teardown whose first safe branch deletion was refused.
@@ -1162,6 +1278,7 @@ impl SessionRuntime {
         let name = session_name(payload)?;
         let requested_role = requested_role(payload)?;
         let parent_session_id = parent_session_id(payload)?;
+        let creator_agent_id = creator_agent_id(payload)?;
         // Re-read both catalog layers at the daemon admission boundary; the
         // registered repository root is authoritative for workspace policy.
         let catalog = usagi_core::infrastructure::role_catalog::load_effective(
@@ -1175,28 +1292,23 @@ impl SessionRuntime {
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
         let existing_session = before.sessions.iter().find(|session| session.name == name);
+        // This check shares the create reservation's lifecycle lock. The
+        // presentation-layer preflight gives an early effect-free refusal,
+        // while this comparison closes the race where another Agent reserves
+        // the same name between preflight and reservation.
+        authorize_existing_create_record(existing_session, parent_session_id, creator_agent_id)?;
         if let Some(summary) = orphan_failure_summary(existing_session) {
             return Err(SessionRuntimeError::OrphanRecoveryBlocked(summary));
         }
-        let role_id = if let Some(existing) = existing_session {
-            if let Some(requested) = requested_role.as_ref() {
-                catalog
-                    .resolve(Some(requested), RoleScope::Session)
-                    .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?
-            } else if let Some(assigned) = existing.role_id.as_ref() {
-                catalog
-                    .resolve(Some(assigned), RoleScope::Session)
-                    .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?
-            } else {
-                None
-            }
-        } else {
-            catalog
-                .resolve(requested_role.as_ref(), RoleScope::Session)
-                .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?
-        };
-        let (base_ref, semantic_key) =
-            create_identity(payload, origin, &name, role_id.as_ref(), parent_session_id)?;
+        let role_id = resolve_create_role(&catalog, existing_session, requested_role.as_ref())?;
+        let (base_ref, semantic_key) = create_identity(
+            payload,
+            origin,
+            &name,
+            role_id.as_ref(),
+            parent_session_id,
+            creator_agent_id,
+        )?;
         if let Some(existing) = before
             .operations
             .iter()
@@ -1246,6 +1358,7 @@ impl SessionRuntime {
                     name: name.clone(),
                     role_id,
                     parent_session_id,
+                    creator_agent_id,
                     operation,
                 },
                 Utc::now(),
@@ -1388,6 +1501,8 @@ impl SessionRuntime {
         merged_head_oid: Option<String>,
     ) -> Result<SessionRemoveStep, SessionRuntimeError> {
         let name = session_name(payload)?;
+        let expected_parent_session_id = parent_session_id(payload)?;
+        let expected_creator_agent_id = creator_agent_id(payload)?;
         // A compensation is not a client request: it forces the removal and
         // branch deletion, and neither is negotiable through a payload. A
         // requested removal uses Git's safe `-d` mode unless the client pairs
@@ -1397,6 +1512,12 @@ impl SessionRuntime {
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
+        let existing_session = before.sessions.iter().find(|session| session.name == name);
+        authorize_existing_remove_record(
+            existing_session,
+            expected_parent_session_id,
+            expected_creator_agent_id,
+        )?;
         let semantic_key =
             remove_semantic_key(kind, &name, options.force, options.force_delete_branch);
         if let Some(existing) = before
@@ -1426,11 +1547,7 @@ impl SessionRuntime {
                 .replay(&before, existing)
                 .map(SessionRemoveStep::Settled);
         }
-        let session = before
-            .sessions
-            .iter()
-            .find(|session| session.name == name)
-            .ok_or(SessionRuntimeError::UnknownSession)?;
+        let session = existing_session.ok_or(SessionRuntimeError::UnknownSession)?;
         let integrity_orphan = session
             .failure
             .as_ref()
@@ -1442,14 +1559,8 @@ impl SessionRuntime {
         // operation instead of admitting a second one is what keeps a repeated
         // request (an impatient client, a retry with a fresh operation ID) from
         // running the teardown twice.
-        if let Some(in_progress) = session.operation_id.filter(|_| {
-            session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Deleting
-        }) {
-            return Ok(SessionRemoveStep::Settled(SessionReply {
-                operation_id: in_progress.to_string(),
-                revision: before.state_revision,
-                body: snapshot(&before, self.root_worktree_id),
-            }));
+        if let Some(in_progress) = in_progress_remove(session, &before, self.root_worktree_id) {
+            return Ok(in_progress);
         }
         let orphan_branch =
             self.orphan_branch_for_remove(session, &name, options.orphan.discards())?;
@@ -1935,6 +2046,83 @@ fn parent_session_id(payload: &Value) -> Result<Option<SessionId>, SessionRuntim
         .map_err(|_| SessionRuntimeError::InvalidRequest)
 }
 
+fn creator_agent_id(payload: &Value) -> Result<Option<AgentId>, SessionRuntimeError> {
+    payload
+        .get("creator_agent_id")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| SessionRuntimeError::InvalidRequest)
+}
+
+fn authorize_existing_create_record(
+    session: Option<&usagi_core::domain::session_lifecycle::ManagedSession>,
+    parent_session_id: Option<SessionId>,
+    creator_agent_id: Option<AgentId>,
+) -> Result<(), SessionRuntimeError> {
+    if let (Some(session), Some(creator_agent_id)) = (session, creator_agent_id)
+        && (session.parent_session_id != parent_session_id
+            || session.creator_agent_id != Some(creator_agent_id))
+    {
+        return Err(SessionRuntimeError::PermissionDenied);
+    }
+    Ok(())
+}
+
+fn resolve_create_role(
+    catalog: &EffectiveRoleCatalog,
+    existing: Option<&usagi_core::domain::session_lifecycle::ManagedSession>,
+    requested: Option<&RoleId>,
+) -> Result<Option<RoleId>, SessionRuntimeError> {
+    if let Some(existing) = existing {
+        let selected = requested.or(existing.role_id.as_ref());
+        return selected
+            .map(|role| {
+                catalog
+                    .resolve(Some(role), RoleScope::Session)
+                    .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))
+            })
+            .transpose()
+            .map(Option::flatten);
+    }
+    catalog
+        .resolve(requested, RoleScope::Session)
+        .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))
+}
+
+fn authorize_existing_remove_record(
+    session: Option<&usagi_core::domain::session_lifecycle::ManagedSession>,
+    parent_session_id: Option<SessionId>,
+    creator_agent_id: Option<AgentId>,
+) -> Result<(), SessionRuntimeError> {
+    let Some(creator_agent_id) = creator_agent_id else {
+        return Ok(());
+    };
+    let session = session.ok_or(SessionRuntimeError::UnknownSession)?;
+    if session.parent_session_id != parent_session_id
+        || session.creator_agent_id != Some(creator_agent_id)
+    {
+        return Err(SessionRuntimeError::PermissionDenied);
+    }
+    Ok(())
+}
+
+fn in_progress_remove(
+    session: &usagi_core::domain::session_lifecycle::ManagedSession,
+    state: &WorkspaceLifecycleState,
+    root_worktree_id: WorktreeId,
+) -> Option<SessionRemoveStep> {
+    let operation_id = session.operation_id.filter(|_| {
+        session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Deleting
+    })?;
+    Some(SessionRemoveStep::Settled(SessionReply {
+        operation_id: operation_id.to_string(),
+        revision: state.state_revision,
+        body: snapshot(state, root_worktree_id),
+    }))
+}
+
 fn session_base_ref(payload: &Value) -> Result<Option<String>, SessionRuntimeError> {
     let Some(value) = payload.get("base_ref").filter(|value| !value.is_null()) else {
         return Ok(None);
@@ -1963,6 +2151,7 @@ fn create_identity(
     name: &str,
     role_id: Option<&RoleId>,
     parent_session_id: Option<SessionId>,
+    creator_agent_id: Option<AgentId>,
 ) -> Result<(Option<String>, String), SessionRuntimeError> {
     let base_ref = session_base_ref(payload)?;
     let semantic_key = create_semantic_key(
@@ -1970,6 +2159,7 @@ fn create_identity(
         name,
         role_id,
         parent_session_id,
+        creator_agent_id,
         base_ref.as_deref(),
     );
     Ok((base_ref, semantic_key))
@@ -2153,6 +2343,7 @@ fn create_semantic_key(
     name: &str,
     role_id: Option<&RoleId>,
     parent_session_id: Option<SessionId>,
+    creator_agent_id: Option<AgentId>,
     base_ref: Option<&str>,
 ) -> String {
     let action = semantic_key(origin.semantic_action(), name);
@@ -2162,6 +2353,9 @@ fn create_semantic_key(
     );
     let action =
         parent_session_id.map_or(action.clone(), |parent| format!("{action}:parent={parent}"));
+    let action = creator_agent_id.map_or(action.clone(), |creator| {
+        format!("{action}:creator={creator}")
+    });
     base_ref.map_or(action.clone(), |base_ref| {
         format!("{action}:base={base_ref}")
     })
@@ -2314,11 +2508,21 @@ fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Va
     // the lifecycle without widening the wire surface. Scope resolution stays
     // `Available`-only (see `resolve_scope`), so listing a session never makes an
     // unusable one attachable.
+    let mut sessions = json!(state.sessions);
+    for session in sessions
+        .as_array_mut()
+        .expect("managed sessions serialize as an array")
+    {
+        session
+            .as_object_mut()
+            .expect("managed sessions serialize as objects")
+            .remove("creator_agent_id");
+    }
     json!({
         "workspace_id": state.workspace_id,
         "root_worktree_id": root_worktree_id,
         "revision": state.state_revision,
-        "sessions": state.sessions,
+        "sessions": sessions,
     })
 }
 
@@ -3230,7 +3434,7 @@ mod tests {
             );
         }
         assert_eq!(
-            create_semantic_key(CreateOrigin::Direct, "one", None, None, None),
+            create_semantic_key(CreateOrigin::Direct, "one", None, None, None, None),
             "create:one"
         );
         assert_ne!(
@@ -3239,11 +3443,13 @@ mod tests {
                 "one",
                 None,
                 None,
+                None,
                 Some("refs/heads/main")
             ),
             create_semantic_key(
                 CreateOrigin::Direct,
                 "one",
+                None,
                 None,
                 None,
                 Some("refs/remotes/origin/main")
@@ -3694,6 +3900,188 @@ instructions = "code"
     }
 
     #[test]
+    fn authenticated_creator_exclusively_owns_the_session_name_and_identity() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        let parent = SessionId::new();
+        let creator = AgentId::new();
+        let caller = CallerRef {
+            session_id: Some(parent),
+            agent_id: creator,
+        };
+        runtime
+            .handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({
+                    "name": "owned",
+                    "parent_session_id": parent,
+                    "creator_agent_id": creator,
+                }),
+            )
+            .unwrap();
+
+        let durable = runtime.state().unwrap();
+        let session = &durable.sessions[0];
+        assert_eq!(session.parent_session_id, Some(parent));
+        assert_eq!(session.creator_agent_id, Some(creator));
+        assert_eq!(
+            runtime.created_session_ids(&caller).unwrap(),
+            BTreeSet::from([session.session_id])
+        );
+        assert_eq!(
+            runtime.created_session_id("owned", &caller).unwrap(),
+            session.session_id
+        );
+        assert_eq!(
+            runtime.created_session_record_id("owned", &caller).unwrap(),
+            session.session_id
+        );
+        runtime.authorize_create_or_reuse("owned", &caller).unwrap();
+        runtime
+            .authorize_create_or_reuse("new-name", &caller)
+            .unwrap();
+
+        for unrelated in [
+            CallerRef {
+                session_id: Some(parent),
+                agent_id: AgentId::new(),
+            },
+            CallerRef {
+                session_id: Some(SessionId::new()),
+                agent_id: creator,
+            },
+        ] {
+            assert!(runtime.created_session_ids(&unrelated).unwrap().is_empty());
+            assert_eq!(
+                runtime.created_session_id("owned", &unrelated),
+                Err(SessionRuntimeError::PermissionDenied)
+            );
+            assert_eq!(
+                runtime.created_session_record_id("owned", &unrelated),
+                Err(SessionRuntimeError::PermissionDenied)
+            );
+            assert_eq!(
+                runtime.authorize_create_or_reuse("owned", &unrelated),
+                Err(SessionRuntimeError::PermissionDenied)
+            );
+            assert_eq!(
+                runtime.handle(
+                    SessionAction::Create,
+                    &operation(),
+                    &json!({
+                        "name": "owned",
+                        "parent_session_id": unrelated.session_id,
+                        "creator_agent_id": unrelated.agent_id,
+                    }),
+                ),
+                Err(SessionRuntimeError::PermissionDenied)
+            );
+            assert_eq!(
+                runtime.handle(
+                    SessionAction::Remove,
+                    &operation(),
+                    &json!({
+                        "name": "owned",
+                        "parent_session_id": unrelated.session_id,
+                        "creator_agent_id": unrelated.agent_id,
+                    }),
+                ),
+                Err(SessionRuntimeError::PermissionDenied)
+            );
+        }
+    }
+
+    #[test]
+    fn creator_metadata_is_validated_and_failed_records_are_removal_only() {
+        let (_failed_tmp, mut failed_runtime) = runtime(FakeGit::fail());
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        let parent = SessionId::new();
+        let creator = AgentId::new();
+        let caller = CallerRef {
+            session_id: Some(parent),
+            agent_id: creator,
+        };
+        runtime
+            .handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({
+                    "name": "owned",
+                    "parent_session_id": parent,
+                    "creator_agent_id": creator,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.created_session_id("missing", &caller),
+            Err(SessionRuntimeError::UnknownSession)
+        );
+        assert_eq!(
+            runtime.created_session_record_id("missing", &caller),
+            Err(SessionRuntimeError::UnknownSession)
+        );
+        assert_eq!(
+            runtime.handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({
+                    "name": "missing",
+                    "parent_session_id": parent,
+                    "creator_agent_id": creator,
+                }),
+            ),
+            Err(SessionRuntimeError::UnknownSession)
+        );
+        assert!(
+            runtime.snapshot().unwrap()["sessions"][0]
+                .get("creator_agent_id")
+                .is_none()
+        );
+        assert_eq!(
+            runtime.handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"invalid-creator", "creator_agent_id":"not-a-resource-id"}),
+            ),
+            Err(SessionRuntimeError::InvalidRequest)
+        );
+
+        assert!(matches!(
+            failed_runtime.handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({
+                    "name": "failed-owned",
+                    "parent_session_id": parent,
+                    "creator_agent_id": creator,
+                }),
+            ),
+            Err(SessionRuntimeError::SessionWorkspaceCreationFailed { .. })
+        ));
+        assert_eq!(
+            failed_runtime.created_session_id("failed-owned", &caller),
+            Err(SessionRuntimeError::UnknownSession)
+        );
+        assert!(
+            failed_runtime
+                .created_session_record_id("failed-owned", &caller)
+                .is_ok()
+        );
+        runtime
+            .handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({
+                    "name": "owned",
+                    "parent_session_id": parent,
+                    "creator_agent_id": creator,
+                }),
+            )
+            .unwrap();
+        assert!(runtime.created_session_ids(&caller).unwrap().is_empty());
+    }
+
+    #[test]
     fn catalog_default_assignment_is_stable_and_conflicting_role_is_rejected() {
         let (tmp, mut runtime) = runtime(FakeGit::ok());
         std::fs::write(
@@ -4120,6 +4508,7 @@ instructions = "direct"
                     name: "interrupted".into(),
                     role_id: None,
                     parent_session_id: None,
+                    creator_agent_id: None,
                     operation: journal(
                         operation,
                         runtime.generation,

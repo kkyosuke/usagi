@@ -212,7 +212,7 @@ impl Tool for SessionDispatch {
         "session_dispatch"
     }
     fn description(&self) -> &'static str {
-        "session を upsert し、agent に prompt を即時実行させる"
+        "認証済み caller が作成した session を upsert し、agent に prompt を即時実行させる。別 caller や人間が作成した同名 session は再利用できない"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"session":{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"}},"required":["name"],"additionalProperties":false},"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]},"prompt":{"type":"string"}},"required":["session","agent","prompt"],"additionalProperties":false}"#
@@ -224,7 +224,7 @@ impl Tool for SessionGet {
         "session_get"
     }
     fn description(&self) -> &'static str {
-        "session の agent 一覧と現在または最後の task を返す"
+        "認証済み caller が作成した session の agent 一覧と現在または最後の task を返す"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
@@ -236,7 +236,7 @@ impl Tool for AgentList {
         "agent_list"
     }
     fn description(&self) -> &'static str {
-        "agent を session / status で絞り込み一覧する"
+        "認証済み caller が作成した session に属する agent を session / status で絞り込み一覧する"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"session":{"type":"string"},"status":{"type":"string","enum":["idle","running","exited","failed"]}},"additionalProperties":false}"#
@@ -248,7 +248,7 @@ impl Tool for AgentGet {
         "agent_get"
     }
     fn description(&self) -> &'static str {
-        "agent の run 履歴と結果要約を返す"
+        "認証済み caller が作成した session に属する agent の run 履歴と結果要約を返す"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"agent_id":{"type":"string"}},"required":["agent_id"],"additionalProperties":false}"#
@@ -311,7 +311,7 @@ impl Tool for SessionCreate {
         "session_create"
     }
     fn description(&self) -> &'static str {
-        "新しい作業用セッション（隔離された git worktree）を daemon に作らせるときに使う。name 必須。base_ref は任意の fully-qualified local/remote-tracking branch ref。agent_cli は deprecated で、runtime/model を使う。実行と状態の権威は daemon にあり、worktree 作成と lifecycle store 更新が完了してから応答する。"
+        "新しい作業用セッション（隔離された git worktree）を daemon に作らせるときに使う。認証済み Agent が作成した session はその exact caller だけが管理できる。name 必須。base_ref は任意の fully-qualified local/remote-tracking branch ref。agent_cli は deprecated で、runtime/model を使う。実行と状態の権威は daemon にあり、worktree 作成と lifecycle store 更新が完了してから応答する。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"},"base_ref":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["name"]}"#
@@ -326,7 +326,7 @@ impl Tool for SessionResume {
         "session_resume"
     }
     fn description(&self) -> &'static str {
-        "agent_resume_inventory が返した exact target を指定して中断 runtime を再開する。"
+        "agent_resume_inventory が返した exact target を指定し、認証済み caller が作成した session の中断 runtime を再開する。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}"#
@@ -341,7 +341,7 @@ impl Tool for AgentResumeInventory {
         "agent_resume_inventory"
     }
     fn description(&self) -> &'static str {
-        "workspace の root / managed session に属する Agent runtime と exact resume target を provider ID なしで列挙する。"
+        "認証済み caller が作成した managed session に属する Agent runtime と exact resume target を provider ID なしで列挙する。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"workspace_id":{"type":"string"}},"required":["workspace_id"],"additionalProperties":false}"#
@@ -356,7 +356,7 @@ impl Tool for SessionList {
         "session_list"
     }
     fn description(&self) -> &'static str {
-        "存在するセッションの一覧を素早く得るときに使う。daemon の state を軽量に読むだけで、worktree の git 状態などの重い情報は含まない（詳細は session_status）。"
+        "認証済み Agent が自分で作成したセッションの一覧を素早く得るときに使う。daemon の state を軽量に読むだけで、worktree の git 状態などの重い情報は含まない（詳細は session_status）。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{}}"#
@@ -371,7 +371,7 @@ impl Tool for SessionStatus {
         "session_status"
     }
     fn description(&self) -> &'static str {
-        "各セッションの進捗（agent の phase、worktree の status/dirty/merged）を観測するときに使う。委譲したセッションが生存中か・変更が入っているかの判定に使う。"
+        "認証済み Agent が自分で作成した各セッションの進捗（agent の phase、worktree の status/dirty/merged）を観測するときに使う。委譲したセッションが生存中か・変更が入っているかの判定に使う。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{}}"#
@@ -386,7 +386,7 @@ impl Tool for SessionPrompt {
         "session_prompt"
     }
     fn description(&self) -> &'static str {
-        "実行中の既存 session agent に追加指示を送る。name と prompt は必須。live（既定）は live agent が無ければ失敗し、agent を起動したい場合は session_dispatch を使う。queue は次回起動まで待たせることを意図した場合だけ使う。"
+        "認証済み caller が作成した実行中の session agent に追加指示を送る。name と prompt は必須。live（既定）は live agent が無ければ失敗し、agent を起動したい場合は session_dispatch を使う。queue は次回起動まで待たせることを意図した場合だけ使う。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"mode":{"type":"string","enum":["queue","live"]},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name","prompt"]}"#
@@ -416,7 +416,7 @@ impl Tool for SessionPr {
         "session_pr"
     }
     fn description(&self) -> &'static str {
-        "セッションに紐づく PR とそのマージ状態を取得するときに使う。name 省略時は認証済み caller 自身のセッション、指定時はそのセッションを読む。委譲先の成果が基点ブランチに入ったか（done）の検知にも使う。"
+        "セッションに紐づく PR とそのマージ状態を取得するときに使う。name 省略時は認証済み caller 自身のセッション、指定時は caller が作成したセッションだけを読む。委譲先の成果が基点ブランチに入ったか（done）の検知にも使う。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"additionalProperties":false}"#
@@ -431,7 +431,7 @@ impl Tool for SessionRemove {
         "session_remove"
     }
     fn description(&self) -> &'static str {
-        "不要になったセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。integrity orphan の診断不能な残骸や未マージ commit も破棄するときだけ force と purge_orphan を両方指定する。応答は受理で、worktree の撤去は daemon が続ける。完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
+        "認証済み caller が作成した不要なセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。integrity orphan の診断不能な残骸や未マージ commit も破棄するときだけ force と purge_orphan を両方指定する。応答は受理で、worktree の撤去は daemon が続ける。完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"force":{"type":"boolean"},"purge_orphan":{"type":"boolean"}},"required":["name"]}"#
@@ -566,7 +566,7 @@ impl Tool for SessionDelegateIssue {
         "session_delegate_issue"
     }
     fn description(&self) -> &'static str {
-        "既存の committed issue を新しいセッションに委譲して着手させるときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行う。number 必須。同番号 source が複数ある場合は委譲を拒否し、session を作成しない。"
+        "既存の committed issue を caller 所有の新しいセッションに委譲して着手させるときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行う。number 必須。同番号 source が複数ある場合は委譲を拒否し、session を作成しない。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"number":{"type":"integer"},"name":{"type":"string"},"role":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["number"]}"#
@@ -581,7 +581,7 @@ impl Tool for SessionDelegateBrief {
         "session_delegate_brief"
     }
     fn description(&self) -> &'static str {
-        "事前 issue の無い作業を始めるときに使う。ブリーフからトリアージ/設計セッションを作成し、選択した agent へ直ちに実行を dispatch する。brief と agent（runtime と model）必須。既存 agent の id は指定できない（session はこの呼び出しが作るため）。委譲先が worktree 内で issue 化する。"
+        "事前 issue の無い作業を始めるときに使う。ブリーフから caller 所有のトリアージ/設計セッションを作成し、選択した agent へ直ちに実行を dispatch する。brief と agent（runtime と model）必須。既存 agent の id は指定できない（session はこの呼び出しが作るため）。委譲先が worktree 内で issue 化する。"
     }
     // `agent` は runtime/model だけの新規 agent selector である。作成前の session に
     // 既存 Agent が所属することはないため、`id` branch は公開しない（#611）。

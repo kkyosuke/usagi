@@ -111,8 +111,15 @@ pub enum DaemonRequest {
         caller_context: Option<McpCallerContext>,
     },
     /// Read the safe Agent runtime and interrupted-source inventory for one
-    /// workspace. Root and managed-session records share this response.
-    AgentInventory { workspace: WorkspaceId },
+    /// workspace. Human callers see root and managed-session records together;
+    /// an Agent caller sees only sessions it created.
+    AgentInventory {
+        workspace: WorkspaceId,
+        /// Present only for an Agent-originated MCP request. Human TUI/CLI
+        /// callers omit it and retain workspace-wide control.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_context: Option<McpCallerContext>,
+    },
     /// Read the same runtime inventory together with daemon-authoritative
     /// per-session dispatch status. Process-level cross-project views use this
     /// instead of treating a coarse live PTY as proof that dispatch is running.
@@ -144,9 +151,13 @@ pub enum DaemonRequest {
         force: bool,
     },
     /// Resume exactly one interrupted runtime selected from `AgentInventory`.
+    /// Agent-originated requests are limited to a session that caller created.
     ResumeAgent {
         operation_id: String,
         target: AgentResumeTarget,
+        /// Present only for an Agent-originated MCP request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_context: Option<McpCallerContext>,
     },
     /// Repair-only exact resume. The old revision still fences the retained
     /// source, while the active daemon re-resolves hooks/MCP with its current
@@ -3051,6 +3062,7 @@ mod deadline_and_retry_tests {
             client
                 .request(DaemonRequest::AgentInventory {
                     workspace: WorkspaceId::new(),
+                    caller_context: None,
                 })
                 .unwrap(),
             ok_reply()
@@ -3111,6 +3123,7 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::AgentInventory {
                 workspace: WorkspaceId::new(),
+                caller_context: None,
             },
             DaemonRequest::AgentWorkspaceObservation {
                 workspace: WorkspaceId::new(),
