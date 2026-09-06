@@ -567,6 +567,7 @@ impl Run for Session {
                 return Ok(RunOutcome::DaemonRequest(DaemonRequest::ResumeAgent {
                     operation_id: usagi_core::domain::id::OperationId::new().as_str(),
                     target,
+                    caller_context: None,
                 }));
             }
             SessionCommand::ResumeInventory { workspace_id } => {
@@ -579,6 +580,7 @@ impl Run for Session {
                     })?;
                 return Ok(RunOutcome::DaemonRequest(DaemonRequest::AgentInventory {
                     workspace,
+                    caller_context: None,
                 }));
             }
             SessionCommand::Setup { name, command } => (
@@ -1064,7 +1066,7 @@ mod tests {
         });
         assert!(matches!(
             inventory,
-            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::AgentInventory { workspace })
+            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::AgentInventory { workspace, .. })
                 if workspace == target.workspace_id
         ));
 

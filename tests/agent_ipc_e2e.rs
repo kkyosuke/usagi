@@ -768,7 +768,10 @@ fn resume(
     usagi_core::domain::agent::AgentResumeTarget,
 ) {
     let inventory = client
-        .request(DaemonRequest::AgentInventory { workspace })
+        .request(DaemonRequest::AgentInventory {
+            workspace,
+            caller_context: None,
+        })
         .expect("Agent inventory is available");
     let body = match inventory {
         DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
@@ -793,6 +796,7 @@ fn resume(
         .request(DaemonRequest::ResumeAgent {
             operation_id: operation.clone(),
             target: target.clone(),
+            caller_context: None,
         })
         .expect("captured Codex conversation resumes through root IPC");
     let DaemonReply::Accepted { body, .. } = reply else {
@@ -816,6 +820,7 @@ fn wait_for_resume_completion(
             .request(DaemonRequest::ResumeAgent {
                 operation_id: operation.to_owned(),
                 target: target.clone(),
+                caller_context: None,
             })
             .expect("resume replay is available");
         let body = match reply {
@@ -1291,7 +1296,10 @@ fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
 
     let available = Instant::now();
     foreground
-        .request(DaemonRequest::AgentInventory { workspace })
+        .request(DaemonRequest::AgentInventory {
+            workspace,
+            caller_context: None,
+        })
         .expect("Agent inventory remains available during readiness");
     foreground
         .request(DaemonRequest::Terminal {
@@ -1818,7 +1826,10 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
 
     let inventory = |client: &mut IpcClient<std::os::unix::net::UnixStream>| -> AgentInventory {
         let reply = client
-            .request(DaemonRequest::AgentInventory { workspace })
+            .request(DaemonRequest::AgentInventory {
+                workspace,
+                caller_context: None,
+            })
             .expect("Agent inventory is available after a cold restart");
         let body = match reply {
             DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
@@ -1894,6 +1905,7 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
     let request = DaemonRequest::ResumeAgent {
         operation_id: command.operation.to_string(),
         target: command.target.clone(),
+        caller_context: None,
     };
     let DaemonReply::Accepted { body, .. } = client
         .request(request)
@@ -1924,6 +1936,7 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
         .request(DaemonRequest::ResumeAgent {
             operation_id: command.operation.to_string(),
             target: command.target.clone(),
+            caller_context: None,
         })
         .expect("a replayed exact resume is idempotent");
     let replayed_terminal: TerminalRef = match replayed {

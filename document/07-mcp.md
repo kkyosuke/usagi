@@ -13,6 +13,7 @@
 - [プロトコルとライフサイクル](#プロトコルとライフサイクル)
 - [JSON-RPC メソッド](#json-rpc-メソッド)
 - [tool 面](#tool-面)
+  - [Agent が作成した session の authority](#agent-が作成した-session-の-authority)
   - [session lifecycle の受理契約](#session-lifecycle-の受理契約)
 - [tool descriptor と追加手順](#tool-descriptor-と追加手順)
 - [resource 面](#resource-面)
@@ -162,22 +163,40 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 
 | tool | 実挙動 |
 |---|---|
-| `session_create` | daemon IPC を通じて session lifecycle store と worktree を操作する |
-| `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
-| `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
-| `session_prompt` | `live`（既定）は handshake で fence した workspace と optional session が一致する live Agent PTY へ prompt と Enter キーを配送して即時実行し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ durable queue へ配送する。停止中の Agent を起動する入口は `session_dispatch` とする |
-| `agent_resume_inventory` | daemon の workspace-wide Agent inventory から provider ID を含まない safe metadata と opaque な exact resume target を列挙する |
-| `session_resume` | `agent_resume_inventory` が返した exact target を受け取り、新しい daemon-owned Agent runtime を明示的に起動する。`usagi session` の subcommand 名 `resume-inventory` / `resume-exact` とは wire 名が異なる |
+| `session_create` | daemon IPC を通じて session lifecycle store と worktree を操作する。認証済み Agent による作成では exact caller を durable な creator として固定する |
+| `session_remove` | 認証済み Agent では自身が作成した session だけ、削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
+| `session_list` / `session_status` | 認証済み Agent では自身が作成した session だけを lifecycle snapshot から返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
+| `session_prompt` | 認証済み Agent が作成した session の live PTY または durable queue にだけ配送する。`live`（既定）は handshake で fence した対象 PTY へ prompt と Enter キーを配送して即時実行し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ使う。停止中の Agent を起動する入口は `session_dispatch` とする |
+| `agent_resume_inventory` | 認証済み Agent が作成した session の Agent inventory から provider ID を含まない safe metadata と opaque な exact resume target を列挙する |
+| `session_resume` | `agent_resume_inventory` が返した、自身が作成した session の exact target を受け取り、新しい daemon-owned Agent runtime を明示的に起動する。`usagi session` の subcommand 名 `resume-inventory` / `resume-exact` とは wire 名が異なる |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
 | `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する。失敗時は作成した session を巻き戻す（[delegation の atomicity](#delegation-の-atomicity)） |
-| `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。明示した `name` を読む既存経路も維持する |
+| `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。認証済み Agent が `name` を明示する場合は自身が作成した session だけを読める |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get/list で観測する。agent 経路は作成した owner/run の decision だけを操作できる |
 | `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
 | `issue_*` / `memory_*` | issue は authenticated caller の trusted worktree（root caller は workspace root）、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
-| `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
+| `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合する。session/agent の作成・再利用・観測は caller が作成した session に限定し、report/inbox は authenticated current run と保存済み binding に限定する |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
+
+### Agent が作成した session の authority
+
+daemon-provisioned MCP child から session を操作するとき、authority は workspace や session 名ではなく、
+credential から復元した exact `CallerRef` と lifecycle に作成時だけ保存した
+`(parent_session_id, creator_agent_id)` の一致で決まる。これにより同じ親 session に複数 Agent がいる場合も、
+各 Agent が作成した直下 session は混ざらない。既存 session への dispatch、Agent handoff、名前の一致から
+creator を変更・推測することはない。
+
+認証済み Agent の list/inventory は自身が作成した session とそこに属する Agent だけを返す。名前、session ID、
+Agent ID、exact resume target を指定する操作は、対象が別 creator、人間作成、または creator metadata を持たない
+legacy session なら filesystem・Git・PTY・queue・dispatch store に effect を起こす前に `permission_denied` となる。
+create-or-reuse も同じ規則であり、別 creator が既に保持する同名 session を再利用しない。作成 reservation 内で
+creator を再照合するため、異なる Agent による同名作成が競合しても片方の authority へ収束する。
+
+この制約は Agent credential を伴う MCP request に適用する。人間が使う TUI / CLI と、daemon-provisioned でない
+手動 MCP connection は従来どおり workspace-wide な管理面である。`session_pr` の `name` 省略、scratchpad、
+完了報告、inbox のような caller 自身へ既に限定された操作も従来の self scope を維持する。
 
 `terminal_list` は caller が workspace/session/worktree selector を指定する API を持たず、認証済み Agent runtime と
 完全一致する scope の generic terminal ID と `live` だけを返す。Agent PTY と別 scope の terminal は列挙しない。

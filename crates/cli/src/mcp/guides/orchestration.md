@@ -11,6 +11,8 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
   ブランチに乗り、PR 経由で基点ブランチへ反映される。
 - **root/coordinator は git 追跡ファイルを直接書かない**。実装や backlog の変更は対象 session
   の worktree で行う。
+- **認証済み Agent が管理できるのは、自身が作成した直下 session だけ**。同じ workspace や親 session にある
+  別 Agent・人間・legacy の session は一覧に現れず、名前や ID を指定しても操作できない。
 - **issue / memory の tool 系統は workspace 設定で無効化できる**。無効な系統は `tools/list` に
   現れず、名前を直接呼んでも実行されない。このガイドは有効な場合の手順を書いているので、
   掲載されていない tool は使わない。
@@ -20,18 +22,18 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | 操作 | tool | durable effect |
 |---|---|---|
 | session 作成 | `session_create` | daemon が session を lifecycle store に記録し、git worktree を作る |
-| 一覧・進捗観測 | `session_list` / `session_status` | lifecycle snapshot と agent phase・worktree の dirty/merged を返す |
-| 追加指示 | `session_prompt` | live Agent PTY または durable next-launch queue へ prompt を配送する |
-| resume 候補の観測 | `agent_resume_inventory` | workspace の Agent history から provider ID を含まない safe metadata と exact target を返す |
+| 一覧・進捗観測 | `session_list` / `session_status` | 自身が作成した session の lifecycle snapshot と agent phase・worktree の dirty/merged を返す |
+| 追加指示 | `session_prompt` | 自身が作成した session の live Agent PTY または durable next-launch queue へ prompt を配送する |
+| resume 候補の観測 | `agent_resume_inventory` | 自身が作成した session の Agent history から provider ID を含まない safe metadata と exact target を返す |
 | 明示 resume | `session_resume` | inventory が返した exact target から新しい daemon-owned Agent runtime を起動する |
 | issue 委譲 | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う |
 | ブリーフ委譲 | `session_delegate_brief` | session 作成と authenticated worker の即時 dispatch を不可分に行う |
 | PR 観測 | `session_pr` | `name` 省略時は呼び出し元自身、指定時は対象 session の daemon-owned PR inventory と merged 集約を返す |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
-| session 破棄 | `session_remove` | daemon が worktree を破棄し、lifecycle store を更新する |
-| worker dispatch | `session_dispatch` | session を作成または再利用し、worker PTY と run/binding を durable に記録する |
-| worker の観測 | `session_get` / `agent_list` / `agent_get` | dispatch store の agent と run を返す |
+| session 破棄 | `session_remove` | 自身が作成した session の worktree を daemon が破棄し、lifecycle store を更新する |
+| worker dispatch | `session_dispatch` | caller 所有の session を作成または再利用し、worker PTY と run/binding を durable に記録する |
+| worker の観測 | `session_get` / `agent_list` / `agent_get` | 自身が作成した session に属する agent と run を返す |
 | terminal 出力の観測 | `terminal_list` / `terminal_read` | 呼び出し元 Agent と同じ scope の generic terminal を列挙し、ANSI-free の bounded tail を読む。effect はない |
 | worker の報告 | `agent_complete` / `agent_fail` | authenticated current run の報告を保存済み caller inbox へ配送する |
 | caller の受信 | `agent_inbox` / `agent_inbox_ack` | authenticated caller 自身の durable inbox をbounded pageで読み、処理後に明示ACKする |
@@ -39,6 +41,8 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 ## observe と prompt
 
 `session_list` は durable session identity の軽量一覧、`session_status` は Git 観測を含む詳細一覧である。
+どちらも認証済み caller が作成した session だけを返す。名前が分かっていても別 caller の session を
+`session_status` / `session_prompt` / `session_remove` / 明示 `session_pr` で操作することはできない。
 coordinator は session の生存を `session_status`、成果の統合を `session_pr` の `merged` で判定する。
 認証済み worker は `session_pr {}` で自分の session を読み、coordinator は
 `session_pr {"name":"issue-403"}` のように対象名を明示する。name 省略時に caller credential が無ければ、
@@ -59,7 +63,8 @@ live Agent がいる場合はエラーになる。
 中断履歴は `agent_resume_inventory` に `workspace_id` を渡して観測する。返された item のうち resume 可能なものが持つ
 opaque な exact `target` を変更せず `session_resume` へ渡す。workspace、session、worktree、runtime、adapter revision の
 どれかを名前や provider ID から推測して補完しない。resume は新しい daemon-owned Agent runtime を起動する明示操作であり、
-inventory の取得、workspace open、daemon reconnect だけでは発火しない。
+inventory の取得、workspace open、daemon reconnect だけでは発火しない。inventory と resume の対象も caller が
+作成した session に限定され、root runtime や別 creator の exact target は拒否される。
 
 人間向け `usagi session` の subcommand 名は `resume-inventory` / `resume-exact` だが、MCP wire の tool 名は
 `agent_resume_inventory` / `session_resume` である。利用時は常に `tools/list` の schema を正本とする。
@@ -88,7 +93,8 @@ credential を必要とする。手動で
 ## worker を dispatch する
 
 `session_dispatch` は session 名と worker selector、prompt を受け取る。session は存在すれば再利用し、
-無ければ作成する。新規 worker の runtime/model は `tools/list` の schema に列挙された組だけを使う。
+無ければ作成する。ただし再利用できるのは caller 自身が作成した session だけで、別 creator が保持する同名 session は
+effect を起こす前に拒否される。新規 worker の runtime/model は `tools/list` の schema に列挙された組だけを使う。
 `session.role` は任意で、省略時はeffective catalogのsession defaultを使う。明示するIDは選択中のTeamまたは
 global/workspace `roles.toml` に存在し、session scopeを許可する必要がある。未知IDやscope不一致はdaemonが拒否する。
 
@@ -106,7 +112,8 @@ dispatch された worker も authenticated caller なので、さらに `sessio
 または `session_dispatch` を呼び出せる。組み込みの hierarchical Team では、これにより
 Director → Manager → Worker の階層を同じ仕組みで作る。
 session の親は、その session を新規作成した authenticated caller の session として lifecycle state に一度だけ
-保存する。既存 session への `session_dispatch` は所属を変更しない。完了報告の immediate caller は実行ごとに
+保存し、作成した exact Agent identity も creator として固定する。子を管理できるのはその caller だけで、同じ親
+session にいる別 Agent へ authority は移らない。既存 session への `session_dispatch` は所属を変更しない。完了報告の immediate caller は実行ごとに
 daemon が保存する `DispatchBinding` を権威にする。
 
 ```text
@@ -127,7 +134,8 @@ worker は宛先 ID や `:root` を指定しない。親から dispatch され�
 
 `session_get {"name":"issue-123"}` は session 内の agent と現在または最後の task を返す。
 `agent_list` は `session` / `status` で任意に絞り込み、`agent_get {"agent_id":"..."}` はその agent の
-run 履歴を返す。これらは daemon の dispatch store を読み、MCP server のローカル推測を返さない。
+run 履歴を返す。返るのは caller が作成した session に属する Agent だけで、別 session の ID を明示しても拒否される。
+これらは daemon の dispatch store を読み、MCP server のローカル推測を返さない。
 
 ## terminal のエラーを観測する
 
