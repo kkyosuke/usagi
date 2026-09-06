@@ -1753,6 +1753,19 @@ fn production_agent_session_tools_only_reach_sessions_created_by_the_caller() {
 
     let caller_credential = mcp.launch_caller();
     mcp.restart_with_credential(&caller_credential);
+    let invalid_base_ref = mcp.tool(
+        "session_create",
+        &json!({"name":"invalid-base-ref", "base_ref":"main"}),
+    );
+    assert!(
+        invalid_base_ref.get("error").is_some(),
+        "{invalid_base_ref}"
+    );
+    assert!(
+        !mcp.workspace()
+            .join(".usagi/sessions/invalid-base-ref")
+            .exists()
+    );
     mcp.replace_fixture_agent(
         "codex",
         r#"#!/bin/sh
