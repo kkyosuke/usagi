@@ -1136,6 +1136,17 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(registered.registered_connection().is_some());
+
+        let refused_connection = RefusingConnection {
+            refuse_handshake: true,
+            ..RefusingConnection::default()
+        };
+        assert_eq!(
+            connection_id(&refused_connection, None, &client_hello())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]
