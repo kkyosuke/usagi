@@ -173,9 +173,9 @@ projection、foreground input owner を保持する。drawer の呼び名・chor
 [指示モード](03-tui.md#指示モードdirector-mode)と
 [workspace terminal drawer](03-tui.md#workspace-terminal-drawer)が正本であり、本章ではその画面挙動を重複定義しない。
 root Diff は pane/runtime に admission しない。前面の Pull Request
-一覧・Markdown preview は controller の `Overlay::Prs` / `Overlay::Preview` が所有し、
-素材は `Effect::LoadPullRequests` / `LoadPreview` で要求して
-`BackendEvent::PullRequestsLoaded` / `PreviewLoaded`（失敗は対応する `*Error`）として
+一覧・File Preview は controller の `Overlay::Prs` / `Overlay::Preview` が所有し、
+素材は `Effect::LoadPullRequests` / `LoadPreview { path }` で要求して
+`BackendEvent::PullRequestsLoaded` / `PreviewLoaded { path, files, lines }`（失敗は対応する `*Error`）として
 還流し、選択 PR の browser 起動は `Effect::OpenPullRequest` で表す。これらは他の overlay
 と同じく `render_home` に統合し、shell が別途 modal を重ねる暫定接続は残さない（controller
 に相当がある残りの create form・quit confirmation だけを shell が `render_home` の出力へ

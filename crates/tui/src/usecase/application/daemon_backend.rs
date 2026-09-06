@@ -304,7 +304,7 @@ impl DecisionPort for NoDecisions {
     }
 }
 
-/// Pull Request list, Markdown preview, and browser-open boundary for the Home
+/// Pull Request list, file preview, and browser-open boundary for the Home
 /// PR/preview overlays.
 ///
 /// A load returns through [`Completions`] as the matching `BackendEvent`
@@ -321,8 +321,9 @@ pub trait OverlayPort {
     fn sync_pull_request_targets(&mut self, _sessions: Vec<SessionId>) {}
     /// Read a target's Pull Request list.
     fn load_pull_requests(&mut self, target: Target, completions: Completions);
-    /// Read a target's Markdown preview lines.
-    fn load_preview(&mut self, target: Target, completions: Completions);
+    /// List preview candidates (`path: None`) or read one repository-relative
+    /// UTF-8 file (`path: Some`).
+    fn load_preview(&mut self, target: Target, path: Option<String>, completions: Completions);
     /// Open one already-selected Pull Request URL in the browser.
     fn open_pull_request(&mut self, url: String, completions: Completions);
     /// Copy one selected canonical URL.
@@ -345,7 +346,7 @@ impl OverlayPort for NoOverlay {
     fn load_pull_requests(&mut self, _: Target, completions: Completions) {
         unavailable(&completions, "Pull Request data is unavailable");
     }
-    fn load_preview(&mut self, _: Target, completions: Completions) {
+    fn load_preview(&mut self, _: Target, _: Option<String>, completions: Completions) {
         unavailable(&completions, "preview is unavailable");
     }
     fn open_pull_request(&mut self, _: String, completions: Completions) {
@@ -586,8 +587,8 @@ impl DaemonBackend {
             Effect::SyncPullRequestTargets { sessions } => {
                 self.overlay.sync_pull_request_targets(sessions);
             }
-            Effect::LoadPreview { target } => {
-                self.overlay.load_preview(target, self.completions());
+            Effect::LoadPreview { target, path } => {
+                self.overlay.load_preview(target, path, self.completions());
             }
             Effect::OpenPullRequest { url } => {
                 self.overlay.open_pull_request(url, self.completions());
@@ -911,7 +912,7 @@ mod tests {
     #[derive(Default)]
     struct FakeOverlay {
         pull_requests: Vec<Target>,
-        previews: Vec<Target>,
+        previews: Vec<(Target, Option<String>)>,
         opened: Vec<String>,
     }
 
@@ -928,10 +929,11 @@ mod tests {
             }));
         }
 
-        fn load_preview(&mut self, target: Target, completions: Completions) {
-            self.previews.push(target);
+        fn load_preview(&mut self, target: Target, path: Option<String>, completions: Completions) {
+            self.previews.push((target, path.clone()));
             completions.emit(AppEvent::Backend(BackendEvent::PreviewError {
                 target,
+                path,
                 error: SafeError {
                     message: SafeMessage::new("no preview"),
                     error_id: "preview".to_owned(),
@@ -986,7 +988,7 @@ mod tests {
         }
 
         fn load_pull_requests(&mut self, _: Target, _: Completions) {}
-        fn load_preview(&mut self, _: Target, _: Completions) {}
+        fn load_preview(&mut self, _: Target, _: Option<String>, _: Completions) {}
         fn open_pull_request(&mut self, _: String, _: Completions) {}
     }
 
@@ -1284,7 +1286,7 @@ mod tests {
                 if *loaded == target && prs.len() == 1
         ));
         assert_eq!(
-            backend.dispatch(Effect::LoadPreview { target }),
+            backend.dispatch(Effect::LoadPreview { target, path: None }),
             Flow::Continue
         );
         assert!(matches!(
@@ -1342,6 +1344,7 @@ mod tests {
             },
             Effect::LoadPreview {
                 target: Target::Root(WorkspaceId::new()),
+                path: None,
             },
             Effect::OpenPullRequest {
                 url: "https://github.com/o/r/pull/7".to_owned(),

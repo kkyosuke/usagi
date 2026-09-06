@@ -80,7 +80,7 @@ session の Closeup に留まる。terminal が Control と Option（Alt）の�
 | `Ctrl-O {` | MoveTabPrevious | pane tabを前へ並べ替え |
 | `Ctrl-O }` | MoveTabNext | pane tabを次へ並べ替え |
 | `Ctrl-O p` | OpenPullRequests | Pull Request一覧 |
-| `Ctrl-O v` | OpenPreview | Markdown Preview |
+| `Ctrl-O v` | OpenPreview | File Preview |
 | `Ctrl-O d` | OpenDecisions | pending Decision一覧 |
 | `Ctrl-O s` | OpenNotes | Scratchpad |
 | `Ctrl-O ,` | OpenGarden | Session Garden |
@@ -207,7 +207,9 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Pull Request | `c` | URL copy |
 | Pull Request | `Ctrl-X` | 選択PRをdismiss |
 | Pull Request | `Enter` / `Esc` | browserで開く / close |
-| Preview | `↑` / `↓` / `Esc` | scroll / close |
+| Preview file finder | 文字 / paste / `Backspace` | fuzzy filter編集 |
+| Preview file finder | `↑` / `↓` / `Enter` / `Esc` | file選択 / preview / close |
+| Preview document | `↑` / `↓` / `Esc` | scroll / file一覧へ戻る |
 | Scratchpad | paste / `Esc` | draftへ追記 / close |
 | Daemon control | `↑` / `↓` / `←` / `→` / `Tab` | Start / Restart / Stopを選択 |
 | Daemon control | `s` / `r` / `x` | Start / Restart / Stopを直接実行 |

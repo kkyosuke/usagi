@@ -220,7 +220,10 @@ inventory refresh 自体は再開を発火しない。
 session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。
 `Icons: text` ではアイコンを `PR` label へ縮退する。`Ctrl-O p`
 （または `Ctrl-O Ctrl-P`）、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開く。
-Preview は `Ctrl-O v`、scratchpad は `Ctrl-O s` で開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
+File Preview は `Ctrl-O v` で開く。選択中 session の worktree（workspace root target では workspace root）から
+tracked file と gitignore 対象外の未追跡 file を fuzzy 検索し、`Enter` で UTF-8 text を読み取り専用表示する。
+本文の `Esc` は file 一覧へ戻り、一覧の `Esc` は Preview を閉じる。scratchpad は `Ctrl-O s` で開く。
+起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
 検知した PR を選択した一覧を自動で開く。PR 一覧は repository 見出しの下へ番号・状態・title をまとめ、
 上部の All / Open / Closed / Merged を `←→`、PR を `↑↓` で選ぶ。枠外のクリックで閉じ、PR を選んで
 Enter を押すと既定のブラウザで開く。

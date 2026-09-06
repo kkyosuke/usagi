@@ -204,7 +204,7 @@ pub enum LiveTerminalAction {
     PreviousTab,
     /// Open the active Closeup target's Pull Request modal (`Ctrl-O p`).
     OpenPullRequests,
-    /// Open the active target's Markdown preview (`Ctrl-O v`).
+    /// Open the active target's file preview (`Ctrl-O v`).
     OpenPreview,
     /// Open the workspace's pending decisions (`Ctrl-O d`).
     OpenDecisions,
