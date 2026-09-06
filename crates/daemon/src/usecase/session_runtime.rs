@@ -2947,6 +2947,30 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_conventional_branch_is_deleted_only_once() {
+        let git = RecordingGit::new();
+        let calls = Arc::clone(&git.calls);
+        let mut teardown = confined_teardown();
+        teardown.delete_branch = true;
+        teardown.branch_name = Some("usagi/one".into());
+
+        delete_teardown_branch(&git, &teardown).unwrap();
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(
+                PathBuf::from("/repo"),
+                vec![
+                    "branch".into(),
+                    "-d".into(),
+                    "--".into(),
+                    "usagi/one".into()
+                ],
+            )]
+        );
+    }
+
+    #[test]
     fn an_exact_merged_pr_head_force_deletes_only_that_squash_merged_branch() {
         struct RecordingGit {
             head: String,
@@ -4072,6 +4096,41 @@ instructions = "code"
                 Err(SessionRuntimeError::InvalidRequest)
             );
         }
+        assert_eq!(
+            runtime.handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({"name":"missing", "creator_agent_id":"not-a-resource-id"}),
+            ),
+            Err(SessionRuntimeError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn creator_authorization_reports_unreadable_state() {
+        let (tmp, runtime) = runtime(FakeGit::ok());
+        let caller = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: AgentId::new(),
+        };
+        std::fs::write(tmp.path().join("daemon/sessions.json"), "not json").unwrap();
+
+        assert_eq!(
+            runtime.created_session_ids(&caller),
+            Err(SessionRuntimeError::Storage)
+        );
+        assert_eq!(
+            runtime.created_session_id("owned", &caller),
+            Err(SessionRuntimeError::Storage)
+        );
+        assert_eq!(
+            runtime.created_session_record_id("owned", &caller),
+            Err(SessionRuntimeError::Storage)
+        );
+        assert_eq!(
+            runtime.authorize_create_or_reuse("owned", &caller),
+            Err(SessionRuntimeError::Storage)
+        );
     }
 
     #[test]
