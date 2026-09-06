@@ -1460,24 +1460,13 @@ impl AgentRuntime {
             ));
         }
         if let Some(record) = live {
-            let mut bytes = prompt.as_bytes().to_vec();
-            bytes.push(b'\n');
-            self.pty.select_terminal(&record.runtime.terminal);
-            self.pty.write_all(&bytes).map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed")
-            })?;
+            self.submit_live_prompt(&record.runtime.terminal, prompt)?;
             return Ok(PromptDelivery {
                 delivered_to: "live",
                 queued: false,
             });
         }
-        self.dispatch
-            .queue_prompt(workspace, session, prompt.to_owned(), Utc::now())
-            .map_err(map_dispatch_storage_error)?;
-        Ok(PromptDelivery {
-            delivered_to: "queue",
-            queued: true,
-        })
+        self.queue_prompt_for_next_launch(workspace, session, prompt)
     }
 
     /// Delivers a continuation only to the exact live operation that created
@@ -1506,15 +1495,50 @@ impl AgentRuntime {
             .ok_or_else(|| {
                 ProtocolError::new(ErrorCode::Unavailable, "target agent run is no longer live")
             })?;
-        let mut bytes = prompt.as_bytes().to_vec();
-        bytes.push(b'\n');
-        self.pty.select_terminal(&live.runtime.terminal);
-        self.pty.write_all(&bytes).map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed")
-        })?;
+        self.submit_live_prompt(&live.runtime.terminal, prompt)?;
         Ok(PromptDelivery {
             delivered_to: "live",
             queued: false,
+        })
+    }
+
+    /// Writes one complete prompt submission to a live Agent. All prompt paths
+    /// use this boundary so none can leave text in the provider's input editor
+    /// without the same carriage return emitted by the TUI Enter key.
+    fn submit_live_prompt(
+        &mut self,
+        terminal: &TerminalRef,
+        prompt: &str,
+    ) -> Result<(), ProtocolError> {
+        let mut bytes = prompt.as_bytes().to_vec();
+        bytes.push(b'\r');
+        self.pty.select_terminal(terminal);
+        self.pty
+            .write_all(&bytes)
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed"))
+    }
+
+    /// Persists a prompt for the next launch even while a runtime is still
+    /// recorded as live. This is reserved for internal wake delivery after a
+    /// live PTY write failed; public queue mode keeps rejecting live targets.
+    pub fn queue_prompt_for_next_launch(
+        &mut self,
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+        prompt: &str,
+    ) -> Result<PromptDelivery, ProtocolError> {
+        if prompt.trim().is_empty() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "prompt must not be empty",
+            ));
+        }
+        self.dispatch
+            .queue_prompt(workspace, session, prompt.to_owned(), Utc::now())
+            .map_err(map_dispatch_storage_error)?;
+        Ok(PromptDelivery {
+            delivered_to: "queue",
+            queued: true,
         })
     }
 
@@ -3250,12 +3274,8 @@ impl AgentRuntime {
                 )
                 .is_err()
             {
-                let _ = self.prompt(
-                    workspace,
-                    delivered_to.session_id,
-                    &notice,
-                    PromptMode::Queue,
-                );
+                let _ =
+                    self.queue_prompt_for_next_launch(workspace, delivered_to.session_id, &notice);
             }
         }
         Ok(ReportDelivery {
@@ -7872,6 +7892,13 @@ mod tests {
         );
         assert_eq!(
             runtime
+                .queue_prompt_for_next_launch(workspace, Some(session), "  ")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
                 .prompt(workspace, Some(session), "now", PromptMode::Live)
                 .unwrap_err()
                 .code,
@@ -7955,10 +7982,10 @@ mod tests {
             .prompt(workspace, Some(session), "follow up", PromptMode::Live)
             .unwrap();
         assert_eq!(live.delivered_to, "live");
-        assert_eq!(pty(&runtime).writes, b"follow up\n");
-        let fenced = runtime.prompt_run(operation, "decision answer").unwrap();
+        assert_eq!(pty(&runtime).writes, b"follow up\r");
+        let fenced = runtime.prompt_run(operation, "decision\nanswer\n").unwrap();
         assert_eq!(fenced.delivered_to, "live");
-        assert_eq!(pty(&runtime).writes, b"follow up\ndecision answer\n");
+        assert_eq!(pty(&runtime).writes, b"follow up\rdecision\nanswer\n\r");
         assert!(runtime.prompt_run(OperationId::new(), "late").is_err());
         assert_eq!(
             runtime.prompt_run(operation, "  ").unwrap_err().code,
@@ -8163,7 +8190,7 @@ mod tests {
             pty(&runtime).selected.as_ref().unwrap().workspace_id,
             second.workspace
         );
-        assert_eq!(pty(&runtime).writes, b"workspace two\n");
+        assert_eq!(pty(&runtime).writes, b"workspace two\r");
     }
 
     #[test]
@@ -9022,6 +9049,89 @@ mod tests {
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::NoReport);
+    }
+
+    #[test]
+    fn completion_wake_queues_after_live_prompt_write_failure() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let workspace = WorkspaceId::new();
+        let parent_session = SessionId::new();
+        let parent = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("manager").unwrap(),
+            )
+            .unwrap();
+        let caller = CallerRef {
+            session_id: Some(parent_session),
+            agent_id: parent.agent_id,
+        };
+        let operation = OperationId::new();
+        let worker_session = SessionId::new();
+        runtime
+            .dispatch(
+                &operation.to_string(),
+                &DispatchIntent {
+                    workspace,
+                    session_name: "worker".into(),
+                    caller,
+                    agent: DispatchAgentIntent::New {
+                        runtime: AgentProfileId::new("claude").unwrap(),
+                        model: ModelSelector::new("test").unwrap(),
+                    },
+                    prompt: "finish".into(),
+                },
+                worker_session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        let credential = runtime
+            .mcp_callers
+            .iter()
+            .find(|(_, caller)| caller.operation == operation)
+            .map(|(credential, _)| credential.clone())
+            .unwrap();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(parent_session),
+                    profile: None,
+                },
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        assert!(
+            runtime
+                .prompt(
+                    workspace,
+                    Some(parent_session),
+                    "public queue",
+                    PromptMode::Queue,
+                )
+                .is_err(),
+            "public queue mode must still reject a live target"
+        );
+
+        pty_mut(&mut runtime).write_failure = true;
+        runtime
+            .report_from_mcp(&credential, None, InboxKind::Completed, "done".into(), None)
+            .unwrap();
+
+        let wake = runtime
+            .dispatch_store()
+            .queued_prompt(workspace, Some(parent_session))
+            .unwrap()
+            .expect("failed live wake must remain durable for the next launch");
+        assert!(wake.prompt.contains("A child report is ready"));
+        assert!(wake.prompt.contains("done"));
     }
 
     #[test]

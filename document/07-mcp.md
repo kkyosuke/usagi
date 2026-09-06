@@ -165,7 +165,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_create` | daemon IPC を通じて session lifecycle store と worktree を操作する |
 | `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
-| `session_prompt` | `live`（既定）は handshake で fence した workspace と optional session が一致する live Agent PTY へ配送し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ durable queue へ配送する。停止中の Agent を起動する入口は `session_dispatch` とする |
+| `session_prompt` | `live`（既定）は handshake で fence した workspace と optional session が一致する live Agent PTY へ prompt と Enter キーを配送して即時実行し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ durable queue へ配送する。停止中の Agent を起動する入口は `session_dispatch` とする |
 | `agent_resume_inventory` | daemon の workspace-wide Agent inventory から provider ID を含まない safe metadata と opaque な exact resume target を列挙する |
 | `session_resume` | `agent_resume_inventory` が返した exact target を受け取り、新しい daemon-owned Agent runtime を明示的に起動する。`usagi session` の subcommand 名 `resume-inventory` / `resume-exact` とは wire 名が異なる |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
@@ -361,11 +361,11 @@ sibling も衝突判定には含め、重複番号を参照する依存は `unme
 TUI の人間回答面は MCP caller credential を持たない。daemon は agent 用 `DispatchTool` と別の型付き IPC
 request として workspace-scoped な `get` / `list` / `resolve` / `cancel` だけを受け付け、`request` と
 `expire` は credential 付き agent 面に限定する。`resolve` は回答と delivery outbox を atomic に保存してから
-`tools/call` の成功応答を返す。consumer は outbox、durable decision の owner・回答、live runtime の operation
-fence、dispatch binding を照合し、すべて一致するときだけ同じ run の PTY へ continuation prompt を送って event を
-ack する。PTY delivery failure や MCP client disconnect では event を残して再試行し、daemon restart で runtime
-identity を復元できない場合は fail-closed で配送しない。期限切れ、cancel、expire は terminal record のみを残し、
-回答 notification を作らない。deadline maintenance は接続や次の MCP call を待たずに期限を terminal 化する。
+`tools/call` の成功応答を返す。agent caller は同じ credential と `decision_id` で `get` を polling し、daemon は
+durable decision の owner と caller scope を照合して terminal decision を返した時点で event を ack する。回答を
+Agent PTY へ自動配送する経路は持たないため、MCP client disconnect では event を残し、同じ caller の次の `get` で
+収束する。期限切れ、cancel、expire は terminal record のみを残し、回答 event を作らない。deadline maintenance は
+接続や次の MCP call を待たずに期限を terminal 化する。
 
 ## tool descriptor と追加手順
 

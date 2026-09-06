@@ -1,8 +1,9 @@
-//! Atomic durable decisions and their polling-delivery outbox.
+//! Atomic durable decisions and their polling-acknowledgement outbox.
 //!
 //! A resolve changes the decision and appends its delivery in one replaced JSON
-//! document under one lock. A daemon consumer validates the event against that
-//! record and acknowledges it only after delivery to the originating run.
+//! document under one lock. The authenticated caller polls the durable decision,
+//! and the daemon acknowledges the event only after returning that terminal
+//! record to its owner.
 
 #![allow(clippy::missing_errors_doc)] // Store IO errors follow the shared store contract.
 
@@ -252,8 +253,9 @@ impl UserDecisionStore {
                 && decision.answer.as_ref() == Some(&event.answer)
         }))
     }
-    /// Acknowledges one validated delivery. Repeated acknowledgements are a
-    /// safe no-op, which makes reconnect recovery idempotent.
+    /// Acknowledges one validated terminal observation. Repeated
+    /// acknowledgements are a safe no-op, which makes reconnect recovery
+    /// idempotent.
     pub fn ack_event(&self, id: UserDecisionId) -> Result<bool> {
         self.mutate(|state| {
             let Some(index) = state

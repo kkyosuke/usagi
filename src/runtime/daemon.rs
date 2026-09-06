@@ -2539,12 +2539,7 @@ impl DecisionWaker for AgentDecisionWaker<'_> {
             return Ok(());
         }
         runtime
-            .prompt(
-                workspace,
-                binding.worker.session_id,
-                &prompt,
-                PromptMode::Queue,
-            )
+            .queue_prompt_for_next_launch(workspace, binding.worker.session_id, &prompt)
             .map_err(|error| anyhow::anyhow!(error.message))?;
         Ok(())
     }
