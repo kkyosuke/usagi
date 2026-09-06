@@ -7892,6 +7892,13 @@ mod tests {
         );
         assert_eq!(
             runtime
+                .queue_prompt_for_next_launch(workspace, Some(session), "  ")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
                 .prompt(workspace, Some(session), "now", PromptMode::Live)
                 .unwrap_err()
                 .code,
