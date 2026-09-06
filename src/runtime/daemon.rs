@@ -11827,13 +11827,9 @@ impl StandbyShutdownDomains {
     }
 
     /// Arms the standby accept loop and its internal wake pipe as one lifetime.
-    fn accept_lifetime(&self) -> std::io::Result<StandbyAcceptLifetime> {
-        self.accept_lifetime_with(ShutdownPipe::mirroring)
-    }
-
-    fn accept_lifetime_with(
+    fn accept_lifetime(
         &self,
-        create_wake: impl FnOnce(&Arc<ShutdownRequest>) -> std::io::Result<ShutdownPipe>,
+        create_wake: fn(&Arc<ShutdownRequest>) -> std::io::Result<ShutdownPipe>,
     ) -> std::io::Result<StandbyAcceptLifetime> {
         match create_wake(&self.replacement) {
             Ok(wake) => Ok(StandbyAcceptLifetime {
@@ -11862,10 +11858,6 @@ struct StandbyAcceptLifetime {
 }
 
 impl StandbyAcceptLifetime {
-    fn wait_for_listener(&self, listener: std::os::fd::RawFd) -> bool {
-        self.wake.wait_for_listener(listener)
-    }
-
     /// Completes only an explicitly requested replacement, and only when called
     /// after every accepted client has been retired.
     fn finish_planned(&mut self) {
@@ -12091,7 +12083,7 @@ fn spawn_standby_ipc_server(
             let workers = Arc::new(ClientWorkers::new());
             let pre_handshake = PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
             let mut capacity_log = CapacityRefusalLog::default();
-            let mut lifetime = match shutdown.accept_lifetime() {
+            let mut lifetime = match shutdown.accept_lifetime(ShutdownPipe::mirroring) {
                 Ok(lifetime) => lifetime,
                 Err(error) => {
                     ErrorLog::record(&format!("daemon standby accept wait unavailable: {error}"));
@@ -12099,7 +12091,7 @@ fn spawn_standby_ipc_server(
                 }
             };
             while !shutdown.replacement.is_requested() {
-                if !lifetime.wait_for_listener(listener.readiness_fd()) {
+                if !lifetime.wake.wait_for_listener(listener.readiness_fd()) {
                     break;
                 }
                 while !shutdown.replacement.is_requested() {
@@ -20732,7 +20724,7 @@ mod tests {
         let unavailable_process = Arc::new(ShutdownRequest::new());
         let unavailable = StandbyShutdownDomains::new(Arc::clone(&unavailable_process));
         let error = unavailable
-            .accept_lifetime_with(|_| Err(std::io::Error::other("injected wake failure")))
+            .accept_lifetime(|_| Err(std::io::Error::other("injected wake failure")))
             .err()
             .unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
@@ -20742,7 +20734,7 @@ mod tests {
         let unexpected_process = Arc::new(ShutdownRequest::new());
         let unexpected = StandbyShutdownDomains::new(Arc::clone(&unexpected_process));
         {
-            let mut lifetime = unexpected.accept_lifetime().unwrap();
+            let mut lifetime = unexpected.accept_lifetime(ShutdownPipe::mirroring).unwrap();
             // The production loop reaches the same completion call after a poll
             // error, but an absent replacement request must keep it unexpected.
             lifetime.finish_planned();
@@ -20752,8 +20744,9 @@ mod tests {
         let promoted_process = Arc::new(ShutdownRequest::new());
         let promoted = StandbyShutdownDomains::new(Arc::clone(&promoted_process));
         {
-            let mut lifetime = promoted.accept_lifetime().unwrap();
+            let mut lifetime = promoted.accept_lifetime(ShutdownPipe::mirroring).unwrap();
             promoted.request_replacement();
+            assert!(!lifetime.wake.wait_for_listener(-1));
             lifetime.finish_planned();
         }
         assert!(promoted.replacement.is_requested());
