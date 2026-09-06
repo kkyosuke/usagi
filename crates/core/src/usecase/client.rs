@@ -531,6 +531,18 @@ pub fn agent_goal_semantic_key(intent: &AgentGoalIntent) -> String {
     )
 }
 
+/// Canonical idempotency meaning of a session dispatch after its exact worker
+/// Agent has been reserved. Supervisor promotion stores the digest of this key
+/// before spawn and compares it with the Agent admission at bind time.
+#[must_use]
+pub fn agent_dispatch_semantic_key(
+    session_name: &str,
+    worker_agent_id: AgentId,
+    prompt: &str,
+) -> String {
+    format!("dispatch:{session_name}:{worker_agent_id}:{prompt}")
+}
+
 /// The prefix every exact-resume key of one scope shares.
 ///
 /// A caller that only knows the scope — a legacy resume that lets the daemon

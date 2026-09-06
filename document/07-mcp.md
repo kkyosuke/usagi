@@ -270,7 +270,14 @@ Director Work からの `session_dispatch` / `session_delegate_brief` は、認�
 runtime の worker だけを受理する。この制約は prompt 上の指示ではなく daemon が session 作成前に検証する hard invariant
 であり、新規 selector の `runtime` と既存 Agent の保存済み runtime の両方へ適用する。model は同じ runtime 内で workspace
 allowlist に従って選択できる。各 child も自分の認証済み runtime を基準に同じ検証を受けるため、delegation の深さに関係なく
-異なる provider/runtime へ逸脱しない。Supervisor provenance のない classic caller はこの Work Run 固有の制約を受けず、
+異なる provider/runtime へ逸脱しない。Agent spawn 前に保存した root / child の promotion reservation も provenance 束縛前の
+supervised authority として扱うため、起動直後の MCP call や再帰 delegation がその束縛との競合で classic caller へ降格しない。
+child reservation は workspace、session、planned Agent ID、profile、canonical Agent admission semantic digest を固定し、bind と recovery でも同じ値を照合する。別 request が同じ operation を先に使った場合はその worker を取り込まず fail-closed に収束する。予約済み promotion は spawn 前から Supervisor の dispatch budget と concurrency を消費し、policy 超過は worker effect 前に durable escalation となる。
+事前判定と child reservation 直前で `(SupervisorRun, task, generation)` の exact ownership fence が変われば、A→B の所有者入れ替わりも含めて worker は起動せず、`session_delegate_brief` がこの間に
+作成した session も通常の atomic compensation で巻き戻す。
+provenance 束縛前の root / child が再帰委譲した直後に Work Run が cancel / fail しても、daemon は durable な parent
+promotion reservation に保存した immutable parent operation から各 operation の停止 fence を復元し、parent が retry generation へ進んだ後も child の束縛と起動済み worker の exact identity 回収に同じ履歴 fence を使う。live 周期回収は Agent 不在だけで予約を閉じず、socket 受付前の startup recovery だけが hydrated inventory の不在を確定とする。Goal root は Agent が一度未観測でも停止予約を保持し、reserve 後に遅れて出現した worker を後続回収で停止する。child operation は parent operation、既存 Agent dispatch、Supervisor start、別 task と共有できず、`supervisor_start` 自身も start operation と caller dispatch の join を root 作成前に永続化するため、同じ authenticated dispatch を retained Supervisor root/task から別 root へ移すこともできない。
+Supervisor provenance も promotion reservation もない classic caller はこの Work Run 固有の制約を受けず、
 従来どおり workspace allowlist 内の runtime を選べる。
 
 MCP credential の transport authority は PID 単体ではなく、kernel から得た PID・process start identity・現在の

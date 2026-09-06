@@ -12,8 +12,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use uuid::Uuid;
 
 use crate::domain::{
-    agent::InboxKind,
-    id::{AgentRuntimeId, OperationId, SessionId, WorkspaceId, WorktreeId},
+    agent::{AgentProfileId, InboxKind},
+    id::{AgentId, AgentRuntimeId, OperationId, SessionId, WorkspaceId, WorktreeId},
     pr_inventory::{GitHubRepository, canonicalize},
 };
 
@@ -351,6 +351,31 @@ pub struct TaskNode {
     /// recovery distinguish a live in-flight promotion from an orphan.
     #[serde(default)]
     pub promotion_reserved_at: Option<DateTime<Utc>>,
+    /// Exact parent dispatch which created a delegated promotion reservation.
+    /// It remains immutable after binding so descendants and stop recovery do
+    /// not depend on whichever retry generation the parent currently exposes.
+    /// Legacy reservations without this field derive it from parent provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_parent_dispatch_run: Option<OperationId>,
+    /// Managed session created for a delegated promotion before Agent
+    /// admission. This immutable fence prevents another caller which races on
+    /// the same operation ID from being bound as this task's worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_worker_session_id: Option<SessionId>,
+    /// Runtime family captured from the authenticated parent dispatch when a
+    /// delegated promotion is reserved. Director Work requires descendants to
+    /// use that same runtime, and binding rechecks it after Agent admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_worker_profile_id: Option<AgentProfileId>,
+    /// Exact durable Agent identity selected for the delegated session before
+    /// the runtime effect starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_worker_agent_id: Option<AgentId>,
+    /// Digest of the canonical Agent dispatch intent expected to occupy the
+    /// child operation ID. Binding rejects a same-scope/profile collision whose
+    /// prompt, session name, or Agent identity differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_worker_semantic_digest: Option<String>,
     /// The deterministic retry deadline.  It is part of the aggregate rather
     /// than scheduler memory so a restart cannot make a retry run early.
     pub retry_at: Option<DateTime<Utc>>,
@@ -454,6 +479,7 @@ pub enum SupervisorEventSource {
 /// Reducer inputs.  Payload bodies are deliberately not copied into event
 /// queries; the envelope retains only a payload digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // Keep the durable public event constructor source-compatible.
 pub enum SupervisorEventKind {
     AddTask {
         task: TaskNode,
@@ -1191,6 +1217,12 @@ fn dispatch(
         || provenance.task_id != *task_id
         || provenance.generation != generation
         || provenance.parent_task_id != task.parent_task_id
+        || task
+            .promotion_parent_dispatch_run
+            .is_some_and(|parent| provenance.parent_dispatch_run != Some(parent))
+        || task
+            .promotion_worker_session_id
+            .is_some_and(|session| provenance.worker_session_id != Some(session))
         || provenance.dispatch_run_id
             != task
                 .assigned_dispatch_run
@@ -1200,7 +1232,10 @@ fn dispatch(
     }
     if let Some(parent) = &task.parent_task_id {
         let parent = run.tasks.get(parent).ok_or(SupervisorError::MissingTask)?;
-        if provenance.parent_dispatch_run != parent.assigned_dispatch_run {
+        let expected_parent_dispatch = task
+            .promotion_parent_dispatch_run
+            .or(parent.assigned_dispatch_run);
+        if provenance.parent_dispatch_run != expected_parent_dispatch {
             return Err(SupervisorError::ProvenanceMismatch);
         }
     }
@@ -1221,15 +1256,59 @@ fn admit_dispatch(
     task_id: &TaskId,
     provenance: &RunProvenance,
 ) -> Result<(), SupervisorError> {
+    // Preserve the aggregate-wide decision fence even when a stale caller
+    // names a task which is no longer present. Nothing may be admitted while
+    // human input is outstanding, and callers should not be able to use task
+    // lookup errors to distinguish or bypass that state.
     if run.escalation.is_some() || run.state == SupervisorRunState::WaitingForDecision {
         return Err(SupervisorError::PolicyDenied(
             "human decision required".into(),
         ));
     }
-    if run.dispatch_reservations.len() as u64 >= run.policy.max_dispatches
-        && !run
-            .dispatch_reservations
+    let task = run.tasks.get(task_id).ok_or(SupervisorError::MissingTask)?;
+    admit_dispatch_slot(
+        run,
+        task.parent_task_id.as_ref(),
+        run.dispatch_reservations
             .contains(&provenance.dispatch_run_id)
+            || task_holds_promotion_reservation(task),
+    )
+}
+
+/// Checks whether a newly persisted child reservation may proceed to its Agent
+/// effect. Existing unbound promotions consume both dispatch budget and active
+/// concurrency, closing the two-phase interval before provenance is bound.
+///
+/// # Errors
+/// Returns [`SupervisorError::PolicyDenied`] when the immutable run policy has
+/// no slot for the prospective child.
+pub fn admit_child_dispatch_reservation(
+    run: &SupervisorRun,
+    parent_task_id: &TaskId,
+) -> Result<(), SupervisorError> {
+    if !run.tasks.contains_key(parent_task_id) {
+        return Err(SupervisorError::MissingTask);
+    }
+    admit_dispatch_slot(run, Some(parent_task_id), false)
+}
+
+fn admit_dispatch_slot(
+    run: &SupervisorRun,
+    parent_task_id: Option<&TaskId>,
+    already_reserved: bool,
+) -> Result<(), SupervisorError> {
+    if run.escalation.is_some() || run.state == SupervisorRunState::WaitingForDecision {
+        return Err(SupervisorError::PolicyDenied(
+            "human decision required".into(),
+        ));
+    }
+    let pending = run
+        .tasks
+        .values()
+        .filter(|task| task_holds_promotion_reservation(task))
+        .count() as u64;
+    if run.dispatch_reservations.len() as u64 + pending >= run.policy.max_dispatches
+        && !already_reserved
     {
         return Err(SupervisorError::PolicyDenied(
             "dispatch budget exhausted".into(),
@@ -1238,18 +1317,18 @@ fn admit_dispatch(
     let active = run
         .tasks
         .values()
-        .filter(|task| matches!(task.state, TaskState::Dispatched | TaskState::Running))
+        .filter(|task| {
+            matches!(task.state, TaskState::Dispatched | TaskState::Running)
+                || (!task.state.terminal() && task_holds_promotion_reservation(task))
+        })
         .count();
-    if active >= run.policy.max_concurrency {
+    if active >= run.policy.max_concurrency && !already_reserved {
         return Err(SupervisorError::PolicyDenied(
             "concurrency limit reached".into(),
         ));
     }
     let mut depth = 0;
-    let mut parent = run
-        .tasks
-        .get(task_id)
-        .and_then(|task| task.parent_task_id.clone());
+    let mut parent = parent_task_id.cloned();
     while let Some(id) = parent {
         depth += 1;
         parent = run
@@ -1263,6 +1342,15 @@ fn admit_dispatch(
         ));
     }
     Ok(())
+}
+
+fn task_holds_promotion_reservation(task: &TaskNode) -> bool {
+    task.assigned_dispatch_run.is_none()
+        && (task.promotion_reserved_at.is_some()
+            || (task.parent_task_id.is_none()
+                && task.generation == 1
+                && task.state == TaskState::Ready
+                && task.required_artifact_contract == GOAL_REVIEW_READY_ARTIFACT_CONTRACT))
 }
 fn set_task(
     run: &mut SupervisorRun,
@@ -1605,6 +1693,11 @@ mod tests {
             generation: 1,
             assigned_dispatch_run: None,
             promotion_reserved_at: None,
+            promotion_parent_dispatch_run: None,
+            promotion_worker_session_id: None,
+            promotion_worker_profile_id: None,
+            promotion_worker_agent_id: None,
+            promotion_worker_semantic_digest: None,
             retry_at: None,
             verification_digest: None,
             verification_attempt: 0,
@@ -2160,6 +2253,87 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_checks_and_retains_the_reserved_parent_fence() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let root_id = TaskId::new("root").unwrap();
+        let child_id = TaskId::new("child").unwrap();
+        let root = task(run.supervisor_run_id, "root", &[]);
+        let mut child = task(run.supervisor_run_id, "child", &[]);
+        child.parent_task_id = Some(root_id.clone());
+        reduce(
+            &mut run,
+            &event(1, SupervisorEventKind::AddTask { task: root }),
+        )
+        .unwrap();
+        reduce(
+            &mut run,
+            &event(2, SupervisorEventKind::AddTask { task: child }),
+        )
+        .unwrap();
+
+        let parent_dispatch = OperationId::new();
+        run.tasks.get_mut(&root_id).unwrap().assigned_dispatch_run = Some(parent_dispatch);
+        let wrong_parent_dispatch = OperationId::new();
+        let child_dispatch = OperationId::new();
+        let child = run.tasks.get_mut(&child_id).unwrap();
+        child.promotion_reserved_at = Some(now());
+        child.promotion_parent_dispatch_run = Some(wrong_parent_dispatch);
+        let provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: child_id.clone(),
+            parent_task_id: Some(root_id),
+            parent_dispatch_run: Some(parent_dispatch),
+            dispatch_run_id: child_dispatch,
+            worker_session_id: Some(SessionId::new()),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        let before = run.clone();
+        assert_eq!(
+            reduce(
+                &mut run,
+                &event(
+                    3,
+                    SupervisorEventKind::Dispatch {
+                        task_id: child_id.clone(),
+                        generation: 1,
+                        provenance: provenance.clone(),
+                    },
+                ),
+            ),
+            Err(SupervisorError::ProvenanceMismatch)
+        );
+        assert_eq!(run, before);
+
+        run.tasks
+            .get_mut(&child_id)
+            .unwrap()
+            .promotion_parent_dispatch_run = Some(parent_dispatch);
+        run.tasks
+            .get_mut(&TaskId::new("root").unwrap())
+            .unwrap()
+            .assigned_dispatch_run = Some(OperationId::new());
+        reduce(
+            &mut run,
+            &event(
+                3,
+                SupervisorEventKind::Dispatch {
+                    task_id: child_id.clone(),
+                    generation: 1,
+                    provenance,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.tasks[&child_id].promotion_reserved_at, None);
+        assert_eq!(
+            run.tasks[&child_id].promotion_parent_dispatch_run,
+            Some(parent_dispatch)
+        );
+    }
+
+    #[test]
     fn rejects_dag_and_transition_errors_without_mutating_state() {
         let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
         let invalid = task(run.supervisor_run_id, "same", &["same"]);
@@ -2223,6 +2397,72 @@ mod tests {
             ),
             Err(SupervisorError::InvalidTransition)
         );
+    }
+
+    #[test]
+    fn pending_promotions_hold_policy_slots_before_agent_effects() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now())
+            .with_policy(ExecutionPolicy {
+                max_dispatches: 1,
+                max_concurrency: 1,
+                max_depth: 0,
+                max_attempts: 1,
+                retry_backoff_seconds: 1,
+            });
+        let root_id = TaskId::new("root").unwrap();
+        let mut root = task(run.supervisor_run_id, "root", &[]);
+        root.required_artifact_contract = GOAL_REVIEW_READY_ARTIFACT_CONTRACT;
+        root.promotion_reserved_at = Some(now());
+        reduce(
+            &mut run,
+            &event(1, SupervisorEventKind::AddTask { task: root }),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            admit_child_dispatch_reservation(&run, &root_id),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "dispatch budget exhausted"
+        ));
+        run.policy.max_dispatches = 2;
+        assert!(matches!(
+            admit_child_dispatch_reservation(&run, &root_id),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "concurrency limit reached"
+        ));
+        run.policy.max_concurrency = 2;
+        assert!(matches!(
+            admit_child_dispatch_reservation(&run, &root_id),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "maximum task depth exceeded"
+        ));
+
+        // Binding the effect which owns the already-reserved slot must remain
+        // admissible at the exact limit.
+        run.policy.max_dispatches = 1;
+        run.policy.max_concurrency = 1;
+        let dispatch_run = OperationId::new();
+        let supervisor_run_id = run.supervisor_run_id;
+        reduce(
+            &mut run,
+            &event(
+                2,
+                SupervisorEventKind::Dispatch {
+                    task_id: root_id.clone(),
+                    generation: 1,
+                    provenance: RunProvenance {
+                        supervisor_run_id,
+                        task_id: root_id,
+                        parent_task_id: None,
+                        parent_dispatch_run: None,
+                        dispatch_run_id: dispatch_run,
+                        worker_session_id: None,
+                        worker_agent_id: AgentRuntimeId::new(),
+                        worker_worktree_id: WorktreeId::new(),
+                        generation: 1,
+                    },
+                },
+            ),
+        )
+        .unwrap();
+        assert!(run.dispatch_reservations.contains(&dispatch_run));
     }
 
     #[test]
@@ -2828,6 +3068,10 @@ mod tests {
     fn policy_and_reducer_error_edges_are_explicit() {
         let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
         let id = TaskId::new("task").unwrap();
+        assert_eq!(
+            admit_child_dispatch_reservation(&run, &id),
+            Err(SupervisorError::MissingTask)
+        );
         let provenance = RunProvenance {
             supervisor_run_id: run.supervisor_run_id,
             task_id: id.clone(),
@@ -2844,6 +3088,12 @@ mod tests {
             Err(SupervisorError::MissingTask)
         ));
         run.state = SupervisorRunState::WaitingForDecision;
+        run.tasks
+            .insert(id.clone(), task(run.supervisor_run_id, "task", &[]));
+        assert!(matches!(
+            admit_child_dispatch_reservation(&run, &id),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "human decision required"
+        ));
         assert!(matches!(
             admit_dispatch(&run, &id, &provenance),
             Err(SupervisorError::PolicyDenied(reason)) if reason == "human decision required"
