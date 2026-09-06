@@ -2,7 +2,8 @@
 //!
 //! A standby proves it can serve *before* it is allowed to become `current`,
 //! and proving it must change nothing: no locator write, no runtime store
-//! reconcile or save, no supervisor tick, no worker start, no spawn. The only
+//! reconcile or save, no active-runtime supervisor tick or worker start, no PTY
+//! spawn. The only
 //! durable writes on this path are the two registry compare-and-swaps that
 //! admit the standby and record its verified identity.
 //!
