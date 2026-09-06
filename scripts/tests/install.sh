@@ -232,6 +232,21 @@ unset USAGI_DOCTOR_UNSUPPORTED
 grep -q 'does not support safe managed daemon synchronization' "$CASE_DIR/err"
 [ "$($HOME_DIR/.usagi/bin/usagi --version)" = "usagi 2.0.0" ]
 
+prepare_case managed-update-post-commit-failure
+USAGI_DOCTOR_STATUS=1
+export USAGI_DOCTOR_STATUS
+if run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
+    echo "expected a failed managed synchronization to fail the update" >&2
+    exit 1
+fi
+unset USAGI_DOCTOR_STATUS
+grep -q 'could not complete daemon synchronization' "$CASE_DIR/err"
+grep -q "inspect 'usagi daemon status'" "$CASE_DIR/err"
+if grep -q 'left unchanged' "$CASE_DIR/err"; then
+    echo "generic synchronization failure made an invalid pre-commit guarantee" >&2
+    exit 1
+fi
+
 prepare_case managed-update-lock-covers-daemon-sync
 USAGI_DOCTOR_LOG="$CASE_DIR/doctor.log"
 USAGI_DOCTOR_WAIT_FOR="$CASE_DIR/release-doctor"

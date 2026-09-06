@@ -890,8 +890,9 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   途中失敗では旧 binary の bytes と mode が変わらない。CLI は検証対象の installer bytes と identity を束ねた typed request だけを返し、network /
   subprocess の実 IO は合成ルートが実行する。installer は inherited CWD の binary を参照せず、検証 artifact のない旧 release
   へ fallback しない。更新後のバイナリは次回の `usagi` 起動から使われる。installer 自身が lock を解放する前に、
-  atomic rename 後の exact installed binary を内部 managed Doctor として必ず起動する。Doctor は `bootstrap.lock` の下で同期時点の
-  exact owner を unbound 接続により再観測し、handoff、successor build、serving readiness の検証まで同じ直列化区間に含める。
+  atomic rename 後の exact installed binary を内部 managed Doctor として必ず起動する。Doctor は `bootstrap.lock` と
+  `lifecycle.lock` の下で同期時点の exact owner を unbound 接続により再観測し、handoff、successor build、serving readiness の
+  検証まで同じ直列化区間に含める。明示的な `daemon stop` / `restart` も `lifecycle.lock` を通るため、その途中へ割り込まない。
   daemon が無い場合や crash 後の stale owner を回収した場合は singleton lock でも不在を証明し、新規起動しない。
   live Agent の process-local MCP authority を安全に移せない場合、Doctor は replacement を拒否して Agent と旧 daemon を維持する。
   選択した旧 release が managed Doctor capability を解釈できない場合や、published daemon が server-side handoff fence を証明できない場合も、

@@ -1127,6 +1127,54 @@ fn stop_daemon_in_production(home: &DaemonHome) {
     assert!(output.status.success(), "{}", stderr(&output));
 }
 
+/// Lifecycle stop shares the lifecycle lock held by managed update. This makes
+/// an explicit stop linearize wholly before or wholly after daemon replacement,
+/// instead of killing the observed owner in the gap and letting update cold
+/// start a replacement that reverses the user's stop.
+#[test]
+fn daemon_stop_waits_for_lifecycle_custody() {
+    use fs2::FileExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let _guard = daemon_fixture::heavy_e2e_lock();
+    let home = short_home();
+    let started = run_in_production(&[OsStr::new("daemon"), OsStr::new("start")], &home);
+    assert!(started.status.success(), "{}", stderr(&started));
+    let data_dir = home.production_data_dir();
+    assert!(wait_until(Duration::from_secs(15), || {
+        data_dir.join("daemon/current.json").is_file()
+    }));
+
+    let lifecycle = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(data_dir.join("daemon/lifecycle.lock"))
+        .unwrap();
+    FileExt::lock_exclusive(&lifecycle).unwrap();
+    let mut stop = home
+        .production_command(&[OsStr::new("daemon"), OsStr::new("stop")])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        stop.try_wait().unwrap().is_none(),
+        "daemon stop crossed lifecycle custody"
+    );
+    assert!(daemon_record(&data_dir).is_some());
+
+    FileExt::unlock(&lifecycle).unwrap();
+    let stopped = stop.wait_with_output().unwrap();
+    assert!(stopped.status.success(), "{}", stderr(&stopped));
+    assert!(wait_until(Duration::from_secs(10), || {
+        daemon_record(&data_dir).is_none()
+    }));
+}
+
 /// The durable registry document, read as the daemon wrote it.
 fn registry_document(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).expect("the registry document exists"))

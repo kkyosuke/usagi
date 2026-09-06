@@ -19,7 +19,7 @@ use usagi_core::infrastructure::ipc::{
 ///
 /// | verb | moment | what it protects |
 /// |---|---|---|
-/// | [`admitted`](Self::admitted) | after the handshake | a rollover may only leave a draining generation behind if *every* live connection can address it ([`routing`]) |
+/// | [`admitted`](Self::admitted) | before handshake success | a rollover may only leave a draining generation behind if *every* live connection can address it ([`routing`]) |
 /// | [`admit`](Self::admit) | before each request is dispatched | authority is re-decided per request, so a connection opened under a previous role gains nothing from having got in ([`admission`]) |
 /// | [`disconnected`](Self::disconnected) | when the connection ends | a client that has gone away must stop blocking a rollover |
 ///
@@ -31,7 +31,7 @@ pub trait ConnectionFence {
         &self,
         connection: usagi_core::domain::id::ConnectionId,
         hello: &usagi_core::infrastructure::ipc::ClientHello,
-    );
+    ) -> Result<(), ProtocolError>;
 
     /// Admit one request body and return the lease to hold across its dispatch.
     ///
@@ -66,7 +66,8 @@ impl ConnectionFence for UnfencedConnection {
         &self,
         _connection: usagi_core::domain::id::ConnectionId,
         _hello: &usagi_core::infrastructure::ipc::ClientHello,
-    ) {
+    ) -> Result<(), ProtocolError> {
+        Ok(())
     }
 
     fn admit(
@@ -99,6 +100,18 @@ pub struct AdmittedConnection {
     /// client can address a draining generation, and only the client's own
     /// capability list says so ([`ConnectionFence::admitted`]).
     pub client: usagi_core::infrastructure::ipc::ClientHello,
+    /// A production fence records this connection before handshake success is
+    /// visible to the peer. Protocol-only callers leave it absent and the
+    /// request loop performs the legacy in-process registration instead.
+    connection: Option<usagi_core::domain::id::ConnectionId>,
+}
+
+impl AdmittedConnection {
+    /// The fence registration already held for this connection, if any.
+    #[must_use]
+    pub fn registered_connection(&self) -> Option<usagi_core::domain::id::ConnectionId> {
+        self.connection
+    }
 }
 
 /// Complete a bootstrap handshake. No ordinary envelope is accepted before this succeeds.
@@ -136,6 +149,30 @@ pub fn handshake_admitted_with(
     server: &ServerProtocol,
     workspaces: Option<&dyn usagi_core::infrastructure::ipc::WorkspaceResolver>,
 ) -> io::Result<Option<AdmittedConnection>> {
+    handshake_admitted_with_authority(reader, writer, server, workspaces, None)
+}
+
+/// As [`handshake_admitted_with`], but atomically registers the peer's routing
+/// capability before writing handshake success. A rollover freeze may hold this
+/// call at that boundary; once authority has committed, an unsupported peer is
+/// refused without ever observing a successful connection to the old owner.
+pub fn handshake_admitted_with_fence(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    server: &ServerProtocol,
+    workspaces: Option<&dyn usagi_core::infrastructure::ipc::WorkspaceResolver>,
+    fence: &dyn ConnectionFence,
+) -> io::Result<Option<AdmittedConnection>> {
+    handshake_admitted_with_authority(reader, writer, server, workspaces, Some(fence))
+}
+
+fn handshake_admitted_with_authority(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    server: &ServerProtocol,
+    workspaces: Option<&dyn usagi_core::infrastructure::ipc::WorkspaceResolver>,
+    fence: Option<&dyn ConnectionFence>,
+) -> io::Result<Option<AdmittedConnection>> {
     let Some(first) = read_json_frame::<Bootstrap>(reader, server.limits.max_frame_bytes as usize)?
     else {
         return Ok(None);
@@ -154,16 +191,37 @@ pub fn handshake_admitted_with(
     };
     match negotiated {
         Ok(reply) => {
-            write_json_frame(
+            let connection = if let Some(fence) = fence {
+                let connection = usagi_core::domain::id::ConnectionId::new();
+                if let Err(error) = fence.admitted(connection, &hello) {
+                    write_json_frame(
+                        writer,
+                        &Bootstrap::Error(error),
+                        server.limits.max_frame_bytes as usize,
+                    )?;
+                    return Ok(None);
+                }
+                Some(connection)
+            } else {
+                None
+            };
+            let written = write_json_frame(
                 writer,
                 &Bootstrap::ServerHello(reply.clone()),
                 server.limits.max_frame_bytes as usize,
-            )?;
+            );
+            if let Err(error) = written {
+                if let (Some(fence), Some(connection)) = (fence, connection) {
+                    fence.disconnected(connection);
+                }
+                return Err(error);
+            }
             Ok(Some(AdmittedConnection {
                 hello: reply,
                 client_incarnation: usagi_core::domain::id::ClientId::parse(&hello.client_id.0)
                     .ok(),
                 client: hello,
+                connection,
             }))
         }
         Err(error) => {
@@ -315,6 +373,20 @@ pub fn handle_admitted_connection_with(
     Ok(())
 }
 
+fn connection_id(
+    fence: &dyn ConnectionFence,
+    registered: Option<usagi_core::domain::id::ConnectionId>,
+    hello: &usagi_core::infrastructure::ipc::ClientHello,
+) -> io::Result<usagi_core::domain::id::ConnectionId> {
+    let connection = registered.unwrap_or_else(usagi_core::domain::id::ConnectionId::new);
+    if registered.is_none() {
+        fence
+            .admitted(connection, hello)
+            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.message))?;
+    }
+    Ok(connection)
+}
+
 /// Serve one client with a shared terminal owner while preserving the caller's
 /// non-terminal dispatch.  The composition root uses this to keep session
 /// lifecycle routing independent from daemon-owned PTY ownership.
@@ -408,8 +480,9 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
         hello,
         client_incarnation,
         client: client_hello,
+        connection,
     } = admitted;
-    let connection = usagi_core::domain::id::ConnectionId::new();
+    let connection = connection_id(fence, connection, &client_hello)?;
     // The ledger key is the client incarnation the peer declared, so a client
     // that reconnects still reaches the input operations it already issued. A
     // peer without one gets a connection-local identity, which keeps its
@@ -420,7 +493,6 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
         terminal,
         connection,
     };
-    lifetime.fence.admitted(connection, &client_hello);
     (|| {
         while let Some(envelope) =
             read_json_frame::<Envelope>(reader, hello.limits.max_frame_bytes as usize)?
@@ -987,6 +1059,55 @@ mod tests {
     }
 
     #[test]
+    fn connection_admission_precedes_visible_handshake_success() {
+        struct RefuseHandshake;
+
+        impl ConnectionFence for RefuseHandshake {
+            fn admitted(
+                &self,
+                _connection: usagi_core::domain::id::ConnectionId,
+                _hello: &ClientHello,
+            ) -> Result<(), ProtocolError> {
+                Err(ProtocolError::new(
+                    ErrorCode::GenerationRolledOver,
+                    "generation committed a rollover while this connection was waiting",
+                ))
+            }
+
+            fn admit(
+                &self,
+                _body: &serde_json::Value,
+            ) -> Result<Option<crate::usecase::authority::admission::AdmissionLease>, ProtocolError>
+            {
+                unreachable!("a refused handshake dispatches no request")
+            }
+
+            fn disconnected(&self, _connection: usagi_core::domain::id::ConnectionId) {}
+        }
+
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        let mut output = Vec::new();
+        let admitted = handshake_admitted_with_fence(
+            &mut Cursor::new(input),
+            &mut output,
+            &server(),
+            None,
+            &RefuseHandshake,
+        )
+        .unwrap();
+
+        assert!(admitted.is_none());
+        assert!(matches!(
+            read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024).unwrap(),
+            Some(Bootstrap::Error(ProtocolError {
+                code: ErrorCode::GenerationRolledOver,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn admitted_non_terminal_connection_continues_after_the_handshake_boundary() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -1039,8 +1160,9 @@ mod tests {
             &self,
             _connection: usagi_core::domain::id::ConnectionId,
             _hello: &ClientHello,
-        ) {
+        ) -> Result<(), ProtocolError> {
             self.admitted.set(self.admitted.get() + 1);
+            Ok(())
         }
 
         fn admit(
@@ -1070,8 +1192,9 @@ mod tests {
             &self,
             _connection: usagi_core::domain::id::ConnectionId,
             _hello: &ClientHello,
-        ) {
+        ) -> Result<(), ProtocolError> {
             self.admitted.set(self.admitted.get() + 1);
+            Ok(())
         }
 
         fn admit(
@@ -1096,7 +1219,8 @@ mod tests {
             &self,
             _connection: usagi_core::domain::id::ConnectionId,
             _hello: &ClientHello,
-        ) {
+        ) -> Result<(), ProtocolError> {
+            Ok(())
         }
 
         fn admit(

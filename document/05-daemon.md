@@ -667,6 +667,7 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `daemon.json` | JSON | 稼働中 daemon の pid と登録時刻を持つ lifecycle record。daemon は起動時に書き、endpoint cleanup 後に exact record だけを消去する |
 | `daemon.lock` | lock file | active role の `serve` が保持する単一インスタンス lock（standby は取らない）。process 終了時に OS が解放する |
 | `bootstrap.lock` | lock file | client の connect/start/restart/recover bootstrap を cross-process で直列化する |
+| `lifecycle.lock` | lock file | 明示的な stop/restart と managed update の最終観測・handoff・serving 検証を直列化する |
 | `bootstrap-broker-<digest>.lock` | lock file | sandbox 外の bootstrap broker を canonical workspace・executable path ごとに 1 process へ制限する |
 | `bootstrap-broker-<digest>.sock` | private Unix socket | 対応する workspace・executable の read-only sandbox client から cold start だけを受理する |
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |
@@ -872,7 +873,7 @@ record は読み取り可能だが owner unknown であり、自動 signal・sta
 standby / draining registry としては使わない。current locator と socket endpoint は永続データではなく、
 planned daemon generation の終了時に owner が両方を回収する。locator の atomic publication、crash/failure 後の
 復旧、generation-fenced retire の契約は [4. IPC の Unix transport](04-ipc.md#unix-transport) を正本とする。
-`bootstrap.lock` / `daemon.lock` / `record.lock` / `current.lock` は空の安定した同期 node として残る。この 4 node の
+`bootstrap.lock` / `lifecycle.lock` / `daemon.lock` / `record.lock` / `current.lock` は空の安定した同期 node として残る。この 5 node の
 secure create / reopen 契約は共通であり、本節を正本とする。各 path は `O_NOFOLLOW | O_CLOEXEC` で開き、作成 fd を
 `create_new` と syscall mode `0600` で作成し、`fchmod(0600)` してから regular file、effective UID、`nlink == 1`、
 exact `0600` と `FD_CLOEXEC` を fd 上で検証する。reopen も同じ flags と invariant を要求する。restrictive umask `0777` または

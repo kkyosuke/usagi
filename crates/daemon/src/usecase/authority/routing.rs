@@ -129,10 +129,10 @@ struct RoutingState {
 
 /// Exclusive admission freeze held across a rollover's authority commit.
 ///
-/// A connection whose hello completed concurrently waits in
-/// [`RoutingLedger::admit`] until this guard is dropped. By then either the old
-/// generation is active again, or it is draining and the request admission
-/// gate refuses any new resource ownership on it.
+/// A connection whose hello was negotiated concurrently waits in
+/// [`RoutingLedger::admit`] before handshake success is written. By then either
+/// the old generation is active again, or its connection fence can refuse a
+/// routing-incapable peer without exposing a stale successful handshake.
 pub struct RoutingFreeze<'a> {
     ledger: &'a RoutingLedger,
 }

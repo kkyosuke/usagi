@@ -357,7 +357,7 @@ if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
             fail "selected usagi does not support safe managed daemon synchronization; the existing daemon was left unchanged"
             ;;
         *)
-            fail "installed usagi could not safely synchronize the daemon; the existing daemon was left unchanged"
+            fail "installed usagi could not complete daemon synchronization; inspect 'usagi daemon status' before retrying"
             ;;
     esac
 fi

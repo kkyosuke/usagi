@@ -5246,7 +5246,12 @@ fn repair_doctor(
             .map(|tenant| tenant.live_runtimes)
             .fold(0_usize, usize::saturating_add)
     };
-    let daemon_plan = plan_doctor_daemon_replacement(&expected_build, &published_build, &before);
+    let daemon_plan = plan_doctor_daemon_replacement(
+        &expected_build,
+        &published_build,
+        &before,
+        options.restart_agents && !options.managed_update(),
+    );
     if daemon_plan == DoctorDaemonPlan::Defer {
         let credentials = before.provisioned_mcp_callers.map_or_else(
             || "an unknown number of".to_owned(),
@@ -5261,10 +5266,15 @@ fn repair_doctor(
                 out,
                 "doctor fix: this daemon cannot prove server-side handoff fencing; stop it, then rerun 'usagi doctor --fix'"
             )?;
-        } else {
+        } else if options.managed_update() {
             writeln!(
                 out,
                 "doctor fix: finish the live Agent(s), then rerun 'usagi doctor --fix'"
+            )?;
+        } else {
+            writeln!(
+                out,
+                "doctor fix: rerun with --restart-agents to confirm Agent restart"
             )?;
         }
         let message = if before.provisioned_mcp_callers.is_none() {
@@ -5391,20 +5401,23 @@ enum DoctorDaemonPlan {
 ///
 /// A daemon from before `provisioned_mcp_callers` cannot prove that replacement
 /// is fenced against a credential minted after client-side diagnosis, so it is
-/// always deferred. A current daemon may proceed only when no MCP caller
-/// credential exists. Agent stopping is deliberately not part of this
-/// client-side decision: the old owner's server-side admission barrier performs
-/// the authoritative check immediately before the first durable handoff write.
+/// always deferred. Managed update may proceed only when no MCP caller
+/// credential exists. An explicit user repair may first interrupt the selected
+/// outdated Agents; the old owner's server-side admission barrier then performs
+/// the authoritative all-credential check immediately before the first durable
+/// handoff write and safely refuses if any other credential remains.
 fn plan_doctor_daemon_replacement(
     expected: &usagi_core::infrastructure::ipc::BuildIdentity,
     published: &usagi_core::infrastructure::ipc::BuildIdentity,
     diagnosis: &AgentIntegrationDiagnosis,
+    restart_agents: bool,
 ) -> DoctorDaemonPlan {
     if expected == published {
         return DoctorDaemonPlan::Current;
     }
     match diagnosis.provisioned_mcp_callers {
         Some(0) => DoctorDaemonPlan::Replace,
+        Some(_) if restart_agents => DoctorDaemonPlan::Replace,
         _ => DoctorDaemonPlan::Defer,
     }
 }
@@ -5919,23 +5932,52 @@ mod tests {
         let published = doctor_build("old");
 
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &expected, &doctor_diagnosis(Some(3), 0)),
+            plan_doctor_daemon_replacement(
+                &expected,
+                &expected,
+                &doctor_diagnosis(Some(3), 0),
+                false,
+            ),
             DoctorDaemonPlan::Current
         );
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(Some(0), 0)),
+            plan_doctor_daemon_replacement(
+                &expected,
+                &published,
+                &doctor_diagnosis(Some(0), 0),
+                false,
+            ),
             DoctorDaemonPlan::Replace
         );
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(Some(2), 1)),
+            plan_doctor_daemon_replacement(
+                &expected,
+                &published,
+                &doctor_diagnosis(Some(2), 1),
+                false,
+            ),
             DoctorDaemonPlan::Defer
         );
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(None, 0)),
+            plan_doctor_daemon_replacement(
+                &expected,
+                &published,
+                &doctor_diagnosis(Some(2), 1),
+                true,
+            ),
+            DoctorDaemonPlan::Replace
+        );
+        assert_eq!(
+            plan_doctor_daemon_replacement(
+                &expected,
+                &published,
+                &doctor_diagnosis(None, 0),
+                false,
+            ),
             DoctorDaemonPlan::Defer
         );
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(None, 0)),
+            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(None, 0), true,),
             DoctorDaemonPlan::Defer
         );
     }

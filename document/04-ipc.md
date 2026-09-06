@@ -382,6 +382,7 @@ endpoint へ attach するだけでこの section に入らない。これらは
 | section | 待ち上限 | 上限の根拠 | 超過時 |
 |---|---|---|---|
 | `bootstrap.lock` | readiness ceiling（40 × 50ms = 2s）＋ spawn margin 3s | section は 1 回の `connect_or_start` を跨いで保持され、最悪ケースは cold start（lifecycle child の spawn ＋ readiness 探索） | typed `bootstrap_contended` |
+| `lifecycle.lock` | 65s | planned rollover の standby verification 30s と commit 後 serving hydration 30s に launch/output margin 5s を加える | `would_block` の IO error。stop/restart は update と交差せず失敗する |
 | private directory setup | 2s | 1 ディレクトリの作成 / 修復だけなので、健全な保持者は microsecond 単位で去る | `would_block` の IO error |
 
 `bootstrap_contended` は `unavailable` と別の typed error である。daemon は健全に動いていて、単に別 client が接続を
