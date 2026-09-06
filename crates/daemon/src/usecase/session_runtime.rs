@@ -6363,6 +6363,10 @@ instructions = "code"
                 SessionRuntimeError::ScopeUnavailable,
                 "session scope is not available",
             ),
+            (
+                SessionRuntimeError::PermissionDenied,
+                "caller did not create the target session",
+            ),
             (SessionRuntimeError::UnknownSession, "session was not found"),
             (
                 SessionRuntimeError::Rejected,
