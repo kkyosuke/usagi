@@ -359,17 +359,13 @@ fn an_explicit_cold_transition_gives_the_live_runtime_up() {
 }
 
 #[test]
-fn a_manual_restart_is_keyed_like_a_forced_replacement_of_the_running_artifact() {
+fn every_manual_restart_has_a_fresh_operation_identity() {
     let build = artifact();
     let first = manual_operation_id(&build, "local").expect("a known artifact has a key");
-    // Both verbs against the same build and channel attribute their transition
-    // to one operation; a different channel is a different operation.
-    assert_eq!(Some(first.clone()), manual_operation_id(&build, "local"));
-    assert_ne!(
-        Some(first.clone()),
-        manual_operation_id(&build, "production")
-    );
-    assert!(first.0.starts_with("build-rollover-v1-"));
+    let second = manual_operation_id(&build, "local").expect("the next restart has a key");
+    assert_ne!(first, second);
+    assert!(usagi_core::domain::id::OperationId::parse(&first.0).is_ok());
+    assert!(usagi_core::domain::id::OperationId::parse(&second.0).is_ok());
 
     // An unknown artifact has no safe key at all.
     let mut unknown = build;

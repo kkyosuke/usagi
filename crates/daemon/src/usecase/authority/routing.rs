@@ -55,6 +55,8 @@ pub enum RolloverRefusal {
     McpAuthorityRetained { credentials: usize },
     /// The active process could not inspect its process-local MCP authority.
     McpAuthorityUnavailable,
+    /// The explicit Agent restart selection could not be prepared atomically.
+    AgentRestartRefused { reason: String },
 }
 
 impl fmt::Display for RolloverRefusal {
@@ -85,6 +87,7 @@ impl fmt::Display for RolloverRefusal {
             Self::McpAuthorityUnavailable => {
                 f.write_str("daemon-provisioned MCP caller authority is unavailable")
             }
+            Self::AgentRestartRefused { reason } => f.write_str(reason),
         }
     }
 }

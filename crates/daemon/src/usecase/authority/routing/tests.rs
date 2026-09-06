@@ -162,6 +162,9 @@ fn every_refusal_names_itself() {
         RolloverRefusal::RoutingAdmissionBusy,
         RolloverRefusal::McpAuthorityRetained { credentials: 1 },
         RolloverRefusal::McpAuthorityUnavailable,
+        RolloverRefusal::AgentRestartRefused {
+            reason: "agent selection changed".to_owned(),
+        },
     ] {
         assert!(!refusal.to_string().is_empty());
     }

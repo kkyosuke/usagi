@@ -48,7 +48,8 @@ shell を同じ pane model で起動できる。画面、キー操作、設定 U
 | `usagi` / `usagi hop` | Welcome TUI を開く。`hop` は互換用の非表示 alias |
 | `usagi open [path]` | workspace を登録して TUI で開く。省略時はカレントディレクトリ |
 | `usagi config` | Global Config TUI を開く |
-| `usagi doctor [--fix [--restart-agents [--force]]]` | 必要ツール、daemon、Agent integration を診断し、明示された範囲を修復する |
+| `usagi doctor [--fix]` | 必要ツール、settings、既存 daemon を診断し、daemon / Agent lifecycle 以外の修復可能項目だけを修復する |
+| `usagi daemon restart [--restart-agents] [--force]` | daemon を入れ替える。`--restart-agents` は同一 workspace の全 live Agent を durable な計画から exact resume し、併用時の `--force` は Running 中の中断を許可する。複数 workspace は停止前に拒否し、`--force` 単独は live runtime を破棄する |
 | `usagi clean [--dry-run\|--apply [--force]]` | 孤立 workspace data、worktree、branch、process を照合する。既定は dry-run |
 | `usagi update [-v]` | 最新 release、または `-v` で選択した release へ更新する |
 | `usagi completion <shell>` | shell 補完スクリプトを標準出力へ生成する |
@@ -68,7 +69,7 @@ MCP の起動、公開 tool、認証、daemon への反映経路は [7. MCP サ�
 | `usagi daemon status` | active daemon と保持中 tenant の状態を表示する |
 | `usagi daemon retire <path> [--force]` | 指定 workspace tenant を解放する。live runtime は `--force` なしでは解放しない |
 | `usagi daemon stop [--force]` | daemon を停止する。live runtime は `--force` なしでは停止しない |
-| `usagi daemon restart [--force]` | daemon を入れ替える。generic live PTY は seamless rollover で維持し、daemon-provisioned MCP credential を持つ live Agent がいれば拒否する |
+| `usagi daemon restart [--restart-agents] [--force]` | daemon を入れ替える。generic live PTY は seamless rollover で維持する。live Agent は通常拒否し、`--restart-agents` で exact resume、さらに `--force` を併用すると Running 中の中断も許可する |
 | `usagi daemon replace [--force]` | 現在 daemon の artifact replacement を明示的に要求する |
 | `usagi daemon install-service` | macOS LaunchAgent / Linux systemd user service を登録する |
 | `usagi daemon uninstall-service` | 登録済み user service を削除する |
