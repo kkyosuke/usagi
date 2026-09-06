@@ -132,6 +132,10 @@ pub struct RolloverPlan<'a> {
     pub successor: &'a ServerHello,
     /// The registry revision this rollover was planned against.
     pub planned_revision: u64,
+    /// Active generation whose authority is being handed off.
+    pub from: Option<DaemonGeneration>,
+    /// Verified standby generation receiving authority.
+    pub to: DaemonGeneration,
 }
 
 /// Hand authority over only when every participant can address the generation
@@ -151,8 +155,6 @@ pub fn execute_gated_rollover(
     gate: Option<&AdmissionGate>,
     plan: &RolloverPlan<'_>,
     operation: &OperationId,
-    from: Option<DaemonGeneration>,
-    to: DaemonGeneration,
 ) -> Result<RolloverOutcome, HandoffFailure> {
     let snapshot = registry.load()?;
     admit_rollover(
@@ -161,7 +163,104 @@ pub fn execute_gated_rollover(
         plan.planned_revision,
         plan.successor,
     )?;
-    execute_rollover(registry, locator, gate, operation, from, to)
+    execute_rollover(registry, locator, gate, operation, plan.from, plan.to)
+}
+
+/// Hand authority over only after the active-control barrier has drained and a
+/// process-local safety condition still holds.
+///
+/// Closing the gate before `guard` makes its observation atomic with respect
+/// to every control request and background producer. A refusal reopens the
+/// process-local barrier before W1, so no durable handoff intent or authority
+/// change is left behind.
+///
+/// # Errors
+/// Returns the routing or guard refusal with the old authority unchanged, or a
+/// handoff failure after the guard has admitted the transition.
+pub fn execute_gated_rollover_with_guard(
+    registry: &GenerationRegistry,
+    locator: &dyn CurrentLocator,
+    gate: &AdmissionGate,
+    plan: &RolloverPlan<'_>,
+    operation: &OperationId,
+    guard: &mut dyn FnMut() -> Result<(), RolloverRefusal>,
+) -> Result<RolloverOutcome, HandoffFailure> {
+    gate.close(LeaseClass::ActiveControl);
+    gate.await_drain(LeaseClass::ActiveControl)?;
+    gate.enter_draining()?;
+    let mut barrier = PrecommitBarrier::new(gate);
+    let snapshot = registry.load()?;
+    admit_rollover(
+        plan.ledger,
+        snapshot.document(),
+        plan.planned_revision,
+        plan.successor,
+    )?;
+    guard()?;
+
+    execute_prebarred_rollover(
+        registry,
+        locator,
+        &mut barrier,
+        operation,
+        plan.from,
+        plan.to,
+    )
+}
+
+struct PrecommitBarrier<'a> {
+    gate: &'a AdmissionGate,
+    confirmed: bool,
+}
+
+impl<'a> PrecommitBarrier<'a> {
+    const fn new(gate: &'a AdmissionGate) -> Self {
+        Self {
+            gate,
+            confirmed: false,
+        }
+    }
+
+    fn confirm(&mut self) {
+        self.gate.confirm_draining();
+        self.confirmed = true;
+    }
+}
+
+impl Drop for PrecommitBarrier<'_> {
+    fn drop(&mut self) {
+        if !self.confirmed {
+            let _ = self.gate.abort_draining();
+        }
+    }
+}
+
+fn execute_prebarred_rollover(
+    registry: &GenerationRegistry,
+    locator: &dyn CurrentLocator,
+    barrier: &mut PrecommitBarrier<'_>,
+    operation: &OperationId,
+    from: Option<DaemonGeneration>,
+    to: DaemonGeneration,
+) -> Result<RolloverOutcome, HandoffFailure> {
+    let (intent, _) = registry.update(|document| begin_handoff(document, operation, from, to))?;
+    if intent == RolloverOutcome::AlreadyCompleted {
+        return Ok(intent);
+    }
+    let (_, committed) = registry.update(|document| commit_registry(document, operation))?;
+    barrier.confirm();
+
+    let target = committed
+        .document()
+        .entry(to)
+        .map(|entry| PublishedLocator {
+            generation: entry.generation,
+            endpoint: entry.endpoint.clone(),
+        })
+        .ok_or(RegistryError::UnknownGeneration)?;
+    locator.publish(&target)?;
+    let (outcome, _) = registry.update(|document| complete_handoff(document, operation))?;
+    Ok(outcome)
 }
 
 /// Hand authority from `from` to the verified standby `to`.

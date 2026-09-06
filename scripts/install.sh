@@ -341,6 +341,27 @@ OLD_VERSION="$(read_version "$TARGET")"
 # rename either replaces TARGET atomically or leaves its bytes and mode intact.
 mv -f -- "$CANDIDATE" "$TARGET"
 
+# A managed self-update holds update.lock until the exact installed artifact
+# has either synchronized the published daemon or refused without changing its
+# authority. The hidden flag is the capability boundary: older selected
+# releases reject it before Doctor can perform a legacy, weaker replacement.
+if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ] && [ "${USAGI_SYNC_DAEMON:-}" = "1" ]; then
+    printf "起動中の daemon を安全に更新中だよ！ぴょん\n"
+    set +e
+    "$TARGET" doctor --fix --managed-update-sync
+    SYNC_STATUS=$?
+    set -e
+    case "$SYNC_STATUS" in
+        0) ;;
+        2)
+            fail "selected usagi does not support safe managed daemon synchronization; the existing daemon was left unchanged"
+            ;;
+        *)
+            fail "installed usagi could not safely synchronize the daemon; the existing daemon was left unchanged"
+            ;;
+    esac
+fi
+
 if [ -z "$OLD_VERSION" ]; then
     MESSAGE="usagi v${NEW_VERSION} をインストールしたよ！ぴょん"
     FACE="( ◕ω◕)"
@@ -374,8 +395,10 @@ printf "   %s%s%s  %s%s%s\n" "$C_PINK" "$FACE" "$C_RST" "$C_BOLD" "$MESSAGE" "$C
 printf '   %so_(")(")%s  %s→%s  %s%s/usagi%s\n' "$C_PINK" "$C_RST" "$C_DIM" "$C_RST" "$C_CYAN" "$BIN_DIR" "$C_RST"
 printf "\n"
 printf "次回の起動から新しい CLI を使えるよ。起動中の TUI は開き直してね。\n"
-if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
-    printf "起動中の daemon は続けて安全に更新するよ。\n"
+if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ] && [ "${USAGI_SYNC_DAEMON:-}" = "1" ]; then
+    printf "起動中の daemon も新しい build へ安全に更新したよ。\n"
+elif [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
+    printf "daemon は起動していないため、binary の更新だけ完了したよ。\n"
 else
     printf "daemon の build が古い場合は 'usagi doctor --fix' で入れ替えてね。\n"
 fi

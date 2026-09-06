@@ -142,6 +142,8 @@ fn every_refusal_names_itself() {
             planned: 1,
             observed: 2,
         },
+        RolloverRefusal::McpAuthorityRetained { credentials: 1 },
+        RolloverRefusal::McpAuthorityUnavailable,
     ] {
         assert!(!refusal.to_string().is_empty());
     }

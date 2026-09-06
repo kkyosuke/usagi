@@ -259,10 +259,13 @@ MCP credential の transport authority は PID 単体ではなく、kernel か�
 live Agent runtime の間保持する。同じ MCP process の resilient client は credential を再送して新しい connection へ
 再 bind でき、旧 connection の遅延 cleanup は新 lease を解除しない。別 process からの claim は、kernel が以前の exact process
 identity の終了を確認できた場合だけ置き換えられる。PID が再利用されても start identity が一致しない request は
-`ownership_unknown` へ fail closed する。Agent runtime の終了または daemon restart では process-local credential 自体が失効する。
+`ownership_unknown` へ fail closed する。Agent runtime の終了、forced / cold daemon restart では process-local credential 自体が失効する。
+planned restart は発行済み credential が 1 件でもあれば旧 owner を active のまま維持して拒否する。
 
-このため `usagi update` が続けて実行する Doctor と `usagi doctor --fix` は、daemon build mismatch 時に live MCP child claim が
-残っていれば planned replacement を保留する。旧 daemon が claim 総数を報告できない場合も、live Agent がいれば安全側に保留し、
+このため `usagi update` が lock 内で実行する managed Doctor と `usagi doctor --fix` は、daemon build mismatch 時に
+child claim 前を含む daemon-provisioned MCP caller credential が残っていれば planned replacement を保留する。旧 daemon が
+credential 総数を報告できない場合も、live Agent がいれば安全側に保留する。診断後に Agent launch が競合しても、old active が
+control admission を close / drain した後に process-local credential を再検証し、最初の durable handoff write より前に拒否する。
 Agent を終了して Doctor を再実行するまで旧 daemon の control authority を維持する。
 
 callerのcurrent runが`SupervisorRun`へ束縛されている`session_dispatch` / `session_delegate_brief`では、daemonが

@@ -82,7 +82,15 @@ pub enum TuiRequest {
         fix: bool,
         restart_agents: bool,
         force: bool,
+        invocation: DoctorInvocation,
     },
+}
+
+/// Whether Doctor was invoked by a person or by the locked self-update path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorInvocation {
+    User,
+    ManagedUpdate,
 }
 
 /// CLI の解析・ハンドラ実行結果。
@@ -208,6 +216,9 @@ pub enum Command {
         /// 実行中 tool を含む live Agent の停止を許可する
         #[arg(long, requires = "restart_agents")]
         force: bool,
+        /// installer が update lock 内で daemon を同期する内部 capability
+        #[arg(long, hide = true, requires = "fix")]
+        managed_update_sync: bool,
     },
     /// 紐付いていない workspace・daemon data・worktree・branch を整理する
     Clean {
@@ -425,10 +436,16 @@ impl Command {
                 fix,
                 restart_agents,
                 force,
+                managed_update_sync,
             } => Box::new(h::Doctor {
                 fix,
                 restart_agents,
                 force,
+                invocation: if managed_update_sync {
+                    DoctorInvocation::ManagedUpdate
+                } else {
+                    DoctorInvocation::User
+                },
             }),
             Command::Clean {
                 dry_run: _,
@@ -642,8 +659,8 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, DaemonCommand, Run, RunOutcome, Session, SessionCommand, Shell, TuiRequest,
-        run,
+        Cli, Command, DaemonCommand, DoctorInvocation, Run, RunOutcome, Session, SessionCommand,
+        Shell, TuiRequest, run,
     };
     use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
@@ -669,6 +686,7 @@ mod tests {
                 fix: false,
                 restart_agents: false,
                 force: false,
+                managed_update_sync: false,
             })
         ));
         assert!(matches!(
@@ -709,6 +727,7 @@ mod tests {
                 fix: true,
                 restart_agents: false,
                 force: false,
+                managed_update_sync: false,
             })
         ));
         assert!(matches!(
@@ -719,10 +738,27 @@ mod tests {
                 fix: true,
                 restart_agents: true,
                 force: true,
+                managed_update_sync: false,
             })
         ));
         assert!(Cli::try_parse_from(["usagi", "doctor", "--restart-agents"]).is_err());
         assert!(Cli::try_parse_from(["usagi", "doctor", "--fix", "--force"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "doctor", "--fix", "--managed-update-sync"])
+                .unwrap()
+                .command,
+            Some(Command::Doctor {
+                fix: true,
+                restart_agents: false,
+                force: false,
+                managed_update_sync: true,
+            })
+        ));
+        assert!(Cli::try_parse_from(["usagi", "doctor", "--managed-update-sync"]).is_err());
+        let help = Cli::try_parse_from(["usagi", "doctor", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(!help.contains("managed-update-sync"));
     }
 
     /// 内部フックコマンド（ヘルプ非表示だが実行可能）も解析できる。
@@ -1144,6 +1180,7 @@ mod tests {
                     fix: false,
                     restart_agents: false,
                     force: false,
+                    invocation: DoctorInvocation::User,
                 },
             ),
         ] {
@@ -1302,6 +1339,7 @@ mod tests {
             fix: false,
             restart_agents: false,
             force: false,
+            invocation: DoctorInvocation::User,
         });
         assert_eq!(outcome.clone(), outcome);
         assert!(format!("{outcome:?}").contains("Doctor"));

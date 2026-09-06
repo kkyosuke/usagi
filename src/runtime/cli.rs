@@ -128,8 +128,9 @@ mod action_io {
                     fix,
                     restart_agents,
                     force,
+                    invocation,
                 }),
-            ) => tui::launch_doctor(out, info, fix, restart_agents, force)
+            ) => tui::launch_doctor(out, info, fix, restart_agents, force, invocation)
                 .map(|()| ExitCode::SUCCESS),
             (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
@@ -359,92 +360,59 @@ fn execute_self_update(
     out.flush()?;
     err.flush()?;
     let daemon_was_published = daemon::has_published_daemon();
-    let installed = installed_usagi_path()?;
-    execute_self_update_with(
-        request,
-        out,
-        err,
-        &mut |script, select_version| {
-            use std::process::{Command, Stdio};
+    execute_self_update_with(request, out, err, &mut |script, select_version| {
+        let mut command = update_installer_command(select_version, daemon_was_published);
+        let mut child = command.spawn()?;
+        let write_result = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("installer stdin is unavailable"))?
+            .write_all(script);
+        if let Err(error) = write_result {
+            let _ = child.wait();
+            return Err(error);
+        }
+        let status = child.wait()?;
+        Ok(std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    })
+}
 
-            let mut command = Command::new("bash");
-            command
-                .arg("-s")
-                .arg("--")
-                .current_dir("/")
-                .env("USAGI_MANAGED_UPDATE", "1")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit());
-            if select_version {
-                command.arg("--select-version");
-            }
-            let mut child = command.spawn()?;
-            let write_result = child
-                .stdin
-                .take()
-                .ok_or_else(|| std::io::Error::other("installer stdin is unavailable"))?
-                .write_all(script);
-            if let Err(error) = write_result {
-                let _ = child.wait();
-                return Err(error);
-            }
-            let status = child.wait()?;
-            Ok(std::process::Output {
-                status,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        },
-        &mut || {
-            use std::process::{Command, Stdio};
+fn update_installer_command(
+    select_version: bool,
+    synchronize_daemon: bool,
+) -> std::process::Command {
+    use std::process::{Command, Stdio};
 
-            if !daemon_was_published {
-                return Ok(None);
-            }
-            let status = Command::new(&installed)
-                .args(["doctor", "--fix"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status()?;
-            Ok(Some(std::process::Output {
-                status,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            }))
-        },
-    )
+    let mut command = Command::new("bash");
+    command
+        .arg("-s")
+        .arg("--")
+        .current_dir("/")
+        .env("USAGI_MANAGED_UPDATE", "1")
+        .env_remove("USAGI_SYNC_DAEMON")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if synchronize_daemon {
+        command.env("USAGI_SYNC_DAEMON", "1");
+    }
+    if select_version {
+        command.arg("--select-version");
+    }
+    command
 }
 
 type InstallerLauncher<'a> = dyn FnMut(&[u8], bool) -> std::io::Result<std::process::Output> + 'a;
-type DaemonSynchronizer<'a> = dyn FnMut() -> std::io::Result<Option<std::process::Output>> + 'a;
-
-fn installed_usagi_path() -> std::io::Result<PathBuf> {
-    let selected = usagi_core::infrastructure::paths::data_dir()
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(installed_usagi_path_from_selected(
-        &selected,
-        usagi_core::infrastructure::paths::runtime_mode(),
-    ))
-}
-
-fn installed_usagi_path_from_selected(
-    selected: &Path,
-    mode: usagi_core::infrastructure::paths::RuntimeMode,
-) -> PathBuf {
-    usagi_core::infrastructure::paths::DataHome::from_selected(selected, mode)
-        .base()
-        .join("bin")
-        .join("usagi")
-}
 
 fn execute_self_update_with(
     request: &InstallerRequest,
     out: &mut dyn Write,
     err: &mut dyn Write,
     launch: &mut InstallerLauncher<'_>,
-    synchronize_daemon: &mut DaemonSynchronizer<'_>,
 ) -> std::io::Result<ExitCode> {
     let Some(script) = request.verified_script() else {
         writeln!(
@@ -456,20 +424,7 @@ fn execute_self_update_with(
     let result = launch(script, request.select_version())?;
     out.write_all(&result.stdout)?;
     err.write_all(&result.stderr)?;
-    if !result.status.success() {
-        return Ok(exit_code(result.status.code().unwrap_or(1)));
-    }
-    let Some(daemon) = synchronize_daemon()? else {
-        writeln!(out, "daemon is not running; binary update is complete")?;
-        return Ok(ExitCode::SUCCESS);
-    };
-    out.write_all(&daemon.stdout)?;
-    err.write_all(&daemon.stderr)?;
-    if daemon.status.success() {
-        Ok(ExitCode::SUCCESS)
-    } else {
-        Ok(exit_code(daemon.status.code().unwrap_or(1)))
-    }
+    Ok(exit_code(result.status.code().unwrap_or(1)))
 }
 
 // Claude `PreToolUse` フックの実 stdin を束ね、純粋な判定 usecase に委ねる合成の縁。
@@ -814,16 +769,18 @@ mod tests {
     use std::io::{self, Write};
     use std::path::PathBuf;
 
-    use usagi_cli::cli::{DaemonCommand, InstallerRequest, RunOutcome, TuiRequest};
+    use usagi_cli::cli::{
+        DaemonCommand, DoctorInvocation, InstallerRequest, RunOutcome, TuiRequest,
+    };
     use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
     use usagi_core::usecase::claude_sandbox::SandboxMode;
     use usagi_core::usecase::client::{ClientError, DaemonReply, DaemonRequest};
 
     use super::{
         Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
-        execute_self_update_with, exit_code, installed_usagi_path_from_selected,
-        linux_home_entry_inventory, mcp_daemon_route, process_outcome,
-        validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
+        execute_self_update_with, exit_code, linux_home_entry_inventory, mcp_daemon_route,
+        process_outcome, update_installer_command, validate_launcher_policy_inputs,
+        write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
@@ -1040,6 +997,7 @@ mod tests {
                 fix: false,
                 restart_agents: false,
                 force: false,
+                invocation: DoctorInvocation::User,
             }),
             Action::LaunchDoctor,
         );
@@ -1110,7 +1068,6 @@ mod tests {
             InstallerRequest::new(b"#!/bin/bash\ntrunc", [1; 32], true),
         ] {
             let launches = Cell::new(0);
-            let synchronizations = Cell::new(0);
             let mut out = Vec::new();
             let mut err = Vec::new();
             let mut launch = |_: &[u8], _: bool| {
@@ -1120,15 +1077,10 @@ mod tests {
             launch(&[], false).unwrap();
             launches.set(0);
             let status =
-                execute_self_update_with(&request, &mut out, &mut err, &mut launch, &mut || {
-                    synchronizations.set(synchronizations.get() + 1);
-                    Ok(None)
-                })
-                .unwrap();
+                execute_self_update_with(&request, &mut out, &mut err, &mut launch).unwrap();
 
             assert_eq!(status, std::process::ExitCode::FAILURE);
             assert_eq!(launches.get(), 0);
-            assert_eq!(synchronizations.get(), 0);
             assert!(out.is_empty());
             assert_eq!(
                 String::from_utf8(err).unwrap(),
@@ -1145,65 +1097,43 @@ mod tests {
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let status = execute_self_update_with(
-            &request,
-            &mut out,
-            &mut err,
-            &mut |script, selected| {
+        let status =
+            execute_self_update_with(&request, &mut out, &mut err, &mut |script, selected| {
                 assert!(script.is_empty());
                 assert!(selected);
                 Ok(process_output(0, b"installed\n", b"warning\n"))
-            },
-            &mut || Ok(Some(process_output(0, b"daemon synchronized\n", b""))),
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(status, std::process::ExitCode::SUCCESS);
-        assert_eq!(out, b"installed\ndaemon synchronized\n");
+        assert_eq!(out, b"installed\n");
         assert_eq!(err, b"warning\n");
 
-        let synchronizations = Cell::new(0);
-        let status = execute_self_update_with(
-            &request,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut |_, _| Ok(process_output(7, b"", b"failed\n")),
-            &mut || {
-                synchronizations.set(synchronizations.get() + 1);
-                Ok(None)
-            },
-        )
-        .unwrap();
+        let status =
+            execute_self_update_with(&request, &mut Vec::new(), &mut Vec::new(), &mut |_, _| {
+                Ok(process_output(7, b"", b"failed\n"))
+            })
+            .unwrap();
         assert_eq!(status, std::process::ExitCode::from(7));
-        assert_eq!(synchronizations.get(), 0);
 
-        let launch_error = execute_self_update_with(
-            &request,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut |_, _| Err(io::Error::other("launch failed")),
-            &mut || Ok(None),
-        )
-        .unwrap_err();
+        let launch_error =
+            execute_self_update_with(&request, &mut Vec::new(), &mut Vec::new(), &mut |_, _| {
+                Err(io::Error::other("launch failed"))
+            })
+            .unwrap_err();
         assert_eq!(launch_error.to_string(), "launch failed");
 
-        let output_error = execute_self_update_with(
-            &request,
-            &mut BrokenWriter,
-            &mut Vec::new(),
-            &mut |_, _| Ok(process_output(0, b"output", b"")),
-            &mut || Ok(None),
-        )
-        .unwrap_err();
+        let output_error =
+            execute_self_update_with(&request, &mut BrokenWriter, &mut Vec::new(), &mut |_, _| {
+                Ok(process_output(0, b"output", b""))
+            })
+            .unwrap_err();
         assert_eq!(output_error.kind(), io::ErrorKind::Other);
 
-        let stderr_error = execute_self_update_with(
-            &request,
-            &mut Vec::new(),
-            &mut BrokenWriter,
-            &mut |_, _| Ok(process_output(0, b"", b"warning")),
-            &mut || Ok(None),
-        )
-        .unwrap_err();
+        let stderr_error =
+            execute_self_update_with(&request, &mut Vec::new(), &mut BrokenWriter, &mut |_, _| {
+                Ok(process_output(0, b"", b"warning"))
+            })
+            .unwrap_err();
         assert_eq!(stderr_error.kind(), io::ErrorKind::Other);
 
         #[cfg(unix)]
@@ -1220,7 +1150,6 @@ mod tests {
                         stderr: Vec::new(),
                     })
                 },
-                &mut || Ok(None),
             )
             .unwrap();
             assert_eq!(status, std::process::ExitCode::FAILURE);
@@ -1234,72 +1163,41 @@ mod tests {
         };
         launch(&[], false).unwrap();
         launches.set(0);
-        let identity_error = execute_self_update_with(
-            &invalid,
-            &mut Vec::new(),
-            &mut BrokenWriter,
-            &mut launch,
-            &mut || Ok(None),
-        )
-        .unwrap_err();
+        let identity_error =
+            execute_self_update_with(&invalid, &mut Vec::new(), &mut BrokenWriter, &mut launch)
+                .unwrap_err();
         assert_eq!(identity_error.kind(), io::ErrorKind::Other);
         assert_eq!(launches.get(), 0);
     }
 
     #[test]
-    fn verified_installer_propagates_daemon_synchronization_status() {
-        let request = verified_installer_request();
-        let status = execute_self_update_with(
-            &request,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut |_, _| Ok(process_output(0, b"", b"")),
-            &mut || Ok(Some(process_output(9, b"", b"daemon failed\n"))),
-        )
-        .unwrap();
-        assert_eq!(status, std::process::ExitCode::from(9));
-
-        let mut no_daemon = Vec::new();
-        let status = execute_self_update_with(
-            &request,
-            &mut no_daemon,
-            &mut Vec::new(),
-            &mut |_, _| Ok(process_output(0, b"", b"")),
-            &mut || Ok(None),
-        )
-        .unwrap();
-        assert_eq!(status, std::process::ExitCode::SUCCESS);
+    fn managed_installer_environment_is_explicit_and_cwd_independent() {
+        let command = update_installer_command(true, true);
         assert_eq!(
-            no_daemon,
-            b"daemon is not running; binary update is complete\n"
+            command.get_args().collect::<Vec<_>>(),
+            ["-s", "--", "--select-version"]
         );
-    }
-
-    #[test]
-    fn installed_binary_path_uses_the_mode_neutral_data_home() {
-        use usagi_core::infrastructure::paths::RuntimeMode;
-
+        assert_eq!(command.get_current_dir(), Some(std::path::Path::new("/")));
+        let environment = command
+            .get_envs()
+            .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(
-            installed_usagi_path_from_selected(
-                std::path::Path::new("/data/usagi"),
-                RuntimeMode::Production,
-            ),
-            std::path::Path::new("/data/usagi/bin/usagi")
+            environment.get(std::ffi::OsStr::new("USAGI_MANAGED_UPDATE")),
+            Some(&Some(std::ffi::OsStr::new("1")))
         );
-        for mode in [RuntimeMode::Local, RuntimeMode::Development] {
-            let child = match mode {
-                RuntimeMode::Local => "local",
-                RuntimeMode::Development => "dev",
-                RuntimeMode::Production => unreachable!(),
-            };
-            assert_eq!(
-                installed_usagi_path_from_selected(
-                    &std::path::Path::new("/data/usagi").join(child),
-                    mode,
-                ),
-                std::path::Path::new("/data/usagi/bin/usagi")
-            );
-        }
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("USAGI_SYNC_DAEMON")),
+            Some(&Some(std::ffi::OsStr::new("1")))
+        );
+
+        let no_daemon = update_installer_command(false, false);
+        assert_eq!(no_daemon.get_args().collect::<Vec<_>>(), ["-s", "--"]);
+        assert_eq!(
+            no_daemon
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("USAGI_SYNC_DAEMON")),
+            Some((std::ffi::OsStr::new("USAGI_SYNC_DAEMON"), None))
+        );
     }
 
     fn verified_installer_request() -> InstallerRequest {

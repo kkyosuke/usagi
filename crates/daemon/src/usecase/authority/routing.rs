@@ -48,6 +48,11 @@ pub enum RolloverRefusal {
     /// The registry moved since the rollover was planned. Re-planning against
     /// the current revision is the only safe continuation.
     RegistryRevisionMismatch { planned: u64, observed: u64 },
+    /// MCP caller credentials are process-local and cannot move to the
+    /// successor. This includes credentials whose child has not connected yet.
+    McpAuthorityRetained { credentials: usize },
+    /// The active process could not inspect its process-local MCP authority.
+    McpAuthorityUnavailable,
 }
 
 impl fmt::Display for RolloverRefusal {
@@ -68,6 +73,13 @@ impl fmt::Display for RolloverRefusal {
                 f,
                 "generation registry moved from revision {planned} to {observed}"
             ),
+            Self::McpAuthorityRetained { credentials } => write!(
+                f,
+                "{credentials} daemon-provisioned MCP caller credential(s) remain on the active generation"
+            ),
+            Self::McpAuthorityUnavailable => {
+                f.write_str("daemon-provisioned MCP caller authority is unavailable")
+            }
         }
     }
 }

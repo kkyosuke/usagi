@@ -890,9 +890,11 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   途中失敗では旧 binary の bytes と mode が変わらない。CLI は検証対象の installer bytes と identity を束ねた typed request だけを返し、network /
   subprocess の実 IO は合成ルートが実行する。installer は inherited CWD の binary を参照せず、検証 artifact のない旧 release
   へ fallback しない。更新後のバイナリは次回の `usagi` 起動から使われる。更新開始時に published daemon があった場合だけ、
-  atomic rename 後の exact installed binary を `doctor --fix` として起動し、その exit status を update の結果へ反映する。
-  daemon が無ければ update は新規起動しない。live Agent の process-local MCP authority を安全に移せない場合、Doctor は daemon
-  replacement を保留して Agent と旧 daemon を維持し、再実行方法を表示する。
+  installer 自身が lock を解放する前に atomic rename 後の exact installed binary を内部 managed Doctor として unbound 接続で起動し、
+  handoff、successor build、serving readiness の検証まで同じ直列化区間に含める。daemon が無ければ update は新規起動しない。
+  live Agent の process-local MCP authority を安全に移せない場合、Doctor は replacement を拒否して Agent と旧 daemon を維持する。
+  選択した旧 release が managed Doctor capability を解釈できない場合も、その binary の legacy Doctor を実行せず非 0 で終える。
+  atomic rename 後の拒否では binary は選択版、daemon は旧 build のままであり、安全な現行版へ更新するか Agent 終了後に Doctor を再実行する。
 - **内部フックコマンド**: Claude の `PreToolUse` フックが呼ぶ `usagi guard-workspace`（worktree の外へ
   出るツール呼び出しを拒否）と、Codex / Claude の各ライフサイクルフックが呼ぶ `usagi agent-phase <phase>`
   （phase 報告）。この 2 つは人間向けではないため `--help` に出さない（`hide = true`）。呼び手（人手でも

@@ -101,8 +101,9 @@ production / local は接続の副作用として replacement を起こさず、
 binary の更新直後も TUI / CLI / MCP は停止中の Agent を巻き込まず接続でき、daemon artifact の更新は明示的な
 `usagi daemon restart` / `usagi daemon replace` が担う。development だけは artifact pair と channel から決まる stable
 operation ID の typed rollover trigger を **planned replacement** で消費する（`--force` を付けない）。したがって live runtime の有無は
-daemon 自身の census が決め、何も live でなければ cold transition、live Agent / generic Terminal があれば PTY を維持する
-seamless rollover になる（[planned replacement](#planned-replacement)）。replacement 後は exact artifact を handshake で
+daemon 自身の census が決め、何も live でなければ cold transition、generic Terminal だけが live なら PTY を維持する
+seamless rollover になる。live Agent の daemon-provisioned MCP credential は process 間で移送できないため、1 件でもあれば
+old active を維持して拒否する（[planned replacement](#planned-replacement)）。replacement 後は exact artifact を handshake で
 確認してから再接続する。これにより `USAGI_RUNTIME_MODE=development cargo run` は再コンパイル後も起動でき、かつ再 build が
 他の client の live Agent を巻き添えにしない。同じ artifact の通常 TUI / CLI / MCP 起動は trigger 0 で daemon を再利用する。intentional な
 same-artifact replacement は通常 bootstrap と分離した `usagi daemon replace` が force trigger を発行する。
@@ -114,8 +115,8 @@ typed refusal になる。
 したがって TUI の終了や同 build client の再接続だけでは daemon-owned Agent PTY は失われない。一方、cold transition は
 旧 owner process を終了するため、その process が持つ PTY master と live Agent / generic Terminal を継続できない。
 fresh daemon は unfinished runtime を `identity_unknown` へ reconcile し、旧 `TerminalRef` を live として復元しない。
-このため `daemon restart` / `daemon replace` は live runtime があれば PTY を維持する seamless rollover を試み、
-安全な handoff の前提が欠ける場合だけ拒否する。`daemon stop` は渡す先がないため、live runtime を既定で拒否する
+このため `daemon restart` / `daemon replace` は live generic Terminal があれば PTY を維持する seamless rollover を試み、
+live Agent credential を含む安全な handoff の前提が欠ける場合は拒否する。`daemon stop` は渡す先がないため、live runtime を既定で拒否する
 （[planned replacement](#planned-replacement)）。検証済み active locator への接続が `ConnectionRefused` になった場合だけ、共有
 bootstrap は後述の exact stale-owner recovery を試みる。draining、malformed / unsafe locator、所有権または lifecycle
 record の安全性が不明な場合は replacement を起動せず、安全な typed lifecycle error を表示する。client が
@@ -178,7 +179,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
 | `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
-| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。successor の active runtime が inventory request に応答してから成功を返す。`--force` は live runtime を明示的に破棄する cold transition |
+| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。`--force` は live runtime を明示的に破棄する cold transition |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
 | `usagi daemon` / `usagi daemon serve` | 前景で daemon を active role で serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
@@ -557,8 +558,8 @@ replacement 後も維持する。2 process を安全に運用する authority �
 |---|---|
 | authority を渡す**元**（active generation）が registry に登録される | `serve` が起動時に登録する（[first activation](#first-activation)） |
 | authority を渡す**先**（standby process）が起動して registry に登録される | `serve --standby` が登録し readiness 後に `verified_build` を立てる（[standby process の lifecycle](#standby-process-の-lifecycle)） |
-| active generation が request ごとに role を決め直し、rollover の routing 前提を判定できる | active generation が [admission fence](#admission-fence) と [routing 前提条件](#rollover-の-routing-前提条件)の ledger を通して serve する |
-| 検証済み standby を active へ昇格させる handoff の起動 | CLI が standby を stage し、old active へ durable operation ID 付き `rollover` IPC verb を送る。old active が successor hello を再検証し、自 process の gate で `execute_gated_rollover` を駆動する。successor は commit を custody loop で観測し、同じ socket・generation の readiness-only loop を active runtime loop へ切り替える。CLI は current locator と generation を照合し、successor が harmless inventory request に応答してから成功を返す |
+| active generation が request ごとに role を決め直し、rollover の routing / MCP authority 前提を判定できる | active generation が [admission fence](#admission-fence) と [routing 前提条件](#rollover-の-routing-前提条件)の ledger を通して serve する。control admission を close / drain した後、全 daemon-provisioned MCP credential が 0 のままか再検証する |
+| 検証済み standby を active へ昇格させる handoff の起動 | CLI が standby を stage し、old active へ durable operation ID 付き `rollover` IPC verb を送る。old active が successor hello を再検証し、自 process の gate で guarded rollover を駆動する。successor は commit を custody loop で観測し、同じ socket・generation の readiness-only loop を active runtime loop へ切り替える。CLI は current locator と generation を照合し、successor が harmless inventory request に応答してから成功を返す |
 
 seamless refusal は registry を読み、欠けている前提を名前で示す。
 
@@ -581,7 +582,8 @@ generation なので、seamless の successor 候補にはならない。
 | live runtime | 要求 | 結果 |
 |---|---|---|
 | 0 | planned replacement | cold transition |
-| 1 以上 | planned replacement、seamless refusal なし | standby を stage し、old active の gate を通した seamless rollover |
+| 1 以上、全て generic Terminal | planned replacement、seamless refusal なし | standby を stage し、old active の gate を通した seamless rollover |
+| 1 以上、Agent credential あり | planned replacement | typed refusal。old active / current / Agent PTY / credential は維持 |
 | 1 以上 | planned replacement、seamless refusal あり | typed refusal。old active / current / PTY は維持 |
 | 1 以上 | replacement `--force` | 明示的な cold transition |
 | 1 以上 | `stop` | 拒否。signal を送らず、`current` も PTY も registry も変更しない |
@@ -1457,10 +1459,11 @@ resume、再診断の順である。これにより old owner の PTY handle を
 materialize することもない。provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
 modern daemon は全件 effect-before-zero で拒否する。停止後に scope が stale、current adapter が resume 非対応と判明しても、別
 conversation は推測しない。最終診断は outdated Agent 数、live Agent 数、retained draining
-generation 数を表示する。診断は daemon 全体の daemon-provisioned MCP child claim 総数も返す。daemon build mismatch 時に
-live claim が残る場合は process-local credential を successor が引き継げないため replacement を保留し、旧 daemon と Agent を
-維持する。`--restart-agents` で停止・resume する outdated Agent が全 claim を説明できる場合だけ、その停止後に replacement
-できる。旧 daemon が claim 総数 field を持たない場合も、live Agent があれば未知を 0 と推測せず保留する。
+generation 数を表示する。診断は child が未 claim のものも含む daemon 全体の daemon-provisioned MCP caller credential 総数を返す。
+daemon build mismatch 時に credential が残る場合は process-local authority を successor が引き継げないため replacement を保留し、
+旧 daemon と Agent を維持する。`--restart-agents` はこの build handoff の拒否を上書きせず、先に Agent を停止して競合窓を作らない。
+旧 daemon が credential 総数 field を持たない場合も、live Agent があれば未知を 0 と推測せず保留する。0 と診断した後も old active が
+control admission を close / drain して credential を再検証し、競合した Agent launch があれば durable write 前に拒否する。
 IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
 
 診断 vocabulary 導入前の daemon は integration revision を返せず Agent を選択停止できない。live Agent が無ければ通常の
@@ -1897,8 +1900,10 @@ shipping `serve` はこの authority の role 取得・handoff・draining collec
 registry の単一 active として登録し（[first activation](#first-activation)）、`current.json` を publish し、
 正常終了時に返却する。standby role では private endpoint を bind して registry へ standby として登録し、
 readiness 後に `verified_build` を立てる（[standby process の lifecycle](#standby-process-の-lifecycle)）。
-planned replacement は old active 自身へ `rollover` IPC verb を送り、その process-local gate を閉じて handoff を
-commit する。old process はその後 `draining` として owner terminal を serve し、[generation collection](#generation-collection)
+planned replacement は old active 自身へ `rollover` IPC verb を送り、その process-local gate を閉じて既存 control work を
+drain する。その barrier 後に process-local MCP authority と routing / registry revision を再検証し、すべて成立した場合だけ
+最初の durable handoff write を行って commit する。refusal では barrier を再び active に戻す。old process は commit 後
+`draining` として owner terminal を serve し、[generation collection](#generation-collection)
 の条件が揃ったときだけ自動終了する。
 
 ### durable registry
@@ -2192,6 +2197,7 @@ active generation は connection ごとに `ClientHello` の routing 回答を�
 | 後継 generation | `ServerHello` に同じ capability を広告している | `successor_routing_unsupported` |
 | durable registry | この build が書く schema である | `registry_schema_unsupported` |
 | durable registry | rollover を計画した revision のままである | `registry_revision_mismatch` |
+| active generation の MCP authority | child が未 claim のものを含め、daemon-provisioned caller credential が 0 | `mcp_authority_retained` / `mcp_authority_unavailable` |
 
 client 側の routing 契約は [4. IPC の owner generation routing](04-ipc.md#owner-generation-routing) が正本である。
 capability は connection 単位で記録するため、旧 build の client が切断すれば refusal は解け、同じ client が

@@ -505,13 +505,13 @@ pub struct AgentIntegrationDiagnosis {
     pub outdated: Vec<OutdatedAgentRuntime>,
     /// Claimed daemon-provisioned MCP child slots belonging to `outdated`.
     pub outdated_mcp_children: usize,
-    /// All claimed daemon-provisioned MCP child slots held by this daemon.
+    /// All daemon-provisioned MCP caller credentials held by this daemon.
     ///
     /// `None` means the serving daemon predates this diagnostic field. A newer
     /// client must treat that as unknown rather than assuming that no live
     /// caller would lose its control authority during daemon replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_mcp_children: Option<usize>,
+    pub provisioned_mcp_callers: Option<usize>,
 }
 
 /// Explicit source-to-replacement relation returned by a successful resume.
@@ -766,7 +766,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(diagnosis.workspace_id, workspace);
-        assert_eq!(diagnosis.claimed_mcp_children, None);
+        assert_eq!(diagnosis.provisioned_mcp_callers, None);
     }
 
     #[test]

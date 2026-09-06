@@ -5560,7 +5560,7 @@ fn start_ipc_accept_loop(
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
                                             Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
-                                            Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
+                                            Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, request_id, &body, hello),
                                             Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                             Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
                                             Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
@@ -8109,6 +8109,7 @@ fn record_session_lineage(
 fn dispatch_rollover(
     data_dir: &Path,
     fence: &GenerationFence,
+    agent: &SharedAgentRuntime,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -8128,7 +8129,7 @@ fn dispatch_rollover(
         .map(|file| GenerationRegistry::new(file, DEFAULT_GENERATION_LIMIT))
         .map_err(|error| error.to_string())
         .and_then(|registry| {
-            rollover_trigger::execute(
+            rollover_trigger::execute_with_guard(
                 &registry,
                 &CurrentLocatorFile::new(data_dir),
                 &fence.gate,
@@ -8138,6 +8139,23 @@ fn dispatch_rollover(
                     build: current_build(),
                 },
                 &operation,
+                &mut || {
+                    let credentials = agent
+                        .lock()
+                        .map_err(|_| {
+                            usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityUnavailable
+                        })?
+                        .provisioned_mcp_callers();
+                    if credentials == 0 {
+                        Ok(())
+                    } else {
+                        Err(
+                            usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityRetained {
+                                credentials,
+                            },
+                        )
+                    }
+                },
             )
             .map_err(|error| error.to_string())
         });
@@ -15237,14 +15255,21 @@ fn existing_policy_client(
 /// daemon to stop the Agent processes it still owns before rollover transfers
 /// control to the current binary.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-pub(crate) fn diagnostic_client(policy: ClientPolicy) -> Result<LaneClient, ClientError> {
+pub(crate) fn diagnostic_client(
+    policy: ClientPolicy,
+    unbound: bool,
+) -> Result<LaneClient, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     connect_deadline_client(
         &data_dir,
         policy,
         current_build(),
-        client_workspace(),
+        if unbound {
+            ClientWorkspace::Unbound
+        } else {
+            client_workspace()
+        },
         SystemClock::new(),
         policy.timeout_ms,
     )

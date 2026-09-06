@@ -121,11 +121,16 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 
 `~/.usagi/bin` が `PATH` に無い場合は installer が追記方法を案内する。導入済みなら `usagi update` で
 最新版へ、`usagi update -v` で選んだ release へ更新できる。更新後の CLI は次回起動から使われる。更新前に
-daemon が稼働していた場合は、更新した exact binary が続けて `doctor --fix` を実行し、安全な handoff が完了するまで待つ。
-daemon が動いていなければ新しく起動しない。起動中の TUI は終了して開き直す。
+daemon が稼働していた場合は、installer が更新 lock を保持したまま exact installed binary の内部 Doctor を実行し、
+安全な handoff と新 daemon の応答確認が完了するまで待つ。daemon が動いていなければ新しく起動しない。
+起動中の TUI は終了して開き直す。
 
-live Agent の process-local MCP credential を新 daemon へ安全に渡せない場合は daemon の入れ替えだけを保留し、
-binary 更新と Agent はそのまま維持する。Agent を終了した後に `usagi doctor --fix` を再実行する。
+live Agent の process-local MCP credential を新 daemon へ安全に渡せない場合は、binary は更新するが daemon handoff を拒否して
+update を非 0 で終え、Agent と旧 daemon を維持する。Agent を終了した後に `usagi doctor --fix` を再実行する。
+選択した旧 release が安全な managed 同期 capability を持たない場合も旧 daemon を変更せず拒否する。
+
+この managed 同期を含まない旧版から初めて更新する 1 回だけは、実行中の旧 `update` 自体を遡及変更できないため binary の
+差し替えだけで終わる。その場合は新しい `usagi update` または `usagi doctor --fix` をもう一度実行する。
 
 対象は macOS（amd64 / arm64）と Linux（amd64）である。v2 の daemon IPC と PTY 管理は Unix transport を
 使うため Windows は対象外で、installer もこの 3 つ以外は失敗する。
@@ -324,7 +329,8 @@ Open、Recent、Unite で元ディレクトリが消えた workspace を選ぶ�
 
 `restart` は live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、
 安全な handoff の前提が欠ける場合だけ拒否する。`stop` は live Agent や terminal があると拒否する。
-`--force` は live PTY を破棄してよい場合だけ使う。詳細は [planned replacement](document/05-daemon.md#planned-replacement)を参照する。
+`--force` は live PTY を破棄してよい場合だけ使う。通常の planned replacement も daemon-provisioned MCP credential を持つ
+live Agent がいれば旧 owner を維持して拒否する。詳細は [planned replacement](document/05-daemon.md#planned-replacement)を参照する。
 service 登録は macOS（LaunchAgent）と Linux（systemd user unit。systemd 240 以降）で利用できる。
 登録した service は、登録時に解決した workspace を起動 directory として固定する。login 時の起動と異常終了後の
 復帰を担うが、`usagi daemon stop` による意図した停止の扱いは異なる（LaunchAgent は起動し直し、systemd unit は
