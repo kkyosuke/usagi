@@ -121,13 +121,15 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 
 `~/.usagi/bin` が `PATH` に無い場合は installer が追記方法を案内する。導入済みなら `usagi update` で
 最新版へ、`usagi update -v` で選んだ release へ更新できる。更新後の CLI は次回起動から使われる。更新前に
-daemon が稼働していた場合は、installer が更新 lock を保持したまま exact installed binary の内部 Doctor を実行し、
-安全な handoff と新 daemon の応答確認が完了するまで待つ。daemon が動いていなければ新しく起動しない。
+installer は更新 lock を保持したまま exact installed binary の内部 Doctor を必ず実行し、同期時点の daemon 状態を
+lifecycle lock の下で再確認する。daemon が動いていれば安全な handoff と新 daemon の応答確認が完了するまで待ち、
+停止中または crash 後の stale owner だけなら回収して停止状態を維持する。
 起動中の TUI は終了して開き直す。
 
 live Agent の process-local MCP credential を新 daemon へ安全に渡せない場合は、binary は更新するが daemon handoff を拒否して
 update を非 0 で終え、Agent と旧 daemon を維持する。Agent を終了した後に `usagi doctor --fix` を再実行する。
-選択した旧 release が安全な managed 同期 capability を持たない場合も旧 daemon を変更せず拒否する。
+選択した旧 release が安全な managed 同期 capability を持たない場合や、稼働中の旧 daemon が server-side handoff fence を
+証明できない場合も旧 daemon を変更せず拒否する。後者は旧 daemon を停止してから更新を再実行する。
 
 この managed 同期を含まない旧版から初めて更新する 1 回だけは、実行中の旧 `update` 自体を遡及変更できないため binary の
 差し替えだけで終わる。その場合は新しい `usagi update` または `usagi doctor --fix` をもう一度実行する。

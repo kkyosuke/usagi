@@ -13855,7 +13855,11 @@ impl IpcRolloverRequester<'_> {
         )
     }
 
-    fn wait_until_serving(&self, pid: u32, deadline: Instant) -> std::io::Result<()> {
+    fn wait_until_serving(&self, pid: u32) -> std::io::Result<()> {
+        // Promotion hydrates the active runtime only after W2. Give that second
+        // healthy-but-slow stage its own complete readiness budget instead of
+        // inheriting whatever standby verification happened to leave behind.
+        let deadline = Instant::now() + ROLLOVER_STARTUP_WINDOW;
         loop {
             if self.successor_is_serving(pid) {
                 return Ok(());
@@ -13910,7 +13914,7 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
         // A lost ACK after commit is a success once the committed successor is
         // serving. Never roll back an observable handoff because the response
         // frame was lost.
-        self.wait_until_serving(pid, deadline)?;
+        self.wait_until_serving(pid)?;
         Ok(format!(
             "daemon authority handed off (operation {})",
             operation.0
@@ -15276,6 +15280,94 @@ pub(crate) fn diagnostic_client(
     .map_err(|error| ClientError::Unavailable(error.to_string()))
 }
 
+/// Cross-process lifecycle custody for one managed update synchronization.
+///
+/// The updater holds this from its final daemon observation through replacement
+/// and serving verification. Ordinary client bootstrap therefore cannot turn a
+/// stopped daemon into a running one between those steps. When absence was
+/// observed, the singleton lock is held too so a direct serve cannot publish
+/// until the no-op synchronization has linearized.
+pub(crate) struct ManagedUpdateLock {
+    _bootstrap: std::fs::File,
+    _absence: Option<FileInstanceLock>,
+}
+
+/// Observe the exact published owner without cold-starting one, while holding
+/// the lifecycle locks needed to keep that observation stable.
+///
+/// A stale crash record is recovered under the same bootstrap lock. `None`
+/// means the singleton lock proved that no daemon is active; a live but not yet
+/// reachable owner remains an error rather than being mistaken for absence.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=managed_update_with_a_live_generic_pty_keeps_the_draining_owner
+pub(crate) fn managed_update_diagnostic_client(
+    policy: ClientPolicy,
+) -> Result<(ManagedUpdateLock, Option<LaneClient>), ClientError> {
+    let data_dir = client_result(paths::data_dir())?;
+    let bootstrap = acquire_bootstrap_lock(&data_dir)?;
+    let connect = || {
+        connect_deadline_client(
+            &data_dir,
+            policy,
+            current_build(),
+            ClientWorkspace::Unbound,
+            SystemClock::new(),
+            policy.timeout_ms,
+        )
+    };
+    match connect() {
+        Ok(client) => Ok((
+            ManagedUpdateLock {
+                _bootstrap: bootstrap,
+                _absence: None,
+            },
+            Some(client),
+        )),
+        Err(connect_error) => {
+            match recover_stale_client_endpoint(&data_dir)
+                .map_err(|error| ClientError::Unavailable(error.to_string()))?
+            {
+                bootstrap::StaleRecovery::OwnerActive => {
+                    return Err(ClientError::Unavailable(
+                        "daemon owner is active but its endpoint is not ready".into(),
+                    ));
+                }
+                bootstrap::StaleRecovery::Recovered | bootstrap::StaleRecovery::NotProven => {}
+            }
+            let absence = FileInstanceLock {
+                path: data_dir.join("daemon").join("daemon.lock"),
+                held: RefCell::new(None),
+            };
+            if !absence
+                .acquire()
+                .map_err(|error| ClientError::Unavailable(error.to_string()))?
+            {
+                return Err(ClientError::Unavailable(
+                    "daemon owner became active during managed update synchronization".into(),
+                ));
+            }
+            let store = DaemonRecordStore::new(FsRecordFile {
+                path: data_dir.join("daemon").join("daemon.json"),
+            });
+            let record = store
+                .load()
+                .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+            let current = data_dir.join("daemon").join("current.json").is_file();
+            if record.is_some() || current {
+                return Err(ClientError::Unavailable(format!(
+                    "daemon absence could not be proved after endpoint failure: {connect_error}"
+                )));
+            }
+            Ok((
+                ManagedUpdateLock {
+                    _bootstrap: bootstrap,
+                    _absence: Some(absence),
+                },
+                None,
+            ))
+        }
+    }
+}
+
 /// Whether a daemon current locator is published. Doctor uses this only to
 /// distinguish a normal cold start from a failed connection to an existing
 /// owner; it is not process-liveness or signal authority.
@@ -15535,6 +15627,28 @@ pub(crate) fn replace_running_daemon(
     .map(Ok)
 }
 
+/// Replace a published daemon while the managed updater already holds the
+/// bootstrap lock returned by [`managed_update_diagnostic_client`].
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=managed_update_with_a_live_generic_pty_keeps_the_draining_owner
+pub(crate) fn replace_running_daemon_during_update(
+    out: &mut dyn Write,
+    policy: ClientPolicy,
+    info: &AppInfo,
+    _lock: &ManagedUpdateLock,
+) -> std::io::Result<Result<(), ClientError>> {
+    let trigger = match request_replacement_while_locked(policy) {
+        Ok(trigger) => trigger,
+        Err(error) => return Ok(Err(error)),
+    };
+    run(
+        out,
+        CliDaemonCommand::Restart { force: false },
+        info,
+        Some(trigger.operation_id),
+    )
+    .map(Ok)
+}
+
 /// Requests intentional replacement of the currently running daemon artifact.
 /// This only creates the deterministic trigger; it never sends a stop signal or
 /// spawns a second daemon. [`replace_running_daemon`] consumes it.
@@ -15543,6 +15657,14 @@ fn request_replacement(policy: ClientPolicy) -> Result<BuildRolloverTrigger, Cli
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
+    request_replacement_while_locked(policy)
+}
+
+fn request_replacement_while_locked(
+    policy: ClientPolicy,
+) -> Result<BuildRolloverTrigger, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let expected_build = current_build();
     // Replacing the running artifact is a lifecycle observation, not workspace
     // work: it reads the daemon's advertised build and sends no request, so it
@@ -15669,12 +15791,17 @@ pub(crate) fn current_build() -> BuildIdentity {
     // atomic replacement of the executable path cannot change what a running
     // daemon advertises. `build.rs` leaves the source id empty when it cannot
     // uniquely identify the source, which keeps the identity fail-safe unknown.
+    #[cfg(debug_assertions)]
+    let source_id = std::env::var("USAGI_TEST_BUILD_SOURCE_ID")
+        .unwrap_or_else(|_| env!("USAGI_BUILD_SOURCE_ID").to_owned());
+    #[cfg(not(debug_assertions))]
+    let source_id = env!("USAGI_BUILD_SOURCE_ID").to_owned();
     usagi_core::infrastructure::ipc::build_identity(
         env!("CARGO_PKG_VERSION"),
         env!("USAGI_BUILD_COMMIT"),
         env!("USAGI_BUILD_TARGET"),
         env!("USAGI_BUILD_PROFILE"),
-        env!("USAGI_BUILD_SOURCE_ID"),
+        &source_id,
     )
 }
 /// Connects one exact-owner-verified daemon session. `arm` wraps the accepted

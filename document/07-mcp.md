@@ -264,7 +264,7 @@ planned restart は発行済み credential が 1 件でもあれば旧 owner を
 
 このため `usagi update` が lock 内で実行する managed Doctor と `usagi doctor --fix` は、daemon build mismatch 時に
 child claim 前を含む daemon-provisioned MCP caller credential が残っていれば planned replacement を保留する。旧 daemon が
-credential 総数を報告できない場合も、live Agent がいれば安全側に保留する。診断後に Agent launch が競合しても、old active が
+credential 総数を報告できない場合は、live inventory が 0 でも server-side fence が不明なため安全側に保留する。診断後に Agent launch が競合しても、old active が
 control admission を close / drain した後に process-local credential を再検証し、最初の durable handoff write より前に拒否する。
 Agent を終了して Doctor を再実行するまで旧 daemon の control authority を維持する。
 

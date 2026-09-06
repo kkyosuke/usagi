@@ -5183,7 +5183,19 @@ fn repair_doctor(
     let expected = current_agent_integrations();
     // Deliberately inspect/stop on the published owner before build policy may
     // roll it over: only that process owns the old PTY handles.
-    let (mut owner, expected_build, published_build) = open_doctor_owner(options.managed_update())?;
+    let Some(DoctorOwner {
+        mut owner,
+        expected_build,
+        published_build,
+        managed_update_lock,
+    }) = open_doctor_owner(options.managed_update())?
+    else {
+        writeln!(
+            out,
+            "doctor fix: daemon is not running; managed update left it stopped"
+        )?;
+        return Ok(());
+    };
     let workspace = doctor_workspace_id(&mut *owner)?;
     writeln!(
         out,
@@ -5204,8 +5216,13 @@ fn repair_doctor(
     )?;
     let before = match doctor_agent_diagnosis(&mut *owner, workspace, &expected) {
         Ok(diagnosis) => diagnosis,
-        Err(DoctorDiagnosisError::Unsupported) => {
+        Err(DoctorDiagnosisError::Unsupported) if !options.managed_update() => {
             return repair_legacy_doctor(out, info, owner, workspace, &expected, options);
+        }
+        Err(DoctorDiagnosisError::Unsupported) => {
+            return Err(std::io::Error::other(
+                "managed update cannot safely hand off a daemon that predates server-side rollover fencing; stop the old daemon and rerun the update",
+            ));
         }
         Err(DoctorDiagnosisError::Client(error)) => {
             return Err(std::io::Error::other(error.to_string()));
@@ -5229,8 +5246,7 @@ fn repair_doctor(
             .map(|tenant| tenant.live_runtimes)
             .fold(0_usize, usize::saturating_add)
     };
-    let daemon_plan =
-        plan_doctor_daemon_replacement(&expected_build, &published_build, &before, live_runtimes);
+    let daemon_plan = plan_doctor_daemon_replacement(&expected_build, &published_build, &before);
     if daemon_plan == DoctorDaemonPlan::Defer {
         let credentials = before.provisioned_mcp_callers.map_or_else(
             || "an unknown number of".to_owned(),
@@ -5240,14 +5256,44 @@ fn repair_doctor(
             out,
             "doctor fix: daemon rollover deferred; {credentials} daemon-provisioned MCP caller credential(s) and {live_runtimes} live/unknown runtime(s) remain on the published daemon"
         )?;
-        writeln!(
-            out,
-            "doctor fix: finish the live Agent(s), then rerun 'usagi doctor --fix'"
-        )?;
-        return doctor_deferred_result(
-            options.managed_update(),
-            "managed update cannot synchronize the daemon while live Agent authority remains",
-        );
+        if before.provisioned_mcp_callers.is_none() {
+            writeln!(
+                out,
+                "doctor fix: this daemon cannot prove server-side handoff fencing; stop it, then rerun 'usagi doctor --fix'"
+            )?;
+        } else {
+            writeln!(
+                out,
+                "doctor fix: finish the live Agent(s), then rerun 'usagi doctor --fix'"
+            )?;
+        }
+        let message = if before.provisioned_mcp_callers.is_none() {
+            "managed update cannot synchronize a daemon without server-side handoff fencing"
+        } else {
+            "managed update cannot synchronize the daemon while live Agent authority remains"
+        };
+        return doctor_deferred_result(options.managed_update(), message);
+    }
+    // Managed update synchronizes only daemon ownership. Historical Agent
+    // integration repair remains an explicit user Doctor action; conflating the
+    // two made a harmless outdated record skip the daemon handoff while still
+    // reporting update success.
+    if options.managed_update() {
+        if daemon_plan == DoctorDaemonPlan::Replace {
+            drop(owner);
+            crate::runtime::daemon::replace_running_daemon_during_update(
+                out,
+                ClientPolicy::cli(),
+                info,
+                managed_update_lock
+                    .as_ref()
+                    .expect("managed observation always retains its lifecycle lock"),
+            )?
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+        let _current = current_daemon_client(&expected_build, true)?;
+        writeln!(out, "doctor fix: daemon build is current and serving")?;
+        return Ok(());
     }
     let Some(plan) = prepare_outdated_agent_repair(
         out,
@@ -5285,7 +5331,7 @@ fn repair_doctor(
             )
         })
         .count();
-    let draining = wait_for_draining_daemons();
+    let draining = draining_daemons();
     writeln!(
         out,
         "doctor fix: interrupted {}, resumed {}, outdated after repair {}, old MCP child claims after repair {}, live Agent(s) {live}, draining daemon(s) {draining}",
@@ -5299,9 +5345,9 @@ fn repair_doctor(
             "Agent integration repair did not converge",
         ));
     }
-    if after.outdated_mcp_children != 0 || draining != 0 {
+    if after.outdated_mcp_children != 0 {
         return Err(std::io::Error::other(
-            "repair completed but an old MCP child claim or draining daemon remains",
+            "repair completed but an old MCP child claim remains",
         ));
     }
     Ok(())
@@ -5344,50 +5390,69 @@ enum DoctorDaemonPlan {
 /// live Agent's process-local MCP credential.
 ///
 /// A daemon from before `provisioned_mcp_callers` cannot prove that replacement
-/// is safe while an Agent is live. A current daemon may proceed only when no MCP
-/// caller credential exists. Agent stopping is deliberately not part of this
+/// is fenced against a credential minted after client-side diagnosis, so it is
+/// always deferred. A current daemon may proceed only when no MCP caller
+/// credential exists. Agent stopping is deliberately not part of this
 /// client-side decision: the old owner's server-side admission barrier performs
 /// the authoritative check immediately before the first durable handoff write.
 fn plan_doctor_daemon_replacement(
     expected: &usagi_core::infrastructure::ipc::BuildIdentity,
     published: &usagi_core::infrastructure::ipc::BuildIdentity,
     diagnosis: &AgentIntegrationDiagnosis,
-    live_runtimes: usize,
 ) -> DoctorDaemonPlan {
     if expected == published {
         return DoctorDaemonPlan::Current;
     }
     match diagnosis.provisioned_mcp_callers {
         Some(0) => DoctorDaemonPlan::Replace,
-        Some(_) => DoctorDaemonPlan::Defer,
-        None => {
-            if live_runtimes == 0 {
-                DoctorDaemonPlan::Replace
-            } else {
-                DoctorDaemonPlan::Defer
-            }
-        }
+        _ => DoctorDaemonPlan::Defer,
     }
 }
 
+struct DoctorOwner {
+    owner: Box<dyn DaemonClient>,
+    expected_build: usagi_core::infrastructure::ipc::BuildIdentity,
+    published_build: usagi_core::infrastructure::ipc::BuildIdentity,
+    managed_update_lock: Option<crate::runtime::daemon::ManagedUpdateLock>,
+}
+
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn open_doctor_owner(
-    managed_update_sync: bool,
-) -> std::io::Result<(
-    Box<dyn DaemonClient>,
-    usagi_core::infrastructure::ipc::BuildIdentity,
-    usagi_core::infrastructure::ipc::BuildIdentity,
-)> {
+fn open_doctor_owner(managed_update_sync: bool) -> std::io::Result<Option<DoctorOwner>> {
     let expected = crate::runtime::daemon::current_build();
+    if managed_update_sync {
+        let (lock, client) =
+            crate::runtime::daemon::managed_update_diagnostic_client(ClientPolicy::cli())
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let Some(client) = client else {
+            return Ok(None);
+        };
+        let published = client.server_build().clone();
+        return Ok(Some(DoctorOwner {
+            owner: Box::new(client),
+            expected_build: expected,
+            published_build: published,
+            managed_update_lock: Some(lock),
+        }));
+    }
     match crate::runtime::daemon::diagnostic_client(ClientPolicy::cli(), managed_update_sync) {
         Ok(client) => {
             let published = client.server_build().clone();
-            Ok((Box::new(client), expected, published))
+            Ok(Some(DoctorOwner {
+                owner: Box::new(client),
+                expected_build: expected,
+                published_build: published,
+                managed_update_lock: None,
+            }))
         }
         Err(_) if !crate::runtime::daemon::has_published_daemon() => {
             let client = crate::runtime::daemon::policy_client(ClientPolicy::cli())
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            Ok((Box::new(client), expected.clone(), expected))
+            Ok(Some(DoctorOwner {
+                owner: Box::new(client),
+                expected_build: expected.clone(),
+                published_build: expected,
+                managed_update_lock: None,
+            }))
         }
         Err(error) => Err(std::io::Error::other(error.to_string())),
     }
@@ -5491,7 +5556,9 @@ fn prepare_outdated_agent_repair(
     }))
 }
 
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+#[coverage(off)]
+// coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+#[allow(clippy::too_many_lines)] // Conservative legacy stop/cold-replace/exact-resume transaction.
 fn repair_legacy_doctor(
     out: &mut dyn Write,
     info: &AppInfo,
@@ -5545,6 +5612,13 @@ fn repair_legacy_doctor(
         return Err(std::io::Error::other(
             "legacy daemon cannot stop Agents selectively; --force is required and may discard generic terminals",
         ));
+    }
+    if live.is_empty() && !options.force {
+        writeln!(
+            out,
+            "doctor fix: legacy daemon has no server-side handoff fence; rerun with --force for a cold replacement"
+        )?;
+        return Ok(());
     }
     drop(owner);
     crate::runtime::daemon::replace_running_daemon(out, ClientPolicy::cli(), options.force, info)?
@@ -5624,6 +5698,23 @@ fn wait_for_draining_daemons() -> usize {
         thread::sleep(Duration::from_millis(250));
     }
     unreachable!("bounded draining diagnosis always returns")
+}
+
+/// Count retained draining owners without waiting for their intentionally live
+/// generic PTYs to exit.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+fn draining_daemons() -> usize {
+    crate::runtime::daemon::invalidate_routes();
+    crate::runtime::daemon::trusted_generations()
+        .map(|generations| {
+            generations
+                .iter()
+                .filter(|generation| {
+                    generation.role == usagi_core::infrastructure::ipc::GenerationRole::Draining
+                })
+                .count()
+        })
+        .unwrap_or_default()
 }
 
 fn current_agent_integrations() -> Vec<AgentIntegrationRevision> {
@@ -5828,24 +5919,24 @@ mod tests {
         let published = doctor_build("old");
 
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &expected, &doctor_diagnosis(Some(3), 0), 3,),
+            plan_doctor_daemon_replacement(&expected, &expected, &doctor_diagnosis(Some(3), 0)),
             DoctorDaemonPlan::Current
         );
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(Some(0), 0), 0,),
+            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(Some(0), 0)),
             DoctorDaemonPlan::Replace
         );
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(Some(2), 1), 2,),
+            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(Some(2), 1)),
             DoctorDaemonPlan::Defer
         );
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(None, 0), 1,),
+            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(None, 0)),
             DoctorDaemonPlan::Defer
         );
         assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(None, 0), 0,),
-            DoctorDaemonPlan::Replace
+            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(None, 0)),
+            DoctorDaemonPlan::Defer
         );
     }
 

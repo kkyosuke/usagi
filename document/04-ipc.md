@@ -678,7 +678,7 @@ Doctor の integration repair は同じ exact resume 境界を狭く拡張する
 code-defined profile revision と、live runtime の launch snapshot revision を比較し、古い hook / MCP integration
 だけを provider ID・argv・設定本文なしで返す。診断には outdated runtime に属する MCP child claim 数に加え、daemon 全体で
 発行済みの MCP caller credential 総数 `provisioned_mcp_callers` を含める。child がまだ claim していない credential も数える。
-field が無い旧 daemon は「不明」であり、live Agent がいる状態で 0 と推測して rollover しない。exact resume metadata の準備可否も含み、1件でも準備できていなければ
+field が無い旧 daemon は「不明」であり、client-side inventory が 0 でも server-side fence を証明できないため rollover しない。exact resume metadata の準備可否も含み、1件でも準備できていなければ
 `restart_agents` は停止前に全件拒否する。`restart_agents` は利用者へ表示した診断集合の exact runtime ref を再送し、その集合だけを
 停止する非 retry mutation である。診断後に追加された Agent は停止せず、選択済み ref が差し替わった場合は全件停止前に stale として
 拒否する。reported phase が `running` の runtime は `force` なしで全件 effect-before-zero の `busy` となる。generic terminal は対象外である。
@@ -690,9 +690,10 @@ handoff を拒否する。build が同じときの integration repair では、�
 `resume_agent_with_current_integration` へ渡す。この repair-only request は source の旧 adapter revision を fence として
 保持したまま、active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope /
 lineage を変えずに hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
-旧 daemon がこの診断 vocabulary を実装していない場合、live Agent が無ければ通常 rollover を行う。live Agent がある場合は
-一覧を返して停止を保留し、`--restart-agents --force` が同時に指定された場合だけ既存の cold restart を使う。この互換経路は
-generic terminal も停止し得るが、再起動後も今回停止した runtime ID に対応する exact target だけを resume する。
+旧 daemon がこの診断 vocabulary または server-side handoff fence を実装していない場合、planned rollover は行わない。
+利用者が明示した `--force` の cold replacement だけを互換経路とし、live Agent がある場合はさらに
+`--restart-agents` を必要とする。この経路は generic terminal も停止し得るが、再起動後も今回停止した runtime ID に
+対応する exact target だけを resume する。内部 managed Doctor はこの強制 authority を持たず非 0 で保留する。
 
 ## Work Run observation and control
 

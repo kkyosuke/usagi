@@ -157,7 +157,7 @@ pub fn execute_gated_rollover(
     operation: &OperationId,
 ) -> Result<RolloverOutcome, HandoffFailure> {
     let snapshot = registry.load()?;
-    admit_rollover(
+    let _routing_freeze = admit_rollover(
         plan.ledger,
         snapshot.document(),
         plan.planned_revision,
@@ -190,7 +190,7 @@ pub fn execute_gated_rollover_with_guard(
     gate.enter_draining()?;
     let mut barrier = PrecommitBarrier::new(gate);
     let snapshot = registry.load()?;
-    admit_rollover(
+    let _routing_freeze = admit_rollover(
         plan.ledger,
         snapshot.document(),
         plan.planned_revision,

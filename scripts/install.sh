@@ -345,8 +345,8 @@ mv -f -- "$CANDIDATE" "$TARGET"
 # has either synchronized the published daemon or refused without changing its
 # authority. The hidden flag is the capability boundary: older selected
 # releases reject it before Doctor can perform a legacy, weaker replacement.
-if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ] && [ "${USAGI_SYNC_DAEMON:-}" = "1" ]; then
-    printf "起動中の daemon を安全に更新中だよ！ぴょん\n"
+if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
+    printf "daemon の状態を安全に同期中だよ！ぴょん\n"
     set +e
     "$TARGET" doctor --fix --managed-update-sync
     SYNC_STATUS=$?
@@ -395,10 +395,8 @@ printf "   %s%s%s  %s%s%s\n" "$C_PINK" "$FACE" "$C_RST" "$C_BOLD" "$MESSAGE" "$C
 printf '   %so_(")(")%s  %s→%s  %s%s/usagi%s\n' "$C_PINK" "$C_RST" "$C_DIM" "$C_RST" "$C_CYAN" "$BIN_DIR" "$C_RST"
 printf "\n"
 printf "次回の起動から新しい CLI を使えるよ。起動中の TUI は開き直してね。\n"
-if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ] && [ "${USAGI_SYNC_DAEMON:-}" = "1" ]; then
-    printf "起動中の daemon も新しい build へ安全に更新したよ。\n"
-elif [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
-    printf "daemon は起動していないため、binary の更新だけ完了したよ。\n"
+if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
+    printf "daemon の build を同期したよ（停止中なら起動していないよ）。\n"
 else
     printf "daemon の build が古い場合は 'usagi doctor --fix' で入れ替えてね。\n"
 fi

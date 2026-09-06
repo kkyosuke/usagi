@@ -150,7 +150,7 @@ run_installer_for_version() {
 
 run_managed_installer() {
     (cd "$CWD_DIR" && HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" FIXTURE_DIR="$FIXTURE_DIR" \
-        USAGI_MANAGED_UPDATE=1 USAGI_SYNC_DAEMON=1 PATH="$FAKE_BIN:$PATH" \
+        USAGI_MANAGED_UPDATE=1 PATH="$FAKE_BIN:$PATH" \
         USAGI_VERSION=v2.0.0 bash "$INSTALLER")
 }
 
@@ -206,7 +206,7 @@ USAGI_DOCTOR_LOG="$CASE_DIR/doctor.log"
 export USAGI_DOCTOR_LOG
 run_managed_installer >"$CASE_DIR/out"
 unset USAGI_DOCTOR_LOG
-grep -q '起動中の daemon も新しい build へ安全に更新した' "$CASE_DIR/out"
+grep -q 'daemon の build を同期した' "$CASE_DIR/out"
 grep -q "^$CWD_DIR|--fix --managed-update-sync$" "$CASE_DIR/doctor.log"
 if grep -q "usagi doctor --fix" "$CASE_DIR/out"; then
     echo "managed update printed the standalone daemon instruction" >&2
@@ -218,8 +218,8 @@ USAGI_DOCTOR_LOG="$CASE_DIR/doctor.log"
 export USAGI_DOCTOR_LOG
 run_managed_installer_without_daemon >"$CASE_DIR/out"
 unset USAGI_DOCTOR_LOG
-grep -q 'daemon は起動していないため、binary の更新だけ完了した' "$CASE_DIR/out"
-[ ! -e "$CASE_DIR/doctor.log" ]
+grep -q 'daemon の build を同期した' "$CASE_DIR/out"
+grep -q '^.*|--fix --managed-update-sync$' "$CASE_DIR/doctor.log"
 
 prepare_case managed-update-unsupported
 USAGI_DOCTOR_UNSUPPORTED=1

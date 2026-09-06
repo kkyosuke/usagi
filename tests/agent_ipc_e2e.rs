@@ -232,9 +232,32 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
     spawn_daemon(repo, home, path, shell)
 }
 
+fn start_daemon_with_source_identity(
+    repo: &Path,
+    home: &Path,
+    path: &Path,
+    shell: &Path,
+    source_identity: &str,
+) -> Daemon {
+    let data_dir = channel_data_dir(home);
+    fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    spawn_daemon_command(repo, home, path, Some(shell), Some(source_identity))
+}
+
 /// Start a daemon against an existing home, as a cold restart does. The data
 /// directory is already published, so it is not re-created here.
 fn spawn_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> Daemon {
+    spawn_daemon_command(repo, home, path, shell, None)
+}
+
+fn spawn_daemon_command(
+    repo: &Path,
+    home: &Path,
+    path: &Path,
+    shell: Option<&Path>,
+    source_identity: Option<&str>,
+) -> Daemon {
     let fixture_path = format!("{}:/usr/bin:/bin", path.display());
     let mut command = usagi_command(
         home,
@@ -253,6 +276,9 @@ fn spawn_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
         );
     if let Some(shell) = shell {
         command.env("SHELL", shell);
+    }
+    if let Some(source_identity) = source_identity {
+        command.env("USAGI_TEST_BUILD_SOURCE_ID", source_identity);
     }
     let child = command
         .stdin(Stdio::null())
@@ -2236,6 +2262,191 @@ fn root_restart_rolls_over_two_real_generic_ptys_without_a_readiness_retry() {
     // fixture's exact lifecycle-record path before the temporary home vanishes.
     daemon_fixture::reap(home.path());
     drop(old_daemon);
+}
+
+/// Managed self-update uses the same seamless handoff as restart, but a
+/// retained generic PTY is a successful result rather than a repair failure.
+/// The hidden build override is debug-only and lets one shipping fixture
+/// process advertise the previous artifact without compiling a second binary.
+#[test]
+#[allow(clippy::too_many_lines)] // One real owner/handoff/PTY continuity contract.
+fn managed_update_with_a_live_generic_pty_keeps_the_draining_owner() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let shell_spawns = home.path().join("shell-spawn-count");
+    fs::create_dir_all(&bin).unwrap();
+    let shell = bin.join("fixture-shell");
+    write_shell(&shell, &shell_spawns);
+
+    let mut old_daemon =
+        start_daemon_with_source_identity(repo.path(), home.path(), &bin, &shell, &"a".repeat(64));
+    let data_dir = channel_data_dir(home.path());
+    let mut persistent = client(&data_dir);
+    let (workspace, session, worktree) = available_scope(&mut persistent);
+    let DaemonReply::Ok(launched) = persistent
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::to_value(TerminalRequest::Launch {
+                intent: TerminalLaunchIntent {
+                    request: TerminalLaunchRequest {
+                        profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                        scope: TerminalLaunchScope {
+                            workspace_id: workspace,
+                            session_id: Some(session),
+                            worktree_id: worktree,
+                        },
+                    },
+                    geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    launch_operation: None,
+                },
+            })
+            .unwrap(),
+        })
+        .expect("the generic PTY launches before managed synchronization")
+    else {
+        panic!("generic terminal launch is synchronous");
+    };
+    let terminal: TerminalRef = serde_json::from_value(launched["terminal"].clone()).unwrap();
+    let subscription = attach(&mut persistent, &terminal);
+    wait_for_spawns(&shell_spawns, 1);
+    let children_before = live_process_identities(&data_dir);
+    let old_pid = daemon_pid(&data_dir);
+    let old_generation = terminal.daemon_generation;
+
+    let sync_cwd = short_dir("managed-update-cwd-");
+    let synchronized = usagi_command(
+        home.path(),
+        Channel::Local,
+        sync_cwd.path(),
+        &[
+            "doctor".as_ref(),
+            "--fix".as_ref(),
+            "--managed-update-sync".as_ref(),
+        ],
+    )
+    .output()
+    .expect("managed Doctor runs");
+    assert!(
+        synchronized.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&synchronized.stdout),
+        String::from_utf8_lossy(&synchronized.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&synchronized.stdout)
+            .contains("daemon build is current and serving")
+    );
+
+    let document = read_registry_document(&data_dir)
+        .unwrap()
+        .expect("managed update keeps a generation registry");
+    let current = document.current.expect("a successor is current");
+    assert_ne!(current, old_generation);
+    assert!(document.generations.iter().any(|entry| {
+        entry.generation == old_generation
+            && entry.role == usagi_daemon::usecase::generation::GenerationRole::Draining
+    }));
+    assert!(alive(old_pid), "the generic PTY owner remains draining");
+    assert_eq!(live_process_identities(&data_dir), children_before);
+
+    let stream = connect_current(&data_dir).expect("the managed successor accepts immediately");
+    let successor = IpcClient::connect(
+        stream,
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        daemon_fixture::client_workspace(&data_dir),
+    )
+    .expect("the managed successor serves the current build");
+    assert_eq!(successor.server_build(), &shipping_build_identity());
+
+    persistent
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal,
+                subscription,
+                input_seq: 0,
+                input_operation: Some(OperationId::new()),
+                bytes: b"finish-managed\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .expect("the draining owner still serves its generic PTY");
+    drop(successor);
+    drop(persistent);
+    daemon_fixture::reap(home.path());
+    let _ = old_daemon.terminate_and_wait(Duration::from_secs(2));
+}
+
+#[test]
+fn managed_update_sync_never_cold_starts_an_absent_or_crashed_daemon() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let sync = usagi_command(
+        home.path(),
+        Channel::Local,
+        repo.path(),
+        &[
+            "doctor".as_ref(),
+            "--fix".as_ref(),
+            "--managed-update-sync".as_ref(),
+        ],
+    )
+    .output()
+    .expect("managed Doctor observes an absent daemon");
+    assert!(sync.status.success());
+    assert!(
+        String::from_utf8_lossy(&sync.stdout)
+            .contains("daemon is not running; managed update left it stopped")
+    );
+    assert!(
+        !channel_data_dir(home.path())
+            .join("daemon/current.json")
+            .exists()
+    );
+
+    let crashed_home = short_dir("usagi-");
+    let bin = crashed_home.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let mut crashed = start_daemon(repo.path(), crashed_home.path(), &bin, None);
+    let crashed_data = channel_data_dir(crashed_home.path());
+    drop(client(&crashed_data));
+    crashed.child.kill().unwrap();
+    crashed.child.wait().unwrap();
+    assert!(
+        crashed_data.join("daemon/current.json").exists(),
+        "SIGKILL leaves a stale published locator"
+    );
+
+    let recovered = usagi_command(
+        crashed_home.path(),
+        Channel::Local,
+        repo.path(),
+        &[
+            "doctor".as_ref(),
+            "--fix".as_ref(),
+            "--managed-update-sync".as_ref(),
+        ],
+    )
+    .output()
+    .expect("managed Doctor recovers the crashed owner");
+    assert!(
+        recovered.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&recovered.stdout)
+            .contains("daemon is not running; managed update left it stopped")
+    );
+    assert!(!crashed_data.join("daemon/current.json").exists());
+    assert!(!crashed_data.join("daemon/daemon.json").exists());
 }
 
 /// A launched Agent owns a daemon-minted MCP credential before its MCP child

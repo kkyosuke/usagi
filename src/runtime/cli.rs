@@ -359,9 +359,8 @@ fn execute_self_update(
     // preamble first so it cannot appear after the child output.
     out.flush()?;
     err.flush()?;
-    let daemon_was_published = daemon::has_published_daemon();
     execute_self_update_with(request, out, err, &mut |script, select_version| {
-        let mut command = update_installer_command(select_version, daemon_was_published);
+        let mut command = update_installer_command(select_version);
         let mut child = command.spawn()?;
         let write_result = child
             .stdin
@@ -381,10 +380,7 @@ fn execute_self_update(
     })
 }
 
-fn update_installer_command(
-    select_version: bool,
-    synchronize_daemon: bool,
-) -> std::process::Command {
+fn update_installer_command(select_version: bool) -> std::process::Command {
     use std::process::{Command, Stdio};
 
     let mut command = Command::new("bash");
@@ -393,13 +389,9 @@ fn update_installer_command(
         .arg("--")
         .current_dir("/")
         .env("USAGI_MANAGED_UPDATE", "1")
-        .env_remove("USAGI_SYNC_DAEMON")
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    if synchronize_daemon {
-        command.env("USAGI_SYNC_DAEMON", "1");
-    }
     if select_version {
         command.arg("--select-version");
     }
@@ -1172,7 +1164,7 @@ mod tests {
 
     #[test]
     fn managed_installer_environment_is_explicit_and_cwd_independent() {
-        let command = update_installer_command(true, true);
+        let command = update_installer_command(true);
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["-s", "--", "--select-version"]
@@ -1185,19 +1177,9 @@ mod tests {
             environment.get(std::ffi::OsStr::new("USAGI_MANAGED_UPDATE")),
             Some(&Some(std::ffi::OsStr::new("1")))
         );
-        assert_eq!(
-            environment.get(std::ffi::OsStr::new("USAGI_SYNC_DAEMON")),
-            Some(&Some(std::ffi::OsStr::new("1")))
-        );
-
-        let no_daemon = update_installer_command(false, false);
+        let no_daemon = update_installer_command(false);
         assert_eq!(no_daemon.get_args().collect::<Vec<_>>(), ["-s", "--"]);
-        assert_eq!(
-            no_daemon
-                .get_envs()
-                .find(|(key, _)| *key == std::ffi::OsStr::new("USAGI_SYNC_DAEMON")),
-            Some((std::ffi::OsStr::new("USAGI_SYNC_DAEMON"), None))
-        );
+        assert!(no_daemon.get_current_dir().is_some());
     }
 
     fn verified_installer_request() -> InstallerRequest {

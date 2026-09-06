@@ -190,7 +190,8 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 
 `usagi daemon start` と `usagi daemon restart` は、起動した `serve` が authority を公開して request を
 serve できるまで **最大 30 秒**待つ。cold start は `daemon.json` の登録まで、seamless rollover は standby の
-verified readiness と handoff 後の successor が harmless inventory request に応答するまでをこの窓に含める。
+verified readiness に最大30秒を与え、W2 commit 後の promotion にはそこから独立した最大30秒を与えて successor が
+harmless inventory request に応答するまで待つ。
 cold start は socket を bind するだけでなく、generation registry の
 recovery、runtime state の hydrate、serve する workspace の adopt を経てから登録するため、
 負荷のかかった host ではここが数秒から十数秒に伸びる。
@@ -1462,13 +1463,13 @@ conversation は推測しない。最終診断は outdated Agent 数、live Agen
 generation 数を表示する。診断は child が未 claim のものも含む daemon 全体の daemon-provisioned MCP caller credential 総数を返す。
 daemon build mismatch 時に credential が残る場合は process-local authority を successor が引き継げないため replacement を保留し、
 旧 daemon と Agent を維持する。`--restart-agents` はこの build handoff の拒否を上書きせず、先に Agent を停止して競合窓を作らない。
-旧 daemon が credential 総数 field を持たない場合も、live Agent があれば未知を 0 と推測せず保留する。0 と診断した後も old active が
+旧 daemon が credential 総数 field を持たない場合は、live inventory が 0 でも server fence capability を証明できないため保留する。0 と診断した後も old active が
 control admission を close / drain して credential を再検証し、競合した Agent launch があれば durable write 前に拒否する。
 IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
 
-診断 vocabulary 導入前の daemon は integration revision を返せず Agent を選択停止できない。live Agent が無ければ通常の
-planned replacement を行う。live Agent がある場合は runtime 一覧を表示して rollover を保留し、
-`--restart-agents --force` が同時に指定された場合だけ既存 lifecycle の cold restart を互換経路として使う。この経路は
+診断 vocabulary 導入前の daemon は integration revision も server-side handoff fence も証明できないため、live Agent の有無に
+かかわらず planned replacement を行わない。利用者が `--force` を明示した cold restart だけを互換経路とし、live Agent が
+ある場合はさらに `--restart-agents` を必要とする。この経路は
 generic terminal も破棄し得るため、CLI は実行前の案内と refusal にその追加影響を明記する。再起動後は durable provider
 metadata から exact target を読み直し、current integration で resume する。
 
@@ -2097,7 +2098,7 @@ W4  registry CAS   handoff を消し、operation を完了として記録       
 | W4 より後 | handoff なし | 新 authority のまま |
 
 observable になった commit を旧 authority へ rollback しない。rollover reply が失われても W2 が確認できれば roll forward し、
-successor が active runtime として inventory request に応答するまで最大30秒待って成功へ収束する。後継 process の exact identity を alive と証明できない場合は
+successor が active runtime として inventory request に応答するまで commit 時点から新しい最大30秒を与えて成功へ収束する。後継 process の exact identity を alive と証明できない場合は
 旧 authority を復活させず、全 generation を retired にし locator を撤去した **effect zero の fail-closed** に収束する。
 ambiguous な partial phase は operation ID で同じ結果へ収束するため、concurrent restart・ACK loss・再試行は 1 つの
 outcome になる。異なる operation の割り込みは `handoff_in_progress` で拒否する。
@@ -2190,6 +2191,9 @@ current locator、admission barrier、全 PTY は元のままである。
 active generation は connection ごとに `ClientHello` の routing 回答を記録し、connection が終わったら忘れる。
 記録は connection 単位であり client incarnation 単位ではない: 新しい build で再接続した client は回答を
 変えられなければならず、去った client は rollover を阻害し続けてはならない。
+全 participant の検査と同じ ledger lock で connection admission を freeze し、W2 commit まで保持する。freeze 中に hello を
+完了した worker は ledger 登録で待ち、handoff が abort すれば再び active の下で、commit すれば control/spawn を拒否する
+draining gate の下で進む。このため検査直後に owner routing 非対応 client が参加する窓はない。
 
 | 参加者 | 条件 | 満たさない場合 |
 |---|---|---|
@@ -2202,7 +2206,7 @@ active generation は connection ごとに `ClientHello` の routing 回答を�
 client 側の routing 契約は [4. IPC の owner generation routing](04-ipc.md#owner-generation-routing) が正本である。
 capability は connection 単位で記録するため、旧 build の client が切断すれば refusal は解け、同じ client が
 新しい build で再接続すれば自分の答えを更新する。shipping `daemon restart` はこの gate を最初の durable
-handoff write より前に評価する。
+handoff write より前に評価し、routing freeze は authority commit を跨いで保持する。
 
 ### legacy migration
 
