@@ -2128,7 +2128,10 @@ fn terminal_inventory_matches_scope(
 }
 
 fn agent_inventory_request(workspace: WorkspaceId) -> DaemonRequest {
-    DaemonRequest::AgentInventory { workspace }
+    DaemonRequest::AgentInventory {
+        workspace,
+        caller_context: None,
+    }
 }
 
 /// Read one workspace's safe Agent inventory over a per-request daemon client.
@@ -2291,6 +2294,7 @@ fn exact_agent_resume_request(
     DaemonRequest::ResumeAgent {
         operation_id: operation_id.to_string(),
         target,
+        caller_context: None,
     }
 }
 
@@ -5620,7 +5624,10 @@ fn doctor_agent_inventory(
     workspace: WorkspaceId,
 ) -> std::io::Result<AgentInventory> {
     let reply = client
-        .request(DaemonRequest::AgentInventory { workspace })
+        .request(DaemonRequest::AgentInventory {
+            workspace,
+            caller_context: None,
+        })
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     serde_json::from_value(doctor_reply_body(reply))
         .map_err(|_| std::io::Error::other("daemon returned an invalid Agent inventory"))
@@ -8398,13 +8405,17 @@ mod tests {
         };
         assert_eq!(
             agent_inventory_request(workspace),
-            usagi_core::usecase::client::DaemonRequest::AgentInventory { workspace }
+            usagi_core::usecase::client::DaemonRequest::AgentInventory {
+                workspace,
+                caller_context: None,
+            }
         );
         assert_eq!(
             exact_agent_resume_request(operation, target.clone()),
             usagi_core::usecase::client::DaemonRequest::ResumeAgent {
                 operation_id: operation.to_string(),
                 target,
+                caller_context: None,
             }
         );
     }

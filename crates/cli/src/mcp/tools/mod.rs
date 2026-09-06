@@ -74,16 +74,16 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
     let (route, policy) = match tool.name() {
         name if name.starts_with("issue_") || name.starts_with("memory_") => (Store, Public),
         "session_create" => (SessionRoute(Session::Create), SessionCredential),
-        "session_list" => (SessionRoute(Session::List), Public),
-        "session_status" => (SessionRoute(Session::Status), Public),
+        "session_list" => (SessionRoute(Session::List), SessionCredential),
+        "session_status" => (SessionRoute(Session::Status), SessionCredential),
         "session_complete" => (SessionRoute(Session::Complete), SessionCredential),
         // An explicit name remains public-compatible, while an authenticated
         // caller may omit it and let the daemon resolve its stable session ID.
         "session_pr" => (SessionRoute(Session::Pr), SessionCredential),
-        "session_remove" => (SessionRoute(Session::Remove), Public),
-        "session_resume" => (AgentResume, Public),
-        "agent_resume_inventory" => (AgentInventory, Public),
-        "session_prompt" => (SessionRoute(Session::Prompt), Public),
+        "session_remove" => (SessionRoute(Session::Remove), SessionCredential),
+        "session_resume" => (AgentResume, AgentCredential),
+        "agent_resume_inventory" => (AgentInventory, AgentCredential),
+        "session_prompt" => (SessionRoute(Session::Prompt), SessionCredential),
         "session_note_get" => (SessionRoute(Session::NoteGet), SessionCredential),
         "session_note_update" => (SessionRoute(Session::NoteUpdate), SessionCredential),
         "session_todo_list" => (SessionRoute(Session::TodoList), SessionCredential),
@@ -170,13 +170,13 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
         if !matches!(
             (descriptor.route(), descriptor.caller_policy()),
             (
-                ToolRoute::Store
-                    | ToolRoute::Session(_)
-                    | ToolRoute::AgentInventory
-                    | ToolRoute::AgentResume,
+                ToolRoute::Store | ToolRoute::Session(_),
                 CallerPolicy::Public
             ) | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
-                | (ToolRoute::Dispatch(_), CallerPolicy::AgentCredential)
+                | (
+                    ToolRoute::AgentInventory | ToolRoute::AgentResume | ToolRoute::Dispatch(_),
+                    CallerPolicy::AgentCredential
+                )
                 | (ToolRoute::Supervisor(_), CallerPolicy::DaemonProvenance)
         ) {
             return Err(RegistryError(format!(
@@ -476,13 +476,13 @@ mod tests {
             assert!(matches!(
                 (descriptor.route(), descriptor.caller_policy()),
                 (
-                    ToolRoute::Store
-                        | ToolRoute::Session(_)
-                        | ToolRoute::AgentInventory
-                        | ToolRoute::AgentResume,
+                    ToolRoute::Store | ToolRoute::Session(_),
                     CallerPolicy::Public
                 ) | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
-                    | (ToolRoute::Dispatch(_), CallerPolicy::AgentCredential)
+                    | (
+                        ToolRoute::AgentInventory | ToolRoute::AgentResume | ToolRoute::Dispatch(_),
+                        CallerPolicy::AgentCredential
+                    )
                     | (ToolRoute::Supervisor(_), CallerPolicy::DaemonProvenance)
             ));
         }
