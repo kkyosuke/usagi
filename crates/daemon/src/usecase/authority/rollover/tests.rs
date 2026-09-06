@@ -461,6 +461,106 @@ fn a_guarded_lost_ack_replay_reopens_its_temporary_barrier() {
 }
 
 #[test]
+fn a_guarded_committed_replay_is_effect_free_before_locator_recovery() {
+    let world = world();
+    let operation = operation("guarded-committed-replay");
+    let successor = hello(world.next, &build("next"));
+    let ledger = RoutingLedger::new();
+    let plan = RolloverPlan {
+        ledger: &ledger,
+        successor: &successor,
+        planned_revision: world.document().document().revision,
+        from: Some(world.old),
+        to: world.next,
+    };
+    world.locator.fail_publish(true);
+    assert!(matches!(
+        execute_gated_rollover_with_guard(
+            &world.store,
+            &world.locator,
+            &world.gate,
+            &plan,
+            &operation,
+            &mut || Ok(()),
+        ),
+        Err(HandoffFailure::Locator(_))
+    ));
+    let replay_gate = AdmissionGate::new(world.old, GenerationRole::Active);
+    let replay_plan = RolloverPlan {
+        ledger: &ledger,
+        successor: &successor,
+        planned_revision: world.document().document().revision,
+        from: Some(world.old),
+        to: world.next,
+    };
+    let mut guard_calls = 0;
+
+    assert_eq!(
+        execute_gated_rollover_with_guard(
+            &world.store,
+            &world.locator,
+            &replay_gate,
+            &replay_plan,
+            &operation,
+            &mut || {
+                guard_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap(),
+        RolloverOutcome::AlreadyCompleted
+    );
+    assert_eq!(guard_calls, 0);
+    assert_eq!(replay_gate.role(), GenerationRole::Active);
+    assert!(replay_gate.is_open(LeaseClass::ActiveControl));
+}
+
+#[test]
+fn a_guarded_replay_completed_during_the_guard_reopens_its_barrier() {
+    let world = world();
+    let operation = operation("guarded-concurrent-replay");
+    let successor = hello(world.next, &build("next"));
+    let ledger = RoutingLedger::new();
+    let plan = RolloverPlan {
+        ledger: &ledger,
+        successor: &successor,
+        planned_revision: world.document().document().revision,
+        from: Some(world.old),
+        to: world.next,
+    };
+    let mut guard_calls = 0;
+
+    assert_eq!(
+        execute_gated_rollover_with_guard(
+            &world.store,
+            &world.locator,
+            &world.gate,
+            &plan,
+            &operation,
+            &mut || {
+                guard_calls += 1;
+                execute_rollover(
+                    &world.store,
+                    &world.locator,
+                    None,
+                    &operation,
+                    Some(world.old),
+                    world.next,
+                )
+                .map(|_| ())
+                .map_err(|_| RolloverRefusal::McpAuthorityUnavailable)
+            },
+        )
+        .unwrap(),
+        RolloverOutcome::AlreadyCompleted
+    );
+    assert_eq!(guard_calls, 1);
+    assert_eq!(world.gate.role(), GenerationRole::Active);
+    assert!(world.gate.is_open(LeaseClass::ActiveControl));
+    assert_eq!(world.document().document().current, Some(world.next));
+}
+
+#[test]
 fn a_failed_locator_publish_leaves_a_committed_handoff_that_rolls_forward() {
     let world = world();
     let op = operation("a");

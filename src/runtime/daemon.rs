@@ -14901,6 +14901,7 @@ impl PendingDaemonAgentRestart {
         }
     }
 
+    #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=pending_daemon_agent_restart_round_trips_and_clears_only_its_operation
     fn validate(&self) -> std::io::Result<()> {
         if self.schema_version != PENDING_DAEMON_AGENT_RESTART_SCHEMA
             || self.operation_id.is_empty()
@@ -14963,6 +14964,7 @@ fn pending_daemon_agent_restart_path(data_dir: &Path) -> PathBuf {
         .join(PENDING_DAEMON_AGENT_RESTART_FILE)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=pending_daemon_agent_restart_round_trips_and_clears_only_its_operation
 fn read_pending_daemon_agent_restart(
     data_dir: &Path,
 ) -> std::io::Result<Option<PendingDaemonAgentRestart>> {
@@ -14977,6 +14979,7 @@ fn read_pending_daemon_agent_restart(
     Ok(pending)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=pending_daemon_agent_restart_round_trips_and_clears_only_its_operation
 fn write_pending_daemon_agent_restart(
     data_dir: &Path,
     pending: &PendingDaemonAgentRestart,
@@ -14991,6 +14994,7 @@ fn write_pending_daemon_agent_restart(
     .map_err(|error| std::io::Error::other(format!("{error:#}")))
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=pending_daemon_agent_restart_round_trips_and_clears_only_its_operation
 fn clear_pending_daemon_agent_restart(
     data_dir: &Path,
     operation_id: &str,
@@ -15016,6 +15020,7 @@ fn clear_pending_daemon_agent_restart(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=planned_agent_workspace_is_resolved_by_durable_identity
 fn planned_agent_workspace_root(
     data_dir: &Path,
     plan: &DaemonRestartAgentPlan,
@@ -15059,6 +15064,7 @@ fn planned_agent_workspace_root(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_restart_recovers_agents_after_requester_exit
 fn restore_pending_daemon_agents(
     data_dir: &Path,
     agent: &SharedAgentRuntime,
@@ -15129,6 +15135,7 @@ fn restore_pending_daemon_agents(
     Ok(restored)
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_restart_recovers_agents_after_requester_exit
 fn recover_pending_daemon_agents_once(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
