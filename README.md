@@ -120,8 +120,19 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 ```
 
 `~/.usagi/bin` が `PATH` に無い場合は installer が追記方法を案内する。導入済みなら `usagi update` で
-最新版へ、`usagi update -v` で選んだ release へ更新できる。更新後の CLI は次回起動から使われる。
-起動中の TUI は終了して開き直し、稼働中 daemon の build が古い場合は `usagi doctor --fix` で入れ替える。
+最新版へ、`usagi update -v` で選んだ release へ更新できる。更新後の CLI は次回起動から使われる。更新前に
+installer は更新 lock を保持したまま exact installed binary の内部 Doctor を必ず実行し、同期時点の daemon 状態を
+lifecycle lock の下で再確認する。daemon が動いていれば安全な handoff と新 daemon の応答確認が完了するまで待ち、
+停止中または crash 後の stale owner だけなら回収して停止状態を維持する。
+起動中の TUI は終了して開き直す。
+
+live Agent の process-local MCP credential を新 daemon へ安全に渡せない場合は、binary は更新するが daemon handoff を拒否して
+update を非 0 で終え、Agent と旧 daemon を維持する。Agent を終了した後に `usagi doctor --fix` を再実行する。
+選択した旧 release が安全な managed 同期 capability を持たない場合や、稼働中の旧 daemon が server-side handoff fence を
+証明できない場合も旧 daemon を変更せず拒否する。後者は旧 daemon を停止してから更新を再実行する。
+
+この managed 同期を含まない旧版から初めて更新する 1 回だけは、実行中の旧 `update` 自体を遡及変更できないため binary の
+差し替えだけで終わる。その場合は新しい `usagi update` または `usagi doctor --fix` をもう一度実行する。
 
 対象は macOS（amd64 / arm64）と Linux（amd64）である。v2 の daemon IPC と PTY 管理は Unix transport を
 使うため Windows は対象外で、installer もこの 3 つ以外は失敗する。
@@ -296,11 +307,11 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi open [path]` | workspace を登録して直接開く |
 | `usagi config` | Global Config を開く |
 | `usagi doctor` | 必要ツールの診断画面を開く |
-| `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、daemon だけが古い場合は seamless restart する |
+| `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、live MCP authority を失わない場合だけ古い daemon を seamless restart する |
 | `usagi doctor --fix --restart-agents` | 古い integration の Agent を一覧化・停止し、provider session ID を使って現在の設定で再開する。Running の Agent は拒否する |
 | `usagi doctor --fix --restart-agents --force` | Running（tool / prompt 実行中）の Agent も明示的に中断して再開する |
 | `usagi clean [--dry-run\|--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch と、消滅した generation が握ったままの capacity claim を検出・削除する |
-| `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
+| `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新し、稼働していた daemon を更新済み binary の Doctor で同期する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
 | `usagi session <command>` | daemon-owned session の作成・削除・sleep・resume・setup・prompt を操作する |
@@ -320,7 +331,8 @@ Open、Recent、Unite で元ディレクトリが消えた workspace を選ぶ�
 
 `restart` は live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、
 安全な handoff の前提が欠ける場合だけ拒否する。`stop` は live Agent や terminal があると拒否する。
-`--force` は live PTY を破棄してよい場合だけ使う。詳細は [planned replacement](document/05-daemon.md#planned-replacement)を参照する。
+`--force` は live PTY を破棄してよい場合だけ使う。通常の planned replacement も daemon-provisioned MCP credential を持つ
+live Agent がいれば旧 owner を維持して拒否する。詳細は [planned replacement](document/05-daemon.md#planned-replacement)を参照する。
 service 登録は macOS（LaunchAgent）と Linux（systemd user unit。systemd 240 以降）で利用できる。
 登録した service は、登録時に解決した workspace を起動 directory として固定する。login 時の起動と異常終了後の
 復帰を担うが、`usagi daemon stop` による意図した停止の扱いは異なる（LaunchAgent は起動し直し、systemd unit は

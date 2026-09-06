@@ -68,7 +68,7 @@ MCP の起動、公開 tool、認証、daemon への反映経路は [7. MCP サ�
 | `usagi daemon status` | active daemon と保持中 tenant の状態を表示する |
 | `usagi daemon retire <path> [--force]` | 指定 workspace tenant を解放する。live runtime は `--force` なしでは解放しない |
 | `usagi daemon stop [--force]` | daemon を停止する。live runtime は `--force` なしでは停止しない |
-| `usagi daemon restart [--force]` | daemon を入れ替える。通常は live PTY を維持する seamless rollover |
+| `usagi daemon restart [--force]` | daemon を入れ替える。generic live PTY は seamless rollover で維持し、daemon-provisioned MCP credential を持つ live Agent がいれば拒否する |
 | `usagi daemon replace [--force]` | 現在 daemon の artifact replacement を明示的に要求する |
 | `usagi daemon install-service` | macOS LaunchAgent / Linux systemd user service を登録する |
 | `usagi daemon uninstall-service` | 登録済み user service を削除する |

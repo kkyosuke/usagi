@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use usagi_core::domain::id::ConnectionId;
 use usagi_core::infrastructure::ipc::{
@@ -48,6 +48,13 @@ pub enum RolloverRefusal {
     /// The registry moved since the rollover was planned. Re-planning against
     /// the current revision is the only safe continuation.
     RegistryRevisionMismatch { planned: u64, observed: u64 },
+    /// Another rollover already froze connection admission for its commit.
+    RoutingAdmissionBusy,
+    /// MCP caller credentials are process-local and cannot move to the
+    /// successor. This includes credentials whose child has not connected yet.
+    McpAuthorityRetained { credentials: usize },
+    /// The active process could not inspect its process-local MCP authority.
+    McpAuthorityUnavailable,
 }
 
 impl fmt::Display for RolloverRefusal {
@@ -68,6 +75,16 @@ impl fmt::Display for RolloverRefusal {
                 f,
                 "generation registry moved from revision {planned} to {observed}"
             ),
+            Self::RoutingAdmissionBusy => {
+                f.write_str("routing admission is frozen by another rollover")
+            }
+            Self::McpAuthorityRetained { credentials } => write!(
+                f,
+                "{credentials} daemon-provisioned MCP caller credential(s) remain on the active generation"
+            ),
+            Self::McpAuthorityUnavailable => {
+                f.write_str("daemon-provisioned MCP caller authority is unavailable")
+            }
         }
     }
 }
@@ -100,7 +117,32 @@ impl ParticipantRouting {
 /// and a client that has gone away must stop blocking a rollover.
 #[derive(Default)]
 pub struct RoutingLedger {
-    participants: Mutex<BTreeMap<ConnectionId, ParticipantRouting>>,
+    state: Mutex<RoutingState>,
+    unfrozen: Condvar,
+}
+
+#[derive(Default)]
+struct RoutingState {
+    participants: BTreeMap<ConnectionId, ParticipantRouting>,
+    frozen: bool,
+}
+
+/// Exclusive admission freeze held across a rollover's authority commit.
+///
+/// A connection whose hello was negotiated concurrently waits in
+/// [`RoutingLedger::admit`] before handshake success is written. By then either
+/// the old generation is active again, or its connection fence can refuse a
+/// routing-incapable peer without exposing a stale successful handshake.
+pub struct RoutingFreeze<'a> {
+    ledger: &'a RoutingLedger,
+}
+
+impl Drop for RoutingFreeze<'_> {
+    fn drop(&mut self) {
+        let mut state = self.ledger.lock();
+        state.frozen = false;
+        self.ledger.unfrozen.notify_all();
+    }
 }
 
 impl RoutingLedger {
@@ -112,32 +154,60 @@ impl RoutingLedger {
 
     /// Record what an admitted connection advertised.
     pub fn admit(&self, connection: ConnectionId, hello: &ClientHello) {
-        self.lock()
+        let mut state = self.lock();
+        while state.frozen {
+            state = self
+                .unfrozen
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state
+            .participants
             .insert(connection, ParticipantRouting::of(hello));
     }
 
     /// Forget a connection that has gone away.
     pub fn disconnect(&self, connection: &ConnectionId) {
-        self.lock().remove(connection);
+        self.lock().participants.remove(connection);
     }
 
     /// How many admitted connections there are.
     #[must_use]
     pub fn connections(&self) -> usize {
-        self.lock().len()
+        self.lock().participants.len()
     }
 
     /// How many admitted connections cannot address a draining generation.
     #[must_use]
     pub fn unsupported(&self) -> usize {
         self.lock()
+            .participants
             .values()
             .filter(|participant| !participant.supports_owner_routing)
             .count()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<ConnectionId, ParticipantRouting>> {
-        self.participants
+    /// Freeze connection admission after atomically proving that every already
+    /// admitted participant supports owner-generation routing.
+    fn freeze_supported(&self) -> Result<RoutingFreeze<'_>, RolloverRefusal> {
+        let mut state = self.lock();
+        if state.frozen {
+            return Err(RolloverRefusal::RoutingAdmissionBusy);
+        }
+        let connections = state
+            .participants
+            .values()
+            .filter(|participant| !participant.supports_owner_routing)
+            .count();
+        if connections > 0 {
+            return Err(RolloverRefusal::ClientRoutingUnsupported { connections });
+        }
+        state.frozen = true;
+        Ok(RoutingFreeze { ledger: self })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, RoutingState> {
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -153,12 +223,12 @@ impl RoutingLedger {
 ///
 /// # Errors
 /// Returns the [`RolloverRefusal`] that keeps the current authority in place.
-pub fn admit_rollover(
-    ledger: &RoutingLedger,
+pub fn admit_rollover<'a>(
+    ledger: &'a RoutingLedger,
     document: &RegistryDocument,
     planned_revision: u64,
     successor: &ServerHello,
-) -> Result<(), RolloverRefusal> {
+) -> Result<RoutingFreeze<'a>, RolloverRefusal> {
     if document.schema != REGISTRY_SCHEMA {
         return Err(RolloverRefusal::RegistrySchemaUnsupported);
     }
@@ -171,11 +241,7 @@ pub fn admit_rollover(
     if !supports_owner_generation_routing(&successor.capabilities) {
         return Err(RolloverRefusal::SuccessorRoutingUnsupported);
     }
-    let connections = ledger.unsupported();
-    if connections > 0 {
-        return Err(RolloverRefusal::ClientRoutingUnsupported { connections });
-    }
-    Ok(())
+    ledger.freeze_supported()
 }
 
 #[cfg(test)]

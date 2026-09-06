@@ -1345,6 +1345,15 @@ impl AgentRuntime {
             .and_then(|record| record.runtime.session_id)
     }
 
+    /// Number of process-local MCP caller credentials this daemon has minted.
+    ///
+    /// An unclaimed credential still belongs to a live Agent and would become
+    /// unusable after handing control authority to another process.
+    #[must_use]
+    pub fn provisioned_mcp_callers(&self) -> usize {
+        self.mcp_callers.len()
+    }
+
     /// Returns the runtime phase projected for one session.
     ///
     /// The daemon-observed [`RuntimeState`](super::runtime::RuntimeState) is the
@@ -1691,6 +1700,7 @@ impl AgentRuntime {
             workspace_id: workspace,
             outdated,
             outdated_mcp_children,
+            provisioned_mcp_callers: Some(self.mcp_callers.len()),
         })
     }
 
@@ -5040,6 +5050,7 @@ mod tests {
         assert_eq!(diagnosis.outdated[0].phase, AgentPhase::Waiting);
         assert!(diagnosis.outdated[0].resume_available);
         assert_eq!(diagnosis.outdated_mcp_children, 1);
+        assert_eq!(diagnosis.provisioned_mcp_callers, Some(1));
         let newcomer = agent
             .launch(
                 &OperationId::new().to_string(),
@@ -5085,7 +5096,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(interrupted, 1);
-        assert_eq!(stopped, diagnosis);
+        assert_eq!(stopped.outdated, diagnosis.outdated);
+        assert_eq!(stopped.outdated_mcp_children, 1);
+        assert_eq!(
+            stopped.provisioned_mcp_callers,
+            Some(2),
+            "the diagnosis taken at interruption includes a newly minted, unclaimed credential"
+        );
         assert_eq!(
             agent
                 .coordinator
