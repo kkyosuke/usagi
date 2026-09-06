@@ -16959,14 +16959,44 @@ fn existing_policy_client(
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let build = current_build();
-    let initial = connect_client(
-        &data_dir,
-        policy,
-        build.clone(),
-        workspace.clone(),
-        |stream| deadline_transport(clock, stream, policy.timeout_ms),
-    )
-    .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let deadline = Instant::now() + Duration::from_millis(policy.timeout_ms);
+    let initial = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let budget_ms = u64::try_from(remaining.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        match connect_client(
+            &data_dir,
+            policy,
+            build.clone(),
+            workspace.clone(),
+            |stream| deadline_transport(clock, stream, budget_ms),
+        ) {
+            Ok(client) => break client,
+            Err(error)
+                if Instant::now() < deadline
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::UnexpectedEof
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::Other
+                    ) =>
+            {
+                // A just-refused rollover can still be releasing its temporary
+                // handshake/routing barrier when the next deliberate lifecycle
+                // command arrives. Re-observe the exact current owner within
+                // the original CLI deadline; never bootstrap or replace here.
+                RealSleeper.sleep();
+            }
+            Err(error) => return Err(ClientError::Unavailable(error.to_string())),
+        }
+    };
     let reconnect = move |clock: SystemClock, budget_ms: u64| {
         connect_client(
             &data_dir,
