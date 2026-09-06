@@ -10,6 +10,7 @@ pub mod application;
 pub mod closeup;
 /// Doctor diagnostics and their injectable environment boundary.
 pub mod doctor;
+pub(crate) mod fuzzy;
 pub mod overview;
 /// Shared syntax for destructive session removal commands.
 pub mod session_remove;

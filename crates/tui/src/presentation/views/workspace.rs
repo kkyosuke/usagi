@@ -42,6 +42,7 @@ use crate::presentation::views::decision_modal;
 use crate::presentation::views::director_drawer::{self, DIRECTOR_ICON, DirectorDrawerProjection};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
+use crate::presentation::views::preview_modal;
 use crate::presentation::views::remove_modal::{self, RemoveEntry, RemoveModal};
 use crate::presentation::views::root_terminal_drawer::{
     self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
@@ -366,7 +367,7 @@ pub struct HomeProjection {
     unread_decision_ids: std::collections::BTreeSet<usagi_core::domain::id::UserDecisionId>,
     /// Open Pull Request overlay projection, drawn above the sidebar/pane frame.
     pr_overlay: Option<PrOverlay>,
-    /// Open Markdown preview overlay projection, drawn above the frame.
+    /// Open file preview overlay projection, drawn above the frame.
     preview_overlay: Option<PreviewOverlay>,
     /// Merge-confirmed cleanup queue projected with current session labels.
     cleanup_queue: Option<CleanupModal>,
@@ -2423,24 +2424,14 @@ fn render_pr_overlay(
     )
 }
 
-/// Compose the Markdown preview overlay over `base`. A fetch error renders as a
-/// safe unavailable notice; otherwise the preview lines are drawn at their scroll.
+/// Compose the file finder or selected text document over `base`.
 fn render_preview_overlay(
     height: usize,
     width: usize,
     base: &[String],
     overlay: &PreviewOverlay,
 ) -> Vec<String> {
-    let document = overlay.error().map_or_else(
-        || OverlayDocument::Ready(overlay.lines().to_vec()),
-        |error| OverlayDocument::Unavailable(error.message.as_str().to_owned()),
-    );
-    text_overlay::render_over(
-        height,
-        width,
-        base,
-        &TextOverlay::new("Preview", document).scrolled_to(overlay.scroll()),
-    )
+    preview_modal::render_over(height, width, base, overlay)
 }
 
 /// Apply the inactive treatment whenever the right pane does not own input
@@ -6468,6 +6459,18 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
                 target,
+                path: None,
+                files: vec!["README.md".into()],
+                lines: vec![],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                path: Some("README.md".into()),
+                files: vec![],
                 lines: vec!["# Heading".into(), "content line".into()],
             }),
         );
@@ -6485,6 +6488,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewError {
                 target,
+                path: Some("README.md".into()),
                 error: SafeError {
                     message: SafeMessage::new("no preview available"),
                     error_id: "preview".into(),

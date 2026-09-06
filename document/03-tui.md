@@ -1426,8 +1426,8 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 
 | shape | 対象 modal | shape helper | 共通化する部分 |
 |---|---|---|---|
-| list | Prs / Closeup / Decisions（一覧・option） / remove | `list_window` + `scroll_window` + `selection_marker` | 選択追従の viewport・カーソルマーカー・`↑/↓ N more`・行 clip |
-| text-viewer | Preview（`text_overlay`。PR error の Unavailable も） | `viewport_window` + `scroll_window` | offset 起点の読み取り専用 scroll・scroll indicator |
+| list | Prs / Closeup / Decisions（一覧・option） / remove / Preview file finder | `list_window` + `scroll_window` + `selection_marker` | 選択追従の viewport・カーソルマーカー・`↑/↓ N more`・行 clip |
+| text-viewer | Preview document（`text_overlay`。PR error の Unavailable も） | `viewport_window` + `scroll_window` | offset 起点の読み取り専用 scroll・scroll indicator |
 | editor | Notes / Environment / Decisions（editor） | `content_line` + `caption` / `heading` + `footer` | draft 行・section 切替・error 行・footer |
 | palette | Overview / Closeup | `prompt_line` / `filter_line` + `subcommand_row` + list helper | command 入力の `❯`、マーカーなしの filter 入力、前方一致候補、inline subcommand picker、result / footer |
 
@@ -1440,6 +1440,18 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
   subcommand の quiet な `›` は list の danger カーソルとは別に保つ。
 - **決定 modal の選択行は共通カーソルへ移行**した。旧 plain `>` を `selection_marker` の danger `›` に揃え、他の
   list modal と同じ `content_line(format!("{marker} {label}"), inner)` で描く。
+
+### File Preview
+
+`Ctrl-O v` は active target の File Preview overlay を開く。最初の画面は file finder で、session target はその
+worktree、workspace root target は workspace root を検索する。候補は `git ls-files` が返す tracked file と
+gitignore 対象外の未追跡 file に限定し、path の大文字小文字を区別しない fuzzy subsequence match で絞り込む。
+文字 / paste / `Backspace` で filter を編集し、`↑` / `↓` で選択、`Enter` で file 本文へ進む。
+
+本文は UTF-8 regular file の読み取り専用 text-viewer で、512 KiB を上限とする。binary、UTF-8 でない file、
+directory、target root 外へ解決される path は safe error として表示し、内容を読まない。表示行に含まれる terminal
+control / bidi control は無害化する。本文の `Esc` は候補と filter を保持した finder へ戻り、finder の `Esc` は
+overlay を閉じる。
 
 ## Sidebar mascot
 

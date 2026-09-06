@@ -1164,7 +1164,7 @@ impl BackendOverlayPort for UnavailableBackendPort {
     fn load_pull_requests(&mut self, _: Target, completions: Completions) {
         unavailable_completion(&completions, "Pull Request data is unavailable");
     }
-    fn load_preview(&mut self, _: Target, completions: Completions) {
+    fn load_preview(&mut self, _: Target, _: Option<String>, completions: Completions) {
         unavailable_completion(&completions, "preview is unavailable");
     }
     fn open_pull_request(&mut self, _: String, completions: Completions) {
@@ -11967,7 +11967,7 @@ mod tests {
                 },
             },
             Effect::LoadPullRequests { target },
-            Effect::LoadPreview { target },
+            Effect::LoadPreview { target, path: None },
             Effect::OpenPullRequest {
                 url: "https://github.com/o/r/pull/1".to_owned(),
             },
