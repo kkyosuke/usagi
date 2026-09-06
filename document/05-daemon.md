@@ -2067,7 +2067,9 @@ readiness 中の standby endpoint が答えるのは handshake と typed refusal
 [admission fence](#admission-fence) を通し、control / spawn / 他 generation の terminal は fence が拒否する。
 fence が受理する read も readiness 中は runtime state を所有していないため typed に拒否する。handoff commit 後は
 standby accept loop を join してから同じ listener を active server へ渡すため、旧 standby loop と active loop が
-同時に request を admit する窓はない。
+同時に request を admit する窓はない。standby accept loop の停止要求はこの planned replacement 専用であり、process 全体の
+shutdown とは別 domain にする。client worker の panic または accept loop の予期しない終了は process 全体を shutdown して
+registry custody を解放し、planned replacement だけは process を生かしたまま listener を昇格先へ返す。
 
 ### handoff protocol
 

@@ -2784,7 +2784,7 @@ impl PtySpawner for AgentPty {
             self.children
                 .observe(&UnixChildProbe, pid, "daemon-owned-agent-pty");
         std::thread::spawn(move || {
-            let _panic = ShutdownOnWorkerPanic { shutdown };
+            let mut lifecycle = ShutdownOnUnexpectedWorkerExit::new(shutdown);
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
             while let Ok(count) = reader.read(&mut bytes) {
@@ -2797,15 +2797,21 @@ impl PtySpawner for AgentPty {
                     return;
                 }
             }
-            if let Ok(status) = exit_pty
+            let Ok(status) = exit_pty
                 .lock()
                 .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
-            {
-                let _ = observations.send(AgentPtyObservation::Exited(
+            else {
+                return;
+            };
+            if observations
+                .send(AgentPtyObservation::Exited(
                     output_terminal,
                     status,
                     release,
-                ));
+                ))
+                .is_ok()
+            {
+                lifecycle.finish();
             }
         });
         Ok(identity)
@@ -3013,7 +3019,7 @@ impl GenericPtySpawner for DaemonPty {
             .children
             .observe(&UnixChildProbe, pid, "daemon-owned-pty");
         std::thread::spawn(move || {
-            let _panic = ShutdownOnWorkerPanic { shutdown };
+            let mut lifecycle = ShutdownOnUnexpectedWorkerExit::new(shutdown);
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
             while let Ok(count) = reader.read(&mut bytes) {
@@ -3029,12 +3035,17 @@ impl GenericPtySpawner for DaemonPty {
                     return;
                 }
             }
-            if let Ok(status) = exit_pty
+            let Ok(status) = exit_pty
                 .lock()
                 .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
+            else {
+                return;
+            };
+            if output_sender
+                .send(PtyObservation::Exited(output_terminal, status, release))
+                .is_ok()
             {
-                let _ =
-                    output_sender.send(PtyObservation::Exited(output_terminal, status, release));
+                lifecycle.finish();
             }
         });
         Ok(identity)
@@ -5792,6 +5803,39 @@ struct ShutdownOnIpcWorkerExit {
 impl Drop for ShutdownOnIpcWorkerExit {
     fn drop(&mut self) {
         self.shutdown.request();
+    }
+}
+
+/// Shuts the process down when a worker that requires explicit completion is lost.
+///
+/// Unlike [`ShutdownOnWorkerPanic`], this guard also covers ordinary early
+/// returns. The worker marks itself complete only after its final required
+/// effect. This is especially important for a standby: [`ShutdownPipe`] requests
+/// the internal replacement domain while it drops, so consulting that flag from
+/// `Drop` would misclassify an unwind as a planned promotion.
+struct ShutdownOnUnexpectedWorkerExit {
+    shutdown: Arc<ShutdownRequest>,
+    completed: bool,
+}
+
+impl ShutdownOnUnexpectedWorkerExit {
+    fn new(shutdown: Arc<ShutdownRequest>) -> Self {
+        Self {
+            shutdown,
+            completed: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ShutdownOnUnexpectedWorkerExit {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.shutdown.request();
+        }
     }
 }
 
@@ -11864,6 +11908,7 @@ impl StandbyEndpoint for StandbyIpc<'_> {
             protocol,
             gate.clone(),
             Arc::clone(&self.standby_shutdown),
+            Arc::clone(&self.shutdown),
         );
         match worker {
             Ok(worker) => {
@@ -11955,33 +12000,32 @@ fn spawn_standby_ipc_server(
     listener: SecureUnixListener,
     protocol: usagi_core::infrastructure::ipc::ServerProtocol,
     gate: AdmissionGate,
+    standby_shutdown: Arc<ShutdownRequest>,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let connection_limit = client_connection_limit();
     std::thread::Builder::new()
         .name("usagi-ipc-standby".to_string())
         .spawn(move || {
-            let _exit = ShutdownOnIpcWorkerExit {
-                shutdown: Arc::clone(&shutdown),
-            };
+            let mut exit = ShutdownOnUnexpectedWorkerExit::new(Arc::clone(&shutdown));
             let workers = Arc::new(ClientWorkers::new());
             let pre_handshake = PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
             let mut capacity_log = CapacityRefusalLog::default();
-            let wake = match ShutdownPipe::mirroring(&shutdown) {
+            let wake = match ShutdownPipe::mirroring(&standby_shutdown) {
                 Ok(wake) => wake,
                 Err(error) => {
                     ErrorLog::record(&format!("daemon standby accept wait unavailable: {error}"));
                     return listener;
                 }
             };
-            while !shutdown.is_requested() {
+            while !standby_shutdown.is_requested() {
                 if !wake.wait_for_listener(listener.readiness_fd()) {
                     break;
                 }
-                while !shutdown.is_requested() {
+                while !standby_shutdown.is_requested() {
                     match listener.accept() {
                         Ok(stream) => {
-                            if shutdown.is_requested() {
+                            if standby_shutdown.is_requested() {
                                 break;
                             }
                             let capacity_available = client_connection_capacity_available(
@@ -12039,6 +12083,12 @@ fn spawn_standby_ipc_server(
                 ErrorLog::record(&format!(
                     "daemon standby shutdown retired with client worker failures: {report:?}"
                 ));
+            }
+            // Promotion and retirement request this private domain before they
+            // join us. Mark the exit planned only after every retained client is
+            // retired; an unwind at any earlier point must wake the process owner.
+            if standby_shutdown.is_requested() {
+                exit.finish();
             }
             listener
         })
@@ -20581,7 +20631,8 @@ mod tests {
     }
 
     #[test]
-    fn an_unwinding_worker_requests_shutdown_but_a_clean_exit_does_not() {
+    fn standby_client_panic_reaches_only_the_process_shutdown_domain() {
+        let standby_shutdown = Arc::new(ShutdownRequest::new());
         let failed = Arc::new(ShutdownRequest::new());
         let panic = panic::catch_unwind(AssertUnwindSafe({
             let failed = Arc::clone(&failed);
@@ -20592,7 +20643,11 @@ mod tests {
         }));
         assert!(panic.is_err());
         assert!(failed.is_requested());
+        assert!(!standby_shutdown.is_requested());
+    }
 
+    #[test]
+    fn an_unwinding_worker_requests_shutdown_but_a_clean_exit_does_not() {
         let completed = Arc::new(ShutdownRequest::new());
         {
             let _guard = ShutdownOnWorkerPanic {
@@ -20600,6 +20655,25 @@ mod tests {
             };
         }
         assert!(!completed.is_requested());
+    }
+
+    #[test]
+    fn standby_accept_exit_distinguishes_promotion_from_failure() {
+        let unexpected = Arc::new(ShutdownRequest::new());
+        {
+            let _exit = ShutdownOnUnexpectedWorkerExit::new(Arc::clone(&unexpected));
+        }
+        assert!(unexpected.is_requested());
+
+        let promoted = Arc::new(ShutdownRequest::new());
+        let standby_shutdown = Arc::new(ShutdownRequest::new());
+        {
+            let mut exit = ShutdownOnUnexpectedWorkerExit::new(Arc::clone(&promoted));
+            standby_shutdown.request();
+            exit.finish();
+        }
+        assert!(standby_shutdown.is_requested());
+        assert!(!promoted.is_requested());
     }
 
     #[test]
@@ -22893,10 +22967,11 @@ instructions = "{instructions}"
         .resolve(&request)
         .unwrap();
         let metrics = Arc::new(TerminalPipelineMetrics::default());
+        let shutdown = Arc::new(ShutdownRequest::new());
         let (mut pty, observations) = DaemonPty::new(
             metrics,
             Arc::new(SpawnedChildren::default()),
-            Arc::new(ShutdownRequest::new()),
+            Arc::clone(&shutdown),
         );
 
         pty.spawn(&launch, &terminal, Geometry { cols: 80, rows: 24 })
@@ -22919,6 +22994,7 @@ instructions = "{instructions}"
                 PtyObservation::Shutdown => panic!("unexpected observer shutdown"),
             }
         }
+        assert!(!shutdown.is_requested());
     }
 
     #[test]
