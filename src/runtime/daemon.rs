@@ -11828,7 +11828,14 @@ impl StandbyShutdownDomains {
 
     /// Arms the standby accept loop and its internal wake pipe as one lifetime.
     fn accept_lifetime(&self) -> std::io::Result<StandbyAcceptLifetime> {
-        match ShutdownPipe::mirroring(&self.replacement) {
+        self.accept_lifetime_with(ShutdownPipe::mirroring)
+    }
+
+    fn accept_lifetime_with(
+        &self,
+        create_wake: impl FnOnce(&Arc<ShutdownRequest>) -> std::io::Result<ShutdownPipe>,
+    ) -> std::io::Result<StandbyAcceptLifetime> {
+        match create_wake(&self.replacement) {
             Ok(wake) => Ok(StandbyAcceptLifetime {
                 shutdown: self.clone(),
                 wake,
@@ -20722,6 +20729,16 @@ mod tests {
 
     #[test]
     fn standby_accept_exit_distinguishes_promotion_from_failure() {
+        let unavailable_process = Arc::new(ShutdownRequest::new());
+        let unavailable = StandbyShutdownDomains::new(Arc::clone(&unavailable_process));
+        let error = unavailable
+            .accept_lifetime_with(|_| Err(std::io::Error::other("injected wake failure")))
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(unavailable_process.is_requested());
+        assert!(!unavailable.replacement.is_requested());
+
         let unexpected_process = Arc::new(ShutdownRequest::new());
         let unexpected = StandbyShutdownDomains::new(Arc::clone(&unexpected_process));
         {
