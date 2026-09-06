@@ -97,7 +97,7 @@ pub enum HealthReason {
     PrScanIncomplete,
     /// metrics tick が購読側に届かず捨てられ続けている。
     MetricsUpdatesDropped,
-    /// 長寿命 maintenance worker が panic して停止した。
+    /// 長寿命 daemon worker が異常終了して graceful shutdown を開始した。
     BackgroundWorkerStopped,
 }
 

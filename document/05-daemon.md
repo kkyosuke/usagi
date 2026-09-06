@@ -401,6 +401,11 @@ admit 済み client worker と connection cleanup worker も panic 時だけ同�
 runtime lock の内側で panic した場合や cleanup consumer が停止した場合に、daemon が endpoint を公開し workspace fence を保持したまま
 機能不全になることを許さない。通常の client disconnect と cleanup worker の planned completion は daemon shutdown を要求しない。
 
+同じ fail-stop 境界は、共有 runtime を更新する maintenance worker、PTY child watcher、standby の client / custody worker、signal
+delivery worker にも適用する。回復可能な IO / durable state の error は worker ごとの契約どおり記録して retry または縮退するが、panic
+または明示的に planned とされていない長寿命 worker の終了は shared shutdown を要求する。これにより mutex を poison した worker や custody
+監視を失った generation が、到達不能な endpoint と workspace / generation ownership を残して生存し続けない。
+
 client worker の retirement barrier は `shutdown(2)` の起こしに依存しない。retirement は**まず flag を公開してから**
 socket を shutdown し、worker 側は次の frame を待つ read を毎回 `poll(2)` の bounded な readiness 待ちで囲って、
 待ちが空振りするたびにその flag を確認する。これは idle policy ではない（空振りは透過的に再試行され、idle な
@@ -1831,13 +1836,13 @@ bounded queue への publish、drop 集計、wire snapshot はこの broker が�
 subscriber と drop count は 0 から始まる。TUI は push queue を登録せず snapshot を周期的に取得する。
 subscribe する client は再接続後に新しい observer を登録し、その queue を drain する。
 
-daemon の長寿命 worker は、maintenance 6 種（PR refresh、session teardown、custody、retention GC、draining
-collection、decision maintenance）と critical pipeline 3 種（Agent observer、generic terminal observer、PR
-projection）の closed vocabulary を共有する。共通境界は panic と unexpected normal exit の両方を worker ごとの
-process-local failure bit へ記録し、metrics broker は失敗 worker 数を snapshot に載せる。このため、worker が停止すると
-daemon health indicator は restart まで danger を表示する。
+daemon の長寿命 worker は、maintenance 9 種（PR refresh、session teardown、custody、retention GC、draining
+collection、decision maintenance、tenant retirement、orphan cleanup、Supervisor recovery）と critical pipeline 3 種
+（Agent observer、generic terminal observer、PR projection）の closed vocabulary を共有する。共通境界は panic と unexpected normal exit の両方を worker ごとの
+process-local failure bit へ記録して shared shutdown を要求し、metrics broker は endpoint retirement 前に取得された snapshot に
+失敗 worker 数を載せる。新しい daemon incarnation では count は 0 へ戻る。
 
-owner-output observer または PR projection の異常終了は shared shutdown も要求する。failure cleanup は projection
+owner-output observer または PR projection の異常終了では、共通の shutdown に加えて failure cleanup が projection
 queue を閉じて producer を bounded refusal へ収束させ、observer receiver の終了は backpressure 中の PTY reader を
 channel disconnect で解放する。planned shutdown は failure bit を立てず、accept loop の lifecycle owner が source と
 projection を閉じた後、maintenance を含む全 worker handle を join する。worker vocabulary、health bitset の幅、worker

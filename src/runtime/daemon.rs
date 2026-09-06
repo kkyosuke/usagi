@@ -2640,6 +2640,7 @@ struct AgentPty {
     metrics: Arc<TerminalPipelineMetrics>,
     environment: BTreeMap<String, String>,
     children: Arc<SpawnedChildren>,
+    shutdown: Arc<ShutdownRequest>,
 }
 
 struct OwnedPty {
@@ -2688,6 +2689,7 @@ impl AgentPty {
         environment: BTreeMap<String, String>,
         metrics: Arc<TerminalPipelineMetrics>,
         children: Arc<SpawnedChildren>,
+        shutdown: Arc<ShutdownRequest>,
     ) -> (Self, Receiver<AgentPtyObservation>) {
         let (observations, receiver) = mpsc::sync_channel(PTY_OBSERVATION_QUEUE_ITEMS);
         (
@@ -2698,6 +2700,7 @@ impl AgentPty {
                 metrics,
                 environment,
                 children,
+                shutdown,
             },
             receiver,
         )
@@ -2772,6 +2775,7 @@ impl PtySpawner for AgentPty {
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
+        let shutdown = Arc::clone(&self.shutdown);
         // The identity is observed before the watcher owns it, so the token this
         // thread carries is the very one the exit observation hands back. Every
         // way out of the thread — a drained reader, an unreadable wait, a
@@ -2780,6 +2784,7 @@ impl PtySpawner for AgentPty {
             self.children
                 .observe(&UnixChildProbe, pid, "daemon-owned-agent-pty");
         std::thread::spawn(move || {
+            let _panic = ShutdownOnWorkerPanic { shutdown };
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
             while let Ok(count) = reader.read(&mut bytes) {
@@ -2915,11 +2920,13 @@ struct DaemonPty {
     observations: SyncSender<PtyObservation>,
     metrics: Arc<TerminalPipelineMetrics>,
     children: Arc<SpawnedChildren>,
+    shutdown: Arc<ShutdownRequest>,
 }
 impl DaemonPty {
     fn new(
         metrics: Arc<TerminalPipelineMetrics>,
         children: Arc<SpawnedChildren>,
+        shutdown: Arc<ShutdownRequest>,
     ) -> (Self, Receiver<PtyObservation>) {
         let (observations, receiver) = mpsc::sync_channel(PTY_OBSERVATION_QUEUE_ITEMS);
         (
@@ -2929,6 +2936,7 @@ impl DaemonPty {
                 observations,
                 metrics,
                 children,
+                shutdown,
             },
             receiver,
         )
@@ -2998,12 +3006,14 @@ impl GenericPtySpawner for DaemonPty {
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
+        let shutdown = Arc::clone(&self.shutdown);
         // As in the Agent spawner: the watcher thread owns the release token, so
         // the proof lives exactly as long as this child does.
         let (identity, release) = self
             .children
             .observe(&UnixChildProbe, pid, "daemon-owned-pty");
         std::thread::spawn(move || {
+            let _panic = ShutdownOnWorkerPanic { shutdown };
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
             while let Ok(count) = reader.read(&mut bytes) {
@@ -3662,7 +3672,11 @@ fn spawn_ipc_server(
     // their finals into it, so short-lived runtimes cannot grow the daemon's
     // tombstones without bound.
     let retention = usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new();
-    let (pty, observations) = DaemonPty::new(Arc::clone(&pipeline_metrics), Arc::clone(&children));
+    let (pty, observations) = DaemonPty::new(
+        Arc::clone(&pipeline_metrics),
+        Arc::clone(&children),
+        Arc::clone(&shutdown),
+    );
     background_workers.bind_terminal_observations(pty.observations.clone());
     let workspace_root = trusted_repository_root(&runtime)?;
     // The handshake fence compares a client's declared workspace against the
@@ -3700,6 +3714,7 @@ fn spawn_ipc_server(
         terminal_environment(),
         Arc::clone(&pipeline_metrics),
         Arc::clone(&children),
+        Arc::clone(&shutdown),
     );
     background_workers.bind_agent_observations(agent_pty.observations.clone());
     let mcp_command = std::env::current_exe()?;
@@ -5097,8 +5112,9 @@ where
             if result.is_ok() && shutdown.is_requested() {
                 monitor.finish_planned();
             } else {
+                // Dropping an unfinished monitor records the failure and raises
+                // the shared shutdown fence before source-specific cleanup.
                 drop(monitor);
-                shutdown.request();
                 on_failure();
             }
             if let Err(payload) = result {
@@ -12003,6 +12019,7 @@ fn spawn_standby_ipc_server(
                                 protocol.clone(),
                                 gate.clone(),
                                 pre_handshake_permit,
+                                Arc::clone(&shutdown),
                             ) {
                                 Ok(handle) => {
                                     retain_client_worker(&workers, Ok(unblock), handle);
@@ -12034,10 +12051,12 @@ fn spawn_standby_client_worker(
     protocol: usagi_core::infrastructure::ipc::ServerProtocol,
     gate: AdmissionGate,
     pre_handshake_permit: PreHandshakePermit,
+    shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("usagi-ipc-standby-client".to_string())
         .spawn(move || {
+            let _panic = ShutdownOnWorkerPanic { shutdown };
             let retirement = completion.retirement();
             let _completion = ShutdownAcceptedStreamOnDrop(Some(completion));
             if stream.set_nonblocking(false).is_err() {
@@ -12880,6 +12899,9 @@ fn start_standby_custody_worker(
     std::thread::Builder::new()
         .name("usagi-daemon-standby-custody".to_string())
         .spawn(move || {
+            let _panic = ShutdownOnWorkerPanic {
+                shutdown: Arc::clone(&shutdown),
+            };
             let mut promoted = false;
             while !shutdown.is_requested() {
                 // An unreadable registry is uncertainty, not a loss: it never
@@ -13088,9 +13110,15 @@ impl ShutdownSignal for SignalShutdown {
             let handle = std::thread::Builder::new()
                 .name("usagi-daemon-signal".to_string())
                 .spawn(move || {
-                    if prepared.forever().next().is_some() {
-                        requested.request();
-                    }
+                    let _panic = ShutdownOnWorkerPanic {
+                        shutdown: Arc::clone(&requested),
+                    };
+                    // `forever` normally returns only after a signal. If its
+                    // delivery source ever closes, fail stop as well: the raw
+                    // signal flag cannot wake the lifecycle owner's condvar on
+                    // its own.
+                    let _ = prepared.forever().next();
+                    requested.request();
                 });
             if let Err(error) = handle {
                 for id in flag_ids {
@@ -14149,7 +14177,7 @@ fn run_broker_lifecycle_command(command: &CliDaemonCommand) -> Option<std::io::R
 /// panic in an IPC, PTY, or observer worker. The hook records every thread's
 /// panic before the thread unwinds; [`run`] then catches a main-thread panic at
 /// the outer daemon boundary and terminates the process with an ordinary error.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_is_reported_as_daemon_health_danger
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_reports_danger_and_requests_shutdown
 fn install_panic_logger() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -14157,7 +14185,7 @@ fn install_panic_logger() {
         previous(info);
     }));
 }
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_is_reported_as_daemon_health_danger
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_reports_danger_and_requests_shutdown
 fn format_panic(info: &PanicHookInfo<'_>) -> String {
     let payload = if let Some(message) = info.payload().downcast_ref::<&str>() {
         (*message).to_owned()
@@ -17396,7 +17424,12 @@ mod tests {
                 data,
                 generation,
                 root.to_path_buf(),
-                DaemonPty::new(Arc::clone(&metrics), Arc::clone(&children)).0,
+                DaemonPty::new(
+                    Arc::clone(&metrics),
+                    Arc::clone(&children),
+                    Arc::new(ShutdownRequest::new()),
+                )
+                .0,
                 Arc::clone(tenants) as Workspaces,
                 Arc::new(UserEnvironment::new(data.to_path_buf(), OpCli)),
                 usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new(),
@@ -17409,7 +17442,13 @@ mod tests {
                 data,
                 generation,
                 Arc::clone(tenants) as Workspaces,
-                AgentPty::new(terminal_environment(), metrics, Arc::clone(&children)).0,
+                AgentPty::new(
+                    terminal_environment(),
+                    metrics,
+                    Arc::clone(&children),
+                    Arc::new(ShutdownRequest::new()),
+                )
+                .0,
                 std::env::current_exe().unwrap(),
                 Arc::new(UserEnvironment::new(data.to_path_buf(), OpCli)),
                 usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new(),
@@ -20439,7 +20478,7 @@ mod tests {
     }
 
     #[test]
-    fn a_panicked_background_worker_is_reported_as_daemon_health_danger() {
+    fn a_panicked_background_worker_reports_danger_and_requests_shutdown() {
         use usagi_core::usecase::client::MetricsAction;
         use usagi_core::usecase::daemon_health::{DaemonHealth, DaemonHealthTracker, HealthReason};
 
@@ -20451,6 +20490,7 @@ mod tests {
         )
         .unwrap();
         assert!(handle.join().is_err());
+        assert!(shutdown.is_requested());
 
         let broker = Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
             AgentConcurrencyGauge::default(),
@@ -22853,7 +22893,11 @@ instructions = "{instructions}"
         .resolve(&request)
         .unwrap();
         let metrics = Arc::new(TerminalPipelineMetrics::default());
-        let (mut pty, observations) = DaemonPty::new(metrics, Arc::new(SpawnedChildren::default()));
+        let (mut pty, observations) = DaemonPty::new(
+            metrics,
+            Arc::new(SpawnedChildren::default()),
+            Arc::new(ShutdownRequest::new()),
+        );
 
         pty.spawn(&launch, &terminal, Geometry { cols: 80, rows: 24 })
             .unwrap();
@@ -23066,10 +23110,14 @@ instructions = "{instructions}"
         let baseline = std::fs::read_dir("/dev/fd").unwrap().count();
         let metrics = Arc::new(TerminalPipelineMetrics::default());
         let children = Arc::new(SpawnedChildren::default());
-        let (mut generic, generic_observations) =
-            DaemonPty::new(Arc::clone(&metrics), Arc::clone(&children));
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let (mut generic, generic_observations) = DaemonPty::new(
+            Arc::clone(&metrics),
+            Arc::clone(&children),
+            Arc::clone(&shutdown),
+        );
         let (mut agent, agent_observations) =
-            AgentPty::new(BTreeMap::new(), metrics, Arc::clone(&children));
+            AgentPty::new(BTreeMap::new(), metrics, Arc::clone(&children), shutdown);
         let generation = DaemonGeneration::new();
 
         let generic_scope = TerminalLaunchScope {
@@ -23343,7 +23391,11 @@ instructions = "{instructions}"
             worktree_id: worktree,
         };
         let metrics = Arc::new(TerminalPipelineMetrics::default());
-        let (pty, observations) = DaemonPty::new(metrics, Arc::new(SpawnedChildren::default()));
+        let (pty, observations) = DaemonPty::new(
+            metrics,
+            Arc::new(SpawnedChildren::default()),
+            Arc::new(ShutdownRequest::new()),
+        );
         let observer_stop = pty.observations.clone();
         let runtime = Arc::new(Mutex::new(GenericTerminalRuntime::new(
             DaemonGeneration::new(),

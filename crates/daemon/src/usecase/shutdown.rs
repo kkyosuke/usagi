@@ -70,10 +70,15 @@ impl ShutdownRequest {
     /// Runs one long-lived worker behind the daemon's failure detector.
     ///
     /// A panic or return not marked with
-    /// [`BackgroundWorkerMonitor::finish_planned`] is retained until restart.
-    /// The process panic hook remains responsible for its ordinary diagnostic.
-    pub fn monitor_background_worker(&self, worker: BackgroundWorker) -> BackgroundWorkerMonitor {
+    /// [`BackgroundWorkerMonitor::finish_planned`] is retained for the rest of
+    /// this process incarnation and requests process-wide shutdown. The process
+    /// panic hook remains responsible for its ordinary diagnostic.
+    pub fn monitor_background_worker(
+        &self,
+        worker: BackgroundWorker,
+    ) -> BackgroundWorkerMonitor<'_> {
         BackgroundWorkerMonitor {
+            shutdown: self,
             failures: Arc::clone(&self.background_worker_failures),
             worker,
             planned: false,
@@ -137,8 +142,8 @@ impl ShutdownRequest {
     }
 }
 
-/// The fixed set of daemon workers whose unexpected exit disables a product
-/// feature until restart.
+/// The fixed set of daemon workers whose unexpected exit makes the current
+/// process incarnation unsafe to keep serving.
 ///
 /// This is the single authority for the health bitset and its cardinality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,23 +188,30 @@ impl BackgroundWorker {
 /// A worker-lifetime guard that records every exit not explicitly completed as
 /// planned.
 #[derive(Debug)]
-pub struct BackgroundWorkerMonitor {
+pub struct BackgroundWorkerMonitor<'a> {
+    shutdown: &'a ShutdownRequest,
     failures: Arc<AtomicU16>,
     worker: BackgroundWorker,
     planned: bool,
 }
 
-impl BackgroundWorkerMonitor {
+impl BackgroundWorkerMonitor<'_> {
     /// Marks the guarded worker's return as part of planned daemon shutdown.
     pub fn finish_planned(mut self) {
         self.planned = true;
     }
 }
 
-impl Drop for BackgroundWorkerMonitor {
+impl Drop for BackgroundWorkerMonitor<'_> {
     fn drop(&mut self) {
         if !self.planned {
             self.failures.fetch_or(self.worker.bit(), Ordering::Release);
+            // A maintenance worker may unwind while holding a shared runtime
+            // mutex. Keeping the daemon alive would then retain its workspace
+            // fences while every request sees only a poisoned owner. Converge
+            // every unplanned long-lived worker exit on the ordinary graceful
+            // shutdown path instead.
+            self.shutdown.request();
         }
     }
 }
@@ -298,6 +310,7 @@ mod tests {
             shutdown.background_worker_health().failed_count(),
             u8::try_from(BackgroundWorker::COUNT).unwrap()
         );
+        assert!(shutdown.is_requested());
 
         let duplicate = catch_unwind(AssertUnwindSafe(|| {
             let _monitor = shutdown.monitor_background_worker(BackgroundWorker::Custody);
@@ -317,5 +330,6 @@ mod tests {
             .monitor_background_worker(BackgroundWorker::AgentObserver)
             .finish_planned();
         assert_eq!(shutdown.background_worker_health().failed_count(), 0);
+        assert!(!shutdown.is_requested());
     }
 }
