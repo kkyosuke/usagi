@@ -38,8 +38,8 @@
 use std::fmt;
 use std::io;
 
-use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::DaemonState;
+use usagi_core::domain::{AppInfo, id::OperationId as DomainOperationId};
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonRecordStore, LivenessProbe, RecordFile, Sleeper, Terminator,
 };
@@ -321,17 +321,15 @@ pub const fn plan_stop(mode: TransitionMode, live: LiveResources) -> StopPlan {
 
 /// The durable operation a manual `daemon restart` is attributed to.
 ///
-/// A manual restart is a forced replacement of the artifact that is already
-/// running, so it is keyed exactly like the trigger `usagi daemon replace`
-/// derives for that case: both verbs attribute their transition to the same
-/// durable operation instead of minting an identity each time. It is an
-/// attribution key, not a deduplication key — a second deliberate restart is a
-/// second transition, and converging an *in-flight* handoff onto one operation
-/// is the registry's job ([`super::authority::handoff`]). An unknown artifact
-/// identity has no safe key and yields `None`.
+/// Each deliberate invocation gets a fresh identity. The deterministic build
+/// trigger is still used as the capability check: an unknown artifact or empty
+/// channel has no safe rollover identity. Reusing that trigger's deterministic
+/// operation for separate manual invocations would make a later restart look
+/// like a lost-ACK replay of an already completed handoff.
 #[must_use]
 pub fn manual_operation_id(build: &BuildIdentity, channel: &str) -> Option<OperationId> {
-    build_rollover_trigger(build, build, channel, true).map(|trigger| trigger.operation_id)
+    build_rollover_trigger(build, build, channel, true)
+        .map(|_| OperationId(DomainOperationId::new().to_string()))
 }
 
 /// Refuse a transition that would destroy live runtime.

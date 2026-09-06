@@ -185,6 +185,19 @@ pub fn execute_gated_rollover_with_guard(
     operation: &OperationId,
     guard: &mut dyn FnMut() -> Result<(), RolloverRefusal>,
 ) -> Result<RolloverOutcome, HandoffFailure> {
+    // A replay of an operation which already crossed W2 must be effect-free.
+    // In particular, the guard may stop live Agent processes; running it before
+    // recognizing a lost-ACK replay would stop the successor's current Agents
+    // even though there is no handoff left to perform.
+    let snapshot = registry.load()?;
+    if snapshot.document().completed_operation.as_ref() == Some(operation)
+        || snapshot.document().handoff.as_ref().is_some_and(|handoff| {
+            handoff.operation == *operation
+                && handoff.phase == super::registry::HandoffPhase::Committed
+        })
+    {
+        return Ok(RolloverOutcome::AlreadyCompleted);
+    }
     gate.close(LeaseClass::ActiveControl);
     gate.await_drain(LeaseClass::ActiveControl)?;
     gate.enter_draining()?;

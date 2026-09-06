@@ -1,6 +1,6 @@
 //! TUI 面へ実端末と filesystem を接続する composition adapter。
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -20,12 +20,8 @@ use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, queue};
-use usagi_cli::cli::DoctorInvocation;
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::agent::{
-    AgentIntegrationDiagnosis, AgentIntegrationRevision, AgentInventory, AgentProfileId,
-    AgentResumeTarget, AgentRuntimeInventoryState, ProviderResumeProjection, ProviderResumeReason,
-};
+use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
 use usagi_core::domain::id::{SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
@@ -54,8 +50,8 @@ use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentGoalIntent, AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics,
     DaemonReply, DaemonRequest, MetricsAction, PrBatchRequest, PrDismissRequest, PrSnapshot,
-    SessionAction, TenantAction, TenantInventory, TerminalAction, TerminalGeometry,
-    TerminalLaneBudget, TerminalLaunchIntent, TerminalRequest,
+    SessionAction, TerminalAction, TerminalGeometry, TerminalLaneBudget, TerminalLaunchIntent,
+    TerminalRequest,
 };
 use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::note::Target as StoreTarget;
@@ -114,7 +110,7 @@ use usagi_tui::usecase::terminal_input::{
 
 use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
-use crate::runtime::daemon::{LaneClient, current_build};
+use crate::runtime::daemon::LaneClient;
 use crate::runtime::file_preview::{FilePreviewError, list_files, read_file};
 use crate::runtime::inventory_pump::TerminalInventoryPump;
 use crate::runtime::platform_child_reaper::PlatformChildReaper;
@@ -4937,8 +4933,8 @@ impl DoctorPort for RuntimeDoctorPort {
 
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
     fn daemon_health(&mut self) -> Result<String, String> {
-        crate::runtime::daemon::ensure_ready()
-            .map(|()| "daemon is reachable".to_owned())
+        crate::runtime::daemon::diagnostic_client(ClientPolicy::cli(), true)
+            .map(|_| "daemon is reachable".to_owned())
             .map_err(|error| error.to_string())
     }
 }
@@ -5148,719 +5144,14 @@ pub(crate) fn launch(
     }
 }
 
-/// Runs the Doctor TUI, or performs a headless repair and post-repair diagnosis.
+/// Runs Doctor diagnostics without changing daemon or Agent lifecycle state.
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
 pub(crate) fn launch_doctor(
     out: &mut dyn Write,
     info: &AppInfo,
-    fix: bool,
-    restart_agents: bool,
-    force: bool,
-    invocation: DoctorInvocation,
+    _fix: bool,
 ) -> std::io::Result<()> {
-    if fix {
-        let result = repair_doctor(
-            out,
-            info,
-            DoctorRepairOptions {
-                restart_agents,
-                force,
-                invocation,
-            },
-        );
-        if let Err(error) = &result {
-            ErrorLog::record(&tui_error_entry("doctor repair", &error.to_string()));
-        }
-        return result;
-    }
     launch(out, info, &EntryScreen::Doctor)
-}
-
-#[coverage(off)]
-// coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-#[allow(clippy::too_many_lines)] // One ordered old-owner stop → rollover → exact resume transaction.
-fn repair_doctor(
-    out: &mut dyn Write,
-    info: &AppInfo,
-    options: DoctorRepairOptions,
-) -> std::io::Result<()> {
-    let expected = current_agent_integrations();
-    // Deliberately inspect/stop on the published owner before build policy may
-    // roll it over: only that process owns the old PTY handles.
-    let Some(DoctorOwner {
-        mut owner,
-        expected_build,
-        published_build,
-        managed_update_lock,
-    }) = open_doctor_owner(options.managed_update())?
-    else {
-        writeln!(
-            out,
-            "doctor fix: daemon is not running; managed update left it stopped"
-        )?;
-        return Ok(());
-    };
-    let workspace = doctor_workspace_id(&mut *owner)?;
-    writeln!(
-        out,
-        "doctor fix: client build={} {}, daemon build={} {}",
-        expected_build.version,
-        expected_build.artifact,
-        published_build.version,
-        published_build.artifact,
-    )?;
-    let expected_revisions = expected
-        .iter()
-        .map(|item| format!("{}={}", item.profile_id, item.revision))
-        .collect::<Vec<_>>()
-        .join(", ");
-    writeln!(
-        out,
-        "doctor fix: expected Agent integrations {expected_revisions}"
-    )?;
-    let before = match doctor_agent_diagnosis(&mut *owner, workspace, &expected) {
-        Ok(diagnosis) => diagnosis,
-        Err(DoctorDiagnosisError::Unsupported) if !options.managed_update() => {
-            return repair_legacy_doctor(out, info, owner, workspace, &expected, options);
-        }
-        Err(DoctorDiagnosisError::Unsupported) => {
-            return Err(std::io::Error::other(
-                "managed update cannot safely hand off a daemon that predates server-side rollover fencing; stop the old daemon and rerun the update",
-            ));
-        }
-        Err(DoctorDiagnosisError::Client(error)) => {
-            return Err(std::io::Error::other(error.to_string()));
-        }
-    };
-    let live_runtimes = if expected_build == published_build {
-        0
-    } else {
-        let reply = owner
-            .request(DaemonRequest::Tenant {
-                action: TenantAction::Inventory,
-                root: None,
-                force: false,
-            })
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let inventory: TenantInventory = serde_json::from_value(doctor_reply_body(reply))
-            .map_err(|_| std::io::Error::other("daemon returned an invalid tenant inventory"))?;
-        inventory
-            .tenants
-            .iter()
-            .map(|tenant| tenant.live_runtimes)
-            .fold(0_usize, usize::saturating_add)
-    };
-    let daemon_plan = plan_doctor_daemon_replacement(
-        &expected_build,
-        &published_build,
-        &before,
-        options.restart_agents && !options.managed_update(),
-    );
-    if daemon_plan == DoctorDaemonPlan::Defer {
-        let credentials = before.provisioned_mcp_callers.map_or_else(
-            || "an unknown number of".to_owned(),
-            |count| count.to_string(),
-        );
-        writeln!(
-            out,
-            "doctor fix: daemon rollover deferred; {credentials} daemon-provisioned MCP caller credential(s) and {live_runtimes} live/unknown runtime(s) remain on the published daemon"
-        )?;
-        if before.provisioned_mcp_callers.is_none() {
-            writeln!(
-                out,
-                "doctor fix: this daemon cannot prove server-side handoff fencing; stop it, then rerun 'usagi doctor --fix'"
-            )?;
-        } else if options.managed_update() {
-            writeln!(
-                out,
-                "doctor fix: finish the live Agent(s), then rerun 'usagi doctor --fix'"
-            )?;
-        } else {
-            writeln!(
-                out,
-                "doctor fix: rerun with --restart-agents to confirm Agent restart"
-            )?;
-        }
-        let message = if before.provisioned_mcp_callers.is_none() {
-            "managed update cannot synchronize a daemon without server-side handoff fencing"
-        } else {
-            "managed update cannot synchronize the daemon while live Agent authority remains"
-        };
-        return doctor_deferred_result(options.managed_update(), message);
-    }
-    // Managed update synchronizes only daemon ownership. Historical Agent
-    // integration repair remains an explicit user Doctor action; conflating the
-    // two made a harmless outdated record skip the daemon handoff while still
-    // reporting update success.
-    if options.managed_update() {
-        if daemon_plan == DoctorDaemonPlan::Replace {
-            drop(owner);
-            crate::runtime::daemon::replace_running_daemon_during_update(
-                out,
-                ClientPolicy::cli(),
-                info,
-                managed_update_lock
-                    .as_ref()
-                    .expect("managed observation always retains its lifecycle lock"),
-            )?
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        }
-        let _current = current_daemon_client(&expected_build, true)?;
-        writeln!(out, "doctor fix: daemon build is current and serving")?;
-        return Ok(());
-    }
-    let Some(plan) = prepare_outdated_agent_repair(
-        out,
-        &mut *owner,
-        workspace,
-        &expected,
-        &before,
-        options.restart_agents,
-        options.force,
-    )?
-    else {
-        return Ok(());
-    };
-    drop(owner);
-
-    if daemon_plan == DoctorDaemonPlan::Replace {
-        crate::runtime::daemon::replace_running_daemon(out, ClientPolicy::cli(), false, info)?
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-    }
-    let mut current = current_daemon_client(&expected_build, options.managed_update())?;
-    writeln!(out, "doctor fix: daemon build is current")?;
-    for (target, revision) in plan.targets.iter().cloned() {
-        resume_doctor_agent(&mut *current, target, revision)?;
-    }
-    let after = doctor_agent_diagnosis(&mut *current, workspace, &expected)
-        .map_err(doctor_diagnosis_io_error)?;
-    let inventory = doctor_agent_inventory(&mut *current, workspace)?;
-    let live = inventory
-        .runtimes
-        .iter()
-        .filter(|item| {
-            matches!(
-                item.state,
-                usagi_core::domain::agent::AgentRuntimeInventoryState::Live
-            )
-        })
-        .count();
-    let draining = draining_daemons();
-    writeln!(
-        out,
-        "doctor fix: interrupted {}, resumed {}, outdated after repair {}, old MCP child claims after repair {}, live Agent(s) {live}, draining daemon(s) {draining}",
-        plan.interrupted,
-        plan.targets.len(),
-        after.outdated.len(),
-        after.outdated_mcp_children,
-    )?;
-    if !after.outdated.is_empty() {
-        return Err(std::io::Error::other(
-            "Agent integration repair did not converge",
-        ));
-    }
-    if after.outdated_mcp_children != 0 {
-        return Err(std::io::Error::other(
-            "repair completed but an old MCP child claim remains",
-        ));
-    }
-    Ok(())
-}
-
-struct DoctorStopPlan {
-    targets: Vec<(AgentResumeTarget, u32)>,
-    interrupted: u64,
-}
-
-#[derive(Clone, Copy)]
-struct DoctorRepairOptions {
-    restart_agents: bool,
-    force: bool,
-    invocation: DoctorInvocation,
-}
-
-impl DoctorRepairOptions {
-    const fn managed_update(self) -> bool {
-        matches!(self.invocation, DoctorInvocation::ManagedUpdate)
-    }
-}
-
-#[inline(never)]
-fn doctor_deferred_result(managed_update: bool, message: &str) -> std::io::Result<()> {
-    if managed_update {
-        Err(std::io::Error::other(message))
-    } else {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DoctorDaemonPlan {
-    Current,
-    Replace,
-    Defer,
-}
-
-/// Decide whether Doctor may replace the published daemon without stranding a
-/// live Agent's process-local MCP credential.
-///
-/// A daemon from before `provisioned_mcp_callers` cannot prove that replacement
-/// is fenced against a credential minted after client-side diagnosis, so it is
-/// always deferred. Managed update may proceed only when no MCP caller
-/// credential exists. An explicit user repair may first interrupt the selected
-/// outdated Agents; the old owner's server-side admission barrier then performs
-/// the authoritative all-credential check immediately before the first durable
-/// handoff write and safely refuses if any other credential remains.
-fn plan_doctor_daemon_replacement(
-    expected: &usagi_core::infrastructure::ipc::BuildIdentity,
-    published: &usagi_core::infrastructure::ipc::BuildIdentity,
-    diagnosis: &AgentIntegrationDiagnosis,
-    restart_agents: bool,
-) -> DoctorDaemonPlan {
-    if expected == published {
-        return DoctorDaemonPlan::Current;
-    }
-    match diagnosis.provisioned_mcp_callers {
-        Some(0) => DoctorDaemonPlan::Replace,
-        Some(_) if restart_agents => DoctorDaemonPlan::Replace,
-        _ => DoctorDaemonPlan::Defer,
-    }
-}
-
-struct DoctorOwner {
-    owner: Box<dyn DaemonClient>,
-    expected_build: usagi_core::infrastructure::ipc::BuildIdentity,
-    published_build: usagi_core::infrastructure::ipc::BuildIdentity,
-    managed_update_lock: Option<crate::runtime::daemon::ManagedUpdateLock>,
-}
-
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn open_doctor_owner(managed_update_sync: bool) -> std::io::Result<Option<DoctorOwner>> {
-    let expected = crate::runtime::daemon::current_build();
-    if managed_update_sync {
-        let (lock, client) =
-            crate::runtime::daemon::managed_update_diagnostic_client(ClientPolicy::cli())
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let Some(client) = client else {
-            return Ok(None);
-        };
-        let published = client.server_build().clone();
-        return Ok(Some(DoctorOwner {
-            owner: Box::new(client),
-            expected_build: expected,
-            published_build: published,
-            managed_update_lock: Some(lock),
-        }));
-    }
-    match crate::runtime::daemon::diagnostic_client(ClientPolicy::cli(), managed_update_sync) {
-        Ok(client) => {
-            let published = client.server_build().clone();
-            Ok(Some(DoctorOwner {
-                owner: Box::new(client),
-                expected_build: expected,
-                published_build: published,
-                managed_update_lock: None,
-            }))
-        }
-        Err(_) if !crate::runtime::daemon::has_published_daemon() => {
-            let client = crate::runtime::daemon::policy_client(ClientPolicy::cli())
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            Ok(Some(DoctorOwner {
-                owner: Box::new(client),
-                expected_build: expected.clone(),
-                published_build: expected,
-                managed_update_lock: None,
-            }))
-        }
-        Err(error) => Err(std::io::Error::other(error.to_string())),
-    }
-}
-
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn prepare_outdated_agent_repair(
-    out: &mut dyn Write,
-    owner: &mut dyn DaemonClient,
-    workspace: WorkspaceId,
-    expected: &[AgentIntegrationRevision],
-    diagnosis: &AgentIntegrationDiagnosis,
-    restart_agents: bool,
-    force: bool,
-) -> std::io::Result<Option<DoctorStopPlan>> {
-    writeln!(
-        out,
-        "doctor fix: {} outdated Agent integration(s), {} old MCP child claim(s)",
-        diagnosis.outdated.len(),
-        diagnosis.outdated_mcp_children,
-    )?;
-    for item in &diagnosis.outdated {
-        writeln!(
-            out,
-            "  - runtime={} session={} profile={} revision={}→{} phase={} exact-resume={}",
-            item.runtime.agent_runtime_id,
-            item.runtime
-                .session_id
-                .map_or_else(|| ":root".to_owned(), |id| id.to_string()),
-            item.profile_id,
-            item.actual_revision,
-            item.expected_revision,
-            item.phase.as_token(),
-            if item.resume_available { "yes" } else { "no" },
-        )?;
-    }
-    if !restart_agents && !diagnosis.outdated.is_empty() {
-        writeln!(
-            out,
-            "doctor fix: rerun with --restart-agents to confirm Agent restart"
-        )?;
-        writeln!(
-            out,
-            "doctor fix: daemon rollover deferred so the published owner keeps authority to stop those Agents"
-        )?;
-        return Ok(None);
-    }
-    if diagnosis.outdated.is_empty() {
-        return Ok(Some(DoctorStopPlan {
-            targets: Vec::new(),
-            interrupted: 0,
-        }));
-    }
-    let revision_by_runtime = diagnosis
-        .outdated
-        .iter()
-        .map(|item| (item.runtime.agent_runtime_id, item.expected_revision))
-        .collect::<BTreeMap<_, _>>();
-    let body = doctor_reply_body(
-        owner
-            .request(DaemonRequest::RestartAgents {
-                workspace,
-                expected: expected.to_vec(),
-                runtimes: diagnosis
-                    .outdated
-                    .iter()
-                    .map(|item| item.runtime.clone())
-                    .collect(),
-                force,
-            })
-            .map_err(|error| std::io::Error::other(error.to_string()))?,
-    );
-    let interrupted = body
-        .get("interrupted")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_default();
-    let inventory: AgentInventory = serde_json::from_value(
-        body.get("inventory")
-            .cloned()
-            .ok_or_else(|| std::io::Error::other("daemon returned no repair inventory"))?,
-    )
-    .map_err(|_| std::io::Error::other("daemon returned an invalid repair inventory"))?;
-    let targets = inventory
-        .resumable
-        .into_iter()
-        .filter_map(|item| {
-            let revision = revision_by_runtime.get(&item.runtime_id).copied()?;
-            item.target.map(|target| (target, revision))
-        })
-        .collect::<Vec<_>>();
-    if targets.len() != revision_by_runtime.len() {
-        return Err(std::io::Error::other(format!(
-            "daemon interrupted {} outdated Agent(s), but exact resume metadata exists for only {}",
-            revision_by_runtime.len(),
-            targets.len(),
-        )));
-    }
-    Ok(Some(DoctorStopPlan {
-        targets,
-        interrupted,
-    }))
-}
-
-#[coverage(off)]
-// coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-#[allow(clippy::too_many_lines)] // Conservative legacy stop/cold-replace/exact-resume transaction.
-fn repair_legacy_doctor(
-    out: &mut dyn Write,
-    info: &AppInfo,
-    mut owner: Box<dyn DaemonClient>,
-    workspace: WorkspaceId,
-    expected: &[AgentIntegrationRevision],
-    options: DoctorRepairOptions,
-) -> std::io::Result<()> {
-    let inventory = doctor_agent_inventory(&mut *owner, workspace)?;
-    let live = inventory
-        .runtimes
-        .iter()
-        .filter(|item| {
-            matches!(
-                item.state,
-                AgentRuntimeInventoryState::Reserved | AgentRuntimeInventoryState::Live
-            )
-        })
-        .collect::<Vec<_>>();
-    let live_runtime_ids = live
-        .iter()
-        .map(|item| item.runtime.agent_runtime_id)
-        .collect::<BTreeSet<_>>();
-    writeln!(
-        out,
-        "doctor fix: daemon predates integration diagnosis; {} live Agent runtime(s) require conservative repair",
-        live.len()
-    )?;
-    for item in &live {
-        writeln!(
-            out,
-            "  - runtime={} session={} state={:?}",
-            item.runtime.agent_runtime_id,
-            item.runtime
-                .session_id
-                .map_or_else(|| ":root".to_owned(), |id| id.to_string()),
-            item.state,
-        )?;
-    }
-    if !live.is_empty() && !options.restart_agents {
-        writeln!(
-            out,
-            "doctor fix: rerun with --restart-agents --force; legacy repair may also discard generic terminals"
-        )?;
-        return doctor_deferred_result(
-            options.managed_update(),
-            "managed update cannot synchronize a legacy daemon while live Agents remain",
-        );
-    }
-    if !live.is_empty() && !options.force {
-        return Err(std::io::Error::other(
-            "legacy daemon cannot stop Agents selectively; --force is required and may discard generic terminals",
-        ));
-    }
-    if live.is_empty() && !options.force {
-        writeln!(
-            out,
-            "doctor fix: legacy daemon has no server-side handoff fence; rerun with --force for a cold replacement"
-        )?;
-        return Ok(());
-    }
-    drop(owner);
-    crate::runtime::daemon::replace_running_daemon(out, ClientPolicy::cli(), options.force, info)?
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let mut current = current_daemon_client(&current_build(), options.managed_update())?;
-    let inventory = doctor_agent_inventory(&mut *current, workspace)?;
-    let claude_revision = expected
-        .iter()
-        .find(|item| item.profile_id.as_str() == "claude")
-        .map(|item| item.revision);
-    let codex_revision = expected
-        .iter()
-        .find(|item| item.profile_id.as_str() == "codex")
-        .map(|item| item.revision);
-    let targets = inventory
-        .resumable
-        .into_iter()
-        .filter_map(|item| {
-            if !live_runtime_ids.contains(&item.runtime_id) {
-                return None;
-            }
-            let target = item.target?;
-            let revision = match item.provider? {
-                usagi_core::domain::agent::ProviderKind::Claude => claude_revision,
-                // `codex` and `sakana-ai` intentionally share one adapter
-                // integration revision.
-                usagi_core::domain::agent::ProviderKind::Codex => codex_revision,
-            }?;
-            Some((target, revision))
-        })
-        .collect::<Vec<_>>();
-    if targets.len() != live_runtime_ids.len() {
-        return Err(std::io::Error::other(format!(
-            "legacy restart stopped {} Agent(s), but exact provider resume metadata exists for only {}",
-            live_runtime_ids.len(),
-            targets.len(),
-        )));
-    }
-    for (target, revision) in targets.iter().cloned() {
-        resume_doctor_agent(&mut *current, target, revision)?;
-    }
-    let after = doctor_agent_diagnosis(&mut *current, workspace, expected)
-        .map_err(doctor_diagnosis_io_error)?;
-    let draining = wait_for_draining_daemons();
-    writeln!(
-        out,
-        "doctor fix: legacy daemon replaced, resumed {}, outdated after repair {}, old MCP child claims after repair {}, draining daemon(s) {draining}",
-        targets.len(),
-        after.outdated.len(),
-        after.outdated_mcp_children,
-    )?;
-    if !after.outdated.is_empty() || after.outdated_mcp_children != 0 || draining != 0 {
-        return Err(std::io::Error::other(
-            "legacy integration repair did not converge",
-        ));
-    }
-    Ok(())
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn wait_for_draining_daemons() -> usize {
-    for attempt in 0..20 {
-        crate::runtime::daemon::invalidate_routes();
-        let draining = crate::runtime::daemon::trusted_generations()
-            .map(|generations| {
-                generations
-                    .iter()
-                    .filter(|generation| {
-                        generation.role == usagi_core::infrastructure::ipc::GenerationRole::Draining
-                    })
-                    .count()
-            })
-            .unwrap_or_default();
-        if draining == 0 || attempt == 19 {
-            return draining;
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    unreachable!("bounded draining diagnosis always returns")
-}
-
-/// Count retained draining owners without waiting for their intentionally live
-/// generic PTYs to exit.
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn draining_daemons() -> usize {
-    crate::runtime::daemon::invalidate_routes();
-    crate::runtime::daemon::trusted_generations()
-        .map(|generations| {
-            generations
-                .iter()
-                .filter(|generation| {
-                    generation.role == usagi_core::infrastructure::ipc::GenerationRole::Draining
-                })
-                .count()
-        })
-        .unwrap_or_default()
-}
-
-fn current_agent_integrations() -> Vec<AgentIntegrationRevision> {
-    use usagi_core::domain::settings::DefaultModel;
-
-    [
-        (
-            DefaultModel::Claude,
-            usagi_daemon::usecase::claude::PROFILE_REVISION,
-        ),
-        (
-            DefaultModel::OpenAi,
-            usagi_daemon::usecase::codex::PROFILE_REVISION,
-        ),
-        (
-            DefaultModel::SakanaAi,
-            usagi_daemon::usecase::codex::PROFILE_REVISION,
-        ),
-    ]
-    .into_iter()
-    .map(|(model, revision)| AgentIntegrationRevision {
-        profile_id: AgentProfileId::new(model.profile_id())
-            .expect("code-defined profile ID is canonical"),
-        revision,
-    })
-    .collect()
-}
-
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn current_daemon_client(
-    expected: &usagi_core::infrastructure::ipc::BuildIdentity,
-    managed_update_sync: bool,
-) -> std::io::Result<Box<dyn DaemonClient>> {
-    let client =
-        crate::runtime::daemon::diagnostic_client(ClientPolicy::cli(), managed_update_sync)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-    if client.server_build() != expected {
-        return Err(std::io::Error::other(
-            "daemon replacement returned before the current build was serving",
-        ));
-    }
-    Ok(Box::new(client))
-}
-
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn doctor_agent_diagnosis(
-    client: &mut dyn DaemonClient,
-    workspace: WorkspaceId,
-    expected: &[AgentIntegrationRevision],
-) -> Result<AgentIntegrationDiagnosis, DoctorDiagnosisError> {
-    let reply = client
-        .request(DaemonRequest::DiagnoseAgents {
-            workspace,
-            expected: expected.to_vec(),
-        })
-        .map_err(|error| match error {
-            ClientError::Protocol(ref protocol)
-                if protocol.code == usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument =>
-            {
-                DoctorDiagnosisError::Unsupported
-            }
-            other => DoctorDiagnosisError::Client(other),
-        })?;
-    serde_json::from_value(doctor_reply_body(reply)).map_err(|_| DoctorDiagnosisError::Unsupported)
-}
-
-enum DoctorDiagnosisError {
-    Unsupported,
-    Client(ClientError),
-}
-
-fn doctor_diagnosis_io_error(error: DoctorDiagnosisError) -> std::io::Error {
-    match error {
-        DoctorDiagnosisError::Unsupported => {
-            std::io::Error::other("current daemon does not support Agent integration diagnosis")
-        }
-        DoctorDiagnosisError::Client(error) => std::io::Error::other(error.to_string()),
-    }
-}
-
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn doctor_workspace_id(client: &mut dyn DaemonClient) -> std::io::Result<WorkspaceId> {
-    let reply = client
-        .request(DaemonRequest::Session {
-            action: SessionAction::List,
-            operation_id: usagi_core::domain::id::OperationId::new().to_string(),
-            payload: serde_json::json!({}),
-        })
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let snapshot = lifecycle_snapshot(&doctor_reply_body(reply)).map_err(std::io::Error::other)?;
-    Ok(snapshot.workspace_id)
-}
-
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn doctor_agent_inventory(
-    client: &mut dyn DaemonClient,
-    workspace: WorkspaceId,
-) -> std::io::Result<AgentInventory> {
-    let reply = client
-        .request(DaemonRequest::AgentInventory {
-            workspace,
-            caller_context: None,
-        })
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    serde_json::from_value(doctor_reply_body(reply))
-        .map_err(|_| std::io::Error::other("daemon returned an invalid Agent inventory"))
-}
-
-fn doctor_reply_body(reply: DaemonReply) -> serde_json::Value {
-    match reply {
-        DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
-    }
-}
-
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-fn resume_doctor_agent(
-    client: &mut dyn DaemonClient,
-    target: AgentResumeTarget,
-    expected_revision: u32,
-) -> std::io::Result<()> {
-    client
-        .request(DaemonRequest::ResumeAgentWithCurrentIntegration {
-            operation_id: usagi_core::domain::id::OperationId::new().to_string(),
-            target,
-            expected_revision,
-        })
-        .map(|_| ())
-        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 #[cfg(test)]
@@ -5882,121 +5173,33 @@ mod tests {
         AGENT_LAUNCH_UNCORRELATED, AgentGoalIntent, AgentLaunchIntent, AppEvent, AppKey,
         BackendDaemonControlPort, BackendTargetStorePort, Completions, DaemonAction,
         DaemonAgentCommandPort, DaemonCommandOutput, DaemonDecisionCommandPort, DaemonReply,
-        DaemonRequest, DaemonRestoreConnectionPort, DoctorDaemonPlan, DoctorDiagnosisError,
-        EnvScope, EnvironmentStorePort, FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry,
-        LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
-        PersistentSettingsPort, ProductionBackendFactory, ProductionDaemonControl,
-        RepoEnvironmentStore, RoleEditorScope, SessionRoleCatalog, SettingsEnvironmentStore, Start,
-        StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
-        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult,
-        WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult, agent_goal_request,
-        agent_inventory_request, agent_launch_request, child_directory_names,
-        classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
-        correlate_agent_launch, created_session_hook, current_agent_integrations,
-        daemon_control_error, daemon_control_result, daemon_error_reason, decision_cadence,
-        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
-        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
-        decode_work_run_control_reply, decode_work_run_snapshot_reply, doctor_deferred_result,
-        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request, global_icon_mode,
+        DaemonRequest, DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort,
+        FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET,
+        LaneConnection, LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort,
+        ProductionBackendFactory, ProductionDaemonControl, RepoEnvironmentStore, RoleEditorScope,
+        SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
+        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
+        TerminalSubscription, VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError,
+        WorkRunControlResult, agent_goal_request, agent_inventory_request, agent_launch_request,
+        child_directory_names, classify_terminal_input, classify_workspace_directory,
+        correlate_agent_goal, correlate_agent_launch, created_session_hook, daemon_control_error,
+        daemon_control_result, daemon_error_reason, decision_cadence, decode_agent_admission,
+        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
+        decode_terminal_inventory, decode_terminal_poll, decode_work_run_control_reply,
+        decode_work_run_snapshot_reply, exact_agent_resume_request, global_icon_mode,
         lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        metrics_cadence, passthrough_key, plan_doctor_daemon_replacement, pr_cadence,
-        pr_snapshot_events, probe_path, provider_resume_projection,
-        reduced_motion_from_environment, remove_session_payload, reply_geometry,
-        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, tui_error_entry, validate_workspace_directory,
-        version_detail, version_result_from_observation, work_run_control_client_error,
-        workspace_directory_missing, workspace_open_error,
+        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
+        provider_resume_projection, reduced_motion_from_environment, remove_session_payload,
+        reply_geometry, resolve_workspace_path, session_cadence, session_snapshot_result,
+        terminal_copy_key, terminal_inventory_matches_scope, tui_error_entry,
+        validate_workspace_directory, version_detail, version_result_from_observation,
+        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use usagi_core::infrastructure::bounded_process::ChildObservation;
     use usagi_tui::usecase::application::runtime_ports::SessionWorktreeScanPort;
-
-    fn doctor_build(artifact: &str) -> usagi_core::infrastructure::ipc::BuildIdentity {
-        usagi_core::infrastructure::ipc::BuildIdentity {
-            version: "test".into(),
-            commit: "test".into(),
-            target: "test".into(),
-            artifact: artifact.into(),
-        }
-    }
-
-    fn doctor_diagnosis(
-        provisioned_mcp_callers: Option<usize>,
-        outdated_mcp_children: usize,
-    ) -> usagi_core::domain::agent::AgentIntegrationDiagnosis {
-        usagi_core::domain::agent::AgentIntegrationDiagnosis {
-            workspace_id: usagi_core::domain::id::WorkspaceId::new(),
-            outdated: Vec::new(),
-            outdated_mcp_children,
-            provisioned_mcp_callers,
-        }
-    }
-
-    #[test]
-    fn doctor_replaces_only_after_live_mcp_authority_is_accounted_for() {
-        let expected = doctor_build("new");
-        let published = doctor_build("old");
-
-        assert!(doctor_deferred_result(false, "deferred").is_ok());
-        assert_eq!(
-            doctor_deferred_result(true, "deferred")
-                .unwrap_err()
-                .to_string(),
-            "deferred"
-        );
-
-        assert_eq!(
-            plan_doctor_daemon_replacement(
-                &expected,
-                &expected,
-                &doctor_diagnosis(Some(3), 0),
-                false,
-            ),
-            DoctorDaemonPlan::Current
-        );
-        assert_eq!(
-            plan_doctor_daemon_replacement(
-                &expected,
-                &published,
-                &doctor_diagnosis(Some(0), 0),
-                false,
-            ),
-            DoctorDaemonPlan::Replace
-        );
-        assert_eq!(
-            plan_doctor_daemon_replacement(
-                &expected,
-                &published,
-                &doctor_diagnosis(Some(2), 1),
-                false,
-            ),
-            DoctorDaemonPlan::Defer
-        );
-        assert_eq!(
-            plan_doctor_daemon_replacement(
-                &expected,
-                &published,
-                &doctor_diagnosis(Some(2), 1),
-                true,
-            ),
-            DoctorDaemonPlan::Replace
-        );
-        assert_eq!(
-            plan_doctor_daemon_replacement(
-                &expected,
-                &published,
-                &doctor_diagnosis(None, 0),
-                false,
-            ),
-            DoctorDaemonPlan::Defer
-        );
-        assert_eq!(
-            plan_doctor_daemon_replacement(&expected, &published, &doctor_diagnosis(None, 0), true,),
-            DoctorDaemonPlan::Defer
-        );
-    }
 
     #[test]
     fn reduced_motion_environment_accepts_only_the_documented_opt_in() {
@@ -6353,42 +5556,6 @@ mod tests {
         assert_eq!(
             version_detail(VersionProbeResult::EmptyOutput),
             Err("version output is empty".to_owned())
-        );
-    }
-
-    #[test]
-    fn doctor_repair_catalog_and_reply_decoder_are_deterministic() {
-        let integrations = current_agent_integrations();
-        assert_eq!(
-            integrations
-                .iter()
-                .map(|integration| (integration.profile_id.as_str(), integration.revision))
-                .collect::<Vec<_>>(),
-            [("claude", 4), ("codex", 4), ("sakana-ai", 4)]
-        );
-        assert_eq!(
-            doctor_reply_body(DaemonReply::Ok(serde_json::json!({"ok": true}))),
-            serde_json::json!({"ok": true})
-        );
-        assert_eq!(
-            doctor_reply_body(DaemonReply::Accepted {
-                operation_id: "operation".to_owned(),
-                revision: 1,
-                body: serde_json::json!({"accepted": true}),
-            }),
-            serde_json::json!({"accepted": true})
-        );
-        assert!(
-            doctor_diagnosis_io_error(DoctorDiagnosisError::Unsupported)
-                .to_string()
-                .contains("does not support")
-        );
-        assert_eq!(
-            doctor_diagnosis_io_error(DoctorDiagnosisError::Client(ClientError::Unavailable(
-                "offline".to_owned(),
-            )))
-            .to_string(),
-            "Unavailable: offline"
         );
     }
 
