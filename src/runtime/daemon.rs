@@ -21281,7 +21281,7 @@ instructions = "{instructions}"
         let codex = codex_developer_instructions_arguments(prompt);
         assert_eq!(codex[0], "-c");
         assert!(codex[1].contains(r#"\"quotes\""#));
-        assert!(codex[1].contains(r"C:\\work\nnext\tline^@\u007F"));
+        assert!(codex[1].contains(r"C:\\work\nnext\tline\u0000\u007F"));
         let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
         assert_eq!(parsed["developer_instructions"].as_str(), Some(prompt));
     }
