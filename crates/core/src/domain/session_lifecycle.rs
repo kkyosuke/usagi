@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::id::{
-    CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
+    AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
 };
 use crate::domain::role::RoleId;
 
@@ -258,6 +258,11 @@ pub struct ManagedSession {
     /// creation and is never inferred from later dispatch history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<SessionId>,
+    /// Exact authenticated Agent that created this session. Together with
+    /// `parent_session_id`, this distinguishes a workspace-root Agent's child
+    /// from sessions created by a human control plane or another root Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_agent_id: Option<AgentId>,
     /// Stable role assignment for this incarnation. Missing on legacy records
     /// and never populated implicitly during migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -299,11 +304,31 @@ impl ManagedSession {
         role_id: Option<RoleId>,
         parent_session_id: Option<SessionId>,
     ) -> Self {
+        Self::new_creating_with_role_parent_and_creator(
+            name,
+            operation_id,
+            now,
+            role_id,
+            parent_session_id,
+            None,
+        )
+    }
+
+    #[must_use]
+    pub fn new_creating_with_role_parent_and_creator(
+        name: String,
+        operation_id: OperationId,
+        now: DateTime<Utc>,
+        role_id: Option<RoleId>,
+        parent_session_id: Option<SessionId>,
+        creator_agent_id: Option<AgentId>,
+    ) -> Self {
         Self {
             session_id: SessionId::new(),
             worktree_id: WorktreeId::new(),
             name,
             parent_session_id,
+            creator_agent_id,
             role_id,
             lifecycle: SessionLifecycle::Creating,
             attempt: 1,
@@ -325,6 +350,7 @@ impl ManagedSession {
             worktree_id: WorktreeId::new(),
             name,
             parent_session_id: None,
+            creator_agent_id: None,
             role_id: None,
             lifecycle: SessionLifecycle::Available,
             attempt: 1,
@@ -349,6 +375,7 @@ impl ManagedSession {
             worktree_id: WorktreeId::new(),
             name,
             parent_session_id: None,
+            creator_agent_id: None,
             role_id: None,
             lifecycle: SessionLifecycle::Failed,
             attempt: 1,
@@ -540,6 +567,7 @@ pub enum LifecycleEvent {
         name: String,
         role_id: Option<RoleId>,
         parent_session_id: Option<SessionId>,
+        creator_agent_id: Option<AgentId>,
         operation: OperationJournal,
     },
     CreateCompleted {
@@ -595,35 +623,22 @@ pub fn reduce(
             name,
             role_id,
             parent_session_id,
+            creator_agent_id,
             operation,
-        } => reserve_create(state, name, role_id, parent_session_id, operation, now),
+        } => reserve_create(
+            state,
+            name,
+            role_id,
+            parent_session_id,
+            creator_agent_id,
+            operation,
+            now,
+        ),
         LifecycleEvent::BeginRemove {
             session_id,
             operation,
             delete_plan,
-        } => {
-            let s = state
-                .sessions
-                .iter_mut()
-                .find(|s| s.session_id == session_id)
-                .ok_or(LifecycleError::MissingSession)?;
-            if !matches!(
-                s.lifecycle,
-                SessionLifecycle::Available | SessionLifecycle::Failed
-            ) {
-                return Err(LifecycleError::InvalidTransition);
-            }
-            s.lifecycle = SessionLifecycle::Deleting;
-            s.attempt += 1;
-            s.operation_id = Some(operation.operation_id);
-            s.delete_plan = Some(delete_plan);
-            s.setup_plan = None;
-            s.failure = None;
-            s.changed_at = now;
-            state.operations.push(operation);
-            state.changed(now);
-            Ok(())
-        }
+        } => begin_remove(state, session_id, operation, delete_plan, now),
         LifecycleEvent::RequestCancel { operation_id } => {
             let op = state
                 .operations
@@ -677,11 +692,42 @@ pub fn reduce(
     }
 }
 
+fn begin_remove(
+    state: &mut WorkspaceLifecycleState,
+    session_id: SessionId,
+    operation: OperationJournal,
+    delete_plan: DeletePlan,
+    now: DateTime<Utc>,
+) -> Result<(), LifecycleError> {
+    let session = state
+        .sessions
+        .iter_mut()
+        .find(|session| session.session_id == session_id)
+        .ok_or(LifecycleError::MissingSession)?;
+    if !matches!(
+        session.lifecycle,
+        SessionLifecycle::Available | SessionLifecycle::Failed
+    ) {
+        return Err(LifecycleError::InvalidTransition);
+    }
+    session.lifecycle = SessionLifecycle::Deleting;
+    session.attempt += 1;
+    session.operation_id = Some(operation.operation_id);
+    session.delete_plan = Some(delete_plan);
+    session.setup_plan = None;
+    session.failure = None;
+    session.changed_at = now;
+    state.operations.push(operation);
+    state.changed(now);
+    Ok(())
+}
+
 fn reserve_create(
     state: &mut WorkspaceLifecycleState,
     name: String,
     role_id: Option<RoleId>,
     parent_session_id: Option<SessionId>,
+    creator_agent_id: Option<AgentId>,
     operation: OperationJournal,
     now: DateTime<Utc>,
 ) -> Result<(), LifecycleError> {
@@ -692,12 +738,13 @@ fn reserve_create(
     let id = operation.operation_id;
     state
         .sessions
-        .push(ManagedSession::new_creating_with_role_and_parent(
+        .push(ManagedSession::new_creating_with_role_parent_and_creator(
             name,
             id,
             now,
             role_id,
             parent_session_id,
+            creator_agent_id,
         ));
     state.operations.push(operation);
     state.changed(now);
@@ -869,8 +916,10 @@ mod tests {
         let legacy = ManagedSession::adopt_available("legacy".into(), now());
         let wire = serde_json::to_value(&legacy).unwrap();
         assert!(wire.get("role_id").is_none());
+        assert!(wire.get("creator_agent_id").is_none());
         let decoded: ManagedSession = serde_json::from_value(wire).unwrap();
         assert!(decoded.role_id.is_none());
+        assert!(decoded.creator_agent_id.is_none());
 
         let assigned = ManagedSession::new_creating_with_role(
             "review".into(),
@@ -930,6 +979,7 @@ mod tests {
                 name: "a".into(),
                 role_id: None,
                 parent_session_id: None,
+                creator_agent_id: None,
                 operation: operation.clone(),
             },
             now(),
@@ -969,6 +1019,7 @@ mod tests {
                 name: "x".into(),
                 role_id: None,
                 parent_session_id: None,
+                creator_agent_id: None,
                 operation: create.clone(),
             },
             now(),
@@ -1012,6 +1063,7 @@ mod tests {
                 name: "x".into(),
                 role_id: None,
                 parent_session_id: None,
+                creator_agent_id: None,
                 operation: fresh,
             },
             now(),
@@ -1043,6 +1095,7 @@ mod tests {
                 name: "a".into(),
                 role_id: None,
                 parent_session_id: None,
+                creator_agent_id: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1158,6 +1211,7 @@ mod tests {
                     name: "../victim".into(),
                     role_id: None,
                     parent_session_id: None,
+                    creator_agent_id: None,
                     operation: op(),
                 },
                 now(),
@@ -1208,6 +1262,7 @@ mod tests {
                 name: "a".into(),
                 role_id: None,
                 parent_session_id: None,
+                creator_agent_id: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1220,6 +1275,7 @@ mod tests {
                     name: "a".into(),
                     role_id: None,
                     parent_session_id: None,
+                    creator_agent_id: None,
                     operation: op()
                 },
                 now()
@@ -1316,6 +1372,7 @@ mod tests {
                 name: "b".into(),
                 role_id: None,
                 parent_session_id: None,
+                creator_agent_id: None,
                 operation: create.clone(),
             },
             now(),
@@ -1419,6 +1476,7 @@ mod tests {
                 name: "legacy".into(),
                 role_id: None,
                 parent_session_id: None,
+                creator_agent_id: None,
                 operation: create.clone(),
             },
             now(),
@@ -1502,6 +1560,7 @@ mod tests {
                 name: "terminal".into(),
                 role_id: None,
                 parent_session_id: None,
+                creator_agent_id: None,
                 operation: operation.clone(),
             },
             now(),

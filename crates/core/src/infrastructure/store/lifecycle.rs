@@ -200,6 +200,7 @@ mod tests {
                     name: "one".into(),
                     role_id: None,
                     parent_session_id: None,
+                    creator_agent_id: None,
                     operation,
                 },
                 now(),
@@ -235,6 +236,7 @@ mod tests {
                         name: "one".into(),
                         role_id: None,
                         parent_session_id: None,
+                        creator_agent_id: None,
                         operation
                     },
                     now()
@@ -264,6 +266,7 @@ mod tests {
                         name: "one".into(),
                         role_id: None,
                         parent_session_id: None,
+                        creator_agent_id: None,
                         operation,
                     },
                     now(),

@@ -5966,7 +5966,7 @@ fn dispatch_agent_tool(
             .ok_or_else(|| {
                 ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
             })?;
-        let mut runtime = agent.lock().map_err(|_| {
+        let runtime = agent.lock().map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
         })?;
         let authenticated = runtime
@@ -6070,7 +6070,18 @@ fn dispatch_agent_tool(
             };
         }
         let caller = authenticated.caller;
-        let store = runtime.dispatch_store();
+        let store = runtime.dispatch_store().clone();
+        drop(runtime);
+        let owned_sessions = bound
+            .sessions()
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .created_session_ids(&caller)
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session ownership is unavailable")
+            })?;
         let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {
             let mut runs = store
                 .runs()
@@ -6134,7 +6145,6 @@ fn dispatch_agent_tool(
                 };
                 let session_name = input.session.name;
                 let requested_role = input.session.role;
-                drop(runtime);
                 let supervised = supervisor
                     .lock()
                     .map_err(|_| {
@@ -6153,6 +6163,21 @@ fn dispatch_agent_tool(
                         })?
                         .require_same_dispatch_runtime(workspace, &caller, &selected)?;
                 }
+                bound
+                    .sessions()
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+                    })?
+                    .authorize_create_or_reuse(&session_name, &caller)
+                    .map_err(|error| {
+                        let code = if matches!(error, SessionRuntimeError::PermissionDenied) {
+                            ErrorCode::PermissionDenied
+                        } else {
+                            ErrorCode::Unavailable
+                        };
+                        ProtocolError::new(code, error.safe_message())
+                    })?;
                 let _delegation_permit = authorize_delegation(
                     bound,
                     agent,
@@ -6173,16 +6198,17 @@ fn dispatch_agent_tool(
                         usagi_core::usecase::client::SessionAction::Create,
                         &operation_id,
                         &serde_json::json!({
-                            "name": session_name,
-                            "role": requested_role,
-                            "parent_session_id": caller.session_id,
+                        "name": session_name,
+                        "role": requested_role,
+                        "parent_session_id": caller.session_id,
+                        "creator_agent_id": caller.agent_id,
                         }),
                     )
                     .map_err(|error| {
-                        let code = if matches!(error, SessionRuntimeError::RoleConflict(..)) {
-                            ErrorCode::RevisionConflict
-                        } else {
-                            ErrorCode::InvalidArgument
+                        let code = match &error {
+                            SessionRuntimeError::PermissionDenied => ErrorCode::PermissionDenied,
+                            SessionRuntimeError::RoleConflict(..) => ErrorCode::RevisionConflict,
+                            _ => ErrorCode::InvalidArgument,
                         };
                         ProtocolError::new(code, error.safe_message())
                     })?;
@@ -6283,7 +6309,7 @@ fn dispatch_agent_tool(
                         ));
                     }
                 }
-                runtime = agent.lock().map_err(|_| {
+                let runtime = agent.lock().map_err(|_| {
                     ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
                 })?;
                 let run_id = OperationId::parse(&admission.operation_id)
@@ -6319,6 +6345,12 @@ fn dispatch_agent_tool(
                 let session_id = session_id_by_name(&snapshot, &input.name).ok_or_else(|| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
                 })?;
+                if !owned_sessions.contains(&session_id) {
+                    return Err(ProtocolError::new(
+                        ErrorCode::PermissionDenied,
+                        "caller did not create the target session",
+                    ));
+                }
                 let agents = store.agents_in_workspace(workspace).map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id == Some(session_id)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
                 let session_metadata = snapshot
                     .get("sessions")
@@ -6351,6 +6383,12 @@ fn dispatch_agent_tool(
                         })
                     })
                     .transpose()?;
+                if session.is_some_and(|session| !owned_sessions.contains(&session)) {
+                    return Err(ProtocolError::new(
+                        ErrorCode::PermissionDenied,
+                        "caller did not create the target session",
+                    ));
+                }
                 let status = payload
                     .get("status")
                     .cloned()
@@ -6359,7 +6397,7 @@ fn dispatch_agent_tool(
                     .map_err(|_| {
                         ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent status")
                     })?;
-                let agents = store.agents_in_workspace(workspace).map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| session.is_none_or(|id| item.session_id == Some(id)) && status.is_none_or(|value| item.status == value)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "session_id": item.session_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                let agents = store.agents_in_workspace(workspace).map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id.is_some_and(|id| owned_sessions.contains(&id)) && session.is_none_or(|id| item.session_id == Some(id)) && status.is_none_or(|value| item.status == value)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "session_id": item.session_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
                 Ok((ResponseOutcome::Ok, serde_json::json!({"agents": agents})))
             }
             DispatchToolAction::AgentGet => {
@@ -6374,6 +6412,15 @@ fn dispatch_agent_tool(
                     .ok_or_else(|| {
                         ProtocolError::new(ErrorCode::InvalidArgument, "agent was not found")
                     })?;
+                if item
+                    .session_id
+                    .is_none_or(|session| !owned_sessions.contains(&session))
+                {
+                    return Err(ProtocolError::new(
+                        ErrorCode::PermissionDenied,
+                        "caller did not create the target session",
+                    ));
+                }
                 let runs = store
                     .runs()
                     .map_err(|_| {
@@ -6409,6 +6456,9 @@ fn dispatch_agent_tool(
                         format!("{}: {error}", input.summary)
                     });
                 let reported_result = input.result.clone();
+                let mut runtime = agent.lock().map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })?;
                 let delivery = runtime.report_from_mcp(
                     &credential.credential,
                     input.run_id,
@@ -8087,7 +8137,7 @@ fn session_lineage_by_name(
     Some((session_id, parent_session_id))
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_into_an_existing_session_does_not_reparent_it
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_session_tools_only_reach_sessions_created_by_the_caller
 fn record_session_lineage(
     agent: &SharedAgentRuntime,
     workspace_id: WorkspaceId,
@@ -8497,6 +8547,9 @@ fn session_response_envelope(
                 SessionRuntimeError::Delivery(_) => {
                     usagi_core::infrastructure::ipc::ErrorCode::Unavailable
                 }
+                SessionRuntimeError::PermissionDenied => {
+                    usagi_core::infrastructure::ipc::ErrorCode::PermissionDenied
+                }
                 _ => usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
             };
             envelope(
@@ -8748,6 +8801,18 @@ fn dispatch_session_action(
     let agent = context.agent;
     let pr_inventory = context.pr_inventory;
 
+    let authenticated_caller = payload
+        .get("_caller_credential")
+        .and_then(serde_json::Value::as_str)
+        .map(|credential| {
+            agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .mcp_dispatch_context(credential)
+                .ok_or(SessionRuntimeError::ScopeUnavailable)
+        })
+        .transpose()?;
+
     let reply = |body: serde_json::Value| {
         let revision = bound
             .sessions()
@@ -8783,13 +8848,6 @@ fn dispatch_session_action(
             .map_err(|_| SessionRuntimeError::Storage)?
             .session_scope_by_id(session_id)
     };
-    let named_session = |name: &str| {
-        bound
-            .sessions()
-            .lock()
-            .map_err(|_| SessionRuntimeError::Storage)?
-            .session_id(name)
-    };
     let bound_workspace = || {
         bound
             .sessions()
@@ -8798,9 +8856,45 @@ fn dispatch_session_action(
             .workspace_id()
             .map_err(|_| SessionRuntimeError::Storage)
     };
+    if let Some(authenticated) = authenticated_caller.as_ref()
+        && authenticated.workspace_id != bound_workspace()?
+    {
+        return Err(SessionRuntimeError::ScopeUnavailable);
+    }
+    let caller = authenticated_caller.as_ref().map(|caller| &caller.caller);
+    let target_session = |name: &str| {
+        let sessions = bound
+            .sessions()
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        if let Some(caller) = caller {
+            sessions.created_session_id(name, caller)
+        } else {
+            sessions.session_id(name)
+        }
+    };
+    let authorize_create_or_reuse = |name: &str| {
+        if let Some(caller) = caller {
+            bound
+                .sessions()
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .authorize_create_or_reuse(name, caller)?;
+        }
+        Ok::<(), SessionRuntimeError>(())
+    };
 
     match action {
         SessionAction::List | SessionAction::Status | SessionAction::Overview => {
+            let visible = caller
+                .map(|caller| {
+                    bound
+                        .sessions()
+                        .lock()
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                        .created_session_ids(caller)
+                })
+                .transpose()?;
             let mut status = bound
                 .sessions()
                 .lock()
@@ -8859,7 +8953,7 @@ fn dispatch_session_action(
                         Some((id, parent))
                     })
                     .collect::<BTreeMap<SessionId, Option<SessionId>>>();
-                for item in items {
+                for item in items.iter_mut() {
                     let Some(id) = item
                         .get("session_id")
                         .cloned()
@@ -8893,6 +8987,14 @@ fn dispatch_session_action(
                     );
                     item["organization_path"] = serde_json::json!(path);
                 }
+                if let Some(visible) = visible.as_ref() {
+                    items.retain(|item| {
+                        item.get("session_id")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok())
+                            .is_some_and(|id| visible.contains(&id))
+                    });
+                }
             }
             Ok(status)
         }
@@ -8900,9 +9002,12 @@ fn dispatch_session_action(
             let name = string("name")?;
             let prompt = string("prompt")?;
             let target = if name == ":root" {
+                if caller.is_some() {
+                    return Err(SessionRuntimeError::PermissionDenied);
+                }
                 None
             } else {
-                Some(named_session(name)?)
+                Some(target_session(name)?)
             };
             let mode = match payload
                 .get("mode")
@@ -8947,7 +9052,7 @@ fn dispatch_session_action(
         SessionAction::Pr => {
             let (name, id) = if payload.get("name").is_some() {
                 let name = string("name")?;
-                (name.to_owned(), named_session(name)?)
+                (name.to_owned(), target_session(name)?)
             } else {
                 let id = caller_scope()?.session_id;
                 let lifecycle = bound
@@ -9077,66 +9182,40 @@ fn dispatch_session_action(
         }
         SessionAction::DelegateBrief => reply(delegate_brief(context, operation_id, payload)?),
         SessionAction::DelegateIssue => {
-            let authenticated = payload
-                .get("_caller_credential")
-                .and_then(serde_json::Value::as_str)
-                .map(|credential| {
-                    agent
-                        .lock()
-                        .map_err(|_| SessionRuntimeError::Storage)?
-                        .mcp_dispatch_context(credential)
-                        .ok_or(SessionRuntimeError::ScopeUnavailable)
-                })
-                .transpose()?;
             let workspace = bound_workspace()?;
-            if authenticated
-                .as_ref()
-                .is_some_and(|context| context.workspace_id != workspace)
-            {
-                return Err(SessionRuntimeError::ScopeUnavailable);
-            }
-            let caller = authenticated.map(|context| context.caller);
-            let _delegation_permit = authorize_delegation(
-                bound,
-                agent,
-                caller.as_ref(),
-                payload.get("role"),
-                operation_id,
-            )?;
-            let (name, prompt) = {
-                let number = payload
-                    .get("number")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| u32::try_from(value).ok())
-                    .ok_or(SessionRuntimeError::InvalidRequest)?;
-                let root = bound
-                    .sessions()
-                    .lock()
-                    .map_err(|_| SessionRuntimeError::Storage)?
-                    .repository_root()
-                    .to_path_buf();
-                let issue = issue::get(&IssueStore::new(root), number)
-                    .map_err(|error| {
-                        error
-                            .chain()
-                            .find_map(|cause| cause.downcast_ref::<AmbiguousIssueNumber>())
-                            .cloned()
-                            .map_or(
-                                SessionRuntimeError::Storage,
-                                SessionRuntimeError::AmbiguousIssue,
-                            )
-                    })?
-                    .ok_or(SessionRuntimeError::InvalidRequest)?;
-                (
-                    payload
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .map_or_else(|| format!("issue-{number}"), str::to_owned),
-                    issue::to_prompt(&issue),
-                )
-            };
+            let number = payload
+                .get("number")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(SessionRuntimeError::InvalidRequest)?;
+            let name = payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(|| format!("issue-{number}"), str::to_owned);
+            let _delegation_permit =
+                authorize_delegation(bound, agent, caller, payload.get("role"), operation_id)?;
+            authorize_create_or_reuse(&name)?;
+            let root = bound
+                .sessions()
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .repository_root()
+                .to_path_buf();
+            let issue = issue::get(&IssueStore::new(root), number)
+                .map_err(|error| {
+                    error
+                        .chain()
+                        .find_map(|cause| cause.downcast_ref::<AmbiguousIssueNumber>())
+                        .cloned()
+                        .map_or(
+                            SessionRuntimeError::Storage,
+                            SessionRuntimeError::AmbiguousIssue,
+                        )
+                })?
+                .ok_or(SessionRuntimeError::InvalidRequest)?;
+            let prompt = issue::to_prompt(&issue);
             let requested_role = payload.get("role").cloned();
-            let created = bound
+            let mut created = bound
                 .sessions()
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
@@ -9146,11 +9225,21 @@ fn dispatch_session_action(
                     &serde_json::json!({
                         "name": name,
                         "role": requested_role,
-                        "parent_session_id": caller.as_ref().and_then(|caller| caller.session_id),
+                        "parent_session_id": caller.and_then(|caller| caller.session_id),
+                        "creator_agent_id": caller.map(|caller| caller.agent_id),
                     }),
                 )?;
             let id = record_session_lineage(agent, workspace, &created.body, &name)?;
-            let delivery = if let Some(caller) = caller {
+            if caller.is_some()
+                && let Some(sessions) = created
+                    .body
+                    .get_mut("sessions")
+                    .and_then(serde_json::Value::as_array_mut)
+            {
+                sessions
+                    .retain(|session| session.get("session_id") == Some(&serde_json::json!(id)));
+            }
+            let delivery = if let Some(caller) = caller.cloned() {
                 let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
                 runtime
                     .dispatch_store()
@@ -9184,24 +9273,25 @@ fn dispatch_session_action(
         // readers (session list, terminal poll, user-decision list) on the
         // daemon. The fast durable transitions still run under the lock.
         SessionAction::Create => {
-            let parent_session_id = payload
-                .get("_caller_credential")
-                .and_then(serde_json::Value::as_str)
-                .map(|credential| {
-                    agent
-                        .lock()
-                        .map_err(|_| SessionRuntimeError::Storage)?
-                        .mcp_dispatch_caller(credential)
-                        .map(|caller| caller.session_id)
-                        .ok_or(SessionRuntimeError::ScopeUnavailable)
-                })
-                .transpose()?
-                .flatten();
+            authorize_create_or_reuse(string("name")?)?;
             let mut create_payload = payload.clone();
-            create_payload["parent_session_id"] = serde_json::json!(parent_session_id);
-            let created =
+            create_payload["parent_session_id"] =
+                serde_json::json!(caller.and_then(|caller| caller.session_id));
+            create_payload["creator_agent_id"] =
+                serde_json::json!(caller.map(|caller| caller.agent_id));
+            let mut created =
                 perform_create(bound.sessions(), &SystemGit, operation_id, &create_payload)?;
-            record_session_lineage(agent, bound_workspace()?, &created.body, string("name")?)?;
+            let id =
+                record_session_lineage(agent, bound_workspace()?, &created.body, string("name")?)?;
+            if caller.is_some()
+                && let Some(sessions) = created
+                    .body
+                    .get_mut("sessions")
+                    .and_then(serde_json::Value::as_array_mut)
+            {
+                sessions
+                    .retain(|session| session.get("session_id") == Some(&serde_json::json!(id)));
+            }
             Ok(created)
         }
         // Remove goes further: it answers as soon as the session is durably
@@ -9216,18 +9306,33 @@ fn dispatch_session_action(
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .removal_identity(name)?;
+            if let Some(caller) = caller {
+                let target = bound
+                    .sessions()
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .created_session_record_id(name, caller)?;
+                if id != target {
+                    return Err(SessionRuntimeError::PermissionDenied);
+                }
+            }
             let merged_head_oid = best_effort_merged_pr_head(pr_inventory, id, branch_head);
+            let mut remove_payload = payload.clone();
+            remove_payload["parent_session_id"] =
+                serde_json::json!(caller.and_then(|caller| caller.session_id));
+            remove_payload["creator_agent_id"] =
+                serde_json::json!(caller.map(|caller| caller.agent_id));
             perform_remove_with_merged_head(
                 bound.sessions(),
                 teardown,
                 operation_id,
-                payload,
+                &remove_payload,
                 merged_head_oid,
             )
         }
         SessionAction::Sleep => {
             let name = string("name")?;
-            let id = named_session(name)?;
+            let id = target_session(name)?;
             let slept = agent
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
@@ -9262,11 +9367,14 @@ fn dispatch_session_action(
                 force,
             )?)
         }
-        SessionAction::Setup => bound
-            .sessions()
-            .lock()
-            .map_err(|_| SessionRuntimeError::Storage)?
-            .handle(action, operation_id, payload),
+        SessionAction::Setup => {
+            target_session(string("name")?)?;
+            bound
+                .sessions()
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .handle(action, operation_id, payload)
+        }
     }
 }
 
@@ -9508,6 +9616,7 @@ fn delegate_brief(
         if authenticated.workspace_id != workspace {
             return Err(SessionRuntimeError::ScopeUnavailable);
         }
+        sessions.authorize_create_or_reuse(&name, &authenticated.caller)?;
         (
             workspace,
             authenticated.run_id,
@@ -9556,7 +9665,7 @@ fn delegate_brief(
             message: error.message,
         })?;
 
-    let created = perform_delegated_create(
+    let mut created = perform_delegated_create(
         bound.sessions(),
         &SystemGit,
         operation_id,
@@ -9564,9 +9673,17 @@ fn delegate_brief(
             "name": name,
             "role": payload.get("role").cloned(),
             "parent_session_id": caller.session_id,
+            "creator_agent_id": caller.agent_id,
         }),
     )?;
     let id = record_session_lineage(agent, workspace, &created.body, &name)?;
+    if let Some(sessions) = created
+        .body
+        .get_mut("sessions")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        sessions.retain(|session| session.get("session_id") == Some(&serde_json::json!(id)));
+    }
     let scope = bound.scope_resolver();
     let reservation = supervisor
         .lock()
@@ -10162,6 +10279,7 @@ fn reconcile_pending_supervisor_promotions(
 fn dispatch_agent_maintenance(
     agent: &SharedAgentRuntime,
     request: &AgentDispatchRequest,
+    visible_sessions: Option<&BTreeSet<SessionId>>,
 ) -> Option<Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError>> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 
@@ -10173,8 +10291,23 @@ fn dispatch_agent_maintenance(
                     ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
                 })
                 .map(|agent| {
-                    serde_json::to_value(agent.inventory(*workspace))
-                        .expect("safe Agent inventory is serializable")
+                    let mut inventory = agent.inventory(*workspace);
+                    if let Some(visible_sessions) = visible_sessions {
+                        inventory.runtimes.retain(|item| {
+                            item.runtime
+                                .session_id
+                                .is_some_and(|session| visible_sessions.contains(&session))
+                        });
+                        let runtime_ids = inventory
+                            .runtimes
+                            .iter()
+                            .map(|item| item.runtime.agent_runtime_id)
+                            .collect::<BTreeSet<_>>();
+                        inventory
+                            .resumable
+                            .retain(|item| runtime_ids.contains(&item.runtime_id));
+                    }
+                    serde_json::to_value(inventory).expect("safe Agent inventory is serializable")
                 }),
         ),
         AgentDispatchRequest::WorkspaceObservation(workspace) => Some(
@@ -10223,6 +10356,7 @@ fn dispatch_agent_maintenance(
     }
 }
 
+#[allow(clippy::too_many_lines)] // One boundary keeps optional Agent authority and admission atomic.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn dispatch_agent(
     agent: &SharedAgentRuntime,
@@ -10240,49 +10374,131 @@ fn dispatch_agent(
             DaemonRequest::Agent {
                 operation_id,
                 intent,
-            } => Some(AgentDispatchRequest::Launch(operation_id, intent)),
+            } => Some((AgentDispatchRequest::Launch(operation_id, intent), None)),
             DaemonRequest::AgentGoal {
                 operation_id,
                 intent,
-            } => Some(AgentDispatchRequest::Goal(operation_id, intent)),
-            DaemonRequest::AgentInventory { workspace } => {
-                Some(AgentDispatchRequest::Inventory(workspace))
-            }
+            } => Some((AgentDispatchRequest::Goal(operation_id, intent), None)),
+            DaemonRequest::AgentInventory {
+                workspace,
+                caller_context,
+            } => Some((AgentDispatchRequest::Inventory(workspace), caller_context)),
             DaemonRequest::AgentWorkspaceObservation { workspace } => {
-                Some(AgentDispatchRequest::WorkspaceObservation(workspace))
+                Some((AgentDispatchRequest::WorkspaceObservation(workspace), None))
             }
             DaemonRequest::DiagnoseAgents {
                 workspace,
                 expected,
-            } => Some(AgentDispatchRequest::Diagnose(workspace, expected)),
+            } => Some((AgentDispatchRequest::Diagnose(workspace, expected), None)),
             DaemonRequest::RestartAgents {
                 workspace,
                 expected,
                 runtimes,
                 force,
-            } => Some(AgentDispatchRequest::Restart(
-                workspace, expected, runtimes, force,
+            } => Some((
+                AgentDispatchRequest::Restart(workspace, expected, runtimes, force),
+                None,
             )),
             DaemonRequest::ResumeAgent {
                 operation_id,
                 target,
-            } => Some(AgentDispatchRequest::Resume(operation_id, target)),
+                caller_context,
+            } => Some((
+                AgentDispatchRequest::Resume(operation_id, target),
+                caller_context,
+            )),
             DaemonRequest::ResumeAgentWithCurrentIntegration {
                 operation_id,
                 target,
                 expected_revision,
-            } => Some(AgentDispatchRequest::RepairResume(
-                operation_id,
-                target,
-                expected_revision,
+            } => Some((
+                AgentDispatchRequest::RepairResume(operation_id, target, expected_revision),
+                None,
             )),
             _ => None,
         });
-    let Some(request) = request else {
+    let Some((request, caller_context)) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
+    let ownership = caller_context.map(|caller_context| {
+        use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+        let authenticated = agent
+            .lock()
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
+            .mcp_dispatch_context(&caller_context.credential)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "agent caller provenance is unknown",
+                )
+            })?;
+        let workspace = bound
+            .sessions()
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .workspace_id()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+            })?;
+        if authenticated.workspace_id != workspace {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent caller does not belong to this workspace",
+            ));
+        }
+        let requested_workspace = match &request {
+            AgentDispatchRequest::Inventory(requested) => *requested,
+            AgentDispatchRequest::Resume(_, target) => target.workspace_id,
+            _ => workspace,
+        };
+        if requested_workspace != workspace {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent request does not belong to this workspace",
+            ));
+        }
+        bound
+            .sessions()
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .created_session_ids(&authenticated.caller)
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session ownership is unavailable")
+            })
+    });
+    let ownership = match ownership.transpose() {
+        Ok(ownership) => ownership,
+        Err(error) => {
+            return envelope(
+                hello,
+                request_id,
+                ResponseOutcome::Error(error),
+                serde_json::Value::Null,
+            );
+        }
+    };
+    if let (Some(owned), AgentDispatchRequest::Resume(_, target)) = (&ownership, &request)
+        && target
+            .session_id
+            .is_none_or(|session| !owned.contains(&session))
+    {
+        return envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(usagi_core::infrastructure::ipc::ProtocolError::new(
+                usagi_core::infrastructure::ipc::ErrorCode::PermissionDenied,
+                "caller did not create the target session",
+            )),
+            serde_json::Value::Null,
+        );
+    }
     let scope = bound.scope_resolver();
-    if let Some(result) = dispatch_agent_maintenance(agent, &request) {
+    if let Some(result) = dispatch_agent_maintenance(agent, &request, ownership.as_ref()) {
         return match result {
             Ok(body) => envelope(hello, request_id, ResponseOutcome::Ok, body),
             Err(error) => envelope(
