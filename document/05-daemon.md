@@ -185,7 +185,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
 | `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
-| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。`--force` は live runtime を明示的に破棄する cold transition |
+| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。`--restart-agents` は全 live Agent の exact stop/resume を handoff barrier 内で行い、`--restart-agents --force` は Running 中の Agent の中断も許可する。`--restart-agents` なしの `--force` だけが live runtime を破棄する cold transition |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
 | `usagi daemon` / `usagi daemon serve` | 前景で daemon を active role で serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
@@ -1457,33 +1457,29 @@ producer `OperationId` と target 全体を semantic key にして dedupe する
 
 daemon restart reconciliation は unfinished record の provider status を `interrupted` にするが、自動 resume は行わない。TUI 起動、pane inventory 復元、daemon / macOS 再起動も同様である。schema v1/v2/v3 record は provider metadata または public lineage が欠けたまま schema v4 として読めるが、ID を推測して補完せず resume 不可のままにする。fixture は continuation の restart stability / non-reuse、root と複数 session、同一 scope の複数 history、Claude UUID、structured Codex capture、scope/revision/incarnation mismatch、ID の public plan argv / snapshot / IPC 非露出、source relation、operation restart replay と exact source の一度だけの spawn を確認する。
 
-### Doctor による integration repair
+### daemon restart による Agent integration 更新
 
-`usagi doctor --fix` は現在の client、published daemon、live Agent の build / integration revision を順に診断する。
-daemon だけが古ければ通常 client の production reuse policy には落とさず、明示的に planned replacement を使い、
-successor の build と serving readiness を再検証する。古い Agent integration がある場合は一覧を表示し、
-`--restart-agents` が明示されるまで Agent process を停止しない。`--force` は `running` phase（tool / prompt の途中を含む）を
-破棄する追加 authority であり、通常の idle / waiting Agent 再起動や daemon rollover の force ではない。
+`usagi doctor` は tool、settings、既存 daemon の状態を診断するが、daemon や Agent の起動・停止・入替を行わない。
+daemon lifecycle と Agent integration の更新は `usagi daemon restart` が所有する。通常の restart は live Agent の
+process-local MCP credential が残っていれば effect-zero で拒否する。`--restart-agents` は daemon 全体の live Agent を一覧化し、
+exact resume metadata が全件揃う場合だけ old owner で停止して、successor の current integration で再開する。
+`--force` は `running` phase（tool / prompt の途中を含む）を破棄する追加 authority であり、
+`--restart-agents` と併用した場合は generic Terminal や daemon rollover の cold force ではない。
 launch 時の hook、sandbox writable roots、argv、private config の変更は provider ごとの integration revision を増分する。
-これにより Doctor は同じ build の runtime でも旧 launch 設定を識別し、current adapter での再開対象にできる。
+これにより restart は同じ build の runtime でも current adapter で再開できる。
 
-修復順序は old owner で exact Agent を停止、daemon build を rollover、current adapter で provider-native session ID を exact
-resume、再診断の順である。これにより old owner の PTY handle を successor が推測して signal することも、old adapter が新設定を
+順序は restart plan の effect-free 検証、active-control admission の close / drain、old owner での exact Agent 停止、
+daemon build の rollover、current adapter での provider-native session ID の exact resume である。これにより old owner の
+PTY handle を successor が推測して signal することも、old adapter が新設定を
 materialize することもない。provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
-modern daemon は全件 effect-before-zero で拒否する。停止後に scope が stale、current adapter が resume 非対応と判明しても、別
-conversation は推測しない。最終診断は outdated Agent 数、live Agent 数、retained draining
-generation 数を表示する。診断は child が未 claim のものも含む daemon 全体の daemon-provisioned MCP caller credential 総数を返す。
-daemon build mismatch 時に credential が残る場合は process-local authority を successor が引き継げないため replacement を保留し、
-旧 daemon と Agent を維持する。`--restart-agents` はこの build handoff の拒否を上書きせず、先に Agent を停止して競合窓を作らない。
-旧 daemon が credential 総数 field を持たない場合は、live inventory が 0 でも server fence capability を証明できないため保留する。0 と診断した後も old active が
-control admission を close / drain して credential を再検証し、競合した Agent launch があれば durable write 前に拒否する。
+modern daemon は全件 effect-before-zero で拒否する。plan 後に Agent が増減または差し替わった場合も、old active が
+control admission を close / drain した barrier 内で exact runtime 集合を再検証し、Agent 停止と durable handoff write の間へ
+新しい Agent admission を挟ませない。停止後に scope が stale、current adapter が resume 非対応と判明しても、別 conversation は推測しない。
 IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
 
-診断 vocabulary 導入前の daemon は integration revision も server-side handoff fence も証明できないため、live Agent の有無に
-かかわらず planned replacement を行わない。利用者が `--force` を明示した cold restart だけを互換経路とし、live Agent が
-ある場合はさらに `--restart-agents` を必要とする。この経路は
-generic terminal も破棄し得るため、CLI は実行前の案内と refusal にその追加影響を明記する。再起動後は durable provider
-metadata から exact target を読み直し、current integration で resume する。
+machine-wide restart plan vocabulary 導入前の daemon は barrier 内の全 Agent 集合を証明できないため、
+`--restart-agents` を effect-zero で拒否する。導入直後の一度だけは live Agent を終了して通常の `daemon restart` を行う。
+`--force` の cold restart は互換経路として残るが Agent と generic Terminal を破棄するため、自動 exact resume の代替にはしない。
 
 restart 後の Agent owner は hydrate 済み operation を admission より先に照合する。同じ semantic intent は保存済み
 accepted / completed / safe failure を replay し、同じ `OperationId` の異なる intent は
@@ -2384,7 +2380,9 @@ readiness 中は reconcile / save、worker / tick、spawn を行わず、初期�
 
 handoff commit 後は readiness-only accept loop を止めて listener を回収し、同じ generation の空 owner shard と
 global allocator を active writer として開く。retained shard は owner routing で旧 generation 自身が serve するため、
-successor はそれらを cold-restart の `identity_unknown` に reconcile せず、provider resume も実行しない。
+successor は live resource を cold-restart の `identity_unknown` に reconcile しない。通常の rollover は provider resume を
+自動実行しないが、`--restart-agents` の successor は old owner が停止済みにした Agent source history だけを read-only で取り込み、
+active serving の開始後に client から届く exact resume request を current integration で実行する。
 
 ### generation collection
 

@@ -514,6 +514,26 @@ pub struct AgentIntegrationDiagnosis {
     pub provisioned_mcp_callers: Option<usize>,
 }
 
+/// One live Agent selected for a daemon restart and its exact continuation.
+///
+/// The provider-native conversation identity remains daemon-private. The
+/// public target is sufficient to fence one post-restart resume without
+/// allowing a caller to guess a different conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonRestartAgent {
+    pub runtime: AgentRuntimeRef,
+    pub target: AgentResumeTarget,
+    pub profile_id: AgentProfileId,
+    pub expected_revision: u32,
+    pub phase: crate::domain::session_lifecycle::AgentPhase,
+}
+
+/// Effect-free plan for restarting every live Agent around one daemon handoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonRestartAgentPlan {
+    pub agents: Vec<DaemonRestartAgent>,
+}
+
 /// Explicit source-to-replacement relation returned by a successful resume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentResumeRelation {

@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::agent::{
-    AgentProfileId, AgentResumeTarget, CallerRef, ModelSelector, ProviderSessionId,
+    AgentIntegrationRevision, AgentProfileId, AgentResumeTarget, CallerRef, ModelSelector,
+    ProviderSessionId,
 };
 use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use crate::domain::id::{AgentId, OperationId, SessionId, TerminalRef, WorkspaceId};
@@ -41,9 +42,16 @@ pub enum DaemonRequest {
     /// only the process-local bearer used on this already established channel.
     McpChildClaim,
     /// Ask the currently active daemon to hand authority to its verified
-    /// standby. The old active drives the process-local admission barrier;
-    /// clients only supply the durable operation identity.
-    Rollover { operation_id: String },
+    /// standby. The old active drives the process-local admission barrier and
+    /// revalidates any explicit Agent selection; the client supplies no process
+    /// handle or provider-native conversation identity.
+    Rollover {
+        operation_id: String,
+        /// Explicit request to stop every live Agent inside the active-control
+        /// barrier and exact-resume it after successor promotion.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restart_agents: Option<DaemonRestartAgents>,
+    },
     /// Observe or explicitly release one workspace held by the live daemon.
     /// This control surface is unbound because neither operation reads a
     /// caller-selected workspace resource.
@@ -141,6 +149,13 @@ pub enum DaemonRequest {
         workspace: WorkspaceId,
         expected: Vec<crate::domain::agent::AgentIntegrationRevision>,
     },
+    /// Plan a machine-wide Agent restart without changing process state.
+    /// The later rollover must present this exact runtime selection again
+    /// after closing active-control admission.
+    PlanDaemonRestartAgents {
+        expected: Vec<AgentIntegrationRevision>,
+        force: bool,
+    },
     /// Stop only daemon-owned Agents whose launch-time integration is older
     /// than the invoking binary. A reported running phase requires `force`;
     /// generic terminals are never part of this operation.
@@ -205,6 +220,14 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
+}
+
+/// Exact live-Agent selection carried by the rollover request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonRestartAgents {
+    pub expected: Vec<AgentIntegrationRevision>,
+    pub runtimes: Vec<crate::domain::id::AgentRuntimeRef>,
+    pub force: bool,
 }
 
 /// Operations on the live daemon's in-memory tenant registry.
@@ -1230,12 +1253,15 @@ impl<S: Read + Write> DaemonClient for IpcClient<S> {
 
 #[cfg(test)]
 mod metrics_schema_tests {
-    use super::{AgentConcurrency, DaemonMetrics, DaemonRequest, MetricsAction};
+    use super::{
+        AgentConcurrency, DaemonMetrics, DaemonRequest, DaemonRestartAgents, MetricsAction,
+    };
 
     #[test]
     fn rollover_request_round_trips_with_its_durable_operation() {
         let request = DaemonRequest::Rollover {
             operation_id: "build-rollover-v1-test".into(),
+            restart_agents: None,
         };
         let encoded = serde_json::to_value(&request).unwrap();
         assert_eq!(
@@ -1248,6 +1274,28 @@ mod metrics_schema_tests {
         assert_eq!(
             serde_json::from_value::<DaemonRequest>(encoded).unwrap(),
             request
+        );
+
+        let restart = DaemonRequest::Rollover {
+            operation_id: "restart-agents-test".into(),
+            restart_agents: Some(DaemonRestartAgents {
+                expected: Vec::new(),
+                runtimes: Vec::new(),
+                force: true,
+            }),
+        };
+        let encoded = serde_json::to_value(&restart).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "kind": "rollover",
+                "operation_id": "restart-agents-test",
+                "restart_agents": {"expected": [], "runtimes": [], "force": true}
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(encoded).unwrap(),
+            restart
         );
     }
 
@@ -1722,6 +1770,7 @@ impl RetryEligibility {
             | DaemonRequest::AgentWorkspaceObservation { .. }
             | DaemonRequest::SupervisorSnapshot { .. }
             | DaemonRequest::DiagnoseAgents { .. }
+            | DaemonRequest::PlanDaemonRestartAgents { .. }
             | DaemonRequest::Tenant {
                 action: TenantAction::Inventory,
                 ..

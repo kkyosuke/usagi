@@ -16,9 +16,12 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use usagi_core::domain::agent::{AgentProfileId, AgentWorkspaceObservation};
+use usagi_core::domain::agent::{
+    AgentProfileId, AgentRuntimeInventoryState, AgentWorkspaceObservation,
+};
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::session_lifecycle::AgentPhase;
+use usagi_core::domain::settings::Settings;
 use usagi_core::domain::supervisor::{
     SupervisorRunId, SupervisorRunQuery, SupervisorRunState, SupervisorWorkspaceSnapshot, TaskState,
 };
@@ -26,6 +29,7 @@ use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
 use usagi_core::infrastructure::ipc::ErrorCode;
+use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentGoalIntent, AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonReply,
     DaemonRequest, IpcClient, McpCallerContext, SessionAction, TerminalAction, TerminalGeometry,
@@ -127,6 +131,21 @@ fn fixture_goal_repo() -> tempfile::TempDir {
 
 fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
     write_codex_cli(bin, "codex", count, ready_status);
+}
+
+/// Fixture whose resumed conversation remains live without waiting for test
+/// input. The original invocation still uses the ordinary one-line lifecycle;
+/// only the daemon-restart replacement parks until fixture cleanup.
+fn write_restartable_codex(bin: &Path, count: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        count.display(),
+    );
+    let path = bin.join("codex");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// Quote one UTF-8 path as a single POSIX shell word. Cargo may place the test
@@ -2333,14 +2352,10 @@ fn managed_update_with_a_live_generic_pty_keeps_the_draining_owner() {
         home.path(),
         Channel::Local,
         sync_cwd.path(),
-        &[
-            "doctor".as_ref(),
-            "--fix".as_ref(),
-            "--managed-update-sync".as_ref(),
-        ],
+        &["daemon".as_ref(), "sync-after-update".as_ref()],
     )
     .output()
-    .expect("managed Doctor runs");
+    .expect("managed daemon synchronization runs");
     assert!(
         synchronized.status.success(),
         "{}{}",
@@ -2349,7 +2364,7 @@ fn managed_update_with_a_live_generic_pty_keeps_the_draining_owner() {
     );
     assert!(
         String::from_utf8_lossy(&synchronized.stdout)
-            .contains("daemon build is current and serving")
+            .contains("installed build is current and serving")
     );
 
     let document = read_registry_document(&data_dir)
@@ -2404,18 +2419,13 @@ fn managed_update_sync_never_cold_starts_an_absent_or_crashed_daemon() {
         home.path(),
         Channel::Local,
         repo.path(),
-        &[
-            "doctor".as_ref(),
-            "--fix".as_ref(),
-            "--managed-update-sync".as_ref(),
-        ],
+        &["daemon".as_ref(), "sync-after-update".as_ref()],
     )
     .output()
-    .expect("managed Doctor observes an absent daemon");
+    .expect("managed synchronization observes an absent daemon");
     assert!(sync.status.success());
     assert!(
-        String::from_utf8_lossy(&sync.stdout)
-            .contains("daemon is not running; managed update left it stopped")
+        String::from_utf8_lossy(&sync.stdout).contains("daemon is not running; left it stopped")
     );
     assert!(
         !channel_data_dir(home.path())
@@ -2440,14 +2450,10 @@ fn managed_update_sync_never_cold_starts_an_absent_or_crashed_daemon() {
         crashed_home.path(),
         Channel::Local,
         repo.path(),
-        &[
-            "doctor".as_ref(),
-            "--fix".as_ref(),
-            "--managed-update-sync".as_ref(),
-        ],
+        &["daemon".as_ref(), "sync-after-update".as_ref()],
     )
     .output()
-    .expect("managed Doctor recovers the crashed owner");
+    .expect("managed synchronization recovers the crashed owner");
     assert!(
         recovered.status.success(),
         "{}{}",
@@ -2456,43 +2462,57 @@ fn managed_update_sync_never_cold_starts_an_absent_or_crashed_daemon() {
     );
     assert!(
         String::from_utf8_lossy(&recovered.stdout)
-            .contains("daemon is not running; managed update left it stopped")
+            .contains("daemon is not running; left it stopped")
     );
     assert!(!crashed_data.join("daemon/current.json").exists());
     assert!(!crashed_data.join("daemon/daemon.json").exists());
 }
 
 /// A launched Agent owns a daemon-minted MCP credential before its MCP child
-/// connects. Planned replacement must preserve that authority by refusing the
-/// rollover while the old owner is still active.
+/// connects. Plain replacement must preserve that authority by refusing the
+/// rollover, while the explicit Agent-restart path stops and exactly resumes it.
 #[test]
-fn root_restart_refuses_an_unclaimed_agent_mcp_credential_without_handoff() {
+#[allow(clippy::too_many_lines)] // One shipping transition proves refusal, handoff, and exact resume.
+fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() {
     let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
     let agent_spawns = home.path().join("agent-spawn-count");
-    write_codex(&bin, &agent_spawns, 0);
+    write_restartable_codex(&bin, &agent_spawns);
 
+    let fixture_path = format!("{}:/usr/bin:/bin", bin.display());
     let daemon = start_daemon(repo.path(), home.path(), &bin, None);
     let data_dir = channel_data_dir(home.path());
-    let mut client = client(&data_dir);
-    let (workspace, session, _) = available_scope(&mut client);
-    let (_, terminal) = launch(&mut client, workspace, session, None);
+    Storage::new(&data_dir)
+        .save_settings(&Settings {
+            // A replacement resolves the current integration from the successor's
+            // configuration instead of inheriting the old Agent process environment.
+            env: [("PATH".to_owned(), fixture_path.clone())].into(),
+            ..Settings::default()
+        })
+        .unwrap();
+    let mut owner = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut owner);
+    let _ = launch(&mut owner, workspace, session, None);
     wait_for_spawns(&agent_spawns, 1);
-    let subscription = attach(&mut client, &terminal);
     let old_pid = daemon_pid(&data_dir);
     let old_locator = read_locator(&data_dir.join("daemon")).unwrap();
 
     let restart_cwd = short_dir("restart-cwd-");
-    let refused = usagi_command(
+    let mut refused_command = usagi_command(
         home.path(),
         Channel::Local,
         restart_cwd.path(),
         &["daemon".as_ref(), "restart".as_ref()],
-    )
-    .output()
-    .expect("the shipping restart command returns");
+    );
+    refused_command.env("PATH", &fixture_path).env(
+        usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
+        "1",
+    );
+    let refused = refused_command
+        .output()
+        .expect("the shipping restart command returns");
     assert!(!refused.status.success());
     assert!(
         String::from_utf8_lossy(&refused.stderr)
@@ -2505,20 +2525,73 @@ fn root_restart_refuses_an_unclaimed_agent_mcp_credential_without_handoff() {
     assert_eq!(read_locator(&data_dir.join("daemon")).unwrap(), old_locator);
     assert!(alive(old_pid));
 
-    client
-        .request(DaemonRequest::Terminal {
-            action: TerminalAction::Input,
-            payload: serde_json::to_value(TerminalRequest::Input {
-                terminal,
-                subscription,
-                input_seq: 0,
-                input_operation: Some(OperationId::new()),
-                bytes: b"finish-agent\n".to_vec(),
-            })
-            .unwrap(),
+    drop(owner);
+
+    let mut restart_command = usagi_command(
+        home.path(),
+        Channel::Local,
+        restart_cwd.path(),
+        &[
+            "daemon".as_ref(),
+            "restart".as_ref(),
+            "--restart-agents".as_ref(),
+            "--force".as_ref(),
+        ],
+    );
+    restart_command.env("PATH", fixture_path).env(
+        usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
+        "1",
+    );
+    let restarted = restart_command
+        .output()
+        .expect("the explicit Agent restart returns");
+    assert!(
+        restarted.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&restarted.stdout),
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&restarted.stdout).contains("restarted 1 Agent(s)"));
+    assert_ne!(daemon_pid(&data_dir), old_pid);
+    let mut current = client(&data_dir);
+    let inventory = current
+        .request(DaemonRequest::AgentInventory {
+            workspace,
+            caller_context: None,
         })
-        .expect("the refused handoff leaves the old Agent owner serving");
-    drop(client);
+        .expect("the successor reports the resumed Agent");
+    let body = match inventory {
+        DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+    };
+    let inventory: usagi_core::domain::agent::AgentInventory =
+        serde_json::from_value(body).unwrap();
+    assert_eq!(
+        inventory
+            .runtimes
+            .iter()
+            .filter(|item| item.state == AgentRuntimeInventoryState::Live)
+            .count(),
+        1,
+        "successor inventory: {inventory:?}; invocations: {}; {}",
+        fs::read_to_string(&agent_spawns).unwrap_or_default(),
+        daemon_error_log(&data_dir)
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observed_spawns = fs::read_to_string(&agent_spawns)
+            .map(|body| body.lines().count())
+            .unwrap_or_default();
+        if observed_spawns == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the successor reported a live replacement without running the fixture provider:\n{inventory:?}\n{}",
+            daemon_error_log(&data_dir)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(current);
     daemon_fixture::reap(home.path());
     drop(daemon);
 }

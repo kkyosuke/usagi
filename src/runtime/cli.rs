@@ -36,6 +36,7 @@ enum Action {
     LaunchConfig,
     LaunchDoctor,
     LaunchDaemon,
+    SyncDaemonAfterUpdate,
     RequestDaemonReplacement,
     LaunchMcp,
     Clean,
@@ -77,6 +78,7 @@ impl From<&RunOutcome> for Action {
             RunOutcome::LaunchTui(TuiRequest::Config) => Self::LaunchConfig,
             RunOutcome::LaunchTui(TuiRequest::Doctor { .. }) => Self::LaunchDoctor,
             RunOutcome::LaunchDaemon(_) => Self::LaunchDaemon,
+            RunOutcome::SyncDaemonAfterUpdate => Self::SyncDaemonAfterUpdate,
             RunOutcome::RequestDaemonReplacement { .. } => Self::RequestDaemonReplacement,
             RunOutcome::LaunchMcp => Self::LaunchMcp,
             RunOutcome::Clean { .. } => Self::Clean,
@@ -122,18 +124,20 @@ mod action_io {
             (Action::LaunchConfig, RunOutcome::LaunchTui(TuiRequest::Config)) => {
                 tui::launch(out, info, &EntryScreen::Config).map(|()| ExitCode::SUCCESS)
             }
-            (
-                Action::LaunchDoctor,
-                RunOutcome::LaunchTui(TuiRequest::Doctor {
-                    fix,
-                    restart_agents,
-                    force,
-                    invocation,
-                }),
-            ) => tui::launch_doctor(out, info, fix, restart_agents, force, invocation)
-                .map(|()| ExitCode::SUCCESS),
+            (Action::LaunchDoctor, RunOutcome::LaunchTui(TuiRequest::Doctor { fix })) => {
+                tui::launch_doctor(out, info, fix).map(|()| ExitCode::SUCCESS)
+            }
             (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
+            }
+            (Action::SyncDaemonAfterUpdate, RunOutcome::SyncDaemonAfterUpdate) => {
+                match daemon::sync_after_update(out, ClientPolicy::cli(), info)? {
+                    Ok(()) => Ok(ExitCode::SUCCESS),
+                    Err(error) => {
+                        write_client_error(err, "daemon synchronization refused", &error)?;
+                        Ok(ExitCode::FAILURE)
+                    }
+                }
             }
             (Action::RequestDaemonReplacement, RunOutcome::RequestDaemonReplacement { force }) => {
                 match daemon::replace_running_daemon(out, ClientPolicy::cli(), force, info)? {
@@ -761,9 +765,7 @@ mod tests {
     use std::io::{self, Write};
     use std::path::PathBuf;
 
-    use usagi_cli::cli::{
-        DaemonCommand, DoctorInvocation, InstallerRequest, RunOutcome, TuiRequest,
-    };
+    use usagi_cli::cli::{DaemonCommand, InstallerRequest, RunOutcome, TuiRequest};
     use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
     use usagi_core::usecase::claude_sandbox::SandboxMode;
     use usagi_core::usecase::client::{ClientError, DaemonReply, DaemonRequest};
@@ -985,17 +987,16 @@ mod tests {
             Action::LaunchConfig,
         );
         assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Doctor {
-                fix: false,
-                restart_agents: false,
-                force: false,
-                invocation: DoctorInvocation::User,
-            }),
+            RunOutcome::LaunchTui(TuiRequest::Doctor { fix: false }),
             Action::LaunchDoctor,
         );
         assert_route(
             RunOutcome::LaunchDaemon(DaemonCommand::Start),
             Action::LaunchDaemon,
+        );
+        assert_route(
+            RunOutcome::SyncDaemonAfterUpdate,
+            Action::SyncDaemonAfterUpdate,
         );
         assert_route(
             RunOutcome::RequestDaemonReplacement { force: true },
@@ -1033,6 +1034,7 @@ mod tests {
         assert_route(
             RunOutcome::DaemonRequest(DaemonRequest::Rollover {
                 operation_id: "operation".into(),
+                restart_agents: None,
             }),
             Action::DaemonRequest,
         );

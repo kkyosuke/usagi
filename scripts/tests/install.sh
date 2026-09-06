@@ -41,13 +41,13 @@ make_binary() {
         '#!/bin/sh' \
         'case "${1:-}" in' \
         "  --version) printf 'usagi ${version}\\n' ;;" \
-        '  doctor)' \
+        '  daemon)' \
         '    shift' \
-        '    [ "${USAGI_DOCTOR_UNSUPPORTED:-}" != "1" ] || exit 2' \
-        '    [ "$#" -eq 2 ] && [ "$1" = "--fix" ] && [ "$2" = "--managed-update-sync" ] || exit 2' \
-        '    [ -z "${USAGI_DOCTOR_LOG:-}" ] || printf "%s|%s %s\\n" "$PWD" "$1" "$2" >> "$USAGI_DOCTOR_LOG"' \
-        '    while [ -n "${USAGI_DOCTOR_WAIT_FOR:-}" ] && [ ! -e "$USAGI_DOCTOR_WAIT_FOR" ]; do sleep 0.01; done' \
-        '    exit "${USAGI_DOCTOR_STATUS:-0}"' \
+        '    [ "${USAGI_SYNC_UNSUPPORTED:-}" != "1" ] || exit 2' \
+        '    [ "$#" -eq 1 ] && [ "$1" = "sync-after-update" ] || exit 2' \
+        '    [ -z "${USAGI_SYNC_LOG:-}" ] || printf "%s|%s\\n" "$PWD" "$1" >> "$USAGI_SYNC_LOG"' \
+        '    while [ -n "${USAGI_SYNC_WAIT_FOR:-}" ] && [ ! -e "$USAGI_SYNC_WAIT_FOR" ]; do sleep 0.01; done' \
+        '    exit "${USAGI_SYNC_STATUS:-0}"' \
         '    ;;' \
         '  *) exit 2 ;;' \
         'esac' \
@@ -183,7 +183,7 @@ export FAKE_CURL_LOG
 run_installer >"$CASE_DIR/out"
 unset FAKE_CURL_LOG
 grep -q '次回の起動から新しい CLI を使える' "$CASE_DIR/out"
-grep -q "daemon の build が古い場合は 'usagi doctor --fix'" "$CASE_DIR/out"
+grep -q "daemon の build が古い場合は 'usagi daemon restart'" "$CASE_DIR/out"
 grep -q "$ASSET をダウンロードして検証中" "$CASE_DIR/out"
 grep -q '次の行を shell の設定ファイル' "$CASE_DIR/out"
 grep -q 'releases/download/v2.0.0/' "$CASE_DIR/curl.log"
@@ -202,44 +202,44 @@ run_installer_for_version >/dev/null
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
 
 prepare_case managed-update
-USAGI_DOCTOR_LOG="$CASE_DIR/doctor.log"
-export USAGI_DOCTOR_LOG
+USAGI_SYNC_LOG="$CASE_DIR/sync.log"
+export USAGI_SYNC_LOG
 run_managed_installer >"$CASE_DIR/out"
-unset USAGI_DOCTOR_LOG
+unset USAGI_SYNC_LOG
 grep -q 'daemon の build を同期した' "$CASE_DIR/out"
-grep -q "^$CWD_DIR|--fix --managed-update-sync$" "$CASE_DIR/doctor.log"
+grep -q "^$CWD_DIR|sync-after-update$" "$CASE_DIR/sync.log"
 if grep -q "usagi doctor --fix" "$CASE_DIR/out"; then
     echo "managed update printed the standalone daemon instruction" >&2
     exit 1
 fi
 
 prepare_case managed-update-without-daemon
-USAGI_DOCTOR_LOG="$CASE_DIR/doctor.log"
-export USAGI_DOCTOR_LOG
+USAGI_SYNC_LOG="$CASE_DIR/sync.log"
+export USAGI_SYNC_LOG
 run_managed_installer_without_daemon >"$CASE_DIR/out"
-unset USAGI_DOCTOR_LOG
+unset USAGI_SYNC_LOG
 grep -q 'daemon の build を同期した' "$CASE_DIR/out"
-grep -q '^.*|--fix --managed-update-sync$' "$CASE_DIR/doctor.log"
+grep -q '^.*|sync-after-update$' "$CASE_DIR/sync.log"
 
 prepare_case managed-update-unsupported
-USAGI_DOCTOR_UNSUPPORTED=1
-export USAGI_DOCTOR_UNSUPPORTED
+USAGI_SYNC_UNSUPPORTED=1
+export USAGI_SYNC_UNSUPPORTED
 if run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
     echo "expected an old selected release to refuse managed synchronization" >&2
     exit 1
 fi
-unset USAGI_DOCTOR_UNSUPPORTED
+unset USAGI_SYNC_UNSUPPORTED
 grep -q 'does not support safe managed daemon synchronization' "$CASE_DIR/err"
 [ "$($HOME_DIR/.usagi/bin/usagi --version)" = "usagi 2.0.0" ]
 
 prepare_case managed-update-post-commit-failure
-USAGI_DOCTOR_STATUS=1
-export USAGI_DOCTOR_STATUS
+USAGI_SYNC_STATUS=1
+export USAGI_SYNC_STATUS
 if run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
     echo "expected a failed managed synchronization to fail the update" >&2
     exit 1
 fi
-unset USAGI_DOCTOR_STATUS
+unset USAGI_SYNC_STATUS
 grep -q 'could not complete daemon synchronization' "$CASE_DIR/err"
 grep -q "inspect 'usagi daemon status'" "$CASE_DIR/err"
 if grep -q 'left unchanged' "$CASE_DIR/err"; then
@@ -248,26 +248,26 @@ if grep -q 'left unchanged' "$CASE_DIR/err"; then
 fi
 
 prepare_case managed-update-lock-covers-daemon-sync
-USAGI_DOCTOR_LOG="$CASE_DIR/doctor.log"
-USAGI_DOCTOR_WAIT_FOR="$CASE_DIR/release-doctor"
-export USAGI_DOCTOR_LOG USAGI_DOCTOR_WAIT_FOR
+USAGI_SYNC_LOG="$CASE_DIR/sync.log"
+USAGI_SYNC_WAIT_FOR="$CASE_DIR/release-sync"
+export USAGI_SYNC_LOG USAGI_SYNC_WAIT_FOR
 run_managed_installer >"$CASE_DIR/first.out" 2>"$CASE_DIR/first.err" &
 FIRST_PID=$!
 for _ in $(seq 1 200); do
-    [ -s "$CASE_DIR/doctor.log" ] && break
+    [ -s "$CASE_DIR/sync.log" ] && break
     sleep 0.01
 done
-[ "$(wc -l < "$CASE_DIR/doctor.log" | tr -d ' ')" -eq 1 ]
+[ "$(wc -l < "$CASE_DIR/sync.log" | tr -d ' ')" -eq 1 ]
 run_managed_installer >"$CASE_DIR/second.out" 2>"$CASE_DIR/second.err" &
 SECOND_PID=$!
 sleep 0.1
 kill -0 "$SECOND_PID"
-[ "$(wc -l < "$CASE_DIR/doctor.log" | tr -d ' ')" -eq 1 ]
-touch "$CASE_DIR/release-doctor"
+[ "$(wc -l < "$CASE_DIR/sync.log" | tr -d ' ')" -eq 1 ]
+touch "$CASE_DIR/release-sync"
 wait "$FIRST_PID"
 wait "$SECOND_PID"
-unset USAGI_DOCTOR_LOG USAGI_DOCTOR_WAIT_FOR
-[ "$(wc -l < "$CASE_DIR/doctor.log" | tr -d ' ')" -eq 2 ]
+unset USAGI_SYNC_LOG USAGI_SYNC_WAIT_FOR
+[ "$(wc -l < "$CASE_DIR/sync.log" | tr -d ' ')" -eq 2 ]
 
 prepare_case unsupported-linux-arm64
 cat > "$FAKE_BIN/uname" <<'SH'

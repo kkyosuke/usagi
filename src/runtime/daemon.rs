@@ -22,7 +22,8 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::domain::agent::prompt::{PromptScope, launch_system_prompt};
 use usagi_core::domain::agent::{
-    AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName, aggregate_agent_status,
+    AgentIntegrationRevision, AgentProfileId, DaemonRestartAgentPlan, DurableLaunchSnapshot,
+    EnvironmentVariableName, aggregate_agent_status,
 };
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{
@@ -54,8 +55,8 @@ use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::infrastructure::workspace_state;
 use usagi_core::usecase::claude_sandbox::{self, SandboxMode};
 use usagi_core::usecase::client::{
-    ClientError, ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient,
-    MonotonicClock, PolicyClient, TerminalLaneBudget,
+    ClientError, ClientPolicy, DaemonClient, DaemonRestartAgents, DeadlineConnection,
+    DeadlineStream, IpcClient, MonotonicClock, PolicyClient, TerminalLaneBudget,
 };
 use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::child_identity::UnixChildProbe;
@@ -135,9 +136,11 @@ use usagi_daemon::usecase::resources::fence::FencedPrInventory;
 use usagi_daemon::usecase::resources::identity::{ChildIdentity, ChildProcessProbe, record_child};
 use usagi_daemon::usecase::resources::retention::LogicalClock;
 use usagi_daemon::usecase::rollover_trigger;
+#[cfg(test)]
+use usagi_daemon::usecase::runtime::RuntimeStoreSnapshot;
 use usagi_daemon::usecase::runtime::{
-    OutputJournal, ProvisionContext, PtySpawner, RuntimeStoreSnapshot, SandboxLauncher,
-    SpawnProvision, TerminateReapError,
+    OutputJournal, ProvisionContext, PtySpawner, SandboxLauncher, SpawnProvision,
+    TerminateReapError,
 };
 use usagi_daemon::usecase::serve::{DaemonRecordPort, GenerationAuthority};
 use usagi_daemon::usecase::serve_standby::{StandbyAuthority, StandbyEndpoint};
@@ -3598,6 +3601,19 @@ impl Drop for DaemonBackgroundWorkers {
     }
 }
 
+/// Durable runtime state a newly active generation is allowed to import.
+///
+/// A promoted standby must not adopt another generation's live PTYs. It does
+/// need non-live Agent source records so an explicit restart can exact-resume
+/// the provider conversation that the old owner stopped before W2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeHydration {
+    All,
+    AgentResumeHistory,
+    #[cfg(test)]
+    Empty,
+}
+
 // IPC request routing remains in the composition adapter, and each argument is one
 // independently resolved startup fact (endpoint, generation, data directory, fenced
 // workspace, build, owner record, custody probe, shutdown); bundling them would only
@@ -3612,7 +3628,7 @@ fn spawn_ipc_server(
     build: &BuildIdentity,
     daemon_process: DaemonRecord,
     custody: Option<FsCustodyProbe>,
-    hydrate_retained: bool,
+    hydration: RuntimeHydration,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let owner = daemon_process.clone();
@@ -3712,7 +3728,7 @@ fn spawn_ipc_server(
         Arc::clone(&user_environment),
         retention.clone(),
         &children,
-        hydrate_retained,
+        hydration == RuntimeHydration::All,
         terminal_limit,
     )?;
     background_workers.push(start_terminal_observer(
@@ -3743,7 +3759,7 @@ fn spawn_ipc_server(
         retention.clone(),
         agent_concurrency.clone(),
         &children,
-        hydrate_retained,
+        hydration,
         terminal_limit,
     )?;
     reconcile_removed_session_agents(&data_dir.join("daemon"), &agent)?;
@@ -4859,7 +4875,7 @@ fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // Composition injects each Agent dependency separately.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Composition injects each Agent dependency separately.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn open_agent_runtime(
     data_dir: &Path,
@@ -4871,14 +4887,30 @@ fn open_agent_runtime(
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     concurrency: AgentConcurrencyGauge,
     children: &Arc<SpawnedChildren>,
-    hydrate_retained: bool,
+    hydration: RuntimeHydration,
     terminal_limit: usize,
 ) -> std::io::Result<SharedAgentRuntime> {
     let state = open_runtime_state(data_dir, generation, children, terminal_limit)?;
-    let snapshot = if hydrate_retained {
-        hydrate_runtime_state(&state, "agent runtime")?.agents
-    } else {
-        RuntimeStoreSnapshot::default()
+    let snapshot = match hydration {
+        RuntimeHydration::All => hydrate_runtime_state(&state, "agent runtime")?.agents,
+        RuntimeHydration::AgentResumeHistory => {
+            let mut snapshot = hydrate_runtime_state(&state, "Agent resume history")?.agents;
+            snapshot.records.retain(|record| {
+                matches!(
+                    record.state,
+                    usagi_daemon::usecase::runtime::RuntimeState::Exited
+                        | usagi_daemon::usecase::runtime::RuntimeState::Reclaimed
+                        | usagi_daemon::usecase::runtime::RuntimeState::Interrupted
+                        | usagi_daemon::usecase::runtime::RuntimeState::Sleeping
+                        | usagi_daemon::usecase::runtime::RuntimeState::ReconcileRequired(
+                            usagi_daemon::usecase::runtime::ReconcileState::IdentityUnknown
+                        )
+                )
+            });
+            snapshot.reconcile_after_daemon_restart().0
+        }
+        #[cfg(test)]
+        RuntimeHydration::Empty => RuntimeStoreSnapshot::default(),
     };
     let store = ShardedAgentStore::new(state);
     let mut registry = AdapterRegistry::new();
@@ -5606,10 +5638,10 @@ fn start_ipc_accept_loop(
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
                                             Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
-                                            Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, request_id, &body, hello),
+                                            Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, request_id, &body, hello),
                                             Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                             Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
-                                            Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
+                                            Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "plan_daemon_restart_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
                                             Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, &body, hello),
                                             Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, &body, hello),
                                             Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
@@ -8414,60 +8446,145 @@ fn record_session_lineage(
     Ok(session_id)
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
+#[allow(clippy::too_many_lines)] // One guarded stop, handoff, and pre-commit recovery transaction.
 fn dispatch_rollover(
     data_dir: &Path,
     fence: &GenerationFence,
     agent: &SharedAgentRuntime,
+    bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
-    let operation = serde_json::from_value::<DaemonRequest>(body.clone())
+    let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
         .and_then(|request| match request {
-            DaemonRequest::Rollover { operation_id } => Some(OperationId(operation_id)),
+            DaemonRequest::Rollover {
+                operation_id,
+                restart_agents,
+            } => Some((OperationId(operation_id), restart_agents)),
             _ => None,
         });
-    let Some(operation) = operation else {
+    let Some((operation, restart_agents)) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
-    let result = GenerationRegistryFile::new(data_dir)
-        .map(|file| GenerationRegistry::new(file, DEFAULT_GENERATION_LIMIT))
-        .map_err(|error| error.to_string())
-        .and_then(|registry| {
-            rollover_trigger::execute_with_guard(
-                &registry,
-                &CurrentLocatorFile::new(data_dir),
-                &fence.gate,
-                &fence.ledger,
-                &UnixStandbyProbe {
-                    data_dir,
-                    build: current_build(),
-                },
-                &operation,
-                &mut || {
-                    let credentials = agent
-                        .lock()
-                        .map_err(|_| {
-                            usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityUnavailable
-                        })?
-                        .provisioned_mcp_callers();
-                    if credentials == 0 {
-                        Ok(())
-                    } else {
-                        Err(
-                            usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityRetained {
-                                credentials,
+    let registry = match GenerationRegistryFile::new(data_dir) {
+        Ok(file) => GenerationRegistry::new(file, DEFAULT_GENERATION_LIMIT),
+        Err(error) => {
+            return envelope(
+                hello,
+                request_id,
+                ResponseOutcome::Error(ProtocolError::new(ErrorCode::Busy, error.to_string())),
+                serde_json::Value::Null,
+            );
+        }
+    };
+    let mut interrupted = None;
+    let result = rollover_trigger::execute_with_guard(
+        &registry,
+        &CurrentLocatorFile::new(data_dir),
+        &fence.gate,
+        &fence.ledger,
+        &UnixStandbyProbe {
+            data_dir,
+            build: current_build(),
+        },
+        &operation,
+        &mut || {
+            let mut agent = agent.lock().map_err(|_| {
+                usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityUnavailable
+            })?;
+            if let Some(restart) = &restart_agents {
+                match agent.interrupt_agents_for_daemon_restart(
+                    &restart.expected,
+                    &restart.runtimes,
+                    restart.force,
+                ) {
+                    Ok(plan) => interrupted = Some(plan),
+                    Err(failure) => {
+                        if !failure.interrupted.agents.is_empty() {
+                            interrupted = Some(failure.interrupted);
+                        }
+                        return Err(
+                            usagi_daemon::usecase::authority::routing::RolloverRefusal::AgentRestartRefused {
+                                reason: failure.error.message,
                             },
-                        )
+                        );
                     }
-                },
-            )
-            .map_err(|error| error.to_string())
-        });
+                }
+            }
+            let credentials = agent.provisioned_mcp_callers();
+            if credentials == 0 {
+                Ok(())
+            } else {
+                Err(
+                    usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityRetained {
+                        credentials,
+                    },
+                )
+            }
+        },
+    );
+    if result.is_err()
+        && let Some(interrupted) = &interrupted
+        && !registry.load().is_ok_and(|snapshot| {
+            snapshot.document().completed_operation.as_ref() == Some(&operation)
+                || snapshot.document().handoff.as_ref().is_some_and(|handoff| {
+                    handoff.operation == operation
+                        && handoff.phase
+                            == usagi_daemon::usecase::authority::registry::HandoffPhase::Committed
+                })
+        })
+    {
+        // The old owner performed the stop, so it also owns effect-zero
+        // recovery if the handoff failed before W2. Client-side recovery is a
+        // second safety net, not the only way to avoid leaving Agents stopped
+        // when the requesting process disconnects.
+        let scope = bound.scope_resolver();
+        let mut first_error = None;
+        for item in &interrupted.agents {
+            let operation = usagi_core::domain::id::OperationId::new().to_string();
+            let restored = agent
+                .lock()
+                .map_err(|_| "agent owner is unavailable".to_owned())
+                .and_then(|agent| {
+                    agent
+                        .prepare_resume_readiness(&operation, &item.target)
+                        .map_err(|error| error.message)
+                })
+                .and_then(|preflight| {
+                    run_agent_readiness(agent, preflight.as_ref())
+                        .map_err(|error| error.message)
+                        .map(|()| preflight)
+                })
+                .and_then(|preflight| {
+                    agent
+                        .lock()
+                        .map_err(|_| "agent owner is unavailable".to_owned())?
+                        .resume_exact_after_readiness(
+                            &operation,
+                            &item.target,
+                            &scope,
+                            preflight.as_ref(),
+                        )
+                        .map_err(|error| error.message)
+                });
+            if let Err(error) = restored {
+                first_error.get_or_insert(error);
+            }
+        }
+        let restore_error = first_error.map_or(Ok(()), Err);
+        if let Err(error) = restore_error {
+            ErrorLog::record(&format!(
+                "daemon rollover pre-commit Agent rollback failed: {error}"
+            ));
+        }
+    }
+    let result = result.map_err(|error| error.to_string());
     match result {
         Ok(outcome) => envelope(
             hello,
@@ -10211,6 +10328,10 @@ enum AgentDispatchRequest {
         WorkspaceId,
         Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
     ),
+    PlanRestart(
+        Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
+        bool,
+    ),
     Restart(
         WorkspaceId,
         Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
@@ -10250,6 +10371,7 @@ fn admit_agent_dispatch_request(
             AgentDispatchRequest::Inventory(_)
             | AgentDispatchRequest::WorkspaceObservation(_)
             | AgentDispatchRequest::Diagnose(_, _)
+            | AgentDispatchRequest::PlanRestart(_, _)
             | AgentDispatchRequest::Restart(_, _, _, _) => {
                 unreachable!("handled before readiness")
             }
@@ -10304,6 +10426,7 @@ fn admit_agent_dispatch_request(
                 AgentDispatchRequest::Inventory(_)
                 | AgentDispatchRequest::WorkspaceObservation(_)
                 | AgentDispatchRequest::Diagnose(_, _)
+                | AgentDispatchRequest::PlanRestart(_, _)
                 | AgentDispatchRequest::Restart(_, _, _, _) => {
                     unreachable!("handled before readiness")
                 }
@@ -10920,6 +11043,17 @@ fn dispatch_agent_maintenance(
                     serde_json::to_value(diagnosis).expect("safe Agent diagnosis is serializable")
                 }),
         ),
+        AgentDispatchRequest::PlanRestart(expected, force) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|agent| agent.plan_daemon_restart_agents(expected, *force))
+                .map(|plan| {
+                    serde_json::to_value(plan).expect("safe Agent restart plan is serializable")
+                }),
+        ),
         AgentDispatchRequest::Restart(workspace, expected, runtimes, force) => Some(
             agent
                 .lock()
@@ -10977,6 +11111,9 @@ fn dispatch_agent(
                 workspace,
                 expected,
             } => Some((AgentDispatchRequest::Diagnose(workspace, expected), None)),
+            DaemonRequest::PlanDaemonRestartAgents { expected, force } => {
+                Some((AgentDispatchRequest::PlanRestart(expected, force), None))
+            }
             DaemonRequest::RestartAgents {
                 workspace,
                 expected,
@@ -11377,6 +11514,7 @@ fn daemon_request_surface(body: &serde_json::Value) -> &'static str {
             | "agent_inventory"
             | "agent_workspace_observation"
             | "diagnose_agents"
+            | "plan_daemon_restart_agents"
             | "restart_agents"
             | "resume_agent"
             | "resume_agent_with_current_integration",
@@ -12312,7 +12450,7 @@ impl DaemonReady for IpcReady<'_> {
                 &self.build,
                 process,
                 Some(custody),
-                true,
+                RuntimeHydration::All,
                 Arc::clone(&self.shutdown),
             )
         })?;
@@ -13876,7 +14014,7 @@ fn promote_standby_generation(
         build,
         record,
         None,
-        false,
+        RuntimeHydration::AgentResumeHistory,
         Arc::clone(&shutdown.process),
     )?;
     *worker
@@ -14651,6 +14789,7 @@ fn serve_bootstrap_broker(
 struct IpcRolloverRequester<'a> {
     data_dir: &'a Path,
     launcher: &'a ServeLauncher,
+    restart_agents: Option<bool>,
 }
 
 /// Planned rollover uses the same slow-but-healthy startup allowance as a cold
@@ -14661,6 +14800,58 @@ const ROLLOVER_PROBE_BUDGET_MS: u64 = 250;
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl IpcRolloverRequester<'_> {
+    fn prepare_agent_restart(&self) -> std::io::Result<Option<DaemonRestartAgentPlan>> {
+        let Some(force) = self.restart_agents else {
+            return Ok(None);
+        };
+        let mut client = existing_policy_client(ClientPolicy::cli(), ClientWorkspace::Unbound)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let reply = client
+            .request(DaemonRequest::PlanDaemonRestartAgents {
+                expected: current_agent_integrations(),
+                force,
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let body = match reply {
+            usagi_core::usecase::client::DaemonReply::Ok(body)
+            | usagi_core::usecase::client::DaemonReply::Accepted { body, .. } => body,
+        };
+        serde_json::from_value(body)
+            .map(Some)
+            .map_err(|_| std::io::Error::other("daemon returned an invalid Agent restart plan"))
+    }
+
+    fn restore_agent_plan(
+        plan: &DaemonRestartAgentPlan,
+        current_integration: bool,
+    ) -> std::io::Result<()> {
+        if plan.agents.is_empty() {
+            return Ok(());
+        }
+        let mut client = existing_policy_client(ClientPolicy::cli(), ClientWorkspace::Unbound)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let mut first_error = None;
+        for agent in &plan.agents {
+            let request = if current_integration {
+                DaemonRequest::ResumeAgentWithCurrentIntegration {
+                    operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                    target: agent.target.clone(),
+                    expected_revision: agent.expected_revision,
+                }
+            } else {
+                DaemonRequest::ResumeAgent {
+                    operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                    target: agent.target.clone(),
+                    caller_context: None,
+                }
+            };
+            if let Err(error) = client.request(request) {
+                first_error.get_or_insert_with(|| error.to_string());
+            }
+        }
+        first_error.map_or(Ok(()), |error| Err(std::io::Error::other(error)))
+    }
+
     fn committed(&self, operation: &OperationId, standby_pid: u32) -> bool {
         read_registry_document(self.data_dir)
             .ok()
@@ -14678,7 +14869,34 @@ impl IpcRolloverRequester<'_> {
             })
     }
 
-    fn stop_standby(mut standby: LaunchedStandby) {
+    fn stop_standby(&self, mut standby: LaunchedStandby) {
+        let retired = GenerationRegistryFile::new(self.data_dir)
+            .map(|file| GenerationRegistry::new(file, DEFAULT_GENERATION_LIMIT))
+            .and_then(|registry| {
+                registry
+                    .update(|document| {
+                        let generation = document
+                            .generations
+                            .iter()
+                            .find(|entry| {
+                                entry.role == GenerationRole::Standby
+                                    && entry.process.pid == standby.record.pid
+                                    && standby.record.process_start_identity.as_deref()
+                                        == Some(entry.process.start_identity.as_str())
+                            })
+                            .map(|entry| entry.generation);
+                        generation.map_or(Ok(()), |generation| {
+                            document.transition(generation, GenerationRole::Retired)
+                        })
+                    })
+                    .map(|_| ())
+                    .map_err(std::io::Error::other)
+            });
+        if let Err(error) = retired {
+            ErrorLog::record(&format!(
+                "failed standby registry retirement deferred: {error}"
+            ));
+        }
         if standby
             .child
             .try_wait()
@@ -14809,11 +15027,12 @@ impl IpcRolloverRequester<'_> {
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl RolloverRequester for IpcRolloverRequester<'_> {
     fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
+        let agent_plan = self.prepare_agent_restart()?;
         let deadline = Instant::now() + ROLLOVER_STARTUP_WINDOW;
         let standby = self.launcher.launch_standby()?;
         let pid = standby.pid();
         if let Err(error) = self.wait_until_verified(pid, deadline) {
-            Self::stop_standby(standby);
+            self.stop_standby(standby);
             return Err(error);
         }
         // Rollover is a machine-wide lifecycle request. Binding this control
@@ -14824,6 +15043,15 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
             .and_then(|mut client| {
                 client.request(DaemonRequest::Rollover {
                     operation_id: operation.0.clone(),
+                    restart_agents: agent_plan.as_ref().map(|plan| DaemonRestartAgents {
+                        expected: current_agent_integrations(),
+                        runtimes: plan
+                            .agents
+                            .iter()
+                            .map(|agent| agent.runtime.clone())
+                            .collect(),
+                        force: self.restart_agents.unwrap_or(false),
+                    }),
                 })
             });
         let mut committed = self.committed(operation, pid);
@@ -14837,20 +15065,32 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
             committed = self.wait_until_committed(operation, pid, deadline);
         }
         if !committed {
-            Self::stop_standby(standby);
-            return Err(std::io::Error::other(match result {
+            self.stop_standby(standby);
+            let failure = match result {
                 Ok(_) => "rollover returned before its authority commit".to_owned(),
                 Err(error) => error.to_string(),
-            }));
+            };
+            if let Some(plan) = &agent_plan
+                && let Err(restore_error) = Self::restore_agent_plan(plan, false)
+            {
+                ErrorLog::record(&format!(
+                    "daemon restart client-side Agent rollback failed: {restore_error}"
+                ));
+            }
+            return Err(std::io::Error::other(failure));
         }
         // A lost ACK after commit is a success once the committed successor is
         // serving. Never roll back an observable handoff because the response
         // frame was lost.
         reap_child(standby.child);
         self.wait_until_serving(pid)?;
+        if let Some(plan) = &agent_plan {
+            Self::restore_agent_plan(plan, true)?;
+        }
         Ok(format!(
-            "daemon authority handed off (operation {})",
-            operation.0
+            "daemon authority handed off (operation {}), restarted {} Agent(s)",
+            operation.0,
+            agent_plan.as_ref().map_or(0, |plan| plan.agents.len())
         ))
     }
 }
@@ -15323,6 +15563,13 @@ fn run_inner(
     }
     let data_dir = prepare_private_data_dir()?;
     let daemon_dir = data_dir.join("daemon");
+    let restart_agents = match &command {
+        CliDaemonCommand::Restart {
+            restart_agents: true,
+            force,
+        } => Some(*force),
+        _ => None,
+    };
     // Stop and replacement observe and mutate one machine-wide daemon
     // lifecycle. Sharing this lifecycle lock with managed update makes that
     // observation linearizable: a stop either completes before update sees
@@ -15415,15 +15662,27 @@ fn run_inner(
         // A manual restart is a forced replacement of the artifact that is
         // already running, so it carries exactly the operation id the build
         // trigger derives for that case. A repeated restart converges on it.
-        CliDaemonCommand::Restart { force } => PresentationDaemonCommand::Replace {
+        CliDaemonCommand::Restart {
+            restart_agents,
+            force,
+        } => PresentationDaemonCommand::Replace {
             operation: operation
                 .or_else(|| manual_operation_id(&current_build(), runtime_channel())),
-            mode: transition_mode(force),
+            // With `--restart-agents`, force authorizes interrupting a Running
+            // Agent, never destruction of generic PTYs. The daemon transition
+            // itself therefore remains planned and uses the rollover barrier.
+            mode: transition_mode(force && !restart_agents),
         },
         CliDaemonCommand::Replace { .. } => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "daemon replace must be routed through the client trigger",
+            ));
+        }
+        CliDaemonCommand::SyncAfterUpdate => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "managed daemon synchronization must be routed through the update adapter",
             ));
         }
     };
@@ -15438,6 +15697,7 @@ fn run_inner(
     let rollover = IpcRolloverRequester {
         data_dir: &data_dir,
         launcher: &launcher,
+        restart_agents,
     };
     // One resolution of the workspace identity for the whole process: the fence
     // that guards the workspace and the runtime that owns it must key on the same
@@ -16219,10 +16479,10 @@ fn existing_policy_client(
 }
 
 /// Connects to the currently published daemon without applying the build
-/// replacement policy. Doctor uses this narrow lane to ask an older compatible
-/// daemon to stop the Agent processes it still owns before rollover transfers
-/// control to the current binary.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+/// replacement policy. Diagnostic and managed-update callers use this narrow
+/// lane when cold-start or artifact replacement would change the state being
+/// observed.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=doctor_reports_real_diagnostics
 pub(crate) fn diagnostic_client(
     policy: ClientPolicy,
     unbound: bool,
@@ -16337,12 +16597,107 @@ pub(crate) fn managed_update_diagnostic_client(
     }
 }
 
-/// Whether a daemon current locator is published. Doctor uses this only to
-/// distinguish a normal cold start from a failed connection to an existing
-/// owner; it is not process-liveness or signal authority.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-pub(crate) fn has_published_daemon() -> bool {
-    paths::data_dir().is_ok_and(|data_dir| data_dir.join("daemon").join("current.json").is_file())
+/// Synchronize the published daemon with the exact installed binary while the
+/// installer still owns `update.lock`.
+///
+/// This lifecycle-only path never starts an absent daemon and never repairs or
+/// restarts Agents. A live process-local Agent credential leaves the old daemon
+/// untouched and makes the update report a deferred synchronization.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=managed_update_with_a_live_generic_pty_keeps_the_draining_owner
+pub(crate) fn sync_after_update(
+    out: &mut dyn Write,
+    policy: ClientPolicy,
+    info: &AppInfo,
+) -> std::io::Result<Result<(), ClientError>> {
+    let expected_build = current_build();
+    let (lock, client) = match managed_update_diagnostic_client(policy) {
+        Ok(value) => value,
+        Err(error) => return Ok(Err(error)),
+    };
+    let Some(mut owner) = client else {
+        writeln!(out, "daemon sync: daemon is not running; left it stopped")?;
+        return Ok(Ok(()));
+    };
+    let published_build = owner.server_build().clone();
+    if published_build != expected_build {
+        let workspace = owner
+            .request(DaemonRequest::Session {
+                action: usagi_core::usecase::client::SessionAction::List,
+                operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                payload: serde_json::json!({}),
+            })
+            .and_then(|reply| {
+                let body = match reply {
+                    usagi_core::usecase::client::DaemonReply::Ok(body)
+                    | usagi_core::usecase::client::DaemonReply::Accepted { body, .. } => body,
+                };
+                serde_json::from_value::<WorkspaceId>(body["workspace_id"].clone()).map_err(|_| {
+                    ClientError::Unavailable(
+                        "daemon returned an invalid workspace identity".to_owned(),
+                    )
+                })
+            });
+        let workspace = match workspace {
+            Ok(workspace) => workspace,
+            Err(error) => return Ok(Err(error)),
+        };
+        let diagnosis = owner
+            .request(DaemonRequest::DiagnoseAgents {
+                workspace,
+                expected: current_agent_integrations(),
+            })
+            .and_then(|reply| {
+                let body = match reply {
+                    usagi_core::usecase::client::DaemonReply::Ok(body)
+                    | usagi_core::usecase::client::DaemonReply::Accepted { body, .. } => body,
+                };
+                serde_json::from_value::<usagi_core::domain::agent::AgentIntegrationDiagnosis>(body)
+                    .map_err(|_| {
+                        ClientError::Lifecycle(
+                            "daemon cannot prove server-side handoff fencing".to_owned(),
+                        )
+                    })
+            });
+        let diagnosis = match diagnosis {
+            Ok(diagnosis) => diagnosis,
+            Err(error) => return Ok(Err(error)),
+        };
+        match diagnosis.provisioned_mcp_callers {
+            Some(0) => {}
+            Some(credentials) => {
+                return Ok(Err(ClientError::Lifecycle(format!(
+                    "daemon synchronization deferred: {credentials} daemon-provisioned MCP caller credential(s) remain; use 'usagi daemon restart --restart-agents' when they can be restarted"
+                ))));
+            }
+            None => {
+                return Ok(Err(ClientError::Lifecycle(
+                    "daemon cannot prove server-side handoff fencing".to_owned(),
+                )));
+            }
+        }
+        drop(owner);
+        if let Err(error) = replace_running_daemon_during_update(out, policy, info, &lock)? {
+            return Ok(Err(error));
+        }
+    }
+    let mut current = match diagnostic_client(policy, true) {
+        Ok(client) => client,
+        Err(error) => return Ok(Err(error)),
+    };
+    if current.server_build() != &expected_build {
+        return Ok(Err(ClientError::Lifecycle(
+            "daemon synchronization returned before the installed build was serving".to_owned(),
+        )));
+    }
+    if let Err(error) = current.request(DaemonRequest::Tenant {
+        action: usagi_core::usecase::client::TenantAction::Inventory,
+        root: None,
+        force: false,
+    }) {
+        return Ok(Err(error));
+    }
+    writeln!(out, "daemon sync: installed build is current and serving")?;
+    Ok(Ok(()))
 }
 
 /// A workspace-bound daemon client for a background observation lane.
@@ -16589,7 +16944,10 @@ pub(crate) fn replace_running_daemon(
     };
     run(
         out,
-        CliDaemonCommand::Restart { force },
+        CliDaemonCommand::Restart {
+            restart_agents: false,
+            force,
+        },
         info,
         Some(trigger.operation_id),
     )
@@ -16612,7 +16970,10 @@ pub(crate) fn replace_running_daemon_during_update(
     };
     run_with_lifecycle_custody(
         out,
-        CliDaemonCommand::Restart { force: false },
+        CliDaemonCommand::Restart {
+            restart_agents: false,
+            force: false,
+        },
         info,
         Some(trigger.operation_id),
         Some(&lock.lifecycle),
@@ -16667,6 +17028,30 @@ fn request_replacement_while_locked(
 
 fn runtime_channel() -> &'static str {
     runtime_channel_for(paths::runtime_mode())
+}
+
+fn current_agent_integrations() -> Vec<AgentIntegrationRevision> {
+    [
+        (
+            DefaultModel::Claude,
+            usagi_daemon::usecase::claude::PROFILE_REVISION,
+        ),
+        (
+            DefaultModel::OpenAi,
+            usagi_daemon::usecase::codex::PROFILE_REVISION,
+        ),
+        (
+            DefaultModel::SakanaAi,
+            usagi_daemon::usecase::codex::PROFILE_REVISION,
+        ),
+    ]
+    .into_iter()
+    .map(|(model, revision)| AgentIntegrationRevision {
+        profile_id: AgentProfileId::new(model.profile_id())
+            .expect("code-defined profile ID is canonical"),
+        revision,
+    })
+    .collect()
 }
 
 const fn runtime_channel_for(mode: paths::RuntimeMode) -> &'static str {
@@ -17072,6 +17457,7 @@ mod tests {
             ("agent_inventory", "agent"),
             ("agent_workspace_observation", "agent"),
             ("diagnose_agents", "agent"),
+            ("plan_daemon_restart_agents", "agent"),
             ("restart_agents", "agent"),
             ("resume_agent", "agent"),
             ("resume_agent_with_current_integration", "agent"),
@@ -19881,7 +20267,7 @@ mod tests {
                 usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new(),
                 AgentConcurrencyGauge::default(),
                 &children,
-                false,
+                RuntimeHydration::Empty,
                 GENERIC_TERMINAL_LIMIT,
             )
             .unwrap(),

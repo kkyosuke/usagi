@@ -2367,6 +2367,24 @@ fn config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap(
 fn doctor_reports_real_diagnostics() {
     let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
+
+    // Doctor observes lifecycle state but never changes it. An absent daemon
+    // remains absent until the user explicitly starts it.
+    let absent = run_with_home(&[OsStr::new("doctor")], &home);
+    assert!(absent.status.success());
+    assert!(stdout(&absent).contains("[error] Daemon:"));
+    assert!(daemon_pid(home.path()).is_none());
+
+    let started = run_with_home(&[OsStr::new("daemon"), OsStr::new("start")], &home);
+    assert!(started.status.success(), "{}", stderr(&started));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while connect_current(&channel_data_dir(home.path())).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "explicitly started daemon did not publish its endpoint"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let output = run_with_home(&[OsStr::new("doctor")], &home);
     assert!(output.status.success());
     let out = stdout(&output);

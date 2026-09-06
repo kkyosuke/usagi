@@ -227,7 +227,7 @@ client が daemon を auto-start する前にも、同じ `bound` 解決を read
 workspace の最長一致、または申告 path 自身が repository の場合だけ、その解決済み root を lifecycle child と
 bootstrap broker の cwd にする。どちらでもない場合は handshake と同じ `workspace-mismatch` / effect none を返し、
 child、workspace fence、project-local `.usagi` を作らない。`selected` と、選択済み root に対する `unbound` readiness は
-明示操作なので従来どおり任意の canonical directory を起動 root にできる。Doctor のように選択を持たない `unbound`
+明示操作なので従来どおり任意の canonical directory を起動 root にできる。選択を持たない `unbound`
 lifecycle probe は ambient cwd に同じ implicit rule を適用する。これにより、同じ `bound` command の可否は daemon の
 生死に依存しない。
 
@@ -675,26 +675,23 @@ CLI / TUI port と MCP `agent_resume_inventory` が共通 contract を使う。s
 
 daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。利用者による明示操作だけが request を作る。
 
-Doctor の integration repair は同じ exact resume 境界を狭く拡張する。`diagnose_agents` は invoking binary が持つ
-code-defined profile revision と、live runtime の launch snapshot revision を比較し、古い hook / MCP integration
-だけを provider ID・argv・設定本文なしで返す。診断には outdated runtime に属する MCP child claim 数に加え、daemon 全体で
-発行済みの MCP caller credential 総数 `provisioned_mcp_callers` を含める。child がまだ claim していない credential も数える。
-field が無い旧 daemon は「不明」であり、client-side inventory が 0 でも server-side fence を証明できないため rollover しない。exact resume metadata の準備可否も含み、1件でも準備できていなければ
-`restart_agents` は停止前に全件拒否する。`restart_agents` は利用者へ表示した診断集合の exact runtime ref を再送し、その集合だけを
-停止する非 retry mutation である。診断後に追加された Agent は停止せず、選択済み ref が差し替わった場合は全件停止前に stale として
-拒否する。reported phase が `running` の runtime は `force` なしで全件 effect-before-zero の `busy` となる。generic terminal は対象外である。
+`daemon restart --restart-agents` は同じ exact resume 境界を machine-wide lifecycle に使う。
+`plan_daemon_restart_agents` は daemon 全体の live Agent を列挙し、全 runtime ref、public resume target、current profile revision、
+reported phase を返す effect-free request である。provider ID・argv・設定本文・provider-native session ID は返さない。
+exact resume metadata が1件でも欠ける場合、ownership-unknown process がある場合、または `running` phase に `--force` が無い場合は
+全件 effect-before-zero で拒否する。
 
-daemon build mismatch と発行済み credential が同時にある場合、`--restart-agents` でも client 側で先に停止せず replacement を
-保留する。credential が 0 の診断後も old active は `ActiveControl` admission を close / drain し、全 provisioned credential が
-なお 0 であることを最初の durable handoff write より前に再検証する。競合した Agent launch または検査不能は barrier を元へ戻して
-handoff を拒否する。build が同じときの integration repair では、停止後に client が返された exact target を
-`resume_agent_with_current_integration` へ渡す。この repair-only request は source の旧 adapter revision を fence として
-保持したまま、active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope /
-lineage を変えずに hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
-旧 daemon がこの診断 vocabulary または server-side handoff fence を実装していない場合、planned rollover は行わない。
-利用者が明示した `--force` の cold replacement だけを互換経路とし、live Agent がある場合はさらに
-`--restart-agents` を必要とする。この経路は generic terminal も停止し得るが、再起動後も今回停止した runtime ID に
-対応する exact target だけを resume する。内部 managed Doctor はこの強制 authority を持たず非 0 で保留する。
+client は plan の exact runtime 集合を `rollover.restart_agents` に再送する。old active は `ActiveControl` admission を close / drain
+してから同じ machine-wide 集合を再計算し、完全一致した場合だけ全 Agent を停止する。そのまま provisioned credential が 0 であることを
+検証して最初の durable handoff write へ進むため、plan 後に競合した Agent launch は停止も handoff も行わず stale として拒否される。
+commit 前の handoff failure では old daemon 自身が barrier を開き直して old integration で exact resume を行い、client も
+応答断に備えた同じ復旧を best effort で再試行する。commit 後は successor の
+`resume_agent_with_current_integration` へ plan の target を渡す。この request は source の旧 adapter revision を fence として保持したまま、
+active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope / lineage を変えずに
+hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
+
+machine-wide plan vocabulary を持たない旧 daemon は `--restart-agents` を effect-zero で拒否する。`--restart-agents` なしの
+`--force` は従来どおり Agent と generic Terminal を破棄する cold replacement であり、自動 exact resume の互換経路ではない。
 
 ## Work Run observation and control
 

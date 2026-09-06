@@ -343,12 +343,12 @@ mv -f -- "$CANDIDATE" "$TARGET"
 
 # A managed self-update holds update.lock until the exact installed artifact
 # has either synchronized the published daemon or refused without changing its
-# authority. The hidden flag is the capability boundary: older selected
-# releases reject it before Doctor can perform a legacy, weaker replacement.
+# authority. The hidden daemon verb is the capability boundary: older selected
+# releases reject it before any weaker replacement can run.
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
     printf "daemon の状態を安全に同期中だよ！ぴょん\n"
     set +e
-    "$TARGET" doctor --fix --managed-update-sync
+    "$TARGET" daemon sync-after-update
     SYNC_STATUS=$?
     set -e
     case "$SYNC_STATUS" in
@@ -398,7 +398,7 @@ printf "次回の起動から新しい CLI を使えるよ。起動中の TUI �
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
     printf "daemon の build を同期したよ（停止中なら起動していないよ）。\n"
 else
-    printf "daemon の build が古い場合は 'usagi doctor --fix' で入れ替えてね。\n"
+    printf "daemon の build が古い場合は 'usagi daemon restart' で入れ替えてね。\n"
 fi
 
 case ":$PATH:" in
