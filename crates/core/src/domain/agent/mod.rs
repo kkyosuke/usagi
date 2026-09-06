@@ -505,6 +505,13 @@ pub struct AgentIntegrationDiagnosis {
     pub outdated: Vec<OutdatedAgentRuntime>,
     /// Claimed daemon-provisioned MCP child slots belonging to `outdated`.
     pub outdated_mcp_children: usize,
+    /// All claimed daemon-provisioned MCP child slots held by this daemon.
+    ///
+    /// `None` means the serving daemon predates this diagnostic field. A newer
+    /// client must treat that as unknown rather than assuming that no live
+    /// caller would lose its control authority during daemon replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_mcp_children: Option<usize>,
 }
 
 /// Explicit source-to-replacement relation returned by a successful resume.
@@ -747,6 +754,20 @@ impl std::error::Error for LaunchValidationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_integration_diagnosis_keeps_mcp_claims_unknown() {
+        let workspace = WorkspaceId::new();
+        let diagnosis: AgentIntegrationDiagnosis = serde_json::from_value(serde_json::json!({
+            "workspace_id": workspace,
+            "outdated": [],
+            "outdated_mcp_children": 0,
+        }))
+        .unwrap();
+
+        assert_eq!(diagnosis.workspace_id, workspace);
+        assert_eq!(diagnosis.claimed_mcp_children, None);
+    }
 
     #[test]
     fn constructors_reject_invalid_public_values() {

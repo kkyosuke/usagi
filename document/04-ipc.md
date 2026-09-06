@@ -675,7 +675,9 @@ daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent`
 
 Doctor の integration repair は同じ exact resume 境界を狭く拡張する。`diagnose_agents` は invoking binary が持つ
 code-defined profile revision と、live runtime の launch snapshot revision を比較し、古い hook / MCP integration
-だけを provider ID・argv・設定本文なしで返す。診断には exact resume metadata の準備可否も含み、1件でも準備できていなければ
+だけを provider ID・argv・設定本文なしで返す。診断には outdated runtime に属する MCP child claim 数に加え、daemon 全体の
+MCP child claim 総数 `claimed_mcp_children` を含める。field が無い旧 daemon は「不明」であり、live Agent がいる状態で 0 と
+推測して rollover しない。exact resume metadata の準備可否も含み、1件でも準備できていなければ
 `restart_agents` は停止前に全件拒否する。`restart_agents` は利用者へ表示した診断集合の exact runtime ref を再送し、その集合だけを
 停止する非 retry mutation である。診断後に追加された Agent は停止せず、選択済み ref が差し替わった場合は全件停止前に stale として
 拒否する。reported phase が `running` の runtime は `force` なしで全件 effect-before-zero の `busy` となる。generic terminal は対象外である。

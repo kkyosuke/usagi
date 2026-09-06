@@ -2147,59 +2147,28 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
         geometry: TerminalGeometry { cols: 80, rows: 24 },
         launch_operation: Some(OperationId::new()),
     };
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let successor_launch = loop {
-        // The readiness wait is told which daemon must answer, so a successor
-        // that dies while handshaking fails here rather than being retried for
-        // the whole 60 s readiness budget — the launch loop's own liveness check
-        // below only covers failures that reach `request`.
-        let mut successor = client_ready(
-            &data_dir,
-            DAEMON_READINESS_TIMEOUT,
-            Some(new_pid),
-            "admit a connection after rollover",
-        );
-        match successor.request(DaemonRequest::Terminal {
+    // A successful restart now includes successor serving-readiness, not only
+    // registry commit. The first control request after the command must work;
+    // callers no longer need a GenerationRolledOver retry loop here.
+    let mut successor = client_ready(
+        &data_dir,
+        DAEMON_READINESS_TIMEOUT,
+        Some(new_pid),
+        "admit a connection after rollover",
+    );
+    let successor_launch = match successor
+        .request(DaemonRequest::Terminal {
             action: TerminalAction::Launch,
             payload: serde_json::to_value(TerminalRequest::Launch {
                 intent: successor_intent.clone(),
             })
             .unwrap(),
-        }) {
-            Ok(DaemonReply::Ok(body)) => break body,
-            Ok(other) => panic!("successor generic terminal launch is synchronous: {other:?}"),
-            // Two spellings of "the successor is not answering launches yet":
-            // the control gate is still closed, or the connection went away
-            // before the reply. Both belong to the same bounded wait. Re-sending
-            // is safe because `successor_intent` carries one fixed producer
-            // `OperationId` for the whole loop, so the daemon converges it onto a
-            // single durable launch — and the `shell_spawns` assertions below
-            // still fail any run that actually spawned twice.
-            Err(error)
-                if error.code() == ErrorCode::GenerationRolledOver
-                    || error.is_transport_failure() =>
-            {
-                // A retry may absorb the rollover window. It may never absorb a
-                // successor that panicked or died: both are the product failure
-                // this case exists to catch, so they fail here rather than as a
-                // deadline timeout twenty seconds later.
-                assert_no_daemon_panic(&data_dir, "the successor was admitting a launch");
-                assert!(
-                    alive(new_pid),
-                    "the successor daemon exited instead of admitting a launch: {error:?}\n{}",
-                    daemon_error_log(&data_dir)
-                );
-                assert!(
-                    Instant::now() < deadline,
-                    "the successor never opened its control gate; last refusal: {error:?}\n{}",
-                    daemon_error_log(&data_dir)
-                );
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(error) => panic!(
-                "the successor refused a launch: {error:?}\n{}",
-                daemon_error_log(&data_dir)
-            ),
+        })
+        .expect("the first successor control request is admitted after restart")
+    {
+        DaemonReply::Ok(body) => body,
+        other @ DaemonReply::Accepted { .. } => {
+            panic!("successor generic terminal launch is synchronous: {other:?}")
         }
     };
     let successor_terminal: TerminalRef =

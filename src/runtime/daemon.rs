@@ -13712,6 +13712,12 @@ struct IpcRolloverRequester<'a> {
     launcher: &'a ServeLauncher,
 }
 
+/// Planned rollover uses the same slow-but-healthy startup allowance as a cold
+/// daemon start. Promotion hydrates the full runtime after the durable handoff,
+/// so registry commit alone is not readiness.
+const ROLLOVER_STARTUP_WINDOW: Duration = Duration::from_secs(30);
+const ROLLOVER_PROBE_BUDGET_MS: u64 = 250;
+
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl IpcRolloverRequester<'_> {
     fn committed(&self, operation: &OperationId, standby_pid: u32) -> bool {
@@ -13739,8 +13745,8 @@ impl IpcRolloverRequester<'_> {
         let _ = Terminator::terminate(&SigtermTerminator, &record);
     }
 
-    fn wait_until_verified(&self, pid: u32) -> std::io::Result<()> {
-        for _ in 0..40 {
+    fn wait_until_verified(&self, pid: u32, deadline: Instant) -> std::io::Result<()> {
+        loop {
             if read_registry_document(self.data_dir)
                 .ok()
                 .flatten()
@@ -13754,10 +13760,95 @@ impl IpcRolloverRequester<'_> {
             {
                 return Ok(());
             }
+            if Instant::now() >= deadline {
+                break;
+            }
             RealSleeper.sleep();
         }
         Err(std::io::Error::other(
-            "standby did not reach verified readiness within the startup window",
+            "standby did not reach verified readiness within 30 seconds",
+        ))
+    }
+
+    fn wait_until_committed(&self, operation: &OperationId, pid: u32, deadline: Instant) -> bool {
+        loop {
+            if self.committed(operation, pid) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            RealSleeper.sleep();
+        }
+    }
+
+    /// A committed successor is not ready until its active runtime answers a
+    /// harmless inventory request. The registry and locator change before the
+    /// standby custody loop finishes promotion, and returning in that window
+    /// exposes `generation_rolled_over` to the command immediately following a
+    /// successful restart.
+    fn successor_is_serving(&self, pid: u32) -> bool {
+        use usagi_core::usecase::client::{DaemonReply, TenantAction};
+
+        let Some(generation) = read_registry_document(self.data_dir)
+            .ok()
+            .flatten()
+            .and_then(|document| {
+                let current = document.current?;
+                document
+                    .generations
+                    .iter()
+                    .find(|entry| {
+                        entry.generation == current
+                            && entry.process.pid == pid
+                            && entry.role == GenerationRole::Active
+                    })
+                    .map(|entry| entry.generation)
+            })
+        else {
+            return false;
+        };
+        let Ok(locator) = read_locator(&self.data_dir.join("daemon")) else {
+            return false;
+        };
+        if locator.generation.0 != generation.as_str() {
+            return false;
+        }
+        let Ok(mut client) = connect_deadline_client(
+            self.data_dir,
+            ClientPolicy::cli(),
+            current_build(),
+            ClientWorkspace::Unbound,
+            SystemClock::new(),
+            ROLLOVER_PROBE_BUDGET_MS,
+        ) else {
+            return false;
+        };
+        if client.daemon_generation().0 != generation.as_str() {
+            return false;
+        }
+        matches!(
+            client.request(DaemonRequest::Tenant {
+                action: TenantAction::Inventory,
+                root: None,
+                force: false,
+            }),
+            Ok(DaemonReply::Ok(_))
+        )
+    }
+
+    fn wait_until_serving(&self, pid: u32, deadline: Instant) -> std::io::Result<()> {
+        loop {
+            if self.successor_is_serving(pid) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            RealSleeper.sleep();
+        }
+        Err(std::io::Error::other(
+            "successor committed authority but did not begin serving within 30 seconds",
         ))
     }
 }
@@ -13765,8 +13856,9 @@ impl IpcRolloverRequester<'_> {
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl RolloverRequester for IpcRolloverRequester<'_> {
     fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
+        let deadline = Instant::now() + ROLLOVER_STARTUP_WINDOW;
         let pid = self.launcher.launch_standby()?;
-        if let Err(error) = self.wait_until_verified(pid) {
+        if let Err(error) = self.wait_until_verified(pid, deadline) {
             Self::stop_standby(pid);
             return Err(error);
         }
@@ -13780,18 +13872,31 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
                     operation_id: operation.0.clone(),
                 })
             });
-        match result {
-            Ok(_) => Ok(format!(
-                "daemon authority handed off (operation {})",
-                operation.0
-            )),
-            Err(error) => {
-                if !self.committed(operation, pid) {
-                    Self::stop_standby(pid);
-                }
-                Err(std::io::Error::other(error.to_string()))
-            }
+        let mut committed = self.committed(operation, pid);
+        if !committed
+            && result
+                .as_ref()
+                .is_err_and(usagi_core::usecase::client::ClientError::is_transport_failure)
+        {
+            // A transport failure cannot distinguish a request that never
+            // arrived from a reply lost while W2 was becoming observable.
+            committed = self.wait_until_committed(operation, pid, deadline);
         }
+        if !committed {
+            Self::stop_standby(pid);
+            return Err(std::io::Error::other(match result {
+                Ok(_) => "rollover returned before its authority commit".to_owned(),
+                Err(error) => error.to_string(),
+            }));
+        }
+        // A lost ACK after commit is a success once the committed successor is
+        // serving. Never roll back an observable handoff because the response
+        // frame was lost.
+        self.wait_until_serving(pid, deadline)?;
+        Ok(format!(
+            "daemon authority handed off (operation {})",
+            operation.0
+        ))
     }
 }
 

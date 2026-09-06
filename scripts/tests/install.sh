@@ -134,6 +134,11 @@ run_installer_for_version() {
         PATH="$FAKE_BIN:$PATH" USAGI_VERSION=v2.0.0 bash "$INSTALLER")
 }
 
+run_managed_installer() {
+    (cd "$CWD_DIR" && HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" FIXTURE_DIR="$FIXTURE_DIR" \
+        USAGI_MANAGED_UPDATE=1 PATH="$FAKE_BIN:$PATH" USAGI_VERSION=v2.0.0 bash "$INSTALLER")
+}
+
 assert_old_preserved() {
     cmp "$CASE_DIR/old-bytes" "$HOME_DIR/.usagi/bin/usagi"
     [ "$(mode "$HOME_DIR/.usagi/bin/usagi")" = 751 ]
@@ -175,6 +180,14 @@ cmp "$CASE_DIR/sentinel" "$CWD_DIR/usagi"
 prepare_case selected-version
 run_installer_for_version >/dev/null
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+
+prepare_case managed-update
+run_managed_installer >"$CASE_DIR/out"
+grep -q '起動中の daemon は続けて安全に更新する' "$CASE_DIR/out"
+if grep -q "usagi doctor --fix" "$CASE_DIR/out"; then
+    echo "managed update printed the standalone daemon instruction" >&2
+    exit 1
+fi
 
 prepare_case unsupported-linux-arm64
 cat > "$FAKE_BIN/uname" <<'SH'

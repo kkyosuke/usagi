@@ -178,7 +178,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
 | `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
-| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。`--force` は live runtime を明示的に破棄する cold transition |
+| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。successor の active runtime が inventory request に応答してから成功を返す。`--force` は live runtime を明示的に破棄する cold transition |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
 | `usagi daemon` / `usagi daemon serve` | 前景で daemon を active role で serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
@@ -187,8 +187,10 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 
 ### 起動窓
 
-`usagi daemon start` と `usagi daemon restart` は、起動した `serve` が `daemon.json` に自分を
-登録するまで **最大 30 秒**待つ。cold start は socket を bind するだけでなく、generation registry の
+`usagi daemon start` と `usagi daemon restart` は、起動した `serve` が authority を公開して request を
+serve できるまで **最大 30 秒**待つ。cold start は `daemon.json` の登録まで、seamless rollover は standby の
+verified readiness と handoff 後の successor が harmless inventory request に応答するまでをこの窓に含める。
+cold start は socket を bind するだけでなく、generation registry の
 recovery、runtime state の hydrate、serve する workspace の adopt を経てから登録するため、
 負荷のかかった host ではここが数秒から十数秒に伸びる。
 
@@ -556,7 +558,7 @@ replacement 後も維持する。2 process を安全に運用する authority �
 | authority を渡す**元**（active generation）が registry に登録される | `serve` が起動時に登録する（[first activation](#first-activation)） |
 | authority を渡す**先**（standby process）が起動して registry に登録される | `serve --standby` が登録し readiness 後に `verified_build` を立てる（[standby process の lifecycle](#standby-process-の-lifecycle)） |
 | active generation が request ごとに role を決め直し、rollover の routing 前提を判定できる | active generation が [admission fence](#admission-fence) と [routing 前提条件](#rollover-の-routing-前提条件)の ledger を通して serve する |
-| 検証済み standby を active へ昇格させる handoff の起動 | CLI が standby を stage し、old active へ durable operation ID 付き `rollover` IPC verb を送る。old active が successor hello を再検証し、自 process の gate で `execute_gated_rollover` を駆動する。successor は commit を custody loop で観測し、同じ socket・generation の readiness-only loop を active runtime loop へ切り替える |
+| 検証済み standby を active へ昇格させる handoff の起動 | CLI が standby を stage し、old active へ durable operation ID 付き `rollover` IPC verb を送る。old active が successor hello を再検証し、自 process の gate で `execute_gated_rollover` を駆動する。successor は commit を custody loop で観測し、同じ socket・generation の readiness-only loop を active runtime loop へ切り替える。CLI は current locator と generation を照合し、successor が harmless inventory request に応答してから成功を返す |
 
 seamless refusal は registry を読み、欠けている前提を名前で示す。
 
@@ -1443,7 +1445,8 @@ daemon restart reconciliation は unfinished record の provider status を `int
 ### Doctor による integration repair
 
 `usagi doctor --fix` は現在の client、published daemon、live Agent の build / integration revision を順に診断する。
-daemon だけが古ければ planned replacement を使い、Agent PTY を破棄しない。古い Agent integration がある場合は一覧を表示し、
+daemon だけが古ければ通常 client の production reuse policy には落とさず、明示的に planned replacement を使い、
+successor の build と serving readiness を再検証する。古い Agent integration がある場合は一覧を表示し、
 `--restart-agents` が明示されるまで Agent process を停止しない。`--force` は `running` phase（tool / prompt の途中を含む）を
 破棄する追加 authority であり、通常の idle / waiting Agent 再起動や daemon rollover の force ではない。
 launch 時の hook、sandbox writable roots、argv、private config の変更は provider ごとの integration revision を増分する。
@@ -1454,7 +1457,11 @@ resume、再診断の順である。これにより old owner の PTY handle を
 materialize することもない。provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
 modern daemon は全件 effect-before-zero で拒否する。停止後に scope が stale、current adapter が resume 非対応と判明しても、別
 conversation は推測しない。最終診断は outdated Agent 数、live Agent 数、retained draining
-generation 数を表示する。IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
+generation 数を表示する。診断は daemon 全体の daemon-provisioned MCP child claim 総数も返す。daemon build mismatch 時に
+live claim が残る場合は process-local credential を successor が引き継げないため replacement を保留し、旧 daemon と Agent を
+維持する。`--restart-agents` で停止・resume する outdated Agent が全 claim を説明できる場合だけ、その停止後に replacement
+できる。旧 daemon が claim 総数 field を持たない場合も、live Agent があれば未知を 0 と推測せず保留する。
+IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
 
 診断 vocabulary 導入前の daemon は integration revision を返せず Agent を選択停止できない。live Agent が無ければ通常の
 planned replacement を行う。live Agent がある場合は runtime 一覧を表示して rollover を保留し、
@@ -2084,7 +2091,8 @@ W4  registry CAS   handoff を消し、operation を完了として記録       
 | W3〜W4 | `committed`・locator は新 | roll forward（clear のみ） |
 | W4 より後 | handoff なし | 新 authority のまま |
 
-observable になった commit を旧 authority へ rollback しない。後継 process の exact identity を alive と証明できない場合は
+observable になった commit を旧 authority へ rollback しない。rollover reply が失われても W2 が確認できれば roll forward し、
+successor が active runtime として inventory request に応答するまで最大30秒待って成功へ収束する。後継 process の exact identity を alive と証明できない場合は
 旧 authority を復活させず、全 generation を retired にし locator を撤去した **effect zero の fail-closed** に収束する。
 ambiguous な partial phase は operation ID で同じ結果へ収束するため、concurrent restart・ACK loss・再試行は 1 つの
 outcome になる。異なる operation の割り込みは `handoff_in_progress` で拒否する。

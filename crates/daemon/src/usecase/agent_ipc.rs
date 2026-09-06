@@ -1691,6 +1691,12 @@ impl AgentRuntime {
             workspace_id: workspace,
             outdated,
             outdated_mcp_children,
+            claimed_mcp_children: Some(
+                self.mcp_callers
+                    .values()
+                    .filter(|caller| caller.child.is_some())
+                    .count(),
+            ),
         })
     }
 
@@ -5040,6 +5046,7 @@ mod tests {
         assert_eq!(diagnosis.outdated[0].phase, AgentPhase::Waiting);
         assert!(diagnosis.outdated[0].resume_available);
         assert_eq!(diagnosis.outdated_mcp_children, 1);
+        assert_eq!(diagnosis.claimed_mcp_children, Some(1));
         let newcomer = agent
             .launch(
                 &OperationId::new().to_string(),

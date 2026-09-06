@@ -261,6 +261,10 @@ live Agent runtime の間保持する。同じ MCP process の resilient client 
 identity の終了を確認できた場合だけ置き換えられる。PID が再利用されても start identity が一致しない request は
 `ownership_unknown` へ fail closed する。Agent runtime の終了または daemon restart では process-local credential 自体が失効する。
 
+このため `usagi update` が続けて実行する Doctor と `usagi doctor --fix` は、daemon build mismatch 時に live MCP child claim が
+残っていれば planned replacement を保留する。旧 daemon が claim 総数を報告できない場合も、live Agent がいれば安全側に保留し、
+Agent を終了して Doctor を再実行するまで旧 daemon の control authority を維持する。
+
 callerのcurrent runが`SupervisorRun`へ束縛されている`session_dispatch` / `session_delegate_brief`では、daemonが
 root goalと確定済みchild completionのbounded handoff contextを今回のtask instructionへ前置する。raw conversationや
 terminal transcriptは含めず、workerが明示したsummaryとstructured artifact参照だけを使う。snapshotはchild operationの

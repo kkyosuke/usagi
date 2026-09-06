@@ -120,8 +120,12 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 ```
 
 `~/.usagi/bin` が `PATH` に無い場合は installer が追記方法を案内する。導入済みなら `usagi update` で
-最新版へ、`usagi update -v` で選んだ release へ更新できる。更新後の CLI は次回起動から使われる。
-起動中の TUI は終了して開き直し、稼働中 daemon の build が古い場合は `usagi doctor --fix` で入れ替える。
+最新版へ、`usagi update -v` で選んだ release へ更新できる。更新後の CLI は次回起動から使われる。更新前に
+daemon が稼働していた場合は、更新した exact binary が続けて `doctor --fix` を実行し、安全な handoff が完了するまで待つ。
+daemon が動いていなければ新しく起動しない。起動中の TUI は終了して開き直す。
+
+live Agent の process-local MCP credential を新 daemon へ安全に渡せない場合は daemon の入れ替えだけを保留し、
+binary 更新と Agent はそのまま維持する。Agent を終了した後に `usagi doctor --fix` を再実行する。
 
 対象は macOS（amd64 / arm64）と Linux（amd64）である。v2 の daemon IPC と PTY 管理は Unix transport を
 使うため Windows は対象外で、installer もこの 3 つ以外は失敗する。
@@ -296,11 +300,11 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi open [path]` | workspace を登録して直接開く |
 | `usagi config` | Global Config を開く |
 | `usagi doctor` | 必要ツールの診断画面を開く |
-| `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、daemon だけが古い場合は seamless restart する |
+| `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、live MCP authority を失わない場合だけ古い daemon を seamless restart する |
 | `usagi doctor --fix --restart-agents` | 古い integration の Agent を一覧化・停止し、provider session ID を使って現在の設定で再開する。Running の Agent は拒否する |
 | `usagi doctor --fix --restart-agents --force` | Running（tool / prompt 実行中）の Agent も明示的に中断して再開する |
 | `usagi clean [--dry-run\|--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch と、消滅した generation が握ったままの capacity claim を検出・削除する |
-| `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
+| `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新し、稼働していた daemon を更新済み binary の Doctor で同期する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
 | `usagi session <command>` | daemon-owned session の作成・削除・sleep・resume・setup・prompt を操作する |
