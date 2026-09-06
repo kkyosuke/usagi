@@ -4037,15 +4037,6 @@ instructions = "code"
                 .get("creator_agent_id")
                 .is_none()
         );
-        assert_eq!(
-            runtime.handle(
-                SessionAction::Create,
-                &operation(),
-                &json!({"name":"invalid-creator", "creator_agent_id":"not-a-resource-id"}),
-            ),
-            Err(SessionRuntimeError::InvalidRequest)
-        );
-
         assert!(matches!(
             failed_runtime.handle(
                 SessionAction::Create,
@@ -4079,6 +4070,27 @@ instructions = "code"
             )
             .unwrap();
         assert!(runtime.created_session_ids(&caller).unwrap().is_empty());
+    }
+
+    #[test]
+    fn creator_metadata_and_base_ref_validation_fail_before_effect() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        let parent = SessionId::new();
+        let creator = AgentId::new();
+        for payload in [
+            json!({"name":"invalid-creator", "creator_agent_id":"not-a-resource-id"}),
+            json!({
+                "name": "invalid-base-ref",
+                "base_ref": "main",
+                "parent_session_id": parent,
+                "creator_agent_id": creator,
+            }),
+        ] {
+            assert_eq!(
+                runtime.handle(SessionAction::Create, &operation(), &payload),
+                Err(SessionRuntimeError::InvalidRequest)
+            );
+        }
     }
 
     #[test]
