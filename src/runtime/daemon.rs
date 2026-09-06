@@ -14300,6 +14300,7 @@ pub(crate) fn run(
     run_with_lifecycle_custody(out, command, info, operation, None)
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=daemon_stop_waits_for_lifecycle_custody
 fn run_with_lifecycle_custody(
     out: &mut dyn Write,
     command: CliDaemonCommand,
@@ -15774,6 +15775,7 @@ fn request_replacement(
     request_replacement_while_locked(policy).map(|trigger| (bootstrap, trigger))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 fn request_replacement_while_locked(
     policy: ClientPolicy,
 ) -> Result<BuildRolloverTrigger, ClientError> {

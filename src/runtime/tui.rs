@@ -5381,6 +5381,7 @@ impl DoctorRepairOptions {
     }
 }
 
+#[inline(never)]
 fn doctor_deferred_result(managed_update: bool, message: &str) -> std::io::Result<()> {
     if managed_update {
         Err(std::io::Error::other(message))
@@ -5888,15 +5889,15 @@ mod tests {
         daemon_control_error, daemon_control_result, daemon_error_reason, decision_cadence,
         decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
-        decode_work_run_control_reply, decode_work_run_snapshot_reply, doctor_diagnosis_io_error,
-        doctor_reply_body, exact_agent_resume_request, global_icon_mode, lifecycle_snapshot,
-        load_screen_graph_data, load_workspace_state, map_terminal_error, metrics_cadence,
-        passthrough_key, plan_doctor_daemon_replacement, pr_cadence, pr_snapshot_events,
-        probe_path, provider_resume_projection, reduced_motion_from_environment,
-        remove_session_payload, reply_geometry, resolve_workspace_path, session_cadence,
-        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
-        tui_error_entry, validate_workspace_directory, version_detail,
-        version_result_from_observation, work_run_control_client_error,
+        decode_work_run_control_reply, decode_work_run_snapshot_reply, doctor_deferred_result,
+        doctor_diagnosis_io_error, doctor_reply_body, exact_agent_resume_request, global_icon_mode,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        metrics_cadence, passthrough_key, plan_doctor_daemon_replacement, pr_cadence,
+        pr_snapshot_events, probe_path, provider_resume_projection,
+        reduced_motion_from_environment, remove_session_payload, reply_geometry,
+        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, tui_error_entry, validate_workspace_directory,
+        version_detail, version_result_from_observation, work_run_control_client_error,
         workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
@@ -5930,6 +5931,14 @@ mod tests {
     fn doctor_replaces_only_after_live_mcp_authority_is_accounted_for() {
         let expected = doctor_build("new");
         let published = doctor_build("old");
+
+        assert!(doctor_deferred_result(false, "deferred").is_ok());
+        assert_eq!(
+            doctor_deferred_result(true, "deferred")
+                .unwrap_err()
+                .to_string(),
+            "deferred"
+        );
 
         assert_eq!(
             plan_doctor_daemon_replacement(

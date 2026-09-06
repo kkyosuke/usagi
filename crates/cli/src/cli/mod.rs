@@ -1183,6 +1183,15 @@ mod tests {
                     invocation: DoctorInvocation::User,
                 },
             ),
+            (
+                &["usagi", "doctor", "--fix", "--managed-update-sync"][..],
+                TuiRequest::Doctor {
+                    fix: true,
+                    restart_agents: false,
+                    force: false,
+                    invocation: DoctorInvocation::ManagedUpdate,
+                },
+            ),
         ] {
             let mut out = Vec::new();
             let mut err = Vec::new();

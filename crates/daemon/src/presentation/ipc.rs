@@ -378,7 +378,10 @@ fn connection_id(
     registered: Option<usagi_core::domain::id::ConnectionId>,
     hello: &usagi_core::infrastructure::ipc::ClientHello,
 ) -> io::Result<usagi_core::domain::id::ConnectionId> {
-    let connection = registered.unwrap_or_else(usagi_core::domain::id::ConnectionId::new);
+    let connection = match registered {
+        Some(connection) => connection,
+        None => usagi_core::domain::id::ConnectionId::new(),
+    };
     if registered.is_none() {
         fence
             .admitted(connection, hello)
@@ -1060,31 +1063,10 @@ mod tests {
 
     #[test]
     fn connection_admission_precedes_visible_handshake_success() {
-        struct RefuseHandshake;
-
-        impl ConnectionFence for RefuseHandshake {
-            fn admitted(
-                &self,
-                _connection: usagi_core::domain::id::ConnectionId,
-                _hello: &ClientHello,
-            ) -> Result<(), ProtocolError> {
-                Err(ProtocolError::new(
-                    ErrorCode::GenerationRolledOver,
-                    "generation committed a rollover while this connection was waiting",
-                ))
-            }
-
-            fn admit(
-                &self,
-                _body: &serde_json::Value,
-            ) -> Result<Option<crate::usecase::authority::admission::AdmissionLease>, ProtocolError>
-            {
-                unreachable!("a refused handshake dispatches no request")
-            }
-
-            fn disconnected(&self, _connection: usagi_core::domain::id::ConnectionId) {}
-        }
-
+        let fence = RefusingConnection {
+            refuse_handshake: true,
+            ..RefusingConnection::default()
+        };
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
         let mut output = Vec::new();
@@ -1093,11 +1075,13 @@ mod tests {
             &mut output,
             &server(),
             None,
-            &RefuseHandshake,
+            &fence,
         )
         .unwrap();
 
         assert!(admitted.is_none());
+        assert_eq!(fence.admitted.get(), 1);
+        assert_eq!(fence.disconnected.get(), 0);
         assert!(matches!(
             read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024).unwrap(),
             Some(Bootstrap::Error(ProtocolError {
@@ -1105,6 +1089,53 @@ mod tests {
                 ..
             }))
         ));
+
+        let refused_write = RefusingConnection {
+            refuse_handshake: true,
+            ..RefusingConnection::default()
+        };
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        assert!(
+            handshake_admitted_with_fence(
+                &mut Cursor::new(input),
+                &mut BrokenWriter,
+                &server(),
+                None,
+                &refused_write,
+            )
+            .is_err()
+        );
+
+        let failed_success_write = AdmittingConnection::default();
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        assert!(
+            handshake_admitted_with_fence(
+                &mut Cursor::new(input),
+                &mut BrokenWriter,
+                &server(),
+                None,
+                &failed_success_write,
+            )
+            .is_err()
+        );
+        assert_eq!(failed_success_write.admitted.get(), 1);
+        assert_eq!(failed_success_write.disconnected.get(), 1);
+
+        let fence = AdmittingConnection::default();
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        let registered = handshake_admitted_with_fence(
+            &mut Cursor::new(input),
+            &mut Vec::new(),
+            &server(),
+            None,
+            &fence,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(registered.registered_connection().is_some());
     }
 
     #[test]
@@ -1153,6 +1184,7 @@ mod tests {
     struct RefusingConnection {
         admitted: std::cell::Cell<usize>,
         disconnected: std::cell::Cell<usize>,
+        refuse_handshake: bool,
     }
 
     impl ConnectionFence for RefusingConnection {
@@ -1162,7 +1194,14 @@ mod tests {
             _hello: &ClientHello,
         ) -> Result<(), ProtocolError> {
             self.admitted.set(self.admitted.get() + 1);
-            Ok(())
+            if self.refuse_handshake {
+                Err(ProtocolError::new(
+                    ErrorCode::GenerationRolledOver,
+                    "generation committed a rollover while this connection was waiting",
+                ))
+            } else {
+                Ok(())
+            }
         }
 
         fn admit(
