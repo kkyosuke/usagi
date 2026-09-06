@@ -1301,21 +1301,15 @@ impl SessionRuntime {
             return Err(SessionRuntimeError::OrphanRecoveryBlocked(summary));
         }
         let role_id = resolve_create_role(&catalog, existing_session, requested_role.as_ref())?;
-        let identity = create_identity(
-            payload,
+        let base_ref = session_base_ref(payload)?;
+        let semantic_key = create_semantic_key(
             origin,
             &name,
             role_id.as_ref(),
             parent_session_id,
             creator_agent_id,
+            base_ref.as_deref(),
         );
-        // Keep this explicit: `?` on the multiline call produces a synthetic
-        // line that LLVM counts separately for each crate compilation unit.
-        #[allow(clippy::question_mark)]
-        let (base_ref, semantic_key) = match identity {
-            Ok(identity) => identity,
-            Err(error) => return Err(error),
-        };
         if let Some(existing) = before
             .operations
             .iter()
@@ -2150,26 +2144,6 @@ fn session_base_ref(payload: &Value) -> Result<Option<String>, SessionRuntimeErr
         })
         .ok_or(SessionRuntimeError::InvalidRequest)?;
     Ok(Some(refname.to_owned()))
-}
-
-fn create_identity(
-    payload: &Value,
-    origin: CreateOrigin,
-    name: &str,
-    role_id: Option<&RoleId>,
-    parent_session_id: Option<SessionId>,
-    creator_agent_id: Option<AgentId>,
-) -> Result<(Option<String>, String), SessionRuntimeError> {
-    let base_ref = session_base_ref(payload)?;
-    let semantic_key = create_semantic_key(
-        origin,
-        name,
-        role_id,
-        parent_session_id,
-        creator_agent_id,
-        base_ref.as_deref(),
-    );
-    Ok((base_ref, semantic_key))
 }
 
 fn validate_teardown_target(
