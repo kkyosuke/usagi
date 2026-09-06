@@ -1301,14 +1301,21 @@ impl SessionRuntime {
             return Err(SessionRuntimeError::OrphanRecoveryBlocked(summary));
         }
         let role_id = resolve_create_role(&catalog, existing_session, requested_role.as_ref())?;
-        let (base_ref, semantic_key) = create_identity(
+        let identity = create_identity(
             payload,
             origin,
             &name,
             role_id.as_ref(),
             parent_session_id,
             creator_agent_id,
-        )?;
+        );
+        // Keep this explicit: `?` on the multiline call produces a synthetic
+        // line that LLVM counts separately for each crate compilation unit.
+        #[allow(clippy::question_mark)]
+        let (base_ref, semantic_key) = match identity {
+            Ok(identity) => identity,
+            Err(error) => return Err(error),
+        };
         if let Some(existing) = before
             .operations
             .iter()
