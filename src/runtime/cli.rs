@@ -128,8 +128,9 @@ mod action_io {
                     fix,
                     restart_agents,
                     force,
+                    invocation,
                 }),
-            ) => tui::launch_doctor(out, info, fix, restart_agents, force)
+            ) => tui::launch_doctor(out, info, fix, restart_agents, force, invocation)
                 .map(|()| ExitCode::SUCCESS),
             (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
@@ -359,19 +360,7 @@ fn execute_self_update(
     out.flush()?;
     err.flush()?;
     execute_self_update_with(request, out, err, &mut |script, select_version| {
-        use std::process::{Command, Stdio};
-
-        let mut command = Command::new("bash");
-        command
-            .arg("-s")
-            .arg("--")
-            .current_dir("/")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        if select_version {
-            command.arg("--select-version");
-        }
+        let mut command = update_installer_command(select_version);
         let mut child = command.spawn()?;
         let write_result = child
             .stdin
@@ -389,6 +378,24 @@ fn execute_self_update(
             stderr: Vec::new(),
         })
     })
+}
+
+fn update_installer_command(select_version: bool) -> std::process::Command {
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new("bash");
+    command
+        .arg("-s")
+        .arg("--")
+        .current_dir("/")
+        .env("USAGI_MANAGED_UPDATE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if select_version {
+        command.arg("--select-version");
+    }
+    command
 }
 
 type InstallerLauncher<'a> = dyn FnMut(&[u8], bool) -> std::io::Result<std::process::Output> + 'a;
@@ -409,11 +416,7 @@ fn execute_self_update_with(
     let result = launch(script, request.select_version())?;
     out.write_all(&result.stdout)?;
     err.write_all(&result.stderr)?;
-    if result.status.success() {
-        Ok(ExitCode::SUCCESS)
-    } else {
-        Ok(exit_code(result.status.code().unwrap_or(1)))
-    }
+    Ok(exit_code(result.status.code().unwrap_or(1)))
 }
 
 // Claude `PreToolUse` フックの実 stdin を束ね、純粋な判定 usecase に委ねる合成の縁。
@@ -758,7 +761,9 @@ mod tests {
     use std::io::{self, Write};
     use std::path::PathBuf;
 
-    use usagi_cli::cli::{DaemonCommand, InstallerRequest, RunOutcome, TuiRequest};
+    use usagi_cli::cli::{
+        DaemonCommand, DoctorInvocation, InstallerRequest, RunOutcome, TuiRequest,
+    };
     use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
     use usagi_core::usecase::claude_sandbox::SandboxMode;
     use usagi_core::usecase::client::{ClientError, DaemonReply, DaemonRequest};
@@ -766,7 +771,8 @@ mod tests {
     use super::{
         Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
         execute_self_update_with, exit_code, linux_home_entry_inventory, mcp_daemon_route,
-        process_outcome, validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
+        process_outcome, update_installer_command, validate_launcher_policy_inputs,
+        write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
@@ -983,6 +989,7 @@ mod tests {
                 fix: false,
                 restart_agents: false,
                 force: false,
+                invocation: DoctorInvocation::User,
             }),
             Action::LaunchDoctor,
         );
@@ -1078,15 +1085,7 @@ mod tests {
 
     #[test]
     fn verified_installer_maps_process_output_and_io_failures() {
-        let request = InstallerRequest::new(
-            b"",
-            [
-                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
-                0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
-                0x78, 0x52, 0xb8, 0x55,
-            ],
-            true,
-        );
+        let request = verified_installer_request();
 
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -1161,6 +1160,38 @@ mod tests {
                 .unwrap_err();
         assert_eq!(identity_error.kind(), io::ErrorKind::Other);
         assert_eq!(launches.get(), 0);
+    }
+
+    #[test]
+    fn managed_installer_environment_is_explicit_and_cwd_independent() {
+        let command = update_installer_command(true);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["-s", "--", "--select-version"]
+        );
+        assert_eq!(command.get_current_dir(), Some(std::path::Path::new("/")));
+        let environment = command
+            .get_envs()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("USAGI_MANAGED_UPDATE")),
+            Some(&Some(std::ffi::OsStr::new("1")))
+        );
+        let no_daemon = update_installer_command(false);
+        assert_eq!(no_daemon.get_args().collect::<Vec<_>>(), ["-s", "--"]);
+        assert!(no_daemon.get_current_dir().is_some());
+    }
+
+    fn verified_installer_request() -> InstallerRequest {
+        InstallerRequest::new(
+            b"",
+            [
+                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+                0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+                0x78, 0x52, 0xb8, 0x55,
+            ],
+            true,
+        )
     }
 
     fn process_output(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> std::process::Output {

@@ -134,7 +134,7 @@ trigger は artifact pair、runtime channel、force bit から決まる stable `
 response loss、reconnect、repeated bootstrap は同じ key へ収束する。trigger の生成は effect-free であり、old daemon、
 endpoint、PTY に stop signal を送らない。production / local の bootstrap は trigger を typed outcome として返して
 old owner を維持する。development の bootstrap は既知の mismatch trigger に限って **planned replacement** で消費し
-（live runtime があれば seamless rollover、無ければ cold transition）、replacement の exact artifact を再接続時の
+（live generic Terminal だけなら seamless rollover、live Agent credential があれば拒否、runtime が無ければ cold transition）、replacement の exact artifact を再接続時の
 handshake で確認する。replacement が拒否された場合と、replacement 後も別 artifact が広告されている場合は、
 到達可能な old owner を effect 0 で再利用する（[5. daemon の build mismatch](05-daemon.md#authority-と-lifecycle)）。
 通常 bootstrap から same-artifact replacement は発行せず、明示
@@ -143,7 +143,8 @@ version / target 一致へ昇格せず、typed `BuildIdentityUnavailable` とし
 
 trigger の生成自体は effect-free だが、`usagi daemon replace` はその trigger を自ら消費し、
 `usagi daemon restart` と同じ経路で replacement を実行する。live runtime があれば standby readiness 後に
-old active へ `rollover` request を送り、live runtime が無い場合だけ cold transition を行う
+old active へ `rollover` request を送り、old active が control drain 後に live Agent credential を検出すれば拒否する。
+live runtime が無い場合だけ cold transition を行う
 （[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。
 
 private standby の起動・登録・readiness は shipping の `daemon serve --standby` が駆動する
@@ -381,6 +382,7 @@ endpoint へ attach するだけでこの section に入らない。これらは
 | section | 待ち上限 | 上限の根拠 | 超過時 |
 |---|---|---|---|
 | `bootstrap.lock` | readiness ceiling（40 × 50ms = 2s）＋ spawn margin 3s | section は 1 回の `connect_or_start` を跨いで保持され、最悪ケースは cold start（lifecycle child の spawn ＋ readiness 探索） | typed `bootstrap_contended` |
+| `lifecycle.lock` | 65s | planned rollover の standby verification 30s と commit 後 serving hydration 30s に launch/output margin 5s を加える | `would_block` の IO error。stop/restart は update と交差せず失敗する |
 | private directory setup | 2s | 1 ディレクトリの作成 / 修復だけなので、健全な保持者は microsecond 単位で去る | `would_block` の IO error |
 
 `bootstrap_contended` は `unavailable` と別の typed error である。daemon は健全に動いていて、単に別 client が接続を
@@ -675,18 +677,24 @@ daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent`
 
 Doctor の integration repair は同じ exact resume 境界を狭く拡張する。`diagnose_agents` は invoking binary が持つ
 code-defined profile revision と、live runtime の launch snapshot revision を比較し、古い hook / MCP integration
-だけを provider ID・argv・設定本文なしで返す。診断には exact resume metadata の準備可否も含み、1件でも準備できていなければ
+だけを provider ID・argv・設定本文なしで返す。診断には outdated runtime に属する MCP child claim 数に加え、daemon 全体で
+発行済みの MCP caller credential 総数 `provisioned_mcp_callers` を含める。child がまだ claim していない credential も数える。
+field が無い旧 daemon は「不明」であり、client-side inventory が 0 でも server-side fence を証明できないため rollover しない。exact resume metadata の準備可否も含み、1件でも準備できていなければ
 `restart_agents` は停止前に全件拒否する。`restart_agents` は利用者へ表示した診断集合の exact runtime ref を再送し、その集合だけを
 停止する非 retry mutation である。診断後に追加された Agent は停止せず、選択済み ref が差し替わった場合は全件停止前に stale として
 拒否する。reported phase が `running` の runtime は `force` なしで全件 effect-before-zero の `busy` となる。generic terminal は対象外である。
 
-停止後、client は daemon build policy を適用して seamless rollover を完了し、返された exact target を
+daemon build mismatch と発行済み credential が同時にある場合、`--restart-agents` でも client 側で先に停止せず replacement を
+保留する。credential が 0 の診断後も old active は `ActiveControl` admission を close / drain し、全 provisioned credential が
+なお 0 であることを最初の durable handoff write より前に再検証する。競合した Agent launch または検査不能は barrier を元へ戻して
+handoff を拒否する。build が同じときの integration repair では、停止後に client が返された exact target を
 `resume_agent_with_current_integration` へ渡す。この repair-only request は source の旧 adapter revision を fence として
 保持したまま、active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope /
 lineage を変えずに hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
-旧 daemon がこの診断 vocabulary を実装していない場合、live Agent が無ければ通常 rollover を行う。live Agent がある場合は
-一覧を返して停止を保留し、`--restart-agents --force` が同時に指定された場合だけ既存の cold restart を使う。この互換経路は
-generic terminal も停止し得るが、再起動後も今回停止した runtime ID に対応する exact target だけを resume する。
+旧 daemon がこの診断 vocabulary または server-side handoff fence を実装していない場合、planned rollover は行わない。
+利用者が明示した `--force` の cold replacement だけを互換経路とし、live Agent がある場合はさらに
+`--restart-agents` を必要とする。この経路は generic terminal も停止し得るが、再起動後も今回停止した runtime ID に
+対応する exact target だけを resume する。内部 managed Doctor はこの強制 authority を持たず非 0 で保留する。
 
 ## Work Run observation and control
 
@@ -1253,7 +1261,8 @@ owner-generation runtime shard は
 提供し、client 側の owner routing は本節の契約として実装済みである。shipping の `serve` は自分の
 generation を durable registry の active として登録するため、`generations.json` は production に存在する
 （[5. daemon の first activation](05-daemon.md#first-activation)）。shipping の `daemon restart` は live runtime が
-あれば standby を stage し、old active へ [`rollover` request](#daemon-rollover-request) を送って gated handoff を
+あれば standby を stage し、old active へ [`rollover` request](#daemon-rollover-request) を送る。live Agent credential が
+無い場合だけ gated handoff を
 起動する。shipping の replacement は 1 本の durable operation に集約され、old active が IPC request から gated
 handoff を駆動する（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。
 

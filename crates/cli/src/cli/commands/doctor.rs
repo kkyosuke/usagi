@@ -2,13 +2,14 @@
 
 use std::io::{self, Write};
 
-use crate::cli::{Run, RunOutcome, TuiRequest};
+use crate::cli::{DoctorInvocation, Run, RunOutcome, TuiRequest};
 
 /// `usagi doctor` のハンドラ。
 pub struct Doctor {
     pub fix: bool,
     pub restart_agents: bool,
     pub force: bool,
+    pub invocation: DoctorInvocation,
 }
 
 impl Run for Doctor {
@@ -17,6 +18,7 @@ impl Run for Doctor {
             fix: self.fix,
             restart_agents: self.restart_agents,
             force: self.force,
+            invocation: self.invocation,
         }))
     }
 }
@@ -24,7 +26,7 @@ impl Run for Doctor {
 #[cfg(test)]
 mod tests {
     use crate::cli::execute;
-    use crate::cli::{Command, RunOutcome, TuiRequest};
+    use crate::cli::{Command, DoctorInvocation, RunOutcome, TuiRequest};
 
     #[test]
     fn requests_doctor_without_output() {
@@ -32,6 +34,7 @@ mod tests {
             fix: false,
             restart_agents: false,
             force: false,
+            managed_update_sync: false,
         });
         assert_eq!(
             outcome,
@@ -39,6 +42,7 @@ mod tests {
                 fix: false,
                 restart_agents: false,
                 force: false,
+                invocation: DoctorInvocation::User,
             })
         );
         assert!(output.is_empty());

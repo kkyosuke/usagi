@@ -771,8 +771,8 @@ fn a_rollover_is_refused_while_a_connected_client_cannot_route_by_owner() {
         daemon_process: None,
     };
     assert_eq!(
-        admit_rollover(&ledger, snapshot.document(), revision, &successor),
-        Err(RolloverRefusal::ClientRoutingUnsupported { connections: 1 })
+        admit_rollover(&ledger, snapshot.document(), revision, &successor).err(),
+        Some(RolloverRefusal::ClientRoutingUnsupported { connections: 1 })
     );
     // Effect zero: both endpoints still serve, both children still run.
     assert_eq!(
@@ -789,10 +789,7 @@ fn a_rollover_is_refused_while_a_connected_client_cannot_route_by_owner() {
         vec![usagi_core::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY.into()];
     let ledger = RoutingLedger::new();
     ledger.admit(usagi_core::domain::id::ConnectionId::new(), &legacy);
-    assert_eq!(
-        admit_rollover(&ledger, snapshot.document(), revision, &successor),
-        Ok(())
-    );
+    assert!(admit_rollover(&ledger, snapshot.document(), revision, &successor).is_ok());
     world.shutdown();
 }
 

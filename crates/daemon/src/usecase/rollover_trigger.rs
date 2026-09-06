@@ -12,7 +12,7 @@ use usagi_core::infrastructure::ipc::{OperationId, ServerHello};
 use super::authority::admission::AdmissionGate;
 use super::authority::registry::{GenerationRegistry, RegistryFailure};
 use super::authority::rollover::{
-    CurrentLocator, HandoffFailure, RolloverPlan, execute_gated_rollover,
+    CurrentLocator, HandoffFailure, RolloverPlan, execute_gated_rollover_with_guard,
 };
 use super::authority::routing::RoutingLedger;
 use super::authority::standby::{ReadinessRefusal, StandbyProbe, verify_readiness};
@@ -78,6 +78,32 @@ pub fn execute(
     probe: &dyn StandbyProbe,
     operation: &OperationId,
 ) -> Result<super::authority::handoff::RolloverOutcome, RolloverTriggerFailure> {
+    execute_with_guard(
+        registry,
+        locator,
+        gate,
+        ledger,
+        probe,
+        operation,
+        &mut || Ok(()),
+    )
+}
+
+/// Verify the successor, close and drain active control, then evaluate the
+/// process-local handoff guard immediately before the first durable write.
+///
+/// # Errors
+/// Returns the same typed trigger failures as [`execute`], including a guard
+/// refusal which leaves the old authority active.
+pub fn execute_with_guard(
+    registry: &GenerationRegistry,
+    locator: &dyn CurrentLocator,
+    gate: &AdmissionGate,
+    ledger: &RoutingLedger,
+    probe: &dyn StandbyProbe,
+    operation: &OperationId,
+    guard: &mut dyn FnMut() -> Result<(), super::authority::routing::RolloverRefusal>,
+) -> Result<super::authority::handoff::RolloverOutcome, RolloverTriggerFailure> {
     let snapshot = registry.load()?;
     let document = snapshot.document();
     let active = document
@@ -105,17 +131,11 @@ pub fn execute(
         ledger,
         successor: &hello,
         planned_revision: document.revision,
+        from: Some(active.generation),
+        to: successor.generation,
     };
-    execute_gated_rollover(
-        registry,
-        locator,
-        Some(gate),
-        &plan,
-        operation,
-        Some(active.generation),
-        successor.generation,
-    )
-    .map_err(Into::into)
+    execute_gated_rollover_with_guard(registry, locator, gate, &plan, operation, guard)
+        .map_err(Into::into)
 }
 
 #[cfg(test)]

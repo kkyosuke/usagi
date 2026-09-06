@@ -3453,9 +3453,10 @@ impl usagi_daemon::presentation::ipc::ConnectionFence for CensusConnectionFence<
         &self,
         connection: ConnectionId,
         hello: &usagi_core::infrastructure::ipc::ClientHello,
-    ) {
+    ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+        self.inner.admitted(connection, hello)?;
         self.cleanup.connected(connection, self.peer_pid);
-        self.inner.admitted(connection, hello);
+        Ok(())
     }
 
     fn admit(
@@ -5456,12 +5457,18 @@ fn start_ipc_accept_loop(
                                 let mut reader = PreHandshakeDeadlineStream::new(stream, deadline);
                                 let mut writer =
                                     PreHandshakeDeadlineStream::new(writer, deadline);
+                                let census_fence = CensusConnectionFence {
+                                    inner: connection_fence.as_ref(),
+                                    cleanup: connection_cleanup,
+                                    peer_pid: peer_process.pid,
+                                };
                                 let admitted =
-                                    usagi_daemon::presentation::ipc::handshake_admitted_with(
+                                    usagi_daemon::presentation::ipc::handshake_admitted_with_fence(
                                         &mut reader,
                                         &mut writer,
                                         &server,
                                         Some(connection_resolver.as_ref()),
+                                        &census_fence,
                                     );
                                 // Capacity covers the complete hello response, on
                                 // every success/refusal/error path, but never the
@@ -5500,6 +5507,12 @@ fn start_ipc_accept_loop(
                                     &connection_initial,
                                     admitted.client.workspace.as_ref(),
                                 ) else {
+                                    if let Some(connection) = admitted.registered_connection() {
+                                        usagi_daemon::presentation::ipc::ConnectionFence::disconnected(
+                                            &census_fence,
+                                            connection,
+                                        );
+                                    }
                                     ErrorLog::record(
                                         "daemon admitted connection closed: its workspace is no longer held",
                                     );
@@ -5509,12 +5522,24 @@ fn start_ipc_accept_loop(
                                 // policy for an admitted subscription. Failure to
                                 // remove it fails this socket closed.
                                 if let Err(error) = reader.clear_deadlines() {
+                                    if let Some(connection) = admitted.registered_connection() {
+                                        usagi_daemon::presentation::ipc::ConnectionFence::disconnected(
+                                            &census_fence,
+                                            connection,
+                                        );
+                                    }
                                     ErrorLog::record(&format!(
                                         "daemon admitted connection closed: reader pre-handshake deadline could not be cleared: {error}"
                                     ));
                                     return;
                                 }
                                 if let Err(error) = writer.clear_deadlines() {
+                                    if let Some(connection) = admitted.registered_connection() {
+                                        usagi_daemon::presentation::ipc::ConnectionFence::disconnected(
+                                            &census_fence,
+                                            connection,
+                                        );
+                                    }
                                     ErrorLog::record(&format!(
                                         "daemon admitted connection closed: writer pre-handshake deadline could not be cleared: {error}"
                                     ));
@@ -5544,11 +5569,6 @@ fn start_ipc_accept_loop(
                                         retention,
                                     );
                                 let mut metrics_observer = None;
-                                let census_fence = CensusConnectionFence {
-                                    inner: connection_fence.as_ref(),
-                                    cleanup: connection_cleanup,
-                                    peer_pid: peer_process.pid,
-                                };
                                 let result = usagi_daemon::presentation::ipc::handle_admitted_connection_with_terminal_and_observe(
                                     &mut reader,
                                     &mut writer,
@@ -5587,7 +5607,7 @@ fn start_ipc_accept_loop(
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
                                             Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
-                                            Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
+                                            Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, request_id, &body, hello),
                                             Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                             Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
                                             Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
@@ -8219,6 +8239,7 @@ fn record_session_lineage(
 fn dispatch_rollover(
     data_dir: &Path,
     fence: &GenerationFence,
+    agent: &SharedAgentRuntime,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -8238,7 +8259,7 @@ fn dispatch_rollover(
         .map(|file| GenerationRegistry::new(file, DEFAULT_GENERATION_LIMIT))
         .map_err(|error| error.to_string())
         .and_then(|registry| {
-            rollover_trigger::execute(
+            rollover_trigger::execute_with_guard(
                 &registry,
                 &CurrentLocatorFile::new(data_dir),
                 &fence.gate,
@@ -8248,6 +8269,23 @@ fn dispatch_rollover(
                     build: current_build(),
                 },
                 &operation,
+                &mut || {
+                    let credentials = agent
+                        .lock()
+                        .map_err(|_| {
+                            usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityUnavailable
+                        })?
+                        .provisioned_mcp_callers();
+                    if credentials == 0 {
+                        Ok(())
+                    } else {
+                        Err(
+                            usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityRetained {
+                                credentials,
+                            },
+                        )
+                    }
+                },
             )
             .map_err(|error| error.to_string())
         });
@@ -11132,6 +11170,14 @@ impl PrivateLockWait {
         limit: bootstrap::READINESS_CEILING.saturating_add(Duration::from_secs(3)),
         poll: Self::POLL,
     };
+
+    /// Explicit lifecycle custody can span standby verification and, after the
+    /// authority commit, successor serving hydration. Both stages have their
+    /// own 30-second window; the margin covers process launch and final output.
+    const LIFECYCLE: Self = Self {
+        limit: Duration::from_secs(65),
+        poll: Self::POLL,
+    };
 }
 
 fn lock_private_exclusive(
@@ -12484,8 +12530,20 @@ impl usagi_daemon::presentation::ipc::ConnectionFence for GenerationFence {
         &self,
         connection: usagi_core::domain::id::ConnectionId,
         hello: &usagi_core::infrastructure::ipc::ClientHello,
-    ) {
+    ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
         self.ledger.admit(connection, hello);
+        if self.gate.role() != GenerationRole::Active
+            && !usagi_core::infrastructure::ipc::supports_owner_generation_routing(
+                &hello.capabilities,
+            )
+        {
+            self.ledger.disconnect(&connection);
+            return Err(usagi_core::infrastructure::ipc::ProtocolError::new(
+                usagi_core::infrastructure::ipc::ErrorCode::GenerationRolledOver,
+                "generation committed a rollover while this connection was waiting",
+            ));
+        }
+        Ok(())
     }
 
     fn admit(
@@ -13494,9 +13552,21 @@ struct ServeLauncher {
     exe: PathBuf,
     launched: RefCell<Option<std::process::Child>>,
 }
+
+struct LaunchedStandby {
+    child: std::process::Child,
+    record: DaemonRecord,
+}
+
+impl LaunchedStandby {
+    fn pid(&self) -> u32 {
+        self.record.pid
+    }
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl ServeLauncher {
-    fn launch_standby(&self) -> std::io::Result<u32> {
+    fn launch_standby(&self) -> std::io::Result<LaunchedStandby> {
         let mut command = std::process::Command::new(&self.exe);
         command
             .args(["daemon", "serve", "--standby"])
@@ -13505,7 +13575,20 @@ impl ServeLauncher {
             .stderr(std::process::Stdio::null());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        command.spawn().map(|child| child.id())
+        let mut child = command.spawn()?;
+        let pid = child.id();
+        let identity = match process_start_identity(pid) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        Ok(LaunchedStandby {
+            child,
+            record: DaemonRecord::identified(pid, identity),
+        })
     }
 }
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
@@ -14068,6 +14151,12 @@ struct IpcRolloverRequester<'a> {
     launcher: &'a ServeLauncher,
 }
 
+/// Planned rollover uses the same slow-but-healthy startup allowance as a cold
+/// daemon start. Promotion hydrates the full runtime after the durable handoff,
+/// so registry commit alone is not readiness.
+const ROLLOVER_STARTUP_WINDOW: Duration = Duration::from_secs(30);
+const ROLLOVER_PROBE_BUDGET_MS: u64 = 250;
+
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl IpcRolloverRequester<'_> {
     fn committed(&self, operation: &OperationId, standby_pid: u32) -> bool {
@@ -14087,16 +14176,24 @@ impl IpcRolloverRequester<'_> {
             })
     }
 
-    fn stop_standby(pid: u32) {
-        let Ok(identity) = process_start_identity(pid) else {
+    fn stop_standby(mut standby: LaunchedStandby) {
+        if standby
+            .child
+            .try_wait()
+            .is_ok_and(|status| status.is_some())
+        {
             return;
-        };
-        let record = DaemonRecord::identified(pid, identity);
-        let _ = Terminator::terminate(&SigtermTerminator, &record);
+        }
+        // Signal only the identity captured while the spawned Child still held
+        // custody of its PID. Re-reading identity here could authenticate an
+        // unrelated process if a failed standby had exited and the PID was
+        // reused before cleanup.
+        let _ = Terminator::terminate(&SigtermTerminator, &standby.record);
+        reap_child(standby.child);
     }
 
-    fn wait_until_verified(&self, pid: u32) -> std::io::Result<()> {
-        for _ in 0..40 {
+    fn wait_until_verified(&self, pid: u32, deadline: Instant) -> std::io::Result<()> {
+        loop {
             if read_registry_document(self.data_dir)
                 .ok()
                 .flatten()
@@ -14110,10 +14207,99 @@ impl IpcRolloverRequester<'_> {
             {
                 return Ok(());
             }
+            if Instant::now() >= deadline {
+                break;
+            }
             RealSleeper.sleep();
         }
         Err(std::io::Error::other(
-            "standby did not reach verified readiness within the startup window",
+            "standby did not reach verified readiness within 30 seconds",
+        ))
+    }
+
+    fn wait_until_committed(&self, operation: &OperationId, pid: u32, deadline: Instant) -> bool {
+        loop {
+            if self.committed(operation, pid) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            RealSleeper.sleep();
+        }
+    }
+
+    /// A committed successor is not ready until its active runtime answers a
+    /// harmless inventory request. The registry and locator change before the
+    /// standby custody loop finishes promotion, and returning in that window
+    /// exposes `generation_rolled_over` to the command immediately following a
+    /// successful restart.
+    fn successor_is_serving(&self, pid: u32) -> bool {
+        use usagi_core::usecase::client::{DaemonReply, TenantAction};
+
+        let Some(generation) = read_registry_document(self.data_dir)
+            .ok()
+            .flatten()
+            .and_then(|document| {
+                let current = document.current?;
+                document
+                    .generations
+                    .iter()
+                    .find(|entry| {
+                        entry.generation == current
+                            && entry.process.pid == pid
+                            && entry.role == GenerationRole::Active
+                    })
+                    .map(|entry| entry.generation)
+            })
+        else {
+            return false;
+        };
+        let Ok(locator) = read_locator(&self.data_dir.join("daemon")) else {
+            return false;
+        };
+        if locator.generation.0 != generation.as_str() {
+            return false;
+        }
+        let Ok(mut client) = connect_deadline_client(
+            self.data_dir,
+            ClientPolicy::cli(),
+            current_build(),
+            ClientWorkspace::Unbound,
+            SystemClock::new(),
+            ROLLOVER_PROBE_BUDGET_MS,
+        ) else {
+            return false;
+        };
+        if client.daemon_generation().0 != generation.as_str() {
+            return false;
+        }
+        matches!(
+            client.request(DaemonRequest::Tenant {
+                action: TenantAction::Inventory,
+                root: None,
+                force: false,
+            }),
+            Ok(DaemonReply::Ok(_))
+        )
+    }
+
+    fn wait_until_serving(&self, pid: u32) -> std::io::Result<()> {
+        // Promotion hydrates the active runtime only after W2. Give that second
+        // healthy-but-slow stage its own complete readiness budget instead of
+        // inheriting whatever standby verification happened to leave behind.
+        let deadline = Instant::now() + ROLLOVER_STARTUP_WINDOW;
+        loop {
+            if self.successor_is_serving(pid) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            RealSleeper.sleep();
+        }
+        Err(std::io::Error::other(
+            "successor committed authority but did not begin serving within 30 seconds",
         ))
     }
 }
@@ -14121,9 +14307,11 @@ impl IpcRolloverRequester<'_> {
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl RolloverRequester for IpcRolloverRequester<'_> {
     fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
-        let pid = self.launcher.launch_standby()?;
-        if let Err(error) = self.wait_until_verified(pid) {
-            Self::stop_standby(pid);
+        let deadline = Instant::now() + ROLLOVER_STARTUP_WINDOW;
+        let standby = self.launcher.launch_standby()?;
+        let pid = standby.pid();
+        if let Err(error) = self.wait_until_verified(pid, deadline) {
+            Self::stop_standby(standby);
             return Err(error);
         }
         // Rollover is a machine-wide lifecycle request. Binding this control
@@ -14136,18 +14324,32 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
                     operation_id: operation.0.clone(),
                 })
             });
-        match result {
-            Ok(_) => Ok(format!(
-                "daemon authority handed off (operation {})",
-                operation.0
-            )),
-            Err(error) => {
-                if !self.committed(operation, pid) {
-                    Self::stop_standby(pid);
-                }
-                Err(std::io::Error::other(error.to_string()))
-            }
+        let mut committed = self.committed(operation, pid);
+        if !committed
+            && result
+                .as_ref()
+                .is_err_and(usagi_core::usecase::client::ClientError::is_transport_failure)
+        {
+            // A transport failure cannot distinguish a request that never
+            // arrived from a reply lost while W2 was becoming observable.
+            committed = self.wait_until_committed(operation, pid, deadline);
         }
+        if !committed {
+            Self::stop_standby(standby);
+            return Err(std::io::Error::other(match result {
+                Ok(_) => "rollover returned before its authority commit".to_owned(),
+                Err(error) => error.to_string(),
+            }));
+        }
+        // A lost ACK after commit is a success once the committed successor is
+        // serving. Never roll back an observable handoff because the response
+        // frame was lost.
+        reap_child(standby.child);
+        self.wait_until_serving(pid)?;
+        Ok(format!(
+            "daemon authority handed off (operation {})",
+            operation.0
+        ))
     }
 }
 
@@ -14451,9 +14653,20 @@ pub(crate) fn run(
     info: &AppInfo,
     operation: Option<usagi_core::infrastructure::ipc::OperationId>,
 ) -> std::io::Result<()> {
+    run_with_lifecycle_custody(out, command, info, operation, None)
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=daemon_stop_waits_for_lifecycle_custody
+fn run_with_lifecycle_custody(
+    out: &mut dyn Write,
+    command: CliDaemonCommand,
+    info: &AppInfo,
+    operation: Option<usagi_core::infrastructure::ipc::OperationId>,
+    lifecycle_custody: Option<&std::fs::File>,
+) -> std::io::Result<()> {
     install_panic_logger();
     match panic::catch_unwind(AssertUnwindSafe(|| {
-        run_inner(out, command, info, operation)
+        run_inner(out, command, info, operation, lifecycle_custody.is_some())
     })) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => {
@@ -14601,12 +14814,32 @@ fn run_inner(
     command: CliDaemonCommand,
     info: &AppInfo,
     operation: Option<usagi_core::infrastructure::ipc::OperationId>,
+    lifecycle_custody_held: bool,
 ) -> std::io::Result<()> {
     if let Some(result) = run_broker_lifecycle_command(&command) {
         return result;
     }
     let data_dir = prepare_private_data_dir()?;
     let daemon_dir = data_dir.join("daemon");
+    // Stop and replacement observe and mutate one machine-wide daemon
+    // lifecycle. Sharing this lifecycle lock with managed update makes that
+    // observation linearizable: a stop either completes before update sees
+    // absence, or runs after update has finished, never in the gap between its
+    // owner observation and replacement plan. This is distinct from
+    // `bootstrap.lock`: a client holding the cold-start lock may spawn the
+    // lifecycle subprocess that reaches this point.
+    let _lifecycle_custody = if !lifecycle_custody_held
+        && matches!(
+            command,
+            CliDaemonCommand::Stop { .. } | CliDaemonCommand::Restart { .. }
+        ) {
+        Some(acquire_lifecycle_lock_io_within(
+            &data_dir,
+            PrivateLockWait::LIFECYCLE,
+        )?)
+    } else {
+        None
+    };
     if let CliDaemonCommand::Retire { path, force } = command {
         let root = paths::canonical_workspace_root(&path)
             .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
@@ -15488,18 +15721,118 @@ fn existing_policy_client(
 /// daemon to stop the Agent processes it still owns before rollover transfers
 /// control to the current binary.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
-pub(crate) fn diagnostic_client(policy: ClientPolicy) -> Result<LaneClient, ClientError> {
+pub(crate) fn diagnostic_client(
+    policy: ClientPolicy,
+    unbound: bool,
+) -> Result<LaneClient, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     connect_deadline_client(
         &data_dir,
         policy,
         current_build(),
-        client_workspace(),
+        if unbound {
+            ClientWorkspace::Unbound
+        } else {
+            client_workspace()
+        },
         SystemClock::new(),
         policy.timeout_ms,
     )
     .map_err(|error| ClientError::Unavailable(error.to_string()))
+}
+
+/// Cross-process lifecycle custody for one managed update synchronization.
+///
+/// The updater holds both client bootstrap and explicit lifecycle custody from
+/// its final daemon observation through replacement and serving verification.
+/// Neither ordinary bootstrap nor a concurrent stop/restart can interleave
+/// those steps. When absence was observed, the singleton lock is held too so a
+/// direct serve cannot publish until the no-op synchronization has linearized.
+pub(crate) struct ManagedUpdateLock {
+    _bootstrap: std::fs::File,
+    lifecycle: std::fs::File,
+    _absence: Option<FileInstanceLock>,
+}
+
+/// Observe the exact published owner without cold-starting one, while holding
+/// the lifecycle locks needed to keep that observation stable.
+///
+/// A stale crash record is recovered under the same bootstrap lock. `None`
+/// means the singleton lock proved that no daemon is active; a live but not yet
+/// reachable owner remains an error rather than being mistaken for absence.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=managed_update_with_a_live_generic_pty_keeps_the_draining_owner
+pub(crate) fn managed_update_diagnostic_client(
+    policy: ClientPolicy,
+) -> Result<(ManagedUpdateLock, Option<LaneClient>), ClientError> {
+    let data_dir = client_result(paths::data_dir())?;
+    let bootstrap = acquire_bootstrap_lock(&data_dir)?;
+    let lifecycle = acquire_lifecycle_lock_io_within(&data_dir, PrivateLockWait::LIFECYCLE)
+        .map_err(|error| map_bootstrap_lock_error(&error))?;
+    let connect = || {
+        connect_deadline_client(
+            &data_dir,
+            policy,
+            current_build(),
+            ClientWorkspace::Unbound,
+            SystemClock::new(),
+            policy.timeout_ms,
+        )
+    };
+    match connect() {
+        Ok(client) => Ok((
+            ManagedUpdateLock {
+                _bootstrap: bootstrap,
+                lifecycle,
+                _absence: None,
+            },
+            Some(client),
+        )),
+        Err(connect_error) => {
+            match recover_stale_client_endpoint(&data_dir)
+                .map_err(|error| ClientError::Unavailable(error.to_string()))?
+            {
+                bootstrap::StaleRecovery::OwnerActive => {
+                    return Err(ClientError::Unavailable(
+                        "daemon owner is active but its endpoint is not ready".into(),
+                    ));
+                }
+                bootstrap::StaleRecovery::Recovered | bootstrap::StaleRecovery::NotProven => {}
+            }
+            let absence = FileInstanceLock {
+                path: data_dir.join("daemon").join("daemon.lock"),
+                held: RefCell::new(None),
+            };
+            if !absence
+                .acquire()
+                .map_err(|error| ClientError::Unavailable(error.to_string()))?
+            {
+                return Err(ClientError::Unavailable(
+                    "daemon owner became active during managed update synchronization".into(),
+                ));
+            }
+            let store = DaemonRecordStore::new(FsRecordFile {
+                path: data_dir.join("daemon").join("daemon.json"),
+            });
+            let record = store
+                .load()
+                .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+            let current = data_dir.join("daemon").join("current.json").is_file();
+            if record.is_some() || current {
+                return Err(ClientError::Unavailable(format!(
+                    "daemon absence could not be proved after endpoint failure: {connect_error}"
+                )));
+            }
+            Ok((
+                ManagedUpdateLock {
+                    _bootstrap: bootstrap,
+                    lifecycle,
+                    _absence: Some(absence),
+                },
+                None,
+            ))
+        }
+    }
 }
 
 /// Whether a daemon current locator is published. Doctor uses this only to
@@ -15748,8 +16081,8 @@ pub(crate) fn replace_running_daemon(
     force: bool,
     info: &AppInfo,
 ) -> std::io::Result<Result<(), ClientError>> {
-    let trigger = match request_replacement(policy) {
-        Ok(trigger) => trigger,
+    let (_bootstrap, trigger) = match request_replacement(policy) {
+        Ok(prepared) => prepared,
         Err(error) => return Ok(Err(error)),
     };
     run(
@@ -15761,14 +16094,49 @@ pub(crate) fn replace_running_daemon(
     .map(Ok)
 }
 
+/// Replace a published daemon while the managed updater already holds the
+/// bootstrap and lifecycle locks returned by
+/// [`managed_update_diagnostic_client`].
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=managed_update_with_a_live_generic_pty_keeps_the_draining_owner
+pub(crate) fn replace_running_daemon_during_update(
+    out: &mut dyn Write,
+    policy: ClientPolicy,
+    info: &AppInfo,
+    lock: &ManagedUpdateLock,
+) -> std::io::Result<Result<(), ClientError>> {
+    let trigger = match request_replacement_while_locked(policy) {
+        Ok(trigger) => trigger,
+        Err(error) => return Ok(Err(error)),
+    };
+    run_with_lifecycle_custody(
+        out,
+        CliDaemonCommand::Restart { force: false },
+        info,
+        Some(trigger.operation_id),
+        Some(&lock.lifecycle),
+    )
+    .map(Ok)
+}
+
 /// Requests intentional replacement of the currently running daemon artifact.
 /// This only creates the deterministic trigger; it never sends a stop signal or
 /// spawns a second daemon. [`replace_running_daemon`] consumes it.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
-fn request_replacement(policy: ClientPolicy) -> Result<BuildRolloverTrigger, ClientError> {
+fn request_replacement(
+    policy: ClientPolicy,
+) -> Result<(std::fs::File, BuildRolloverTrigger), ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
-    let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
+    let bootstrap = acquire_bootstrap_lock(&data_dir)?;
+    request_replacement_while_locked(policy).map(|trigger| (bootstrap, trigger))
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
+fn request_replacement_while_locked(
+    policy: ClientPolicy,
+) -> Result<BuildRolloverTrigger, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let expected_build = current_build();
     // Replacing the running artifact is a lifecycle observation, not workspace
     // work: it reads the daemon's advertised build and sends no request, so it
@@ -15895,12 +16263,17 @@ pub(crate) fn current_build() -> BuildIdentity {
     // atomic replacement of the executable path cannot change what a running
     // daemon advertises. `build.rs` leaves the source id empty when it cannot
     // uniquely identify the source, which keeps the identity fail-safe unknown.
+    #[cfg(debug_assertions)]
+    let source_id = std::env::var("USAGI_TEST_BUILD_SOURCE_ID")
+        .unwrap_or_else(|_| env!("USAGI_BUILD_SOURCE_ID").to_owned());
+    #[cfg(not(debug_assertions))]
+    let source_id = env!("USAGI_BUILD_SOURCE_ID").to_owned();
     usagi_core::infrastructure::ipc::build_identity(
         env!("CARGO_PKG_VERSION"),
         env!("USAGI_BUILD_COMMIT"),
         env!("USAGI_BUILD_TARGET"),
         env!("USAGI_BUILD_PROFILE"),
-        env!("USAGI_BUILD_SOURCE_ID"),
+        &source_id,
     )
 }
 /// Connects one exact-owner-verified daemon session. `arm` wraps the accepted
@@ -16032,6 +16405,26 @@ fn acquire_bootstrap_lock_io_within(
             &path,
             "bootstrap lock",
             PrivateLockModePolicy::OwnerLegacy0644,
+            wait,
+        )
+    })()
+}
+
+/// Serializes explicit stop/restart with managed update's final observation,
+/// replacement, and serving verification. It is separate from the client
+/// bootstrap lock because a bootstrap owner launches a lifecycle subprocess
+/// while continuing to hold its own lock.
+fn acquire_lifecycle_lock_io_within(
+    data_dir: &Path,
+    wait: PrivateLockWait,
+) -> std::io::Result<std::fs::File> {
+    (|| {
+        ensure_private_dir_all(data_dir)?;
+        let path = data_dir.join("daemon").join("lifecycle.lock");
+        lock_private_exclusive(
+            &path,
+            "daemon lifecycle lock",
+            PrivateLockModePolicy::CrashResidue,
             wait,
         )
     })()
@@ -17092,6 +17485,8 @@ mod tests {
         // Reopening after the creating fd closes is the regression boundary:
         // the former code left a mode-000 node under umask 0777.
         let bootstrap = acquire_bootstrap_lock(&data).unwrap();
+        let lifecycle =
+            acquire_lifecycle_lock_io_within(&data, PrivateLockWait::LIFECYCLE).unwrap();
         let reopened_flags = unsafe { libc::fcntl(bootstrap.as_raw_fd(), libc::F_GETFD) };
         assert_ne!(reopened_flags, -1);
         assert_ne!(reopened_flags & libc::FD_CLOEXEC, 0);
@@ -17121,6 +17516,7 @@ mod tests {
             "daemon.lock",
             "record.lock",
             "bootstrap.lock",
+            "lifecycle.lock",
             "current.json",
             "current.lock",
         ] {
@@ -17134,7 +17530,7 @@ mod tests {
                 "{private_file} did not override umask 0777"
             );
         }
-        drop((listener, instance, bootstrap));
+        drop((listener, instance, lifecycle, bootstrap));
         unsafe {
             libc::umask(previous_umask);
         }
@@ -17231,7 +17627,24 @@ mod tests {
         let bootstrap = acquire_bootstrap_lock(&bootstrap_data).unwrap();
         assert_private_lock_descriptor(&bootstrap);
 
-        drop((bootstrap, instance));
+        let lifecycle_path = bootstrap_data.join("daemon/lifecycle.lock");
+        fail_private_lock_after_create(&lifecycle_path);
+        assert!(
+            acquire_lifecycle_lock_io_within(&bootstrap_data, PrivateLockWait::LIFECYCLE).is_err()
+        );
+        assert_eq!(
+            std::fs::metadata(&lifecycle_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0
+        );
+        let lifecycle =
+            acquire_lifecycle_lock_io_within(&bootstrap_data, PrivateLockWait::LIFECYCLE).unwrap();
+        assert_private_lock_descriptor(&lifecycle);
+
+        drop((lifecycle, bootstrap, instance));
         unsafe {
             libc::umask(previous_umask);
         }
@@ -17302,6 +17715,8 @@ mod tests {
         assert!(PrivateLockWait::BOOTSTRAP.limit > bootstrap::READINESS_CEILING);
         assert!(PrivateLockWait::BOOTSTRAP.poll < PrivateLockWait::BOOTSTRAP.limit);
         assert!(PrivateLockWait::RECORD.limit < PrivateLockWait::BOOTSTRAP.limit);
+        assert!(PrivateLockWait::LIFECYCLE.limit > ROLLOVER_STARTUP_WINDOW * 2);
+        assert!(PrivateLockWait::LIFECYCLE.poll < PrivateLockWait::LIFECYCLE.limit);
     }
 
     /// Every daemon socket this composition root builds carries an armed
@@ -26028,7 +26443,9 @@ instructions = "{instructions}"
 
         let (outcomes, seen) = serve_through_fence(
             &fence,
-            &fence_client_hello(Vec::new()),
+            &fence_client_hello(vec![
+                usagi_core::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY.to_owned(),
+            ]),
             &[session_request(), attach_request()],
         );
         assert_eq!(outcomes.len(), 2);
@@ -26057,8 +26474,8 @@ instructions = "{instructions}"
         let old_build = fence_client_hello(Vec::new());
 
         let (first, second) = (ConnectionId::new(), ConnectionId::new());
-        fence.admitted(first, &routing);
-        fence.admitted(second, &old_build);
+        fence.admitted(first, &routing).unwrap();
+        fence.admitted(second, &old_build).unwrap();
         assert_eq!(fence.ledger.connections(), 2);
         assert_eq!(fence.ledger.unsupported(), 1);
 
@@ -26069,8 +26486,37 @@ instructions = "{instructions}"
         assert_eq!(fence.ledger.unsupported(), 0);
     }
 
-    /// The loop itself performs that pair: a connection is admitted after the
-    /// handshake and forgotten on every exit, so the ledger tracks live
+    #[test]
+    fn a_connection_unblocked_after_commit_must_support_owner_routing() {
+        use usagi_daemon::presentation::ipc::ConnectionFence;
+
+        let fence = fence_in(GenerationRole::Active);
+        fence.gate.close(LeaseClass::ActiveControl);
+        fence.gate.await_drain(LeaseClass::ActiveControl).unwrap();
+        fence.gate.enter_draining().unwrap();
+
+        let refused = fence
+            .admitted(ConnectionId::new(), &fence_client_hello(Vec::new()))
+            .unwrap_err();
+        assert_eq!(
+            refused.code,
+            usagi_core::infrastructure::ipc::ErrorCode::GenerationRolledOver
+        );
+        assert_eq!(fence.ledger.connections(), 0);
+
+        fence
+            .admitted(
+                ConnectionId::new(),
+                &fence_client_hello(vec![
+                    usagi_core::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY.to_owned(),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(fence.ledger.connections(), 1);
+    }
+
+    /// The loop itself performs that pair: a connection is admitted before
+    /// handshake success and forgotten on every exit, so the ledger tracks live
     /// connections rather than historical ones.
     #[test]
     fn serving_a_connection_admits_it_to_the_ledger_and_forgets_it_at_the_end() {
@@ -26550,7 +26996,9 @@ instructions = "{instructions}"
             peer_pid: 41,
         };
 
-        fence.admitted(connection, &fence_client_hello(Vec::new()));
+        fence
+            .admitted(connection, &fence_client_hello(Vec::new()))
+            .unwrap();
         assert_eq!(
             inbox.live(),
             (BTreeSet::from([connection]), BTreeSet::from([41]))
