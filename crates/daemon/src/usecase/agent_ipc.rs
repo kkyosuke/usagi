@@ -29,11 +29,11 @@ use usagi_core::{
             AgentCapability, AgentIntegrationDiagnosis, AgentIntegrationRevision, AgentInventory,
             AgentProfileId, AgentResumableInventoryItem, AgentResumeRelation, AgentResumeTarget,
             AgentRuntimeInventoryItem, AgentRuntimeInventoryState, AgentStatus,
-            AgentWorkspaceObservation, CallerRef, DispatchBinding, DispatchRun, InboxKind,
-            InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
-            OutdatedAgentRuntime, ProviderCaptureProvenance, ProviderKind, ProviderResumePhase,
-            ProviderResumeReason, ProviderResumeRef, ProviderResumeStatus, ProviderSessionId,
-            RunStatus, WorkerRef, dominant_agent_status,
+            AgentWorkspaceObservation, CallerRef, DaemonRestartAgent, DaemonRestartAgentPlan,
+            DispatchBinding, DispatchRun, InboxKind, InboxMessage, LaunchMode, LaunchRequest,
+            LaunchScope, ModelSelector, OutdatedAgentRuntime, ProviderCaptureProvenance,
+            ProviderKind, ProviderResumePhase, ProviderResumeReason, ProviderResumeRef,
+            ProviderResumeStatus, ProviderSessionId, RunStatus, WorkerRef, dominant_agent_status,
         },
         id::{
             AgentContinuationRef, AgentId, AgentRuntimeId, AgentRuntimeRef, CompletionFence,
@@ -379,6 +379,25 @@ pub struct AgentRuntime {
     /// Like the caller credentials, it is in-memory only: a phase report refines
     /// a live runtime's projection and must fail closed across daemon restart.
     reported_phases: BTreeMap<AgentRuntimeId, AgentPhase>,
+}
+
+/// A daemon-restart stop that failed, including the exact subset already
+/// interrupted before the failure became observable.
+#[derive(Debug)]
+pub struct DaemonRestartInterruptionError {
+    /// The failure returned to the requesting client.
+    pub error: ProtocolError,
+    /// Sources whose processes were already stopped and must be resumed.
+    pub interrupted: DaemonRestartAgentPlan,
+}
+
+impl DaemonRestartInterruptionError {
+    fn before_effect(error: ProtocolError) -> Self {
+        Self {
+            error,
+            interrupted: DaemonRestartAgentPlan { agents: Vec::new() },
+        }
+    }
 }
 
 impl AgentRuntime {
@@ -1742,6 +1761,193 @@ impl AgentRuntime {
             outdated_mcp_children,
             provisioned_mcp_callers: Some(self.mcp_callers.len()),
         })
+    }
+
+    /// Plans an exact, machine-wide stop/resume set for daemon replacement.
+    ///
+    /// Every process that can still be an Agent owner must be represented by a
+    /// resumable target. The plan is effect-free; the same selection is checked
+    /// again inside the rollover active-control barrier before any process is
+    /// interrupted.
+    pub fn plan_daemon_restart_agents(
+        &self,
+        expected: &[AgentIntegrationRevision],
+        force: bool,
+    ) -> Result<DaemonRestartAgentPlan, ProtocolError> {
+        let expected = expected_integration_revisions(expected)?;
+        let records = self.coordinator.snapshot().records;
+        let failed = self.failed_dispatch_ids().unwrap_or_default();
+        if records.iter().any(|record| {
+            holds_live_or_unknown_agent(record.state)
+                && !matches!(
+                    record.state,
+                    super::runtime::RuntimeState::Reserved | super::runtime::RuntimeState::Running
+                )
+        }) {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "an Agent process has ownership-unknown state; no Agent was stopped",
+            ));
+        }
+        let mut agents = records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.state,
+                    super::runtime::RuntimeState::Reserved | super::runtime::RuntimeState::Running
+                ) && record.superseded_by.is_none()
+            })
+            .map(|record| {
+                let expected_revision = expected
+                    .get(record.launch.plan.profile_id.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "a live Agent profile has no current integration revision",
+                        )
+                    })?;
+                let (available, _) = Self::repair_source_availability(record, &records);
+                let target = resume_target(record).filter(|_| available).ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::Busy,
+                        "a live Agent has no exact provider resume metadata; no Agent was stopped",
+                    )
+                })?;
+                let phase = self.record_phase(record, &failed).1;
+                if !force && phase == AgentPhase::Running {
+                    return Err(ProtocolError::new(
+                        ErrorCode::Busy,
+                        "an Agent is running a prompt or tool; retry with --force to interrupt it",
+                    ));
+                }
+                Ok(DaemonRestartAgent {
+                    runtime: record.runtime.clone(),
+                    target,
+                    profile_id: record.launch.plan.profile_id.clone(),
+                    expected_revision,
+                    phase,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        agents.sort_by_key(|item| item.runtime.agent_runtime_id.as_str());
+        let workspaces = agents
+            .iter()
+            .map(|item| item.runtime.terminal.workspace_id)
+            .collect::<BTreeSet<_>>();
+        if workspaces.len() > 1 {
+            return Err(ProtocolError::new(
+                ErrorCode::Busy,
+                "live Agents span multiple workspaces; no Agent was stopped",
+            ));
+        }
+        let selected = agents
+            .iter()
+            .map(|item| item.runtime.agent_runtime_id)
+            .collect::<BTreeSet<_>>();
+        if self
+            .mcp_callers
+            .values()
+            .any(|caller| !selected.contains(&caller.runtime.agent_runtime_id))
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "daemon-provisioned MCP authority cannot be matched to a live Agent; no Agent was stopped",
+            ));
+        }
+        Ok(DaemonRestartAgentPlan { agents })
+    }
+
+    /// Interrupts the exact plan revalidated inside the rollover barrier.
+    pub fn interrupt_agents_for_daemon_restart(
+        &mut self,
+        expected: &[AgentIntegrationRevision],
+        selected: &[AgentRuntimeRef],
+        force: bool,
+    ) -> Result<DaemonRestartAgentPlan, Box<DaemonRestartInterruptionError>> {
+        let plan = self
+            .plan_daemon_restart_agents(expected, force)
+            .map_err(DaemonRestartInterruptionError::before_effect)
+            .map_err(Box::new)?;
+        let mut planned = plan
+            .agents
+            .iter()
+            .map(|item| item.runtime.clone())
+            .collect::<Vec<_>>();
+        let mut requested = selected.to_vec();
+        planned.sort_by_key(|runtime| runtime.agent_runtime_id.as_str());
+        requested.sort_by_key(|runtime| runtime.agent_runtime_id.as_str());
+        if requested.len() != selected.len() || requested != planned {
+            return Err(Box::new(DaemonRestartInterruptionError::before_effect(
+                ProtocolError::new(
+                    ErrorCode::StaleTarget,
+                    "live Agent selection changed before daemon handoff; no Agent was stopped",
+                ),
+            )));
+        }
+        let runtime_ids = plan
+            .agents
+            .iter()
+            .map(|item| item.runtime.agent_runtime_id.as_str())
+            .collect();
+        if let Err(error) =
+            self.coordinator
+                .interrupt_agents(&runtime_ids, &mut *self.store, &mut *self.pty)
+        {
+            let stopped = self
+                .coordinator
+                .snapshot()
+                .records
+                .into_iter()
+                .filter(|record| {
+                    runtime_ids.contains(&record.runtime.agent_runtime_id.as_str())
+                        && record.state == super::runtime::RuntimeState::Exited
+                })
+                .map(|record| record.runtime.agent_runtime_id.as_str())
+                .collect::<BTreeSet<_>>();
+            self.clear_daemon_restart_authority(&stopped);
+            return Err(Box::new(DaemonRestartInterruptionError {
+                error: map_runtime_error(error),
+                interrupted: DaemonRestartAgentPlan {
+                    agents: plan
+                        .agents
+                        .into_iter()
+                        .filter(|agent| stopped.contains(&agent.runtime.agent_runtime_id.as_str()))
+                        .collect(),
+                },
+            }));
+        }
+        self.clear_daemon_restart_authority(&runtime_ids);
+        Ok(plan)
+    }
+
+    /// Whether rollback/recovery must resume one source from a durable daemon
+    /// restart transaction.
+    ///
+    /// A transaction is persisted before interruption, so a pre-effect crash
+    /// can leave entries whose exact original runtime is still live. Those
+    /// entries are already recovered and must not be sent through the non-live
+    /// exact-resume path. Every other state is left to that path's full fences.
+    pub fn daemon_restart_restore_needed(
+        &self,
+        runtime: &AgentRuntimeRef,
+    ) -> Result<bool, ProtocolError> {
+        self.coordinator
+            .record_for(runtime)
+            .map(|record| {
+                !matches!(
+                    record.state,
+                    super::runtime::RuntimeState::Reserved | super::runtime::RuntimeState::Running
+                )
+            })
+            .map_err(map_runtime_error)
+    }
+
+    fn clear_daemon_restart_authority(&mut self, runtime_ids: &BTreeSet<String>) {
+        self.mcp_callers
+            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id.as_str()));
+        self.reported_phases
+            .retain(|runtime, _| !runtime_ids.contains(&runtime.as_str()));
     }
 
     /// Stops only outdated integrations selected by a diagnosis against the
@@ -4390,6 +4596,8 @@ mod tests {
         resize_failure: bool,
         write_failure: bool,
         terminate_success: bool,
+        terminate_calls: usize,
+        terminate_fail_at: Option<usize>,
         spawn_counter: Option<Arc<AtomicU32>>,
     }
     impl PtySpawner for Pty {
@@ -4421,6 +4629,10 @@ mod tests {
             &mut self,
             _: &TerminalRef,
         ) -> Result<(), super::super::runtime::TerminateReapError> {
+            self.terminate_calls += 1;
+            if self.terminate_fail_at == Some(self.terminate_calls) {
+                return Err(super::super::runtime::TerminateReapError);
+            }
             self.terminate_success
                 .then_some(())
                 .ok_or(super::super::runtime::TerminateReapError)
@@ -5396,6 +5608,301 @@ mod tests {
                 .terminal,
             admission.terminal,
             "missing exact provider metadata must be refused before termination"
+        );
+    }
+
+    #[test]
+    fn daemon_restart_plan_revalidates_every_live_agent_before_interrupting() {
+        let workspace = WorkspaceId::new();
+        let mut agent = runtime();
+        agent.pty = Box::new(Pty {
+            terminate_success: true,
+            ..Pty::default()
+        });
+        let admission = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: crate::usecase::claude::PROFILE_REVISION,
+        }];
+        assert_eq!(
+            agent
+                .plan_daemon_restart_agents(&expected, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::Busy
+        );
+        let credential = agent.mcp_callers.keys().next().cloned().unwrap();
+        agent
+            .report_agent_phase(&credential, AgentPhase::Waiting)
+            .unwrap();
+        let plan = agent.plan_daemon_restart_agents(&expected, false).unwrap();
+        assert_eq!(plan.agents.len(), 1);
+        assert_eq!(plan.agents[0].runtime.terminal, admission.terminal);
+        assert_eq!(plan.agents[0].phase, AgentPhase::Waiting);
+        assert!(
+            !agent
+                .daemon_restart_restore_needed(&plan.agents[0].runtime)
+                .unwrap()
+        );
+
+        let mut stale = plan.agents[0].runtime.clone();
+        stale.agent_runtime_id = AgentRuntimeId::new();
+        assert_eq!(
+            agent
+                .interrupt_agents_for_daemon_restart(&expected, &[stale], true,)
+                .unwrap_err()
+                .error
+                .code,
+            ErrorCode::StaleTarget
+        );
+        assert_eq!(agent.provisioned_mcp_callers(), 1);
+
+        let current = agent.plan_daemon_restart_agents(&expected, true).unwrap();
+        let stopped = agent
+            .interrupt_agents_for_daemon_restart(
+                &expected,
+                &current
+                    .agents
+                    .iter()
+                    .map(|item| item.runtime.clone())
+                    .collect::<Vec<_>>(),
+                true,
+            )
+            .unwrap();
+        assert_eq!(stopped, current);
+        assert!(
+            agent
+                .daemon_restart_restore_needed(&stopped.agents[0].runtime)
+                .unwrap()
+        );
+        assert_eq!(agent.provisioned_mcp_callers(), 0);
+        assert!(
+            agent
+                .inventory(workspace)
+                .runtimes
+                .iter()
+                .all(|item| item.state == AgentRuntimeInventoryState::Exited)
+        );
+    }
+
+    #[test]
+    fn daemon_restart_plan_refuses_every_unprovable_agent_authority() {
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: crate::usecase::claude::PROFILE_REVISION,
+        }];
+        let workspace = WorkspaceId::new();
+
+        let mut incomplete = runtime();
+        incomplete
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        assert_eq!(
+            incomplete
+                .plan_daemon_restart_agents(&[], true)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        let mut snapshot = incomplete.coordinator.snapshot();
+        snapshot.records[0].provider_resume = None;
+        incomplete.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        assert_eq!(
+            incomplete
+                .plan_daemon_restart_agents(&expected, true)
+                .unwrap_err()
+                .code,
+            ErrorCode::Busy
+        );
+
+        let mut unmatched = runtime();
+        unmatched
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = unmatched.mcp_callers.keys().next().cloned().unwrap();
+        unmatched
+            .mcp_callers
+            .get_mut(&credential)
+            .unwrap()
+            .runtime
+            .agent_runtime_id = AgentRuntimeId::new();
+        assert_eq!(
+            unmatched
+                .plan_daemon_restart_agents(&expected, true)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+
+        let mut historical = runtime();
+        let exited = historical
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        historical.exit(&exited.terminal, 0).unwrap();
+        assert!(
+            historical
+                .plan_daemon_restart_agents(&expected, true)
+                .unwrap()
+                .agents
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn daemon_restart_plan_refuses_agents_from_multiple_workspaces_before_stopping_any() {
+        let first_workspace = WorkspaceId::new();
+        let second_workspace = WorkspaceId::new();
+        let mut agent = runtime();
+        for workspace in [first_workspace, second_workspace] {
+            agent
+                .launch(
+                    &OperationId::new().to_string(),
+                    &AgentLaunchIntent {
+                        workspace,
+                        session: None,
+                        profile: Some(AgentProfileId::new("claude").unwrap()),
+                    },
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap();
+        }
+        for credential in agent.mcp_callers.keys().cloned().collect::<Vec<_>>() {
+            agent
+                .report_agent_phase(&credential, AgentPhase::Waiting)
+                .unwrap();
+        }
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: crate::usecase::claude::PROFILE_REVISION,
+        }];
+
+        let refusal = agent
+            .plan_daemon_restart_agents(&expected, false)
+            .unwrap_err();
+
+        assert_eq!(refusal.code, ErrorCode::Busy);
+        assert!(refusal.message.contains("multiple workspaces"));
+        assert_eq!(agent.provisioned_mcp_callers(), 2);
+        assert!(
+            agent
+                .coordinator
+                .snapshot()
+                .records
+                .iter()
+                .all(|record| { record.state == crate::usecase::runtime::RuntimeState::Running })
+        );
+    }
+
+    #[test]
+    fn daemon_restart_interruption_reports_only_the_partial_stop_for_rollback() {
+        let workspace = WorkspaceId::new();
+        let mut agent = runtime();
+        agent.pty = Box::new(Pty {
+            terminate_success: true,
+            terminate_fail_at: Some(2),
+            spawn_counter: Some(Arc::new(AtomicU32::new(100))),
+            ..Pty::default()
+        });
+        for workspace in [workspace, workspace] {
+            agent
+                .launch(
+                    &OperationId::new().to_string(),
+                    &AgentLaunchIntent {
+                        workspace,
+                        session: None,
+                        profile: Some(AgentProfileId::new("claude").unwrap()),
+                    },
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap();
+        }
+        for credential in agent.mcp_callers.keys().cloned().collect::<Vec<_>>() {
+            agent
+                .report_agent_phase(&credential, AgentPhase::Waiting)
+                .unwrap();
+        }
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: crate::usecase::claude::PROFILE_REVISION,
+        }];
+        let plan = agent.plan_daemon_restart_agents(&expected, false).unwrap();
+        let failure = agent
+            .interrupt_agents_for_daemon_restart(
+                &expected,
+                &plan
+                    .agents
+                    .iter()
+                    .map(|item| item.runtime.clone())
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap_err();
+
+        assert_eq!(failure.error.code, ErrorCode::OwnershipUnknown);
+        assert_eq!(failure.interrupted.agents.len(), 1);
+        assert_eq!(agent.provisioned_mcp_callers(), 1);
+        let snapshot = agent.coordinator.snapshot();
+        assert_eq!(
+            snapshot
+                .records
+                .iter()
+                .filter(|record| record.state == super::super::runtime::RuntimeState::Exited)
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .records
+                .iter()
+                .filter(|record| {
+                    record.state
+                        == super::super::runtime::RuntimeState::ReconcileRequired(
+                            super::super::runtime::ReconcileState::OrphanRunning,
+                        )
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            agent
+                .plan_daemon_restart_agents(&expected, true)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
         );
     }
 

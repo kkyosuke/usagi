@@ -78,19 +78,7 @@ pub enum TuiRequest {
     /// Config 画面を開く。
     Config,
     /// Doctor 診断または明示された修復を実行する。
-    Doctor {
-        fix: bool,
-        restart_agents: bool,
-        force: bool,
-        invocation: DoctorInvocation,
-    },
-}
-
-/// Whether Doctor was invoked by a person or by the locked self-update path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DoctorInvocation {
-    User,
-    ManagedUpdate,
+    Doctor { fix: bool },
 }
 
 /// CLI の解析・ハンドラ実行結果。
@@ -102,6 +90,8 @@ pub enum RunOutcome {
     LaunchTui(TuiRequest),
     /// daemon control plane の起動を依頼する。
     LaunchDaemon(DaemonCommand),
+    /// installed binary から managed update の daemon 同期を依頼する。
+    SyncDaemonAfterUpdate,
     /// Ask for a coalesced build-artifact replacement trigger and perform the
     /// replacement it keys. `force` gives up the live runtime the running
     /// daemon owns; without it a busy daemon is refused untouched.
@@ -210,15 +200,6 @@ pub enum Command {
         /// 修復可能な問題を修復してから再診断する
         #[arg(long)]
         fix: bool,
-        /// 古い daemon-owned Agent を停止し、現在の integration で exact resume する
-        #[arg(long, requires = "fix")]
-        restart_agents: bool,
-        /// 実行中 tool を含む live Agent の停止を許可する
-        #[arg(long, requires = "restart_agents")]
-        force: bool,
-        /// installer が update lock 内で daemon を同期する内部 capability
-        #[arg(long, hide = true, requires = "fix")]
-        managed_update_sync: bool,
     },
     /// 紐付いていない workspace・daemon data・worktree・branch を整理する
     Clean {
@@ -359,10 +340,16 @@ pub enum DaemonCommand {
     },
     /// daemon を再起動する
     Restart {
-        /// live な Agent / generic terminal を巻き添えに入れ替えることを明示する
+        /// daemon-owned Agent を停止し、切替後に現在の integration で exact resume する
+        #[arg(long)]
+        restart_agents: bool,
+        /// `--restart-agents` では実行中 tool の中断を、それ以外では live runtime の破棄を許可する
         #[arg(long)]
         force: bool,
     },
+    /// installer が update lock 内で daemon を同期する内部 capability
+    #[command(hide = true)]
+    SyncAfterUpdate,
     /// 現在 daemon の artifact を明示的に入れ替える trigger を要求する
     Replace {
         /// live な Agent / generic terminal を巻き添えに入れ替えることを明示する
@@ -432,21 +419,7 @@ impl Command {
             Command::Hop => Box::new(h::Hop),
             Command::Open { path } => Box::new(h::Open { path }),
             Command::Config => Box::new(h::Config),
-            Command::Doctor {
-                fix,
-                restart_agents,
-                force,
-                managed_update_sync,
-            } => Box::new(h::Doctor {
-                fix,
-                restart_agents,
-                force,
-                invocation: if managed_update_sync {
-                    DoctorInvocation::ManagedUpdate
-                } else {
-                    DoctorInvocation::User
-                },
-            }),
+            Command::Doctor { fix } => Box::new(h::Doctor { fix }),
             Command::Clean {
                 dry_run: _,
                 apply,
@@ -511,6 +484,7 @@ impl Run for DaemonEntry {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         Ok(match self.command.clone() {
             DaemonCommand::Replace { force } => RunOutcome::RequestDaemonReplacement { force },
+            DaemonCommand::SyncAfterUpdate => RunOutcome::SyncDaemonAfterUpdate,
             command => RunOutcome::LaunchDaemon(command),
         })
     }
@@ -661,8 +635,8 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, DaemonCommand, DoctorInvocation, Run, RunOutcome, Session, SessionCommand,
-        Shell, TuiRequest, run,
+        Cli, Command, DaemonCommand, Run, RunOutcome, Session, SessionCommand, Shell, TuiRequest,
+        run,
     };
     use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
@@ -684,12 +658,7 @@ mod tests {
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "doctor"]).unwrap().command,
-            Some(Command::Doctor {
-                fix: false,
-                restart_agents: false,
-                force: false,
-                managed_update_sync: false,
-            })
+            Some(Command::Doctor { fix: false })
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "clean"]).unwrap().command,
@@ -720,47 +689,38 @@ mod tests {
     }
 
     #[test]
-    fn doctor_repair_flags_require_explicit_escalation_in_order() {
+    fn doctor_and_daemon_restart_keep_diagnosis_and_lifecycle_flags_separate() {
         assert!(matches!(
             Cli::try_parse_from(["usagi", "doctor", "--fix"])
                 .unwrap()
                 .command,
-            Some(Command::Doctor {
-                fix: true,
-                restart_agents: false,
-                force: false,
-                managed_update_sync: false,
-            })
+            Some(Command::Doctor { fix: true })
         ));
         assert!(matches!(
-            Cli::try_parse_from(["usagi", "doctor", "--fix", "--restart-agents", "--force"])
+            Cli::try_parse_from(["usagi", "daemon", "restart", "--restart-agents", "--force"])
                 .unwrap()
                 .command,
-            Some(Command::Doctor {
-                fix: true,
-                restart_agents: true,
-                force: true,
-                managed_update_sync: false,
+            Some(Command::Daemon {
+                command: Some(DaemonCommand::Restart {
+                    restart_agents: true,
+                    force: true,
+                })
             })
         ));
         assert!(Cli::try_parse_from(["usagi", "doctor", "--restart-agents"]).is_err());
         assert!(Cli::try_parse_from(["usagi", "doctor", "--fix", "--force"]).is_err());
         assert!(matches!(
-            Cli::try_parse_from(["usagi", "doctor", "--fix", "--managed-update-sync"])
+            Cli::try_parse_from(["usagi", "daemon", "sync-after-update"])
                 .unwrap()
                 .command,
-            Some(Command::Doctor {
-                fix: true,
-                restart_agents: false,
-                force: false,
-                managed_update_sync: true,
+            Some(Command::Daemon {
+                command: Some(DaemonCommand::SyncAfterUpdate)
             })
         ));
-        assert!(Cli::try_parse_from(["usagi", "doctor", "--managed-update-sync"]).is_err());
-        let help = Cli::try_parse_from(["usagi", "doctor", "--help"])
+        let help = Cli::try_parse_from(["usagi", "daemon", "--help"])
             .unwrap_err()
             .to_string();
-        assert!(!help.contains("managed-update-sync"));
+        assert!(!help.contains("sync-after-update"));
     }
 
     /// 内部フックコマンド（ヘルプ非表示だが実行可能）も解析できる。
@@ -817,11 +777,24 @@ mod tests {
             ),
             (
                 &["usagi", "daemon", "restart"][..],
-                DaemonCommand::Restart { force: false },
+                DaemonCommand::Restart {
+                    restart_agents: false,
+                    force: false,
+                },
             ),
             (
                 &["usagi", "daemon", "restart", "--force"][..],
-                DaemonCommand::Restart { force: true },
+                DaemonCommand::Restart {
+                    restart_agents: false,
+                    force: true,
+                },
+            ),
+            (
+                &["usagi", "daemon", "restart", "--restart-agents", "--force"][..],
+                DaemonCommand::Restart {
+                    restart_agents: true,
+                    force: true,
+                },
             ),
             (
                 &["usagi", "daemon", "install-service"][..],
@@ -1176,23 +1149,10 @@ mod tests {
                 },
             ),
             (&["usagi", "config"][..], TuiRequest::Config),
+            (&["usagi", "doctor"][..], TuiRequest::Doctor { fix: false }),
             (
-                &["usagi", "doctor"][..],
-                TuiRequest::Doctor {
-                    fix: false,
-                    restart_agents: false,
-                    force: false,
-                    invocation: DoctorInvocation::User,
-                },
-            ),
-            (
-                &["usagi", "doctor", "--fix", "--managed-update-sync"][..],
-                TuiRequest::Doctor {
-                    fix: true,
-                    restart_agents: false,
-                    force: false,
-                    invocation: DoctorInvocation::ManagedUpdate,
-                },
+                &["usagi", "doctor", "--fix"][..],
+                TuiRequest::Doctor { fix: true },
             ),
         ] {
             let mut out = Vec::new();
@@ -1346,12 +1306,7 @@ mod tests {
         };
         assert_eq!(request.clone(), request);
         assert!(format!("{request:?}").contains("Workspace"));
-        let outcome = RunOutcome::LaunchTui(TuiRequest::Doctor {
-            fix: false,
-            restart_agents: false,
-            force: false,
-            invocation: DoctorInvocation::User,
-        });
+        let outcome = RunOutcome::LaunchTui(TuiRequest::Doctor { fix: false });
         assert_eq!(outcome.clone(), outcome);
         assert!(format!("{outcome:?}").contains("Doctor"));
     }

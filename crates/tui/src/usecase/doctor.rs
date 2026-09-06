@@ -60,11 +60,11 @@ pub trait DoctorPort {
     /// ストレージの初期化または設定の読み込みに失敗した場合は安全に表示できる理由を返す。
     fn settings_health(&mut self) -> Result<String, String>;
 
-    /// daemon を起動または接続できるか確認する。
+    /// 既存 daemon へ接続できるか確認する。
     ///
     /// # Errors
     ///
-    /// daemon の起動または接続に失敗した場合は安全に表示できる理由を返す。
+    /// daemon が不在か接続に失敗した場合は安全に表示できる理由を返す。
     fn daemon_health(&mut self) -> Result<String, String>;
 }
 
