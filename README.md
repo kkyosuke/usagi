@@ -127,7 +127,8 @@ lifecycle lock の下で再確認する。daemon が動いていれば安全な 
 起動中の TUI は終了して開き直す。
 
 live Agent の process-local MCP credential を新 daemon へ安全に渡せない場合は、binary は更新するが daemon handoff を拒否して
-update を非 0 で終え、Agent と旧 daemon を維持する。Agent を終了した後に `usagi daemon restart` を実行する。
+update を非 0 で終え、Agent と旧 daemon を維持する。Agent を終了した後に `usagi daemon restart` を実行するか、同一 workspace
+内の Agent を引き継ぐ場合は `usagi daemon restart --restart-agents`（Running 中も中断するなら `--force` を追加）を明示的に実行する。
 選択した旧 release が安全な managed 同期 capability を持たない場合や、稼働中の旧 daemon が server-side handoff fence を
 証明できない場合も旧 daemon を変更せず拒否する。後者は旧 daemon を停止してから更新を再実行する。
 
@@ -309,7 +310,7 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi doctor` | 必要ツールの診断画面を開く |
 | `usagi doctor --fix` | 修復可能な診断項目を修復して再診断する。daemon / Agent lifecycle は変更しない |
 | `usagi daemon restart` | daemon を planned replacement する。generic Terminal は seamless handoff し、live Agent がいれば拒否する |
-| `usagi daemon restart --restart-agents` | idle / waiting の live Agent をすべて停止し、daemon 切替後に provider session ID から現在の integration で exact resume する |
+| `usagi daemon restart --restart-agents` | 1 workspace 内の idle / waiting な live Agent をすべて停止し、daemon 切替後に provider session ID から現在の integration で exact resume する。複数 workspace にまたがる場合は停止前に拒否する |
 | `usagi daemon restart --restart-agents --force` | Running（tool / prompt 実行中）の Agent も明示的に中断して exact resume する。generic Terminal は破棄しない |
 | `usagi clean [--dry-run\|--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch と、消滅した generation が握ったままの capacity claim を検出・削除する |
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新し、稼働していた daemon を更新済み binary の内部同期 command で揃える |

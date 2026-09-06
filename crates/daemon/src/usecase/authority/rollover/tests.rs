@@ -434,6 +434,7 @@ fn a_guarded_lost_ack_replay_reopens_its_temporary_barrier() {
         from: Some(world.old),
         to: world.next,
     };
+    let mut guard_calls = 0;
 
     assert_eq!(
         execute_gated_rollover_with_guard(
@@ -442,10 +443,17 @@ fn a_guarded_lost_ack_replay_reopens_its_temporary_barrier() {
             &replay_gate,
             &replay_plan,
             &operation,
-            &mut || Ok(()),
+            &mut || {
+                guard_calls += 1;
+                Ok(())
+            },
         )
         .unwrap(),
         RolloverOutcome::AlreadyCompleted
+    );
+    assert_eq!(
+        guard_calls, 0,
+        "a completed replay must not run its effectful guard"
     );
     assert_eq!(world.file.writes(), writes);
     assert_eq!(replay_gate.role(), GenerationRole::Active);

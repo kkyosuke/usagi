@@ -148,6 +148,30 @@ fn write_restartable_codex(bin: &Path, count: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// Restartable provider whose successor readiness can be held until the test
+/// has killed the lifecycle requester. The daemon recovery worker, rather than
+/// that requester, must still consume the durable restart transaction.
+fn write_recovery_gated_codex(
+    bin: &Path,
+    count: &Path,
+    block: &Path,
+    probed: &Path,
+    release: &Path,
+) {
+    fs::create_dir_all(bin).unwrap();
+    let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then\n  if [ -f '{}' ]; then : > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; fi\n  exit 0\nfi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        block.display(),
+        probed.display(),
+        release.display(),
+        count.display(),
+    );
+    let path = bin.join("codex");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// Quote one UTF-8 path as a single POSIX shell word. Cargo may place the test
 /// binary under a target directory containing spaces, quotes, or a literal
 /// `$HOME`; double quotes would re-expand that text inside the fixture provider.
@@ -2552,6 +2576,10 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
         String::from_utf8_lossy(&restarted.stderr)
     );
     assert!(String::from_utf8_lossy(&restarted.stdout).contains("restarted 1 Agent(s)"));
+    assert!(
+        !data_dir.join("daemon/agent-restart.json").exists(),
+        "restart success requires durable Agent recovery to be complete"
+    );
     assert_ne!(daemon_pid(&data_dir), old_pid);
     let mut current = client(&data_dir);
     let inventory = current
@@ -2591,6 +2619,134 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
         );
         thread::sleep(Duration::from_millis(20));
     }
+    drop(current);
+
+    // A later deliberate restart is a new transition, not a replay of the
+    // completed handoff above. It must stop and resume the replacement Agent
+    // exactly once under a fresh operation identity.
+    let first_successor_pid = daemon_pid(&data_dir);
+    let restarted_again = restart_command
+        .output()
+        .expect("a second explicit Agent restart returns");
+    assert!(
+        restarted_again.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&restarted_again.stdout),
+        String::from_utf8_lossy(&restarted_again.stderr)
+    );
+    assert_ne!(daemon_pid(&data_dir), first_successor_pid);
+    wait_for_spawns(&agent_spawns, 3);
+    assert!(!data_dir.join("daemon/agent-restart.json").exists());
+    daemon_fixture::reap(home.path());
+    drop(daemon);
+}
+
+/// W2 transfers recovery custody to the successor daemon, not to the CLI which
+/// requested the handoff. Killing that CLI while successor readiness is held
+/// must therefore leave a durable plan which the daemon finishes exactly once.
+#[test]
+#[allow(clippy::too_many_lines)] // One requester-loss crash boundary is exercised end to end.
+fn root_restart_recovers_agents_after_requester_exit() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let agent_spawns = home.path().join("agent-spawn-count");
+    let block = home.path().join("block-successor-readiness");
+    let probed = home.path().join("successor-readiness-probed");
+    let release = home.path().join("release-successor-readiness");
+    write_recovery_gated_codex(&bin, &agent_spawns, &block, &probed, &release);
+
+    let fixture_path = format!("{}:/usr/bin:/bin", bin.display());
+    let daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    Storage::new(&data_dir)
+        .save_settings(&Settings {
+            env: [("PATH".to_owned(), fixture_path.clone())].into(),
+            ..Settings::default()
+        })
+        .unwrap();
+    let mut owner = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut owner);
+    let _ = launch(&mut owner, workspace, session, None);
+    wait_for_spawns(&agent_spawns, 1);
+    drop(owner);
+    let old_pid = daemon_pid(&data_dir);
+    fs::write(&block, "").unwrap();
+
+    let restart_cwd = short_dir("restart-cwd-");
+    let mut command = usagi_command(
+        home.path(),
+        Channel::Local,
+        restart_cwd.path(),
+        &[
+            "daemon".as_ref(),
+            "restart".as_ref(),
+            "--restart-agents".as_ref(),
+            "--force".as_ref(),
+        ],
+    );
+    command.env("PATH", &fixture_path).env(
+        usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
+        "1",
+    );
+    let mut requester = command.spawn().expect("the restart requester starts");
+    let pending = data_dir.join("daemon/agent-restart.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while published_daemon_pid(&data_dir).is_none_or(|pid| pid == old_pid)
+        || !pending.is_file()
+        || !probed.is_file()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "successor did not reach the held recovery boundary:\n{}",
+            daemon_error_log(&data_dir)
+        );
+        assert!(
+            requester.try_wait().unwrap().is_none(),
+            "requester returned before durable Agent recovery completed"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    requester.kill().expect("the requester is still alive");
+    requester.wait().unwrap();
+    fs::write(&release, "").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while pending.exists()
+        || fs::read_to_string(&agent_spawns)
+            .map(|body| body.lines().count())
+            .unwrap_or_default()
+            != 2
+    {
+        assert!(
+            Instant::now() < deadline,
+            "successor did not finish requester-independent recovery:\n{}",
+            daemon_error_log(&data_dir)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let mut current = client(&data_dir);
+    let inventory = current
+        .request(DaemonRequest::AgentInventory {
+            workspace,
+            caller_context: None,
+        })
+        .expect("the successor serves recovered Agent inventory");
+    let body = match inventory {
+        DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+    };
+    let inventory: usagi_core::domain::agent::AgentInventory =
+        serde_json::from_value(body).unwrap();
+    assert_eq!(
+        inventory
+            .runtimes
+            .iter()
+            .filter(|item| item.state == AgentRuntimeInventoryState::Live)
+            .count(),
+        1
+    );
     drop(current);
     daemon_fixture::reap(home.path());
     drop(daemon);
@@ -2775,10 +2931,12 @@ fn live_process_identities(data_dir: &Path) -> Vec<(u64, String)> {
 }
 
 fn daemon_pid(data_dir: &Path) -> u64 {
-    let record = fs::read_to_string(data_dir.join("daemon/daemon.json")).unwrap();
-    serde_json::from_str::<serde_json::Value>(&record).unwrap()["pid"]
-        .as_u64()
-        .unwrap()
+    published_daemon_pid(data_dir).expect("daemon record contains a pid")
+}
+
+fn published_daemon_pid(data_dir: &Path) -> Option<u64> {
+    let record = fs::read_to_string(data_dir.join("daemon/daemon.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&record).ok()?["pid"].as_u64()
 }
 
 /// Whether the refused transition left the owner and its child exactly as they

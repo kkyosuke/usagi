@@ -1831,6 +1831,16 @@ impl AgentRuntime {
             })
             .collect::<Result<Vec<_>, _>>()?;
         agents.sort_by_key(|item| item.runtime.agent_runtime_id.as_str());
+        let workspaces = agents
+            .iter()
+            .map(|item| item.runtime.terminal.workspace_id)
+            .collect::<BTreeSet<_>>();
+        if workspaces.len() > 1 {
+            return Err(ProtocolError::new(
+                ErrorCode::Busy,
+                "live Agents span multiple workspaces; no Agent was stopped",
+            ));
+        }
         let selected = agents
             .iter()
             .map(|item| item.runtime.agent_runtime_id)
@@ -1909,6 +1919,28 @@ impl AgentRuntime {
         }
         self.clear_daemon_restart_authority(&runtime_ids);
         Ok(plan)
+    }
+
+    /// Whether rollback/recovery must resume one source from a durable daemon
+    /// restart transaction.
+    ///
+    /// A transaction is persisted before interruption, so a pre-effect crash
+    /// can leave entries whose exact original runtime is still live. Those
+    /// entries are already recovered and must not be sent through the non-live
+    /// exact-resume path. Every other state is left to that path's full fences.
+    pub fn daemon_restart_restore_needed(
+        &self,
+        runtime: &AgentRuntimeRef,
+    ) -> Result<bool, ProtocolError> {
+        self.coordinator
+            .record_for(runtime)
+            .map(|record| {
+                !matches!(
+                    record.state,
+                    super::runtime::RuntimeState::Reserved | super::runtime::RuntimeState::Running
+                )
+            })
+            .map_err(map_runtime_error)
     }
 
     fn clear_daemon_restart_authority(&mut self, runtime_ids: &BTreeSet<String>) {
@@ -5617,6 +5649,11 @@ mod tests {
         assert_eq!(plan.agents.len(), 1);
         assert_eq!(plan.agents[0].runtime.terminal, admission.terminal);
         assert_eq!(plan.agents[0].phase, AgentPhase::Waiting);
+        assert!(
+            !agent
+                .daemon_restart_restore_needed(&plan.agents[0].runtime)
+                .unwrap()
+        );
 
         let mut stale = plan.agents[0].runtime.clone();
         stale.agent_runtime_id = AgentRuntimeId::new();
@@ -5643,6 +5680,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stopped, current);
+        assert!(
+            agent
+                .daemon_restart_restore_needed(&stopped.agents[0].runtime)
+                .unwrap()
+        );
         assert_eq!(agent.provisioned_mcp_callers(), 0);
         assert!(
             agent
@@ -5741,9 +5783,53 @@ mod tests {
     }
 
     #[test]
-    fn daemon_restart_interruption_reports_only_the_partial_stop_for_rollback() {
+    fn daemon_restart_plan_refuses_agents_from_multiple_workspaces_before_stopping_any() {
         let first_workspace = WorkspaceId::new();
         let second_workspace = WorkspaceId::new();
+        let mut agent = runtime();
+        for workspace in [first_workspace, second_workspace] {
+            agent
+                .launch(
+                    &OperationId::new().to_string(),
+                    &AgentLaunchIntent {
+                        workspace,
+                        session: None,
+                        profile: Some(AgentProfileId::new("claude").unwrap()),
+                    },
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap();
+        }
+        for credential in agent.mcp_callers.keys().cloned().collect::<Vec<_>>() {
+            agent
+                .report_agent_phase(&credential, AgentPhase::Waiting)
+                .unwrap();
+        }
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: crate::usecase::claude::PROFILE_REVISION,
+        }];
+
+        let refusal = agent
+            .plan_daemon_restart_agents(&expected, false)
+            .unwrap_err();
+
+        assert_eq!(refusal.code, ErrorCode::Busy);
+        assert!(refusal.message.contains("multiple workspaces"));
+        assert_eq!(agent.provisioned_mcp_callers(), 2);
+        assert!(
+            agent
+                .coordinator
+                .snapshot()
+                .records
+                .iter()
+                .all(|record| { record.state == crate::usecase::runtime::RuntimeState::Running })
+        );
+    }
+
+    #[test]
+    fn daemon_restart_interruption_reports_only_the_partial_stop_for_rollback() {
+        let workspace = WorkspaceId::new();
         let mut agent = runtime();
         agent.pty = Box::new(Pty {
             terminate_success: true,
@@ -5751,7 +5837,7 @@ mod tests {
             spawn_counter: Some(Arc::new(AtomicU32::new(100))),
             ..Pty::default()
         });
-        for workspace in [first_workspace, second_workspace] {
+        for workspace in [workspace, workspace] {
             agent
                 .launch(
                     &OperationId::new().to_string(),

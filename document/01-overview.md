@@ -49,7 +49,7 @@ shell を同じ pane model で起動できる。画面、キー操作、設定 U
 | `usagi open [path]` | workspace を登録して TUI で開く。省略時はカレントディレクトリ |
 | `usagi config` | Global Config TUI を開く |
 | `usagi doctor [--fix]` | 必要ツール、settings、既存 daemon を診断し、daemon / Agent lifecycle 以外の修復可能項目だけを修復する |
-| `usagi daemon restart [--restart-agents] [--force]` | daemon を入れ替える。`--restart-agents` は全 live Agent を exact resume し、併用時の `--force` は Running 中の中断を許可する。`--force` 単独は live runtime を破棄する |
+| `usagi daemon restart [--restart-agents] [--force]` | daemon を入れ替える。`--restart-agents` は同一 workspace の全 live Agent を durable な計画から exact resume し、併用時の `--force` は Running 中の中断を許可する。複数 workspace は停止前に拒否し、`--force` 単独は live runtime を破棄する |
 | `usagi clean [--dry-run\|--apply [--force]]` | 孤立 workspace data、worktree、branch、process を照合する。既定は dry-run |
 | `usagi update [-v]` | 最新 release、または `-v` で選択した release へ更新する |
 | `usagi completion <shell>` | shell 補完スクリプトを標準出力へ生成する |

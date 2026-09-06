@@ -675,22 +675,24 @@ CLI / TUI port と MCP `agent_resume_inventory` が共通 contract を使う。s
 
 daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。利用者による明示操作だけが request を作る。
 
-`daemon restart --restart-agents` は同じ exact resume 境界を machine-wide lifecycle に使う。
+`daemon restart --restart-agents` は同じ exact resume 境界を daemon lifecycle に使う。
 `plan_daemon_restart_agents` は daemon 全体の live Agent を列挙し、全 runtime ref、public resume target、current profile revision、
 reported phase を返す effect-free request である。provider ID・argv・設定本文・provider-native session ID は返さない。
 exact resume metadata が1件でも欠ける場合、ownership-unknown process がある場合、または `running` phase に `--force` が無い場合は
-全件 effect-before-zero で拒否する。
+全件 effect-before-zero で拒否する。successor が旧 owner の workspace fence を奪わず再開できるのは initial tenant だけなので、
+live Agent が複数 workspace にまたがる場合も停止前に拒否する。
 
-client は plan の exact runtime 集合を `rollover.restart_agents` に再送する。old active は `ActiveControl` admission を close / drain
-してから同じ machine-wide 集合を再計算し、完全一致した場合だけ全 Agent を停止する。そのまま provisioned credential が 0 であることを
+client は plan の exact runtime 集合を `rollover.restart_agents` に再送し、sole Agent workspace を standby の initial tenant に選ぶ。
+old active は `ActiveControl` admission を close / drain してから同じ daemon-wide 集合を再計算し、完全一致した場合だけ全 Agent を停止する。そのまま provisioned credential が 0 であることを
 検証して最初の durable handoff write へ進むため、plan 後に競合した Agent launch は停止も handoff も行わず stale として拒否される。
-commit 前の handoff failure では old daemon 自身が barrier を開き直して old integration で exact resume を行い、client も
-応答断に備えた同じ復旧を best effort で再試行する。commit 後は successor の
-`resume_agent_with_current_integration` へ plan の target を渡す。この request は source の旧 adapter revision を fence として保持したまま、
+選択した exact source と item ごとの resume operation は最初の停止より先に owner-only の durable transaction へ保存する。commit 前の handoff
+failure では old daemon が registry recovery を先に確定してから old integration で exact resume し、commit 後または requester 消失後は
+active generation の recovery worker が同じ transaction を current integration で完了する。transaction が残る間は別の restart/update を
+拒否し、CLI は transaction の消去と successor serving の両方を確認してから成功する。current-integration resume は source の旧 adapter revision を fence として保持したまま、
 active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope / lineage を変えずに
 hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
 
-machine-wide plan vocabulary を持たない旧 daemon は `--restart-agents` を effect-zero で拒否する。`--restart-agents` なしの
+daemon-wide plan vocabulary を持たない旧 daemon は `--restart-agents` を effect-zero で拒否する。`--restart-agents` なしの
 `--force` は従来どおり Agent と generic Terminal を破棄する cold replacement であり、自動 exact resume の互換経路ではない。
 
 ## Work Run observation and control

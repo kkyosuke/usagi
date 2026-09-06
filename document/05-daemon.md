@@ -185,7 +185,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
 | `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
-| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。`--restart-agents` は全 live Agent の exact stop/resume を handoff barrier 内で行い、`--restart-agents --force` は Running 中の Agent の中断も許可する。`--restart-agents` なしの `--force` だけが live runtime を破棄する cold transition |
+| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。`--restart-agents` は同一 workspace の全 live Agent を durable transaction から exact stop/resume し、`--restart-agents --force` は Running 中の Agent の中断も許可する。複数 workspace は停止前に拒否し、`--restart-agents` なしの `--force` だけが live runtime を破棄する cold transition |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
 | `usagi daemon` / `usagi daemon serve` | 前景で daemon を active role で serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
@@ -549,9 +549,10 @@ draining、不正 endpoint では replacement を起動せず fail closed にす
 ## planned replacement
 
 `usagi daemon restart` と `usagi daemon replace` は同じ一つの経路（`usecase::replacement`）を通る。
-manual restart は「稼働中と同じ artifact の forced replacement」であり、その durable operation ID は
-`daemon replace` が同じ場合に導く trigger と同一である。したがって繰り返し・並行の restart は
-新しい identity を作らず、同じ operation へ収束する。`stop` → fresh `start` へ直接降りる bypass は無い。
+manual restart は「稼働中と同じ artifact の forced replacement」である。artifact/channel の既知性は deterministic な
+build trigger と同じ規則で検証するが、独立した invocation は毎回新しい durable operation ID を作る。同じ invocation 内の
+response-loss retry だけがその operation へ収束するため、後日の restart を完了済み handoff の replay と誤認しない。
+`stop` → fresh `start` へ直接降りる bypass は無い。
 
 replacement は 2 つの観測から決まる。どちらも仮定ではなく実測である。
 
@@ -1462,14 +1463,17 @@ daemon restart reconciliation は unfinished record の provider status を `int
 `usagi doctor` は tool、settings、既存 daemon の状態を診断するが、daemon や Agent の起動・停止・入替を行わない。
 daemon lifecycle と Agent integration の更新は `usagi daemon restart` が所有する。通常の restart は live Agent の
 process-local MCP credential が残っていれば effect-zero で拒否する。`--restart-agents` は daemon 全体の live Agent を一覧化し、
-exact resume metadata が全件揃う場合だけ old owner で停止して、successor の current integration で再開する。
+同一 workspace に属して exact resume metadata が全件揃う場合だけ old owner で停止して、successor の current integration で再開する。
+複数 workspace にまたがる Agent は、draining owner が保持する workspace fence を successor が奪えないため全件を停止前に拒否する。
 `--force` は `running` phase（tool / prompt の途中を含む）を破棄する追加 authority であり、
 `--restart-agents` と併用した場合は generic Terminal や daemon rollover の cold force ではない。
 launch 時の hook、sandbox writable roots、argv、private config の変更は provider ごとの integration revision を増分する。
 これにより restart は同じ build の runtime でも current adapter で再開できる。
 
-順序は restart plan の effect-free 検証、active-control admission の close / drain、old owner での exact Agent 停止、
-daemon build の rollover、current adapter での provider-native session ID の exact resume である。これにより old owner の
+順序は restart plan の effect-free 検証、sole workspace を initial tenant にした standby の起動、active-control admission の
+close / drain、最初の停止より前の durable recovery transaction、old owner での exact Agent 停止、daemon build の rollover、active generation
+による provider-native session ID の exact resume である。requester が W2 後に終了しても daemon worker が item ごとの同じ
+operation を再試行し、source relation が二重 spawn を防ぐ。CLI は transaction が消えるまで成功を返さない。これにより old owner の
 PTY handle を successor が推測して signal することも、old adapter が新設定を
 materialize することもない。provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
 modern daemon は全件 effect-before-zero で拒否する。plan 後に Agent が増減または差し替わった場合も、old active が
@@ -1477,7 +1481,7 @@ control admission を close / drain した barrier 内で exact runtime 集合�
 新しい Agent admission を挟ませない。停止後に scope が stale、current adapter が resume 非対応と判明しても、別 conversation は推測しない。
 IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
 
-machine-wide restart plan vocabulary 導入前の daemon は barrier 内の全 Agent 集合を証明できないため、
+daemon-wide restart plan vocabulary 導入前の daemon は barrier 内の全 Agent 集合を証明できないため、
 `--restart-agents` を effect-zero で拒否する。導入直後の一度だけは live Agent を終了して通常の `daemon restart` を行う。
 `--force` の cold restart は互換経路として残るが Agent と generic Terminal を破棄するため、自動 exact resume の代替にはしない。
 
@@ -2112,8 +2116,8 @@ W4  registry CAS   handoff を消し、operation を完了として記録       
 observable になった commit を旧 authority へ rollback しない。rollover reply が失われても W2 が確認できれば roll forward し、
 successor が active runtime として inventory request に応答するまで commit 時点から新しい最大30秒を与えて成功へ収束する。後継 process の exact identity を alive と証明できない場合は
 旧 authority を復活させず、全 generation を retired にし locator を撤去した **effect zero の fail-closed** に収束する。
-ambiguous な partial phase は operation ID で同じ結果へ収束するため、concurrent restart・ACK loss・再試行は 1 つの
-outcome になる。異なる operation の割り込みは `handoff_in_progress` で拒否する。
+ambiguous な partial phase は operation ID で同じ結果へ収束するため、同じ invocation の ACK loss・再試行は 1 つの
+outcome になる。独立した concurrent restart は別 operation なので `handoff_in_progress` で拒否する。
 
 ### admission fence
 
@@ -2381,8 +2385,9 @@ readiness 中は reconcile / save、worker / tick、spawn を行わず、初期�
 handoff commit 後は readiness-only accept loop を止めて listener を回収し、同じ generation の空 owner shard と
 global allocator を active writer として開く。retained shard は owner routing で旧 generation 自身が serve するため、
 successor は live resource を cold-restart の `identity_unknown` に reconcile しない。通常の rollover は provider resume を
-自動実行しないが、`--restart-agents` の successor は old owner が停止済みにした Agent source history だけを read-only で取り込み、
-active serving の開始後に client から届く exact resume request を current integration で実行する。
+通常の cold restart では自動実行しないが、`--restart-agents` の successor は old owner が停止済みにした Agent source history
+だけを read-only で取り込み、W1 前に保存された durable restart transaction を daemon-owned recovery worker が current
+integration で実行する。requester は再開の実行主体ではなく、transaction の完了と active serving を確認するだけである。
 
 ### generation collection
 
