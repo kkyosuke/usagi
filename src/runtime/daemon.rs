@@ -2640,6 +2640,7 @@ struct AgentPty {
     metrics: Arc<TerminalPipelineMetrics>,
     environment: BTreeMap<String, String>,
     children: Arc<SpawnedChildren>,
+    shutdown: Arc<ShutdownRequest>,
 }
 
 struct OwnedPty {
@@ -2688,6 +2689,7 @@ impl AgentPty {
         environment: BTreeMap<String, String>,
         metrics: Arc<TerminalPipelineMetrics>,
         children: Arc<SpawnedChildren>,
+        shutdown: Arc<ShutdownRequest>,
     ) -> (Self, Receiver<AgentPtyObservation>) {
         let (observations, receiver) = mpsc::sync_channel(PTY_OBSERVATION_QUEUE_ITEMS);
         (
@@ -2698,6 +2700,7 @@ impl AgentPty {
                 metrics,
                 environment,
                 children,
+                shutdown,
             },
             receiver,
         )
@@ -2772,6 +2775,7 @@ impl PtySpawner for AgentPty {
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
+        let shutdown = Arc::clone(&self.shutdown);
         // The identity is observed before the watcher owns it, so the token this
         // thread carries is the very one the exit observation hands back. Every
         // way out of the thread — a drained reader, an unreadable wait, a
@@ -2780,6 +2784,7 @@ impl PtySpawner for AgentPty {
             self.children
                 .observe(&UnixChildProbe, pid, "daemon-owned-agent-pty");
         std::thread::spawn(move || {
+            let mut lifecycle = ShutdownOnUnexpectedWorkerExit::new(shutdown);
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
             while let Ok(count) = reader.read(&mut bytes) {
@@ -2792,15 +2797,21 @@ impl PtySpawner for AgentPty {
                     return;
                 }
             }
-            if let Ok(status) = exit_pty
+            let Ok(status) = exit_pty
                 .lock()
                 .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
-            {
-                let _ = observations.send(AgentPtyObservation::Exited(
+            else {
+                return;
+            };
+            if observations
+                .send(AgentPtyObservation::Exited(
                     output_terminal,
                     status,
                     release,
-                ));
+                ))
+                .is_ok()
+            {
+                lifecycle.finish();
             }
         });
         Ok(identity)
@@ -2915,11 +2926,13 @@ struct DaemonPty {
     observations: SyncSender<PtyObservation>,
     metrics: Arc<TerminalPipelineMetrics>,
     children: Arc<SpawnedChildren>,
+    shutdown: Arc<ShutdownRequest>,
 }
 impl DaemonPty {
     fn new(
         metrics: Arc<TerminalPipelineMetrics>,
         children: Arc<SpawnedChildren>,
+        shutdown: Arc<ShutdownRequest>,
     ) -> (Self, Receiver<PtyObservation>) {
         let (observations, receiver) = mpsc::sync_channel(PTY_OBSERVATION_QUEUE_ITEMS);
         (
@@ -2929,6 +2942,7 @@ impl DaemonPty {
                 observations,
                 metrics,
                 children,
+                shutdown,
             },
             receiver,
         )
@@ -2998,12 +3012,14 @@ impl GenericPtySpawner for DaemonPty {
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
+        let shutdown = Arc::clone(&self.shutdown);
         // As in the Agent spawner: the watcher thread owns the release token, so
         // the proof lives exactly as long as this child does.
         let (identity, release) = self
             .children
             .observe(&UnixChildProbe, pid, "daemon-owned-pty");
         std::thread::spawn(move || {
+            let mut lifecycle = ShutdownOnUnexpectedWorkerExit::new(shutdown);
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
             while let Ok(count) = reader.read(&mut bytes) {
@@ -3019,12 +3035,17 @@ impl GenericPtySpawner for DaemonPty {
                     return;
                 }
             }
-            if let Ok(status) = exit_pty
+            let Ok(status) = exit_pty
                 .lock()
                 .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
+            else {
+                return;
+            };
+            if output_sender
+                .send(PtyObservation::Exited(output_terminal, status, release))
+                .is_ok()
             {
-                let _ =
-                    output_sender.send(PtyObservation::Exited(output_terminal, status, release));
+                lifecycle.finish();
             }
         });
         Ok(identity)
@@ -3663,7 +3684,11 @@ fn spawn_ipc_server(
     // their finals into it, so short-lived runtimes cannot grow the daemon's
     // tombstones without bound.
     let retention = usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new();
-    let (pty, observations) = DaemonPty::new(Arc::clone(&pipeline_metrics), Arc::clone(&children));
+    let (pty, observations) = DaemonPty::new(
+        Arc::clone(&pipeline_metrics),
+        Arc::clone(&children),
+        Arc::clone(&shutdown),
+    );
     background_workers.bind_terminal_observations(pty.observations.clone());
     let workspace_root = trusted_repository_root(&runtime)?;
     // The handshake fence compares a client's declared workspace against the
@@ -3701,6 +3726,7 @@ fn spawn_ipc_server(
         terminal_environment(),
         Arc::clone(&pipeline_metrics),
         Arc::clone(&children),
+        Arc::clone(&shutdown),
     );
     background_workers.bind_agent_observations(agent_pty.observations.clone());
     let mcp_command = std::env::current_exe()?;
@@ -5098,8 +5124,9 @@ where
             if result.is_ok() && shutdown.is_requested() {
                 monitor.finish_planned();
             } else {
+                // Dropping an unfinished monitor records the failure and raises
+                // the shared shutdown fence before source-specific cleanup.
                 drop(monitor);
-                shutdown.request();
                 on_failure();
             }
             if let Err(payload) = result {
@@ -5796,6 +5823,39 @@ struct ShutdownOnIpcWorkerExit {
 impl Drop for ShutdownOnIpcWorkerExit {
     fn drop(&mut self) {
         self.shutdown.request();
+    }
+}
+
+/// Shuts the process down when a worker that requires explicit completion is lost.
+///
+/// Unlike [`ShutdownOnWorkerPanic`], this guard also covers ordinary early
+/// returns. The worker marks itself complete only after its final required
+/// effect. This is especially important for a standby: [`ShutdownPipe`] requests
+/// the internal replacement domain while it drops, so consulting that flag from
+/// `Drop` would misclassify an unwind as a planned promotion.
+struct ShutdownOnUnexpectedWorkerExit {
+    shutdown: Arc<ShutdownRequest>,
+    completed: bool,
+}
+
+impl ShutdownOnUnexpectedWorkerExit {
+    fn new(shutdown: Arc<ShutdownRequest>) -> Self {
+        Self {
+            shutdown,
+            completed: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ShutdownOnUnexpectedWorkerExit {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.shutdown.request();
+        }
     }
 }
 
@@ -11994,6 +12054,87 @@ fn live_generation_endpoints(data_dir: &Path) -> BTreeSet<String> {
 /// a lock and a record, a standby watches the one entry that names it.
 const STANDBY_CUSTODY_TICK: Duration = Duration::from_secs(1);
 
+/// The two intentionally distinct shutdown domains owned by a standby process.
+///
+/// `replacement` stops only the readiness accept loop so promotion can reuse its
+/// listener. `process` wakes the lifecycle owner, which releases registry custody
+/// and exits. Keeping them in one named value prevents two same-typed requests
+/// from being swapped at the accept/client/custody composition seams.
+#[derive(Clone)]
+struct StandbyShutdownDomains {
+    process: Arc<ShutdownRequest>,
+    replacement: Arc<ShutdownRequest>,
+}
+
+impl StandbyShutdownDomains {
+    fn new(process: Arc<ShutdownRequest>) -> Self {
+        Self {
+            process,
+            replacement: Arc::new(ShutdownRequest::new()),
+        }
+    }
+
+    fn request_process(&self) {
+        self.process.request();
+    }
+
+    fn request_replacement(&self) {
+        self.replacement.request();
+    }
+
+    fn process_panic_guard(&self) -> ShutdownOnWorkerPanic {
+        ShutdownOnWorkerPanic {
+            shutdown: Arc::clone(&self.process),
+        }
+    }
+
+    /// Arms the standby accept loop and its internal wake pipe as one lifetime.
+    fn accept_lifetime(
+        &self,
+        create_wake: fn(&Arc<ShutdownRequest>) -> std::io::Result<ShutdownPipe>,
+    ) -> std::io::Result<StandbyAcceptLifetime> {
+        match create_wake(&self.replacement) {
+            Ok(wake) => Ok(StandbyAcceptLifetime {
+                shutdown: self.clone(),
+                wake,
+                completed: false,
+            }),
+            Err(error) => {
+                self.request_process();
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Couples standby accept completion with the wake pipe that could obscure it.
+///
+/// The guard decides whether the worker completed before its `wake` field drops.
+/// Since [`ShutdownPipe::drop`] requests the replacement domain, keeping both in
+/// this owner makes it impossible for field destruction to disguise an
+/// unexpected accept-loop return as a planned promotion.
+struct StandbyAcceptLifetime {
+    shutdown: StandbyShutdownDomains,
+    wake: ShutdownPipe,
+    completed: bool,
+}
+
+impl StandbyAcceptLifetime {
+    /// Completes only an explicitly requested replacement, and only when called
+    /// after every accepted client has been retired.
+    fn finish_planned(&mut self) {
+        self.completed = self.shutdown.replacement.is_requested();
+    }
+}
+
+impl Drop for StandbyAcceptLifetime {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.shutdown.request_process();
+        }
+    }
+}
+
 /// The private endpoint a standby generation binds, and nothing else.
 ///
 /// Everything the active [`IpcReady`] does that a standby must not do is simply
@@ -12008,8 +12149,7 @@ struct StandbyIpc<'a> {
     workspace_root: PathBuf,
     build: BuildIdentity,
     pid: u32,
-    shutdown: Arc<ShutdownRequest>,
-    standby_shutdown: Arc<ShutdownRequest>,
+    shutdown: StandbyShutdownDomains,
     worker: Arc<Mutex<Option<std::thread::JoinHandle<SecureUnixListener>>>>,
     listener: Arc<Mutex<Option<SecureUnixListener>>>,
     cleanup: RefCell<Option<EndpointCleanup>>,
@@ -12033,8 +12173,7 @@ impl<'a> StandbyIpc<'a> {
             workspace_root,
             build: current_build(),
             pid,
-            shutdown,
-            standby_shutdown: Arc::new(ShutdownRequest::new()),
+            shutdown: StandbyShutdownDomains::new(shutdown),
             worker: Arc::new(Mutex::new(None)),
             listener: Arc::new(Mutex::new(None)),
             cleanup: RefCell::new(None),
@@ -12105,12 +12244,8 @@ impl StandbyEndpoint for StandbyIpc<'_> {
             DaemonRecord::identified(self.pid, process_start_identity(self.pid)?),
             paths::wire_workspace_root(&workspace_root),
         );
-        let worker = spawn_standby_ipc_server(
-            listener,
-            protocol,
-            gate.clone(),
-            Arc::clone(&self.standby_shutdown),
-        );
+        let worker =
+            spawn_standby_ipc_server(listener, protocol, gate.clone(), self.shutdown.clone());
         match worker {
             Ok(worker) => {
                 *self.cleanup.borrow_mut() = Some(cleanup);
@@ -12132,8 +12267,8 @@ impl StandbyEndpoint for StandbyIpc<'_> {
     }
 
     fn retire(&self) -> std::io::Result<()> {
-        self.shutdown.request();
-        self.standby_shutdown.request();
+        self.shutdown.request_process();
+        self.shutdown.request_replacement();
         // Closing the two lease classes is what makes "stopped admitting"
         // observable to a request already in flight, rather than only to the next
         // connection.
@@ -12201,33 +12336,30 @@ fn spawn_standby_ipc_server(
     listener: SecureUnixListener,
     protocol: usagi_core::infrastructure::ipc::ServerProtocol,
     gate: AdmissionGate,
-    shutdown: Arc<ShutdownRequest>,
+    shutdown: StandbyShutdownDomains,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let connection_limit = client_connection_limit();
     std::thread::Builder::new()
         .name("usagi-ipc-standby".to_string())
         .spawn(move || {
-            let _exit = ShutdownOnIpcWorkerExit {
-                shutdown: Arc::clone(&shutdown),
-            };
             let workers = Arc::new(ClientWorkers::new());
             let pre_handshake = PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
             let mut capacity_log = CapacityRefusalLog::default();
-            let wake = match ShutdownPipe::mirroring(&shutdown) {
-                Ok(wake) => wake,
+            let mut lifetime = match shutdown.accept_lifetime(ShutdownPipe::mirroring) {
+                Ok(lifetime) => lifetime,
                 Err(error) => {
                     ErrorLog::record(&format!("daemon standby accept wait unavailable: {error}"));
                     return listener;
                 }
             };
-            while !shutdown.is_requested() {
-                if !wake.wait_for_listener(listener.readiness_fd()) {
+            while !shutdown.replacement.is_requested() {
+                if !lifetime.wake.wait_for_listener(listener.readiness_fd()) {
                     break;
                 }
-                while !shutdown.is_requested() {
+                while !shutdown.replacement.is_requested() {
                     match listener.accept() {
                         Ok(stream) => {
-                            if shutdown.is_requested() {
+                            if shutdown.replacement.is_requested() {
                                 break;
                             }
                             let capacity_available = client_connection_capacity_available(
@@ -12265,6 +12397,7 @@ fn spawn_standby_ipc_server(
                                 protocol.clone(),
                                 gate.clone(),
                                 pre_handshake_permit,
+                                shutdown.clone(),
                             ) {
                                 Ok(handle) => {
                                     retain_client_worker(&workers, Ok(unblock), handle);
@@ -12285,6 +12418,10 @@ fn spawn_standby_ipc_server(
                     "daemon standby shutdown retired with client worker failures: {report:?}"
                 ));
             }
+            // Promotion and retirement request this private domain before they
+            // join us. Mark the exit planned only after every retained client is
+            // retired; an unwind at any earlier point must wake the process owner.
+            lifetime.finish_planned();
             listener
         })
 }
@@ -12296,10 +12433,12 @@ fn spawn_standby_client_worker(
     protocol: usagi_core::infrastructure::ipc::ServerProtocol,
     gate: AdmissionGate,
     pre_handshake_permit: PreHandshakePermit,
+    shutdown: StandbyShutdownDomains,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("usagi-ipc-standby-client".to_string())
         .spawn(move || {
+            let _panic = shutdown.process_panic_guard();
             let retirement = completion.retirement();
             let _completion = ShutdownAcceptedStreamOnDrop(Some(completion));
             if stream.set_nonblocking(false).is_err() {
@@ -12929,7 +13068,6 @@ struct StandbyRegistryAuthority<'a> {
     endpoint: &'a StandbyIpc<'a>,
     build: BuildIdentity,
     pid: u32,
-    shutdown: Arc<ShutdownRequest>,
     registered: RefCell<Option<usagi_core::domain::id::DaemonGeneration>>,
 }
 
@@ -12941,7 +13079,6 @@ impl<'a> StandbyRegistryAuthority<'a> {
             data_dir,
             build: current_build(),
             pid,
-            shutdown: Arc::clone(&endpoint.shutdown),
             endpoint,
             registered: RefCell::new(None),
         }
@@ -13031,9 +13168,8 @@ impl StandbyAuthority for StandbyRegistryAuthority<'_> {
             process,
             self.endpoint.hydrate()?.0,
             self.build.clone(),
-            Arc::clone(&self.endpoint.standby_shutdown),
             Arc::clone(&self.endpoint.worker),
-            Arc::clone(&self.shutdown),
+            self.endpoint.shutdown.clone(),
         )
     }
 
@@ -13147,15 +13283,15 @@ fn start_standby_custody_worker(
     process: ProcessIdentity,
     workspace_root: PathBuf,
     build: BuildIdentity,
-    standby_shutdown: Arc<ShutdownRequest>,
     worker: Arc<Mutex<Option<std::thread::JoinHandle<SecureUnixListener>>>>,
-    shutdown: Arc<ShutdownRequest>,
+    shutdown: StandbyShutdownDomains,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-daemon-standby-custody".to_string())
         .spawn(move || {
+            let _panic = shutdown.process_panic_guard();
             let mut promoted = false;
-            while !shutdown.is_requested() {
+            while !shutdown.process.is_requested() {
                 // An unreadable registry is uncertainty, not a loss: it never
                 // terminates a standby that may still hold its entry.
                 if let Ok(Some(document)) = read_registry_document(&data_dir) {
@@ -13166,16 +13302,15 @@ fn start_standby_custody_worker(
                             generation,
                             &process,
                             &build,
-                            &standby_shutdown,
                             &worker,
-                            Arc::clone(&shutdown),
+                            &shutdown,
                         ) {
                             Ok(()) => promoted = true,
                             Err(error) => {
                                 ErrorLog::record(&format!(
                                     "daemon standby promotion failed: {error}"
                                 ));
-                                shutdown.request();
+                                shutdown.request_process();
                                 return;
                             }
                         }
@@ -13190,11 +13325,11 @@ fn start_standby_custody_worker(
                             "daemon standby custody lost ({}); shutting down",
                             loss.reason()
                         ));
-                        shutdown.request();
+                        shutdown.request_process();
                         return;
                     }
                 }
-                if shutdown.wait_for_tick(STANDBY_CUSTODY_TICK) {
+                if shutdown.process.wait_for_tick(STANDBY_CUSTODY_TICK) {
                     break;
                 }
             }
@@ -13212,11 +13347,10 @@ fn promote_standby_generation(
     generation: usagi_core::domain::id::DaemonGeneration,
     process: &ProcessIdentity,
     build: &BuildIdentity,
-    standby_shutdown: &ShutdownRequest,
     worker: &Mutex<Option<std::thread::JoinHandle<SecureUnixListener>>>,
-    shutdown: Arc<ShutdownRequest>,
+    shutdown: &StandbyShutdownDomains,
 ) -> std::io::Result<()> {
-    standby_shutdown.request();
+    shutdown.request_replacement();
     let standby = worker
         .lock()
         .map_err(|_| std::io::Error::other("standby worker lock is poisoned"))?
@@ -13241,7 +13375,7 @@ fn promote_standby_generation(
         record,
         None,
         false,
-        shutdown,
+        Arc::clone(&shutdown.process),
     )?;
     *worker
         .lock()
@@ -13362,9 +13496,15 @@ impl ShutdownSignal for SignalShutdown {
             let handle = std::thread::Builder::new()
                 .name("usagi-daemon-signal".to_string())
                 .spawn(move || {
-                    if prepared.forever().next().is_some() {
-                        requested.request();
-                    }
+                    let _panic = ShutdownOnWorkerPanic {
+                        shutdown: Arc::clone(&requested),
+                    };
+                    // `forever` normally returns only after a signal. If its
+                    // delivery source ever closes, fail stop as well: the raw
+                    // signal flag cannot wake the lifecycle owner's condvar on
+                    // its own.
+                    let _ = prepared.forever().next();
+                    requested.request();
                 });
             if let Err(error) = handle {
                 for id in flag_ids {
@@ -14578,7 +14718,7 @@ fn run_broker_lifecycle_command(command: &CliDaemonCommand) -> Option<std::io::R
 /// panic in an IPC, PTY, or observer worker. The hook records every thread's
 /// panic before the thread unwinds; [`run`] then catches a main-thread panic at
 /// the outer daemon boundary and terminates the process with an ordinary error.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_is_reported_as_daemon_health_danger
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_reports_danger_and_requests_shutdown
 fn install_panic_logger() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -14586,7 +14726,7 @@ fn install_panic_logger() {
         previous(info);
     }));
 }
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_is_reported_as_daemon_health_danger
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_reports_danger_and_requests_shutdown
 fn format_panic(info: &PanicHookInfo<'_>) -> String {
     let payload = if let Some(message) = info.payload().downcast_ref::<&str>() {
         (*message).to_owned()
@@ -18027,7 +18167,12 @@ mod tests {
                 data,
                 generation,
                 root.to_path_buf(),
-                DaemonPty::new(Arc::clone(&metrics), Arc::clone(&children)).0,
+                DaemonPty::new(
+                    Arc::clone(&metrics),
+                    Arc::clone(&children),
+                    Arc::new(ShutdownRequest::new()),
+                )
+                .0,
                 Arc::clone(tenants) as Workspaces,
                 Arc::new(UserEnvironment::new(data.to_path_buf(), OpCli)),
                 usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new(),
@@ -18040,7 +18185,13 @@ mod tests {
                 data,
                 generation,
                 Arc::clone(tenants) as Workspaces,
-                AgentPty::new(terminal_environment(), metrics, Arc::clone(&children)).0,
+                AgentPty::new(
+                    terminal_environment(),
+                    metrics,
+                    Arc::clone(&children),
+                    Arc::new(ShutdownRequest::new()),
+                )
+                .0,
                 std::env::current_exe().unwrap(),
                 Arc::new(UserEnvironment::new(data.to_path_buf(), OpCli)),
                 usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new(),
@@ -21070,7 +21221,7 @@ mod tests {
     }
 
     #[test]
-    fn a_panicked_background_worker_is_reported_as_daemon_health_danger() {
+    fn a_panicked_background_worker_reports_danger_and_requests_shutdown() {
         use usagi_core::usecase::client::MetricsAction;
         use usagi_core::usecase::daemon_health::{DaemonHealth, DaemonHealthTracker, HealthReason};
 
@@ -21082,6 +21233,7 @@ mod tests {
         )
         .unwrap();
         assert!(handle.join().is_err());
+        assert!(shutdown.is_requested());
 
         let broker = Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
             AgentConcurrencyGauge::default(),
@@ -21172,18 +21324,23 @@ mod tests {
     }
 
     #[test]
-    fn an_unwinding_worker_requests_shutdown_but_a_clean_exit_does_not() {
-        let failed = Arc::new(ShutdownRequest::new());
+    fn standby_client_panic_reaches_only_the_process_shutdown_domain() {
+        let process = Arc::new(ShutdownRequest::new());
+        let shutdown = StandbyShutdownDomains::new(Arc::clone(&process));
         let panic = panic::catch_unwind(AssertUnwindSafe({
-            let failed = Arc::clone(&failed);
+            let shutdown = shutdown.clone();
             move || {
-                let _guard = ShutdownOnWorkerPanic { shutdown: failed };
-                panic!("injected connection worker panic");
+                let _guard = shutdown.process_panic_guard();
+                panic!("injected standby client panic");
             }
         }));
         assert!(panic.is_err());
-        assert!(failed.is_requested());
+        assert!(process.is_requested());
+        assert!(!shutdown.replacement.is_requested());
+    }
 
+    #[test]
+    fn a_clean_panic_guard_does_not_request_shutdown() {
         let completed = Arc::new(ShutdownRequest::new());
         {
             let _guard = ShutdownOnWorkerPanic {
@@ -21191,6 +21348,49 @@ mod tests {
             };
         }
         assert!(!completed.is_requested());
+    }
+
+    #[test]
+    fn standby_accept_exit_distinguishes_promotion_from_failure() {
+        let unavailable_process = Arc::new(ShutdownRequest::new());
+        let unavailable = StandbyShutdownDomains::new(Arc::clone(&unavailable_process));
+        let error = unavailable
+            .accept_lifetime(|_| Err(std::io::Error::other("injected wake failure")))
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(unavailable_process.is_requested());
+        assert!(!unavailable.replacement.is_requested());
+
+        let unexpected_process = Arc::new(ShutdownRequest::new());
+        let unexpected = StandbyShutdownDomains::new(Arc::clone(&unexpected_process));
+        {
+            let mut lifetime = unexpected.accept_lifetime(ShutdownPipe::mirroring).unwrap();
+            // The production loop reaches the same completion call after a poll
+            // error, but an absent replacement request must keep it unexpected.
+            lifetime.finish_planned();
+        }
+        assert!(unexpected_process.is_requested());
+
+        let promoted_process = Arc::new(ShutdownRequest::new());
+        let promoted = StandbyShutdownDomains::new(Arc::clone(&promoted_process));
+        {
+            let mut lifetime = promoted.accept_lifetime(ShutdownPipe::mirroring).unwrap();
+            promoted.request_replacement();
+            assert!(!lifetime.wake.wait_for_listener(-1));
+            lifetime.finish_planned();
+        }
+        assert!(promoted.replacement.is_requested());
+        assert!(!promoted_process.is_requested());
+    }
+
+    #[test]
+    fn an_unfinished_pty_watcher_requests_shutdown() {
+        let shutdown = Arc::new(ShutdownRequest::new());
+        {
+            let _lifecycle = ShutdownOnUnexpectedWorkerExit::new(Arc::clone(&shutdown));
+        }
+        assert!(shutdown.is_requested());
     }
 
     #[test]
@@ -23484,7 +23684,12 @@ instructions = "{instructions}"
         .resolve(&request)
         .unwrap();
         let metrics = Arc::new(TerminalPipelineMetrics::default());
-        let (mut pty, observations) = DaemonPty::new(metrics, Arc::new(SpawnedChildren::default()));
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let (mut pty, observations) = DaemonPty::new(
+            metrics,
+            Arc::new(SpawnedChildren::default()),
+            Arc::clone(&shutdown),
+        );
 
         pty.spawn(&launch, &terminal, Geometry { cols: 80, rows: 24 })
             .unwrap();
@@ -23506,6 +23711,7 @@ instructions = "{instructions}"
                 PtyObservation::Shutdown => panic!("unexpected observer shutdown"),
             }
         }
+        assert!(!shutdown.is_requested());
     }
 
     #[test]
@@ -23697,10 +23903,14 @@ instructions = "{instructions}"
         let baseline = std::fs::read_dir("/dev/fd").unwrap().count();
         let metrics = Arc::new(TerminalPipelineMetrics::default());
         let children = Arc::new(SpawnedChildren::default());
-        let (mut generic, generic_observations) =
-            DaemonPty::new(Arc::clone(&metrics), Arc::clone(&children));
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let (mut generic, generic_observations) = DaemonPty::new(
+            Arc::clone(&metrics),
+            Arc::clone(&children),
+            Arc::clone(&shutdown),
+        );
         let (mut agent, agent_observations) =
-            AgentPty::new(BTreeMap::new(), metrics, Arc::clone(&children));
+            AgentPty::new(BTreeMap::new(), metrics, Arc::clone(&children), shutdown);
         let generation = DaemonGeneration::new();
 
         let generic_scope = TerminalLaunchScope {
@@ -23974,7 +24184,11 @@ instructions = "{instructions}"
             worktree_id: worktree,
         };
         let metrics = Arc::new(TerminalPipelineMetrics::default());
-        let (pty, observations) = DaemonPty::new(metrics, Arc::new(SpawnedChildren::default()));
+        let (pty, observations) = DaemonPty::new(
+            metrics,
+            Arc::new(SpawnedChildren::default()),
+            Arc::new(ShutdownRequest::new()),
+        );
         let observer_stop = pty.observations.clone();
         let runtime = Arc::new(Mutex::new(GenericTerminalRuntime::new(
             DaemonGeneration::new(),

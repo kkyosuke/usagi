@@ -437,7 +437,7 @@ session / terminal の所有権や local fallback を判断する根拠にはし
 | `pr_projection_coalesced_bytes` | `u64` | 既に queue 済みの projection chunk へ連結した committed output byte 数 |
 | `pr_projection_gaps` | `u64` | 落ちた byte を跨いで PR 走査を連結しないために記録した discontinuity 数 |
 | `agent_concurrency` | `object?` | Agent concurrency の使用中/上限。報告しない daemon では欠落する（下記） |
-| `failed_background_workers` | `u8` | この daemon process で panic して停止した長寿命 maintenance worker の種類数 |
+| `failed_background_workers` | `u8` | この daemon process で異常終了し、graceful shutdown を要求した長寿命 worker の種類数 |
 
 各 subscriber は容量 1 の queue を持つ。daemon は tick で block せず、queue が埋まった
 observer の中間 sample を落として count する。切断された observer は次の publish で取り除く。

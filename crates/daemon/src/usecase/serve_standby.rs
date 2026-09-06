@@ -9,7 +9,7 @@
 //! | holds the workspace fence and the instance lock for its whole lifetime | holds neither: it spawns nothing and writes no worktree |
 //! | registers `daemon.json` as the data directory's owner | writes no lifecycle record |
 //! | binds an endpoint and publishes `current.json` | binds a *private* endpoint and publishes nothing |
-//! | starts PTY, supervisor, PR, teardown and custody workers | starts no worker, no tick, no spawn |
+//! | starts PTY, supervisor, PR, teardown and active custody workers | starts only readiness endpoint/client and registry custody workers; no active-runtime tick or spawn |
 //! | reconciles the durable runtime state on the way in | hydrates it read-only |
 //!
 //! So the state machine is short:
