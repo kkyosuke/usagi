@@ -266,6 +266,9 @@ impl<D: CasDocument> CasStore<D> {
     /// # Errors
     /// Returns [`ResourceError::Corrupt`] or the document's own validation
     /// refusal for bytes this build must not act on, or the store's read error.
+    // Direct tests cover absence, IO, decode, and validation outcomes. LLVM
+    // still records each document/`impl FnOnce` monomorphization independently.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=unreadable_corrupt_and_unknown_schema_bytes_all_fail_closed
     pub fn load(&self, absent: impl FnOnce() -> D) -> Result<CasSnapshot<D>, ResourceFailure> {
         let Some(observed) = self.file.read()? else {
             let document = absent();
@@ -289,6 +292,9 @@ impl<D: CasDocument> CasStore<D> {
     /// Returns [`ResourceError::StaleRevision`] when another writer committed
     /// first or when `next` does not advance the revision by exactly one, the
     /// document's validation refusal, or the store's error.
+    // Direct tests cover revision, validation, IO, lost-race, and success
+    // outcomes. LLVM still records every document monomorphization separately.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=a_write_failure_and_a_lost_race_are_reported_differently
     pub fn commit(
         &self,
         snapshot: &CasSnapshot<D>,
@@ -318,6 +324,10 @@ impl<D: CasDocument> CasStore<D> {
     /// # Errors
     /// Returns `change`'s refusal, or any [`load`](Self::load) /
     /// [`commit`](Self::commit) failure.
+    // Direct tests cover load, convergence, refusal, and commit failures. LLVM
+    // nevertheless counts the `impl FnOnce` call-site monomorphizations as
+    // independent copies whose error exits cannot all run in one instance.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=a_converged_update_writes_nothing_and_a_refused_one_commits_nothing
     pub fn update<T>(
         &self,
         absent: impl FnOnce() -> D,
@@ -342,6 +352,9 @@ impl<D: CasDocument> CasStore<D> {
     /// # Errors
     /// Returns `change`'s refusal, any non-contention store failure, or
     /// [`ResourceError::StaleRevision`] after the bounded retry budget expires.
+    // Direct tests cover successful replay and retry-budget exhaustion. LLVM
+    // still counts each output/closure monomorphization as an independent copy.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=update_reloads_and_reapplies_after_a_stale_revision
     pub fn update_retrying<T>(
         &self,
         mut absent: impl FnMut() -> D,
