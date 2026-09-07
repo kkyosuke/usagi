@@ -603,7 +603,7 @@ fn fixture_reap_terminates_the_exact_bootstrap_broker_after_a_daemon_crash() {
 }
 
 #[test]
-fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
+fn bare_daemon_is_idempotent_after_restart() {
     let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
     let output = home.run(&[OsStr::new("daemon"), OsStr::new("restart")]);
@@ -614,6 +614,21 @@ fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
     );
     assert!(stdout(&output).contains("daemon restarted"));
     assert_daemon_running(&home);
+
+    let data_dir = home.data_dir();
+    let restarted = daemon_record(&data_dir).expect("restart registers a daemon record");
+    let repeated = home.run(&[OsStr::new("daemon")]);
+    assert!(repeated.status.success(), "{}", stderr(&repeated));
+    assert_eq!(
+        stdout(&repeated),
+        format!(
+            "usagi v{}: daemon already running (pid {})\n",
+            env!("CARGO_PKG_VERSION"),
+            restarted.pid
+        )
+    );
+    assert_eq!(daemon_record(&data_dir), Some(restarted));
+
     stop_daemon(&home);
 }
 
