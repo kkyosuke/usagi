@@ -95,13 +95,12 @@ impl TextOverlay {
         }
     }
 
-    fn body(&self, height: usize) -> Vec<String> {
+    fn body(&self, body_height: usize) -> Vec<String> {
         let lines = self.lines();
         // border 2, status 1, footer 1 を先に確保する。極小 terminal でも 1 行だけは
         // viewport に残し、render_modal / render_over が最終 clip を担う。
         // scroll indicator（最大 2 行）と footer（空行を含め 2 行）および枠を
         // 先に差し引く。これにより通常サイズでは footer が clip されない。
-        let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
         let viewport = body_height.saturating_sub(4).max(1);
         // text-viewer shape: offset-anchored viewport + shared `↑/↓ N more`
         // scroll rendering, the same emission the PR list uses.
@@ -115,18 +114,58 @@ impl TextOverlay {
         }));
         modal::fixed_body(body, body_height)
     }
+
+    /// Compose into a body that already fits inside the terminal height.
+    ///
+    /// Unlike the legacy renderers below, a reserved frame is not vertically
+    /// clipped after composition. On a body shorter than five rows, prioritize
+    /// one document row and the footer over showing every scroll indicator so
+    /// the reader never loses its way back to the finder.
+    fn body_with_reserved_footer(&self, body_height: usize) -> Vec<String> {
+        if body_height >= 5 {
+            return self.body(body_height);
+        }
+
+        let lines = self.lines();
+        let (start, end) = modal::viewport_window(lines.len(), self.scroll, 1);
+        let line = lines[start].clone();
+        let footer = modal::footer(if self.dismiss_on_any_key {
+            "Press any key to close"
+        } else {
+            &self.footer
+        });
+        match body_height {
+            0 => Vec::new(),
+            1 => vec![line],
+            2 => vec![line, footer],
+            3 => vec![line, String::new(), footer],
+            _ => {
+                let mut body = if start > 0 {
+                    vec![modal::scroll_above(start), line]
+                } else if end < lines.len() {
+                    vec![line, modal::scroll_below(lines.len() - end)]
+                } else {
+                    vec![line]
+                };
+                body.push(String::new());
+                body.push(footer);
+                modal::fixed_body(body, body_height)
+            }
+        }
+    }
 }
 
 /// 空の画面に中央配置して描く。
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, state: &TextOverlay) -> Vec<String> {
     let (height, _) = crate::presentation::widgets::normalize_size(raw_height, raw_width);
+    let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
     modal::render_modal(
         raw_height,
         raw_width,
         &state.title,
         INNER_WIDTH,
-        &state.body(height),
+        &state.body(body_height),
     )
 }
 
@@ -139,13 +178,38 @@ pub fn render_over(
     state: &TextOverlay,
 ) -> Vec<String> {
     let (height, _) = crate::presentation::widgets::normalize_size(raw_height, raw_width);
+    let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
     modal::render_over(
         raw_height,
         raw_width,
         base,
         &state.title,
         INNER_WIDTH,
-        &state.body(height),
+        &state.body(body_height),
+    )
+}
+
+/// Render a text overlay with caller-selected preferred dimensions.
+///
+/// File Preview uses this to give both its finder and document stages one large,
+/// stable frame. Other text overlays retain the compact default above.
+#[must_use]
+pub(crate) fn render_over_with_layout(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    state: &TextOverlay,
+    inner_width: usize,
+    desired_body_height: usize,
+) -> Vec<String> {
+    let body_height = modal::reserved_body_height(raw_height, raw_width, desired_body_height);
+    modal::render_over(
+        raw_height,
+        raw_width,
+        base,
+        &state.title,
+        inner_width,
+        &state.body_with_reserved_footer(body_height),
     )
 }
 
@@ -221,6 +285,39 @@ mod tests {
                 .count()
         };
         assert_eq!(box_height(&ready), box_height(&fallback));
+    }
+
+    #[test]
+    fn reserved_body_keeps_its_footer_on_a_short_terminal() {
+        let modal = TextOverlay::new(
+            "Preview",
+            OverlayDocument::Ready(vec!["first".into(), "selected".into(), "last".into()]),
+        )
+        .scrolled_to(1)
+        .with_footer("Esc: back to files");
+
+        assert!(modal.body_with_reserved_footer(0).is_empty());
+        assert_eq!(modal.body_with_reserved_footer(1).len(), 1);
+        assert_eq!(modal.body_with_reserved_footer(2).len(), 2);
+        assert_eq!(modal.body_with_reserved_footer(3).len(), 3);
+        let body = modal.body_with_reserved_footer(4);
+        assert_eq!(body.len(), 4);
+        assert!(body.join("\n").contains("selected"));
+        assert!(body.join("\n").contains("Esc: back to files"));
+
+        let at_start = modal.clone().scrolled_to(0).body_with_reserved_footer(4);
+        assert!(at_start.join("\n").contains("↓ 2 more"));
+        let only_line = TextOverlay::new("Preview", OverlayDocument::Ready(vec!["only".into()]))
+            .body_with_reserved_footer(4);
+        assert!(only_line.join("\n").contains("only"));
+        assert_eq!(modal.body_with_reserved_footer(5).len(), 5);
+        assert!(
+            modal
+                .acknowledgement()
+                .body_with_reserved_footer(2)
+                .join("\n")
+                .contains("Press any key to close")
+        );
     }
 
     #[test]

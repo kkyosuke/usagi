@@ -85,7 +85,7 @@ pub enum Overlay {
     RemoveSessions,
     /// active target scope の Pull Request 一覧。素材は port から還流する。
     Prs,
-    /// Active target's repository file finder and read-only text preview.
+    /// Selected session's repository file finder and read-only text preview.
     Preview,
     /// session 作成が accept 後に失敗したことを伝える dialog。表示は safe message だけ。
     CreateSessionError,
@@ -820,7 +820,7 @@ impl PrOverlay {
 
 const MAX_PREVIEW_FILTER_CHARS: usize = 256;
 
-/// Active target file finder and read-only text preview state.
+/// Selected-session file finder and read-only text preview state.
 ///
 /// Repository-relative paths and file lines return through [`Effect::LoadPreview`]
 /// and [`BackendEvent::PreviewLoaded`]. The reducer owns filtering, selection,
@@ -1962,6 +1962,27 @@ impl AppState {
         self.active.map(Target::Session)
     }
 
+    /// Resolve the session whose files the Preview overlay may search.
+    ///
+    /// Switch is a cursor-driven inspection surface, so Preview follows the
+    /// selected sidebar session just like the right-pane preview. Closeup keeps
+    /// operating on its active session. Neither route manufactures a workspace
+    /// root target or accepts a stale session identity.
+    fn file_preview_target(&self) -> Option<Target> {
+        let session = match self.route {
+            Route::Home(HomeMode::Switch) => match self.selected {
+                Selection::Target(Target::Session(session)) => session,
+                Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => {
+                    return None;
+                }
+            },
+            Route::Home(HomeMode::Closeup) => self.active?,
+        };
+        self.sessions
+            .contains(&session)
+            .then_some(Target::Session(session))
+    }
+
     fn rows(&self) -> Vec<Selection> {
         let mut rows = Vec::with_capacity(self.sessions.len() + 1);
         rows.extend(
@@ -2323,7 +2344,7 @@ pub enum AppKey {
     OpenEnvironment,
     /// Open the active target's Pull Request list overlay (`Ctrl-O p`).
     OpenPrs,
-    /// Open the active target's file preview overlay.
+    /// Open the selected session's file preview overlay.
     OpenPreview,
     /// Open the current workspace's durable pending decision list.
     OpenDecisions,
@@ -6045,7 +6066,7 @@ fn open_prs_for_target(state: &mut AppState, target: Target) -> Vec<Effect> {
 }
 
 fn open_preview(state: &mut AppState) -> Vec<Effect> {
-    let Some(target) = state.active_target() else {
+    let Some(target) = state.file_preview_target() else {
         return Vec::new();
     };
     state.overlay = Some(Overlay::Preview);
@@ -13955,6 +13976,66 @@ mod tests {
     }
 
     #[test]
+    fn preview_overlay_resolves_its_target_from_the_home_mode() {
+        let (workspace, active, selected) = ids();
+        let missing = SessionId::new();
+        let mut state = AppState::home(workspace, vec![active, selected]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::NextSession));
+        assert_eq!(state.active(), Some(active));
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(selected))
+        );
+
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+            vec![Effect::LoadPreview {
+                target: Target::Session(selected),
+                path: None,
+            }]
+        );
+        assert_eq!(
+            state.preview_overlay().map(PreviewOverlay::target),
+            Some(Target::Session(selected))
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        state.route = Route::Home(HomeMode::Closeup);
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+            vec![Effect::LoadPreview {
+                target: Target::Session(active),
+                path: None,
+            }]
+        );
+        assert_eq!(
+            state.preview_overlay().map(PreviewOverlay::target),
+            Some(Target::Session(active))
+        );
+
+        for selection in [
+            Selection::NewSession,
+            Selection::Idle,
+            Selection::Target(Target::Root(workspace)),
+            Selection::Target(Target::Session(missing)),
+        ] {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+            state.route = Route::Home(HomeMode::Switch);
+            state.selected = selection;
+            assert!(update(&mut state, AppEvent::Key(AppKey::OpenPreview)).is_empty());
+            assert_eq!(state.overlay(), None);
+        }
+
+        state.route = Route::Home(HomeMode::Closeup);
+        state.active = Some(missing);
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenPreview)).is_empty());
+        assert_eq!(state.overlay(), None);
+        state.active = None;
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenPreview)).is_empty());
+        assert_eq!(state.overlay(), None);
+    }
+
+    #[test]
     fn opening_one_overlay_discards_the_other_state() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
@@ -14471,15 +14552,24 @@ mod tests {
         assert_eq!(state.overlay(), None);
         assert!(!state.closeup_action_forced);
 
-        // Even an internally stale Closeup cannot reopen actions or target-scoped
-        // overlays, and synthetic root/stale selections cannot activate.
+        // Even an internally stale Closeup cannot reopen active-target actions or
+        // overlays. Ctrl-A returns to Switch, where Preview deliberately follows
+        // the still-valid sidebar cursor even though there is no active target.
         state.route = Route::Home(HomeMode::Closeup);
         assert!(update_management_key(&mut state, AppKey::CtrlA).is_empty());
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
-        for key in [AppKey::OpenNotes, AppKey::OpenPrs, AppKey::OpenPreview] {
+        for key in [AppKey::OpenNotes, AppKey::OpenPrs] {
             assert!(update(&mut state, AppEvent::Key(key)).is_empty());
             assert_eq!(state.overlay(), None);
         }
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+            vec![Effect::LoadPreview {
+                target: Target::Session(session),
+                path: None,
+            }]
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         for selection in [
             Selection::Target(Target::Root(workspace)),
             Selection::Target(Target::Session(dropped)),
