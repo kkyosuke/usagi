@@ -179,6 +179,10 @@ fn lifecycle_and_dispatch_overrides_keep_runtime_identity_and_safe_home_status()
     assert!(text(&render(24, 120, "atlas", &fixtures, 0, false)).contains("failed · safe failure"));
     fixtures[0].pending_decisions = 2;
     assert!(text(&render(24, 120, "atlas", &fixtures, 0, false)).contains("action · 2 decisions"));
+    fixtures[0].pending_decisions = 1;
+    let single_decision = text(&render(24, 120, "atlas", &fixtures, 0, false));
+    assert!(single_decision.contains("action · 1 decision"));
+    assert!(!single_decision.contains("1 decisions"));
     fixtures[0].pending_decisions = 0;
     fixtures[0].lifecycle = SessionLifecycle::Available;
     fixtures[0].pr_merged = true;
@@ -194,6 +198,39 @@ fn lifecycle_and_dispatch_overrides_keep_runtime_identity_and_safe_home_status()
     fixtures[0].agents_observed = true;
     fixtures[0].agents.clear();
     assert!(text(&render(24, 120, "atlas", &fixtures, 0, false)).contains("No agent activity."));
+}
+
+#[test]
+fn unobserved_homes_keep_cached_lifecycles_and_do_not_revive_stale_runtime_state() {
+    let mut fixtures = sessions(1);
+    fixtures[0].agents_observed = false;
+    fixtures[0].failure_summary = Some("old snapshot".to_owned());
+    for (lifecycle, expected) in [
+        (SessionLifecycle::Available, "project inactive"),
+        (SessionLifecycle::Creating, "cached · creating"),
+        (SessionLifecycle::Initializing, "cached · creating"),
+        (SessionLifecycle::Deleting, "cached · deleting"),
+        (SessionLifecycle::Failed, "cached · failed"),
+    ] {
+        fixtures[0].lifecycle = lifecycle;
+        for status in [
+            None,
+            Some(DispatchAgentStatus::Starting),
+            Some(DispatchAgentStatus::Failed),
+        ] {
+            fixtures[0].agent_status = status;
+            for tick in [0, 63] {
+                let frame = super::super::render(24, 120, "atlas", &fixtures, tick, false)
+                    .expect("shared meadow fits");
+                assert_frame(&frame, 24, 120, &fixtures);
+                let text = text(&frame);
+                assert!(text.contains(expected), "{text}");
+                assert!(!text.contains("old snapshot"), "{text}");
+                assert!(!text.contains("starting"), "{text}");
+                assert_eq!(home_status(&fixtures[0]).1, Style::new().dim());
+            }
+        }
+    }
 }
 
 #[test]

@@ -722,9 +722,20 @@ fn draw_home(canvas: &mut Canvas, session: &GardenSession, area: Area) {
 }
 
 fn home_status(session: &GardenSession) -> (String, Style) {
-    if session.pending_decisions > 0 {
+    if !session.agents_observed {
         return (
-            format!("action · {} decisions", session.pending_decisions),
+            super::inactive_status(session).to_owned(),
+            Style::new().dim(),
+        );
+    }
+    if session.pending_decisions > 0 {
+        let noun = if session.pending_decisions == 1 {
+            "decision"
+        } else {
+            "decisions"
+        };
+        return (
+            format!("action · {} {noun}", session.pending_decisions),
             Role::Warning.style().bold(),
         );
     }
@@ -739,9 +750,6 @@ fn home_status(session: &GardenSession) -> (String, Style) {
     }
     if session.pr_merged {
         return ("PR merged!".to_owned(), Role::Success.style());
-    }
-    if !session.agents_observed {
-        return ("project inactive".to_owned(), Style::new().dim());
     }
     if session.lifecycle == SessionLifecycle::Available
         && matches!(

@@ -909,15 +909,21 @@ fn needs_attention(session: &GardenSession) -> bool {
             .any(|agent| matches!(agent.phase, AgentPhase::Waiting | AgentPhase::Interrupted))
 }
 
-fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
-    let status = match session.lifecycle {
+fn inactive_status(session: &GardenSession) -> &'static str {
+    match session.lifecycle {
         SessionLifecycle::Available => "project inactive",
         SessionLifecycle::Creating | SessionLifecycle::Initializing => "cached · creating",
         SessionLifecycle::Deleting => "cached · deleting",
         SessionLifecycle::Failed => "cached · failed",
-    };
+    }
+}
+
+fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
     [
-        centered(PLOT_WIDTH, &Style::new().dim().paint(status)),
+        centered(
+            PLOT_WIDTH,
+            &Style::new().dim().paint(inactive_status(session)),
+        ),
         " ".repeat(PLOT_WIDTH),
         " ".repeat(PLOT_WIDTH),
         " ".repeat(PLOT_WIDTH),
@@ -1498,6 +1504,50 @@ mod tests {
         assert!(plain(&frame).join("\n").contains("1 wait · 1 run"));
         let targets = rabbits(&frame);
         assert!(targets[0].column + targets[0].width <= targets[1].column);
+    }
+
+    #[test]
+    fn compact_cards_keep_unobserved_sessions_without_reviving_cached_agents() {
+        let observed = session(
+            STEADY_ID,
+            "live",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        let mut cached = session(
+            "10000000-0000-4000-8000-000000000001",
+            "cached",
+            SessionLifecycle::Available,
+            AgentPhase::Waiting,
+        );
+        cached.agents_observed = false;
+        let mut empty = session(
+            "20000000-0000-4000-8000-000000000001",
+            "empty",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        );
+        empty.agents.clear();
+        let frame = super::render(
+            13,
+            64,
+            "atlas",
+            &[observed.clone(), cached.clone(), empty],
+            0,
+            false,
+        )
+        .expect("compact cards fit");
+        assert_eq!(rabbits(&frame).len(), 1);
+        assert_eq!(
+            rabbits(&frame)[0].agent,
+            Some(observed.agents[0].runtime_id)
+        );
+        assert_eq!(plots(&frame).len(), 2);
+        assert_eq!(plots(&frame)[0].session_id, cached.id);
+        let text = plain(&frame).join("\n");
+        assert!(text.contains("cached"), "{text}");
+        assert!(text.contains("Status is"), "{text}");
+        assert!(text.contains("1 usagi"), "{text}");
     }
 
     fn grass_row(rows: &[String]) -> &str {
