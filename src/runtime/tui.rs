@@ -22,7 +22,7 @@ use crossterm::terminal::{
 use crossterm::{execute, queue};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
-use usagi_core::domain::id::{SessionId, UserDecisionId, WorkspaceId};
+use usagi_core::domain::id::{OperationId, SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -77,8 +77,8 @@ use usagi_tui::usecase::application::agent_tab_intent::{
 };
 use usagi_tui::usecase::application::controller::{
     AppEvent, AppKey, BackendEvent, DaemonAction, EnvironmentEntry, NewRequest, Notice,
-    PendingToken, RoleChoice, RoleEditorScope, SafeError, SafeMessage, SessionRoleCatalog,
-    SessionRoleProjection, Target, classify_management_input,
+    PendingToken, PreviewFileFilter, RoleChoice, RoleEditorScope, SafeError, SafeMessage,
+    SessionRoleCatalog, SessionRoleProjection, Target, classify_management_input,
 };
 use usagi_tui::usecase::application::daemon_backend::{
     Completions, DaemonBackend, DaemonControlPort as BackendDaemonControlPort,
@@ -737,19 +737,25 @@ impl ProductionOverlayPort {
     fn publish_preview(completion: PreviewCompletion, completions: &Completions) {
         let PreviewCompletion {
             target,
+            request_id,
             path,
+            filter,
             result,
         } = completion;
         let event = match result {
             Ok((files, lines)) => BackendEvent::PreviewLoaded {
                 target,
+                request_id,
                 path,
+                filter,
                 files,
                 lines,
             },
             Err(error) => BackendEvent::PreviewError {
                 target,
+                request_id,
                 path,
+                filter,
                 error: SafeError {
                     message: SafeMessage::new(error.message()),
                     error_id: error.error_id().to_owned(),
@@ -795,14 +801,23 @@ impl BackendOverlayPort for ProductionOverlayPort {
         }
     }
 
-    fn load_preview(&mut self, target: Target, path: Option<String>, completions: Completions) {
+    fn load_preview(
+        &mut self,
+        target: Target,
+        request_id: OperationId,
+        path: Option<String>,
+        filter: PreviewFileFilter,
+        completions: Completions,
+    ) {
         let root = match self.target_root(target) {
             Ok(root) => root.to_path_buf(),
             Err(error) => {
                 Self::publish_preview(
                     PreviewCompletion {
                         target,
+                        request_id,
                         path,
+                        filter,
                         result: Err(error),
                     },
                     &completions,
@@ -810,7 +825,8 @@ impl BackendOverlayPort for ProductionOverlayPort {
                 return;
             }
         };
-        self.preview_pump.request(target, path, root);
+        self.preview_pump
+            .request(target, request_id, path, filter, root);
     }
 
     fn cancel_preview(&mut self) {
@@ -5646,8 +5662,8 @@ mod tests {
     use usagi_tui::usecase::application::Key;
     use usagi_tui::usecase::application::controller::{
         AppState, BackendEvent, Effect, EntryEvent, EntryState, EntryWorkspace, EnvironmentEntry,
-        NewEvent, NewForm, NewMode, NewRequest, NewState, Notice, Overlay, Target, update,
-        update_entry, update_new,
+        NewEvent, NewForm, NewMode, NewRequest, NewState, Notice, Overlay, PreviewFileFilter,
+        Target, update, update_entry, update_new,
     };
     use usagi_tui::usecase::application::runtime_ports::RestoreConnectionPort;
     use usagi_tui::usecase::terminal_input::{
@@ -9606,7 +9622,9 @@ mod tests {
         });
         composition.backend.dispatch(Effect::LoadPreview {
             target: Target::Root(workspace_id),
+            request_id: OperationId::new(),
             path: None,
+            filter: PreviewFileFilter::All,
         });
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut completions = Vec::new();
@@ -9640,7 +9658,9 @@ mod tests {
 
         composition.backend.dispatch(Effect::LoadPreview {
             target: Target::Session(session_ids[0]),
+            request_id: OperationId::new(),
             path: None,
+            filter: PreviewFileFilter::All,
         });
         let deadline = Instant::now() + Duration::from_secs(1);
         let preview_error = loop {
@@ -9658,6 +9678,7 @@ mod tests {
                     target: Target::Session(id),
                     path: None,
                     error,
+                    ..
                 }
             )] if *id == session_ids[0] && error.error_id == "preview-files"
         ));

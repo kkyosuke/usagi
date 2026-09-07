@@ -3417,9 +3417,9 @@ mod tests {
     use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, BranchChoice, Feedback, GARDEN_IDLE_THRESHOLD,
-        GardenClick, HomeMode, RoleChoice, Route, SafeError, SafeMessage, Selection,
-        SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection, Target, TargetPhase,
-        update,
+        GardenClick, HomeMode, PreviewFileFilter, RoleChoice, Route, SafeError, SafeMessage,
+        Selection, SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection, Target,
+        TargetPhase, update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
@@ -6461,21 +6461,27 @@ mod tests {
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
                 target,
+                request_id,
                 path: None,
+                filter: PreviewFileFilter::All,
                 files: vec!["README.md".into()],
                 lines: vec![],
             }),
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let request_id = state.preview_overlay().unwrap().request_id();
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
                 target,
+                request_id,
                 path: Some("README.md".into()),
+                filter: PreviewFileFilter::All,
                 files: vec![],
                 lines: vec!["# Heading".into(), "content line".into()],
             }),
@@ -6490,11 +6496,14 @@ mod tests {
         assert!(ready.contains("Heading"));
         assert!(ready.contains("content line"));
 
+        let request_id = state.preview_overlay().unwrap().request_id();
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewError {
                 target,
+                request_id,
                 path: Some("README.md".into()),
+                filter: PreviewFileFilter::All,
                 error: SafeError {
                     message: SafeMessage::new("no preview available"),
                     error_id: "preview".into(),

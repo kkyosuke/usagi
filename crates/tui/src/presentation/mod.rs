@@ -83,8 +83,8 @@ use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState,
     DirectorConsoleParent, DirectorNew, DirectorRoute, Effect, EnvironmentEntry, ExitChoice,
     Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay, PendingToken,
-    RoleChoice, Route, SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection, Target,
-    WorkspaceDrawerFocus,
+    PreviewFileFilter, RoleChoice, Route, SessionBranchCatalog, SessionRoleCatalog,
+    SessionRoleProjection, Target, WorkspaceDrawerFocus,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -1164,7 +1164,14 @@ impl BackendOverlayPort for UnavailableBackendPort {
     fn load_pull_requests(&mut self, _: Target, completions: Completions) {
         unavailable_completion(&completions, "Pull Request data is unavailable");
     }
-    fn load_preview(&mut self, _: Target, _: Option<String>, completions: Completions) {
+    fn load_preview(
+        &mut self,
+        _: Target,
+        _: OperationId,
+        _: Option<String>,
+        _: PreviewFileFilter,
+        completions: Completions,
+    ) {
         unavailable_completion(&completions, "preview is unavailable");
     }
     fn open_pull_request(&mut self, _: String, completions: Completions) {
@@ -10407,8 +10414,8 @@ mod tests {
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, DirectorConsoleParent, DirectorNew,
         DirectorRoute, Effect, EnvironmentEntry, GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode,
-        NewRequest, Overlay, PendingToken, RoleEditorScope, Route, SessionCreateIntent,
-        SessionRoleCatalog, TabDirection, Target,
+        NewRequest, Overlay, PendingToken, PreviewFileFilter, RoleEditorScope, Route,
+        SessionCreateIntent, SessionRoleCatalog, TabDirection, Target,
     };
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -11967,7 +11974,12 @@ mod tests {
                 },
             },
             Effect::LoadPullRequests { target },
-            Effect::LoadPreview { target, path: None },
+            Effect::LoadPreview {
+                target,
+                request_id: OperationId::new(),
+                path: None,
+                filter: PreviewFileFilter::All,
+            },
             Effect::OpenPullRequest {
                 url: "https://github.com/o/r/pull/1".to_owned(),
             },
