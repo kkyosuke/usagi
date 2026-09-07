@@ -100,6 +100,9 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
   Agent / terminal、durable state、error log には注入しない。
 - **解決に失敗した binding は注入せず、その変数だけを落として error ログに記録する**（変数名と参照は
   記録し、解決値は記録しない）。vault がロックされていても pane は開く。
+- TUI の pane launch は background の専用 IPC policy でこの bounded queue の完了を待つ。1Password の承認モーダル中も
+  通常操作用の短い deadline では pending pane を失敗にせず、描画・入力・quit は待たせない。policy の値は
+  [daemon IPC](04-ipc.md#attempt-deadline-と-reconnect-budget)を正本とする。
 - 解決結果は workspace ごとに**設定内容をキーにキャッシュ**する。設定が変わらなければ次の pane 起動で
   `op read` を再実行せず、設定または `OP_SERVICE_ACCOUNT_TOKEN` を編集すればキャッシュは無効になる。
 
