@@ -85,7 +85,11 @@ struct Capture {
 pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildObservation {
     let mut command = Command::new(program);
     command.args(arguments);
-    match observe_command_output(command, policy) {
+    normalize_observation(observe_command_output(command, policy))
+}
+
+fn normalize_observation(observation: ChildOutputObservation) -> ChildObservation {
+    match observation {
         ChildOutputObservation::Success { stdout, stderr } => {
             normalize_output(if stdout.is_empty() { stderr } else { stdout })
         }
@@ -487,6 +491,10 @@ mod tests {
         assert_eq!(
             normalize_output(b"  \n".to_vec()),
             ChildObservation::EmptyOutput
+        );
+        assert_eq!(
+            normalize_observation(ChildOutputObservation::ObservationFailed),
+            ChildObservation::ObservationFailed
         );
     }
 

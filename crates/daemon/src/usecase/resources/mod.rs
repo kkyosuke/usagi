@@ -347,7 +347,8 @@ impl<D: CasDocument> CasStore<D> {
         mut absent: impl FnMut() -> D,
         mut change: impl FnMut(&mut D) -> Result<T, ResourceError>,
     ) -> Result<(T, CasSnapshot<D>), ResourceFailure> {
-        for attempt in 0..MAX_CAS_UPDATE_ATTEMPTS {
+        let mut attempts_remaining = MAX_CAS_UPDATE_ATTEMPTS;
+        loop {
             let snapshot = self.load(&mut absent)?;
             let mut next = snapshot.to_document();
             let value = change(&mut next)?;
@@ -357,13 +358,15 @@ impl<D: CasDocument> CasStore<D> {
             next.bump();
             match self.commit(&snapshot, next) {
                 Ok(committed) => return Ok((value, committed)),
-                Err(failure)
-                    if failure.refusal() == Some(ResourceError::StaleRevision)
-                        && attempt + 1 < MAX_CAS_UPDATE_ATTEMPTS => {}
+                Err(failure) if failure.refusal() == Some(ResourceError::StaleRevision) => {
+                    attempts_remaining -= 1;
+                    if attempts_remaining == 0 {
+                        return Err(failure);
+                    }
+                }
                 Err(failure) => return Err(failure),
             }
         }
-        unreachable!("the bounded CAS loop returns on its final attempt")
     }
 }
 

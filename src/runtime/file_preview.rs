@@ -322,6 +322,22 @@ mod tests {
     }
 
     #[test]
+    fn background_loader_reads_a_nested_document_and_rejects_an_empty_path() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("nested")).unwrap();
+        fs::write(root.path().join("nested/file.txt"), "one\ntwo").unwrap();
+
+        assert_eq!(
+            load_preview(root.path(), Some("nested/file.txt")).unwrap(),
+            (Vec::new(), vec!["one".to_owned(), "two".to_owned()])
+        );
+        assert!(matches!(
+            open_beneath(root.path(), ""),
+            Err(FilePreviewError::OutsideRoot)
+        ));
+    }
+
+    #[test]
     fn reading_rejects_invalid_missing_and_non_file_targets() {
         let root = tempdir().unwrap();
         fs::create_dir(root.path().join("directory")).unwrap();
