@@ -95,13 +95,12 @@ impl TextOverlay {
         }
     }
 
-    fn body(&self, height: usize) -> Vec<String> {
+    fn body(&self, body_height: usize) -> Vec<String> {
         let lines = self.lines();
         // border 2, status 1, footer 1 を先に確保する。極小 terminal でも 1 行だけは
         // viewport に残し、render_modal / render_over が最終 clip を担う。
         // scroll indicator（最大 2 行）と footer（空行を含め 2 行）および枠を
         // 先に差し引く。これにより通常サイズでは footer が clip されない。
-        let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
         let viewport = body_height.saturating_sub(4).max(1);
         // text-viewer shape: offset-anchored viewport + shared `↑/↓ N more`
         // scroll rendering, the same emission the PR list uses.
@@ -121,12 +120,13 @@ impl TextOverlay {
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, state: &TextOverlay) -> Vec<String> {
     let (height, _) = crate::presentation::widgets::normalize_size(raw_height, raw_width);
+    let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
     modal::render_modal(
         raw_height,
         raw_width,
         &state.title,
         INNER_WIDTH,
-        &state.body(height),
+        &state.body(body_height),
     )
 }
 
@@ -139,13 +139,38 @@ pub fn render_over(
     state: &TextOverlay,
 ) -> Vec<String> {
     let (height, _) = crate::presentation::widgets::normalize_size(raw_height, raw_width);
+    let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
     modal::render_over(
         raw_height,
         raw_width,
         base,
         &state.title,
         INNER_WIDTH,
-        &state.body(height),
+        &state.body(body_height),
+    )
+}
+
+/// Render a text overlay with caller-selected preferred dimensions.
+///
+/// File Preview uses this to give both its finder and document stages one large,
+/// stable frame. Other text overlays retain the compact default above.
+#[must_use]
+pub(crate) fn render_over_with_layout(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    state: &TextOverlay,
+    inner_width: usize,
+    desired_body_height: usize,
+) -> Vec<String> {
+    let body_height = modal::reserved_body_height(raw_height, raw_width, desired_body_height);
+    modal::render_over(
+        raw_height,
+        raw_width,
+        base,
+        &state.title,
+        inner_width,
+        &state.body(body_height),
     )
 }
 
