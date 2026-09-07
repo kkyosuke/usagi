@@ -20,7 +20,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use usagi_core::domain::agent::AgentProfileId;
 use usagi_core::domain::id::{
-    AgentContinuationRef, OperationId, SessionId, UserDecisionId, WorkspaceId,
+    AgentContinuationRef, OperationId, RequestId, SessionId, UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
@@ -326,7 +326,7 @@ pub trait OverlayPort {
     fn load_preview(
         &mut self,
         target: Target,
-        request_id: OperationId,
+        request_id: RequestId,
         path: Option<String>,
         filter: PreviewFileFilter,
         completions: Completions,
@@ -358,7 +358,7 @@ impl OverlayPort for NoOverlay {
     fn load_preview(
         &mut self,
         _: Target,
-        _: OperationId,
+        _: RequestId,
         _: Option<String>,
         _: PreviewFileFilter,
         completions: Completions,
@@ -935,7 +935,7 @@ mod tests {
     #[derive(Default)]
     struct FakeOverlay {
         pull_requests: Vec<Target>,
-        previews: Vec<(Target, OperationId, Option<String>, PreviewFileFilter)>,
+        previews: Vec<(Target, RequestId, Option<String>, PreviewFileFilter)>,
         opened: Vec<String>,
     }
 
@@ -955,7 +955,7 @@ mod tests {
         fn load_preview(
             &mut self,
             target: Target,
-            request_id: OperationId,
+            request_id: RequestId,
             path: Option<String>,
             filter: PreviewFileFilter,
             completions: Completions,
@@ -1024,7 +1024,7 @@ mod tests {
         fn load_preview(
             &mut self,
             _: Target,
-            _: OperationId,
+            _: RequestId,
             _: Option<String>,
             _: PreviewFileFilter,
             _: Completions,
@@ -1329,7 +1329,7 @@ mod tests {
         assert_eq!(
             backend.dispatch(Effect::LoadPreview {
                 target,
-                request_id: OperationId::new(),
+                request_id: RequestId::new(),
                 path: None,
                 filter: PreviewFileFilter::All,
             }),
@@ -1390,7 +1390,7 @@ mod tests {
             },
             Effect::LoadPreview {
                 target: Target::Root(WorkspaceId::new()),
-                request_id: OperationId::new(),
+                request_id: RequestId::new(),
                 path: None,
                 filter: PreviewFileFilter::All,
             },

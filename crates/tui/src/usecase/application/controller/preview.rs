@@ -1,6 +1,7 @@
 //! Pure finder/document state and reducer for the Home Preview overlay.
 
-use usagi_core::domain::id::OperationId;
+use unicode_segmentation::UnicodeSegmentation;
+use usagi_core::domain::id::RequestId;
 use usagi_core::domain::presentation_text::presentation_character_is_safe;
 
 use crate::usecase::fuzzy::fuzzy_score;
@@ -101,7 +102,7 @@ struct PreviewDisplay {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewOverlay {
     pub(super) target: Target,
-    pub(super) request_id: OperationId,
+    pub(super) request_id: RequestId,
     pub(super) files: Vec<String>,
     pub(super) filter: String,
     pub(super) file_filter: PreviewFileFilter,
@@ -124,7 +125,7 @@ impl PreviewOverlay {
     pub(super) fn loading(target: Target) -> Self {
         Self {
             target,
-            request_id: OperationId::new(),
+            request_id: RequestId::new(),
             files: Vec::new(),
             filter: String::new(),
             file_filter: PreviewFileFilter::All,
@@ -149,7 +150,7 @@ impl PreviewOverlay {
     }
     /// Identity of the latest finder/document load accepted by this overlay.
     #[must_use]
-    pub const fn request_id(&self) -> OperationId {
+    pub const fn request_id(&self) -> RequestId {
         self.request_id
     }
     /// Current fuzzy filter.
@@ -271,8 +272,8 @@ impl PreviewOverlay {
         self.error.as_ref()
     }
 
-    fn begin_request(&mut self) -> OperationId {
-        self.request_id = OperationId::new();
+    fn begin_request(&mut self) -> RequestId {
+        self.request_id = RequestId::new();
         self.request_id
     }
 
@@ -384,7 +385,7 @@ fn update_preview_search(overlay: &mut PreviewOverlay, key: &AppKey) {
     match key {
         AppKey::Escape | AppKey::Enter => overlay.search_editing = false,
         AppKey::Backspace => {
-            overlay.search.pop();
+            pop_last_grapheme(&mut overlay.search);
             overlay.reset_search_position();
         }
         AppKey::Char(character) if presentation_character_is_safe(*character) => {
@@ -448,7 +449,7 @@ fn update_preview_finder(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
         }
         AppKey::Backspace => {
             let overlay = state.preview_overlay.as_mut().unwrap();
-            overlay.filter.pop();
+            pop_last_grapheme(&mut overlay.filter);
             overlay.selected = 0;
         }
         AppKey::Char(character) if presentation_character_is_safe(*character) => {
@@ -510,6 +511,12 @@ pub(super) fn sanitize_preview_line(line: &str) -> String {
         .collect()
 }
 
+fn pop_last_grapheme(value: &mut String) {
+    if let Some((start, _)) = value.grapheme_indices(true).next_back() {
+        value.truncate(start);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use usagi_core::domain::id::{SessionId, WorkspaceId};
@@ -520,7 +527,7 @@ mod tests {
     fn complete(
         state: &mut AppState,
         target: Target,
-        request_id: OperationId,
+        request_id: RequestId,
         path: Option<&str>,
         filter: PreviewFileFilter,
         files: &[&str],
@@ -679,6 +686,10 @@ mod tests {
         let unchanged = overlay.clone();
         update_preview_search(&mut overlay, &AppKey::Up);
         assert_eq!(overlay, unchanged);
+
+        overlay.search = "a👩‍💻".to_owned();
+        update_preview_search(&mut overlay, &AppKey::Backspace);
+        assert_eq!(overlay.search, "a");
     }
 
     #[test]

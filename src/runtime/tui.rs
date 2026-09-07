@@ -22,7 +22,7 @@ use crossterm::terminal::{
 use crossterm::{execute, queue};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
-use usagi_core::domain::id::{OperationId, SessionId, UserDecisionId, WorkspaceId};
+use usagi_core::domain::id::{RequestId, SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -804,7 +804,7 @@ impl BackendOverlayPort for ProductionOverlayPort {
     fn load_preview(
         &mut self,
         target: Target,
-        request_id: OperationId,
+        request_id: RequestId,
         path: Option<String>,
         filter: PreviewFileFilter,
         completions: Completions,
@@ -5639,8 +5639,8 @@ mod tests {
     use serde_json::json;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{
-        AgentContinuationRef, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
-        WorkspaceId, WorktreeId,
+        AgentContinuationRef, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
+        TerminalRef, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -9622,7 +9622,7 @@ mod tests {
         });
         composition.backend.dispatch(Effect::LoadPreview {
             target: Target::Root(workspace_id),
-            request_id: OperationId::new(),
+            request_id: RequestId::new(),
             path: None,
             filter: PreviewFileFilter::All,
         });
@@ -9658,7 +9658,7 @@ mod tests {
 
         composition.backend.dispatch(Effect::LoadPreview {
             target: Target::Session(session_ids[0]),
-            request_id: OperationId::new(),
+            request_id: RequestId::new(),
             path: None,
             filter: PreviewFileFilter::All,
         });

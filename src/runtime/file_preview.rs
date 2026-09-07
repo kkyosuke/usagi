@@ -104,7 +104,7 @@ fn list_files_with(
             )?;
         }
         PreviewFileFilter::Tracked => {
-            extend_listed_files(&mut files, run(root, &["ls-files", "-z", "--cached"]))?
+            extend_listed_files(&mut files, run(root, &["ls-files", "-z", "--cached"]))?;
         }
     }
     files.sort();

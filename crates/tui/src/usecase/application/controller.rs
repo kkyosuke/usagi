@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
 use usagi_core::domain::id::{
-    AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, OperationId, SessionId, UserDecisionId,
-    WorkspaceId,
+    AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, OperationId, RequestId, SessionId,
+    UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pr_inventory::{PrEntry, PrState};
@@ -2609,7 +2609,7 @@ pub enum BackendEvent {
     PreviewLoaded {
         target: Target,
         /// Unique identity of the request; value-equal A-B-A loads stay fenced.
-        request_id: OperationId,
+        request_id: RequestId,
         path: Option<String>,
         /// Finder group that originated this request.
         filter: PreviewFileFilter,
@@ -2620,7 +2620,7 @@ pub enum BackendEvent {
     PreviewError {
         target: Target,
         /// Unique identity of the request; value-equal A-B-A loads stay fenced.
-        request_id: OperationId,
+        request_id: RequestId,
         path: Option<String>,
         /// Finder group that originated this request.
         filter: PreviewFileFilter,
@@ -2821,7 +2821,7 @@ pub enum Effect {
     /// read one selected file (`path: Some`) through the overlay data owner.
     LoadPreview {
         target: Target,
-        request_id: OperationId,
+        request_id: RequestId,
         path: Option<String>,
         filter: PreviewFileFilter,
     },
@@ -13691,6 +13691,24 @@ mod tests {
         );
     }
 
+    fn assert_preview_load(
+        state: &AppState,
+        effects: &[Effect],
+        target: Target,
+        path: Option<&str>,
+        filter: PreviewFileFilter,
+    ) {
+        assert_eq!(
+            effects,
+            [Effect::LoadPreview {
+                target,
+                request_id: state.preview_overlay().unwrap().request_id(),
+                path: path.map(str::to_owned),
+                filter,
+            }]
+        );
+    }
+
     #[test]
     fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
         let (workspace, session, _) = ids();
@@ -13699,16 +13717,7 @@ mod tests {
 
         // `v` opens the preview overlay for the active target and requests it.
         let effects = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
-        let request_id = state.preview_overlay().unwrap().request_id();
-        assert_eq!(
-            effects,
-            vec![Effect::LoadPreview {
-                target,
-                request_id,
-                path: None,
-                filter: PreviewFileFilter::All,
-            }]
-        );
+        assert_preview_load(&state, &effects, target, None, PreviewFileFilter::All);
         assert_eq!(state.overlay(), Some(Overlay::Preview));
         assert!(state.preview_overlay().unwrap().is_loading());
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
@@ -13747,15 +13756,12 @@ mod tests {
         assert_eq!(overlay.selected_file(), Some("src/runtime.rs"));
 
         let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
-        let request_id = state.preview_overlay().unwrap().request_id();
-        assert_eq!(
-            effects,
-            vec![Effect::LoadPreview {
-                target,
-                request_id,
-                path: Some("src/runtime.rs".into()),
-                filter: PreviewFileFilter::All,
-            }]
+        assert_preview_load(
+            &state,
+            &effects,
+            target,
+            Some("src/runtime.rs"),
+            PreviewFileFilter::All,
         );
         assert_eq!(
             state.preview_overlay().unwrap().path(),
@@ -14083,7 +14089,7 @@ mod tests {
             },
             BackendEvent::PreviewLoaded {
                 target: Target::Session(session),
-                request_id: OperationId::new(),
+                request_id: RequestId::new(),
                 path: None,
                 filter: PreviewFileFilter::All,
                 files: Vec::new(),
@@ -14091,7 +14097,7 @@ mod tests {
             },
             BackendEvent::PreviewError {
                 target: Target::Session(session),
-                request_id: OperationId::new(),
+                request_id: RequestId::new(),
                 path: None,
                 filter: PreviewFileFilter::All,
                 error: safe_error("preview"),

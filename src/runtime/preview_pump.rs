@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-use usagi_core::domain::id::OperationId;
+use usagi_core::domain::id::RequestId;
 use usagi_tui::usecase::application::controller::{PreviewFileFilter, Target};
 
 use super::file_preview::FilePreviewError;
@@ -18,7 +18,7 @@ pub(crate) type PreviewPayload = (Vec<String>, Vec<String>);
 #[derive(Debug)]
 pub(crate) struct PreviewCompletion {
     pub(crate) target: Target,
-    pub(crate) request_id: OperationId,
+    pub(crate) request_id: RequestId,
     pub(crate) path: Option<String>,
     pub(crate) filter: PreviewFileFilter,
     pub(crate) result: Result<PreviewPayload, FilePreviewError>,
@@ -27,7 +27,7 @@ pub(crate) struct PreviewCompletion {
 struct PreviewJob {
     generation: u64,
     target: Target,
-    request_id: OperationId,
+    request_id: RequestId,
     path: Option<String>,
     filter: PreviewFileFilter,
     root: PathBuf,
@@ -113,7 +113,7 @@ impl PreviewPump {
     pub(crate) fn request(
         &self,
         target: Target,
-        request_id: OperationId,
+        request_id: RequestId,
         path: Option<String>,
         filter: PreviewFileFilter,
         root: PathBuf,
@@ -190,7 +190,7 @@ mod tests {
             ))
         });
         let target = Target::Root(WorkspaceId::new());
-        let request_id = OperationId::new();
+        let request_id = RequestId::new();
         pump.request(
             target,
             request_id,
@@ -226,7 +226,7 @@ mod tests {
         let target = Target::Root(WorkspaceId::new());
         pump.request(
             target,
-            OperationId::new(),
+            RequestId::new(),
             Some("first".to_owned()),
             PreviewFileFilter::All,
             PathBuf::from("/repo"),
@@ -234,12 +234,12 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         pump.request(
             target,
-            OperationId::new(),
+            RequestId::new(),
             Some("second".to_owned()),
             PreviewFileFilter::Changed,
             PathBuf::from("/repo"),
         );
-        let latest_request = OperationId::new();
+        let latest_request = RequestId::new();
         pump.request(
             target,
             latest_request,
@@ -267,7 +267,7 @@ mod tests {
         });
         pump.request(
             Target::Root(WorkspaceId::new()),
-            OperationId::new(),
+            RequestId::new(),
             None,
             PreviewFileFilter::All,
             PathBuf::from("/repo"),

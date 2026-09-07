@@ -136,8 +136,7 @@ fn render_document(
         format!("Preview · {path} · /{query} [{match_position}]")
     };
     let footer = if state.is_search_editing() {
-        let query = widgets::clip_to_width(state.search(), 64);
-        format!("Enter/Esc: finish search  /{query}▌")
+        search_footer(state.search(), inner)
     } else {
         format!(
             "Esc: files  /: search  n/N: match  l: lines {}  w: wrap {}  ↑↓: scroll",
@@ -155,6 +154,12 @@ fn render_document(
         INNER_WIDTH,
         BODY_HEIGHT,
     )
+}
+
+fn search_footer(search: &str, inner_width: usize) -> String {
+    let query_width = inner_width.saturating_sub(modal::BODY_INDENT_WIDTH + 2);
+    let query = widgets::clip_to_width(search, query_width);
+    format!("/{query}▌  Enter/Esc: finish search")
 }
 
 const fn on_off(enabled: bool) -> &'static str {
@@ -560,6 +565,18 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('/')));
         let _ = update(&mut state, AppEvent::Key(AppKey::Paste("needle".into())));
         assert!(joined(&state).contains("/needle▌"));
+        let compact = render_over(
+            9,
+            30,
+            &vec!["background".into(); 9],
+            state.preview_overlay().unwrap(),
+        );
+        assert!(
+            compact
+                .iter()
+                .map(|line| strip_ansi(line))
+                .any(|line| line.contains('▌'))
+        );
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('l')));
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('w')));

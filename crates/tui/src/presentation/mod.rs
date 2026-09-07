@@ -30,8 +30,8 @@ use usagi_core::domain::agent::{
     AgentWorkspaceObservation, ProviderResumeProjection,
 };
 use usagi_core::domain::id::{
-    AgentContinuationRef, AgentRuntimeId, OperationId, SessionId, TerminalRef, UserDecisionId,
-    WorkspaceId,
+    AgentContinuationRef, AgentRuntimeId, OperationId, RequestId, SessionId, TerminalRef,
+    UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
@@ -1167,7 +1167,7 @@ impl BackendOverlayPort for UnavailableBackendPort {
     fn load_preview(
         &mut self,
         _: Target,
-        _: OperationId,
+        _: RequestId,
         _: Option<String>,
         _: PreviewFileFilter,
         completions: Completions,
@@ -10446,7 +10446,7 @@ mod tests {
     };
     use usagi_core::domain::id::{
         AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId,
-        SessionId, TerminalId, TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
+        RequestId, SessionId, TerminalId, TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session_lifecycle::AgentPhase;
@@ -11976,7 +11976,7 @@ mod tests {
             Effect::LoadPullRequests { target },
             Effect::LoadPreview {
                 target,
-                request_id: OperationId::new(),
+                request_id: RequestId::new(),
                 path: None,
                 filter: PreviewFileFilter::All,
             },
