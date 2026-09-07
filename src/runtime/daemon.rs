@@ -8437,7 +8437,7 @@ fn session_lineage_by_name(
     Some((session_id, parent_session_id))
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_session_tools_only_reach_sessions_created_by_the_caller
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_session_tools_are_creator_scoped_except_same_workspace_remove
 fn record_session_lineage(
     agent: &SharedAgentRuntime,
     workspace_id: WorkspaceId,
@@ -9758,27 +9758,12 @@ fn dispatch_session_action(
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .removal_identity(name)?;
-            if let Some(caller) = caller {
-                let target = bound
-                    .sessions()
-                    .lock()
-                    .map_err(|_| SessionRuntimeError::Storage)?
-                    .created_session_record_id(name, caller)?;
-                if id != target {
-                    return Err(SessionRuntimeError::PermissionDenied);
-                }
-            }
             let merged_head_oid = best_effort_merged_pr_head(pr_inventory, id, branch_head);
-            let mut remove_payload = payload.clone();
-            remove_payload["parent_session_id"] =
-                serde_json::json!(caller.and_then(|caller| caller.session_id));
-            remove_payload["creator_agent_id"] =
-                serde_json::json!(caller.map(|caller| caller.agent_id));
             perform_remove_with_merged_head(
                 bound.sessions(),
                 teardown,
                 operation_id,
-                &remove_payload,
+                payload,
                 merged_head_oid,
             )
         }

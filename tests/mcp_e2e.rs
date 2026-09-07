@@ -1728,8 +1728,8 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // One authenticated boundary covers every session-targeting MCP family.
-fn production_agent_session_tools_only_reach_sessions_created_by_the_caller() {
+#[allow(clippy::too_many_lines)] // One authenticated boundary covers creator-scoped tools and workspace-wide removal.
+fn production_agent_session_tools_are_creator_scoped_except_same_workspace_remove() {
     let mut mcp = McpHarness::start();
     write_session_role_catalog(&mcp, "coder", "Dispatch coder", "DISPATCH_ROLE_SECRET");
     let created = mcp.tool(
@@ -1826,7 +1826,6 @@ exit 0
             json!({"name":"existing-top-level","prompt":"must not be delivered","mode":"queue"}),
         ),
         ("session_pr", json!({"name":"existing-top-level"})),
-        ("session_remove", json!({"name":"existing-top-level"})),
     ] {
         let refused = mcp.tool(tool, &arguments);
         assert_eq!(refused["error"]["code"], -32603, "{tool}: {refused}");
@@ -1853,6 +1852,16 @@ exit 0
             .join(".usagi/sessions/existing-top-level")
             .exists()
     );
+    let removed = mcp.tool(
+        "session_remove",
+        &json!({"name":"existing-top-level", "force":true}),
+    );
+    assert!(removed.get("error").is_none(), "{removed}");
+    wait_until(|| {
+        !mcp.workspace()
+            .join(".usagi/sessions/existing-top-level")
+            .exists()
+    });
 
     let owned = mcp.tool(
         "session_create",

@@ -164,7 +164,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | tool | 実挙動 |
 |---|---|
 | `session_create` | daemon IPC を通じて session lifecycle store と worktree を操作する。認証済み Agent による作成では exact caller を durable な creator として固定する |
-| `session_remove` | 認証済み Agent では自身が作成した session だけ、削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
+| `session_remove` | 認証済み Agent でも、同じ daemon が所有する同一 workspace の名前指定 session を作成者にかかわらず削除 **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | 認証済み Agent では自身が作成した session だけを lifecycle snapshot から返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
 | `session_prompt` | 認証済み Agent が作成した session の live PTY または durable queue にだけ配送する。`live`（既定）は handshake で fence した対象 PTY へ prompt と Enter キーを配送して即時実行し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ使う。停止中の Agent を起動する入口は `session_dispatch` とする |
 | `agent_resume_inventory` | 認証済み Agent が作成した session の Agent inventory から provider ID を含まない safe metadata と opaque な exact resume target を列挙する |
@@ -189,9 +189,10 @@ credential から復元した exact `CallerRef` と lifecycle に作成時だけ
 creator を変更・推測することはない。
 
 認証済み Agent の list/inventory は自身が作成した session とそこに属する Agent だけを返す。名前、session ID、
-Agent ID、exact resume target を指定する操作は、対象が別 creator、人間作成、または creator metadata を持たない
+Agent ID、exact resume target を指定する操作は、`session_remove` を除き、対象が別 creator、人間作成、または creator metadata を持たない
 legacy session なら filesystem・Git・PTY・queue・dispatch store に effect を起こす前に `permission_denied` となる。
-create-or-reuse も同じ規則であり、別 creator が既に保持する同名 session を再利用しない。作成 reservation 内で
+`session_remove` は例外として、daemon が connection から束縛した同一 workspace の session 名だけを解決し、creator metadata に
+かかわらず teardown を受理する。create-or-reuse は引き続き同じ creator 規則であり、別 creator が既に保持する同名 session を再利用しない。作成 reservation 内で
 creator を再照合するため、異なる Agent による同名作成が競合しても片方の authority へ収束する。
 
 この制約は Agent credential を伴う MCP request に適用する。人間が使う TUI / CLI と、daemon-provisioned でない
