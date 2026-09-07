@@ -85,7 +85,7 @@ pub enum Overlay {
     RemoveSessions,
     /// active target scope の Pull Request 一覧。素材は port から還流する。
     Prs,
-    /// Active target's repository file finder and read-only text preview.
+    /// Selected session's repository file finder and read-only text preview.
     Preview,
     /// session 作成が accept 後に失敗したことを伝える dialog。表示は safe message だけ。
     CreateSessionError,
@@ -13976,8 +13976,9 @@ mod tests {
     }
 
     #[test]
-    fn preview_overlay_searches_the_switch_cursor_session() {
+    fn preview_overlay_resolves_its_target_from_the_home_mode() {
         let (workspace, active, selected) = ids();
+        let missing = SessionId::new();
         let mut state = AppState::home(workspace, vec![active, selected]);
         let _ = update(&mut state, AppEvent::Key(AppKey::NextSession));
         assert_eq!(state.active(), Some(active));
@@ -13999,7 +14000,37 @@ mod tests {
         );
 
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-        state.selected = Selection::NewSession;
+        state.route = Route::Home(HomeMode::Closeup);
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+            vec![Effect::LoadPreview {
+                target: Target::Session(active),
+                path: None,
+            }]
+        );
+        assert_eq!(
+            state.preview_overlay().map(PreviewOverlay::target),
+            Some(Target::Session(active))
+        );
+
+        for selection in [
+            Selection::NewSession,
+            Selection::Idle,
+            Selection::Target(Target::Root(workspace)),
+            Selection::Target(Target::Session(missing)),
+        ] {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+            state.route = Route::Home(HomeMode::Switch);
+            state.selected = selection;
+            assert!(update(&mut state, AppEvent::Key(AppKey::OpenPreview)).is_empty());
+            assert_eq!(state.overlay(), None);
+        }
+
+        state.route = Route::Home(HomeMode::Closeup);
+        state.active = Some(missing);
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenPreview)).is_empty());
+        assert_eq!(state.overlay(), None);
+        state.active = None;
         assert!(update(&mut state, AppEvent::Key(AppKey::OpenPreview)).is_empty());
         assert_eq!(state.overlay(), None);
     }

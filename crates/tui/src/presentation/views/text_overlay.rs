@@ -114,6 +114,45 @@ impl TextOverlay {
         }));
         modal::fixed_body(body, body_height)
     }
+
+    /// Compose into a body that already fits inside the terminal height.
+    ///
+    /// Unlike the legacy renderers below, a reserved frame is not vertically
+    /// clipped after composition. On a body shorter than five rows, prioritize
+    /// one document row and the footer over showing every scroll indicator so
+    /// the reader never loses its way back to the finder.
+    fn body_with_reserved_footer(&self, body_height: usize) -> Vec<String> {
+        if body_height >= 5 {
+            return self.body(body_height);
+        }
+
+        let lines = self.lines();
+        let (start, end) = modal::viewport_window(lines.len(), self.scroll, 1);
+        let line = lines[start].clone();
+        let footer = modal::footer(if self.dismiss_on_any_key {
+            "Press any key to close"
+        } else {
+            &self.footer
+        });
+        match body_height {
+            0 => Vec::new(),
+            1 => vec![line],
+            2 => vec![line, footer],
+            3 => vec![line, String::new(), footer],
+            _ => {
+                let mut body = if start > 0 {
+                    vec![modal::scroll_above(start), line]
+                } else if end < lines.len() {
+                    vec![line, modal::scroll_below(lines.len() - end)]
+                } else {
+                    vec![line]
+                };
+                body.push(String::new());
+                body.push(footer);
+                modal::fixed_body(body, body_height)
+            }
+        }
+    }
 }
 
 /// 空の画面に中央配置して描く。
@@ -170,7 +209,7 @@ pub(crate) fn render_over_with_layout(
         base,
         &state.title,
         inner_width,
-        &state.body(body_height),
+        &state.body_with_reserved_footer(body_height),
     )
 }
 
@@ -246,6 +285,39 @@ mod tests {
                 .count()
         };
         assert_eq!(box_height(&ready), box_height(&fallback));
+    }
+
+    #[test]
+    fn reserved_body_keeps_its_footer_on_a_short_terminal() {
+        let modal = TextOverlay::new(
+            "Preview",
+            OverlayDocument::Ready(vec!["first".into(), "selected".into(), "last".into()]),
+        )
+        .scrolled_to(1)
+        .with_footer("Esc: back to files");
+
+        assert!(modal.body_with_reserved_footer(0).is_empty());
+        assert_eq!(modal.body_with_reserved_footer(1).len(), 1);
+        assert_eq!(modal.body_with_reserved_footer(2).len(), 2);
+        assert_eq!(modal.body_with_reserved_footer(3).len(), 3);
+        let body = modal.body_with_reserved_footer(4);
+        assert_eq!(body.len(), 4);
+        assert!(body.join("\n").contains("selected"));
+        assert!(body.join("\n").contains("Esc: back to files"));
+
+        let at_start = modal.clone().scrolled_to(0).body_with_reserved_footer(4);
+        assert!(at_start.join("\n").contains("↓ 2 more"));
+        let only_line = TextOverlay::new("Preview", OverlayDocument::Ready(vec!["only".into()]))
+            .body_with_reserved_footer(4);
+        assert!(only_line.join("\n").contains("only"));
+        assert_eq!(modal.body_with_reserved_footer(5).len(), 5);
+        assert!(
+            modal
+                .acknowledgement()
+                .body_with_reserved_footer(2)
+                .join("\n")
+                .contains("Press any key to close")
+        );
     }
 
     #[test]

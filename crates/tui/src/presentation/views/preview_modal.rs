@@ -262,4 +262,49 @@ mod tests {
             .unwrap();
         assert_eq!(display_width(document_top.trim()), INNER_WIDTH + 4);
     }
+
+    #[test]
+    fn short_scrolled_document_keeps_the_back_control_inside_the_frame() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                path: None,
+                files: vec!["src/lib.rs".into()],
+                lines: vec![],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                path: Some("src/lib.rs".into()),
+                files: vec![],
+                lines: vec!["first".into(), "selected".into(), "last".into()],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+
+        let frame = render_over(
+            10,
+            40,
+            &vec!["background".into(); 10],
+            state.preview_overlay().unwrap(),
+        );
+        let plain = frame
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("selected"));
+        assert!(plain.contains("Esc: back to files"));
+        assert!(frame.iter().all(|line| display_width(line) == 40));
+        assert!(frame.first().unwrap().starts_with("background"));
+        assert!(frame.last().unwrap().starts_with("background"));
+    }
 }
