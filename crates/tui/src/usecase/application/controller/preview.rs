@@ -672,6 +672,13 @@ mod tests {
         );
         assert_eq!(overlay.search.chars().count(), MAX_PREVIEW_SEARCH_CHARS);
         assert!(!overlay.search.contains('\u{1b}'));
+
+        overlay.search = "missing".to_owned();
+        overlay.move_search_match(true);
+        assert_eq!(overlay.current_match(), 0);
+        let unchanged = overlay.clone();
+        update_preview_search(&mut overlay, &AppKey::Up);
+        assert_eq!(overlay, unchanged);
     }
 
     #[test]

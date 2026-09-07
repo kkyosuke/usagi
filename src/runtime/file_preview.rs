@@ -71,11 +71,19 @@ pub(crate) fn list_files(
     root: &Path,
     filter: PreviewFileFilter,
 ) -> Result<Vec<String>, FilePreviewError> {
+    list_files_with(root, filter, &mut run_git)
+}
+
+fn list_files_with(
+    root: &Path,
+    filter: PreviewFileFilter,
+    run: &mut dyn FnMut(&Path, &[&str]) -> ChildOutputObservation,
+) -> Result<Vec<String>, FilePreviewError> {
     let mut files = Vec::new();
     match filter {
         PreviewFileFilter::All => extend_listed_files(
             &mut files,
-            run_git(
+            run(
                 root,
                 &[
                     "ls-files",
@@ -87,16 +95,16 @@ pub(crate) fn list_files(
             ),
         )?,
         PreviewFileFilter::Changed => {
-            let base = integration_base(root);
+            let base = integration_base(root, run);
             let arguments = changed_diff_arguments(&base);
-            extend_listed_files(&mut files, run_git(root, &arguments))?;
+            extend_listed_files(&mut files, run(root, &arguments))?;
             extend_listed_files(
                 &mut files,
-                run_git(root, &["ls-files", "-z", "--others", "--exclude-standard"]),
+                run(root, &["ls-files", "-z", "--others", "--exclude-standard"]),
             )?;
         }
         PreviewFileFilter::Tracked => {
-            extend_listed_files(&mut files, run_git(root, &["ls-files", "-z", "--cached"]))?
+            extend_listed_files(&mut files, run(root, &["ls-files", "-z", "--cached"]))?
         }
     }
     files.sort();
@@ -125,8 +133,11 @@ fn run_git(root: &Path, arguments: &[&str]) -> ChildOutputObservation {
     observe_command_output(command, PREVIEW_LIST_POLICY)
 }
 
-fn integration_base(root: &Path) -> String {
-    match run_git(
+fn integration_base(
+    root: &Path,
+    run: &mut dyn FnMut(&Path, &[&str]) -> ChildOutputObservation,
+) -> String {
+    match run(
         root,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     ) {
@@ -283,6 +294,7 @@ fn sanitize_line(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::fmt::Write as _;
     use std::fs;
     use std::process::Command;
@@ -329,6 +341,62 @@ mod tests {
                 Err(FilePreviewError::FilesUnavailable)
             );
         }
+    }
+
+    #[test]
+    fn changed_listing_propagates_each_bounded_git_failure() {
+        let root = Path::new("/repo");
+        for observations in [
+            vec![output("origin/main\n"), ChildOutputObservation::ExitFailure],
+            vec![
+                output("origin/main\n"),
+                output("changed\0"),
+                ChildOutputObservation::TimedOut,
+            ],
+        ] {
+            let mut observations = VecDeque::from(observations);
+            let mut run = |_: &Path, _: &[&str]| {
+                observations
+                    .pop_front()
+                    .unwrap_or(ChildOutputObservation::ObservationFailed)
+            };
+            assert_eq!(
+                list_files_with(root, PreviewFileFilter::Changed, &mut run),
+                Err(FilePreviewError::FilesUnavailable)
+            );
+        }
+
+        let mut empty = |_: &Path, _: &[&str]| ChildOutputObservation::ObservationFailed;
+        assert_eq!(
+            list_files_with(root, PreviewFileFilter::All, &mut empty),
+            Err(FilePreviewError::FilesUnavailable)
+        );
+    }
+
+    #[test]
+    fn changed_listing_falls_back_to_main_when_origin_head_is_unavailable() {
+        let mut observations = VecDeque::from([
+            ChildOutputObservation::ExitFailure,
+            output("changed\0"),
+            output("untracked\0"),
+        ]);
+        let mut calls = Vec::new();
+        let mut run = |_: &Path, arguments: &[&str]| {
+            calls.push(
+                arguments
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            );
+            observations
+                .pop_front()
+                .unwrap_or(ChildOutputObservation::ObservationFailed)
+        };
+        assert_eq!(
+            list_files_with(Path::new("/repo"), PreviewFileFilter::Changed, &mut run).unwrap(),
+            ["changed", "untracked"]
+        );
+        assert!(calls[1].contains(&"main".to_owned()));
     }
 
     #[test]
