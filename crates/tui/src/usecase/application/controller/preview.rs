@@ -693,6 +693,31 @@ mod tests {
     }
 
     #[test]
+    fn filter_cycles_and_character_search_cover_each_direction() {
+        assert_eq!(PreviewFileFilter::Tracked.next(), PreviewFileFilter::All);
+        assert_eq!(
+            PreviewFileFilter::All.previous(),
+            PreviewFileFilter::Tracked
+        );
+        assert_eq!(
+            PreviewFileFilter::Tracked.previous(),
+            PreviewFileFilter::Changed
+        );
+
+        let mut overlay = PreviewOverlay::loading(Target::Root(WorkspaceId::new()));
+        overlay.path = Some("file".to_owned());
+        overlay.lines = vec!["n n".to_owned()];
+        assert!(update_preview_document(&mut overlay, &AppKey::Char('/')).is_empty());
+        update_preview_search(&mut overlay, &AppKey::Char('n'));
+        update_preview_search(&mut overlay, &AppKey::Enter);
+        assert_eq!(overlay.search(), "n");
+        assert!(!overlay.is_search_editing());
+
+        assert!(update_preview_document(&mut overlay, &AppKey::Char('N')).is_empty());
+        assert_eq!(overlay.current_match(), 1);
+    }
+
+    #[test]
     fn missing_preview_state_closes_the_overlay_and_cancels_work() {
         let mut state = AppState::home(WorkspaceId::new(), Vec::new());
         state.overlay = Some(Overlay::Preview);
