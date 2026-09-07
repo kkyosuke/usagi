@@ -5807,7 +5807,13 @@ mod tests {
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
         assert!(text.contains("1 session"), "{text}");
         assert!(text.contains("1 usagi"), "{text}");
-        assert!(text.contains("o.o"), "{text}");
+        let frame = garden_frame(24, 100, &home, now()).expect("Garden fits");
+        let rabbits = frame
+            .hitboxes
+            .iter()
+            .filter_map(|hitbox| hitbox.agent)
+            .collect::<Vec<_>>();
+        assert_eq!(rabbits, vec![live.agent_runtime_id]);
         assert!(!text.contains("1 run"), "{text}");
         assert!(!text.contains("done"), "{text}");
     }

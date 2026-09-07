@@ -1156,11 +1156,17 @@ inactive project の pending decision は resident controller がなく観測し
 
 ### responsive layout
 
-全 session が収まり、各 session の Agent が 3 体以下なら、session 名・状態・大きなうさぎ・草地を持つ 28 桁 × 8 行の
-区画を行優先で中央へ並べる。それ以外は 1 Agent を 1 項目へ平坦化し、まず 14 桁 × 2 行の card、次に状態 glyph・`兎`・
-session 名を持つ 8 桁 × 1 行の line、最後に 2 桁 × 1 行の `兎` glyph の順で、その frame に全 Agent が収まる最も読みやすい密度を選ぶ。card は
-session 名、同じ session 内の何体目か、状態 glyph、短い状態語を持つ。Agent がいない session も安全な session summary
-の項目として残すが、最終 glyph 容量を超える異常な件数では Agent のうさぎを優先する。
+Garden 本体が 80 桁 × 18 行以上なら、池・餌場・木と session の巣穴を持つ共通の庭を表示する。
+うさぎは画面内の互いに重ならない範囲で歩行・飲水・食事・休息を繰り返す。端末寸法と総 Agent 数から歩ける範囲を
+均等に割り当て、全羽が収まる最大の姿（従来の 4 行のうさぎ、2 行の小さなうさぎ、2 桁の `兎`）を選ぶ。
+Agent が増えても池・餌場・木を残す。session の巣穴と立札は庭の下側に並び、件数に応じて低く小さくなる。
+巣穴はうさぎの移動範囲から分離し、立札や別 Agent にうさぎが隠れない。session 内の羽数による上限は設けない。
+
+これより小さい端末では従来の compact 表示を使う。全 session と各 session の 3 羽以下の Agent が収まる場合は
+28 桁 × 8 行の区画を並べ、それ以外は 14 桁 × 2 行の card、8 桁 × 1 行の line、2 桁 × 1 行の glyph の順に縮める。
+Agent のいない session も残すが、立札の容量を超える異常な session 数では Agent を優先する。
+共通の庭でも Agent を収めるために立札の領域を先に縮める。景観とうさぎの最小 glyph さえ同時に置けない件数では、
+compact の全幅表示へ切り替えて Agent のクリック範囲を優先する。
 
 どの密度でも観測済み Agent は 1 runtime 1 うさぎ・1 hitbox であり、省略数には畳まない。session lifecycle や dispatch が
 `starting` / `completed` / `stopped` / `failed` でも runtime identity は失わず、姿と状態だけを変える。inactive project の
@@ -1205,14 +1211,14 @@ responsive layout が全 runtime をより小さい表現へ切り替える。�
 action caption を表示しない。
 controller が runtime の `Ended` / `Exited` を観測した runtime（tab は残っており、inventory も保持している）は
 瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さないため描かない。
-詳細区画の幅と hitbox は羽数で変えず、うさぎ 1 羽ぶんの hitbox は実際の描画位置へ別に置く。dense 表示では card / line /
-glyph の全範囲をそのうさぎの hitbox にする。session の選択状態は Garden に装飾せず、
+共通の庭では各うさぎの実際の描画位置と大きさを hitbox にする。compact の詳細区画の幅は羽数で変えず、
+各うさぎの hitbox を別に置く。compact の card / line / glyph はその全範囲を各うさぎの hitbox にする。session の選択状態は Garden に装飾せず、
 すべて同じ dim の立札で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
-詳細区画の `Running` は hop・bound・sniff・dig・look の 5 動作を繰り返す。各 runtime の stable `AgentRuntimeId` から
+compact 詳細区画の `Running` は hop・bound・sniff・dig・look の 5 動作を繰り返す。各 runtime の stable `AgentRuntimeId` から
 動作順と開始位置をずらすため、同じ phase のうさぎも一斉に同じ動きをしない。うさぎ本体の色は ID から 5 色の palette の
-1 色を選び、同じ ID・tick・size なら同じ色と pose になって refresh で見た目が飛ばない。dense 表示ではうさぎを静止させ、
+1 色を選び、同じ ID・tick・size なら同じ色と pose になって refresh で見た目が飛ばない。compact の dense 表示ではうさぎを静止させ、
 背景だけをゆっくり動かして大量の Agent がいる画面のちらつきを抑える。
 `Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
 土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は相対時刻ラベルの分単位の壁時計から
@@ -1222,7 +1228,8 @@ key に入れないため、通常 Home は Garden のために毎秒再構築�
 composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
 うさぎ・空・草の全 pose を静止姿勢に固定する。
 
-背景は workspace 名から決定的に配置した `.` / `*` の空と、詳細区画の草地・薄い土の 2 層で構成する。
+背景は workspace 名から決定的に配置した `.` / `*` の空と草で構成する。共通の庭は以前の池・餌場・木・巣穴の
+イラストを使い、compact 詳細区画は草地・薄い土の 2 層を使う。
 星は同じ cell で明滅し、草は同じ根元で小さく向きを変えるため、Agent の稼働状態を偽らず背景だけに ambient motion を足す。
 うさぎの各行は pose 全体で耳と顔の中心軸を揃え、左向き・右向き・各 lifecycle を切り替えても耳だけ横へずれない。
 詳細区画は `Ready` に足元の草、`Done` に `z`、`Failed` に枯れ草を小さく添える。通常動作は action caption を
