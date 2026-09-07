@@ -4,7 +4,7 @@ use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, rende
 
 fn main() {
     let sessions = sample_sessions();
-    scene("120x24 · roomy Garden", 24, 120, &sessions, 1, false);
+    scene("120x24 · restored meadow", 24, 120, &sessions, 1, false);
     scene("120x24 · reduced motion", 24, 120, &sessions, 1, true);
     scene("120x24 · session 0 件", 24, 120, &[], 1, false);
     let mut open_projects = sessions[..2].to_vec();
@@ -26,6 +26,37 @@ fn main() {
         "2 open projects",
         &open_projects,
         (1, false),
+    );
+    let mut many = sample_sessions()[..1].to_vec();
+    many[0].agents = (0..16)
+        .map(|index| GardenAgent {
+            runtime_id: AgentRuntimeId::parse(&format!("{index:08x}-0000-4000-8000-000000000003"))
+                .expect("fixture id"),
+            phase: AgentPhase::Running,
+        })
+        .collect();
+    scene(
+        "120x24 · all 16 Agents in one meadow",
+        24,
+        120,
+        &many,
+        41,
+        false,
+    );
+    many[0].agents.extend((16..80).map(|index| {
+        GardenAgent {
+            runtime_id: AgentRuntimeId::parse(&format!("{index:08x}-0000-4000-8000-000000000003"))
+                .expect("fixture id"),
+            phase: AgentPhase::Waiting,
+        }
+    }));
+    scene(
+        "120x24 · 80 Agents with the landscape retained",
+        24,
+        120,
+        &many,
+        41,
+        false,
     );
     // 64x14 terminal の先頭 1 行は project bar、残る 13 行へ全 Agent card が収まる。
     scene(

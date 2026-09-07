@@ -1,9 +1,11 @@
 //! Session Garden の純粋な描画サンプル。
 //!
 //! daemon の状態を所有せず、表示用に閉じた [`GardenSession`] を画面内へ並べる。
-//! 通常は大きな plot、件数が増えたら Agent ごとの compact card へ密度を切り替える。
+//! 広い端末では共通の庭を歩き、小さな端末では compact plot/card へ切り替える。
 //! frame と同じ layout から [`GardenHitbox`] も返すため、
 //! 後続実装は座標から session identity を再計算せず click target を解決できる。
+
+mod world;
 
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
@@ -204,6 +206,36 @@ fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
 /// Garden を描画する。最小サイズに満たない場合は `None` を返す。
 #[must_use]
 pub fn render(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<GardenFrame> {
+    garden_layout(height, width)?;
+    if world::fits(height, width) {
+        return Some(world::render(
+            height,
+            width,
+            workspace_name,
+            sessions,
+            tick,
+            reduced_motion,
+        ));
+    }
+    render_compact(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        tick,
+        reduced_motion,
+    )
+}
+
+/// The original compact layout remains available on small terminals.
+fn render_compact(
     height: usize,
     width: usize,
     workspace_name: &str,
@@ -658,6 +690,15 @@ pub fn canonical_tick(
     reduced_motion: bool,
 ) -> Option<u64> {
     let layout = garden_layout(height, width)?;
+    if world::fits(height, width) {
+        return Some(world::canonical_tick(
+            height,
+            width,
+            sessions,
+            tick,
+            reduced_motion,
+        ));
+    }
     if reduced_motion {
         return Some(0);
     }
@@ -868,15 +909,21 @@ fn needs_attention(session: &GardenSession) -> bool {
             .any(|agent| matches!(agent.phase, AgentPhase::Waiting | AgentPhase::Interrupted))
 }
 
-fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
-    let status = match session.lifecycle {
+fn inactive_status(session: &GardenSession) -> &'static str {
+    match session.lifecycle {
         SessionLifecycle::Available => "project inactive",
         SessionLifecycle::Creating | SessionLifecycle::Initializing => "cached · creating",
         SessionLifecycle::Deleting => "cached · deleting",
         SessionLifecycle::Failed => "cached · failed",
-    };
+    }
+}
+
+fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
     [
-        centered(PLOT_WIDTH, &Style::new().dim().paint(status)),
+        centered(
+            PLOT_WIDTH,
+            &Style::new().dim().paint(inactive_status(session)),
+        ),
         " ".repeat(PLOT_WIDTH),
         " ".repeat(PLOT_WIDTH),
         " ".repeat(PLOT_WIDTH),
@@ -1372,7 +1419,7 @@ mod tests {
         tick: u64,
         reduced_motion: bool,
     ) -> Option<super::GardenFrame> {
-        super::render(
+        super::render_compact(
             height,
             width,
             workspace_name,
@@ -1435,7 +1482,72 @@ mod tests {
         let text = plain(&frame).join("\n");
         assert!(text.contains("click a usagi"));
         assert!(text.contains("world"));
+        assert!(text.contains("~~~~~~~~"));
+        assert!(text.contains("&&&"));
         assert!(!text.contains("scroll"));
+    }
+
+    #[test]
+    fn compact_terminals_keep_each_rabbit_in_a_multi_agent_home_clickable() {
+        let mut value = session(
+            STEADY_ID,
+            "compact",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        value.agents.push(GardenAgent {
+            runtime_id: AgentRuntimeId::parse("10000000-0000-4000-8000-000000000002").unwrap(),
+            phase: AgentPhase::Waiting,
+        });
+        let frame = super::render(17, 70, "atlas", &[value], 0, false).expect("compact fits");
+        assert_eq!(rabbits(&frame).len(), 2);
+        assert!(plain(&frame).join("\n").contains("1 wait · 1 run"));
+        let targets = rabbits(&frame);
+        assert!(targets[0].column + targets[0].width <= targets[1].column);
+    }
+
+    #[test]
+    fn compact_cards_keep_unobserved_sessions_without_reviving_cached_agents() {
+        let observed = session(
+            STEADY_ID,
+            "live",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        let mut cached = session(
+            "10000000-0000-4000-8000-000000000001",
+            "cached",
+            SessionLifecycle::Available,
+            AgentPhase::Waiting,
+        );
+        cached.agents_observed = false;
+        let mut empty = session(
+            "20000000-0000-4000-8000-000000000001",
+            "empty",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        );
+        empty.agents.clear();
+        let frame = super::render(
+            13,
+            64,
+            "atlas",
+            &[observed.clone(), cached.clone(), empty],
+            0,
+            false,
+        )
+        .expect("compact cards fit");
+        assert_eq!(rabbits(&frame).len(), 1);
+        assert_eq!(
+            rabbits(&frame)[0].agent,
+            Some(observed.agents[0].runtime_id)
+        );
+        assert_eq!(plots(&frame).len(), 2);
+        assert_eq!(plots(&frame)[0].session_id, cached.id);
+        let text = plain(&frame).join("\n");
+        assert!(text.contains("cached"), "{text}");
+        assert!(text.contains("Status is"), "{text}");
+        assert!(text.contains("1 usagi"), "{text}");
     }
 
     fn grass_row(rows: &[String]) -> &str {

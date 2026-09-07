@@ -130,7 +130,7 @@ const SUMMARY_ORDER: [AgentPhase; 7] = [
 ///
 /// 完成した 1 本の文字列ではなく項目の列を返すのは、[`status_line`] が幅に合わせて
 /// 末尾から落とせるようにするためである。
-fn summary_parts(agents: &[AgentStatus]) -> Vec<String> {
+pub(super) fn summary_parts(agents: &[AgentStatus]) -> Vec<String> {
     SUMMARY_ORDER
         .into_iter()
         .filter_map(|phase| {
