@@ -226,9 +226,9 @@ pub enum Command {
     },
     /// バージョンを表示する
     Version,
-    /// daemon process lifecycle を操作する
+    /// daemon process lifecycle を操作する（command 省略時は start）
     Daemon {
-        /// 実行する lifecycle verb。省略時は前景 serve。
+        /// 実行する lifecycle verb。省略時は冪等な detached start。
         #[command(subcommand)]
         command: Option<DaemonCommand>,
     },
@@ -304,7 +304,7 @@ impl From<SandboxModeArg> for SandboxMode {
 
 /// daemon control plane が受理する閉じた lifecycle verb。
 ///
-/// 引数なしの `usagi daemon` は `serve`（active role）と同じである。各 variant は
+/// 引数なしの `usagi daemon` は冪等な [`DaemonCommand::Start`] と同じである。各 variant は
 /// 追加の positional を持たないため、clap が余分な argv を runtime 起動前に拒否する。
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum DaemonCommand {
@@ -431,7 +431,7 @@ impl Command {
                 version: version.to_owned(),
             }),
             Command::Daemon { command } => Box::new(DaemonEntry {
-                command: command.unwrap_or(DaemonCommand::Serve { standby: false }),
+                command: command.unwrap_or(DaemonCommand::Start),
             }),
             Command::Mcp => Box::new(McpEntry),
             Command::Session { command } => Box::new(Session { command }),
@@ -749,10 +749,7 @@ mod tests {
     #[test]
     fn special_entries_return_typed_launch_requests() {
         for (tokens, expected) in [
-            (
-                &["usagi", "daemon"][..],
-                DaemonCommand::Serve { standby: false },
-            ),
+            (&["usagi", "daemon"][..], DaemonCommand::Start),
             (
                 &["usagi", "daemon", "serve"][..],
                 DaemonCommand::Serve { standby: false },

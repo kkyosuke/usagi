@@ -181,13 +181,13 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 
 | コマンド | 動作 |
 |---|---|
-| `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで最大 30 秒待つ（[起動窓](#起動窓)）。すでに稼働中なら新しい process を起動しない |
+| `usagi daemon` / `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで最大 30 秒待つ（[起動窓](#起動窓)）。すでに稼働中なら成功としてその pid を表示し、新しい process を起動しない |
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
 | `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
 | `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。`--restart-agents` は同一 workspace の全 live Agent を durable transaction から exact stop/resume し、`--restart-agents --force` は Running 中の Agent の中断も許可する。複数 workspace は停止前に拒否し、`--restart-agents` なしの `--force` だけが live runtime を破棄する cold transition |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
-| `usagi daemon` / `usagi daemon serve` | 前景で daemon を active role で serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
+| `usagi daemon serve` | 前景で daemon を active role で serve する内部用 subcommand。[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
 | `usagi daemon install-service` | platform の supervisor（macOS は LaunchAgent、Linux は systemd user unit）を明示的に install し、前景 `serve` を login と異常終了後に supervise する（[service supervision](#service-supervision)） |
 | `usagi daemon uninstall-service` | install 済みの supervisor 定義を停止・無効化して remove する |
