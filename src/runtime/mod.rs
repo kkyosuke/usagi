@@ -13,6 +13,7 @@ pub(crate) mod file_preview;
 pub(crate) mod inventory_pump;
 pub(crate) mod launchd;
 pub(crate) mod platform_child_reaper;
+pub(crate) mod preview_pump;
 pub(crate) mod refresh_pump;
 pub(crate) mod systemd;
 pub(crate) mod terminal_pump;

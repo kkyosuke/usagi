@@ -517,34 +517,29 @@ fn a_concurrent_exit_and_spawn_both_survive_the_shared_document() {
         handles.push(std::thread::spawn(move || {
             let allocator = allocator(&bytes, policy);
             barrier.wait();
-            // Both writers retry until their own transition is durable, which is
-            // what a compare-and-swap makes possible and a whole-save does not.
-            for _ in 0..64 {
-                let result = if writer == 0 {
-                    allocator
-                        .update(|document| document.consume_exit(old, &exiting, 7).map(|_| ()))
-                        .map(|_| ())
-                } else {
-                    allocator
-                        .update(|document| {
-                            document
-                                .reserve(
-                                    &spawn_operation,
-                                    "digest",
-                                    ResourceKind::Terminal,
-                                    new,
-                                    &spawning,
-                                    policy,
-                                )
-                                .map(|_| ())
-                        })
-                        .map(|_| ())
-                };
-                if result.is_ok() {
-                    return;
-                }
+            // The shipping allocator itself retries a stale revision; callers
+            // perform one logical transition and never expose contention as an
+            // ownership failure.
+            if writer == 0 {
+                allocator
+                    .update(|document| document.consume_exit(old, &exiting, 7).map(|_| ()))
+                    .unwrap();
+            } else {
+                allocator
+                    .update(|document| {
+                        document
+                            .reserve(
+                                &spawn_operation,
+                                "digest",
+                                ResourceKind::Terminal,
+                                new,
+                                &spawning,
+                                policy,
+                            )
+                            .map(|_| ())
+                    })
+                    .unwrap();
             }
-            panic!("a compare-and-swap writer never converged");
         }));
     }
     for handle in handles {

@@ -176,7 +176,9 @@ root Diff は pane/runtime に admission しない。前面の Pull Request
 一覧・File Preview は controller の `Overlay::Prs` / `Overlay::Preview` が所有し、
 素材は `Effect::LoadPullRequests` / `LoadPreview { path }` で要求して
 `BackendEvent::PullRequestsLoaded` / `PreviewLoaded { path, files, lines }`（失敗は対応する `*Error`）として
-還流し、選択 PR の browser 起動は `Effect::OpenPullRequest` で表す。これらは他の overlay
+還流し、選択 PR の browser 起動は `Effect::OpenPullRequest` で表す。Previewのfilesystem/Git IOは合成ルートの
+`runtime::preview_pump`がpending/completion各1件のbackground laneとして所有し、reducerの`CancelPreview`で古い結果を
+fenceする。これらは他の overlay
 と同じく `render_home` に統合し、shell が別途 modal を重ねる暫定接続は残さない（controller
 に相当がある残りの create form・quit confirmation だけを shell が `render_home` の出力へ
 合成する）。daemon IO（session worker・pane 起動・terminal stream・metrics）は runtime

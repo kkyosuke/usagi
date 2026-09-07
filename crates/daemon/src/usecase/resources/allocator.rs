@@ -707,15 +707,16 @@ impl ResourceAllocator {
         self.store.load(AllocatorDocument::default)
     }
 
-    /// Apply `change` under one compare-and-swap.
+    /// Apply a side-effect-free `change` under bounded compare-and-swap retry.
     ///
     /// # Errors
     /// Returns `change`'s refusal or the store's failure.
     pub fn update<T>(
         &self,
-        change: impl FnOnce(&mut AllocatorDocument) -> Result<T, ResourceError>,
+        change: impl FnMut(&mut AllocatorDocument) -> Result<T, ResourceError>,
     ) -> Result<(T, super::CasSnapshot<AllocatorDocument>), super::ResourceFailure> {
-        self.store.update(AllocatorDocument::default, change)
+        self.store
+            .update_retrying(AllocatorDocument::default, change)
     }
 }
 

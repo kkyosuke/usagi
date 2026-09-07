@@ -1,16 +1,32 @@
 //! Safe file discovery and text loading for the Home Preview overlay.
 
-use std::fs::File;
+use std::ffi::CString;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path};
+use std::time::Duration;
 
 use usagi_core::domain::presentation_text::presentation_character_is_safe;
-use usagi_core::infrastructure::git::GitRunner;
+use usagi_core::infrastructure::bounded_process::{
+    ChildOutputObservation, ChildPolicy, observe_command_output,
+};
+use usagi_core::infrastructure::git::confined_git_command;
 
 /// Maximum number of repository paths offered to the fuzzy finder.
 pub(crate) const MAX_PREVIEW_FILES: usize = 20_000;
 /// Maximum bytes read from one previewed file.
 pub(crate) const MAX_PREVIEW_BYTES: usize = 512 * 1024;
+/// Maximum bytes retained from `git ls-files` before the child is terminated.
+pub(crate) const MAX_PREVIEW_LIST_BYTES: usize = 8 * 1024 * 1024;
+
+const PREVIEW_LIST_POLICY: ChildPolicy = ChildPolicy {
+    timeout: Duration::from_secs(2),
+    terminate_grace: Duration::from_millis(100),
+    output_limit: MAX_PREVIEW_LIST_BYTES,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FilePreviewError {
@@ -50,29 +66,25 @@ impl FilePreviewError {
 }
 
 /// Return tracked and untracked, non-ignored repository files in stable order.
-pub(crate) fn list_files(
-    git: &dyn GitRunner,
-    root: &Path,
-) -> Result<Vec<String>, FilePreviewError> {
-    let output = git
-        .run(
-            root,
-            &[
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ],
-        )
-        .map_err(|_| FilePreviewError::FilesUnavailable)?;
-    if !output.success {
-        return Err(FilePreviewError::FilesUnavailable);
-    }
+pub(crate) fn list_files(root: &Path) -> Result<Vec<String>, FilePreviewError> {
+    let mut command = confined_git_command(root);
+    command.args([
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]);
+    listed_files(observe_command_output(command, PREVIEW_LIST_POLICY))
+}
 
-    let mut files = output
-        .stdout
-        .split('\0')
+fn listed_files(observation: ChildOutputObservation) -> Result<Vec<String>, FilePreviewError> {
+    let ChildOutputObservation::Success { stdout, .. } = observation else {
+        return Err(FilePreviewError::FilesUnavailable);
+    };
+    let mut files = stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|path| std::str::from_utf8(path).ok())
         .filter(|path| valid_relative_path(path))
         .filter(|path| path.chars().all(presentation_character_is_safe))
         .map(str::to_owned)
@@ -83,23 +95,31 @@ pub(crate) fn list_files(
     Ok(files)
 }
 
+/// Load one finder listing or one selected document for the background preview
+/// lane. Exactly one side of the tuple is populated.
+pub(crate) fn load_preview(
+    root: &Path,
+    path: Option<&str>,
+) -> Result<(Vec<String>, Vec<String>), FilePreviewError> {
+    match path {
+        Some(path) => read_file(root, path).map(|lines| (Vec::new(), lines)),
+        None => list_files(root).map(|files| (files, Vec::new())),
+    }
+}
+
 /// Read one UTF-8 regular file without allowing the requested path to escape
 /// the target workspace or session worktree.
 pub(crate) fn read_file(root: &Path, relative: &str) -> Result<Vec<String>, FilePreviewError> {
     if !valid_relative_path(relative) {
         return Err(FilePreviewError::OutsideRoot);
     }
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|_| FilePreviewError::FileUnavailable)?;
-    let candidate = canonical_root.join(relative);
-    let canonical_file = candidate
-        .canonicalize()
-        .map_err(|_| FilePreviewError::FileUnavailable)?;
-    if !canonical_file.starts_with(&canonical_root) {
-        return Err(FilePreviewError::OutsideRoot);
-    }
-    let metadata = canonical_file
+    let file = open_beneath(
+        &root
+            .canonicalize()
+            .map_err(|_| FilePreviewError::FileUnavailable)?,
+        relative,
+    )?;
+    let metadata = file
         .metadata()
         .map_err(|_| FilePreviewError::FileUnavailable)?;
     if !metadata.is_file() {
@@ -113,13 +133,56 @@ pub(crate) fn read_file(root: &Path, relative: &str) -> Result<Vec<String>, File
         .unwrap_or(MAX_PREVIEW_BYTES)
         .min(MAX_PREVIEW_BYTES);
     let mut bytes = Vec::with_capacity(capacity);
-    File::open(&canonical_file)
-        .and_then(|file| {
-            file.take((MAX_PREVIEW_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)
-        })
+    file.take((MAX_PREVIEW_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
         .map_err(|_| FilePreviewError::FileUnavailable)?;
     decode_file(bytes)
+}
+
+/// Open every component relative to an already-open directory descriptor.
+/// `O_NOFOLLOW` on each hop makes the containment decision and the final read
+/// one descriptor chain rather than a check-then-open path race.
+fn open_beneath(root: &Path, relative: &str) -> Result<File, FilePreviewError> {
+    let mut directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(root)
+        .map_err(|_| FilePreviewError::FileUnavailable)?;
+    let mut components = Path::new(relative).components().peekable();
+    while let Some(Component::Normal(component)) = components.next() {
+        let name = CString::new(component.as_bytes()).map_err(|_| FilePreviewError::OutsideRoot)?;
+        let directory_flag = if components.peek().is_some() {
+            libc::O_DIRECTORY
+        } else {
+            0
+        };
+        // SAFETY: `directory` owns a live descriptor, `name` is NUL-terminated,
+        // and a successful raw descriptor is moved into exactly one `File`.
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | directory_flag,
+            )
+        };
+        if descriptor < 0 {
+            return Err(open_error(&std::io::Error::last_os_error()));
+        }
+        // SAFETY: this branch owns the newly returned descriptor exactly once.
+        let opened = unsafe { File::from_raw_fd(descriptor) };
+        if components.peek().is_none() {
+            return Ok(opened);
+        }
+        directory = opened;
+    }
+    Err(FilePreviewError::OutsideRoot)
+}
+
+fn open_error(error: &std::io::Error) -> FilePreviewError {
+    match error.raw_os_error() {
+        Some(libc::ELOOP | libc::ENOTDIR) => FilePreviewError::OutsideRoot,
+        _ => FilePreviewError::FileUnavailable,
+    }
 }
 
 fn decode_file(bytes: Vec<u8>) -> Result<Vec<String>, FilePreviewError> {
@@ -158,55 +221,44 @@ fn sanitize_line(line: &str) -> String {
 mod tests {
     use std::fmt::Write as _;
     use std::fs;
+    use std::process::Command;
 
-    use anyhow::Result;
     use tempfile::tempdir;
-    use usagi_core::infrastructure::git::{GitOutput, GitRunner};
 
     use super::*;
 
-    struct FakeGit(Option<GitOutput>);
-
-    impl GitRunner for FakeGit {
-        fn run(&self, _: &Path, _: &[&str]) -> Result<GitOutput> {
-            self.0
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("secret failure"))
-        }
-    }
-
-    fn output(success: bool, stdout: &str) -> GitOutput {
-        GitOutput {
-            success,
-            stdout: stdout.to_owned(),
-            stderr: String::new(),
+    fn output(stdout: &str) -> ChildOutputObservation {
+        ChildOutputObservation::Success {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
         }
     }
 
     #[test]
     fn listing_sorts_deduplicates_and_rejects_unsafe_paths() {
-        let git = FakeGit(Some(output(
-            true,
-            "src/z.rs\0README.md\0src/z.rs\0../outside\0/a/./b\0bad\nname\0\0",
-        )));
         assert_eq!(
-            list_files(&git, Path::new("/repo")).unwrap(),
+            listed_files(output(
+                "src/z.rs\0README.md\0src/z.rs\0../outside\0/a/./b\0bad\nname\0\0",
+            ))
+            .unwrap(),
             vec!["README.md", "src/z.rs"]
         );
     }
 
     #[test]
     fn listing_maps_spawn_and_exit_failures_to_a_safe_error() {
-        let spawn = FakeGit(None);
-        assert_eq!(
-            list_files(&spawn, Path::new("/repo")),
-            Err(FilePreviewError::FilesUnavailable)
-        );
-        let exit = FakeGit(Some(output(false, "")));
-        assert_eq!(
-            list_files(&exit, Path::new("/repo")),
-            Err(FilePreviewError::FilesUnavailable)
-        );
+        for failure in [
+            ChildOutputObservation::SpawnFailed,
+            ChildOutputObservation::ExitFailure,
+            ChildOutputObservation::TimedOut,
+            ChildOutputObservation::OutputTooLarge,
+            ChildOutputObservation::ObservationFailed,
+        ] {
+            assert_eq!(
+                listed_files(failure),
+                Err(FilePreviewError::FilesUnavailable)
+            );
+        }
     }
 
     #[test]
@@ -215,8 +267,28 @@ mod tests {
             write!(&mut output, "{index:05}.txt\0").unwrap();
             output
         });
-        let files = list_files(&FakeGit(Some(output(true, &stdout))), Path::new("/repo")).unwrap();
+        let files = listed_files(output(&stdout)).unwrap();
         assert_eq!(files.len(), MAX_PREVIEW_FILES);
+    }
+
+    #[test]
+    fn listing_runs_git_with_a_bounded_machine_output_contract() {
+        let root = tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(root.path().join("b.txt"), "b").unwrap();
+        fs::write(root.path().join("a.txt"), "a").unwrap();
+        assert_eq!(list_files(root.path()).unwrap(), vec!["a.txt", "b.txt"]);
+        assert_eq!(
+            list_files(&root.path().join("missing")),
+            Err(FilePreviewError::FilesUnavailable)
+        );
     }
 
     #[test]
@@ -283,6 +355,69 @@ mod tests {
         assert_eq!(
             read_file(root.path(), "link"),
             Err(FilePreviewError::OutsideRoot)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reading_rejects_symlinks_at_every_descriptor_hop() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("real")).unwrap();
+        fs::write(root.path().join("real/file"), "safe").unwrap();
+        symlink(
+            root.path().join("real"),
+            root.path().join("linked-directory"),
+        )
+        .unwrap();
+        symlink(
+            root.path().join("real/file"),
+            root.path().join("linked-file"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_file(root.path(), "linked-directory/file"),
+            Err(FilePreviewError::OutsideRoot)
+        );
+        assert_eq!(
+            read_file(root.path(), "linked-file"),
+            Err(FilePreviewError::OutsideRoot)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_open_descriptor_cannot_be_redirected_by_a_later_path_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(root.path().join("file"), "safe").unwrap();
+        fs::write(outside.path().join("secret"), "secret").unwrap();
+        let mut opened = open_beneath(root.path(), "file").unwrap();
+
+        fs::rename(root.path().join("file"), root.path().join("old")).unwrap();
+        symlink(outside.path().join("secret"), root.path().join("file")).unwrap();
+        let mut contents = String::new();
+        opened.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "safe");
+    }
+
+    #[test]
+    fn open_errors_distinguish_symlink_or_non_directory_escape() {
+        assert_eq!(
+            open_error(&std::io::Error::from_raw_os_error(libc::ELOOP)),
+            FilePreviewError::OutsideRoot
+        );
+        assert_eq!(
+            open_error(&std::io::Error::from_raw_os_error(libc::ENOTDIR)),
+            FilePreviewError::OutsideRoot
+        );
+        assert_eq!(
+            open_error(&std::io::Error::from_raw_os_error(libc::ENOENT)),
+            FilePreviewError::FileUnavailable
         );
     }
 

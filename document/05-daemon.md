@@ -2249,6 +2249,8 @@ shards/<G2>.json   writer は G2 だけ
 shard は writer が 1 つなので merge が不要である。generation をまたぐのは state ではなく **event** であり、
 draining owner は自分の outbox に append し、active consumer は global allocator へ apply し、owner は consumed
 revision を読んで自分の outbox を回収する。active consumer は旧 shard へ **一切書かない**。
+global allocatorの更新はload・純粋なdocument変換・CASを最大64回まで再適用する。別writerが先にcommitした
+`stale_revision`は最新documentをreloadして収束させ、上限まで競合が続いた場合だけtyped refusalのままfail closedにする。
 
 ### capacity pool
 
@@ -2523,7 +2525,8 @@ request ごとの effect は [admission fence](#admission-fence) が決める。
 shipping `serve` の Agent / generic Terminal store は owner generation ごとの shard と global allocator を使う。
 old generation は `draining` へ移ったあと control / spawn を失い、自分が既に所有する terminal IO と exit publish だけを
 継続する。new active の spawn と old owner の exit は別 shard + allocator CAS なので同時に実行しても lost update せず、
-old exit の capacity release は event revision により 1 度だけ apply される。draining process は
+同じglobal allocatorで競合したCASはbounded retryで再適用され、old exit の capacity release は event revision により
+1 度だけ apply される。draining process は
 [generation collection](#generation-collection) の 4 条件と lease 0 を確認して自主終了する。
 
 daemon owner process の exact identity と fenced SIGTERM は lifecycle record に実装されている。そのため PID reuse や

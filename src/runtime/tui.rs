@@ -111,9 +111,10 @@ use usagi_tui::usecase::terminal_input::{
 use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
 use crate::runtime::daemon::LaneClient;
-use crate::runtime::file_preview::{FilePreviewError, list_files, read_file};
+use crate::runtime::file_preview::{FilePreviewError, load_preview};
 use crate::runtime::inventory_pump::TerminalInventoryPump;
 use crate::runtime::platform_child_reaper::PlatformChildReaper;
+use crate::runtime::preview_pump::{PreviewCompletion, PreviewPump};
 use crate::runtime::refresh_pump::{RefreshCadence, RefreshPump};
 use crate::runtime::terminal_pump::TerminalPollPump;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
@@ -708,6 +709,7 @@ struct ProductionOverlayPort {
     sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
     pr_sessions: Arc<Mutex<Vec<SessionId>>>,
     pr_pump: RefreshPump<PrObservations>,
+    preview_pump: PreviewPump,
     browser: PlatformBrowserOpener,
     clipboard: PlatformClipboard,
 }
@@ -731,6 +733,31 @@ impl ProductionOverlayPort {
                 .ok_or(FilePreviewError::FileUnavailable),
         }
     }
+
+    fn publish_preview(completion: PreviewCompletion, completions: &Completions) {
+        let PreviewCompletion {
+            target,
+            path,
+            result,
+        } = completion;
+        let event = match result {
+            Ok((files, lines)) => BackendEvent::PreviewLoaded {
+                target,
+                path,
+                files,
+                lines,
+            },
+            Err(error) => BackendEvent::PreviewError {
+                target,
+                path,
+                error: SafeError {
+                    message: SafeMessage::new(error.message()),
+                    error_id: error.error_id().to_owned(),
+                },
+            },
+        };
+        completions.emit(AppEvent::Backend(event));
+    }
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
@@ -738,6 +765,9 @@ impl BackendOverlayPort for ProductionOverlayPort {
     fn poll(&mut self, completions: &Completions) {
         if let Some(result) = self.pr_pump.take() {
             self.publish_prs(result, completions);
+        }
+        if let Some(completion) = self.preview_pump.take() {
+            Self::publish_preview(completion, completions);
         }
     }
 
@@ -766,29 +796,25 @@ impl BackendOverlayPort for ProductionOverlayPort {
     }
 
     fn load_preview(&mut self, target: Target, path: Option<String>, completions: Completions) {
-        let result = self
-            .target_root(target)
-            .and_then(|root| match path.as_deref() {
-                Some(path) => read_file(root, path).map(|lines| (Vec::new(), lines)),
-                None => list_files(&SystemGit, root).map(|files| (files, Vec::new())),
-            });
-        let event = match result {
-            Ok((files, lines)) => BackendEvent::PreviewLoaded {
-                target,
-                path,
-                files,
-                lines,
-            },
-            Err(error) => BackendEvent::PreviewError {
-                target,
-                path,
-                error: SafeError {
-                    message: SafeMessage::new(error.message()),
-                    error_id: error.error_id().to_owned(),
-                },
-            },
+        let root = match self.target_root(target) {
+            Ok(root) => root.to_path_buf(),
+            Err(error) => {
+                Self::publish_preview(
+                    PreviewCompletion {
+                        target,
+                        path,
+                        result: Err(error),
+                    },
+                    &completions,
+                );
+                return;
+            }
         };
-        completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+        self.preview_pump.request(target, path, root);
+    }
+
+    fn cancel_preview(&mut self) {
+        self.preview_pump.cancel();
     }
 
     fn open_pull_request(&mut self, url: String, completions: Completions) {
@@ -1158,6 +1184,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             sessions,
             pr_sessions,
             pr_pump,
+            preview_pump: PreviewPump::spawn(load_preview),
             browser: PlatformBrowserOpener {
                 reaper: self.helper_reaper.clone(),
             },
@@ -9581,7 +9608,16 @@ mod tests {
             target: Target::Root(workspace_id),
             path: None,
         });
-        let completions = composition.backend.drain_events();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut completions = Vec::new();
+        while completions.len() < 3 {
+            completions.extend(composition.backend.drain_events());
+            assert!(
+                Instant::now() < deadline,
+                "preview completion did not arrive"
+            );
+            std::thread::yield_now();
+        }
         assert!(matches!(
             completions.as_slice(),
             [
@@ -9606,8 +9642,17 @@ mod tests {
             target: Target::Session(session_ids[0]),
             path: None,
         });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let preview_error = loop {
+            let events = composition.backend.drain_events();
+            if !events.is_empty() {
+                break events;
+            }
+            assert!(Instant::now() < deadline, "preview error did not arrive");
+            std::thread::yield_now();
+        };
         assert!(matches!(
-            composition.backend.drain_events().as_slice(),
+            preview_error.as_slice(),
             [usagi_tui::usecase::application::controller::AppEvent::Backend(
                 BackendEvent::PreviewError {
                     target: Target::Session(id),

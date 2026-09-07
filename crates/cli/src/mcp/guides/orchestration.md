@@ -11,9 +11,8 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
   ブランチに乗り、PR 経由で基点ブランチへ反映される。
 - **root/coordinator は git 追跡ファイルを直接書かない**。実装や backlog の変更は対象 session
   の worktree で行う。
-- **認証済み Agent が管理できるのは、原則として自身が作成した直下 session だけ**。同じ workspace や親 session にある
-  別 Agent・人間・legacy の session は一覧に現れず、名前や ID を指定しても操作できない。ただし `session_remove` は
-  明示した名前を daemon が同一 workspace 内で解決し、作成者にかかわらず削除できる。
+- **認証済み Agent が管理できるのは、自身が作成した直下 session だけ**。同じ workspace や親 session にある
+  別 Agent・人間・legacy の session は一覧に現れず、名前や ID を指定しても操作できない。
 - **issue / memory の tool 系統は workspace 設定で無効化できる**。無効な系統は `tools/list` に
   現れず、名前を直接呼んでも実行されない。このガイドは有効な場合の手順を書いているので、
   掲載されていない tool は使わない。
@@ -32,7 +31,7 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | PR 観測 | `session_pr` | `name` 省略時は呼び出し元自身、指定時は対象 session の daemon-owned PR inventory と merged 集約を返す |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
-| session 破棄 | `session_remove` | 同じ daemon の同一 workspace にある名前指定の session worktree を、作成者にかかわらず daemon が破棄する |
+| session 破棄 | `session_remove` | 自身が作成した session の worktree を daemon が破棄し、lifecycle store を更新する |
 | worker dispatch | `session_dispatch` | caller 所有の session を作成または再利用し、worker PTY と run/binding を durable に記録する |
 | worker の観測 | `session_get` / `agent_list` / `agent_get` | 自身が作成した session に属する agent と run を返す |
 | terminal 出力の観測 | `terminal_list` / `terminal_read` | 呼び出し元 Agent と同じ scope の generic terminal を列挙し、ANSI-free の bounded tail を読む。effect はない |
@@ -43,8 +42,7 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 
 `session_list` は durable session identity の軽量一覧、`session_status` は Git 観測を含む詳細一覧である。
 どちらも認証済み caller が作成した session だけを返す。名前が分かっていても別 caller の session を
-`session_status` / `session_prompt` / 明示 `session_pr` で操作することはできない。`session_remove` だけは例外で、
-同じ daemon の同一 workspace にある session を明示名で削除できる。
+`session_status` / `session_prompt` / `session_remove` / 明示 `session_pr` で操作することはできない。
 coordinator は session の生存を `session_status`、成果の統合を `session_pr` の `merged` で判定する。
 認証済み worker は `session_pr {}` で自分の session を読み、coordinator は
 `session_pr {"name":"issue-403"}` のように対象名を明示する。name 省略時に caller credential が無ければ、
@@ -207,8 +205,7 @@ store の更新は daemon 内で同期的に完了してから応答する。同
 ## session を破棄する
 
 `session_remove` は session 名を受け取る。未コミット変更のある worktree は `force: true` を明示しない
-限り破棄しない。daemon-provisioned MCP child からの要求も、接続先 daemon が所有する同一 workspace 内の
-session なら作成者にかかわらず受理する。
+限り破棄しない。
 
 ```json
 {"jsonrpc":"2.0","id":2,"method":"tools/call",

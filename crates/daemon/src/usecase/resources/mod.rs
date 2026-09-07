@@ -47,6 +47,11 @@ use std::marker::PhantomData;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+/// Maximum number of complete load/apply/compare-and-swap attempts made by one
+/// shared-document update. A stale revision is ordinary writer contention, but
+/// an indefinitely hot allocator must still return control to its caller.
+const MAX_CAS_UPDATE_ATTEMPTS: usize = 64;
+
 /// A typed refusal from either durable object. Every variant is effect zero: the
 /// document the caller read is left exactly as it was, and no spawn, signal, or
 /// capacity release is inferred from a refusal.
@@ -307,8 +312,8 @@ impl<D: CasDocument> CasStore<D> {
     }
 
     /// Load, apply `change`, and commit in one compare-and-swap. `change` runs on
-    /// a copy, so a refusal commits nothing and a converged retry writes nothing
-    /// at all.
+    /// a copy, so a refusal commits nothing and a converged update writes nothing
+    /// at all. Single-writer documents use this form.
     ///
     /// # Errors
     /// Returns `change`'s refusal, or any [`load`](Self::load) /
@@ -327,6 +332,38 @@ impl<D: CasDocument> CasStore<D> {
         next.bump();
         let committed = self.commit(&snapshot, next)?;
         Ok((value, committed))
+    }
+
+    /// Load, apply `change`, and commit with bounded compare-and-swap retries.
+    /// `change` runs on a fresh copy after each stale revision, so it must be a
+    /// deterministic document transformation without external side effects.
+    /// Shared multi-writer documents use this form.
+    ///
+    /// # Errors
+    /// Returns `change`'s refusal, any non-contention store failure, or
+    /// [`ResourceError::StaleRevision`] after the bounded retry budget expires.
+    pub fn update_retrying<T>(
+        &self,
+        mut absent: impl FnMut() -> D,
+        mut change: impl FnMut(&mut D) -> Result<T, ResourceError>,
+    ) -> Result<(T, CasSnapshot<D>), ResourceFailure> {
+        for attempt in 0..MAX_CAS_UPDATE_ATTEMPTS {
+            let snapshot = self.load(&mut absent)?;
+            let mut next = snapshot.to_document();
+            let value = change(&mut next)?;
+            if next == snapshot.document {
+                return Ok((value, snapshot));
+            }
+            next.bump();
+            match self.commit(&snapshot, next) {
+                Ok(committed) => return Ok((value, committed)),
+                Err(failure)
+                    if failure.refusal() == Some(ResourceError::StaleRevision)
+                        && attempt + 1 < MAX_CAS_UPDATE_ATTEMPTS => {}
+                Err(failure) => return Err(failure),
+            }
+        }
+        unreachable!("the bounded CAS loop returns on its final attempt")
     }
 }
 
