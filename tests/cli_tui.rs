@@ -603,10 +603,14 @@ fn fixture_reap_terminates_the_exact_bootstrap_broker_after_a_daemon_crash() {
 }
 
 #[test]
-fn bare_daemon_is_idempotent_after_restart() {
+fn bare_daemon_is_idempotent_after_forced_restart() {
     let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
-    let output = home.run(&[OsStr::new("daemon"), OsStr::new("restart")]);
+    let output = home.run(&[
+        OsStr::new("daemon"),
+        OsStr::new("restart"),
+        OsStr::new("--force"),
+    ]);
     assert!(
         output.status.success(),
         "{}",

@@ -1,7 +1,7 @@
 //! The `usagi daemon serve` usecase: run the daemon in the foreground.
 //!
-//! `serve` is the daemon process itself (a hidden subcommand launched by the
-//! idempotent `usagi daemon` / `usagi daemon start` entry). It owns its record's lifecycle:
+//! `serve` is the daemon process itself (a hidden subcommand used by detached
+//! lifecycle entries and service supervisors). It owns its record's lifecycle:
 //!
 //! 0. **workspace guard** — acquire the [`WorkspaceFence`]; if another daemon
 //!    already owns this workspace (under any `$USAGI_HOME` or runtime mode),
