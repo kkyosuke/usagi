@@ -1447,6 +1447,17 @@ impl ClientPolicy {
             reconnect_attempts: 3,
         }
     }
+    /// Session creation waits for the daemon to finish building a worktree.
+    #[must_use]
+    pub const fn tui_session(action: SessionAction) -> Self {
+        match action {
+            SessionAction::Create => Self {
+                timeout_ms: 10_000,
+                ..Self::tui()
+            },
+            _ => Self::tui(),
+        }
+    }
     #[must_use]
     pub const fn cli() -> Self {
         Self {
@@ -2510,6 +2521,19 @@ mod tests {
     fn policies_are_surface_specific() {
         assert!(ClientPolicy::tui().timeout_ms < ClientPolicy::cli().timeout_ms);
         assert!(ClientPolicy::mcp().timeout_ms > ClientPolicy::cli().timeout_ms);
+        let create = ClientPolicy::tui_session(SessionAction::Create);
+        assert_eq!(create.timeout_ms, 10_000);
+        assert_eq!(
+            create.reconnect_attempts,
+            ClientPolicy::tui().reconnect_attempts
+        );
+        for action in [
+            SessionAction::List,
+            SessionAction::Overview,
+            SessionAction::Remove,
+        ] {
+            assert_eq!(ClientPolicy::tui_session(action), ClientPolicy::tui());
+        }
     }
 
     /// Bootstrap contention is a distinct, effect-free, retryable answer: no

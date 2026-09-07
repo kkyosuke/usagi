@@ -106,6 +106,7 @@ shutdown / generation retirement は
 [5. daemon の client worker barrier](05-daemon.md#client-worker-の保持)で pre-handshake を含む全 worker を unblock / join する。
 
 `ClientPolicy.timeout_ms` / `reconnect_attempts` は surface 別（TUI 2s/3、CLI 10s/1、MCP 30s/1）の policy であり、
+TUI の session 作成は worktree 構築の完了を待つため、`ClientPolicy::tui_session` で 10s/3 を使う。
 CLI・MCP・TUI の per-request 経路は [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget) で
 これを実効化する。TUI の terminal lane はこの policy より小さい
 [per-request budget](#terminal-lane-の-per-request-budget) を持つ。TUI の pane restore は request を off-thread に
