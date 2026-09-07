@@ -64,8 +64,7 @@ MCP の起動、公開 tool、認証、daemon への反映経路は [7. MCP サ�
 
 | コマンド | 動作 |
 |---|---|
-| `usagi daemon` | daemon を前景で serve する |
-| `usagi daemon start` | detached daemon を起動する |
+| `usagi daemon` / `usagi daemon start` | detached daemon を冪等に起動する。稼働済みならその daemon を維持する |
 | `usagi daemon status` | active daemon と保持中 tenant の状態を表示する |
 | `usagi daemon retire <path> [--force]` | 指定 workspace tenant を解放する。live runtime は `--force` なしでは解放しない |
 | `usagi daemon stop [--force]` | daemon を停止する。live runtime は `--force` なしでは停止しない |
