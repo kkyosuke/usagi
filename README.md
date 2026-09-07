@@ -198,6 +198,7 @@ usagi session create implementation --role worker
 ```
 
 session は対象リポジトリの `.usagi/sessions/<name>/` に独立した worktree として作られる。
+TUI の作成時の応答待ちと再試行は [IPC のタイムアウト規約](document/04-ipc.md#frame-と-handshake)に従う。
 Home の作成欄では `local:main` / `remote:origin/(default)` / `remote:origin/main` のように
 出所を区別した base branch を `↑↓` で選ぶ。`(default)` はその remote の既定 branch を表す。
 CLI の `--base` は同じ対象を fully-qualified ref で指定する。

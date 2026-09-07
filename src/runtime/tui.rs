@@ -3756,9 +3756,10 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             ),
         };
         let operation_id = usagi_core::domain::id::OperationId::new().to_string();
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|error| format!("daemon unavailable: {error}"))?;
+        let mut client = crate::runtime::daemon::policy_client(
+            usagi_core::usecase::client::ClientPolicy::tui_session(action),
+        )
+        .map_err(|error| format!("daemon unavailable: {error}"))?;
         let reply = client
             .request(DaemonRequest::Session {
                 action,
