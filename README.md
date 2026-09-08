@@ -100,7 +100,7 @@ TUI が開いたら、次の順に進めます。
 | session | ひとつの作業と、その worktree・Agent・terminal・差分・PR を束ねる単位 |
 | daemon | session と process の状態を所有し、TUI を閉じた後も作業を継続する process |
 | Director | root Agent から作業の分解や別 session への委譲を行う画面 |
-| [Team](document/10-session-roles.md#catalog) | `none` / `hierarchical` / `flat` / `pipeline` から Agent の委譲構造を選ぶ設定 |
+| [Team](document/10-session-roles.md#catalog) | `none`（なし）/ `hierarchical`（階層型）/ `flat`（フラット）/ `pipeline`（パイプライン）から Agent の委譲構造を選ぶ設定 |
 
 Agent は組み込みの MCP server を通じて session の作成・観測・委譲、issue、memory などを扱えます。
 詳しい操作と authority の境界は [MCP サーバ](document/07-mcp.md) を参照してください。
