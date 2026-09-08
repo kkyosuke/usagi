@@ -1,6 +1,6 @@
 # 11. キーバインド
 
-> [ドキュメント目次](README.md) ｜ ← 前へ [10. session role](10-session-roles.md)
+> [ドキュメント目次](README.md) ｜ ← 前へ [10. session role](10-session-roles.md) ｜ 次へ → [12. インストールと更新](12-installation.md)
 
 TUI のキーバインド、入力所有権、割り振り規則について、利用者向け文書では本書だけを正本とする。
 実行時の正本は `terminal_input::PREFIX_SHORTCUTS` の実行可能 catalog であり、contextual help も同じ

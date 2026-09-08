@@ -59,20 +59,10 @@ Linux（amd64）です。Git と、利用したい Agent の CLI（`claude` / `c
 
 ```bash
 usagi doctor  # 必要なツールと設定を確認
-usagi update  # 最新版へ更新
 ```
 
-ソースから導入する場合は、`rust-toolchain.toml` の toolchain を使います。
-
-```bash
-git clone https://github.com/KKyosuke/usagi.git
-cd usagi
-cargo install --path . --locked
-```
-
-配布バイナリとソースビルドで異なるデータ保存先は
-[artifact の既定 mode](document/05-daemon.md#artifact-の既定-mode)、更新時の process 引き継ぎは
-[planned replacement](document/05-daemon.md#planned-replacement) が正本です。
+対応環境、ソースからのビルド、更新、shell 補完は
+[インストールと更新](document/12-installation.md) を参照してください。
 
 ## はじめる
 
@@ -110,6 +100,7 @@ Agent は組み込みの MCP server を通じて session の作成・観測・�
 | 知りたいこと | ドキュメント |
 |---|---|
 | 全体像、CLI command | [プロジェクト概要](document/01-overview.md) |
+| 対応環境、インストール、更新、shell 補完 | [インストールと更新](document/12-installation.md) |
 | 画面、設定、操作 | [TUI](document/03-tui.md) / [キーバインド](document/11-keybindings.md) |
 | session と process の lifecycle | [daemon](document/05-daemon.md) |
 | Agent 連携、委譲 | [MCP サーバ](document/07-mcp.md) / [session role](document/10-session-roles.md) |
