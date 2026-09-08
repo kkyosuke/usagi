@@ -43,7 +43,7 @@ installer は archive の SHA-256 と release version artifact を検証して�
 archive 構造、検証、atomic replacement の内部契約は
 [入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)を正本とする。
 
-`~/.usagi/bin` が `PATH` に無い場合、installer は利用中の shell に合わせた追記方法を表示する。
+`~/.usagi/bin` が `PATH` に無い場合、installer は shell の設定ファイルへの追記方法を表示する。
 導入後は診断画面で Git、Agent CLI、設定、daemon の状態を確認できる。
 
 ```bash
@@ -98,10 +98,21 @@ managed daemon 同期を持たない旧版から初めて更新する 1 回だ�
 source <(usagi completion bash)
 
 # Zsh: 補完関数の directory へ保存する
+mkdir -p ~/.zfunc
 usagi completion zsh > ~/.zfunc/_usagi
 
 # Fish: user completion directory へ保存する
+mkdir -p ~/.config/fish/completions
 usagi completion fish > ~/.config/fish/completions/usagi.fish
+```
+
+Zsh で `~/.zfunc` をまだ使っていない場合は、次を `~/.zshrc` に追加する。
+既に `compinit` を初期化している場合は、`fpath` の行だけをその初期化より前に置く。
+
+```zsh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit
+compinit
 ```
 
 生成元と補完候補の内部契約は

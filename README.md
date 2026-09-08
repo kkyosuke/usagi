@@ -54,14 +54,11 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash
 ```
 
-installer は `usagi` を `~/.usagi/bin/` に配置します。対応環境は macOS（Intel / Apple Silicon）と
-Linux（amd64）です。Git と、利用したい Agent の CLI（`claude` / `codex` / `codex-fugu`）を用意してください。
-
 ```bash
 usagi doctor  # 必要なツールと設定を確認
 ```
 
-対応環境、ソースからのビルド、更新、shell 補完は
+対応環境と必要なツール、ソースからのビルド、更新、shell 補完は
 [インストールと更新](document/12-installation.md) を参照してください。
 
 ## はじめる
