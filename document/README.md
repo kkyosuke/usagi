@@ -40,4 +40,5 @@
 | 9 | [09-env.md](09-env.md) | 環境変数設定（global / workspace の 2 層・secret 解決・子プロセスへの注入） |
 | 10 | [10-session-roles.md](10-session-roles.md) | session role（catalog・stable assignment・daemon 検証・prompt 合成） |
 | 11 | [11-keybindings.md](11-keybindings.md) | TUI キーバインドの割り振り規則・全キーボード操作 |
+| 12 | [12-installation.md](12-installation.md) | 対応環境・インストール・更新・shell 補完 |
 | — | [proposals/](proposals/README.md) | 設計判断の履歴（採用・却下を含む。current spec とは分離して管理） |

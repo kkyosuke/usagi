@@ -849,6 +849,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
 （`crates/cli/mcp/`）が受け持ち、daemon / MCP route の effect はそれぞれの実行面が担う。
 どんなコマンド・オプションがあるかは単一の clap command tree から `usagi --help` と型の両方に
 反映される。通常 CLI branch の dispatch は `Run` トレイトで一様化する。
+インストール・更新・shell 補完の利用手順は
+[12. インストールと更新](12-installation.md)を正本とし、本節は command dispatch と更新の内部安全契約を扱う。
 
 ```text
 解析済み CLI Command ─► Command::into_handler() ─► Box<dyn Run> ─► Run::run(out)
