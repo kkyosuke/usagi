@@ -278,9 +278,12 @@ impl Context {
                 ("Enter / Esc", "open in browser / close"),
             ],
             Self::Preview => &[
-                ("type / paste", "edit fuzzy filter"),
+                ("← / →", "select file scope"),
+                ("type / paste", "filter files / search after /"),
                 ("↑ / ↓", "select file / scroll"),
                 ("Enter", "preview selected file"),
+                ("n / N", "next / previous search match"),
+                ("l / w", "toggle line numbers / wrapping"),
                 ("Esc", "back / close"),
             ],
             Self::Scratchpad => &[("paste", "append to draft"), ("Esc", "close")],

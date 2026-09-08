@@ -7,7 +7,7 @@
 
 mod preview;
 
-pub use preview::PreviewOverlay;
+pub use preview::{PreviewFileFilter, PreviewOverlay, PreviewSearchMatch};
 
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
 use usagi_core::domain::id::{
-    AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, OperationId, SessionId, UserDecisionId,
-    WorkspaceId,
+    AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, OperationId, RequestId, SessionId,
+    UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pr_inventory::{PrEntry, PrState};
@@ -2608,14 +2608,22 @@ pub enum BackendEvent {
     /// that file's safe UTF-8 lines.
     PreviewLoaded {
         target: Target,
+        /// Unique identity of the request; value-equal A-B-A loads stay fenced.
+        request_id: RequestId,
         path: Option<String>,
+        /// Finder group that originated this request.
+        filter: PreviewFileFilter,
         files: Vec<String>,
         lines: Vec<String>,
     },
     /// A safe preview read failure.
     PreviewError {
         target: Target,
+        /// Unique identity of the request; value-equal A-B-A loads stay fenced.
+        request_id: RequestId,
         path: Option<String>,
+        /// Finder group that originated this request.
+        filter: PreviewFileFilter,
         error: SafeError,
     },
 }
@@ -2809,11 +2817,13 @@ pub enum Effect {
     SyncPullRequestTargets {
         sessions: Vec<SessionId>,
     },
-    /// List a target's repository files (`path: None`) or read one selected file
-    /// (`path: Some`) through the overlay data owner.
+    /// List one filtered group of a target's repository files (`path: None`) or
+    /// read one selected file (`path: Some`) through the overlay data owner.
     LoadPreview {
         target: Target,
+        request_id: RequestId,
         path: Option<String>,
+        filter: PreviewFileFilter,
     },
     /// Discard pending and in-flight preview work after leaving the overlay.
     CancelPreview,
@@ -4233,12 +4243,17 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
         }
         BackendEvent::PreviewLoaded {
             target,
+            request_id,
             path,
+            filter,
             files,
             lines,
         } => {
             if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
-                overlay.target == *target && overlay.path.as_ref() == path.as_ref()
+                overlay.target == *target
+                    && overlay.request_id == *request_id
+                    && overlay.path.as_ref() == path.as_ref()
+                    && overlay.file_filter == *filter
             }) {
                 if path.is_none() {
                     overlay.files = files
@@ -4253,6 +4268,9 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                         .map(|line| preview::sanitize_preview_line(line))
                         .collect();
                     overlay.scroll = 0;
+                    overlay.search.clear();
+                    overlay.search_editing = false;
+                    overlay.current_match = 0;
                 }
                 overlay.loading = false;
                 overlay.error = None;
@@ -4260,11 +4278,16 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
         }
         BackendEvent::PreviewError {
             target,
+            request_id,
             path,
+            filter,
             error,
         } => {
             if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
-                overlay.target == *target && overlay.path.as_ref() == path.as_ref()
+                overlay.target == *target
+                    && overlay.request_id == *request_id
+                    && overlay.path.as_ref() == path.as_ref()
+                    && overlay.file_filter == *filter
             }) {
                 overlay.loading = false;
                 overlay.error = Some(error.clone());
@@ -5977,9 +6000,16 @@ fn open_preview(state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     };
     state.overlay = Some(Overlay::Preview);
-    state.preview_overlay = Some(PreviewOverlay::loading(target));
+    let overlay = PreviewOverlay::loading(target);
+    let request_id = overlay.request_id();
+    state.preview_overlay = Some(overlay);
     state.pr_overlay = None;
-    vec![Effect::LoadPreview { target, path: None }]
+    vec![Effect::LoadPreview {
+        target,
+        request_id,
+        path: None,
+        filter: PreviewFileFilter::All,
+    }]
 }
 
 /// Pull Request overlay の入力を還元する。←→ で status tab、↑↓ で PR 選択を回し、
@@ -13638,6 +13668,7 @@ mod tests {
     }
 
     fn preview_loaded(
+        state: &AppState,
         target: Target,
         path: Option<&str>,
         files: &[&str],
@@ -13645,7 +13676,9 @@ mod tests {
     ) -> AppEvent {
         AppEvent::Backend(BackendEvent::PreviewLoaded {
             target,
+            request_id: state.preview_overlay().unwrap().request_id(),
             path: path.map(str::to_owned),
+            filter: state.preview_overlay().unwrap().file_filter(),
             files: files.iter().map(ToString::to_string).collect(),
             lines: lines.iter().map(ToString::to_string).collect(),
         })
@@ -13658,6 +13691,24 @@ mod tests {
         );
     }
 
+    fn assert_preview_load(
+        state: &AppState,
+        effects: &[Effect],
+        target: Target,
+        path: Option<&str>,
+        filter: PreviewFileFilter,
+    ) {
+        assert_eq!(
+            effects,
+            [Effect::LoadPreview {
+                target,
+                request_id: state.preview_overlay().unwrap().request_id(),
+                path: path.map(str::to_owned),
+                filter,
+            }]
+        );
+    }
+
     #[test]
     fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
         let (workspace, session, _) = ids();
@@ -13665,30 +13716,25 @@ mod tests {
         let mut state = AppState::home(workspace, vec![session]);
 
         // `v` opens the preview overlay for the active target and requests it.
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
-            vec![Effect::LoadPreview { target, path: None }]
-        );
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        assert_preview_load(&state, &effects, target, None, PreviewFileFilter::All);
         assert_eq!(state.overlay(), Some(Overlay::Preview));
         assert!(state.preview_overlay().unwrap().is_loading());
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
 
         // A file list for another target is ignored; unsafe backend paths are
         // rejected when the matching result lands.
-        let _ = update(
-            &mut state,
-            preview_loaded(Target::Root(workspace), None, &["stale"], &[]),
-        );
+        let event = preview_loaded(&state, Target::Root(workspace), None, &["stale"], &[]);
+        let _ = update(&mut state, event);
         assert!(state.preview_overlay().unwrap().visible_files().is_empty());
-        let _ = update(
-            &mut state,
-            preview_loaded(
-                target,
-                None,
-                &["src/lib.rs", "README.md", "src/runtime.rs", "bad\npath"],
-                &[],
-            ),
+        let event = preview_loaded(
+            &state,
+            target,
+            None,
+            &["src/lib.rs", "README.md", "src/runtime.rs", "bad\npath"],
+            &[],
         );
+        let _ = update(&mut state, event);
         assert!(!state.preview_overlay().unwrap().is_loading());
         assert_eq!(state.preview_overlay().unwrap().visible_files().len(), 3);
 
@@ -13709,12 +13755,13 @@ mod tests {
         assert_eq!(overlay.selected(), 0);
         assert_eq!(overlay.selected_file(), Some("src/runtime.rs"));
 
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Enter)),
-            vec![Effect::LoadPreview {
-                target,
-                path: Some("src/runtime.rs".into()),
-            }]
+        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_preview_load(
+            &state,
+            &effects,
+            target,
+            Some("src/runtime.rs"),
+            PreviewFileFilter::All,
         );
         assert_eq!(
             state.preview_overlay().unwrap().path(),
@@ -13723,20 +13770,17 @@ mod tests {
         assert!(state.preview_overlay().unwrap().is_loading());
 
         // A late completion for another file cannot replace the requested one.
-        let _ = update(
-            &mut state,
-            preview_loaded(target, Some("src/lib.rs"), &[], &["stale"]),
-        );
+        let event = preview_loaded(&state, target, Some("src/lib.rs"), &[], &["stale"]);
+        let _ = update(&mut state, event);
         assert!(state.preview_overlay().unwrap().lines().is_empty());
-        let _ = update(
-            &mut state,
-            preview_loaded(
-                target,
-                Some("src/runtime.rs"),
-                &[],
-                &["# Title", "\u{1b}[31mred\ttext"],
-            ),
+        let event = preview_loaded(
+            &state,
+            target,
+            Some("src/runtime.rs"),
+            &[],
+            &["# Title", "\u{1b}[31mred\ttext"],
         );
+        let _ = update(&mut state, event);
         assert_eq!(
             state.preview_overlay().unwrap().lines(),
             &["# Title", "�[31mred text"]
@@ -13751,11 +13795,14 @@ mod tests {
         assert_eq!(state.preview_overlay().unwrap().scroll(), 0);
 
         // A safe read error surfaces on the open overlay.
+        let request_id = state.preview_overlay().unwrap().request_id();
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewError {
                 target,
+                request_id,
                 path: Some("src/runtime.rs".into()),
+                filter: PreviewFileFilter::All,
                 error: safe_error("no preview"),
             }),
         );
@@ -13793,11 +13840,15 @@ mod tests {
             Selection::Target(Target::Session(selected))
         );
 
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+            effects,
             vec![Effect::LoadPreview {
                 target: Target::Session(selected),
+                request_id,
                 path: None,
+                filter: PreviewFileFilter::All,
             }]
         );
         assert_eq!(
@@ -13807,11 +13858,15 @@ mod tests {
 
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         state.route = Route::Home(HomeMode::Closeup);
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+            effects,
             vec![Effect::LoadPreview {
                 target: Target::Session(active),
+                request_id,
                 path: None,
+                filter: PreviewFileFilter::All,
             }]
         );
         assert_eq!(
@@ -14034,13 +14089,17 @@ mod tests {
             },
             BackendEvent::PreviewLoaded {
                 target: Target::Session(session),
+                request_id: RequestId::new(),
                 path: None,
+                filter: PreviewFileFilter::All,
                 files: Vec::new(),
                 lines: Vec::new(),
             },
             BackendEvent::PreviewError {
                 target: Target::Session(session),
+                request_id: RequestId::new(),
                 path: None,
+                filter: PreviewFileFilter::All,
                 error: safe_error("preview"),
             },
         ] {
@@ -14371,11 +14430,15 @@ mod tests {
             assert!(update(&mut state, AppEvent::Key(key)).is_empty());
             assert_eq!(state.overlay(), None);
         }
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+            effects,
             vec![Effect::LoadPreview {
                 target: Target::Session(session),
+                request_id,
                 path: None,
+                filter: PreviewFileFilter::All,
             }]
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));

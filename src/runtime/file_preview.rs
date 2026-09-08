@@ -14,6 +14,7 @@ use usagi_core::infrastructure::bounded_process::{
     ChildOutputObservation, ChildPolicy, observe_command_output,
 };
 use usagi_core::infrastructure::git::confined_git_command;
+use usagi_tui::usecase::application::controller::PreviewFileFilter;
 
 /// Maximum number of repository paths offered to the fuzzy finder.
 pub(crate) const MAX_PREVIEW_FILES: usize = 20_000;
@@ -65,34 +66,107 @@ impl FilePreviewError {
     }
 }
 
-/// Return tracked and untracked, non-ignored repository files in stable order.
-pub(crate) fn list_files(root: &Path) -> Result<Vec<String>, FilePreviewError> {
-    let mut command = confined_git_command(root);
-    command.args([
-        "ls-files",
-        "-z",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-    ]);
-    listed_files(observe_command_output(command, PREVIEW_LIST_POLICY))
+/// Return the requested repository file group in stable order.
+pub(crate) fn list_files(
+    root: &Path,
+    filter: PreviewFileFilter,
+) -> Result<Vec<String>, FilePreviewError> {
+    list_files_with(root, filter, &mut run_git)
 }
 
-fn listed_files(observation: ChildOutputObservation) -> Result<Vec<String>, FilePreviewError> {
-    let ChildOutputObservation::Success { stdout, .. } = observation else {
-        return Err(FilePreviewError::FilesUnavailable);
-    };
-    let mut files = stdout
-        .split(|byte| *byte == 0)
-        .filter_map(|path| std::str::from_utf8(path).ok())
-        .filter(|path| valid_relative_path(path))
-        .filter(|path| path.chars().all(presentation_character_is_safe))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+fn list_files_with(
+    root: &Path,
+    filter: PreviewFileFilter,
+    run: &mut dyn FnMut(&Path, &[&str]) -> ChildOutputObservation,
+) -> Result<Vec<String>, FilePreviewError> {
+    let mut files = Vec::new();
+    match filter {
+        PreviewFileFilter::All => extend_listed_files(
+            &mut files,
+            run(
+                root,
+                &[
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                ],
+            ),
+        )?,
+        PreviewFileFilter::Changed => {
+            let base = integration_base(root, run);
+            let arguments = changed_diff_arguments(&base);
+            extend_listed_files(&mut files, run(root, &arguments))?;
+            extend_listed_files(
+                &mut files,
+                run(root, &["ls-files", "-z", "--others", "--exclude-standard"]),
+            )?;
+        }
+        PreviewFileFilter::Tracked => {
+            extend_listed_files(&mut files, run(root, &["ls-files", "-z", "--cached"]))?;
+        }
+    }
     files.sort();
     files.dedup();
     files.truncate(MAX_PREVIEW_FILES);
     Ok(files)
+}
+
+fn changed_diff_arguments(base: &str) -> [&str; 9] {
+    [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-only",
+        "-z",
+        "--diff-filter=ACMRTUXB",
+        "--merge-base",
+        base,
+        "--",
+    ]
+}
+
+fn run_git(root: &Path, arguments: &[&str]) -> ChildOutputObservation {
+    let mut command = confined_git_command(root);
+    command.args(arguments);
+    observe_command_output(command, PREVIEW_LIST_POLICY)
+}
+
+fn integration_base(
+    root: &Path,
+    run: &mut dyn FnMut(&Path, &[&str]) -> ChildOutputObservation,
+) -> String {
+    match run(
+        root,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
+        ChildOutputObservation::Success { stdout, .. } => std::str::from_utf8(&stdout)
+            .ok()
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+            .unwrap_or("main")
+            .to_owned(),
+        _ => "main".to_owned(),
+    }
+}
+
+fn extend_listed_files(
+    files: &mut Vec<String>,
+    observation: ChildOutputObservation,
+) -> Result<(), FilePreviewError> {
+    let ChildOutputObservation::Success { stdout, .. } = observation else {
+        return Err(FilePreviewError::FilesUnavailable);
+    };
+    files.extend(
+        stdout
+            .split(|byte| *byte == 0)
+            .filter_map(|path| std::str::from_utf8(path).ok())
+            .filter(|path| valid_relative_path(path))
+            .filter(|path| path.chars().all(presentation_character_is_safe))
+            .map(str::to_owned),
+    );
+    Ok(())
 }
 
 /// Load one finder listing or one selected document for the background preview
@@ -100,10 +174,11 @@ fn listed_files(observation: ChildOutputObservation) -> Result<Vec<String>, File
 pub(crate) fn load_preview(
     root: &Path,
     path: Option<&str>,
+    filter: PreviewFileFilter,
 ) -> Result<(Vec<String>, Vec<String>), FilePreviewError> {
     match path {
         Some(path) => read_file(root, path).map(|lines| (Vec::new(), lines)),
-        None => list_files(root).map(|files| (files, Vec::new())),
+        None => list_files(root, filter).map(|files| (files, Vec::new())),
     }
 }
 
@@ -219,6 +294,7 @@ fn sanitize_line(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::fmt::Write as _;
     use std::fs;
     use std::process::Command;
@@ -234,13 +310,19 @@ mod tests {
         }
     }
 
+    fn listed(stdout: &str) -> Result<Vec<String>, FilePreviewError> {
+        let mut files = Vec::new();
+        extend_listed_files(&mut files, output(stdout))?;
+        files.sort();
+        files.dedup();
+        files.truncate(MAX_PREVIEW_FILES);
+        Ok(files)
+    }
+
     #[test]
     fn listing_sorts_deduplicates_and_rejects_unsafe_paths() {
         assert_eq!(
-            listed_files(output(
-                "src/z.rs\0README.md\0src/z.rs\0../outside\0/a/./b\0bad\nname\0\0",
-            ))
-            .unwrap(),
+            listed("src/z.rs\0README.md\0src/z.rs\0../outside\0/a/./b\0bad\nname\0\0").unwrap(),
             vec!["README.md", "src/z.rs"]
         );
     }
@@ -255,10 +337,66 @@ mod tests {
             ChildOutputObservation::ObservationFailed,
         ] {
             assert_eq!(
-                listed_files(failure),
+                extend_listed_files(&mut Vec::new(), failure),
                 Err(FilePreviewError::FilesUnavailable)
             );
         }
+    }
+
+    #[test]
+    fn changed_listing_propagates_each_bounded_git_failure() {
+        let root = Path::new("/repo");
+        for observations in [
+            vec![output("origin/main\n"), ChildOutputObservation::ExitFailure],
+            vec![
+                output("origin/main\n"),
+                output("changed\0"),
+                ChildOutputObservation::TimedOut,
+            ],
+        ] {
+            let mut observations = VecDeque::from(observations);
+            let mut run = |_: &Path, _: &[&str]| {
+                observations
+                    .pop_front()
+                    .unwrap_or(ChildOutputObservation::ObservationFailed)
+            };
+            assert_eq!(
+                list_files_with(root, PreviewFileFilter::Changed, &mut run),
+                Err(FilePreviewError::FilesUnavailable)
+            );
+        }
+
+        let mut empty = |_: &Path, _: &[&str]| ChildOutputObservation::ObservationFailed;
+        assert_eq!(
+            list_files_with(root, PreviewFileFilter::All, &mut empty),
+            Err(FilePreviewError::FilesUnavailable)
+        );
+    }
+
+    #[test]
+    fn changed_listing_falls_back_to_main_when_origin_head_is_unavailable() {
+        let mut observations = VecDeque::from([
+            ChildOutputObservation::ExitFailure,
+            output("changed\0"),
+            output("untracked\0"),
+        ]);
+        let mut calls = Vec::new();
+        let mut run = |_: &Path, arguments: &[&str]| {
+            calls.push(
+                arguments
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            );
+            observations
+                .pop_front()
+                .unwrap_or(ChildOutputObservation::ObservationFailed)
+        };
+        assert_eq!(
+            list_files_with(Path::new("/repo"), PreviewFileFilter::Changed, &mut run).unwrap(),
+            ["changed", "untracked"]
+        );
+        assert!(calls[1].contains(&"main".to_owned()));
     }
 
     #[test]
@@ -267,7 +405,7 @@ mod tests {
             write!(&mut output, "{index:05}.txt\0").unwrap();
             output
         });
-        let files = listed_files(output(&stdout)).unwrap();
+        let files = listed(&stdout).unwrap();
         assert_eq!(files.len(), MAX_PREVIEW_FILES);
     }
 
@@ -284,10 +422,76 @@ mod tests {
         );
         fs::write(root.path().join("b.txt"), "b").unwrap();
         fs::write(root.path().join("a.txt"), "a").unwrap();
-        assert_eq!(list_files(root.path()).unwrap(), vec!["a.txt", "b.txt"]);
         assert_eq!(
-            list_files(&root.path().join("missing")),
+            list_files(root.path(), PreviewFileFilter::All).unwrap(),
+            vec!["a.txt", "b.txt"]
+        );
+        assert_eq!(
+            list_files(&root.path().join("missing"), PreviewFileFilter::All),
             Err(FilePreviewError::FilesUnavailable)
+        );
+    }
+
+    #[test]
+    fn changed_listing_disables_repository_configured_diff_programs() {
+        assert_eq!(
+            changed_diff_arguments("origin/main"),
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--name-only",
+                "-z",
+                "--diff-filter=ACMRTUXB",
+                "--merge-base",
+                "origin/main",
+                "--",
+            ]
+        );
+    }
+
+    #[test]
+    fn listing_selects_all_changed_and_tracked_git_views() {
+        let root = tempdir().unwrap();
+        let git = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(root.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "--quiet", "--initial-branch=main"]);
+        git(&["config", "user.email", "preview@example.invalid"]);
+        git(&["config", "user.name", "Preview Test"]);
+        fs::write(root.path().join("modified"), "before").unwrap();
+        fs::write(root.path().join("clean"), "clean").unwrap();
+        fs::write(root.path().join("deleted"), "deleted").unwrap();
+        git(&["add", "modified", "clean", "deleted"]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+        fs::write(root.path().join("modified"), "after").unwrap();
+        fs::remove_file(root.path().join("deleted")).unwrap();
+        fs::write(root.path().join("untracked"), "new").unwrap();
+
+        assert_eq!(
+            list_files(root.path(), PreviewFileFilter::Changed).unwrap(),
+            ["modified", "untracked"]
+        );
+        assert_eq!(
+            list_files(root.path(), PreviewFileFilter::Tracked).unwrap(),
+            ["clean", "deleted", "modified"]
+        );
+        assert_eq!(
+            list_files(root.path(), PreviewFileFilter::All).unwrap(),
+            ["clean", "deleted", "modified", "untracked"]
         );
     }
 
@@ -328,7 +532,7 @@ mod tests {
         fs::write(root.path().join("nested/file.txt"), "one\ntwo").unwrap();
 
         assert_eq!(
-            load_preview(root.path(), Some("nested/file.txt")).unwrap(),
+            load_preview(root.path(), Some("nested/file.txt"), PreviewFileFilter::All,).unwrap(),
             (Vec::new(), vec!["one".to_owned(), "two".to_owned()])
         );
         assert!(matches!(

@@ -20,15 +20,15 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use usagi_core::domain::agent::AgentProfileId;
 use usagi_core::domain::id::{
-    AgentContinuationRef, OperationId, SessionId, UserDecisionId, WorkspaceId,
+    AgentContinuationRef, OperationId, RequestId, SessionId, UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::usecase::env::EnvScope;
 
 use super::controller::{
-    AppEvent, DaemonAction, Effect, EnvironmentEntry, PendingToken, RoleEditorScope,
-    SessionCreateIntent, TabDirection, Target,
+    AppEvent, DaemonAction, Effect, EnvironmentEntry, PendingToken, PreviewFileFilter,
+    RoleEditorScope, SessionCreateIntent, TabDirection, Target,
 };
 use crate::usecase::overview;
 
@@ -321,9 +321,16 @@ pub trait OverlayPort {
     fn sync_pull_request_targets(&mut self, _sessions: Vec<SessionId>) {}
     /// Read a target's Pull Request list.
     fn load_pull_requests(&mut self, target: Target, completions: Completions);
-    /// List preview candidates (`path: None`) or read one repository-relative
-    /// UTF-8 file (`path: Some`).
-    fn load_preview(&mut self, target: Target, path: Option<String>, completions: Completions);
+    /// List filtered preview candidates (`path: None`) or read one
+    /// repository-relative UTF-8 file (`path: Some`).
+    fn load_preview(
+        &mut self,
+        target: Target,
+        request_id: RequestId,
+        path: Option<String>,
+        filter: PreviewFileFilter,
+        completions: Completions,
+    );
     /// Fence out pending and in-flight preview results when the overlay closes.
     fn cancel_preview(&mut self) {}
     /// Open one already-selected Pull Request URL in the browser.
@@ -348,7 +355,14 @@ impl OverlayPort for NoOverlay {
     fn load_pull_requests(&mut self, _: Target, completions: Completions) {
         unavailable(&completions, "Pull Request data is unavailable");
     }
-    fn load_preview(&mut self, _: Target, _: Option<String>, completions: Completions) {
+    fn load_preview(
+        &mut self,
+        _: Target,
+        _: RequestId,
+        _: Option<String>,
+        _: PreviewFileFilter,
+        completions: Completions,
+    ) {
         unavailable(&completions, "preview is unavailable");
     }
     fn open_pull_request(&mut self, _: String, completions: Completions) {
@@ -589,8 +603,14 @@ impl DaemonBackend {
             Effect::SyncPullRequestTargets { sessions } => {
                 self.overlay.sync_pull_request_targets(sessions);
             }
-            Effect::LoadPreview { target, path } => {
-                self.overlay.load_preview(target, path, self.completions());
+            Effect::LoadPreview {
+                target,
+                request_id,
+                path,
+                filter,
+            } => {
+                self.overlay
+                    .load_preview(target, request_id, path, filter, self.completions());
             }
             Effect::CancelPreview => self.overlay.cancel_preview(),
             Effect::OpenPullRequest { url } => {
@@ -915,7 +935,7 @@ mod tests {
     #[derive(Default)]
     struct FakeOverlay {
         pull_requests: Vec<Target>,
-        previews: Vec<(Target, Option<String>)>,
+        previews: Vec<(Target, RequestId, Option<String>, PreviewFileFilter)>,
         opened: Vec<String>,
     }
 
@@ -932,11 +952,21 @@ mod tests {
             }));
         }
 
-        fn load_preview(&mut self, target: Target, path: Option<String>, completions: Completions) {
-            self.previews.push((target, path.clone()));
+        fn load_preview(
+            &mut self,
+            target: Target,
+            request_id: RequestId,
+            path: Option<String>,
+            filter: PreviewFileFilter,
+            completions: Completions,
+        ) {
+            self.previews
+                .push((target, request_id, path.clone(), filter));
             completions.emit(AppEvent::Backend(BackendEvent::PreviewError {
                 target,
+                request_id,
                 path,
+                filter,
                 error: SafeError {
                     message: SafeMessage::new("no preview"),
                     error_id: "preview".to_owned(),
@@ -991,7 +1021,15 @@ mod tests {
         }
 
         fn load_pull_requests(&mut self, _: Target, _: Completions) {}
-        fn load_preview(&mut self, _: Target, _: Option<String>, _: Completions) {}
+        fn load_preview(
+            &mut self,
+            _: Target,
+            _: RequestId,
+            _: Option<String>,
+            _: PreviewFileFilter,
+            _: Completions,
+        ) {
+        }
         fn open_pull_request(&mut self, _: String, _: Completions) {}
     }
 
@@ -1289,7 +1327,12 @@ mod tests {
                 if *loaded == target && prs.len() == 1
         ));
         assert_eq!(
-            backend.dispatch(Effect::LoadPreview { target, path: None }),
+            backend.dispatch(Effect::LoadPreview {
+                target,
+                request_id: RequestId::new(),
+                path: None,
+                filter: PreviewFileFilter::All,
+            }),
             Flow::Continue
         );
         assert!(matches!(
@@ -1347,7 +1390,9 @@ mod tests {
             },
             Effect::LoadPreview {
                 target: Target::Root(WorkspaceId::new()),
+                request_id: RequestId::new(),
                 path: None,
+                filter: PreviewFileFilter::All,
             },
             Effect::CancelPreview,
             Effect::OpenPullRequest {

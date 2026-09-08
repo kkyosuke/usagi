@@ -1453,7 +1453,10 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 `Ctrl-O v` は選択中 session の File Preview overlay を大きな中央 modal で開く。Switch では sidebar cursor の
 session、Closeup では active session の worktree を検索し、`+ new session` 行では開かない。候補は `git ls-files` が返す tracked file と
 gitignore 対象外の未追跡 file に限定し、path の大文字小文字を区別しない fuzzy subsequence match で絞り込む。
-文字 / paste / `Backspace` で filter を編集し、`↑` / `↓` で選択、`Enter` で file 本文へ進む。
+finder 上部の All / Changed / Tracked を `←` / `→` で切り替える。All は tracked と gitignore 対象外の
+未追跡 file、Changed は integration base（通常 `origin/main`、無ければ `main`）から変更された削除済みでない
+tracked file と同じ未追跡 file、Tracked は tracked file だけを表示する。文字 / paste / `Backspace` で fuzzy filter を編集し、`↑` / `↓` で選択、
+`Enter` で file 本文へ進む。scope を切り替えた後に古い scope の取得結果が届いても表示へ採用しない。
 
 一覧取得と本文読み取りは render thread ではなく、pending 1件・completion 1件の resident preview lane で実行する。
 新しい要求は未着手の古い要求を置換し、`Esc` は pending と実行中結果を fence する。`git ls-files` は2秒・stdout/stderr
@@ -1462,8 +1465,12 @@ gitignore 対象外の未追跡 file に限定し、path の大文字小文字�
 本文は UTF-8 regular file の読み取り専用 text-viewer で、512 KiB を上限とする。binary、UTF-8 でない file、
 directory、target root 外へ解決される path は safe error として表示し、内容を読まない。pathはroot directoryの
 descriptorから各要素をno-followで開き、検査後のsymlink差し替えでroot外へ向けられない。表示行に含まれる terminal
-control / bidi control は無害化する。本文の `Esc` は候補と filter を保持した finder へ戻り、finder の `Esc` は
-overlay を閉じる。
+control / bidi control は無害化する。`/` は大文字小文字を区別する literal 検索を開始し、入力中の文字 / paste /
+`Backspace` で query を編集する。先頭から最大 20,000 件の一致箇所を highlight して現在位置を強調し、検索入力を
+終えた後は `n` / `N` で次 / 前の一致へ循環する。`l` は行番号、`w` は長い行の折り返しを切り替え、どちらも
+初期値は off である。
+検索入力中の `Enter` / `Esc` は query を保持して入力を終える。通常の本文で `Esc` を押すと候補、fuzzy filter、
+file scope、行番号 / 折り返し設定を保持した finder へ戻り、finder の `Esc` は overlay を閉じる。
 
 ## Sidebar mascot
 

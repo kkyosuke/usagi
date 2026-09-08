@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-use usagi_tui::usecase::application::controller::Target;
+use usagi_core::domain::id::RequestId;
+use usagi_tui::usecase::application::controller::{PreviewFileFilter, Target};
 
 use super::file_preview::FilePreviewError;
 
@@ -17,14 +18,18 @@ pub(crate) type PreviewPayload = (Vec<String>, Vec<String>);
 #[derive(Debug)]
 pub(crate) struct PreviewCompletion {
     pub(crate) target: Target,
+    pub(crate) request_id: RequestId,
     pub(crate) path: Option<String>,
+    pub(crate) filter: PreviewFileFilter,
     pub(crate) result: Result<PreviewPayload, FilePreviewError>,
 }
 
 struct PreviewJob {
     generation: u64,
     target: Target,
+    request_id: RequestId,
     path: Option<String>,
+    filter: PreviewFileFilter,
     root: PathBuf,
 }
 
@@ -58,7 +63,13 @@ pub(crate) struct PreviewPump {
 impl PreviewPump {
     pub(crate) fn spawn<F>(mut fetch: F) -> Self
     where
-        F: FnMut(&Path, Option<&str>) -> Result<PreviewPayload, FilePreviewError> + Send + 'static,
+        F: FnMut(
+                &Path,
+                Option<&str>,
+                PreviewFileFilter,
+            ) -> Result<PreviewPayload, FilePreviewError>
+            + Send
+            + 'static,
     {
         let shared = Arc::new(Shared {
             state: Mutex::new(PreviewState::default()),
@@ -80,12 +91,14 @@ impl PreviewPump {
                     }
                     state.pending.take().expect("pending preview job")
                 };
-                let result = fetch(&job.root, job.path.as_deref());
+                let result = fetch(&job.root, job.path.as_deref(), job.filter);
                 let mut state = lock(&worker);
                 if state.generation == job.generation && !state.stopped {
                     state.completed = Some(PreviewCompletion {
                         target: job.target,
+                        request_id: job.request_id,
                         path: job.path,
+                        filter: job.filter,
                         result,
                     });
                 }
@@ -97,13 +110,22 @@ impl PreviewPump {
         }
     }
 
-    pub(crate) fn request(&self, target: Target, path: Option<String>, root: PathBuf) {
+    pub(crate) fn request(
+        &self,
+        target: Target,
+        request_id: RequestId,
+        path: Option<String>,
+        filter: PreviewFileFilter,
+        root: PathBuf,
+    ) {
         let mut state = lock(&self.shared);
         state.generation = state.generation.wrapping_add(1);
         state.pending = Some(PreviewJob {
             generation: state.generation,
             target,
+            request_id,
             path,
+            filter,
             root,
         });
         state.completed = None;
@@ -160,17 +182,27 @@ mod tests {
 
     #[test]
     fn a_request_runs_off_thread_and_returns_one_completion() {
-        let pump = PreviewPump::spawn(|root, path| {
+        let pump = PreviewPump::spawn(|root, path, filter| {
+            assert_eq!(filter, PreviewFileFilter::Tracked);
             Ok((
                 vec![root.display().to_string()],
                 vec![path.unwrap_or_default().to_owned()],
             ))
         });
         let target = Target::Root(WorkspaceId::new());
-        pump.request(target, Some("README.md".to_owned()), PathBuf::from("/repo"));
+        let request_id = RequestId::new();
+        pump.request(
+            target,
+            request_id,
+            Some("README.md".to_owned()),
+            PreviewFileFilter::Tracked,
+            PathBuf::from("/repo"),
+        );
         let completion = take_until(&pump);
         assert_eq!(completion.target, target);
+        assert_eq!(completion.request_id, request_id);
         assert_eq!(completion.path.as_deref(), Some("README.md"));
+        assert_eq!(completion.filter, PreviewFileFilter::Tracked);
         assert_eq!(
             completion.result.unwrap(),
             (vec!["/repo".to_owned()], vec!["README.md".to_owned()])
@@ -183,7 +215,7 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let mut calls = 0;
-        let pump = PreviewPump::spawn(move |_, path| {
+        let pump = PreviewPump::spawn(move |_, path, _| {
             calls += 1;
             if calls == 1 {
                 started_tx.send(()).unwrap();
@@ -192,14 +224,35 @@ mod tests {
             Ok((Vec::new(), vec![path.unwrap_or_default().to_owned()]))
         });
         let target = Target::Root(WorkspaceId::new());
-        pump.request(target, Some("first".to_owned()), PathBuf::from("/repo"));
+        pump.request(
+            target,
+            RequestId::new(),
+            Some("first".to_owned()),
+            PreviewFileFilter::All,
+            PathBuf::from("/repo"),
+        );
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        pump.request(target, Some("second".to_owned()), PathBuf::from("/repo"));
-        pump.request(target, Some("latest".to_owned()), PathBuf::from("/repo"));
+        pump.request(
+            target,
+            RequestId::new(),
+            Some("second".to_owned()),
+            PreviewFileFilter::Changed,
+            PathBuf::from("/repo"),
+        );
+        let latest_request = RequestId::new();
+        pump.request(
+            target,
+            latest_request,
+            Some("latest".to_owned()),
+            PreviewFileFilter::Tracked,
+            PathBuf::from("/repo"),
+        );
         release_tx.send(()).unwrap();
 
         let completion = take_until(&pump);
+        assert_eq!(completion.request_id, latest_request);
         assert_eq!(completion.path.as_deref(), Some("latest"));
+        assert_eq!(completion.filter, PreviewFileFilter::Tracked);
         assert_eq!(completion.result.unwrap().1, vec!["latest"]);
     }
 
@@ -207,14 +260,16 @@ mod tests {
     fn cancellation_discards_pending_and_in_flight_results() {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let pump = PreviewPump::spawn(move |_, _| {
+        let pump = PreviewPump::spawn(move |_, _, _| {
             started_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             Err(FilePreviewError::FilesUnavailable)
         });
         pump.request(
             Target::Root(WorkspaceId::new()),
+            RequestId::new(),
             None,
+            PreviewFileFilter::All,
             PathBuf::from("/repo"),
         );
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
