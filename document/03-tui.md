@@ -1684,7 +1684,9 @@ background のいずれも同じ規則に従う。
 | late / 重複 / 未 admit の completion | launch fence が一致した completion だけが admission slot を解放し、operation fence が一致した pane だけを完了させる |
 
 hung request 自体の deadline は本節の責務ではなく、
-[IPC の attempt deadline と reconnect budget](04-ipc.md#attempt-deadline-と-reconnect-budget)が所有する。
+[IPC の attempt deadline と reconnect budget](04-ipc.md#attempt-deadline-と-reconnect-budget)が所有する。pane launch は
+通常の TUI 操作とは別の background policy を使うため、設定 env の `op read` が 1Password の承認を待っても interactive
+deadline では失敗せず、pending chip のまま daemon の bounded な secret 解決完了を待つ。
 
 #### 同一 process の pending operation identity
 

@@ -2480,7 +2480,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String> {
         let mut client = match crate::runtime::daemon::policy_client(
-            usagi_core::usecase::client::ClientPolicy::tui(),
+            usagi_core::usecase::client::ClientPolicy::pane_launch(),
         ) {
             Ok(client) => client,
             Err(error) => {
@@ -2520,7 +2520,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         goal: &str,
     ) -> Result<AgentPaneAdmission, String> {
         let mut client = match crate::runtime::daemon::policy_client(
-            usagi_core::usecase::client::ClientPolicy::tui(),
+            usagi_core::usecase::client::ClientPolicy::pane_launch(),
         ) {
             Ok(client) => client,
             Err(error) => {
@@ -2596,7 +2596,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         operation_id: usagi_core::domain::id::OperationId,
     ) -> Result<ExactAgentResume, String> {
         let mut client = match crate::runtime::daemon::policy_client(
-            usagi_core::usecase::client::ClientPolicy::tui(),
+            usagi_core::usecase::client::ClientPolicy::pane_launch(),
         ) {
             Ok(client) => client,
             Err(error) => {
@@ -2701,7 +2701,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             // a lost response or a reconnect replays the same terminal.
             launch_operation: Some(operation),
         };
-        let mut client = match crate::runtime::daemon::policy_client(ClientPolicy::tui()) {
+        let mut client = match crate::runtime::daemon::policy_client(ClientPolicy::pane_launch()) {
             Ok(client) => client,
             Err(error) => {
                 ErrorLog::record(&tui_error_entry("terminal connect", &error.to_string()));

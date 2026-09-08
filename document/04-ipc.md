@@ -105,7 +105,8 @@ connection worker は timeout で socket と connection-local state を回収し
 shutdown / generation retirement は
 [5. daemon の client worker barrier](05-daemon.md#client-worker-の保持)で pre-handshake を含む全 worker を unblock / join する。
 
-`ClientPolicy.timeout_ms` / `reconnect_attempts` は surface 別（TUI 2s/3、CLI 10s/1、MCP 30s/1）の policy であり、
+`ClientPolicy.timeout_ms` / `reconnect_attempts` は surface 別（TUI interactive 2s/3、TUI pane launch 300s/1、CLI 10s/1、
+MCP 30s/1）の policy であり、
 TUI の session 作成は worktree 構築の完了を待つため、`ClientPolicy::tui_session` で 10s/3 を使う。
 CLI・MCP・TUI の per-request 経路は [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget) で
 これを実効化する。TUI の terminal lane はこの policy より小さい
@@ -306,6 +307,11 @@ progress では **reset しない**。したがって peer が hello 前、reque
 停止しても、各 attempt は deadline + わずかな scheduler 誤差以内に typed unavailable で戻る。deadline を超えた
 socket は partial frame を持ち得るため再利用せず、connection を破棄する。
 
+TUI の pane launch だけは描画・入力・quit から分離済みの background worker で動くため、interactive policy を流用せず
+300 秒 / reconnect 1 回の専用 policy を使う。この budget は最大 32 件を 4 並列で解決する `op read` の 30 秒 deadline と
+2 秒 cleanup を全 wave で消費しても、daemon が final を返すまで待てる。したがって 1Password の承認モーダル中に 2 秒で
+pending pane を失敗へ変えない。一方、raw socket や壊れた daemon を無期限には待たず、attempt と retry の上限は維持する。
+
 `reconnect_attempts = N` は initial の後に高々 N 回の追加 attempt を許す。したがって最大 wall-clock は
 attempt 数 × surface deadline に有界な reconnect 誤差を加えた値として計測できる。budget を使い切ると client は
 typed `unavailable` を返す。これは side-effect state を definitive failure と断定しない（effect unknown）。
@@ -349,7 +355,7 @@ subscription を無効化してしまう）。代わりに lane は connection �
 | input | `input` / `input_outcome` / `detach` | 750ms | keystroke の PTY write と ACK、および失った ACK を解決する read-only 照会 |
 | snapshot | `attach` / `resync` / `inventory` / `completed_inventory` / `observe` / `dismiss` | 1000ms | screen checkpoint の直列化や scope 走査を伴い、keystroke より正当に遅い |
 | connect | lane の connect + handshake | 1000ms | **1 attempt** であり cold start ではない（`daemon start` 後の readiness 探索は独自の bounded retry を持ち、その attempt ごとに新しい budget を得る） |
-| launch | `launch` | 2000ms | process を起こす。lane ではなく per-request の `PolicyClient` 経路に載る |
+| launch | `launch` | 300000ms | process 起動前の bounded secret 解決を待つ background pane launch policy。lane ではなく per-request の `PolicyClient` 経路に載る |
 
 budget 超過は transport failure として扱う。socket に partial frame が残り得るため lane を破棄し、client-local な
 connection epoch を進める。その結果、全 pane が
@@ -1272,7 +1278,7 @@ TUI、CLI、MCP は共通 daemon client port を通して managed session と te
 protocol error、ownership unknown は local managed PTY や local session mutation への fallback を許可しない。
 
 CLI・MCP・TUI の per-request 経路（managed session / PR snapshot / metrics / agent launch・resume / user decision /
-generic terminal launch・inventory）は共通の resilient client を通り、surface policy を
+generic terminal launch・inventory）は共通の resilient client を通り、surface policy（background の pane launch は専用 policy）を
 [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget) として実効化する。したがって daemon が停止しても
 各 attempt は policy 時間内に typed unavailable で戻り、event loop を握る同期 request が TUI の draw / input / quit、
 CLI の exit、MCP の response loop を無期限停止させない。retry の可否は同節の request class 判定が正本であり、

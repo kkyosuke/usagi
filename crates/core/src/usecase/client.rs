@@ -1472,6 +1472,21 @@ impl ClientPolicy {
             reconnect_attempts: 1,
         }
     }
+
+    /// Background TUI pane launch policy.
+    ///
+    /// A launch may resolve the configured `op://` bindings before spawning the
+    /// PTY. That work deliberately lives off the render thread and can include a
+    /// human approval in the 1Password desktop app, so it must not inherit the
+    /// two-second interactive TUI budget. Five minutes covers the bounded secret
+    /// queue while still reclaiming a worker if the daemon itself never answers.
+    #[must_use]
+    pub const fn pane_launch() -> Self {
+        Self {
+            timeout_ms: 300_000,
+            reconnect_attempts: 1,
+        }
+    }
 }
 
 /// Per-request end-to-end deadline budgets for the TUI's terminal lanes.
@@ -1486,16 +1501,18 @@ impl ClientPolicy {
 ///
 /// The connection itself is established under the surface [`ClientPolicy`]
 /// budget, because opening it may have to bootstrap (and cold-start) a daemon.
-/// Only the per-request budgets below are charged to the render thread, and they
-/// are deliberately far smaller than `ClientPolicy::tui().timeout_ms`: a hung
-/// daemon must cost one keystroke a fraction of a second, not two seconds.
+/// The interactive per-request budgets below are charged to the render thread
+/// and are deliberately far smaller than `ClientPolicy::tui().timeout_ms`: a
+/// hung daemon must cost one keystroke a fraction of a second, not two seconds.
+/// `Launch` is the exception: it already runs on a background worker and uses
+/// [`ClientPolicy::pane_launch`] so configured secret approval can finish.
 ///
 /// | budget | actions | why this size |
 /// |---|---|---|
 /// | [`Self::POLL_MS`] | `Resume`, `Resize` | stateless and sub-millisecond in normal operation; a missed one only drops a frame |
 /// | [`Self::INPUT_MS`] | `Input`, `InputOutcome`, `Detach` | a keystroke's PTY write plus its acknowledgement, and the read-only ledger query that resolves a lost one |
 /// | [`Self::SNAPSHOT_MS`] | `Attach`, `Resync`, `Inventory`, `CompletedInventory`, `Observe`, `Dismiss` | serializes a screen checkpoint or scans a scope, so it is legitimately slower than a keystroke |
-/// | [`Self::LAUNCH_MS`] | `Launch` | spawns a process; it runs on the per-request [`PolicyClient`] path, never on a lane |
+/// | [`Self::LAUNCH_MS`] | `Launch` | may wait for configured secret approval; it runs on the background per-request [`PolicyClient`] path, never on a lane |
 ///
 /// Exceeding a budget is a transport failure: the socket may hold a partial
 /// frame, so the lane is dropped and the client's connection epoch advances,
@@ -1524,7 +1541,7 @@ impl TerminalLaneBudget {
     /// An atomic screen snapshot or a scope listing.
     pub const SNAPSHOT_MS: u64 = 1_000;
     /// A daemon-owned process spawn.
-    pub const LAUNCH_MS: u64 = 2_000;
+    pub const LAUNCH_MS: u64 = ClientPolicy::pane_launch().timeout_ms;
     /// Establishing (or re-establishing) a lane's own connection: one
     /// connect + handshake against an already-running daemon.
     ///
@@ -2534,6 +2551,8 @@ mod tests {
         ] {
             assert_eq!(ClientPolicy::tui_session(action), ClientPolicy::tui());
         }
+        assert!(ClientPolicy::pane_launch().timeout_ms > ClientPolicy::mcp().timeout_ms);
+        assert_eq!(ClientPolicy::pane_launch().reconnect_attempts, 1);
     }
 
     /// Bootstrap contention is a distinct, effect-free, retryable answer: no
@@ -2552,11 +2571,11 @@ mod tests {
     }
 
     /// The render thread's budgets are the point of the lane split: a keystroke
-    /// or a tab switch must cost a fraction of the surface policy budget, and a
-    /// stateless poll must cost less again. The connection budget stays the
-    /// surface policy's, because opening a lane may have to cold-start a daemon.
+    /// or a tab switch must cost a fraction of the interactive surface policy,
+    /// and a stateless poll must cost less again. Pane launch is off-thread and
+    /// therefore follows the longer background policy instead.
     #[test]
-    fn terminal_lane_budgets_are_ordered_and_far_below_the_surface_policy() {
+    fn terminal_lane_budgets_are_ordered_and_launch_uses_background_policy() {
         use TerminalAction::{
             Attach, CompletedInventory, Detach, Dismiss, Input, InputOutcome, Inventory, Launch,
             Observe, Resize, Resume, Resync,
@@ -2566,7 +2585,7 @@ mod tests {
             assert!(TerminalLaneBudget::POLL_MS < TerminalLaneBudget::INPUT_MS);
             assert!(TerminalLaneBudget::INPUT_MS < TerminalLaneBudget::SNAPSHOT_MS);
             assert!(TerminalLaneBudget::SNAPSHOT_MS < ClientPolicy::tui().timeout_ms);
-            assert!(TerminalLaneBudget::LAUNCH_MS == ClientPolicy::tui().timeout_ms);
+            assert!(TerminalLaneBudget::LAUNCH_MS == ClientPolicy::pane_launch().timeout_ms);
             // Re-establishing a lane against a daemon that listens but never
             // completes a handshake must not cost the render thread the surface
             // policy budget it used to inherit.
