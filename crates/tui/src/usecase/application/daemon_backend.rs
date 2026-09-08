@@ -324,6 +324,8 @@ pub trait OverlayPort {
     /// List preview candidates (`path: None`) or read one repository-relative
     /// UTF-8 file (`path: Some`).
     fn load_preview(&mut self, target: Target, path: Option<String>, completions: Completions);
+    /// Fence out pending and in-flight preview results when the overlay closes.
+    fn cancel_preview(&mut self) {}
     /// Open one already-selected Pull Request URL in the browser.
     fn open_pull_request(&mut self, url: String, completions: Completions);
     /// Copy one selected canonical URL.
@@ -590,6 +592,7 @@ impl DaemonBackend {
             Effect::LoadPreview { target, path } => {
                 self.overlay.load_preview(target, path, self.completions());
             }
+            Effect::CancelPreview => self.overlay.cancel_preview(),
             Effect::OpenPullRequest { url } => {
                 self.overlay.open_pull_request(url, self.completions());
             }
@@ -1346,6 +1349,7 @@ mod tests {
                 target: Target::Root(WorkspaceId::new()),
                 path: None,
             },
+            Effect::CancelPreview,
             Effect::OpenPullRequest {
                 url: "https://github.com/o/r/pull/7".to_owned(),
             },

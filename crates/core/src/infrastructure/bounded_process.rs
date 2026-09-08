@@ -45,6 +45,19 @@ pub enum ChildObservation {
     ObservationFailed,
 }
 
+/// Raw output of a successful bounded command, or a safe closed failure. Unlike
+/// [`ChildObservation`], success preserves every byte (including NUL and
+/// newlines) and permits empty streams, so callers can parse machine output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildOutputObservation {
+    Success { stdout: Vec<u8>, stderr: Vec<u8> },
+    SpawnFailed,
+    ExitFailure,
+    TimedOut,
+    OutputTooLarge,
+    ObservationFailed,
+}
+
 /// Safe result of a bounded command fed through stdin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildInputExecution {
@@ -69,22 +82,47 @@ struct Capture {
 /// either pipe can fill without deadlocking the child, while retained memory is
 /// limited to `output_limit` bytes per stream.
 #[must_use]
-#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=normalizes_success_and_safe_failure_states,timeout_terminates_the_process_group_and_reaps_the_child
 pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildObservation {
     let mut command = Command::new(program);
+    command.args(arguments);
+    normalize_observation(observe_command_output(command, policy))
+}
+
+fn normalize_observation(observation: ChildOutputObservation) -> ChildObservation {
+    match observation {
+        ChildOutputObservation::Success { stdout, stderr } => {
+            normalize_output(if stdout.is_empty() { stderr } else { stdout })
+        }
+        ChildOutputObservation::SpawnFailed => ChildObservation::SpawnFailed,
+        ChildOutputObservation::ExitFailure => ChildObservation::ExitFailure,
+        ChildOutputObservation::TimedOut => ChildObservation::TimedOut,
+        ChildOutputObservation::OutputTooLarge => ChildObservation::OutputTooLarge,
+        ChildOutputObservation::ObservationFailed => ChildObservation::ObservationFailed,
+    }
+}
+
+/// Runs a caller-built command with bounded output, deadline, and complete
+/// process-group cleanup while preserving successful stdout and stderr bytes.
+/// Failure states never expose command output.
+///
+/// The caller may set a trusted cwd and scrub environment variables before
+/// passing the command; this function owns stdin/stdout/stderr and process-group
+/// configuration from that point onward.
+#[must_use]
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=preserves_machine_output_bytes,normalizes_success_and_safe_failure_states,timeout_terminates_the_process_group_and_reaps_the_child
+pub fn observe_command_output(mut command: Command, policy: ChildPolicy) -> ChildOutputObservation {
     command
-        .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
     let Ok(mut child) = command.spawn() else {
-        return ChildObservation::SpawnFailed;
+        return ChildOutputObservation::SpawnFailed;
     };
     let pid = child.id();
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         terminate_and_reap(&mut child, policy.terminate_grace);
-        return ChildObservation::ObservationFailed;
+        return ChildOutputObservation::ObservationFailed;
     };
     let output_exceeded = Arc::new(AtomicBool::new(false));
     let stdout_exceeded = Arc::clone(&output_exceeded);
@@ -104,7 +142,7 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
             Ok(Some(status)) => break Ok(status),
             Ok(None) if output_exceeded.load(Ordering::Acquire) => {
                 terminate_and_reap(&mut child, policy.terminate_grace);
-                break Err(ChildObservation::OutputTooLarge);
+                break Err(ChildOutputObservation::OutputTooLarge);
             }
             Ok(None) if Instant::now() < deadline => {
                 thread::sleep(
@@ -114,11 +152,11 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
             }
             Ok(None) => {
                 terminate_and_reap(&mut child, policy.terminate_grace);
-                break Err(ChildObservation::TimedOut);
+                break Err(ChildOutputObservation::TimedOut);
             }
             Err(_) => {
                 terminate_and_reap(&mut child, policy.terminate_grace);
-                break Err(ChildObservation::ObservationFailed);
+                break Err(ChildOutputObservation::ObservationFailed);
             }
         }
     };
@@ -129,15 +167,18 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
         return status.unwrap_err();
     };
     let (Ok(stdout), Ok(stderr)) = (stdout, stderr) else {
-        return ChildObservation::ObservationFailed;
+        return ChildOutputObservation::ObservationFailed;
     };
     if stdout.exceeded || stderr.exceeded {
-        return ChildObservation::OutputTooLarge;
+        return ChildOutputObservation::OutputTooLarge;
     }
     if !status.success() {
-        return ChildObservation::ExitFailure;
+        return ChildOutputObservation::ExitFailure;
     }
-    normalize_output(stdout.bytes, stderr.bytes)
+    ChildOutputObservation::Success {
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    }
 }
 
 /// Runs a non-interactive command with bounded input, output, lifetime, and
@@ -286,9 +327,8 @@ fn capture(reader: &mut dyn Read, limit: usize, exceeded_signal: &AtomicBool) ->
     }
 }
 
-fn normalize_output(stdout: Vec<u8>, stderr: Vec<u8>) -> ChildObservation {
-    let selected = if stdout.is_empty() { stderr } else { stdout };
-    let Ok(text) = String::from_utf8(selected) else {
+fn normalize_output(output: Vec<u8>) -> ChildObservation {
+    let Ok(text) = String::from_utf8(output) else {
         return ChildObservation::InvalidOutput;
     };
     let Some(line) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
@@ -441,20 +481,43 @@ mod tests {
     #[test]
     fn output_normalization_is_strict_and_prefers_stdout() {
         assert_eq!(
-            normalize_output(b" stdout \nignored".to_vec(), b"stderr".to_vec()),
+            normalize_output(b" stdout \nignored".to_vec()),
             ChildObservation::Success("stdout".to_owned())
         );
         assert_eq!(
-            normalize_output(Vec::new(), b" stderr ".to_vec()),
-            ChildObservation::Success("stderr".to_owned())
-        );
-        assert_eq!(
-            normalize_output(vec![0xff], Vec::new()),
+            normalize_output(vec![0xff]),
             ChildObservation::InvalidOutput
         );
         assert_eq!(
-            normalize_output(b"  \n".to_vec(), Vec::new()),
+            normalize_output(b"  \n".to_vec()),
             ChildObservation::EmptyOutput
+        );
+        assert_eq!(
+            normalize_observation(ChildOutputObservation::ObservationFailed),
+            ChildObservation::ObservationFailed
+        );
+    }
+
+    #[test]
+    fn preserves_machine_output_bytes() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'one\\000two\\nthree'"]);
+        assert_eq!(
+            observe_command_output(command, policy()),
+            ChildOutputObservation::Success {
+                stdout: b"one\0two\nthree".to_vec(),
+                stderr: Vec::new(),
+            }
+        );
+
+        let mut empty = Command::new("sh");
+        empty.args(["-c", "exit 0"]);
+        assert_eq!(
+            observe_command_output(empty, policy()),
+            ChildOutputObservation::Success {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }
         );
     }
 

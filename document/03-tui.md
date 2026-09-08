@@ -1455,8 +1455,13 @@ session、Closeup では active session の worktree を検索し、`+ new sessi
 gitignore 対象外の未追跡 file に限定し、path の大文字小文字を区別しない fuzzy subsequence match で絞り込む。
 文字 / paste / `Backspace` で filter を編集し、`↑` / `↓` で選択、`Enter` で file 本文へ進む。
 
+一覧取得と本文読み取りは render thread ではなく、pending 1件・completion 1件の resident preview lane で実行する。
+新しい要求は未着手の古い要求を置換し、`Esc` は pending と実行中結果を fence する。`git ls-files` は2秒・stdout/stderr
+各8 MiBの上限を持ち、超過・timeout・非zero終了は内容を表示しない。候補は最大20,000件である。
+
 本文は UTF-8 regular file の読み取り専用 text-viewer で、512 KiB を上限とする。binary、UTF-8 でない file、
-directory、target root 外へ解決される path は safe error として表示し、内容を読まない。表示行に含まれる terminal
+directory、target root 外へ解決される path は safe error として表示し、内容を読まない。pathはroot directoryの
+descriptorから各要素をno-followで開き、検査後のsymlink差し替えでroot外へ向けられない。表示行に含まれる terminal
 control / bidi control は無害化する。本文の `Esc` は候補と filter を保持した finder へ戻り、finder の `Esc` は
 overlay を閉じる。
 

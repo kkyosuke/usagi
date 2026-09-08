@@ -5,6 +5,10 @@
 //! effect は backend adapter が固有の command に変換し、テストでは test-only
 //! backend の command log と event queue を使う。
 
+mod preview;
+
+pub use preview::PreviewOverlay;
+
 #[cfg(test)]
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,7 +37,6 @@ use usagi_core::usecase::agent_phase::AgentPhaseAggregation;
 use usagi_core::usecase::env::EnvScope;
 
 use crate::usecase::application::environment_source::EnvironmentSourceEditor;
-use crate::usecase::fuzzy::fuzzy_score;
 use crate::usecase::terminal_input::{
     KeyCode, KeyEventKind, LiveInput, RuntimeEvent, is_control_and_shift,
 };
@@ -815,104 +818,6 @@ impl PrOverlay {
     #[must_use]
     pub const fn filter(&self) -> PrFilter {
         self.filter
-    }
-}
-
-const MAX_PREVIEW_FILTER_CHARS: usize = 256;
-
-/// Selected-session file finder and read-only text preview state.
-///
-/// Repository-relative paths and file lines return through [`Effect::LoadPreview`]
-/// and [`BackendEvent::PreviewLoaded`]. The reducer owns filtering, selection,
-/// the finder/document transition, and document scroll.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreviewOverlay {
-    target: Target,
-    files: Vec<String>,
-    filter: String,
-    selected: usize,
-    path: Option<String>,
-    lines: Vec<String>,
-    scroll: usize,
-    loading: bool,
-    error: Option<SafeError>,
-}
-
-impl PreviewOverlay {
-    fn loading(target: Target) -> Self {
-        Self {
-            target,
-            files: Vec::new(),
-            filter: String::new(),
-            selected: 0,
-            path: None,
-            lines: Vec::new(),
-            scroll: 0,
-            loading: true,
-            error: None,
-        }
-    }
-
-    /// Overlay が対象とする stable identity。
-    #[must_use]
-    pub const fn target(&self) -> Target {
-        self.target
-    }
-    /// Current fuzzy filter.
-    #[must_use]
-    pub fn filter(&self) -> &str {
-        &self.filter
-    }
-    /// Filtered file paths in fuzzy rank order.
-    #[must_use]
-    pub fn visible_files(&self) -> Vec<&str> {
-        let mut files = self
-            .files
-            .iter()
-            .enumerate()
-            .filter_map(|(order, path)| {
-                fuzzy_score(path, &self.filter).map(|score| (score, order, path.as_str()))
-            })
-            .collect::<Vec<_>>();
-        if !self.filter.is_empty() {
-            files.sort_by_key(|(score, order, _)| (*score, *order));
-        }
-        files.into_iter().map(|(_, _, path)| path).collect()
-    }
-    /// Selected row within [`Self::visible_files`].
-    #[must_use]
-    pub const fn selected(&self) -> usize {
-        self.selected
-    }
-    /// Selected repository-relative path, if the current filter has a match.
-    #[must_use]
-    pub fn selected_file(&self) -> Option<&str> {
-        self.visible_files().get(self.selected).copied()
-    }
-    /// Open repository-relative document path. `None` means the finder is open.
-    #[must_use]
-    pub fn path(&self) -> Option<&str> {
-        self.path.as_deref()
-    }
-    /// 表示可能な preview 行。素材未着なら空。
-    #[must_use]
-    pub fn lines(&self) -> &[String] {
-        &self.lines
-    }
-    /// 現在の先頭行 offset。
-    #[must_use]
-    pub const fn scroll(&self) -> usize {
-        self.scroll
-    }
-    /// Whether the finder or selected document is waiting for its backend data.
-    #[must_use]
-    pub const fn is_loading(&self) -> bool {
-        self.loading
-    }
-    /// port が分類した安全なエラー。
-    #[must_use]
-    pub fn error(&self) -> Option<&SafeError> {
-        self.error.as_ref()
     }
 }
 
@@ -2910,6 +2815,8 @@ pub enum Effect {
         target: Target,
         path: Option<String>,
     },
+    /// Discard pending and in-flight preview work after leaving the overlay.
+    CancelPreview,
     /// Open one already-selected Pull Request URL through the browser opener.
     /// URL validation stays with the executor; the reducer forwards the raw URL.
     OpenPullRequest {
@@ -4343,7 +4250,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 } else {
                     overlay.lines = lines
                         .iter()
-                        .map(|line| sanitize_preview_line(line))
+                        .map(|line| preview::sanitize_preview_line(line))
                         .collect();
                     overlay.scroll = 0;
                 }
@@ -5176,7 +5083,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         // Dismissal is handled by the early Enter/Escape/Ctrl-C branch above; any
         // other key is inert while the create-failure dialog owns input.
         Overlay::Prs => update_prs_overlay(state, &key),
-        Overlay::Preview => update_preview_overlay(state, &key),
+        Overlay::Preview => preview::update_preview_overlay(state, &key),
         Overlay::Overview if matches!(key, AppKey::Escape) => {
             state.overlay = None;
             Vec::new()
@@ -6153,114 +6060,6 @@ fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
             .collect(),
         _ => Vec::new(),
     }
-}
-
-/// Preview overlay input. The finder accepts a fuzzy filter and opens its
-/// selected file; the document scrolls and returns to the cached finder on Esc.
-fn update_preview_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
-    let Some(document_open) = state
-        .preview_overlay
-        .as_ref()
-        .map(|overlay| overlay.path.is_some())
-    else {
-        state.overlay = None;
-        return Vec::new();
-    };
-
-    if document_open {
-        let overlay = state.preview_overlay.as_mut().unwrap();
-        match key {
-            AppKey::Escape => {
-                overlay.path = None;
-                overlay.lines.clear();
-                overlay.scroll = 0;
-                overlay.loading = false;
-                overlay.error = None;
-            }
-            AppKey::Up => overlay.scroll = overlay.scroll.saturating_sub(1),
-            AppKey::Down => overlay.scroll = overlay.scroll.saturating_add(1),
-            _ => {}
-        }
-        return Vec::new();
-    }
-
-    match key {
-        AppKey::Escape => {
-            state.overlay = None;
-            state.preview_overlay = None;
-        }
-        AppKey::Up => {
-            let overlay = state.preview_overlay.as_mut().unwrap();
-            overlay.selected = overlay.selected.saturating_sub(1);
-        }
-        AppKey::Down => {
-            let visible_len = state
-                .preview_overlay
-                .as_ref()
-                .unwrap()
-                .visible_files()
-                .len();
-            let overlay = state.preview_overlay.as_mut().unwrap();
-            overlay.selected = (overlay.selected + 1).min(visible_len.saturating_sub(1));
-        }
-        AppKey::Backspace => {
-            let overlay = state.preview_overlay.as_mut().unwrap();
-            overlay.filter.pop();
-            overlay.selected = 0;
-        }
-        AppKey::Char(character) if presentation_character_is_safe(*character) => {
-            let overlay = state.preview_overlay.as_mut().unwrap();
-            if overlay.filter.chars().count() < MAX_PREVIEW_FILTER_CHARS {
-                overlay.filter.push(*character);
-                overlay.selected = 0;
-            }
-        }
-        AppKey::Paste(text) => {
-            let overlay = state.preview_overlay.as_mut().unwrap();
-            let remaining = MAX_PREVIEW_FILTER_CHARS.saturating_sub(overlay.filter.chars().count());
-            overlay.filter.extend(
-                text.chars()
-                    .filter(|character| presentation_character_is_safe(*character))
-                    .take(remaining),
-            );
-            overlay.selected = 0;
-        }
-        AppKey::Enter => {
-            let Some((target, path)) = state.preview_overlay.as_ref().and_then(|overlay| {
-                overlay
-                    .selected_file()
-                    .map(|path| (overlay.target, path.to_owned()))
-            }) else {
-                return Vec::new();
-            };
-            let overlay = state.preview_overlay.as_mut().unwrap();
-            overlay.path = Some(path.clone());
-            overlay.lines.clear();
-            overlay.scroll = 0;
-            overlay.loading = true;
-            overlay.error = None;
-            return vec![Effect::LoadPreview {
-                target,
-                path: Some(path),
-            }];
-        }
-        _ => {}
-    }
-    Vec::new()
-}
-
-fn sanitize_preview_line(line: &str) -> String {
-    line.chars()
-        .map(|character| {
-            if character == '\t' {
-                ' '
-            } else if presentation_character_is_safe(character) {
-                character
-            } else {
-                '\u{fffd}'
-            }
-        })
-        .collect()
 }
 
 fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
@@ -13852,6 +13651,13 @@ mod tests {
         })
     }
 
+    fn escape_preview(state: &mut AppState) {
+        assert_eq!(
+            update(state, AppEvent::Key(AppKey::Escape)),
+            vec![Effect::CancelPreview]
+        );
+    }
+
     #[test]
     fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
         let (workspace, session, _) = ids();
@@ -13963,14 +13769,14 @@ mod tests {
         );
 
         // The first Esc returns to the cached finder; the second closes it.
-        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        escape_preview(&mut state);
         assert_eq!(state.overlay(), Some(Overlay::Preview));
         assert_eq!(state.preview_overlay().unwrap().path(), None);
         assert_eq!(
             state.preview_overlay().unwrap().selected_file(),
             Some("src/runtime.rs")
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        escape_preview(&mut state);
         assert_eq!(state.overlay(), None);
         assert!(state.preview_overlay().is_none());
     }
@@ -14258,7 +14064,10 @@ mod tests {
         assert!(update_prs_overlay(&mut state, &AppKey::Enter).is_empty());
         state.overlay = Some(Overlay::Preview);
         state.preview_overlay = None;
-        assert!(update_preview_overlay(&mut state, &AppKey::Enter).is_empty());
+        assert_eq!(
+            preview::update_preview_overlay(&mut state, &AppKey::Enter),
+            vec![Effect::CancelPreview]
+        );
 
         assert!(commit_note_draft(&mut state).is_empty());
         state.overlay = Some(Overlay::Notes);
@@ -14406,9 +14215,9 @@ mod tests {
             let _ = commit_note_draft(&mut state);
         }
         state.preview_overlay = None;
-        let _ = update_preview_overlay(&mut state, &AppKey::Home);
+        let _ = preview::update_preview_overlay(&mut state, &AppKey::Home);
         state.preview_overlay = Some(PreviewOverlay::loading(Target::Root(workspace)));
-        let _ = update_preview_overlay(&mut state, &AppKey::Home);
+        let _ = preview::update_preview_overlay(&mut state, &AppKey::Home);
 
         state.overlay = Some(Overlay::Environment);
         state.environment_editor = Some(EnvironmentEditor {

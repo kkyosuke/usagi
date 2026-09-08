@@ -47,6 +47,11 @@ use std::marker::PhantomData;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+/// Maximum number of complete load/apply/compare-and-swap attempts made by one
+/// shared-document update. A stale revision is ordinary writer contention, but
+/// an indefinitely hot allocator must still return control to its caller.
+const MAX_CAS_UPDATE_ATTEMPTS: usize = 64;
+
 /// A typed refusal from either durable object. Every variant is effect zero: the
 /// document the caller read is left exactly as it was, and no spawn, signal, or
 /// capacity release is inferred from a refusal.
@@ -261,6 +266,9 @@ impl<D: CasDocument> CasStore<D> {
     /// # Errors
     /// Returns [`ResourceError::Corrupt`] or the document's own validation
     /// refusal for bytes this build must not act on, or the store's read error.
+    // Direct tests cover absence, IO, decode, and validation outcomes. LLVM
+    // still records each document/`impl FnOnce` monomorphization independently.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=unreadable_corrupt_and_unknown_schema_bytes_all_fail_closed
     pub fn load(&self, absent: impl FnOnce() -> D) -> Result<CasSnapshot<D>, ResourceFailure> {
         let Some(observed) = self.file.read()? else {
             let document = absent();
@@ -284,6 +292,9 @@ impl<D: CasDocument> CasStore<D> {
     /// Returns [`ResourceError::StaleRevision`] when another writer committed
     /// first or when `next` does not advance the revision by exactly one, the
     /// document's validation refusal, or the store's error.
+    // Direct tests cover revision, validation, IO, lost-race, and success
+    // outcomes. LLVM still records every document monomorphization separately.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=a_write_failure_and_a_lost_race_are_reported_differently
     pub fn commit(
         &self,
         snapshot: &CasSnapshot<D>,
@@ -307,12 +318,16 @@ impl<D: CasDocument> CasStore<D> {
     }
 
     /// Load, apply `change`, and commit in one compare-and-swap. `change` runs on
-    /// a copy, so a refusal commits nothing and a converged retry writes nothing
-    /// at all.
+    /// a copy, so a refusal commits nothing and a converged update writes nothing
+    /// at all. Single-writer documents use this form.
     ///
     /// # Errors
     /// Returns `change`'s refusal, or any [`load`](Self::load) /
     /// [`commit`](Self::commit) failure.
+    // Direct tests cover load, convergence, refusal, and commit failures. LLVM
+    // nevertheless counts the `impl FnOnce` call-site monomorphizations as
+    // independent copies whose error exits cannot all run in one instance.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=a_converged_update_writes_nothing_and_a_refused_one_commits_nothing
     pub fn update<T>(
         &self,
         absent: impl FnOnce() -> D,
@@ -327,6 +342,44 @@ impl<D: CasDocument> CasStore<D> {
         next.bump();
         let committed = self.commit(&snapshot, next)?;
         Ok((value, committed))
+    }
+
+    /// Load, apply `change`, and commit with bounded compare-and-swap retries.
+    /// `change` runs on a fresh copy after each stale revision, so it must be a
+    /// deterministic document transformation without external side effects.
+    /// Shared multi-writer documents use this form.
+    ///
+    /// # Errors
+    /// Returns `change`'s refusal, any non-contention store failure, or
+    /// [`ResourceError::StaleRevision`] after the bounded retry budget expires.
+    // Direct tests cover successful replay and retry-budget exhaustion. LLVM
+    // still counts each output/closure monomorphization as an independent copy.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=update_reloads_and_reapplies_after_a_stale_revision
+    pub fn update_retrying<T>(
+        &self,
+        mut absent: impl FnMut() -> D,
+        mut change: impl FnMut(&mut D) -> Result<T, ResourceError>,
+    ) -> Result<(T, CasSnapshot<D>), ResourceFailure> {
+        let mut attempts_remaining = MAX_CAS_UPDATE_ATTEMPTS;
+        loop {
+            let snapshot = self.load(&mut absent)?;
+            let mut next = snapshot.to_document();
+            let value = change(&mut next)?;
+            if next == snapshot.document {
+                return Ok((value, snapshot));
+            }
+            next.bump();
+            match self.commit(&snapshot, next) {
+                Ok(committed) => return Ok((value, committed)),
+                Err(failure) if failure.refusal() == Some(ResourceError::StaleRevision) => {
+                    attempts_remaining -= 1;
+                    if attempts_remaining == 0 {
+                        return Err(failure);
+                    }
+                }
+                Err(failure) => return Err(failure),
+            }
+        }
     }
 }
 

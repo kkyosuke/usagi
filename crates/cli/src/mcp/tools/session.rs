@@ -431,7 +431,7 @@ impl Tool for SessionRemove {
         "session_remove"
     }
     fn description(&self) -> &'static str {
-        "同じ daemon の同一 workspace にある不要なセッション（worktree）を破棄するときに使う。作成者が異なる session も name で削除できる。name 必須。未コミットの変更（dirty）がある場合は force が必要。integrity orphan の診断不能な残骸や未マージ commit も破棄するときだけ force と purge_orphan を両方指定する。応答は受理で、worktree の撤去は daemon が続ける。自身が作成した session の完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
+        "認証済み caller が作成した不要なセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。integrity orphan の診断不能な残骸や未マージ commit も破棄するときだけ force と purge_orphan を両方指定する。応答は受理で、worktree の撤去は daemon が続ける。完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"force":{"type":"boolean"},"purge_orphan":{"type":"boolean"}},"required":["name"]}"#

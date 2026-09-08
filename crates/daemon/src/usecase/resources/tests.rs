@@ -1,13 +1,35 @@
 //! The compare-and-swap seam every durable object in this module shares.
 
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use usagi_core::domain::id::OperationId;
 
 use super::allocator::{ALLOCATOR_SCHEMA, AllocatorDocument, ExpiryClass, OperationTombstone};
 use super::fixture::{FileFault, MemoryFile, SharedBytes};
-use super::{CasDocument, CasStore, ResourceError, ResourceFailure};
+use super::{CasDocument, CasFile, CasStore, ResourceError, ResourceFailure};
 
 fn store(bytes: &SharedBytes) -> CasStore<AllocatorDocument> {
     CasStore::new(MemoryFile::new(bytes))
+}
+
+struct StaleOnceFile {
+    inner: MemoryFile,
+    stale: Arc<AtomicBool>,
+}
+
+impl CasFile for StaleOnceFile {
+    fn read(&self) -> io::Result<Option<String>> {
+        self.inner.read()
+    }
+
+    fn compare_and_write(&self, expected: Option<&str>, contents: &str) -> io::Result<bool> {
+        if self.stale.swap(false, Ordering::AcqRel) {
+            return Ok(false);
+        }
+        self.inner.compare_and_write(expected, contents)
+    }
 }
 
 #[test]
@@ -156,6 +178,62 @@ fn a_converged_update_writes_nothing_and_a_refused_one_commits_nothing() {
         .unwrap();
     assert_eq!(snapshot.document().revision, 1);
     assert!(bytes.get().is_some());
+}
+
+#[test]
+fn update_reloads_and_reapplies_after_a_stale_revision() {
+    let bytes = SharedBytes::default();
+    let stale = Arc::new(AtomicBool::new(true));
+    let store = CasStore::new(StaleOnceFile {
+        inner: MemoryFile::new(&bytes),
+        stale: Arc::clone(&stale),
+    });
+    let mut applications = 0;
+    let operation = OperationId::new();
+
+    let ((), committed) = store
+        .update_retrying(AllocatorDocument::default, |document| {
+            applications += 1;
+            document.tombstones.push(OperationTombstone {
+                operation,
+                digest: "retried".to_owned(),
+                class: ExpiryClass::Failed,
+                cutoff: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(applications, 2);
+    assert!(!stale.load(Ordering::Acquire));
+    assert_eq!(committed.document().revision, 1);
+    assert_eq!(committed.document().tombstones.len(), 1);
+}
+
+#[test]
+fn update_returns_the_typed_stale_revision_after_its_retry_budget() {
+    let bytes = SharedBytes::default();
+    let store =
+        CasStore::<AllocatorDocument>::new(MemoryFile::faulty(&bytes, FileFault::AlwaysStale));
+    let mut applications = 0;
+    let operation = OperationId::new();
+
+    let failure = store
+        .update_retrying(AllocatorDocument::default, |document| {
+            applications += 1;
+            document.tombstones.push(OperationTombstone {
+                operation,
+                digest: "contended".to_owned(),
+                class: ExpiryClass::Failed,
+                cutoff: 1,
+            });
+            Ok(())
+        })
+        .unwrap_err();
+
+    assert_eq!(applications, super::MAX_CAS_UPDATE_ATTEMPTS);
+    assert_eq!(failure.refusal(), Some(ResourceError::StaleRevision));
+    assert!(bytes.get().is_none());
 }
 
 #[test]
