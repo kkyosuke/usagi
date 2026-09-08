@@ -121,13 +121,8 @@ Agent は組み込みの MCP server を通じて session の作成・観測・�
 
 ## 開発
 
-toolchain は `rust-toolchain.toml` に固定されています。開発フローと品質 gate は
-[開発規約](document/06-conventions.md#品質チェックリスク比例の-gate) が正本です。
-
-```bash
-cargo check --workspace --all-targets
-cargo test --workspace --quiet
-```
+toolchain は `rust-toolchain.toml` に固定されています。環境構築、開発フロー、品質 gate、PR の手順は
+[開発規約](document/06-conventions.md) を参照してください。
 
 ## ライセンス
 
