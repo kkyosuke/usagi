@@ -1450,8 +1450,8 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 
 ### File Preview
 
-`Ctrl-O v` は active target の File Preview overlay を開く。最初の画面は file finder で、session target はその
-worktree、workspace root target は workspace root を検索する。候補は `git ls-files` が返す tracked file と
+`Ctrl-O v` は選択中 session の File Preview overlay を大きな中央 modal で開く。Switch では sidebar cursor の
+session、Closeup では active session の worktree を検索し、`+ new session` 行では開かない。候補は `git ls-files` が返す tracked file と
 gitignore 対象外の未追跡 file に限定し、path の大文字小文字を区別しない fuzzy subsequence match で絞り込む。
 文字 / paste / `Backspace` で filter を編集し、`↑` / `↓` で選択、`Enter` で file 本文へ進む。
 

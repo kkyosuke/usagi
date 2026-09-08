@@ -5,9 +5,8 @@ use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverla
 use crate::presentation::widgets::modal;
 use crate::usecase::application::controller::PreviewOverlay;
 
-const INNER_WIDTH: usize = 76;
-const BODY_HEIGHT: usize = 14;
-const FILE_ROWS: usize = 10;
+const INNER_WIDTH: usize = 108;
+const BODY_HEIGHT: usize = 24;
 
 /// Compose Preview over an existing Home frame.
 #[must_use]
@@ -30,6 +29,7 @@ fn render_finder(
     state: &PreviewOverlay,
 ) -> Vec<String> {
     let inner = modal::modal_inner_width(width, INNER_WIDTH);
+    let body_height = modal::reserved_body_height(height, width, BODY_HEIGHT);
     let visible = state.visible_files();
     let rows = visible
         .iter()
@@ -62,7 +62,8 @@ fn render_finder(
             "No files match the filter."
         }));
     } else {
-        body.extend(modal::bounded_list_rows(&rows, state.selected(), FILE_ROWS));
+        let file_rows = body_height.saturating_sub(2);
+        body.extend(modal::bounded_list_rows(&rows, state.selected(), file_rows));
     }
     body.push(modal::footer(
         "type fuzzy filter / ↑↓ select / Enter preview / Esc close",
@@ -95,13 +96,15 @@ fn render_document(
         },
         |error| OverlayDocument::Unavailable(error.message.as_str().to_owned()),
     );
-    text_overlay::render_over(
+    text_overlay::render_over_with_layout(
         height,
         width,
         base,
         &TextOverlay::new(format!("Preview · {path}"), document)
             .scrolled_to(state.scroll())
             .with_footer("↑↓ scroll   Esc: back to files"),
+        INNER_WIDTH,
+        BODY_HEIGHT,
     )
 }
 
@@ -200,5 +203,108 @@ mod tests {
             state.preview_overlay().unwrap(),
         );
         assert!(frame.iter().all(|line| display_width(line) <= 30));
+    }
+
+    #[test]
+    fn finder_and_document_use_the_large_preview_layout() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                path: None,
+                files: (0..30)
+                    .map(|index| format!("src/file-{index}.rs"))
+                    .collect(),
+                lines: vec![],
+            }),
+        );
+
+        let base = vec![String::new(); 40];
+        let finder = render_over(40, 120, &base, state.preview_overlay().unwrap());
+        let finder_box_rows = finder
+            .iter()
+            .map(|line| strip_ansi(line))
+            .filter(|line| line.contains('┌') || line.contains('│') || line.contains('└'))
+            .count();
+        assert_eq!(finder_box_rows, BODY_HEIGHT + 4);
+        let finder_top = finder
+            .iter()
+            .map(|line| strip_ansi(line))
+            .find(|line| line.contains("Preview files"))
+            .unwrap();
+        assert_eq!(display_width(finder_top.trim()), INNER_WIDTH + 4);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                path: Some("src/file-0.rs".into()),
+                files: vec![],
+                lines: vec!["body".into()],
+            }),
+        );
+        let document = render_over(40, 120, &base, state.preview_overlay().unwrap());
+        let document_box_rows = document
+            .iter()
+            .map(|line| strip_ansi(line))
+            .filter(|line| line.contains('┌') || line.contains('│') || line.contains('└'))
+            .count();
+        assert_eq!(document_box_rows, BODY_HEIGHT + 4);
+        let document_top = document
+            .iter()
+            .map(|line| strip_ansi(line))
+            .find(|line| line.contains("Preview · src/file-0.rs"))
+            .unwrap();
+        assert_eq!(display_width(document_top.trim()), INNER_WIDTH + 4);
+    }
+
+    #[test]
+    fn short_scrolled_document_keeps_the_back_control_inside_the_frame() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                path: None,
+                files: vec!["src/lib.rs".into()],
+                lines: vec![],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                path: Some("src/lib.rs".into()),
+                files: vec![],
+                lines: vec!["first".into(), "selected".into(), "last".into()],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+
+        let frame = render_over(
+            10,
+            40,
+            &vec!["background".into(); 10],
+            state.preview_overlay().unwrap(),
+        );
+        let plain = frame
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("selected"));
+        assert!(plain.contains("Esc: back to files"));
+        assert!(frame.iter().all(|line| display_width(line) == 40));
+        assert!(frame.first().unwrap().starts_with("background"));
+        assert!(frame.last().unwrap().starts_with("background"));
     }
 }
