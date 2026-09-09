@@ -3,7 +3,8 @@
 //! Every session (and the workspace **root**) carries an environment: a stable
 //! `name -> value` map edited through the Overview `env` command. These are the
 //! git-free operations that surface reads and writes through the injected
-//! [`WorkspaceStateStore`], the same store the note scratchpad uses.
+//! [`WorkspaceStateRepository`](crate::usecase::ports::WorkspaceStateRepository),
+//! the same port the note scratchpad uses.
 //!
 //! A [`Target`] selects whose environment to touch: a named session or the
 //! workspace root. [`set_environment`] holds the store lock across
@@ -16,8 +17,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 
 use crate::domain::workspace_state::WorkspaceState;
-use crate::infrastructure::store::state::WorkspaceStateStore;
 use crate::usecase::note::Target;
+use crate::usecase::ports::WorkspaceStateRepository;
 
 /// The environment map for `target` within `state`, or `None` when a named
 /// session does not exist. The root always resolves.
@@ -57,7 +58,7 @@ fn environment_of_mut<'a>(
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
 pub fn environment(
-    store: &WorkspaceStateStore,
+    store: &impl WorkspaceStateRepository,
     target: Target<'_>,
 ) -> Result<BTreeMap<String, String>> {
     Ok(store
@@ -78,20 +79,21 @@ pub fn environment(
 ///
 /// Returns an error when the store cannot be locked, read, or written.
 pub fn set_environment(
-    store: &WorkspaceStateStore,
+    store: &impl WorkspaceStateRepository,
     target: Target<'_>,
     env: BTreeMap<String, String>,
     now: DateTime<Utc>,
 ) -> Result<bool> {
-    let _lock = store.lock()?;
-    let mut state = store.load()?.unwrap_or_default();
-    let Some(slot) = environment_of_mut(&mut state, target) else {
-        return Ok(false);
-    };
-    *slot = env;
-    state.updated_at = now;
-    store.save(&state)?;
-    Ok(true)
+    store.transact(|transaction| {
+        let mut state = transaction.load()?.unwrap_or_default();
+        let Some(slot) = environment_of_mut(&mut state, target) else {
+            return Ok(false);
+        };
+        *slot = env;
+        state.updated_at = now;
+        transaction.save(&state)?;
+        Ok(true)
+    })
 }
 
 #[cfg(test)]

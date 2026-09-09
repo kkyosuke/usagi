@@ -182,7 +182,7 @@ fn discover() -> io::Result<Discovery> {
                 state.root().display()
             ));
         } else if trusted_repository {
-            match usagi_core::usecase::clean::observe_repository(&git, state.root()) {
+            match usagi_core::infrastructure::git::observe_repository(&git, state.root()) {
                 Ok(Some(repository)) => repositories.push(repository),
                 Ok(None) => {}
                 Err(error) => warnings.push(format!(

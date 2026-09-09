@@ -1,5 +1,6 @@
 //! Atomic durable storage for daemon-owned session PR inventories.
 
+use crate::usecase::pr_inventory::PrInventoryPort;
 use crate::{
     domain::{id::SessionId, pr_inventory::PrInventory},
     infrastructure::persistence::json_file,
@@ -48,6 +49,23 @@ impl PrInventoryStore {
             &self.path(),
             snapshot,
             PR_INVENTORY_SNAPSHOT_MAX_BYTES,
+        )
+    }
+}
+
+impl PrInventoryPort for PrInventoryStore {
+    type Error = anyhow::Error;
+
+    fn load(&self) -> Result<BTreeMap<SessionId, PrInventory>, Self::Error> {
+        Ok(PrInventoryStore::load(self)?.sessions)
+    }
+
+    fn save(&self, sessions: &BTreeMap<SessionId, PrInventory>) -> Result<(), Self::Error> {
+        PrInventoryStore::save(
+            self,
+            &PrInventoryStoreSnapshot {
+                sessions: sessions.clone(),
+            },
         )
     }
 }

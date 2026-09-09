@@ -9145,9 +9145,7 @@ fn clean_orphan_session_resources(
     force: bool,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
     use usagi_core::infrastructure::git::{delete_branch, remove_worktree};
-    use usagi_core::usecase::clean::{
-        CleanCandidate, CleanInventory, DaemonWorkspaceData, observe_repository, plan,
-    };
+    use usagi_core::usecase::clean::{CleanCandidate, CleanInventory, DaemonWorkspaceData, plan};
 
     let lifecycle = || -> Result<(PathBuf, BTreeSet<String>), SessionRuntimeError> {
         let sessions = bound
@@ -9174,7 +9172,7 @@ fn clean_orphan_session_resources(
         Ok((root, names))
     };
     let (root, names) = lifecycle()?;
-    let repositories = observe_repository(&SystemGit, &root)
+    let repositories = usagi_core::infrastructure::git::observe_repository(&SystemGit, &root)
         .map_err(|error| {
             SessionRuntimeError::DurableFailure(format!(
                 "could not inspect orphan session resources: {error}"

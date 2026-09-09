@@ -38,6 +38,7 @@ pub mod issue;
 pub mod memory;
 pub mod note;
 pub mod owner_routing;
+pub mod ports;
 pub mod pr_inventory;
 pub mod session_state;
 pub mod settings;

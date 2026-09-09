@@ -511,20 +511,25 @@ session の Git effect（create、mirror した tree の nested worktree、remov
 | technical boundary / infrastructure | 面をまたぐ共有（IPC プロトコル型・永続化・git）は `usagi-core` の `infrastructure/`。片面専用（PTY は daemon、端末 adapter は tui）は各面クレート内 |
 | presentation | 各面クレート（TUI の画面 / daemon のサーバ端点 / cli のサブコマンド・MCP tool アダプタ）と、ルート `main.rs` の dispatch |
 
-`usagi-core/infrastructure` は外部 IO adapter だけの置き場ではない。面をまたぐ wire contract、
-cross-process lock を含む transactional store、Git effect の共有実装をまとめた technical boundary である。
-core usecase は `IssueStore` / `WorkspaceStateStore` / `Storage` / `GitRunner` 等を引数として受け、
-その transaction / compensation contract を直接合成する。逆に core infrastructure の adapter は
-usecase が定義する port を実装できる。これらを実体のない同型 port で包み直さず common crate に閉じることを、
-本プロジェクトの明示的な設計判断とする。時計・process 実行等は引き続き注入し、ユニットテスト可能性を保つ。
+`usagi-core/usecase` は `ports.rs` に application-owned な永続化境界を定義し、具体的な
+`IssueStore` / `MemoryStore` / `WorkspaceStateStore` / `Storage` や lock guard を参照しない。
+read-modify-write の原子性は transaction callback の契約として port に残し、
+`usagi-core/infrastructure` の file adapter が lock を保持したままその callback を実行する。
+Git を使う cleanup inventory も infrastructure adapter、観測結果から候補を決める処理は usecase とする。
+これにより保存方式と application policy を明確に分離し、fake port で usecase を検証できる。
 
-実装依存行列は次のとおり（`○` は参照可、`—` は同一領域、空欄は禁止）。`core` の technical boundary と
-usecase の相互参照は上記の共有 contract に限り、domain は常に内側に留まる。
+IPC client の wire 語彙と接続 state machine は段階的に分離中であり、現時点の
+`usecase/client.rs` と `usecase/owner_routing.rs` だけは `core infrastructure::ipc` を参照する。
+この 2 ファイルは architecture test の明示 allowlist とし、他の core usecase から concrete
+infrastructure への依存追加は拒否する。
+
+実装依存行列は次のとおり（`○` は参照可、`△` は上記 2 ファイルだけの移行中例外、`—` は同一領域、空欄は禁止）。
+domain は常に内側に留まる。
 
 | 参照元 | core domain | core usecase | core technical boundary | 同じ面の usecase | 同じ面の infrastructure | 同じ面の presentation |
 |---|---:|---:|---:|---:|---:|---:|
 | core domain | — |  |  | - | - | - |
-| core usecase | ○ | — | ○ | - | - | - |
+| core usecase | ○ | — | △ | - | - | - |
 | core technical boundary | ○ | ○ | — | - | - | - |
 | face usecase | ○ | ○ | ○ | — |  |  |
 | face infrastructure | ○ | ○ | ○ | ○ | — |  |

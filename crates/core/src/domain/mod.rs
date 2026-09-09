@@ -25,6 +25,7 @@ pub mod terminal_visibility;
 pub mod trace;
 pub mod user_decision;
 pub mod workspace;
+pub mod workspace_layout;
 pub mod workspace_state;
 
 /// アプリケーションの自己記述。バージョン表示などで使う。
