@@ -1720,9 +1720,8 @@ impl AppState {
         &self.role_catalog
     }
     /// Whether the session at this stable identity is a usable (attachable)
-    /// checkout. A session with no lifecycle projection — pre-lifecycle callers,
-    /// or a name-only fallback — is treated as usable so their behaviour is
-    /// unchanged. A `Failed` row reports `false`, so attach is not offered.
+    /// checkout. A session with no lifecycle projection is treated as usable;
+    /// a `Failed` row reports `false`, so attach is not offered.
     #[must_use]
     fn session_can_use(&self, session: SessionId) -> bool {
         self.session_lifecycles

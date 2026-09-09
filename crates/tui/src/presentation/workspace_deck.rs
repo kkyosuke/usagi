@@ -1248,7 +1248,7 @@ mod tests {
     use super::*;
 
     fn snapshot(name: &str, path: &str) -> WorkspaceSnapshot {
-        WorkspaceSnapshot::new(
+        WorkspaceSnapshot::with_runtime_ids(
             Workspace {
                 name: name.to_owned(),
                 path: PathBuf::from(path),
@@ -1256,6 +1256,8 @@ mod tests {
                 updated_at: Utc::now(),
             },
             WorkspaceState::default(),
+            WorkspaceId::new(),
+            Vec::new(),
         )
     }
 
@@ -1281,7 +1283,8 @@ mod tests {
                 .collect(),
             ..WorkspaceState::default()
         };
-        WorkspaceSnapshot::new(
+        let session_ids = state.sessions.iter().map(|_| SessionId::new()).collect();
+        WorkspaceSnapshot::with_runtime_ids(
             Workspace {
                 name: name.to_owned(),
                 path: PathBuf::from(path),
@@ -1289,6 +1292,8 @@ mod tests {
                 updated_at: Utc::now(),
             },
             state,
+            WorkspaceId::new(),
+            session_ids,
         )
     }
 

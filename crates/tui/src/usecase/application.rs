@@ -4,7 +4,7 @@
 //! 行う。このモジュールは変換後の [`EntryScreen`] を受け取り、画面の具体的な描画・入力
 //! 処理を [`ScreenRunner`] へ委譲する。これにより画面遷移の判断を端末 IO から分離する。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,6 +14,14 @@ use usagi_core::domain::id::{SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::SessionLifecycleProjection;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::domain::workspace_state::WorkspaceState;
+
+/// Whether daemon-issued session identities form a complete, one-to-one row
+/// mapping.
+#[must_use]
+pub fn runtime_identities_are_valid(session_count: usize, session_ids: &[SessionId]) -> bool {
+    session_count == session_ids.len()
+        && session_ids.iter().copied().collect::<BTreeSet<_>>().len() == session_ids.len()
+}
 
 /// Runtime Agent/terminal launch and stream boundaries.
 pub mod agent_runtime_ports;
@@ -71,22 +79,13 @@ pub struct WorkspaceSnapshot {
 }
 
 impl WorkspaceSnapshot {
-    /// workspace と state を組にする。
-    #[must_use]
-    pub fn new(workspace: Workspace, state: WorkspaceState) -> Self {
-        let session_ids = state.sessions.iter().map(|_| SessionId::new()).collect();
-        Self {
-            workspace,
-            state,
-            workspace_id: WorkspaceId::new(),
-            session_ids,
-            agent_resumes: BTreeMap::new(),
-            session_lifecycles: BTreeMap::new(),
-        }
-    }
-
     /// Build a snapshot whose identities came from the daemon lifecycle
     /// snapshot.  No name/path-to-ID inference is performed by the TUI.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the daemon session records and identities are not aligned or
+    /// an identity occurs more than once.
     #[must_use]
     pub fn with_runtime_ids(
         workspace: Workspace,
@@ -94,6 +93,10 @@ impl WorkspaceSnapshot {
         workspace_id: WorkspaceId,
         session_ids: Vec<SessionId>,
     ) -> Self {
+        assert!(
+            runtime_identities_are_valid(state.sessions.len(), &session_ids),
+            "daemon session records and identities must be aligned and unique"
+        );
         Self {
             workspace,
             state,
@@ -106,6 +109,11 @@ impl WorkspaceSnapshot {
 
     /// Build a daemon-authoritative snapshot including the safe provider resume
     /// projection and per-session lifecycle used by the Home sidebar.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the daemon session records and identities are not aligned or
+    /// an identity occurs more than once.
     #[must_use]
     pub fn with_runtime_projection(
         workspace: Workspace,
@@ -115,6 +123,10 @@ impl WorkspaceSnapshot {
         agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
         session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
     ) -> Self {
+        assert!(
+            runtime_identities_are_valid(state.sessions.len(), &session_ids),
+            "daemon session records and identities must be aligned and unique"
+        );
         Self {
             workspace,
             state,
@@ -535,13 +547,33 @@ mod tests {
     use super::{
         EntryScreen, Key, ScreenRunner, Terminal, WorkspaceSnapshot, open_failure_notice, run,
     };
+    use chrono::Utc;
     use std::io;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{SessionId, WorkspaceId};
+    use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::workspace::Workspace;
     use usagi_core::domain::workspace_state::WorkspaceState;
+
+    fn state_with_session() -> WorkspaceState {
+        WorkspaceState {
+            sessions: vec![SessionRecord {
+                name: "session".to_owned(),
+                display_name: None,
+                origin: SessionOrigin::Human,
+                started_from: None,
+                root: PathBuf::from("/tmp/work/session"),
+                created_at: Utc::now(),
+                last_active: None,
+                notes: Scratchpad::default(),
+                prs: Vec::new(),
+            }],
+            ..WorkspaceState::default()
+        }
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
@@ -738,7 +770,7 @@ mod tests {
         };
         let snapshot = WorkspaceSnapshot::with_runtime_projection(
             Workspace::new("work", "/tmp/work"),
-            WorkspaceState::default(),
+            state_with_session(),
             workspace_id,
             vec![session_id],
             std::collections::BTreeMap::from([(session_id, resume)]),
@@ -799,7 +831,7 @@ mod tests {
         let workspace = Workspace::new("demo", "/tmp/demo");
         let snapshot = WorkspaceSnapshot::with_runtime_ids(
             workspace.clone(),
-            WorkspaceState::default(),
+            state_with_session(),
             workspace_id,
             vec![session_id],
         );
@@ -808,5 +840,30 @@ mod tests {
         assert_eq!(snapshot.workspace_id, workspace_id);
         assert_eq!(snapshot.session_ids, vec![session_id]);
         assert!(snapshot.agent_resumes.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "daemon session records and identities must be aligned and unique")]
+    fn runtime_identity_constructor_rejects_unpaired_records() {
+        let _ = WorkspaceSnapshot::with_runtime_ids(
+            Workspace::new("demo", "/tmp/demo"),
+            WorkspaceState::default(),
+            WorkspaceId::new(),
+            vec![SessionId::new()],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "daemon session records and identities must be aligned and unique")]
+    fn runtime_identity_constructor_rejects_duplicate_ids() {
+        let mut state = state_with_session();
+        state.sessions.push(state.sessions[0].clone());
+        let duplicated = SessionId::new();
+        let _ = WorkspaceSnapshot::with_runtime_ids(
+            Workspace::new("demo", "/tmp/demo"),
+            state,
+            WorkspaceId::new(),
+            vec![duplicated, duplicated],
+        );
     }
 }

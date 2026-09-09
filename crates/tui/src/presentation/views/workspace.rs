@@ -58,6 +58,7 @@ use crate::usecase::application::controller::{
 use crate::usecase::application::pane::{
     PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab, TabSelection,
 };
+use crate::usecase::application::runtime_identities_are_valid;
 use crate::usecase::application::terminal_selection::TerminalPoint;
 use usagi_core::domain::id::{
     AgentContinuationRef, AgentRuntimeId, SessionId, TerminalRef, WorkspaceId,
@@ -1304,8 +1305,8 @@ pub struct Workspace {
     /// Non-persistent, asynchronously refreshed Git observations by stable ID.
     git_diffs: BTreeMap<SessionId, GitDiff>,
     /// Daemon-authoritative lifecycle projection by stable ID. Non-persistent;
-    /// refreshed from each lifecycle snapshot. A session absent here (older
-    /// snapshot or a name-only fallback) is treated as `Available`.
+    /// refreshed from each lifecycle snapshot. A session absent from this map
+    /// is treated as `Available`.
     session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
     /// Non-persistent safe role metadata from the daemon snapshot.
     session_roles: BTreeMap<SessionId, SessionRoleProjection>,
@@ -1315,29 +1316,23 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// core の workspace とその永続化済み状態からセッションキャッシュを作る。
-    #[must_use]
-    pub fn new(workspace: WorkspaceRecord, state: WorkspaceState) -> Self {
-        let mut session_ids = Vec::with_capacity(state.sessions.len());
-        session_ids.resize_with(state.sessions.len(), SessionId::new);
-        Self::with_runtime_ids(workspace, state, session_ids)
-    }
-
     /// Build the cache from daemon-authoritative workspace state and session
     /// identities. The identities fence pane requests and completions.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the daemon session records and identities are not aligned or
+    /// an identity occurs more than once.
     #[must_use]
     pub fn with_runtime_ids(
         workspace: WorkspaceRecord,
         state: WorkspaceState,
         session_ids: Vec<SessionId>,
     ) -> Self {
-        let session_ids = if session_ids.len() == state.sessions.len() {
-            session_ids
-        } else {
-            let mut fallback_ids = Vec::with_capacity(state.sessions.len());
-            fallback_ids.resize_with(state.sessions.len(), SessionId::new);
-            fallback_ids
-        };
+        assert!(
+            runtime_identities_are_valid(state.sessions.len(), &session_ids),
+            "daemon session records and identities must be aligned and unique"
+        );
         Self {
             record: workspace,
             state,
@@ -1374,37 +1369,26 @@ impl Workspace {
         &self.session_ids
     }
 
-    /// Replace only the sidebar's session projection from a daemon lifecycle
-    /// snapshot. The persisted workspace state remains read-only auxiliary data.
-    pub fn replace_sessions(&mut self, sessions: Vec<SessionRecord>) {
-        self.replace_sessions_and_ids(sessions, None);
-    }
-
     /// Replace sidebar rows and their daemon-issued runtime identities from one
     /// lifecycle snapshot. The vectors are aligned by snapshot order; names
     /// remain display-only and are never used to recover an identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the daemon session records and identities are not aligned or
+    /// an identity occurs more than once.
     pub fn replace_sessions_with_runtime_ids(
         &mut self,
         sessions: Vec<SessionRecord>,
         session_ids: Vec<SessionId>,
     ) {
-        self.replace_sessions_and_ids(sessions, Some(session_ids));
-    }
-
-    fn replace_sessions_and_ids(
-        &mut self,
-        sessions: Vec<SessionRecord>,
-        session_ids: Option<Vec<SessionId>>,
-    ) {
-        let changed = self.state.sessions != sessions
-            || session_ids
-                .as_ref()
-                .is_some_and(|ids| self.session_ids != *ids);
+        assert!(
+            runtime_identities_are_valid(sessions.len(), &session_ids),
+            "daemon session records and identities must be aligned and unique"
+        );
+        let changed = self.state.sessions != sessions || self.session_ids != session_ids;
         self.state.sessions = sessions;
-        if let Some(session_ids) = session_ids {
-            debug_assert_eq!(session_ids.len(), self.state.sessions.len());
-            self.session_ids = session_ids;
-        }
+        self.session_ids = session_ids;
         if changed {
             self.material_revision = self.material_revision.saturating_add(1);
         }
@@ -3835,7 +3819,7 @@ mod tests {
             root_notes: Scratchpad::default(),
             updated_at: now(),
         };
-        Workspace::new(record, state)
+        Workspace::with_runtime_ids(record, state, vec![SessionId::new(), SessionId::new()])
     }
 
     #[test]
@@ -8480,7 +8464,7 @@ mod tests {
         assert_eq!(view.name(), "actual");
         assert_eq!(view.path(), std::path::Path::new("/tmp/actual"));
         let replacement = vec![session("only", None, SessionOrigin::Human)];
-        view.replace_sessions(replacement.clone());
+        view.replace_sessions_with_runtime_ids(replacement.clone(), vec![SessionId::new()]);
         assert_eq!(view.sessions(), replacement);
 
         let mut one = session("one", None, SessionOrigin::Human);
@@ -8603,6 +8587,48 @@ mod tests {
         let home =
             HomeProjection::from_state(&state, "actual", Path::new("/tmp/actual"), &[removing]);
         assert!(strip(&super::render_home(20, 80, &home).join("\n")).contains("removing"));
+    }
+
+    #[test]
+    fn workspace_runtime_identity_boundaries_reject_unpaired_or_duplicate_ids() {
+        let record = WorkspaceRecord::new("actual", "/tmp/actual");
+        let sessions = vec![
+            session("one", None, SessionOrigin::Human),
+            session("two", None, SessionOrigin::Human),
+        ];
+        let state = WorkspaceState {
+            sessions: sessions.clone(),
+            ..WorkspaceState::default()
+        };
+        let first = SessionId::new();
+        let second = SessionId::new();
+
+        assert!(
+            std::panic::catch_unwind(|| {
+                Workspace::with_runtime_ids(record.clone(), state.clone(), vec![first])
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                Workspace::with_runtime_ids(record.clone(), state.clone(), vec![first, first])
+            })
+            .is_err()
+        );
+
+        let mut view = Workspace::with_runtime_ids(record, state, vec![first, second]);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                view.replace_sessions_with_runtime_ids(sessions.clone(), vec![first]);
+            }))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                view.replace_sessions_with_runtime_ids(sessions, vec![first, first]);
+            }))
+            .is_err()
+        );
     }
 
     /// #510: an interrupted history tab is labelled and explained only from the
