@@ -10,13 +10,19 @@ use usagi_core::infrastructure::client::{DispatchToolAction, SessionAction, Supe
 /// being attached to the same descriptor as its metadata and policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolRoute {
-    Store,
+    Store(StoreRoot),
     Session(SessionAction),
     AgentInventory,
     AgentResume,
     Dispatch(DispatchToolAction),
     Supervisor(SupervisorToolAction),
-    Unavailable(&'static str),
+}
+
+/// Repository authority used by a store-backed tool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreRoot {
+    Workspace,
+    Memory,
 }
 
 /// Caller provenance required by a tool route.
@@ -38,7 +44,7 @@ pub struct ToolDescriptor {
 
 impl ToolDescriptor {
     #[must_use]
-    pub fn new(tool: Box<dyn Tool>, route: ToolRoute, caller_policy: CallerPolicy) -> Self {
+    fn with_route(tool: Box<dyn Tool>, route: ToolRoute, caller_policy: CallerPolicy) -> Self {
         Self {
             tool,
             route,
@@ -47,9 +53,85 @@ impl ToolDescriptor {
         }
     }
 
+    /// Registers a workspace-backed public tool.
+    #[must_use]
+    pub fn workspace_store(tool: impl Tool + 'static) -> Self {
+        Self::with_route(
+            Box::new(tool),
+            ToolRoute::Store(StoreRoot::Workspace),
+            CallerPolicy::Public,
+        )
+    }
+
+    /// Registers a daemon-owned Agent memory tool.
+    #[must_use]
+    pub fn memory_store(tool: impl Tool + 'static) -> Self {
+        Self::with_route(
+            Box::new(tool),
+            ToolRoute::Store(StoreRoot::Memory),
+            CallerPolicy::Public,
+        )
+    }
+
+    /// Registers a session lifecycle tool whose caller is bound by the daemon.
+    #[must_use]
+    pub fn session(tool: impl Tool + 'static, action: SessionAction) -> Self {
+        Self::with_route(
+            Box::new(tool),
+            ToolRoute::Session(action),
+            CallerPolicy::SessionCredential,
+        )
+    }
+
+    /// Registers the exact-resume inventory route.
+    #[must_use]
+    pub fn agent_inventory(tool: impl Tool + 'static) -> Self {
+        Self::with_route(
+            Box::new(tool),
+            ToolRoute::AgentInventory,
+            CallerPolicy::AgentCredential,
+        )
+    }
+
+    /// Registers the exact-resume mutation route.
+    #[must_use]
+    pub fn agent_resume(tool: impl Tool + 'static) -> Self {
+        Self::with_route(
+            Box::new(tool),
+            ToolRoute::AgentResume,
+            CallerPolicy::AgentCredential,
+        )
+    }
+
+    /// Registers an authenticated Agent dispatch tool.
+    #[must_use]
+    pub fn dispatch(tool: impl Tool + 'static, action: DispatchToolAction) -> Self {
+        Self::with_route(
+            Box::new(tool),
+            ToolRoute::Dispatch(action),
+            CallerPolicy::AgentCredential,
+        )
+    }
+
+    /// Registers a daemon-provenance supervisor tool.
+    #[must_use]
+    pub fn supervisor(tool: impl Tool + 'static, action: SupervisorToolAction) -> Self {
+        Self::with_route(
+            Box::new(tool),
+            ToolRoute::Supervisor(action),
+            CallerPolicy::DaemonProvenance,
+        )
+    }
+
     #[cfg(test)]
     #[must_use]
-    pub fn fixture(
+    pub(crate) fn new(tool: Box<dyn Tool>, route: ToolRoute, caller_policy: CallerPolicy) -> Self {
+        Self::with_route(tool, route, caller_policy)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn fixture(
         tool: Box<dyn Tool>,
         route: ToolRoute,
         caller_policy: CallerPolicy,

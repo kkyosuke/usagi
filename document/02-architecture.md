@@ -1192,8 +1192,9 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
   `call`（Store route の実行）を持つ。`call` は既定が未実装スタブで、issue / memory の store tool だけが
   core usecase を呼ぶ実装へオーバーライドする。tool は **系統ごとにファイル**（`mcp/tools/issue.rs` /
   `memory.rs` / `session.rs` / `terminal.rs` / `supervisor.rs`）に置き、各 tool が 1 struct として実装する。
-- **レジストリと dispatch**: `tools::registry()` が metadata、schema validator、`ToolRoute`、caller policy を持つ
-  descriptor を連結する。MCP serve は Global / Workspace の実効設定で issue / memory 系統を filter した同じ集合を
+- **レジストリと dispatch**: 各系統の `tools()` が tool struct と typed `ToolRoute` を同じ式で
+  `ToolDescriptor` にし、`tools::registry()` は descriptor を連結する。tool 名を再解釈する文字列 `match` は持たず、
+  route を付けていない `Box<dyn Tool>` は registry の要素型になれない。MCP serve は Global / Workspace の実効設定で issue / memory 系統を filter した同じ集合を
   listing と call に使い、name lookup と schema validation の後、descriptor の route に従って Store または daemon IPC へ送る。
   全 tool に一様な入口を与えるが、全 tool が `Tool::call` を通るわけではない。
 - **serve ループ**（`mcp/serve.rs`）: stdio 上の JSON-RPC 2.0 を 1 行ずつ処理する。純粋な

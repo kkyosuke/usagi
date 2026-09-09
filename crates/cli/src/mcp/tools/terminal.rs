@@ -1,6 +1,7 @@
 //! Read-only MCP observation of generic terminals in the authenticated caller scope.
 
-use crate::mcp::tool::Tool;
+use crate::mcp::tool::{Tool, ToolDescriptor};
+use usagi_core::infrastructure::client::DispatchToolAction;
 use usagi_core::usecase::terminal_observation::TERMINAL_READ_MAX_LINES;
 
 const _: () = assert!(TERMINAL_READ_MAX_LINES == 500);
@@ -8,8 +9,11 @@ const _: () = assert!(TERMINAL_READ_MAX_LINES == 500);
 /// Terminal observation tools. Execution is routed through the authenticated
 /// daemon dispatch surface; these adapters only own metadata and schemas.
 #[must_use]
-pub fn tools() -> Vec<Box<dyn Tool>> {
-    vec![Box::new(TerminalList), Box::new(TerminalRead)]
+pub fn tools() -> Vec<ToolDescriptor> {
+    vec![
+        ToolDescriptor::dispatch(TerminalList, DispatchToolAction::TerminalList),
+        ToolDescriptor::dispatch(TerminalRead, DispatchToolAction::TerminalRead),
+    ]
 }
 
 pub struct TerminalList;

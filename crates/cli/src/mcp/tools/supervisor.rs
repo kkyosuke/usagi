@@ -4,21 +4,25 @@
 //! session tools: a supervisor run is a daemon-owned aggregate and does not
 //! replace a session lifecycle or a one-worker dispatch operation.
 
-use crate::mcp::tool::Tool;
+use crate::mcp::tool::{Tool, ToolDescriptor};
 use std::sync::OnceLock;
 use usagi_core::domain::supervisor::{
     MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES, MAX_SUPERVISOR_TEXT_BYTES,
 };
+use usagi_core::infrastructure::client::SupervisorToolAction;
 
 #[must_use]
-pub fn tools() -> Vec<Box<dyn Tool>> {
+pub fn tools() -> Vec<ToolDescriptor> {
     vec![
-        Box::new(SupervisorStart),
-        Box::new(SupervisorGet),
-        Box::new(SupervisorList),
-        Box::new(SupervisorCancel),
-        Box::new(SupervisorResolveEscalation),
-        Box::new(SupervisorEvents),
+        ToolDescriptor::supervisor(SupervisorStart, SupervisorToolAction::Start),
+        ToolDescriptor::supervisor(SupervisorGet, SupervisorToolAction::Get),
+        ToolDescriptor::supervisor(SupervisorList, SupervisorToolAction::List),
+        ToolDescriptor::supervisor(SupervisorCancel, SupervisorToolAction::Cancel),
+        ToolDescriptor::supervisor(
+            SupervisorResolveEscalation,
+            SupervisorToolAction::ResolveEscalation,
+        ),
+        ToolDescriptor::supervisor(SupervisorEvents, SupervisorToolAction::Events),
     ]
 }
 

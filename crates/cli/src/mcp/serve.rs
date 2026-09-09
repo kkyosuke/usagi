@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::infrastructure::client::{
-    ClientError, DaemonClient, DaemonReply, DaemonRequest, McpCallerContext,
+    ClientError, DaemonClient, DaemonReply, DaemonRequest, DispatchToolAction, McpCallerContext,
+    SessionAction,
 };
 use usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
@@ -24,7 +25,7 @@ use super::protocol::{self, error_code};
 use super::runtime_model::{
     ExecutableLocator, PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
 };
-use super::tool::{CallerPolicy, ToolDescriptor, ToolError, ToolRoute};
+use super::tool::{CallerPolicy, StoreRoot, ToolDescriptor, ToolError, ToolRoute};
 use super::{resources, tools};
 
 /// サーバが話せる MCP プロトコルバージョン。先頭が優先版である。
@@ -570,14 +571,14 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Result<Value, &'s
 fn tools_list_result(snapshot: &RuntimeModelSnapshot, families: McpToolFamilies) -> Value {
     let tools: Vec<Value> = tools::registry_with_families(families)
         .iter()
-        .filter(|tool| tool.name() != "session_delegate_brief" || snapshot.can_create_agent())
+        .filter(|tool| tool_is_available(snapshot, tool.route()))
         .map(|tool| {
             // 各 tool の input_schema は妥当な JSON（tools のテストで検証済み）。
             let mut schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
-            if let Some(agent) = agent_selector_schema(snapshot, tool.name()) {
+            if let Some(agent) = agent_selector_schema(snapshot, tool.route()) {
                 schema["properties"]["agent"] = agent;
             }
-            if matches!(tool.name(), "session_create" | "session_delegate_issue") {
+            if uses_runtime_schema(tool.route()) {
                 schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
             }
             json!({
@@ -628,23 +629,26 @@ fn tools_call(
             &format!("unknown tool: {name}"),
         );
     };
-    if name == "session_delegate_brief" && !snapshot.can_create_agent() {
+    if !tool_is_available(snapshot, descriptor.route()) {
         return protocol::error(
             id,
             error_code::METHOD_NOT_FOUND,
-            "session_delegate_brief is unavailable because no configured runtime is executable",
+            &format!(
+                "{} is unavailable because no configured runtime is executable",
+                descriptor.name()
+            ),
         );
     }
     let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
-    if let Some(agent_schema) = agent_selector_schema(snapshot, name) {
+    if let Some(agent_schema) = agent_selector_schema(snapshot, descriptor.route()) {
         schema["properties"]["agent"] = agent_schema;
         if let Some(agent) = arguments.get("agent")
-            && let Err(message) = validate_agent_selector(snapshot, name, agent)
+            && let Err(message) = validate_agent_selector(snapshot, descriptor.route(), agent)
         {
             return protocol::error(id, error_code::INVALID_PARAMS, &message);
         }
     }
-    if matches!(name, "session_create" | "session_delegate_issue") {
+    if uses_runtime_schema(descriptor.route()) {
         schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
     }
     if let Err(ToolError::InvalidParams(message)) = descriptor.validate(&arguments, &schema) {
@@ -655,15 +659,14 @@ fn tools_call(
         &mut arguments,
         caller_credential,
     );
-    if matches!(name, "session_create" | "session_delegate_issue")
+    if uses_runtime_schema(descriptor.route())
         && let Err(message) = snapshot.normalize_legacy_agent(&mut arguments)
     {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
-    let routed_store_root = if descriptor.name().starts_with("memory_") {
-        memory_root
-    } else {
-        store_root
+    let routed_store_root = match descriptor.route() {
+        ToolRoute::Store(StoreRoot::Memory) => memory_root,
+        _ => store_root,
     };
     execute_tool(
         id,
@@ -772,12 +775,7 @@ fn execute_tool(
                 }),
             )
         }
-        ToolRoute::Store => store_tool_call(id, descriptor, &arguments, store_root),
-        ToolRoute::Unavailable(reason) => protocol::error(
-            id,
-            error_code::INTERNAL_ERROR,
-            &format!("tool unavailable: {reason}"),
-        ),
+        ToolRoute::Store(_) => store_tool_call(id, descriptor, &arguments, store_root),
     }
 }
 
@@ -788,23 +786,35 @@ fn execute_tool(
 /// dispatches into, so it advertises only the new-agent branches: an `agent.id`
 /// there can never pass the daemon's ownership check, and rejecting it at the
 /// schema keeps the composite operation from ever starting.
-fn agent_selector_schema(snapshot: &RuntimeModelSnapshot, tool: &str) -> Option<Value> {
-    match tool {
-        "session_dispatch" => Some(snapshot.agent_schema()),
-        "session_delegate_brief" => Some(snapshot.new_agent_schema()),
+fn agent_selector_schema(snapshot: &RuntimeModelSnapshot, route: ToolRoute) -> Option<Value> {
+    match route {
+        ToolRoute::Dispatch(DispatchToolAction::Dispatch) => Some(snapshot.agent_schema()),
+        ToolRoute::Session(SessionAction::DelegateBrief) => Some(snapshot.new_agent_schema()),
         _ => None,
     }
 }
 
 fn validate_agent_selector(
     snapshot: &RuntimeModelSnapshot,
-    tool: &str,
+    route: ToolRoute,
     agent: &Value,
 ) -> Result<(), String> {
-    if tool == "session_delegate_brief" {
-        return snapshot.validate_new_agent(agent);
+    match route {
+        ToolRoute::Session(SessionAction::DelegateBrief) => snapshot.validate_new_agent(agent),
+        _ => snapshot.validate_agent(agent),
     }
-    snapshot.validate_agent(agent)
+}
+
+fn tool_is_available(snapshot: &RuntimeModelSnapshot, route: ToolRoute) -> bool {
+    !matches!(route, ToolRoute::Session(SessionAction::DelegateBrief))
+        || snapshot.can_create_agent()
+}
+
+fn uses_runtime_schema(route: ToolRoute) -> bool {
+    matches!(
+        route,
+        ToolRoute::Session(SessionAction::Create | SessionAction::DelegateIssue)
+    )
 }
 
 fn exact_workspace_id(arguments: &Value) -> Option<usagi_core::domain::id::WorkspaceId> {
@@ -948,7 +958,7 @@ mod tests {
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
     };
-    use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
+    use crate::mcp::tool::{CallerPolicy, StoreRoot, Tool, ToolDescriptor, ToolError, ToolRoute};
     use crate::mcp::tools::registry;
     use serde_json::Value;
     use std::io::{BufReader, Cursor, ErrorKind, Write};
@@ -1059,7 +1069,7 @@ mod tests {
             .find(|descriptor| descriptor.name() == name)
             .unwrap();
         let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
-        if let Some(agent) = agent_selector_schema(snapshot, name) {
+        if let Some(agent) = agent_selector_schema(snapshot, descriptor.route()) {
             schema["properties"]["agent"] = agent;
         }
         value(&schema)
@@ -1387,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_route_validation_and_unavailable_routes_map_protocol_errors() {
+    fn exact_route_validation_maps_protocol_errors() {
         let invalid_workspace = call(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_resume_inventory","arguments":{"workspace_id":"not-a-resource-id"}}}"#,
         )
@@ -1421,27 +1431,6 @@ mod tests {
             Path::new("."),
         );
         assert_eq!(missing_target["error"]["code"], -32602);
-
-        let unavailable = ToolDescriptor::new(
-            Box::new(ErrorTool(|| ToolError::Unimplemented("unused"))),
-            ToolRoute::Unavailable("disabled"),
-            CallerPolicy::Public,
-        );
-        let response = execute_tool(
-            serde_json::json!(3),
-            &unavailable,
-            serde_json::json!({}),
-            &mut client,
-            None,
-            Path::new("."),
-        );
-        assert_eq!(response["error"]["code"], -32603);
-        assert!(
-            response["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("disabled")
-        );
     }
 
     #[test]
@@ -1464,8 +1453,11 @@ mod tests {
                 crate::mcp::protocol::error_code::INVALID_PARAMS,
             ),
         ] {
-            let descriptor =
-                ToolDescriptor::new(Box::new(tool), ToolRoute::Store, CallerPolicy::Public);
+            let descriptor = ToolDescriptor::new(
+                Box::new(tool),
+                ToolRoute::Store(StoreRoot::Workspace),
+                CallerPolicy::Public,
+            );
             assert_eq!(descriptor.name(), "error_fixture");
             assert_eq!(descriptor.description(), "error mapping fixture");
             assert!(descriptor.input_schema().contains("object"));
@@ -2353,7 +2345,11 @@ mod tests {
 
         // A tool that takes no agent selector is left untouched.
         assert!(
-            agent_selector_schema(&snapshot, "session_create").is_none(),
+            agent_selector_schema(
+                &snapshot,
+                ToolRoute::Session(usagi_core::infrastructure::client::SessionAction::Create),
+            )
+            .is_none(),
             "only the dispatching tools carry an agent selector"
         );
     }

@@ -411,14 +411,13 @@ tool descriptor の実装は `crates/cli/src/mcp/tools/` と `crates/cli/src/mcp
 execution route と caller policy を割り当てる。serve 側へ name match を追加しない。
 
 実効設定で filter された registry は MCP serve loop が入力を受け付ける前に検証される。重複 name、重複 execution route、
-route を持つ非公開 entry、明示的に unavailable な advertised capability、不正な object schema は
-起動を拒否する。runtime validator は `tools/list` が返した同じ schema（runtime/model の動的列挙を
+route を持つ非公開 entry、不正な object schema は起動を拒否する。runtime validator は `tools/list` が返した同じ schema（runtime/model の動的列挙を
 含む）で arguments を検証してから route を実行する。
 
 tool を追加・変更するときは registry の全件回帰テストへ valid/invalid arguments が自動的に列挙される。
 route と caller policy の許可された組、advertised と executable route の全単射も同じテストで検証する。
-unimplemented capability を一時的に表現する場合は descriptor の unavailable route と理由を使う。
-advertised registry は unavailable entry を拒否するため、実装済み route を割り当てるまで公開されない。
+production constructor は executable な typed route だけを受け付ける。未実装 capability は registry に置かず、
+実装済み route と同じ変更で初めて公開する。
 
 ## resource 面
 

@@ -1,6 +1,7 @@
 //! MCP tool アダプタの置き場。tool は系統ごとにファイルを分け（`issue` / `memory` /
-//! `session` / `terminal` / `supervisor`）、各 tool が 1 struct として `Tool` を実装する。registry は metadata、schema
-//! validator、execution route、caller policy を 1 つの `ToolDescriptor` に束ねる。
+//! `session` / `terminal` / `supervisor`）、各 tool が 1 struct として `Tool` を実装する。各系統の
+//! registry は metadata、schema validator、typed execution route、caller policy を 1 つの
+//! `ToolDescriptor` に束ねる。
 //!
 //! 各アダプタは presentation に徹する — issue / memory の Store route は usagi-core の
 //! store usecase を直接呼び、session / agent / terminal / supervisor route は usagi-core の
@@ -16,10 +17,9 @@ pub mod terminal;
 use std::collections::HashSet;
 use std::fmt;
 
+use super::tool::{CallerPolicy, ToolDescriptor, ToolRoute, validate_schema_definition};
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
-use usagi_core::infrastructure::client::{DispatchToolAction, SessionAction, SupervisorToolAction};
-
-use super::tool::{CallerPolicy, Tool, ToolDescriptor, ToolRoute, validate_schema_definition};
+use usagi_core::infrastructure::client::SessionAction;
 
 /// 公開する全 MCP tool のレジストリ（issue / memory / session / terminal / supervisor を連結）。
 ///
@@ -49,85 +49,17 @@ pub fn registry_with_families(families: McpToolFamilies) -> Vec<ToolDescriptor> 
     if families.memory {
         tools.extend(memory::tools());
     }
-    tools.extend(
-        session::tools()
-            .into_iter()
-            .filter(|tool| families.issue || tool.name() != "session_delegate_issue"),
-    );
+    tools.extend(session::tools().into_iter().filter(|tool| {
+        families.issue
+            || !matches!(
+                tool.route(),
+                ToolRoute::Session(SessionAction::DelegateIssue)
+            )
+    }));
     tools.extend(terminal::tools());
     tools.extend(supervisor::tools());
-    let descriptors = tools.into_iter().map(descriptor).collect::<Vec<_>>();
-    validate_registry(&descriptors).expect("invalid MCP tool descriptor registry");
-    descriptors
-}
-
-fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
-    use CallerPolicy::{AgentCredential, DaemonProvenance, Public, SessionCredential};
-    use DispatchToolAction as Dispatch;
-    use SessionAction as Session;
-    use SupervisorToolAction as Supervisor;
-    use ToolRoute::{
-        AgentInventory, AgentResume, Dispatch as DispatchRoute, Session as SessionRoute, Store,
-        Supervisor as SupervisorRoute,
-    };
-
-    let (route, policy) = match tool.name() {
-        name if name.starts_with("issue_") || name.starts_with("memory_") => (Store, Public),
-        "session_create" => (SessionRoute(Session::Create), SessionCredential),
-        "session_list" => (SessionRoute(Session::List), SessionCredential),
-        "session_status" => (SessionRoute(Session::Status), SessionCredential),
-        "session_complete" => (SessionRoute(Session::Complete), SessionCredential),
-        // An explicit name remains public-compatible, while an authenticated
-        // caller may omit it and let the daemon resolve its stable session ID.
-        "session_pr" => (SessionRoute(Session::Pr), SessionCredential),
-        "session_remove" => (SessionRoute(Session::Remove), SessionCredential),
-        "session_resume" => (AgentResume, AgentCredential),
-        "agent_resume_inventory" => (AgentInventory, AgentCredential),
-        "session_prompt" => (SessionRoute(Session::Prompt), SessionCredential),
-        "session_note_get" => (SessionRoute(Session::NoteGet), SessionCredential),
-        "session_note_update" => (SessionRoute(Session::NoteUpdate), SessionCredential),
-        "session_todo_list" => (SessionRoute(Session::TodoList), SessionCredential),
-        "session_todo_add" => (SessionRoute(Session::TodoAdd), SessionCredential),
-        "session_todo_update" => (SessionRoute(Session::TodoUpdate), SessionCredential),
-        "session_todo_remove" => (SessionRoute(Session::TodoRemove), SessionCredential),
-        "session_decision_list" => (SessionRoute(Session::DecisionList), SessionCredential),
-        "session_decision_log" => (SessionRoute(Session::DecisionLog), SessionCredential),
-        "session_delegate_issue" => (SessionRoute(Session::DelegateIssue), SessionCredential),
-        "session_delegate_brief" => (SessionRoute(Session::DelegateBrief), SessionCredential),
-        "session_dispatch" => (DispatchRoute(Dispatch::Dispatch), AgentCredential),
-        "session_get" => (DispatchRoute(Dispatch::SessionGet), AgentCredential),
-        "agent_list" => (DispatchRoute(Dispatch::AgentList), AgentCredential),
-        "agent_get" => (DispatchRoute(Dispatch::AgentGet), AgentCredential),
-        "terminal_list" => (DispatchRoute(Dispatch::TerminalList), AgentCredential),
-        "terminal_read" => (DispatchRoute(Dispatch::TerminalRead), AgentCredential),
-        "agent_complete" => (DispatchRoute(Dispatch::AgentComplete), AgentCredential),
-        "agent_fail" => (DispatchRoute(Dispatch::AgentFail), AgentCredential),
-        "agent_inbox" => (DispatchRoute(Dispatch::AgentInbox), AgentCredential),
-        "agent_inbox_ack" => (DispatchRoute(Dispatch::AgentInboxAck), AgentCredential),
-        "user_decision_request" => (
-            DispatchRoute(Dispatch::UserDecisionRequest),
-            AgentCredential,
-        ),
-        "user_decision_get" => (DispatchRoute(Dispatch::UserDecisionGet), AgentCredential),
-        "user_decision_list" => (DispatchRoute(Dispatch::UserDecisionList), AgentCredential),
-        "user_decision_resolve" => (
-            DispatchRoute(Dispatch::UserDecisionResolve),
-            AgentCredential,
-        ),
-        "user_decision_cancel" => (DispatchRoute(Dispatch::UserDecisionCancel), AgentCredential),
-        "user_decision_expire" => (DispatchRoute(Dispatch::UserDecisionExpire), AgentCredential),
-        "supervisor_start" => (SupervisorRoute(Supervisor::Start), DaemonProvenance),
-        "supervisor_get" => (SupervisorRoute(Supervisor::Get), DaemonProvenance),
-        "supervisor_list" => (SupervisorRoute(Supervisor::List), DaemonProvenance),
-        "supervisor_cancel" => (SupervisorRoute(Supervisor::Cancel), DaemonProvenance),
-        "supervisor_resolve_escalation" => (
-            SupervisorRoute(Supervisor::ResolveEscalation),
-            DaemonProvenance,
-        ),
-        "supervisor_events" => (SupervisorRoute(Supervisor::Events), DaemonProvenance),
-        name => panic!("tool {name} has no descriptor route"),
-    };
-    ToolDescriptor::new(tool, route, policy)
+    validate_registry(&tools).expect("invalid MCP tool descriptor registry");
+    tools
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -143,7 +75,7 @@ impl fmt::Display for RegistryError {
 ///
 /// # Errors
 ///
-/// Returns a registry error for duplicate or unavailable routes, caller-policy drift,
+/// Returns a registry error for duplicate routes, caller-policy drift,
 /// or schema vocabulary the runtime validator cannot enforce.
 pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryError> {
     let mut names = HashSet::new();
@@ -161,16 +93,10 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
                 descriptor.name()
             )));
         }
-        if let ToolRoute::Unavailable(reason) = descriptor.route() {
-            return Err(RegistryError(format!(
-                "advertised tool {} is unavailable: {reason}",
-                descriptor.name()
-            )));
-        }
         if !matches!(
             (descriptor.route(), descriptor.caller_policy()),
             (
-                ToolRoute::Store | ToolRoute::Session(_),
+                ToolRoute::Store(_) | ToolRoute::Session(_),
                 CallerPolicy::Public
             ) | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
                 | (
@@ -185,7 +111,7 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
             )));
         }
         let route = match descriptor.route() {
-            ToolRoute::Store => format!("store:{}", descriptor.name()),
+            ToolRoute::Store(_) => format!("store:{}", descriptor.name()),
             route => format!("{route:?}"),
         };
         if !routes.insert(route.clone()) {
@@ -214,11 +140,13 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
 
 #[cfg(test)]
 mod tests {
-    use super::{McpToolFamilies, descriptor, registry, registry_with_families, validate_registry};
-    use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
+    use super::{McpToolFamilies, registry, registry_with_families, validate_registry};
+    use crate::mcp::tool::{CallerPolicy, StoreRoot, Tool, ToolDescriptor, ToolError, ToolRoute};
     use std::path::Path;
     use usagi_core::domain::user_decision::UserDecisionPolicy;
-    use usagi_core::infrastructure::client::SessionAction;
+    use usagi_core::infrastructure::client::{
+        DispatchToolAction, SessionAction, SupervisorToolAction,
+    };
 
     struct FixtureTool(&'static str);
     impl Tool for FixtureTool {
@@ -322,7 +250,7 @@ mod tests {
             assert_eq!(schema["type"], "object");
             assert!(schema.get("properties").is_some());
 
-            if !name.starts_with("issue_") && !name.starts_with("memory_") {
+            if !matches!(tool.route(), ToolRoute::Store(_)) {
                 assert!(
                     matches!(tool.call_store(&serde_json::json!({}), Path::new(".")), Err(ToolError::Unimplemented(n)) if n == name)
                 );
@@ -476,7 +404,7 @@ mod tests {
             assert!(matches!(
                 (descriptor.route(), descriptor.caller_policy()),
                 (
-                    ToolRoute::Store | ToolRoute::Session(_),
+                    ToolRoute::Store(_) | ToolRoute::Session(_),
                     CallerPolicy::Public
                 ) | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
                     | (
@@ -492,22 +420,248 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // The complete 51-tool golden table is intentionally contiguous.
+    fn every_tool_name_keeps_its_exact_route_and_caller_policy() {
+        use CallerPolicy::{AgentCredential, DaemonProvenance, Public, SessionCredential};
+        use DispatchToolAction as Dispatch;
+        use SessionAction as Session;
+        use StoreRoot::{Memory, Workspace};
+        use SupervisorToolAction as Supervisor;
+        use ToolRoute::{AgentInventory, AgentResume, Store};
+
+        let expected = vec![
+            ("issue_create", Store(Workspace), Public),
+            ("issue_get", Store(Workspace), Public),
+            ("issue_to_prompt", Store(Workspace), Public),
+            ("issue_search", Store(Workspace), Public),
+            ("issue_update", Store(Workspace), Public),
+            ("issue_delete", Store(Workspace), Public),
+            ("memory_save", Store(Memory), Public),
+            ("memory_get", Store(Memory), Public),
+            ("memory_search", Store(Memory), Public),
+            ("memory_delete", Store(Memory), Public),
+            (
+                "session_create",
+                ToolRoute::Session(Session::Create),
+                SessionCredential,
+            ),
+            (
+                "session_list",
+                ToolRoute::Session(Session::List),
+                SessionCredential,
+            ),
+            (
+                "session_status",
+                ToolRoute::Session(Session::Status),
+                SessionCredential,
+            ),
+            (
+                "session_prompt",
+                ToolRoute::Session(Session::Prompt),
+                SessionCredential,
+            ),
+            (
+                "session_complete",
+                ToolRoute::Session(Session::Complete),
+                SessionCredential,
+            ),
+            (
+                "session_pr",
+                ToolRoute::Session(Session::Pr),
+                SessionCredential,
+            ),
+            (
+                "session_remove",
+                ToolRoute::Session(Session::Remove),
+                SessionCredential,
+            ),
+            ("session_resume", AgentResume, AgentCredential),
+            ("agent_resume_inventory", AgentInventory, AgentCredential),
+            (
+                "session_note_get",
+                ToolRoute::Session(Session::NoteGet),
+                SessionCredential,
+            ),
+            (
+                "session_note_update",
+                ToolRoute::Session(Session::NoteUpdate),
+                SessionCredential,
+            ),
+            (
+                "session_todo_list",
+                ToolRoute::Session(Session::TodoList),
+                SessionCredential,
+            ),
+            (
+                "session_todo_add",
+                ToolRoute::Session(Session::TodoAdd),
+                SessionCredential,
+            ),
+            (
+                "session_todo_update",
+                ToolRoute::Session(Session::TodoUpdate),
+                SessionCredential,
+            ),
+            (
+                "session_todo_remove",
+                ToolRoute::Session(Session::TodoRemove),
+                SessionCredential,
+            ),
+            (
+                "session_decision_list",
+                ToolRoute::Session(Session::DecisionList),
+                SessionCredential,
+            ),
+            (
+                "session_decision_log",
+                ToolRoute::Session(Session::DecisionLog),
+                SessionCredential,
+            ),
+            (
+                "session_delegate_issue",
+                ToolRoute::Session(Session::DelegateIssue),
+                SessionCredential,
+            ),
+            (
+                "session_delegate_brief",
+                ToolRoute::Session(Session::DelegateBrief),
+                SessionCredential,
+            ),
+            (
+                "session_dispatch",
+                ToolRoute::Dispatch(Dispatch::Dispatch),
+                AgentCredential,
+            ),
+            (
+                "session_get",
+                ToolRoute::Dispatch(Dispatch::SessionGet),
+                AgentCredential,
+            ),
+            (
+                "agent_list",
+                ToolRoute::Dispatch(Dispatch::AgentList),
+                AgentCredential,
+            ),
+            (
+                "agent_get",
+                ToolRoute::Dispatch(Dispatch::AgentGet),
+                AgentCredential,
+            ),
+            (
+                "agent_complete",
+                ToolRoute::Dispatch(Dispatch::AgentComplete),
+                AgentCredential,
+            ),
+            (
+                "agent_fail",
+                ToolRoute::Dispatch(Dispatch::AgentFail),
+                AgentCredential,
+            ),
+            (
+                "agent_inbox",
+                ToolRoute::Dispatch(Dispatch::AgentInbox),
+                AgentCredential,
+            ),
+            (
+                "agent_inbox_ack",
+                ToolRoute::Dispatch(Dispatch::AgentInboxAck),
+                AgentCredential,
+            ),
+            (
+                "user_decision_request",
+                ToolRoute::Dispatch(Dispatch::UserDecisionRequest),
+                AgentCredential,
+            ),
+            (
+                "user_decision_get",
+                ToolRoute::Dispatch(Dispatch::UserDecisionGet),
+                AgentCredential,
+            ),
+            (
+                "user_decision_list",
+                ToolRoute::Dispatch(Dispatch::UserDecisionList),
+                AgentCredential,
+            ),
+            (
+                "user_decision_resolve",
+                ToolRoute::Dispatch(Dispatch::UserDecisionResolve),
+                AgentCredential,
+            ),
+            (
+                "user_decision_cancel",
+                ToolRoute::Dispatch(Dispatch::UserDecisionCancel),
+                AgentCredential,
+            ),
+            (
+                "user_decision_expire",
+                ToolRoute::Dispatch(Dispatch::UserDecisionExpire),
+                AgentCredential,
+            ),
+            (
+                "terminal_list",
+                ToolRoute::Dispatch(Dispatch::TerminalList),
+                AgentCredential,
+            ),
+            (
+                "terminal_read",
+                ToolRoute::Dispatch(Dispatch::TerminalRead),
+                AgentCredential,
+            ),
+            (
+                "supervisor_start",
+                ToolRoute::Supervisor(Supervisor::Start),
+                DaemonProvenance,
+            ),
+            (
+                "supervisor_get",
+                ToolRoute::Supervisor(Supervisor::Get),
+                DaemonProvenance,
+            ),
+            (
+                "supervisor_list",
+                ToolRoute::Supervisor(Supervisor::List),
+                DaemonProvenance,
+            ),
+            (
+                "supervisor_cancel",
+                ToolRoute::Supervisor(Supervisor::Cancel),
+                DaemonProvenance,
+            ),
+            (
+                "supervisor_resolve_escalation",
+                ToolRoute::Supervisor(Supervisor::ResolveEscalation),
+                DaemonProvenance,
+            ),
+            (
+                "supervisor_events",
+                ToolRoute::Supervisor(Supervisor::Events),
+                DaemonProvenance,
+            ),
+        ];
+        let actual = registry()
+            .iter()
+            .map(|descriptor| {
+                (
+                    descriptor.name(),
+                    descriptor.route(),
+                    descriptor.caller_policy(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn registry_rejects_duplicate_name_duplicate_route_and_unadvertised_route() {
         assert_eq!(FixtureTool("description").description(), "fixture");
         assert!(matches!(
             FixtureTool("call").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                descriptor(Box::new(FixtureTool("unknown")));
-            }))
-            .is_err()
-        );
         let duplicate_name = [
             ToolDescriptor::new(
                 Box::new(FixtureTool("same")),
-                ToolRoute::Store,
+                ToolRoute::Store(StoreRoot::Workspace),
                 CallerPolicy::Public,
             ),
             ToolDescriptor::new(
@@ -544,7 +698,7 @@ mod tests {
 
         let unadvertised = [ToolDescriptor::fixture(
             Box::new(FixtureTool("hidden")),
-            ToolRoute::Store,
+            ToolRoute::Store(StoreRoot::Workspace),
             CallerPolicy::Public,
             false,
         )];
@@ -553,18 +707,6 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("not advertised")
-        );
-
-        let unavailable = [ToolDescriptor::new(
-            Box::new(FixtureTool("stub")),
-            ToolRoute::Unavailable("capability disabled"),
-            CallerPolicy::Public,
-        )];
-        assert!(
-            validate_registry(&unavailable)
-                .unwrap_err()
-                .to_string()
-                .contains("unavailable")
         );
     }
 
@@ -582,7 +724,7 @@ mod tests {
         ));
         let unsupported_schema = [ToolDescriptor::new(
             Box::new(UnsupportedSchema),
-            ToolRoute::Store,
+            ToolRoute::Store(StoreRoot::Workspace),
             CallerPolicy::Public,
         )];
         assert!(
@@ -594,7 +736,7 @@ mod tests {
 
         let mismatch = [ToolDescriptor::new(
             Box::new(FixtureTool("mismatch")),
-            ToolRoute::Store,
+            ToolRoute::Store(StoreRoot::Workspace),
             CallerPolicy::AgentCredential,
         )];
         assert!(
@@ -612,7 +754,7 @@ mod tests {
             assert!(
                 validate_registry(&[ToolDescriptor::new(
                     Box::new(fixture),
-                    ToolRoute::Store,
+                    ToolRoute::Store(StoreRoot::Workspace),
                     CallerPolicy::Public,
                 )])
                 .is_err()

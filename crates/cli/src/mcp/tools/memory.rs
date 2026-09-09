@@ -8,7 +8,7 @@ use usagi_core::domain::memory::{Memory, MemorySummary};
 use usagi_core::infrastructure::store::memory::MemoryStore;
 use usagi_core::usecase::memory::{self, MemoryFilter, MemoryPatch};
 
-use crate::mcp::tool::{Tool, ToolError};
+use crate::mcp::tool::{Tool, ToolDescriptor, ToolError};
 
 fn store(root: &Path) -> MemoryStore {
     MemoryStore::new(root)
@@ -88,12 +88,12 @@ struct SearchArgs {
 
 /// memory 系 tool の一覧。
 #[must_use]
-pub fn tools() -> Vec<Box<dyn Tool>> {
+pub fn tools() -> Vec<ToolDescriptor> {
     vec![
-        Box::new(MemorySave),
-        Box::new(MemoryGet),
-        Box::new(MemorySearch),
-        Box::new(MemoryDelete),
+        ToolDescriptor::memory_store(MemorySave),
+        ToolDescriptor::memory_store(MemoryGet),
+        ToolDescriptor::memory_store(MemorySearch),
+        ToolDescriptor::memory_store(MemoryDelete),
     ]
 }
 
