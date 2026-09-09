@@ -506,6 +506,44 @@ fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_modul
 }
 
 #[test]
+fn daemon_request_dispatch_stays_out_of_the_socket_and_lifecycle_composition_module() {
+    let root = workspace_root();
+    let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
+        .expect("daemon composition source is readable");
+    let dispatch = fs::read_to_string(root.join("src/runtime/daemon/dispatch.rs"))
+        .expect("daemon dispatch source is readable");
+
+    assert!(composition.contains("mod dispatch;"));
+    for symbol in [
+        "fn dispatch_agent(",
+        "fn dispatch_session(",
+        "fn dispatch_supervisor_tool(",
+        "fn dispatch_user_decision(",
+        "fn dispatch_metrics(",
+    ] {
+        assert!(
+            !composition.contains(symbol),
+            "{symbol} must stay out of socket and process lifecycle composition"
+        );
+        assert!(
+            dispatch.contains(symbol),
+            "{symbol} must remain owned by the request dispatch adapter"
+        );
+    }
+    assert!(
+        !dispatch
+            .lines()
+            .take(10)
+            .any(|line| line.trim_start().starts_with("#![coverage(off)]")),
+        "moving dispatch must not exclude the module from coverage"
+    );
+    assert!(
+        dispatch.lines().count() <= 6_000,
+        "daemon request dispatch grew beyond its reviewable boundary"
+    );
+}
+
+#[test]
 fn daemon_agent_provisioning_stays_in_its_product_boundary() {
     let root = workspace_root();
     let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
