@@ -504,3 +504,24 @@ fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_modul
     assert!(tenant.contains("fn inventory("));
     assert!(tenant.contains("fn retire("));
 }
+
+#[test]
+fn daemon_agent_provisioning_stays_in_its_product_boundary() {
+    let root = workspace_root();
+    let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
+        .expect("daemon composition source is readable");
+    let provisioning = fs::read_to_string(root.join("src/runtime/daemon/agent_provisioning.rs"))
+        .expect("agent provisioning source is readable");
+
+    assert!(composition.contains("mod agent_provisioning;"));
+    assert!(!composition.contains("struct RootCodexProvisioner"));
+    assert!(!composition.contains("struct RootClaudeProvisioner"));
+    assert!(!composition.contains("fn claude_sandbox_launcher("));
+    assert!(provisioning.contains("struct RootCodexProvisioner"));
+    assert!(provisioning.contains("struct RootClaudeProvisioner"));
+    assert!(provisioning.contains("fn claude_sandbox_launcher("));
+    assert!(
+        provisioning.lines().count() <= 1_400,
+        "agent provisioning grew beyond its reviewable product boundary"
+    );
+}
