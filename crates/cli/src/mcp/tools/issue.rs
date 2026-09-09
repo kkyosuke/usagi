@@ -8,7 +8,7 @@ use std::path::Path;
 use usagi_core::infrastructure::store::issue::IssueStore;
 use usagi_core::usecase::issue::{self, NewIssue};
 
-use crate::mcp::tool::{Tool, ToolError};
+use crate::mcp::tool::{Tool, ToolDescriptor, ToolError};
 
 fn store(root: &Path) -> IssueStore {
     IssueStore::new(root)
@@ -33,14 +33,14 @@ use super::issue_wire::{
 
 /// issue 系 tool の一覧。
 #[must_use]
-pub fn tools() -> Vec<Box<dyn Tool>> {
+pub fn tools() -> Vec<ToolDescriptor> {
     vec![
-        Box::new(IssueCreate),
-        Box::new(IssueGet),
-        Box::new(IssueToPrompt),
-        Box::new(IssueSearch),
-        Box::new(IssueUpdate),
-        Box::new(IssueDelete),
+        ToolDescriptor::workspace_store(IssueCreate),
+        ToolDescriptor::workspace_store(IssueGet),
+        ToolDescriptor::workspace_store(IssueToPrompt),
+        ToolDescriptor::workspace_store(IssueSearch),
+        ToolDescriptor::workspace_store(IssueUpdate),
+        ToolDescriptor::workspace_store(IssueDelete),
     ]
 }
 

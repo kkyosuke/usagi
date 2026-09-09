@@ -3,47 +3,48 @@
 //! document/proposals/01-entry-surfaces.md）。委譲系（delegate_*）は既存 tool を順に
 //! 呼ぶ合成 tool。note / todo / decision はセッション内限定。
 
-use crate::mcp::tool::Tool;
+use crate::mcp::tool::{Tool, ToolDescriptor};
 use std::sync::OnceLock;
 use usagi_core::domain::user_decision::UserDecisionPolicy;
+use usagi_core::infrastructure::client::{DispatchToolAction, SessionAction};
 
 /// session 系 tool の一覧（オーケストレーションの delegate_* を含む）。
 #[must_use]
-pub fn tools() -> Vec<Box<dyn Tool>> {
+pub fn tools() -> Vec<ToolDescriptor> {
     vec![
-        Box::new(SessionCreate),
-        Box::new(SessionList),
-        Box::new(SessionStatus),
-        Box::new(SessionPrompt),
-        Box::new(SessionComplete),
-        Box::new(SessionPr),
-        Box::new(SessionRemove),
-        Box::new(SessionResume),
-        Box::new(AgentResumeInventory),
-        Box::new(SessionNoteGet),
-        Box::new(SessionNoteUpdate),
-        Box::new(SessionTodoList),
-        Box::new(SessionTodoAdd),
-        Box::new(SessionTodoUpdate),
-        Box::new(SessionTodoRemove),
-        Box::new(SessionDecisionList),
-        Box::new(SessionDecisionLog),
-        Box::new(SessionDelegateIssue),
-        Box::new(SessionDelegateBrief),
-        Box::new(SessionDispatch),
-        Box::new(SessionGet),
-        Box::new(AgentList),
-        Box::new(AgentGet),
-        Box::new(AgentComplete),
-        Box::new(AgentFail),
-        Box::new(AgentInbox),
-        Box::new(AgentInboxAck),
-        Box::new(UserDecisionRequest),
-        Box::new(UserDecisionGet),
-        Box::new(UserDecisionList),
-        Box::new(UserDecisionResolve),
-        Box::new(UserDecisionCancel),
-        Box::new(UserDecisionExpire),
+        ToolDescriptor::session(SessionCreate, SessionAction::Create),
+        ToolDescriptor::session(SessionList, SessionAction::List),
+        ToolDescriptor::session(SessionStatus, SessionAction::Status),
+        ToolDescriptor::session(SessionPrompt, SessionAction::Prompt),
+        ToolDescriptor::session(SessionComplete, SessionAction::Complete),
+        ToolDescriptor::session(SessionPr, SessionAction::Pr),
+        ToolDescriptor::session(SessionRemove, SessionAction::Remove),
+        ToolDescriptor::agent_resume(SessionResume),
+        ToolDescriptor::agent_inventory(AgentResumeInventory),
+        ToolDescriptor::session(SessionNoteGet, SessionAction::NoteGet),
+        ToolDescriptor::session(SessionNoteUpdate, SessionAction::NoteUpdate),
+        ToolDescriptor::session(SessionTodoList, SessionAction::TodoList),
+        ToolDescriptor::session(SessionTodoAdd, SessionAction::TodoAdd),
+        ToolDescriptor::session(SessionTodoUpdate, SessionAction::TodoUpdate),
+        ToolDescriptor::session(SessionTodoRemove, SessionAction::TodoRemove),
+        ToolDescriptor::session(SessionDecisionList, SessionAction::DecisionList),
+        ToolDescriptor::session(SessionDecisionLog, SessionAction::DecisionLog),
+        ToolDescriptor::session(SessionDelegateIssue, SessionAction::DelegateIssue),
+        ToolDescriptor::session(SessionDelegateBrief, SessionAction::DelegateBrief),
+        ToolDescriptor::dispatch(SessionDispatch, DispatchToolAction::Dispatch),
+        ToolDescriptor::dispatch(SessionGet, DispatchToolAction::SessionGet),
+        ToolDescriptor::dispatch(AgentList, DispatchToolAction::AgentList),
+        ToolDescriptor::dispatch(AgentGet, DispatchToolAction::AgentGet),
+        ToolDescriptor::dispatch(AgentComplete, DispatchToolAction::AgentComplete),
+        ToolDescriptor::dispatch(AgentFail, DispatchToolAction::AgentFail),
+        ToolDescriptor::dispatch(AgentInbox, DispatchToolAction::AgentInbox),
+        ToolDescriptor::dispatch(AgentInboxAck, DispatchToolAction::AgentInboxAck),
+        ToolDescriptor::dispatch(UserDecisionRequest, DispatchToolAction::UserDecisionRequest),
+        ToolDescriptor::dispatch(UserDecisionGet, DispatchToolAction::UserDecisionGet),
+        ToolDescriptor::dispatch(UserDecisionList, DispatchToolAction::UserDecisionList),
+        ToolDescriptor::dispatch(UserDecisionResolve, DispatchToolAction::UserDecisionResolve),
+        ToolDescriptor::dispatch(UserDecisionCancel, DispatchToolAction::UserDecisionCancel),
+        ToolDescriptor::dispatch(UserDecisionExpire, DispatchToolAction::UserDecisionExpire),
     ]
 }
 pub struct UserDecisionRequest;
