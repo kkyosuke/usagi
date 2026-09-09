@@ -535,6 +535,11 @@ usecase の相互参照は上記の共有 contract に限り、domain は常に�
 全 manifest の usagi dependency と `domain` / `usecase` / `infrastructure` の production Rust AST を走査して強制する。
 コメントや `#[cfg(test)]` の fake は production 依存として数えない。
 
+ルート合成 adapter が TUI の application port（`WorkspaceLoader`、workspace create effect、Work Run control など）を
+実装するときは `usagi_tui::usecase::application` の定義元を直接 import する。`presentation` はこれらを互換 re-export
+しない。これにより adapter が描画面を経由して usecase 境界へ依存しているように見える逆向きの API を作らず、公開名の
+所有場所と依存行列を一致させる。
+
 ## 単一バイナリと合成ルート
 
 配布物は従来どおり**単一バイナリ `usagi`** のまま。合成ルートはすべての起動で完全な

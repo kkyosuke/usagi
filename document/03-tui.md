@@ -184,6 +184,16 @@ Home を開く入口は direct workspace、Welcome の Recent、Open の選択�
 decision、PR snapshot / preview、browser、desktop notification へ振り分ける。別の screen-graph executor や
 production fallback stub は持たない。
 
+composition が一つの接続として保持する Agent runtime adapter は aggregate だが、利用側へは用途別の境界を渡す。pane launch worker は
+`PaneLaunchCommandPort`、live terminal session は `TerminalStreamPort`、session refresh は `SessionRefreshPort` だけを見る。
+aggregate の既定実装が resize、input outcome、inventory を成功として捏造することはなく、未接続なら `Unavailable` を返す。
+`SessionRefreshPort` と `WorkspaceLoader::record_unite` も adapter ごとの明示実装を必須とし、capability の欠落を trait default の
+no-op 成功で隠さない。
+
+Home の top-level `update` は event family の routing を担い、独立した状態機械は `controller/` の feature reducer が担う。
+現在 decision snapshot・unread marker・editor convergence は `controller/decision.rs` が所有し、workspace router に modal の
+内部遷移を重複させない。新しい独立 modal / projection を追加するときも同じ境界へ分離する。
+
 **Home からは Welcome へ戻れる**。入口は片道ではなく、workspace を離れて別の workspace を開くために
 プロセスを終了する必要はない。離脱と終了の区別、および離脱時の teardown は
 [workspace の離脱と終了](#workspace-の離脱と終了)を正本とする。

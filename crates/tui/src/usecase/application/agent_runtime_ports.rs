@@ -43,7 +43,12 @@ pub struct ExactAgentResume {
     pub relation: Option<AgentResumeRelation>,
 }
 
-/// Daemon client vocabulary for one workspace's Agent and terminal boundary.
+/// Composition-level bundle for one workspace's Agent and terminal client.
+///
+/// Feature consumers do not receive this aggregate directly: pane launch uses
+/// [`PaneLaunchCommandPort`] and a live terminal uses `TerminalStreamPort`.
+/// Restore alone needs Agent inventory and terminal inventory from the same
+/// connection so it can bracket a coherent snapshot.
 pub trait AgentCommandPort: Send {
     /// Launches one Agent under the caller's durable operation.
     ///
@@ -133,9 +138,9 @@ pub trait AgentCommandPort: Send {
     fn resize_terminal(
         &mut self,
         _terminal: &TerminalRef,
-        geometry: Geometry,
+        _geometry: Geometry,
     ) -> Result<Geometry, TerminalError> {
-        Ok(geometry)
+        Err(TerminalError::Unavailable)
     }
 
     /// Attaches and returns retained replay and cursor state.
@@ -196,7 +201,7 @@ pub trait AgentCommandPort: Send {
         _operation: OperationId,
         _input_len: usize,
     ) -> Result<TerminalInputResolution, TerminalError> {
-        Ok(TerminalInputResolution::Unknown)
+        Err(TerminalError::Unavailable)
     }
 
     /// Releases a subscription without stopping its process.
@@ -216,7 +221,132 @@ pub trait AgentCommandPort: Send {
     ///
     /// Returns a safe transport failure.
     fn list_terminals(&mut self) -> Result<Vec<TerminalInventoryEntry>, TerminalError> {
-        Ok(Vec::new())
+        Err(TerminalError::Unavailable)
+    }
+}
+
+/// Narrow terminal-stream capability consumed by live pane sessions.
+///
+/// The production connection can implement the wider [`AgentCommandPort`],
+/// while stream coordination remains unable to launch or resume an Agent.
+pub trait TerminalCommandPort {
+    /// Returns the current shared terminal transport epoch.
+    fn connection_epoch(&self) -> Option<u64>;
+
+    /// Applies the requested viewport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, ownership, or availability failure.
+    fn resize(
+        &mut self,
+        terminal: &TerminalRef,
+        geometry: Geometry,
+    ) -> Result<Geometry, TerminalError>;
+
+    /// Attaches one terminal stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, ownership, or availability failure.
+    fn attach(
+        &mut self,
+        terminal: &TerminalRef,
+        geometry: Geometry,
+    ) -> Result<TerminalAttach, TerminalError>;
+
+    /// Reads output after the supplied offset.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, ownership, or availability failure.
+    fn poll(
+        &mut self,
+        terminal: &TerminalRef,
+        after_offset: u64,
+    ) -> Result<Vec<TerminalChunk>, TerminalError>;
+
+    /// Writes fenced input to the terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, ownership, or availability failure.
+    fn input(
+        &mut self,
+        terminal: &TerminalRef,
+        subscription: TerminalSubscription,
+        input_seq: u64,
+        operation: OperationId,
+        bytes: &[u8],
+    ) -> Result<TerminalInputOutcome, TerminalError>;
+
+    /// Reads the final resolution of one input operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, ownership, or availability failure.
+    fn input_outcome(
+        &mut self,
+        terminal: &TerminalRef,
+        operation: OperationId,
+        input_len: usize,
+    ) -> Result<TerminalInputResolution, TerminalError>;
+
+    /// Releases one stream subscription without stopping its process.
+    fn detach(&mut self, terminal: &TerminalRef, subscription: TerminalSubscription);
+}
+
+impl<T: AgentCommandPort + ?Sized> TerminalCommandPort for T {
+    fn connection_epoch(&self) -> Option<u64> {
+        self.terminal_connection_epoch()
+    }
+
+    fn resize(
+        &mut self,
+        terminal: &TerminalRef,
+        geometry: Geometry,
+    ) -> Result<Geometry, TerminalError> {
+        self.resize_terminal(terminal, geometry)
+    }
+
+    fn attach(
+        &mut self,
+        terminal: &TerminalRef,
+        geometry: Geometry,
+    ) -> Result<TerminalAttach, TerminalError> {
+        self.attach_terminal(terminal, geometry)
+    }
+
+    fn poll(
+        &mut self,
+        terminal: &TerminalRef,
+        after_offset: u64,
+    ) -> Result<Vec<TerminalChunk>, TerminalError> {
+        self.poll_terminal(terminal, after_offset)
+    }
+
+    fn input(
+        &mut self,
+        terminal: &TerminalRef,
+        subscription: TerminalSubscription,
+        input_seq: u64,
+        operation: OperationId,
+        bytes: &[u8],
+    ) -> Result<TerminalInputOutcome, TerminalError> {
+        self.input_terminal(terminal, subscription, input_seq, operation, bytes)
+    }
+
+    fn input_outcome(
+        &mut self,
+        terminal: &TerminalRef,
+        operation: OperationId,
+        input_len: usize,
+    ) -> Result<TerminalInputResolution, TerminalError> {
+        self.terminal_input_outcome(terminal, operation, input_len)
+    }
+
+    fn detach(&mut self, terminal: &TerminalRef, subscription: TerminalSubscription) {
+        self.detach_terminal(terminal, subscription);
     }
 }
 

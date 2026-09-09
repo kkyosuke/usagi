@@ -3898,31 +3898,33 @@ fn spawn_ipc_server(
     start_ipc_accept_loop(
         listener,
         server,
-        data_dir.to_path_buf(),
-        initial,
-        tenants,
-        workspaces,
-        resolver,
-        teardown,
-        terminal,
-        agent,
-        retention,
-        pr_inventory,
-        projection,
-        decisions,
-        Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
-            agent_concurrency,
-            shutdown.background_worker_health(),
-        ))),
-        Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
-        pipeline_metrics,
-        supervisor,
-        fence,
-        workers,
-        disconnected,
-        connection_cleanup,
-        background_workers,
-        shutdown,
+        IpcAcceptContext {
+            data_dir: data_dir.to_path_buf(),
+            initial,
+            tenants,
+            workspaces,
+            resolver,
+            teardown,
+            terminal,
+            agent,
+            retention,
+            pr_inventory,
+            projection,
+            decisions,
+            metrics: Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
+                agent_concurrency,
+                shutdown.background_worker_health(),
+            ))),
+            process_metrics: Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
+            pipeline_metrics,
+            supervisor,
+            fence,
+            workers,
+            disconnected,
+            connection_cleanup,
+            background_workers,
+            shutdown,
+        },
     )
 }
 
@@ -5309,11 +5311,10 @@ where
     )
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Composition owns the independently injected daemon services.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
-fn start_ipc_accept_loop(
-    listener: SecureUnixListener,
-    server: usagi_core::infrastructure::ipc::ServerProtocol,
+/// Services owned by the IPC accept lifetime. Keeping the ownership graph in
+/// one value prevents the composition entry point from becoming a positional
+/// argument list as new daemon capabilities are introduced.
+struct IpcAcceptContext {
     data_dir: PathBuf,
     initial: usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
     tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
@@ -5334,9 +5335,41 @@ fn start_ipc_accept_loop(
     workers: Arc<ClientWorkers>,
     disconnected: ConnectionCleanup,
     connection_cleanup: std::thread::JoinHandle<()>,
-    mut background_workers: DaemonBackgroundWorkers,
+    background_workers: DaemonBackgroundWorkers,
     shutdown: Arc<ShutdownRequest>,
+}
+
+#[allow(clippy::too_many_lines)] // Composition owns the independently injected daemon services.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+fn start_ipc_accept_loop(
+    listener: SecureUnixListener,
+    server: usagi_core::infrastructure::ipc::ServerProtocol,
+    context: IpcAcceptContext,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
+    let IpcAcceptContext {
+        data_dir,
+        initial,
+        tenants,
+        workspaces,
+        resolver,
+        teardown,
+        terminal,
+        agent,
+        retention,
+        pr_inventory,
+        projection,
+        decisions,
+        metrics,
+        process_metrics,
+        pipeline_metrics,
+        supervisor,
+        fence,
+        workers,
+        disconnected,
+        connection_cleanup,
+        mut background_workers,
+        shutdown,
+    } = context;
     let connection_limit = client_connection_limit();
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
@@ -5616,6 +5649,13 @@ fn start_ipc_accept_loop(
                                     &census_fence,
                                     &mut owner,
                                     &mut |request_id, body, hello, connection, client| {
+                                        let Ok(request) = serde_json::from_value::<DaemonRequest>(body.clone()) else {
+                                            return usagi_daemon::presentation::ipc::reject_unhandled_request(
+                                                request_id,
+                                                body,
+                                                hello,
+                                            );
+                                        };
                                         if let Some(credential) = request_mcp_credential(&body)
                                             && !agent_launch
                                                 .lock()
@@ -5645,26 +5685,36 @@ fn start_ipc_accept_loop(
                                                 serde_json::Value::Null,
                                             );
                                         }
-                                        match body.get("kind").and_then(serde_json::Value::as_str) {
-                                            Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
-                                            Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, request_id, &body, hello),
-                                            Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
-                                            Some("session") => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
-                                            Some("agent" | "agent_goal" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "plan_daemon_restart_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
-                                            Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, &body, hello),
-                                            Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, &body, hello),
-                                            Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
-                                            Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
-                                            Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                            Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, supervisor: &supervisor }, request_id, &body, hello),
-                                            Some("supervisor_tool") => {
+                                        match request {
+                                            DaemonRequest::McpChildClaim => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
+                                            DaemonRequest::Rollover { .. } => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, request_id, &body, hello),
+                                            DaemonRequest::Tenant { .. } => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
+                                            DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
+                                            DaemonRequest::Agent { .. }
+                                            | DaemonRequest::AgentGoal { .. }
+                                            | DaemonRequest::AgentInventory { .. }
+                                            | DaemonRequest::AgentWorkspaceObservation { .. }
+                                            | DaemonRequest::DiagnoseAgents { .. }
+                                            | DaemonRequest::PlanDaemonRestartAgents { .. }
+                                            | DaemonRequest::RestartAgents { .. }
+                                            | DaemonRequest::ResumeAgent { .. }
+                                            | DaemonRequest::ResumeAgentWithCurrentIntegration { .. } => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
+                                            DaemonRequest::CodexSessionCapture { .. } => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, &body, hello),
+                                            DaemonRequest::AgentPhaseReport { .. } => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, &body, hello),
+                                            DaemonRequest::Dispatch { .. } => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
+                                            DaemonRequest::Metrics { .. } => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
+                                            DaemonRequest::Pr { .. }
+                                            | DaemonRequest::PrBatch { .. }
+                                            | DaemonRequest::PrDismiss { .. } => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
+                                            DaemonRequest::DispatchTool { .. } => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, supervisor: &supervisor }, request_id, &body, hello),
+                                            DaemonRequest::SupervisorTool { .. } => {
                                                 let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
                                                 dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                             },
-                                            Some("supervisor_snapshot") => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
-                                            Some("supervisor_control") => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
-                                            Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
-                                            _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
+                                            DaemonRequest::SupervisorSnapshot { .. } => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
+                                            DaemonRequest::SupervisorControl { .. } => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
+                                            DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
+                                            DaemonRequest::Terminal { .. } => usagi_daemon::presentation::ipc::reject_unhandled_request(request_id, body, hello),
                                         }
                                     },
                                     &mut |body, response| {
@@ -6054,7 +6104,11 @@ fn dispatch_agent_tool(
             _ => None,
         });
     let Some((action, operation_id, payload, caller_context)) = parsed else {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     };
     let response = (|| -> Result<(ResponseOutcome, serde_json::Value), ProtocolError> {
         let credential = caller_context
@@ -7266,7 +7320,11 @@ fn dispatch_supervisor_tool(
         caller_context: _,
     }) = parsed
     else {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     };
     let result = runtime
         .lock()
@@ -8076,7 +8134,11 @@ fn dispatch_user_decision(
             _ => None,
         });
     let Some((action, payload, caller_context, tui_access)) = parsed else {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     };
     if !matches!(
         action,
@@ -8087,7 +8149,11 @@ fn dispatch_user_decision(
             | DispatchToolAction::UserDecisionCancel
             | DispatchToolAction::UserDecisionExpire
     ) {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     }
 
     let workspace = (|| -> Result<_, ProtocolError> {
@@ -8356,7 +8422,11 @@ fn dispatch_dispatch(
             _ => None,
         })
     else {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     };
     let session_id = (|| {
         let mut runtime = bound.sessions().lock().map_err(|_| {
@@ -8479,7 +8549,11 @@ fn dispatch_rollover(
             _ => None,
         });
     let Some((operation, restart_agents)) = request else {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     };
     let registry = match GenerationRegistryFile::new(data_dir) {
         Ok(file) => GenerationRegistry::new(file, DEFAULT_GENERATION_LIMIT),
@@ -8682,7 +8756,11 @@ fn dispatch_metrics(
             _ => None,
         });
     let Some(action) = action else {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     };
     let snapshot = (|| {
         let mut broker = metrics
@@ -8777,7 +8855,11 @@ fn dispatch_session(
             _ => None,
         });
     let Some((action, operation_id, payload)) = request else {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     };
     let result = dispatch_session_action(context, action, &operation_id, &payload);
     session_response_envelope(action, result, request_id, hello)
@@ -11200,7 +11282,11 @@ fn dispatch_agent(
             _ => None,
         });
     let Some((request, caller_context)) = request else {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     };
     let ownership = caller_context.map(|caller_context| {
         use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
@@ -11409,7 +11495,11 @@ fn dispatch_codex_session_capture(
             _ => None,
         });
     let Some((native_session_id, caller_context)) = request else {
-        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+        return usagi_daemon::presentation::ipc::reject_unhandled_request(
+            request_id,
+            body.clone(),
+            hello,
+        );
     };
     let result = agent
         .lock()
