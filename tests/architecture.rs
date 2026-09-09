@@ -504,3 +504,41 @@ fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_modul
     assert!(tenant.contains("fn inventory("));
     assert!(tenant.contains("fn retire("));
 }
+
+#[test]
+fn daemon_agent_provisioning_stays_in_its_product_boundary() {
+    let root = workspace_root();
+    let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
+        .expect("daemon composition source is readable");
+    let provisioning = fs::read_to_string(root.join("src/runtime/daemon/agent_provisioning.rs"))
+        .expect("agent provisioning source is readable");
+    let secure_path = fs::read_to_string(root.join("src/runtime/daemon/secure_path.rs"))
+        .expect("daemon secure-path source is readable");
+
+    assert!(composition.contains("mod agent_provisioning;"));
+    for symbol in [
+        "struct RootCodexProvisioner",
+        "struct RootClaudeProvisioner",
+        "fn claude_sandbox_launcher(",
+        "fn working_directories(",
+        "fn effective_role_instruction(",
+        "fn repair_agent_codex_arg0_permissions(",
+    ] {
+        assert!(
+            !composition.contains(symbol),
+            "{symbol} must stay out of the daemon socket/lifecycle composition"
+        );
+        assert!(
+            provisioning.contains(symbol),
+            "{symbol} must remain owned by Agent provisioning"
+        );
+    }
+    assert!(!composition.contains("use agent_provisioning::*;"));
+    assert!(!provisioning.contains("use super::*;"));
+    assert!(!provisioning.contains("fn validate_owned_directory("));
+    assert!(secure_path.contains("fn validate_owned_directory("));
+    assert!(
+        provisioning.lines().count() <= 1_400,
+        "agent provisioning grew beyond its reviewable product boundary"
+    );
+}
