@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
+use usagi_core::infrastructure::client::{
+    ClientError, DaemonClient, DaemonReply, DaemonRequest, McpCallerContext,
+};
 use usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::workspace::Storage;
-use usagi_core::usecase::client::{
-    ClientError, DaemonClient, DaemonReply, DaemonRequest, McpCallerContext,
-};
 
 use super::protocol::{self, error_code};
 use super::runtime_model::{
@@ -955,7 +955,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
     use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
-    use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
+    use usagi_core::infrastructure::client::{
+        ClientError, DaemonClient, DaemonReply, DaemonRequest,
+    };
 
     struct RecordingClient {
         reply: Result<DaemonReply, ClientError>,
@@ -2050,67 +2052,67 @@ mod tests {
         for (name, action) in [
             (
                 "session_dispatch",
-                usagi_core::usecase::client::DispatchToolAction::Dispatch,
+                usagi_core::infrastructure::client::DispatchToolAction::Dispatch,
             ),
             (
                 "session_get",
-                usagi_core::usecase::client::DispatchToolAction::SessionGet,
+                usagi_core::infrastructure::client::DispatchToolAction::SessionGet,
             ),
             (
                 "agent_list",
-                usagi_core::usecase::client::DispatchToolAction::AgentList,
+                usagi_core::infrastructure::client::DispatchToolAction::AgentList,
             ),
             (
                 "agent_get",
-                usagi_core::usecase::client::DispatchToolAction::AgentGet,
+                usagi_core::infrastructure::client::DispatchToolAction::AgentGet,
             ),
             (
                 "terminal_list",
-                usagi_core::usecase::client::DispatchToolAction::TerminalList,
+                usagi_core::infrastructure::client::DispatchToolAction::TerminalList,
             ),
             (
                 "terminal_read",
-                usagi_core::usecase::client::DispatchToolAction::TerminalRead,
+                usagi_core::infrastructure::client::DispatchToolAction::TerminalRead,
             ),
             (
                 "agent_complete",
-                usagi_core::usecase::client::DispatchToolAction::AgentComplete,
+                usagi_core::infrastructure::client::DispatchToolAction::AgentComplete,
             ),
             (
                 "agent_fail",
-                usagi_core::usecase::client::DispatchToolAction::AgentFail,
+                usagi_core::infrastructure::client::DispatchToolAction::AgentFail,
             ),
             (
                 "agent_inbox",
-                usagi_core::usecase::client::DispatchToolAction::AgentInbox,
+                usagi_core::infrastructure::client::DispatchToolAction::AgentInbox,
             ),
             (
                 "agent_inbox_ack",
-                usagi_core::usecase::client::DispatchToolAction::AgentInboxAck,
+                usagi_core::infrastructure::client::DispatchToolAction::AgentInboxAck,
             ),
             (
                 "user_decision_request",
-                usagi_core::usecase::client::DispatchToolAction::UserDecisionRequest,
+                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionRequest,
             ),
             (
                 "user_decision_get",
-                usagi_core::usecase::client::DispatchToolAction::UserDecisionGet,
+                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionGet,
             ),
             (
                 "user_decision_list",
-                usagi_core::usecase::client::DispatchToolAction::UserDecisionList,
+                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionList,
             ),
             (
                 "user_decision_resolve",
-                usagi_core::usecase::client::DispatchToolAction::UserDecisionResolve,
+                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionResolve,
             ),
             (
                 "user_decision_cancel",
-                usagi_core::usecase::client::DispatchToolAction::UserDecisionCancel,
+                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionCancel,
             ),
             (
                 "user_decision_expire",
-                usagi_core::usecase::client::DispatchToolAction::UserDecisionExpire,
+                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionExpire,
             ),
         ] {
             let snapshot = RuntimeModelSnapshot::capture(

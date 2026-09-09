@@ -21,12 +21,14 @@
 //!   フレーミング（transport は注入）。
 
 pub mod bounded_process;
+pub mod client;
 pub mod daemon;
 pub mod env_resolver;
 pub mod error_log;
 pub mod git;
 pub mod gitignore;
 pub mod ipc;
+pub mod owner_routing;
 pub mod paths;
 pub mod persistence;
 pub mod role_catalog;

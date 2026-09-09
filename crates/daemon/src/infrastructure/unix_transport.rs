@@ -801,7 +801,7 @@ pub fn connect_current(data_dir: &Path) -> io::Result<UnixStream> {
 /// is how a client reaches the generation that owns a terminal it already holds
 /// a complete `TerminalRef` for. The address is not the caller's to choose: the
 /// only input is a [`TrustedEndpoint`], which a
-/// [`GenerationDirectory`](usagi_core::usecase::owner_routing::GenerationDirectory)
+/// [`GenerationDirectory`](usagi_core::infrastructure::owner_routing::GenerationDirectory)
 /// produced from records the daemon wrote, and it is re-derived and re-verified
 /// as that generation's own private socket before a byte is sent (#508).
 ///
@@ -812,7 +812,7 @@ pub fn connect_current(data_dir: &Path) -> io::Result<UnixStream> {
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=owner_routing
 pub fn connect_generation(
     data_dir: &Path,
-    endpoint: &usagi_core::usecase::owner_routing::TrustedEndpoint,
+    endpoint: &usagi_core::infrastructure::owner_routing::TrustedEndpoint,
 ) -> io::Result<UnixStream> {
     let daemon = data_dir.join("daemon");
     verify_private(&daemon, DIR_MODE, true)?;

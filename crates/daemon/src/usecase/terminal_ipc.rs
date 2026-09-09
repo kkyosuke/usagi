@@ -21,11 +21,9 @@ use usagi_core::{
             TerminalLaunchScope, TerminalLaunchValidationError,
         },
     },
+    infrastructure::client::{TerminalGeometry, TerminalRequest},
     infrastructure::ipc::{ErrorCode, ProtocolError},
-    usecase::{
-        client::{TerminalGeometry, TerminalRequest},
-        vt_screen::{COLS_MAX, ROWS_MAX},
-    },
+    usecase::vt_screen::{COLS_MAX, ROWS_MAX},
 };
 
 use super::{
@@ -695,7 +693,7 @@ mod tests {
         id::{ClientId, RequestId, SessionId, WorkspaceId, WorktreeId},
         terminal_launch::{DurableTerminalLaunchSnapshot, TerminalLaunchScope, TerminalProfileId},
     };
-    use usagi_core::usecase::client::TerminalAction;
+    use usagi_core::infrastructure::client::TerminalAction;
 
     #[derive(Default)]
     struct Store {
@@ -904,7 +902,7 @@ mod tests {
                 ClientId::new(),
                 TerminalAction::Launch,
                 TerminalRequest::Launch {
-                    intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                    intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
                         request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                             profile_id: TerminalProfileId::new("login-shell").unwrap(),
                             scope,
@@ -971,7 +969,7 @@ mod tests {
         cols: u16,
     ) -> TerminalRequest {
         TerminalRequest::Launch {
-            intent: usagi_core::usecase::client::TerminalLaunchIntent {
+            intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
                 request: TerminalLaunchRequest {
                     profile_id: TerminalProfileId::new("login-shell").unwrap(),
                     scope: scope.clone(),
@@ -1470,7 +1468,7 @@ mod tests {
         );
         let connection = ConnectionId::new();
         let client = ClientId::new();
-        let intent = usagi_core::usecase::client::TerminalLaunchIntent {
+        let intent = usagi_core::infrastructure::client::TerminalLaunchIntent {
             request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                 profile_id: TerminalProfileId::new("login-shell").unwrap(),
                 scope: TerminalLaunchScope {
@@ -1651,7 +1649,7 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Launch,
                 serde_json::to_value(TerminalRequest::Launch {
-                    intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                    intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
                         request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                             profile_id: TerminalProfileId::new("login-shell").unwrap(),
                             scope: TerminalLaunchScope {
@@ -1694,7 +1692,7 @@ mod tests {
                     RequestId::new(),
                     TerminalAction::Launch,
                     serde_json::to_value(TerminalRequest::Launch {
-                        intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                        intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
                             request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                                 profile_id: TerminalProfileId::new("login-shell").unwrap(),
                                 scope: invalid_scope,
@@ -2042,7 +2040,7 @@ mod tests {
                 ClientId::new(),
                 TerminalAction::Launch,
                 TerminalRequest::Launch {
-                    intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                    intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
                         request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                             profile_id: TerminalProfileId::new("login-shell").unwrap(),
                             scope,
@@ -2275,7 +2273,7 @@ mod tests {
                 ClientId::new(),
                 TerminalAction::Launch,
                 TerminalRequest::Launch {
-                    intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                    intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
                         request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                             profile_id: TerminalProfileId::new("login-shell").unwrap(),
                             scope: scope.clone(),

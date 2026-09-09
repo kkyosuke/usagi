@@ -20,11 +20,11 @@ use usagi_core::domain::settings::{ModalSelectionMode, Settings};
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
-use usagi_core::infrastructure::store::workspace::Storage;
-use usagi_core::usecase::client::{
+use usagi_core::infrastructure::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
     SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
+use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::unix_transport::{
     connect_current, ensure_private_dir_all, read_locator,
 };

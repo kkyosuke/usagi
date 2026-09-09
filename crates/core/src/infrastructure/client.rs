@@ -1,4 +1,4 @@
-//! Surface-neutral daemon client port.
+//! Surface-neutral daemon IPC client and protocol request vocabulary.
 //!
 //! Presentation surfaces submit only typed request bodies through this port.  In
 //! particular, a connection failure is not permission to mutate local session
@@ -1117,7 +1117,7 @@ impl<S: Read + Write> IpcClient<S> {
     /// the generation registry: the peer that answered has already said which
     /// generation it is, so a lane held for a terminal can be matched against
     /// that terminal's `TerminalRef.daemon_generation` with no IO at all
-    /// ([`owner_routing`](crate::usecase::owner_routing)).
+    /// ([`owner_routing`](crate::infrastructure::owner_routing)).
     #[must_use]
     pub fn daemon_generation(&self) -> &DaemonGeneration {
         &self.daemon_generation
@@ -2689,7 +2689,7 @@ mod tests {
         // The connection knows which generation answered it. That is what lets a
         // client hold one lane per owner and match a terminal against it without
         // reading the generation registry per request
-        // ([`owner_routing`](crate::usecase::owner_routing)).
+        // ([`owner_routing`](crate::infrastructure::owner_routing)).
         assert_eq!(client.daemon_generation().0, "daemon");
         assert_eq!(
             client

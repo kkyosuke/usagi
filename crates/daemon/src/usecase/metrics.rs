@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 
-use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
+use usagi_core::infrastructure::client::{AgentConcurrency, DaemonMetrics};
 
 use super::shutdown::BackgroundWorkerHealth;
 

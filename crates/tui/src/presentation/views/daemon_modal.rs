@@ -4,9 +4,9 @@
 //! surface にまとめる。診断値は表示専用であり、lifecycle 操作は controller の typed
 //! effect だけを通る。
 
+use crate::usecase::application::daemon_health::{DaemonHealth, HealthReason};
 use usagi_core::domain::agent::AgentRuntimeInventoryState;
-use usagi_core::usecase::client::DaemonMetrics;
-use usagi_core::usecase::daemon_health::{DaemonHealth, HealthReason};
+use usagi_core::infrastructure::client::DaemonMetrics;
 use usagi_core::usecase::session_state::SessionStateCounts;
 
 use crate::presentation::theme::{Role, Style};
@@ -263,10 +263,10 @@ mod tests {
         AppEvent, AppKey, AppState, BackendEvent, DaemonAction, DaemonControlState, Notice,
         PendingToken, SafeError, SafeMessage, update,
     };
+    use crate::usecase::application::daemon_health::{DaemonHealth, HealthReason};
     use usagi_core::domain::agent::AgentRuntimeInventoryState;
     use usagi_core::domain::id::WorkspaceId;
-    use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
-    use usagi_core::usecase::daemon_health::{DaemonHealth, HealthReason};
+    use usagi_core::infrastructure::client::{AgentConcurrency, DaemonMetrics};
     use usagi_core::usecase::session_state::SessionStateCounts;
 
     fn metrics(in_use: u32) -> DaemonMetrics {

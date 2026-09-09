@@ -105,7 +105,7 @@ pub enum Overlay {
 /// session name に許される最大文字数（表示・path 双方の実害を避ける上限）。
 const MAX_SESSION_NAME_LEN: usize = 64;
 /// Goal composer bound. The daemon repeats this limit before admitting work.
-pub const MAX_WORK_GOAL_BYTES: usize = usagi_core::usecase::client::MAX_AGENT_GOAL_BYTES;
+pub const MAX_WORK_GOAL_BYTES: usize = usagi_core::infrastructure::client::MAX_AGENT_GOAL_BYTES;
 
 /// daemon へ送る前の、TUI-local な新規 session 入力。
 ///

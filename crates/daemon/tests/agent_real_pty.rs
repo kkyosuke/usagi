@@ -29,10 +29,10 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::terminal_launch::TerminalLaunchScope;
 use usagi_core::domain::terminal_visibility::{CompletedTerminalEntry, TerminalVisibilityState};
+use usagi_core::infrastructure::client::{AgentLaunchIntent, TerminalRequest};
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::usecase::agent::AgentProfileCatalog;
-use usagi_core::usecase::client::{AgentLaunchIntent, TerminalRequest};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::presentation::ipc::encode_terminal_response;
 use usagi_daemon::usecase::agent_ipc::{

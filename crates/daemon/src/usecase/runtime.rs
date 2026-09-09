@@ -1785,8 +1785,8 @@ impl RuntimeCoordinator {
     /// Both numbers come from this coordinator, so an observer never restates the
     /// constant that supplied the limit.
     #[must_use]
-    pub fn concurrency(&self) -> usagi_core::usecase::client::AgentConcurrency {
-        usagi_core::usecase::client::AgentConcurrency {
+    pub fn concurrency(&self) -> usagi_core::infrastructure::client::AgentConcurrency {
+        usagi_core::infrastructure::client::AgentConcurrency {
             in_use: u32::try_from(self.occupied_slots()).unwrap_or(u32::MAX),
             limit: u32::try_from(self.limit).unwrap_or(u32::MAX),
         }
@@ -2055,7 +2055,7 @@ mod tests {
             TerminalId, WorkspaceId, WorktreeId,
         },
     };
-    use usagi_core::usecase::client::AgentConcurrency;
+    use usagi_core::infrastructure::client::AgentConcurrency;
     #[test]
     fn spawn_provision_carries_an_optional_ephemeral_sandbox_launcher() {
         let mut provision = SpawnProvision::new([], Vec::new());

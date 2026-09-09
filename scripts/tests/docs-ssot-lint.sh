@@ -18,7 +18,7 @@ make_fixture() {
   cp "$repo/crates/cli/src/mcp/guides/orchestration.md" "$destination/crates/cli/src/mcp/guides/orchestration.md"
   cp "$repo/crates/core/src/domain/settings/mod.rs" "$destination/crates/core/src/domain/settings/mod.rs"
   cp "$repo/crates/core/src/infrastructure/role_catalog.rs" "$destination/crates/core/src/infrastructure/role_catalog.rs"
-  cp "$repo/crates/core/src/usecase/client.rs" "$destination/crates/core/src/usecase/client.rs"
+  cp "$repo/crates/core/src/infrastructure/client.rs" "$destination/crates/core/src/infrastructure/client.rs"
   cp "$repo/crates/daemon/src/lib.rs" "$destination/crates/daemon/src/lib.rs"
   cp "$repo/crates/tui/src/usecase/terminal_input.rs" "$destination/crates/tui/src/usecase/terminal_input.rs"
 }

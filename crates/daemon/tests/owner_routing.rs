@@ -38,16 +38,16 @@ use usagi_core::domain::id::{DaemonGeneration, TerminalId, WorkspaceId, Worktree
 use usagi_core::domain::terminal_launch::{
     TerminalInventoryEntry, TerminalKind, TerminalLaunchScope,
 };
+use usagi_core::infrastructure::client::{
+    ClientError, ClientPolicy, DaemonRequest, DaemonSession, IpcClient, RearmableStream,
+    TerminalGeometry, TerminalRequest,
+};
 use usagi_core::infrastructure::ipc::{
     ClientWorkspace, DaemonGeneration as WireGeneration, Envelope, EnvelopeKind, ProtocolLimits,
     ProtocolRange, ProtocolVersion, ResponseOutcome, ServerProtocol, build_identity,
     read_json_frame, write_json_frame,
 };
-use usagi_core::usecase::client::{
-    ClientError, ClientPolicy, DaemonRequest, DaemonSession, IpcClient, RearmableStream,
-    TerminalGeometry, TerminalRequest,
-};
-use usagi_core::usecase::owner_routing::{
+use usagi_core::infrastructure::owner_routing::{
     GenerationDirectory, GenerationTransport, OwnerPresence, OwnerRouter, TrustedEndpoint,
     presence_of, terminal_request,
 };
@@ -312,7 +312,7 @@ fn answer(
     let terminal: TerminalRequest = serde_json::from_value(payload.clone()).unwrap();
     let action = format!(
         "{:?}",
-        usagi_core::usecase::owner_routing::terminal_action_of(&terminal)
+        usagi_core::infrastructure::owner_routing::terminal_action_of(&terminal)
     );
     observed.actions.lock().unwrap().push(action);
     match terminal {
@@ -564,7 +564,7 @@ fn a_client_pointed_at_the_new_active_still_drives_the_old_generation_terminal()
     // … while a launch is control work on the new active generation.
     router
         .request(terminal_request(&TerminalRequest::Launch {
-            intent: usagi_core::usecase::client::TerminalLaunchIntent {
+            intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
                 request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                     scope: scope(),
                     profile_id: usagi_core::domain::terminal_launch::TerminalProfileId::new(

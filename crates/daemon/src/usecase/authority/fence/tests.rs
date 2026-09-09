@@ -9,17 +9,19 @@ use crate::usecase::generation::GenerationRole;
 /// The wire body a client actually sends, built through the shared request type
 /// so a rename of the serde tags fails these tests instead of silently
 /// reclassifying every request as `Control`.
-fn terminal_body(action: usagi_core::usecase::client::TerminalAction) -> serde_json::Value {
-    serde_json::to_value(usagi_core::usecase::client::DaemonRequest::Terminal {
-        action,
-        payload: json!(null),
-    })
+fn terminal_body(action: usagi_core::infrastructure::client::TerminalAction) -> serde_json::Value {
+    serde_json::to_value(
+        usagi_core::infrastructure::client::DaemonRequest::Terminal {
+            action,
+            payload: json!(null),
+        },
+    )
     .unwrap()
 }
 
 #[test]
 fn the_terminal_surface_separates_scope_queries_from_ref_addressed_io() {
-    use usagi_core::usecase::client::TerminalAction as Action;
+    use usagi_core::infrastructure::client::TerminalAction as Action;
     for (action, expected) in [
         (
             Action::Launch,
@@ -83,7 +85,7 @@ fn the_terminal_surface_separates_scope_queries_from_ref_addressed_io() {
 /// standby proves it can serve at all.
 #[test]
 fn a_generation_that_owns_nothing_resolves_every_named_runtime_elsewhere() {
-    use usagi_core::usecase::client::TerminalAction as Action;
+    use usagi_core::infrastructure::client::TerminalAction as Action;
     for (action, expected) in [
         (
             Action::Attach,
@@ -252,7 +254,7 @@ fn an_unnameable_terminal_action_is_ref_addressed_io() {
 #[test]
 fn an_active_generation_takes_the_control_lease_for_control_and_the_owner_lease_for_its_terminals()
 {
-    use usagi_core::usecase::client::TerminalAction as Action;
+    use usagi_core::infrastructure::client::TerminalAction as Action;
     let (class, owner) = classify_request(&json!({"kind": "session"}), OwnedRuntime::Own);
     assert_eq!(
         classify(GenerationRole::Active, class, owner),

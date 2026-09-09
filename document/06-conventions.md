@@ -342,7 +342,7 @@ lock file は temp directory 上に置き、チェックアウト path の diges
 
 実 daemon を相手にする E2E は、**socket が閉じただけの transient**（endpoint 公開中、listener の retire、
 pre-handshake 上限による accept 直後の close）と、**product の失敗**（daemon の panic・異常終了・typed な拒否）を
-区別する。前者は production の client も新しい接続で retry する（`usagi_core::usecase::client` の `PolicyClient` は
+区別する。前者は production の client も新しい接続で retry する（`usagi_core::infrastructure::client` の `PolicyClient` は
 `is_transport_failure` を retry 対象にする）ため、テストの readiness 待ちでも deadline 内で retry する。
 
 区別を成立させるために、次の 2 つを守る。

@@ -19,7 +19,7 @@
 //! authority before it starts a rollover.
 //!
 //! The client half of the contract is
-//! [`usagi_core::usecase::owner_routing`].
+//! [`usagi_core::infrastructure::owner_routing`].
 
 use std::collections::BTreeMap;
 use std::fmt;

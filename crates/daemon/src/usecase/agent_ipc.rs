@@ -43,6 +43,10 @@ use usagi_core::{
         supervisor::RunProvenance,
         terminal_launch::TerminalLaunchScope,
     },
+    infrastructure::client::{
+        AgentGoalIntent, AgentLaunchIntent, DispatchAgentIntent, DispatchIntent,
+        MAX_AGENT_GOAL_BYTES, TerminalRequest,
+    },
     infrastructure::ipc::{ErrorCode, ProtocolError, agent_operation_digest},
     infrastructure::runtime_model::{
         ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, supported_agent_runtimes,
@@ -52,10 +56,6 @@ use usagi_core::{
         DispatchStore,
     },
     usecase::agent_phase::agent_phase_aggregation_rank,
-    usecase::client::{
-        AgentGoalIntent, AgentLaunchIntent, DispatchAgentIntent, DispatchIntent,
-        MAX_AGENT_GOAL_BYTES, TerminalRequest,
-    },
 };
 
 use crate::usecase::{
@@ -2614,7 +2614,7 @@ impl AgentRuntime {
             session: Some(session),
             profile: Some(worker.runtime.clone()),
         };
-        let semantic = usagi_core::usecase::client::agent_dispatch_semantic_key(
+        let semantic = usagi_core::infrastructure::client::agent_dispatch_semantic_key(
             &intent.session_name,
             worker.agent_id,
             &intent.prompt,
@@ -3815,7 +3815,7 @@ impl AgentRuntime {
 
     /// The Agent concurrency this owner admits from, for tests and diagnostics.
     #[must_use]
-    pub fn concurrency(&self) -> usagi_core::usecase::client::AgentConcurrency {
+    pub fn concurrency(&self) -> usagi_core::infrastructure::client::AgentConcurrency {
         self.coordinator.concurrency()
     }
 }
@@ -3994,14 +3994,14 @@ fn terminal_of(request: &TerminalRequest) -> Option<&TerminalRef> {
 }
 
 /// The canonical launch intent. The formatting authority is
-/// [`usagi_core::usecase::client::agent_launch_semantic_key`] so a client can
+/// [`usagi_core::infrastructure::client::agent_launch_semantic_key`] so a client can
 /// derive the same digest for the final it receives.
 fn semantic_key(intent: &AgentLaunchIntent) -> String {
-    usagi_core::usecase::client::agent_launch_semantic_key(intent)
+    usagi_core::infrastructure::client::agent_launch_semantic_key(intent)
 }
 
 fn goal_semantic_key(intent: &AgentGoalIntent) -> String {
-    usagi_core::usecase::client::agent_goal_semantic_key(intent)
+    usagi_core::infrastructure::client::agent_goal_semantic_key(intent)
 }
 
 fn validate_goal(intent: &AgentGoalIntent) -> Result<(), ProtocolError> {
@@ -4021,9 +4021,9 @@ fn autonomous_goal_prompt(goal: &str, runtime: &str) -> String {
 }
 
 /// The canonical exact-resume intent, shared with clients through
-/// [`usagi_core::usecase::client::agent_resume_semantic_key`].
+/// [`usagi_core::infrastructure::client::agent_resume_semantic_key`].
 fn resume_semantic_key(target: &AgentResumeTarget) -> String {
-    usagi_core::usecase::client::agent_resume_semantic_key(target)
+    usagi_core::infrastructure::client::agent_resume_semantic_key(target)
 }
 
 fn repair_resume_semantic_key(target: &AgentResumeTarget, expected_revision: u32) -> String {
@@ -4199,7 +4199,7 @@ fn durable_resume_relation(
 /// Agent and generic terminals share one geometry contract, including the
 /// screen bounds the daemon's grid authority must respect.
 fn terminal_geometry(
-    geometry: usagi_core::usecase::client::TerminalGeometry,
+    geometry: usagi_core::infrastructure::client::TerminalGeometry,
 ) -> Result<Geometry, ProtocolError> {
     super::terminal_ipc::geometry(geometry)
 }
@@ -4465,7 +4465,7 @@ mod tests {
         id::{AgentId, AgentResumeSourceId, ClientId, RequestId},
         supervisor::{SupervisorRunId, TaskId},
     };
-    use usagi_core::usecase::client::TerminalAction;
+    use usagi_core::infrastructure::client::TerminalAction;
 
     trait JsonAgentTerminalActor {
         fn handle_terminal(
@@ -4547,7 +4547,7 @@ mod tests {
     use usagi_core::domain::agent::{
         AgentCapability, AgentProfile, DurableLaunchSnapshot, LaunchPlan,
     };
-    use usagi_core::usecase::client::TerminalGeometry;
+    use usagi_core::infrastructure::client::TerminalGeometry;
 
     // ---- fakes ---------------------------------------------------------------
 
@@ -6247,7 +6247,7 @@ mod tests {
         runtime.bind_concurrency_gauge(gauge.clone());
         assert_eq!(
             gauge.observe(),
-            Some(usagi_core::usecase::client::AgentConcurrency {
+            Some(usagi_core::infrastructure::client::AgentConcurrency {
                 in_use: 0,
                 limit: u32::try_from(AGENT_RUNTIME_LIMIT).unwrap(),
             })
@@ -6787,7 +6787,7 @@ mod tests {
         let operation = OperationId::new().to_string();
         let launch_intent = intent(None);
         let expected_digest = agent_operation_digest(
-            &usagi_core::usecase::client::agent_launch_semantic_key(&launch_intent),
+            &usagi_core::infrastructure::client::agent_launch_semantic_key(&launch_intent),
         );
 
         let admitted = runtime
@@ -10614,7 +10614,7 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Launch,
                 serde_json::to_value(TerminalRequest::Launch {
-                    intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                    intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
                         request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                             profile_id:
                                 usagi_core::domain::terminal_launch::TerminalProfileId::new(
@@ -10627,7 +10627,7 @@ mod tests {
                                 worktree_id: WorktreeId::new(),
                             },
                         },
-                        geometry: usagi_core::usecase::client::TerminalGeometry {
+                        geometry: usagi_core::infrastructure::client::TerminalGeometry {
                             cols: 80,
                             rows: 24,
                         },

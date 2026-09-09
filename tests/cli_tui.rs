@@ -1810,8 +1810,8 @@ fn cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code() {
 /// named (#548).
 #[test]
 fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
+    use usagi_core::infrastructure::client::{ClientError, ClientPolicy, IpcClient};
     use usagi_core::infrastructure::ipc::ClientWorkspace;
-    use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 
     let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
@@ -1887,8 +1887,8 @@ fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
 /// without disturbing the ones this daemon holds (#710).
 #[test]
 fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() {
+    use usagi_core::infrastructure::client::{ClientError, ClientPolicy, IpcClient};
     use usagi_core::infrastructure::ipc::ClientWorkspace;
-    use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 
     let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();
@@ -2164,11 +2164,11 @@ fn start_daemon_for(home: &DaemonHome, workspace: &Path) {
         );
         thread::sleep(Duration::from_millis(20));
     };
-    usagi_core::usecase::client::IpcClient::connect(
+    usagi_core::infrastructure::client::IpcClient::connect(
         stream,
         "cli-tui-mcp-workspace-opener".into(),
         usagi_core::domain::id::OperationId::new().to_string(),
-        usagi_core::usecase::client::ClientPolicy::cli(),
+        usagi_core::infrastructure::client::ClientPolicy::cli(),
         shipping_build_identity(),
         usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
             root: usagi_core::infrastructure::paths::wire_workspace_root(
@@ -2695,9 +2695,9 @@ fn open_validates_non_utf8_workspace_paths() {
 /// `connect_current` ([4. IPC](../document/04-ipc.md#owner-generation-routing)).
 #[test]
 fn one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner() {
+    use usagi_core::infrastructure::client::{ClientPolicy, IpcClient};
     use usagi_core::infrastructure::ipc::GenerationRole;
-    use usagi_core::usecase::client::{ClientPolicy, IpcClient};
-    use usagi_core::usecase::owner_routing::{RouteCache, RouteTarget};
+    use usagi_core::infrastructure::owner_routing::{RouteCache, RouteTarget};
     use usagi_daemon::infrastructure::generation_registry::TrustedGenerationDirectory;
     use usagi_daemon::infrastructure::unix_transport::connect_generation;
 
@@ -2728,7 +2728,7 @@ fn one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_o
     let owner = every[0].generation;
     assert_eq!(
         cache.resolve(&RouteTarget::ActiveControl).unwrap(),
-        usagi_core::usecase::owner_routing::RouteResolution::Single(every[0].clone())
+        usagi_core::infrastructure::owner_routing::RouteResolution::Single(every[0].clone())
     );
     assert_eq!(&cache.owner(owner).unwrap(), &every[0]);
 
@@ -2760,7 +2760,7 @@ fn one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_o
     let refusal = cache.owner(forged).expect_err("a forged owner is refused");
     assert_eq!(
         refusal,
-        usagi_core::usecase::owner_routing::RoutingError::UnknownGeneration(forged)
+        usagi_core::infrastructure::owner_routing::RoutingError::UnknownGeneration(forged)
     );
     assert_eq!(
         refusal.to_client_error().code(),

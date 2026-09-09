@@ -1,4 +1,4 @@
-//! Addressing a daemon that is temporarily more than one process.
+//! Routing IPC requests while a daemon is temporarily more than one process.
 //!
 //! A planned restart leaves the old generation alive and *draining*: it still
 //! owns the PTYs it spawned, while a new generation becomes `current` and takes
@@ -46,10 +46,10 @@ use std::fmt;
 
 use crate::domain::id::{DaemonGeneration, TerminalRef};
 use crate::domain::terminal_launch::{TerminalInventoryEntry, TerminalLaunchScope};
-use crate::infrastructure::ipc::{ErrorCode, GenerationRole, ProtocolError, SideEffect};
-use crate::usecase::client::{
+use crate::infrastructure::client::{
     ClientError, DaemonReply, DaemonRequest, DaemonSession, TerminalAction, TerminalRequest,
 };
+use crate::infrastructure::ipc::{ErrorCode, GenerationRole, ProtocolError, SideEffect};
 
 /// One generation a client may address, exactly as the daemon published it.
 ///

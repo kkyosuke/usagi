@@ -1,4 +1,4 @@
-//! 診断専用の daemon health projection。
+//! TUI 診断専用の daemon health projection。
 //!
 //! [`DaemonMetrics`] は表示専用の process-local counter であり、操作の可否や
 //! resource ownership の権威ではない。この module が作る [`DaemonHealth`] も同じ
@@ -26,7 +26,7 @@
 //! 時計は sample 自身の `sampled_at_ms` だけを使う。実時計を読むのは
 //! [`DaemonHealthTracker::evaluate`] の引数だけで、この module は IO を持たない。
 
-use crate::usecase::client::DaemonMetrics;
+use usagi_core::infrastructure::client::DaemonMetrics;
 
 /// 最新 sample がこれ以上古ければ「観測が停滞している」と扱う。
 ///
@@ -319,7 +319,7 @@ mod tests {
         DaemonHealth, DaemonHealthTracker, HOLD_MS, HealthLevel, HealthReason, STALLED_MS,
         UNRESPONSIVE_MS,
     };
-    use crate::usecase::client::DaemonMetrics;
+    use usagi_core::infrastructure::client::DaemonMetrics;
 
     const MIB: u64 = 1024 * 1024;
 

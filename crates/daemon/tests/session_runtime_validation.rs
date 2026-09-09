@@ -2,7 +2,7 @@ use std::fs;
 
 use serde_json::json;
 use usagi_core::domain::id::{DaemonGeneration, OperationId};
-use usagi_core::usecase::client::SessionAction;
+use usagi_core::infrastructure::client::SessionAction;
 use usagi_daemon::infrastructure::session_worktree::{SystemGit, SystemSessionWorktreeIo};
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError};
 

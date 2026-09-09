@@ -18,7 +18,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use usagi_core::infrastructure::ipc::GenerationRole as WireRole;
-use usagi_core::usecase::owner_routing::{
+use usagi_core::infrastructure::owner_routing::{
     DirectoryError, GenerationDirectory, TrustedEndpoint, TrustedEndpoints,
 };
 

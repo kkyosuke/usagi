@@ -77,7 +77,7 @@ impl OwnedRuntime {
 /// Classify `body` for a generation whose ownership stance is `owned`.
 ///
 /// The mapping is exhaustive over the wire vocabulary
-/// ([`usagi_core::usecase::client::DaemonRequest`]) rather than over the types,
+/// ([`usagi_core::infrastructure::client::DaemonRequest`]) rather than over the types,
 /// because the fence runs before the body is deserialized into a request: a
 /// payload that fails to parse must still be classified, and classifying it as
 /// `Control` is what keeps it refused everywhere it could do harm.

@@ -38,6 +38,12 @@ use usagi_core::domain::terminal_launch::{
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
+use usagi_core::infrastructure::client::{
+    AgentGoalIntent, AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics,
+    DaemonReply, DaemonRequest, MetricsAction, PrBatchRequest, PrDismissRequest, PrSnapshot,
+    SessionAction, TerminalAction, TerminalGeometry, TerminalLaneBudget, TerminalLaunchIntent,
+    TerminalRequest,
+};
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
 use usagi_core::infrastructure::ipc::{TerminalInputReplayMode, TerminalSnapshotMode};
@@ -47,12 +53,6 @@ use usagi_core::infrastructure::role_catalog::{
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
-use usagi_core::usecase::client::{
-    AgentGoalIntent, AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics,
-    DaemonReply, DaemonRequest, MetricsAction, PrBatchRequest, PrDismissRequest, PrSnapshot,
-    SessionAction, TerminalAction, TerminalGeometry, TerminalLaneBudget, TerminalLaunchIntent,
-    TerminalRequest,
-};
 use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::note::Target as StoreTarget;
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -200,7 +200,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
                 let mut client = Self::client()?;
                 let reply = client
                     .request(DaemonRequest::UserDecision {
-                        action: usagi_core::usecase::client::TuiUserDecisionAction::List,
+                        action: usagi_core::infrastructure::client::TuiUserDecisionAction::List,
                         payload: serde_json::json!({}),
                     })
                     .map_err(daemon_error_reason)?;
@@ -229,7 +229,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
             let mut client = Self::client()?;
             match client
                 .request(DaemonRequest::UserDecision {
-                    action: usagi_core::usecase::client::TuiUserDecisionAction::Resolve,
+                    action: usagi_core::infrastructure::client::TuiUserDecisionAction::Resolve,
                     payload: serde_json::json!({"decision_id": decision_id, "answer": answer}),
                 })
                 .map_err(daemon_error_reason)?
@@ -876,7 +876,7 @@ impl BackendOverlayPort for ProductionOverlayPort {
                     })
                     .and_then(|reply| match reply {
                         DaemonReply::Ok(value) => {
-                            usagi_core::usecase::client::decode_pr_snapshot(value)
+                            usagi_core::infrastructure::client::decode_pr_snapshot(value)
                                 .map_err(|_| "invalid PR snapshot".to_owned())
                         }
                         DaemonReply::Accepted { .. } => {
@@ -1764,7 +1764,7 @@ impl DaemonAgentCommandPort {
     /// pane's `resync_required` / `stale_target` must not revoke the attachments
     /// every other pane holds on the same connection.
     ///
-    /// [`route_terminal_request`]: usagi_core::usecase::owner_routing::route_terminal_request
+    /// [`route_terminal_request`]: usagi_core::infrastructure::owner_routing::route_terminal_request
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
     fn terminal_request(
         &mut self,
@@ -1952,14 +1952,14 @@ impl DaemonAgentCommandPort {
     /// keeps being the point at which this client starts noticing that its daemon
     /// went away.
     ///
-    /// [`merge_inventory`]: usagi_core::usecase::owner_routing::merge_inventory
+    /// [`merge_inventory`]: usagi_core::infrastructure::owner_routing::merge_inventory
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
     fn merged_inventory(
         &mut self,
         scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
     ) -> Result<Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>, TerminalError>
     {
-        use usagi_core::usecase::owner_routing::{
+        use usagi_core::infrastructure::owner_routing::{
             GenerationInventory, InventoryOutcome, merge_inventory,
         };
 
@@ -2022,7 +2022,7 @@ impl Drop for DaemonAgentCommandPort {
 fn owner_of_terminal_request(
     request: &TerminalRequest,
 ) -> Result<usagi_core::domain::id::DaemonGeneration, TerminalError> {
-    use usagi_core::usecase::owner_routing::{RouteTarget, route_terminal_request};
+    use usagi_core::infrastructure::owner_routing::{RouteTarget, route_terminal_request};
 
     match route_terminal_request(request) {
         RouteTarget::Owner(generation) => Ok(generation),
@@ -2032,7 +2032,7 @@ fn owner_of_terminal_request(
 
 /// Maps a typed client failure onto the safe terminal feedback the UI renders.
 /// No mapping authorizes a local PTY fallback.
-fn map_terminal_error(error: &usagi_core::usecase::client::ClientError) -> TerminalError {
+fn map_terminal_error(error: &usagi_core::infrastructure::client::ClientError) -> TerminalError {
     use usagi_core::infrastructure::ipc::ErrorCode;
     match error.code() {
         ErrorCode::ResyncRequired => TerminalError::ResyncRequired,
@@ -2185,9 +2185,10 @@ fn agent_inventory_request(workspace: WorkspaceId) -> DaemonRequest {
 fn fetch_agent_inventory(
     workspace: WorkspaceId,
 ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
-    let mut client =
-        crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-            .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+    let mut client = crate::runtime::daemon::policy_client(
+        usagi_core::infrastructure::client::ClientPolicy::tui(),
+    )
+    .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
     match client
         .request(agent_inventory_request(workspace))
         .map_err(|_| "Agent resume inventory is unavailable".to_owned())?
@@ -2212,12 +2213,15 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
         &mut self,
         workspace: WorkspaceId,
     ) -> Result<usagi_core::domain::agent::AgentWorkspaceObservation, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let mut client = crate::runtime::daemon::policy_client(
+            usagi_core::infrastructure::client::ClientPolicy::tui(),
+        )
+        .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
         match client
             .request(
-                usagi_core::usecase::client::DaemonRequest::AgentWorkspaceObservation { workspace },
+                usagi_core::infrastructure::client::DaemonRequest::AgentWorkspaceObservation {
+                    workspace,
+                },
             )
             .map_err(|_| "Agent workspace observation is unavailable".to_owned())?
         {
@@ -2238,13 +2242,16 @@ impl WorkRunPort for DaemonWorkRunPort {
         &mut self,
         workspace: WorkspaceId,
     ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let mut client = crate::runtime::daemon::policy_client(
+            usagi_core::infrastructure::client::ClientPolicy::tui(),
+        )
+        .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
         decode_work_run_snapshot_reply(
             client
                 .request(
-                    usagi_core::usecase::client::DaemonRequest::SupervisorSnapshot { workspace },
+                    usagi_core::infrastructure::client::DaemonRequest::SupervisorSnapshot {
+                        workspace,
+                    },
                 )
                 .map_err(|_| "Work Run progress is unavailable".to_owned())?,
         )
@@ -2256,15 +2263,14 @@ impl WorkRunPort for DaemonWorkRunPort {
         operation_id: usagi_core::domain::id::OperationId,
         command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
     ) -> Result<WorkRunControlResult, WorkRunControlError> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| {
-                    WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned())
-                })?;
+        let mut client = crate::runtime::daemon::policy_client(
+            usagi_core::infrastructure::client::ClientPolicy::tui(),
+        )
+        .map_err(|_| WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned()))?;
         decode_work_run_control_reply(
             client
                 .request(
-                    usagi_core::usecase::client::DaemonRequest::SupervisorControl {
+                    usagi_core::infrastructure::client::DaemonRequest::SupervisorControl {
                         workspace,
                         operation_id,
                         command,
@@ -2446,7 +2452,7 @@ fn correlate_agent_launch(
     intent: &AgentLaunchIntent,
 ) -> Result<AgentPaneAdmission, String> {
     let expected_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-        &usagi_core::usecase::client::agent_launch_semantic_key(intent),
+        &usagi_core::infrastructure::client::agent_launch_semantic_key(intent),
     );
     correlate_agent_response(
         reply,
@@ -2463,7 +2469,7 @@ fn correlate_agent_goal(
     intent: &AgentGoalIntent,
 ) -> Result<AgentPaneAdmission, String> {
     let expected_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-        &usagi_core::usecase::client::agent_goal_semantic_key(intent),
+        &usagi_core::infrastructure::client::agent_goal_semantic_key(intent),
     );
     correlate_agent_response(reply, operation, &expected_digest, intent.workspace, None)
 }
@@ -2524,7 +2530,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String> {
         let mut client = match crate::runtime::daemon::policy_client(
-            usagi_core::usecase::client::ClientPolicy::pane_launch(),
+            usagi_core::infrastructure::client::ClientPolicy::pane_launch(),
         ) {
             Ok(client) => client,
             Err(error) => {
@@ -2564,7 +2570,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         goal: &str,
     ) -> Result<AgentPaneAdmission, String> {
         let mut client = match crate::runtime::daemon::policy_client(
-            usagi_core::usecase::client::ClientPolicy::pane_launch(),
+            usagi_core::infrastructure::client::ClientPolicy::pane_launch(),
         ) {
             Ok(client) => client,
             Err(error) => {
@@ -2640,7 +2646,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         operation_id: usagi_core::domain::id::OperationId,
     ) -> Result<ExactAgentResume, String> {
         let mut client = match crate::runtime::daemon::policy_client(
-            usagi_core::usecase::client::ClientPolicy::pane_launch(),
+            usagi_core::infrastructure::client::ClientPolicy::pane_launch(),
         ) {
             Ok(client) => client,
             Err(error) => {
@@ -3227,7 +3233,7 @@ fn spawn_decision_pump() -> RefreshPump<Vec<usagi_core::domain::user_decision::U
     let mut lane = LaneConnection::observing();
     RefreshPump::spawn(decision_cadence(), move || {
         let reply = lane.request(DaemonRequest::UserDecision {
-            action: usagi_core::usecase::client::TuiUserDecisionAction::List,
+            action: usagi_core::infrastructure::client::TuiUserDecisionAction::List,
             payload: serde_json::json!({}),
         })?;
         let DaemonReply::Ok(value) = reply else {
@@ -3357,7 +3363,7 @@ fn fetch_scope_inventory(
     lanes: &mut BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient>,
     scope: &TerminalLaunchScope,
 ) -> Result<Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>, ()> {
-    use usagi_core::usecase::owner_routing::{
+    use usagi_core::infrastructure::owner_routing::{
         GenerationInventory, InventoryOutcome, merge_inventory,
     };
 
@@ -3813,7 +3819,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
         };
         let operation_id = usagi_core::domain::id::OperationId::new().to_string();
         let mut client = crate::runtime::daemon::policy_client(
-            usagi_core::usecase::client::ClientPolicy::tui_session(action),
+            usagi_core::infrastructure::client::ClientPolicy::tui_session(action),
         )
         .map_err(|error| format!("daemon unavailable: {error}"))?;
         let reply = client
@@ -3951,9 +3957,10 @@ impl LifecycleRequestError {
 /// daemon の revision state を持ち越さないよう port を都度生成する。
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_session_completion_contract
 fn request_lifecycle_snapshot() -> Result<LifecycleSnapshot, LifecycleRequestError> {
-    let mut client =
-        crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-            .map_err(LifecycleRequestError::Connect)?;
+    let mut client = crate::runtime::daemon::policy_client(
+        usagi_core::infrastructure::client::ClientPolicy::tui(),
+    )
+    .map_err(LifecycleRequestError::Connect)?;
     match client
         .request(DaemonRequest::Session {
             action: SessionAction::List,
@@ -5235,7 +5242,9 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use usagi_core::usecase::client::{ClientError, ClientPolicy, PrSnapshot, TerminalLaneBudget};
+    use usagi_core::infrastructure::client::{
+        ClientError, ClientPolicy, PrSnapshot, TerminalLaneBudget,
+    };
 
     /// The lane clock counts whole milliseconds, so a deadline armed for `n` ms
     /// can elapse a fraction under `n`. Lane-budget assertions allow that much.
@@ -5822,11 +5831,11 @@ mod tests {
     ) {
         use std::os::unix::net::UnixStream;
 
+        use usagi_core::infrastructure::client::{ClientPolicy, IpcClient};
         use usagi_core::infrastructure::ipc::{
             BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, read_json_frame,
             write_json_frame,
         };
-        use usagi_core::usecase::client::{ClientPolicy, IpcClient};
         use usagi_daemon::presentation::ipc::{handshake, server_protocol};
 
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
@@ -5932,7 +5941,7 @@ mod tests {
     #[test]
     fn owner_addressed_requests_route_to_their_reference_and_the_rest_are_refused() {
         use usagi_core::domain::terminal_launch::TerminalLaunchScope;
-        use usagi_core::usecase::client::TerminalRequest;
+        use usagi_core::infrastructure::client::TerminalRequest;
 
         let terminal = input_terminal_ref();
         let scope = TerminalLaunchScope {
@@ -6080,8 +6089,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn production_terminal_input_carries_and_resolves_a_durable_operation() {
+        use usagi_core::infrastructure::client::{DaemonRequest, TerminalAction, TerminalRequest};
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
         use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
         use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
 
@@ -6173,10 +6182,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_daemon_without_the_input_operation_capability_fails_closed_to_legacy() {
+        use usagi_core::infrastructure::client::{DaemonRequest, TerminalRequest};
         use usagi_core::infrastructure::ipc::{
             ResponseOutcome, TERMINAL_INPUT_OPERATION_CAPABILITY,
         };
-        use usagi_core::usecase::client::{DaemonRequest, TerminalRequest};
         use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
         use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
 
@@ -6279,7 +6288,7 @@ mod tests {
     /// The terminal actions one scripted connection received, in order.
     #[cfg(unix)]
     fn terminal_actions(requests: Vec<serde_json::Value>) -> Vec<String> {
-        use usagi_core::usecase::client::{DaemonRequest, TerminalRequest};
+        use usagi_core::infrastructure::client::{DaemonRequest, TerminalRequest};
 
         requests
             .into_iter()
@@ -6550,11 +6559,11 @@ mod tests {
     ) -> (super::LaneClient, HungTerminalServer) {
         use std::os::unix::net::UnixStream;
 
+        use usagi_core::infrastructure::client::{ClientPolicy, IpcClient};
         use usagi_core::infrastructure::ipc::{
             BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, read_json_frame,
             write_json_frame,
         };
-        use usagi_core::usecase::client::{ClientPolicy, IpcClient};
         use usagi_daemon::presentation::ipc::{handshake, server_protocol};
 
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
@@ -6910,8 +6919,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn production_malformed_attach_on_same_socket_keeps_epoch_and_next_input_sequence() {
+        use usagi_core::infrastructure::client::{DaemonRequest, TerminalAction, TerminalRequest};
         use usagi_core::infrastructure::ipc::ResponseOutcome;
-        use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
         use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
         let valid_attach = json!({
@@ -7154,10 +7163,10 @@ mod tests {
     fn production_terminal_input_reports_ack_loss_as_unknown_without_resend() {
         use std::os::unix::net::UnixStream;
 
+        use usagi_core::infrastructure::client::{ClientPolicy, IpcClient};
         use usagi_core::infrastructure::ipc::{
             BuildIdentity, DaemonGeneration, Envelope, read_json_frame,
         };
-        use usagi_core::usecase::client::{ClientPolicy, IpcClient};
         use usagi_daemon::presentation::ipc::{handshake, server_protocol};
         use usagi_tui::usecase::application::agent_runtime_ports::AgentCommandPort;
 
@@ -7512,7 +7521,7 @@ mod tests {
             worktree_id: WorktreeId::new(),
         };
         let digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-            &usagi_core::usecase::client::agent_goal_semantic_key(&intent),
+            &usagi_core::infrastructure::client::agent_goal_semantic_key(&intent),
         );
         let admission = correlate_agent_goal(
             DaemonReply::Accepted {
@@ -7552,7 +7561,7 @@ mod tests {
             worktree_id: WorktreeId::new(),
         };
         let digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-            &usagi_core::usecase::client::agent_launch_semantic_key(&intent),
+            &usagi_core::infrastructure::client::agent_launch_semantic_key(&intent),
         );
         (operation, intent, terminal, operation.to_string(), digest)
     }
@@ -7621,7 +7630,7 @@ mod tests {
             worktree_id: WorktreeId::new(),
         };
         let foreign_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-            &usagi_core::usecase::client::agent_launch_semantic_key(&AgentLaunchIntent {
+            &usagi_core::infrastructure::client::agent_launch_semantic_key(&AgentLaunchIntent {
                 workspace: intent.workspace,
                 session: None,
                 profile: None,
@@ -7937,14 +7946,14 @@ mod tests {
         };
         assert_eq!(
             agent_inventory_request(workspace),
-            usagi_core::usecase::client::DaemonRequest::AgentInventory {
+            usagi_core::infrastructure::client::DaemonRequest::AgentInventory {
                 workspace,
                 caller_context: None,
             }
         );
         assert_eq!(
             exact_agent_resume_request(operation, target.clone()),
-            usagi_core::usecase::client::DaemonRequest::ResumeAgent {
+            usagi_core::infrastructure::client::DaemonRequest::ResumeAgent {
                 operation_id: operation.to_string(),
                 target,
                 caller_context: None,
@@ -7954,8 +7963,8 @@ mod tests {
 
     #[test]
     fn lifecycle_parser_projection_and_safe_error_mapping_cover_every_branch() {
+        use usagi_core::infrastructure::client::ClientError;
         use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
-        use usagi_core::usecase::client::ClientError;
 
         let safe = DaemonDecisionCommandPort::safe_error("decision failed");
         assert_eq!(safe.message.as_str(), "User decisions are unavailable.");
@@ -8109,7 +8118,7 @@ mod tests {
 
     #[test]
     fn build_identity_errors_keep_the_old_daemon_in_the_tui_message() {
-        use usagi_core::usecase::client::ClientError;
+        use usagi_core::infrastructure::client::ClientError;
 
         let running = usagi_core::infrastructure::ipc::build_identity(
             "1",

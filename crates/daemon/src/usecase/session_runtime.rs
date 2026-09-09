@@ -20,6 +20,7 @@ use usagi_core::domain::session_lifecycle::{
     DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal, OperationStatus,
     WorkspaceLifecycleState, validate_session_name,
 };
+use usagi_core::infrastructure::client::SessionAction;
 use usagi_core::infrastructure::git::{GitRunner, delete_branch};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
@@ -27,7 +28,6 @@ use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_di
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
-use usagi_core::usecase::client::SessionAction;
 
 use crate::usecase::session_teardown::{
     PendingTeardown, TeardownEffect, TeardownJournal, TeardownSignal,

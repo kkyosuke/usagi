@@ -7,7 +7,7 @@ use serde_json::json;
 use super::*;
 use crate::domain::id::{SessionId, TerminalId, WorkspaceId, WorktreeId};
 use crate::domain::terminal_launch::TerminalKind;
-use crate::usecase::client::{SessionAction, TerminalGeometry};
+use crate::infrastructure::client::{SessionAction, TerminalGeometry};
 
 // ------------------------------------------------------------------ fixtures
 
@@ -154,7 +154,7 @@ fn control_operations_route_to_the_active_generation() {
     );
 
     let launch = terminal_request(&TerminalRequest::Launch {
-        intent: crate::usecase::client::TerminalLaunchIntent {
+        intent: crate::infrastructure::client::TerminalLaunchIntent {
             request: crate::domain::terminal_launch::TerminalLaunchRequest {
                 scope: scope(),
                 profile_id: crate::domain::terminal_launch::TerminalProfileId::new("shell")

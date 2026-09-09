@@ -33,7 +33,7 @@
 | 層 | 現状 | 置き場所 |
 |---|---|---|
 | daemon | `TerminalRegistry` が **raw PTY byte** を最大 64 KiB の bounded journal に保持し、attach/resync に `Snapshot { base_offset, output_offset, geometry, replay: Vec<u8>, exited }` を返す。`replay` は raw byte tail である | `crates/daemon/src/usecase/terminal.rs` |
-| wire | daemon `Snapshot` を JSON serialize し、TUI が `TerminalAttach { subscription, connection_epoch, output_offset, replay: Vec<u8>, exited }` へ decode する | `crates/core/src/usecase/client.rs` / `crates/tui/src/presentation/` |
+| wire | daemon `Snapshot` を JSON serialize し、TUI が `TerminalAttach { subscription, connection_epoch, output_offset, replay: Vec<u8>, exited }` へ decode する | `crates/core/src/infrastructure/client.rs` / `crates/tui/src/presentation/` |
 | TUI | `TerminalSession::replace` が **blank `TerminalScreen` を作り** `screen.advance(&attach.replay)` で raw tail を先頭から VT parser へ流す | `crates/tui/src/usecase/application/terminal_session.rs` |
 | VT parser | `TerminalScreen`（grid / scrollback / cursor / SGR / scroll region / alternate buffer / saved cursor / UTF-8 decoder）は **TUI クレートにのみ存在** | `crates/tui/src/usecase/application/terminal_screen.rs` |
 
