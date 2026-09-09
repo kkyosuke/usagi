@@ -116,6 +116,7 @@ pub struct EventPump<S, R> {
     tick_interval: Duration,
     next_tick_at: Duration,
     pending_terminal: Option<Event>,
+    legacy_unix_control_aliases: bool,
 }
 
 impl<S, R> EventPump<S, R>
@@ -132,7 +133,16 @@ where
             tick_interval,
             next_tick_at: now.saturating_add(tick_interval),
             pending_terminal: None,
+            legacy_unix_control_aliases: false,
         }
+    }
+
+    /// Restores the original bytes behind crossterm's Unix `Ctrl+4..7`
+    /// aliases when the terminal does not support enhanced keyboard events.
+    #[must_use]
+    pub fn with_legacy_unix_control_aliases(mut self, enabled: bool) -> Self {
+        self.legacy_unix_control_aliases = enabled;
+        self
     }
 
     /// `now` 時点で次の runtime event を返す。
@@ -143,7 +153,10 @@ where
     #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=source_poll_and_read_errors_are_projected_from_each_pump_phase
     pub fn next(&mut self, now: Duration) -> io::Result<RuntimeEvent<R::Event>> {
         while let Some(event) = self.poll_terminal(Duration::ZERO)? {
-            if let Some(event) = adapt_event(event) {
+            if let Some(event) = adapt_event_with_legacy_unix_control_aliases(
+                event,
+                self.legacy_unix_control_aliases,
+            ) {
                 return self.coalesce_wheel(event);
             }
         }
@@ -158,7 +171,10 @@ where
         let timeout = self.next_tick_at.saturating_sub(now);
         loop {
             if let Some(event) = self.poll_terminal(timeout)? {
-                if let Some(event) = adapt_event(event) {
+                if let Some(event) = adapt_event_with_legacy_unix_control_aliases(
+                    event,
+                    self.legacy_unix_control_aliases,
+                ) {
                     return self.coalesce_wheel(event);
                 }
                 continue;
@@ -199,7 +215,10 @@ where
             let Some(raw) = self.poll_terminal(Duration::ZERO)? else {
                 break;
             };
-            let Some(next) = adapt_event::<R::Event>(raw.clone()) else {
+            let Some(next) = adapt_event_with_legacy_unix_control_aliases::<R::Event>(
+                raw.clone(),
+                self.legacy_unix_control_aliases,
+            ) else {
                 continue;
             };
             match (&mut event, next) {
@@ -263,10 +282,20 @@ fn advance_tick(next_tick_at: &mut Duration, tick_interval: Duration, now: Durat
 }
 
 /// crossterm event を、保持可能な TUI runtime 語彙へ変換する。
+#[cfg(test)]
 #[must_use]
 pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
+    adapt_event_with_legacy_unix_control_aliases(event, false)
+}
+
+fn adapt_event_with_legacy_unix_control_aliases<B>(
+    event: Event,
+    legacy_unix_control_aliases: bool,
+) -> Option<RuntimeEvent<B>> {
     match event {
-        Event::Key(key) => Some(RuntimeEvent::Input(LiveInput::Key(adapt_key(key)))),
+        Event::Key(key) => Some(RuntimeEvent::Input(LiveInput::Key(
+            adapt_key_with_legacy_unix_control_aliases(key, legacy_unix_control_aliases),
+        ))),
         Event::Paste(text) => Some(RuntimeEvent::Input(LiveInput::Paste(text.into_bytes()))),
         Event::Resize(width, height) => Some(RuntimeEvent::Resize { width, height }),
         Event::Mouse(mouse) => match mouse.kind {
@@ -307,9 +336,17 @@ pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
 }
 
 /// crossterm の key kind、modifier、code を TUI の terminal 非依存語彙へ写す。
+#[cfg(test)]
 #[must_use]
 pub fn adapt_key(key: KeyEvent) -> InputKeyEvent {
-    InputKeyEvent::new(
+    adapt_key_with_legacy_unix_control_aliases(key, false)
+}
+
+fn adapt_key_with_legacy_unix_control_aliases(
+    key: KeyEvent,
+    legacy_unix_control_aliases: bool,
+) -> InputKeyEvent {
+    let mut input = InputKeyEvent::new(
         match key.code {
             CrosstermKeyCode::Char(character) => {
                 KeyCode::Char(adapt_character(character, key.modifiers))
@@ -345,7 +382,27 @@ pub fn adapt_key(key: KeyEvent) -> InputKeyEvent {
             KeyEventKind::Repeat => InputKeyEventKind::Repeat,
             KeyEventKind::Release => InputKeyEventKind::Release,
         },
-    )
+    );
+    if legacy_unix_control_aliases {
+        input.raw_bytes = legacy_unix_control_byte(&key).into_iter().collect();
+    }
+    input
+}
+
+/// Crossterm's Unix legacy parser projects bytes `0x1c..=0x1f` as
+/// `Ctrl+4..=Ctrl+7`. Reconstruct that byte only when the runtime has already
+/// established that enhanced, unambiguous keyboard events are unavailable.
+fn legacy_unix_control_byte(key: &KeyEvent) -> Option<u8> {
+    if key.modifiers != KeyModifiers::CONTROL {
+        return None;
+    }
+    match key.code {
+        CrosstermKeyCode::Char('4') => Some(0x1c),
+        CrosstermKeyCode::Char('5') => Some(0x1d),
+        CrosstermKeyCode::Char('6') => Some(0x1e),
+        CrosstermKeyCode::Char('7') => Some(0x1f),
+        _ => None,
+    }
 }
 
 /// Canonicalize printable ASCII letters across terminal keyboard protocols.
@@ -608,6 +665,83 @@ mod tests {
     }
 
     #[test]
+    fn legacy_unix_control_aliases_reach_the_prefix_classifier_without_losing_digits() {
+        use usagi_tui::usecase::terminal_input::{
+            LiveInputClassifier, LiveInputOutput, LiveTerminalAction,
+        };
+
+        for (character, expected) in [
+            ('4', LiveTerminalAction::ActivateWorkspace(4)),
+            ('5', LiveTerminalAction::NextTab),
+            ('6', LiveTerminalAction::ActivateWorkspace(6)),
+            ('7', LiveTerminalAction::KeyboardHelp),
+        ] {
+            let source = FakeSource::with([
+                Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+                // Crossterm's Unix legacy parser projects raw 0x1c..=0x1f
+                // as Ctrl-4..=Ctrl-7. Reserved legacy bytes win, while bytes
+                // without a reserved meaning retain their digit shortcut.
+                Event::Key(KeyEvent::new(
+                    KeyCode::Char(character),
+                    KeyModifiers::CONTROL,
+                )),
+            ]);
+            let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0)
+                .with_legacy_unix_control_aliases(true);
+            let mut classifier = LiveInputClassifier::default();
+            let RuntimeEvent::Input(leader) = pump.next(T0).unwrap() else {
+                panic!("leader must remain a live input");
+            };
+            assert_eq!(
+                classifier.classify(Duration::ZERO, leader),
+                LiveInputOutput::Swallowed
+            );
+            let RuntimeEvent::Input(follow_up) = pump.next(T0).unwrap() else {
+                panic!("follow-up must remain a live input");
+            };
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), follow_up),
+                LiveInputOutput::Action(expected),
+                "legacy Ctrl-{character}"
+            );
+        }
+    }
+
+    #[test]
+    fn enhanced_control_digit_remains_distinct_from_control_bracket() {
+        use usagi_tui::usecase::terminal_input::{
+            LiveInputClassifier, LiveInputOutput, LiveTerminalAction,
+        };
+
+        for (character, expected) in [
+            ('5', LiveTerminalAction::ActivateWorkspace(5)),
+            (']', LiveTerminalAction::NextTab),
+        ] {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(
+                    Duration::ZERO,
+                    LiveInput::Key(adapt_key(KeyEvent::new(
+                        KeyCode::Char('o'),
+                        KeyModifiers::CONTROL,
+                    ))),
+                ),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(
+                    Duration::from_millis(1),
+                    LiveInput::Key(adapt_key(KeyEvent::new(
+                        KeyCode::Char(character),
+                        KeyModifiers::CONTROL,
+                    ))),
+                ),
+                LiveInputOutput::Action(expected)
+            );
+        }
+    }
+
+    #[test]
     fn same_direction_wheel_burst_is_coalesced_before_the_next_frame() {
         let source = FakeSource::with([
             wheel(MouseEventKind::ScrollUp, 4, 7),
@@ -851,5 +985,40 @@ mod tests {
             adapt_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).code,
             usagi_tui::usecase::terminal_input::KeyCode::Char('x')
         );
+    }
+
+    #[test]
+    fn legacy_unix_control_alias_reconstruction_is_exact_and_opt_in() {
+        for (character, byte) in [('4', 28), ('5', 29), ('6', 30), ('7', 31)] {
+            assert_eq!(
+                adapt_key_with_legacy_unix_control_aliases(
+                    KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL),
+                    true,
+                )
+                .raw_bytes,
+                vec![byte]
+            );
+        }
+        assert!(
+            adapt_key_with_legacy_unix_control_aliases(
+                KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL),
+                false,
+            )
+            .raw_bytes
+            .is_empty()
+        );
+        for event in [
+            KeyEvent::new(
+                KeyCode::Char('5'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        ] {
+            assert!(
+                adapt_key_with_legacy_unix_control_aliases(event, true)
+                    .raw_bytes
+                    .is_empty()
+            );
+        }
     }
 }

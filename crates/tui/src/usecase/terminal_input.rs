@@ -94,8 +94,10 @@ pub struct KeyEvent {
     pub modifiers: Modifiers,
     /// Press, repeat, or release.
     pub kind: KeyEventKind,
-    /// Original bytes when the terminal backend exposes them. They take priority
-    /// over the portable encoder so no terminal-specific sequence is lost.
+    /// Original bytes when the terminal backend exposes them, or bytes the
+    /// composition adapter can reconstruct without ambiguity. They take
+    /// priority over the portable encoder so no terminal-specific sequence is
+    /// lost.
     pub raw_bytes: Vec<u8>,
 }
 
@@ -692,6 +694,11 @@ pub(crate) fn prefix_help_entries(
 }
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
+    if !key.raw_bytes.is_empty()
+        && let Some(action) = prefix_bytes_action(&key.raw_bytes)
+    {
+        return Some(action);
+    }
     if let Some(byte) = control_byte_from_key_code(key.code) {
         return prefix_control_byte_action(byte);
     }
@@ -947,6 +954,12 @@ mod tests {
             },
             KeyEventKind::Press,
         ))
+    }
+
+    fn key_with_raw(code: KeyCode, modifiers: Modifiers, raw_bytes: Vec<u8>) -> LiveInput {
+        let mut key = KeyEvent::new(code, modifiers, KeyEventKind::Press);
+        key.raw_bytes = raw_bytes;
+        LiveInput::Key(key)
     }
 
     #[test]
@@ -1399,6 +1412,17 @@ mod tests {
             (LiveInput::Raw(vec![27]), LiveTerminalAction::PreviousTab),
             (ctrl(']'), LiveTerminalAction::NextTab),
             (key(KeyCode::Char('\u{1d}')), LiveTerminalAction::NextTab),
+            (
+                key_with_raw(
+                    KeyCode::Char('5'),
+                    Modifiers {
+                        control: true,
+                        ..Modifiers::default()
+                    },
+                    vec![29],
+                ),
+                LiveTerminalAction::NextTab,
+            ),
             (LiveInput::Raw(vec![29]), LiveTerminalAction::NextTab),
         ];
         for (follow_up, action) in cases {

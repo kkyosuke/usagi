@@ -4785,26 +4785,38 @@ fn run_in_terminal(
     run: impl FnOnce(&mut CrosstermTerminal) -> std::io::Result<Exit>,
 ) -> std::io::Result<Exit> {
     enable_raw_mode()?;
+    let keyboard_enhancement = terminal::supports_keyboard_enhancement().unwrap_or(false);
+    let mut keyboard_enhancement_pushed = false;
     let mut setup = std::io::stdout();
-    if let Err(error) = execute!(
-        setup,
-        EnterAlternateScreen,
-        // Ask supporting terminals to preserve modifier identity for shortcuts
-        // and selection-aware input.
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-        EnableMouseCapture,
-        // Capture pastes as a single `Event::Paste` so a multi-line paste reaches
-        // the focused pane as one block instead of a key stream whose embedded
-        // Enters each submit a line to the agent (see `passthrough_key`).
-        EnableBracketedPaste,
-        terminal::DisableLineWrap,
-        cursor::Hide
-    ) {
+    let setup_result = (|| {
+        execute!(setup, EnterAlternateScreen)?;
+        if keyboard_enhancement {
+            // Preserve modifier identity so Ctrl-] and Ctrl-5 remain distinct.
+            execute!(
+                setup,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?;
+            keyboard_enhancement_pushed = true;
+        }
+        execute!(
+            setup,
+            EnableMouseCapture,
+            // Capture pastes as a single `Event::Paste` so a multi-line paste reaches
+            // the focused pane as one block instead of a key stream whose embedded
+            // Enters each submit a line to the agent (see `passthrough_key`).
+            EnableBracketedPaste,
+            terminal::DisableLineWrap,
+            cursor::Hide
+        )
+    })();
+    if let Err(error) = setup_result {
+        if keyboard_enhancement_pushed {
+            let _ = execute!(setup, PopKeyboardEnhancementFlags);
+        }
         let _ = execute!(
             setup,
             cursor::Show,
             terminal::EnableLineWrap,
-            PopKeyboardEnhancementFlags,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -4818,7 +4830,8 @@ fn run_in_terminal(
             NoBackend::default(),
             Duration::from_millis(16),
             Duration::ZERO,
-        ),
+        )
+        .with_legacy_unix_control_aliases(cfg!(unix) && !keyboard_enhancement),
         input_started: Instant::now(),
         renderer: FrameRenderer::new(),
         live_input: LiveInputClassifier::default(),
@@ -4827,11 +4840,13 @@ fn run_in_terminal(
     };
     let result = run(&mut terminal);
     let mut teardown = std::io::stdout();
+    if keyboard_enhancement_pushed {
+        let _ = execute!(teardown, PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(
         teardown,
         cursor::Show,
         terminal::EnableLineWrap,
-        PopKeyboardEnhancementFlags,
         DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
