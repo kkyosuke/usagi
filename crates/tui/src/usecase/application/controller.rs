@@ -5062,8 +5062,8 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             Vec::new()
         }
         Overlay::Daemon => update_daemon_control(state, &key),
-        // The Garden has no hidden viewport. Every key is a wake-up consumed
-        // before Home, including the arrow keys used by other surfaces.
+        // Presentation resolves list scrolling against the drawn viewport as
+        // GardenClick::Scroll. Any key reaching this reducer wakes Home.
         Overlay::Garden => {
             state.overlay = None;
             Vec::new()

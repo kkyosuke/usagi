@@ -26,8 +26,8 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [session garden](#session-garden)
   - [Garden Action Center](#garden-action-center)
-  - [右の session 一覧](#右の-session-一覧)
   - [responsive layout](#responsive-layout)
+  - [右の session 一覧](#右の-session-一覧)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
   - [daemon health indicator](#daemon-health-indicator)
@@ -1316,7 +1316,7 @@ notice に表示するため、見えない overlay が入力だけを所有す�
 
 | 入力 | 挙動 |
 |---|---|
-| key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。矢印 key も含め、背面の terminal や form へは渡さない |
+| 一覧のスクロール以外の key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない。上下・page key と一覧上の wheel は[一覧の操作](#右の-session-一覧)に従う |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
 | active project のうさぎを single click | 移動中の hitbox に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
 | inactive project の巣穴・うさぎを click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く。押した相手が[観測されたうさぎ](#inactive-project-の-agent-観測)なら、controller の準備後に同じ runtime の Agent tab を選ぶ |
