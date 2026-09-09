@@ -742,6 +742,43 @@ enum GardenInputRoute {
     Project(GardenProjectVisit),
 }
 
+fn garden_scroll_input(material: Option<&HomeFrameMaterial>, key: &Key) -> Option<GardenClick> {
+    let scroll = |lines, position| {
+        material
+            .and_then(|material| {
+                views::workspace::garden_scroll_at(
+                    material.height,
+                    material.width,
+                    &material.projection,
+                    material.now,
+                    lines,
+                    position,
+                )
+            })
+            .unwrap_or(GardenClick::Dismiss)
+    };
+    let page = material.map_or(1, |material| {
+        isize::try_from(material.height.saturating_sub(3)).unwrap_or(isize::MAX)
+    });
+    Some(match key {
+        Key::Up => scroll(-1, None),
+        Key::Down => scroll(1, None),
+        Key::PageUp => scroll(-page, None),
+        Key::PageDown => scroll(page, None),
+        Key::Live(LiveTerminalAction::Wheel {
+            up,
+            column,
+            row,
+            notches,
+        }) => {
+            let lines = isize::try_from(*notches).unwrap_or(isize::MAX);
+            scroll(if *up { -lines } else { lines }, Some((*column, *row)))
+        }
+
+        _ => return None,
+    })
+}
+
 /// Give an open Garden exclusive ownership of the next user interaction.
 /// Backend/frame ticks are not user activity and keep the screen saver open.
 /// A pointer press also fences the rest of its drag/release gesture so closing
@@ -769,6 +806,11 @@ fn route_garden_input(
         return None;
     }
 
+    if let Some(click) = garden_scroll_input(material, key) {
+        return Some(GardenInputRoute::Local(
+            runtime.apply_event(AppEvent::GardenClick(click)),
+        ));
+    }
     let pointer = match key {
         Key::Click { column, row } => material
             .and_then(|material| {
@@ -11374,6 +11416,7 @@ mod tests {
                     (
                         WorkspaceId::new(),
                         crate::presentation::widgets::garden::GardenSession {
+                            sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
                             id: SessionId::new(),
                             label: format!("project-{index} / session-{index}"),
                             lifecycle: SessionLifecycle::Available,
@@ -11413,6 +11456,105 @@ mod tests {
     }
 
     #[test]
+    fn garden_list_keys_and_wheel_scroll_without_waking_the_terminal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let root = PathBuf::from("/tmp/demo");
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut gesture = false;
+        let mut material = home_frame_material(
+            24,
+            120,
+            &runtime,
+            "demo",
+            &root,
+            &[],
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        );
+        material.projection = material.projection.with_deck_garden(
+            "demo".into(),
+            vec![(
+                workspace,
+                crate::presentation::widgets::garden::GardenSession {
+                    sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(
+                    ),
+                    id: session,
+                    label: "many agents".into(),
+                    lifecycle: SessionLifecycle::Available,
+                    selected: false,
+                    failure_summary: None,
+                    agents_observed: true,
+                    agents: (0..30)
+                        .map(|_| crate::presentation::widgets::garden::GardenAgent {
+                            runtime_id: AgentRuntimeId::new(),
+                            phase: AgentPhase::Running,
+                        })
+                        .collect(),
+                    agent_status: None,
+                    pending_decisions: 0,
+                    pr_merged: false,
+                },
+            )],
+        );
+        for (key, expected) in [
+            (Key::Down, 1),
+            (Key::Up, 0),
+            (Key::PageDown, 13),
+            (Key::PageUp, 0),
+            (
+                Key::Live(LiveTerminalAction::Wheel {
+                    up: false,
+                    column: 119,
+                    row: 5,
+                    notches: 3,
+                }),
+                3,
+            ),
+            (
+                Key::Live(LiveTerminalAction::Wheel {
+                    up: true,
+                    column: 119,
+                    row: 5,
+                    notches: 3,
+                }),
+                0,
+            ),
+        ] {
+            assert_eq!(
+                route_garden_input(&mut ui, &mut runtime, Some(&material), &key, &mut gesture),
+                Some(GardenInputRoute::Local(Vec::new()))
+            );
+            assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+            assert_eq!(runtime.state().garden_sidebar_scroll(), expected);
+        }
+        let wheel_outside = Key::Live(LiveTerminalAction::Wheel {
+            up: false,
+            column: 0,
+            row: 5,
+            notches: 1,
+        });
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                Some(&material),
+                &wheel_outside,
+                &mut gesture
+            ),
+            Some(GardenInputRoute::Local(Vec::new()))
+        );
+        assert_eq!(runtime.state().overlay(), None);
+    }
+
+    #[test]
     fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
         let workspace = WorkspaceId::new();
         let foreign_workspace = WorkspaceId::new();
@@ -11423,7 +11565,7 @@ mod tests {
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
         let mut material = home_frame_material(
             24,
-            80,
+            120,
             &runtime,
             "demo",
             &root,
@@ -11440,6 +11582,8 @@ mod tests {
             vec![(
                 foreign_workspace,
                 crate::presentation::widgets::garden::GardenSession {
+                    sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(
+                    ),
                     id: session,
                     label: "other / review".to_owned(),
                     lifecycle: SessionLifecycle::Available,
@@ -11457,7 +11601,7 @@ mod tests {
             )],
         );
         let click = (0..24)
-            .flat_map(|row| (0..80).map(move |column| (column, row)))
+            .flat_map(|row| (85..120).map(move |column| (column, row)))
             .find(|&(column, row)| {
                 matches!(
                     garden_click_at(
@@ -14431,6 +14575,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let projected = ProjectedSession {
+            branch: "usagi/alpha".into(),
             id: session,
             label: "alpha".into(),
             detail: "fixture".into(),
@@ -14639,6 +14784,7 @@ mod tests {
             inherited: Vec::new(),
         }));
         let sessions = [ProjectedSession {
+            branch: "usagi/alpha".into(),
             id: session,
             label: "alpha".into(),
             detail: "fixture".into(),

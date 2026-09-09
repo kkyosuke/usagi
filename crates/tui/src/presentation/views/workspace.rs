@@ -152,6 +152,8 @@ pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> (usize, usize) 
 /// 同名・変更・並び替えがあっても target の同一性には使わない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectedSession {
+    /// Managed branch derived from the canonical record name, not its display label.
+    pub branch: String,
     /// daemon / snapshot が与える stable session identity。
     pub id: SessionId,
     /// sidebar に表示する名前。
@@ -213,6 +215,7 @@ impl ProjectedSession {
         Self {
             id,
             label: record.display_label().to_owned(),
+            branch: format!("usagi/{}", record.name),
             detail: record.origin.as_str().to_owned(),
             cwd: record.root.clone(),
             last_modified: record.last_active_or_created(),
@@ -390,6 +393,7 @@ pub struct HomeProjection {
     /// A one-project Home uses its workspace name; the deck replaces both when
     /// more open projects contribute cached plots.
     garden_scope: String,
+    garden_sidebar_scroll: usize,
     garden_workspaces: BTreeMap<SessionId, WorkspaceId>,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
@@ -526,6 +530,11 @@ fn project_garden_sessions(
         sessions
             .iter()
             .map(|session| widgets::garden::GardenSession {
+                sidebar: widgets::garden::sidebar::SessionDetails {
+                    name: session.label.clone(),
+                    branch: session.branch.clone(),
+                    ..Default::default()
+                },
                 id: session.id,
                 label: garden_session_label(session, &names),
                 lifecycle: session.lifecycle,
@@ -703,6 +712,7 @@ impl HomeProjection {
             session_agents,
             garden_sessions,
             garden_scope: workspace_name.to_owned(),
+            garden_sidebar_scroll: state.garden_sidebar_scroll(),
             garden_workspaces,
             garden_motion: GardenMotion::Full,
             garden_tick: None,
@@ -759,7 +769,7 @@ impl HomeProjection {
         let (height, width) = widgets::normalize_size(raw_height, raw_width);
         self.garden_tick = widgets::garden::canonical_tick(
             height,
-            width,
+            widgets::garden::sidebar::scene_width(width),
             sessions,
             tick,
             self.garden_motion.is_reduced(),
@@ -2178,16 +2188,19 @@ fn garden_frame(
     raw_width: usize,
     home: &HomeProjection,
     now: DateTime<Utc>,
-) -> Option<widgets::garden::GardenFrame> {
+) -> Option<widgets::garden::sidebar::GardenView> {
     let sessions = home.garden_sessions.as_ref()?;
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    widgets::garden::render(
+    widgets::garden::sidebar::render(
         height,
         width,
         &home.garden_scope,
         sessions,
-        home.garden_tick.unwrap_or_else(|| garden_tick(now)),
-        home.garden_motion.is_reduced(),
+        widgets::garden::sidebar::ViewOptions {
+            tick: home.garden_tick.unwrap_or_else(|| garden_tick(now)),
+            reduced_motion: home.garden_motion.is_reduced(),
+            scroll: home.garden_sidebar_scroll,
+        },
     )
 }
 
@@ -2222,6 +2235,33 @@ pub fn garden_click_at(
 ) -> Option<GardenClick> {
     let frame = garden_frame(raw_height, raw_width, home, now)?;
     let (column, row) = (usize::from(column), usize::from(row));
+    if let Some(sidebar) = frame.sidebar
+        && column >= sidebar.column
+        && column < sidebar.column + sidebar.width
+        && row > 0
+        && row <= sidebar.footer_row
+    {
+        if row == sidebar.footer_row {
+            let offset = if column < sidebar.column + sidebar.width / 2 {
+                sidebar.scroll.saturating_sub(sidebar.page_size)
+            } else {
+                sidebar
+                    .scroll
+                    .saturating_add(sidebar.page_size)
+                    .min(sidebar.max_scroll)
+            };
+            return Some(GardenClick::Scroll { offset });
+        }
+        if !frame
+            .hitboxes
+            .iter()
+            .any(|hitbox| hitbox.contains(column, row))
+        {
+            return Some(GardenClick::Scroll {
+                offset: sidebar.scroll,
+            });
+        }
+    }
     Some(
         frame
             .hitboxes
@@ -2239,6 +2279,34 @@ pub fn garden_click_at(
             })
             .unwrap_or(GardenClick::Dismiss),
     )
+}
+
+/// Resolve a list scroll against the viewport currently on screen. Wheel input
+/// outside the list keeps the ordinary Garden wake-up behavior.
+#[must_use]
+pub fn garden_scroll_at(
+    raw_height: usize,
+    raw_width: usize,
+    home: &HomeProjection,
+    now: DateTime<Utc>,
+    lines: isize,
+    position: Option<(u16, u16)>,
+) -> Option<GardenClick> {
+    let sidebar = garden_frame(raw_height, raw_width, home, now)?.sidebar?;
+    if let Some((column, row)) = position
+        && (usize::from(column) < sidebar.column
+            || usize::from(column) >= sidebar.column + sidebar.width
+            || row == 0
+            || usize::from(row) > sidebar.footer_row)
+    {
+        return None;
+    }
+    Some(GardenClick::Scroll {
+        offset: sidebar
+            .scroll
+            .saturating_add_signed(lines)
+            .min(sidebar.max_scroll),
+    })
 }
 
 /// controller projection の Home frame を描く。
@@ -2293,7 +2361,7 @@ pub fn render_home_at(
     // 収まらない端末では Garden を開かず Home を保つ（操作できる一覧を警告画面で
     // 覆わない）。
     if let Some(frame) = garden_frame(raw_height, raw_width, home, now) {
-        return frame.rows;
+        return frame.frame.rows;
     }
     let full_body_height = height.saturating_sub(CHROME_ROWS);
     let mut frame = Vec::with_capacity(height);
@@ -3799,6 +3867,7 @@ mod tests {
 
     fn projected_session(id: SessionId, label: &str, cwd: &str) -> ProjectedSession {
         ProjectedSession {
+            branch: format!("usagi/{label}"),
             id,
             label: label.to_string(),
             detail: "snapshot".to_string(),
@@ -4232,6 +4301,18 @@ mod tests {
             Some(1),
             "diagnostic inventory remains visible without inventing an actionable tab"
         );
+    }
+
+    #[test]
+    fn garden_branch_uses_the_canonical_name_after_a_display_rename() {
+        let record = session(
+            "checkout-flow-v2",
+            Some("New checkout"),
+            SessionOrigin::Human,
+        );
+        let projected = ProjectedSession::from_record(SessionId::new(), &record);
+        assert_eq!(projected.label, "New checkout");
+        assert_eq!(projected.branch, "usagi/checkout-flow-v2");
     }
 
     #[test]
@@ -5619,7 +5700,7 @@ mod tests {
         // Garden が Home を置き換えている（sidebar ではなく庭の footer が出る）。
         assert!(text.contains("Garden Action Center"));
         assert!(text.contains("click"));
-        assert!(text.contains("any key · wake"));
+        assert!(text.contains("↑/↓ list · Esc wake"));
         assert!(!text.contains("Agents"));
         assert!(!text.contains(AGENT_ICON));
         assert!(text.contains("waiting"));
@@ -5811,6 +5892,7 @@ mod tests {
         let rabbits = frame
             .hitboxes
             .iter()
+            .filter(|hitbox| hitbox.column < frame.sidebar.unwrap().column)
             .filter_map(|hitbox| hitbox.agent)
             .collect::<Vec<_>>();
         assert_eq!(rabbits, vec![live.agent_runtime_id]);
@@ -5882,6 +5964,8 @@ mod tests {
             vec![(
                 WorkspaceId::new(),
                 widgets::garden::GardenSession {
+                    sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(
+                    ),
                     id: SessionId::new(),
                     label: "other / review".to_owned(),
                     lifecycle: SessionLifecycle::Available,
@@ -5918,8 +6002,15 @@ mod tests {
         let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
 
         let frame = garden_frame(24, 100, &home, now()).expect("the garden owns this frame");
-        // Agent の居ない compact 庭なので、rectangle は区画ぶんだけである。
-        assert_eq!(frame.hitboxes.len(), ids.len());
+        // Every session keeps its plot target as well as its list rows.
+        assert_eq!(
+            frame
+                .hitboxes
+                .iter()
+                .filter(|hitbox| hitbox.column < frame.sidebar.unwrap().column)
+                .count(),
+            ids.len()
+        );
         assert!(frame.hitboxes.iter().all(|hitbox| hitbox.agent.is_none()));
         for hitbox in &frame.hitboxes {
             let column = u16::try_from(hitbox.column + hitbox.width / 2).expect("fits a u16");
@@ -5945,6 +6036,8 @@ mod tests {
             vec![(
                 foreign_workspace,
                 widgets::garden::GardenSession {
+                    sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(
+                    ),
                     id: foreign_session,
                     label: "other / review".to_owned(),
                     lifecycle: SessionLifecycle::Available,
@@ -5965,7 +6058,10 @@ mod tests {
         let agent_row = frame
             .hitboxes
             .iter()
-            .find(|hitbox| hitbox.agent == Some(foreign_agent))
+            .find(|hitbox| {
+                hitbox.agent == Some(foreign_agent)
+                    && hitbox.column >= widgets::garden::sidebar::scene_width(100)
+            })
             .expect("the inactive project's Agent is drawn as a usagi");
         assert_eq!(
             garden_click_at(
@@ -6001,6 +6097,49 @@ mod tests {
         assert_eq!(garden_click_at(12, 100, &home, now(), 10, 10), None);
     }
 
+    #[test]
+    fn garden_sidebar_scroll_buttons_and_wheel_use_the_drawn_viewport() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, vec![]);
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD),
+        );
+        let home = HomeProjection::from_state(&state, "repo", Path::new("/repo"), &[])
+            .with_deck_garden("projects".into(), garden_project_rows());
+        let frame = garden_frame(13, 120, &home, now()).unwrap();
+        let sidebar = frame.sidebar.unwrap();
+        assert!(sidebar.max_scroll > 0);
+        let right = u16::try_from(sidebar.column + sidebar.width - 1).unwrap();
+        assert_eq!(
+            garden_click_at(13, 120, &home, now(), right, 12),
+            Some(GardenClick::Scroll {
+                offset: sidebar.page_size.min(sidebar.max_scroll)
+            })
+        );
+        assert_eq!(
+            garden_click_at(13, 120, &home, now(), right, 1),
+            Some(GardenClick::Scroll { offset: 0 })
+        );
+        assert_eq!(
+            super::garden_scroll_at(13, 120, &home, now(), isize::MAX, None),
+            Some(GardenClick::Scroll {
+                offset: sidebar.max_scroll
+            })
+        );
+        assert_eq!(
+            super::garden_scroll_at(13, 120, &home, now(), -1, Some((right, 2))),
+            Some(GardenClick::Scroll { offset: 0 })
+        );
+        for position in [(0, 2), (120, 2), (right, 0), (right, 13)] {
+            assert_eq!(
+                super::garden_scroll_at(13, 120, &home, now(), 1, Some(position)),
+                None
+            );
+        }
+        assert_eq!(super::garden_scroll_at(13, 80, &home, now(), 1, None), None);
+    }
+
     fn garden_project_rows() -> Vec<(WorkspaceId, widgets::garden::GardenSession)> {
         (0..5)
             .map(|index| {
@@ -6009,6 +6148,7 @@ mod tests {
                 (
                     workspace,
                     widgets::garden::GardenSession {
+                        sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
                         id: session,
                         label: format!("project-{index} / session-{index}"),
                         lifecycle: SessionLifecycle::Available,
@@ -6104,7 +6244,9 @@ mod tests {
         let rabbits = frame
             .hitboxes
             .iter()
-            .filter(|hitbox| hitbox.agent.is_some())
+            .filter(|hitbox| {
+                hitbox.agent.is_some() && hitbox.column < frame.sidebar.unwrap().column
+            })
             .collect::<Vec<_>>();
         assert_eq!(rabbits.len(), 2);
         // うさぎは巣穴より先に並ぶ。複数の動く sprite が重なった cell では、

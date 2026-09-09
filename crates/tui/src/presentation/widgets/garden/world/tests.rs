@@ -6,6 +6,7 @@ use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 fn sessions(count: usize) -> Vec<GardenSession> {
     (0..count)
         .map(|index| GardenSession {
+            sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
             id: SessionId::parse(&format!("{index:08x}-0000-4000-8000-000000000001")).unwrap(),
             label: format!("project / 日本語-{index}"),
             lifecycle: SessionLifecycle::Available,

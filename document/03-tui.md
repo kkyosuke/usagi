@@ -26,6 +26,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [session garden](#session-garden)
   - [Garden Action Center](#garden-action-center)
+  - [右の session 一覧](#右の-session-一覧)
   - [responsive layout](#responsive-layout)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
@@ -1139,8 +1140,8 @@ resident にせず、観測できていない membership を推測もしない�
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
 Garden は header と footer を 1 つずつ持つ固定 viewport で、横移動を持たない。全 session の区画と全 Agent のうさぎが
-同時に収まるよう、端末寸法と件数から表示密度を自動選択する。専用の Agent panel は置かず、同じ Agent を一覧と庭へ
-重複表示しない。情報量が多いときも `more` や移動操作へ逃がさず、うさぎそのものを小さくして 1 画面へ残す。
+同時に収まるよう、端末寸法と件数から表示密度を自動選択する。幅 99 桁以上では右に session 一覧を置き、庭と同じ
+projection から project → session → Agent の階層を表示する。庭のうさぎは小さくして全羽を残し、右の一覧だけを縦にスクロールする。
 
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
 自動で開く。
@@ -1166,7 +1167,7 @@ inactive project の pending decision は resident controller がなく観測し
 
 ### responsive layout
 
-Garden 本体が 80 桁 × 18 行以上なら、池・餌場・木と session の巣穴を持つ共通の庭を表示する。
+右の一覧は幅の約 30%（34〜48 桁）を使う。残る庭が 80 桁 × 18 行以上なら、池・餌場・木と session の巣穴を持つ共通の庭を表示する。
 うさぎは画面内の互いに重ならない範囲で歩行・飲水・食事・休息を繰り返す。端末寸法と総 Agent 数から歩ける範囲を
 均等に割り当て、全羽が収まる最大の姿（従来の 4 行のうさぎ、2 行の小さなうさぎ、2 桁の `兎`）を選ぶ。
 Agent が増えても池・餌場・木を残す。session の巣穴と立札は庭の下側に並び、件数に応じて低く小さくなる。
@@ -1176,13 +1177,31 @@ Agent が増えても池・餌場・木を残す。session の巣穴と立札は
 28 桁 × 8 行の区画を並べ、それ以外は 14 桁 × 2 行の card、8 桁 × 1 行の line、2 桁 × 1 行の glyph の順に縮める。
 Agent のいない session も残すが、立札の容量を超える異常な session 数では Agent を優先する。
 共通の庭でも Agent を収めるために立札の領域を先に縮める。景観とうさぎの最小 glyph さえ同時に置けない件数では、
-compact の全幅表示へ切り替えて Agent のクリック範囲を優先する。
+庭の領域内で compact 表示へ切り替えて Agent のクリック範囲を優先する。
 
 どの密度でも観測済み Agent は 1 runtime 1 うさぎ・1 hitbox であり、省略数には畳まない。session lifecycle や dispatch が
 `starting` / `completed` / `stopped` / `failed` でも runtime identity は失わず、姿と状態だけを変える。inactive project の
 項目も同じ target を持ち、project を activate / restore してから stable `AgentRuntimeId` を照合する。restore 中に Agent が
 閉じた場合は session の Closeup へ安全に留まり、並び位置が同じ別 Agent を選ばない。renderer は raw error、prompt、
 terminal output、provider-native ID を受け取らない。
+
+### 右の session 一覧
+
+project 見出しに session 件数を添え、各 session の状態記号・表示名・managed branch・Agent 件数を並べる。
+branch は canonical session name から得た `usagi/<name>` で、変更可能な表示名や project 名から推測しない。
+Agent は注目順に 1 runtime 1 行で表示し、状態の文言と短い runtime ID を添える。未観測の project は
+`project inactive` と表示する。選択中の session は枠で強調する。
+
+| 操作 | 動作 |
+|---|---|
+| session 名・branch・件数を click | その session の Closeup を開く |
+| Agent 行を click | その runtime の Agent tab を開く。別 project では project 切替後に同じ ID を照合する |
+| `↑` / `↓`、`Page Up` / `Page Down` | 一覧を 1 行 / 1 page スクロールする |
+| 一覧上の mouse wheel、下端の `↑ Previous` / `↓ Next` | 一覧だけをスクロールする。庭と背面の選択は動かない |
+| 一覧の project 見出し・余白を click | Garden を開いたまま保つ |
+
+一覧が端末に収まらない場合も全行へ到達でき、snapshot 更新で行数が減れば scroll 位置を末尾へ収める。
+幅 99 桁未満では一覧を省き、従来の庭を全幅で描く。この場合は上下キーや wheel も通常の wake-up 操作になる。
 
 ### 区画とうさぎ
 
@@ -1222,7 +1241,7 @@ action caption を表示しない。
 controller が runtime の `Ended` / `Exited` を観測した runtime（tab は残っており、inventory も保持している）は
 瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さないため描かない。
 共通の庭では各うさぎの実際の描画位置と大きさを hitbox にする。compact の詳細区画の幅は羽数で変えず、
-各うさぎの hitbox を別に置く。compact の card / line / glyph はその全範囲を各うさぎの hitbox にする。session の選択状態は Garden に装飾せず、
+各うさぎの hitbox を別に置く。compact の card / line / glyph はその全範囲を各うさぎの hitbox にする。session の選択状態は右の一覧で枠を付け、庭には装飾せず、
 すべて同じ dim の立札で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
@@ -1300,9 +1319,9 @@ notice に表示するため、見えない overlay が入力だけを所有す�
 | key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。矢印 key も含め、背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
 | active project のうさぎを single click | 移動中の hitbox に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
-| inactive project の巣穴・うさぎを click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く。押した相手が[観測されたうさぎ](#inactive-project-の-agent-観測)でも Agent tab の選択までは運ばない（その project の controller はまだ存在しない） |
+| inactive project の巣穴・うさぎを click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く。押した相手が[観測されたうさぎ](#inactive-project-の-agent-観測)なら、controller の準備後に同じ runtime の Agent tab を選ぶ |
 | うさぎ以外の巣穴（立札・状態行・入口）を click | 同じ project / session の Closeup へ入るところまでで、tab の選択は動かさない |
-| 巣穴・うさぎの外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
+| 庭の巣穴・うさぎの外を click | click を消費して Garden を閉じ、表示前の Home へ戻る。右の一覧内は[一覧の操作](#右の-session-一覧)に従う |
 
 click は frame を描いたのと同じ layout 関数が返す rectangle に当てて解決する。rectangle は巣穴に stable
 `WorkspaceId` / `SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛する。詳細区画ではうさぎの rectangle を

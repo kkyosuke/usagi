@@ -4550,6 +4550,7 @@ mod tests {
         let session = SessionId::new();
         let runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let projected = crate::presentation::views::workspace::ProjectedSession {
+            branch: "usagi/alpha".into(),
             id: session,
             label: "alpha".to_owned(),
             detail: "fixture".to_owned(),
