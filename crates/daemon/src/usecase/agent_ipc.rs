@@ -401,6 +401,28 @@ impl DaemonRestartInterruptionError {
 }
 
 impl AgentRuntime {
+    fn forget_closed_runtimes(
+        &mut self,
+        closed: &[AgentRuntimeRef],
+        owned_operations: Vec<(AgentRuntimeId, String)>,
+    ) {
+        let runtime_ids = closed
+            .iter()
+            .map(|runtime| runtime.agent_runtime_id)
+            .collect::<BTreeSet<_>>();
+        let operation_ids = owned_operations
+            .into_iter()
+            .filter(|(runtime, _)| runtime_ids.contains(runtime))
+            .map(|(_, operation)| operation)
+            .collect::<BTreeSet<_>>();
+        self.operations
+            .retain(|operation, _| !operation_ids.contains(operation));
+        self.mcp_callers
+            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id));
+        self.reported_phases
+            .retain(|runtime, _| !runtime_ids.contains(runtime));
+    }
+
     #[must_use]
     pub fn new(
         generation: DaemonGeneration,
@@ -3726,21 +3748,7 @@ impl AgentRuntime {
             .coordinator
             .close_session(session, &mut *self.store, &mut *self.pty)
             .map_err(map_runtime_error)?;
-        let runtime_ids = closed
-            .iter()
-            .map(|runtime| runtime.agent_runtime_id)
-            .collect::<Vec<_>>();
-        let operation_ids = owned_operations
-            .into_iter()
-            .filter(|(runtime, _)| runtime_ids.contains(runtime))
-            .map(|(_, operation)| operation)
-            .collect::<Vec<_>>();
-        self.operations
-            .retain(|operation, _| !operation_ids.contains(operation));
-        self.mcp_callers
-            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id));
-        self.reported_phases
-            .retain(|runtime, _| !runtime_ids.contains(runtime));
+        self.forget_closed_runtimes(&closed, owned_operations);
         Ok(closed.len())
     }
 
@@ -3763,21 +3771,7 @@ impl AgentRuntime {
             .coordinator
             .close_workspace(workspace, &mut *self.store, &mut *self.pty)
             .map_err(map_runtime_error)?;
-        let runtime_ids = closed
-            .iter()
-            .map(|runtime| runtime.agent_runtime_id)
-            .collect::<Vec<_>>();
-        let operation_ids = owned_operations
-            .into_iter()
-            .filter(|(runtime, _)| runtime_ids.contains(runtime))
-            .map(|(_, operation)| operation)
-            .collect::<Vec<_>>();
-        self.operations
-            .retain(|operation, _| !operation_ids.contains(operation));
-        self.mcp_callers
-            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id));
-        self.reported_phases
-            .retain(|runtime, _| !runtime_ids.contains(runtime));
+        self.forget_closed_runtimes(&closed, owned_operations);
         Ok(closed.len())
     }
 

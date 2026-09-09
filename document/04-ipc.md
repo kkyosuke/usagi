@@ -414,6 +414,12 @@ session / Agent / dispatch / generic Terminal Launch 等の durable mutation は
 `OperationId` を送らない場合だけ、daemon が自分の operation identity を発行し、その request は cross-connection の
 idempotency evidence を持たない。
 
+server は handshake と generation fence の後、request body 全体を `DaemonRequest` へ decode してから、その列挙型を
+網羅的に owner へ routing する。`kind` 文字列だけを先に見て mutation を受理しない。必須 field の欠落、未知の `kind` / `action`、
+または型として有効でも owner に未配線の request は `invalid_argument` と null body で fail closed になり、`accepted` / `ok` を
+返さない。dispatcher が response 以外の envelope を返した場合も `unavailable` として扱い、`ok(null)` へ読み替えない。
+したがって protocol vocabulary を追加するときは `DaemonRequest` と production router の網羅 match を同じ変更で更新する必要がある。
+
 `ProtocolError` は machine-readable な code、safe message、retry mode、side-effect classification、
 error ID を返す。resource/ownership を証明できない場合は `ownership_unknown`、resume が成立しない
 場合は `resync_required` を使う。OS error、secret、raw launch provision は error detail に含めない。

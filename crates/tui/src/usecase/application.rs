@@ -189,15 +189,12 @@ pub trait WorkspaceLoader: Send {
     /// Returns an error when `parent` cannot be enumerated.
     fn directory_names(&mut self, parent: &Path) -> io::Result<Vec<String>>;
 
-    /// Persist the ordered set of project tabs as one Unite recent. The
-    /// default keeps compatibility adapters storage-free.
+    /// Persist the ordered set of project tabs as one Unite recent.
     ///
     /// # Errors
     ///
     /// Returns an error when the user-data store cannot be updated.
-    fn record_unite(&mut self, _paths: &[PathBuf]) -> io::Result<()> {
-        Ok(())
-    }
+    fn record_unite(&mut self, paths: &[PathBuf]) -> io::Result<()>;
 
     /// Start a non-blocking read of the global workspace registry.
     ///

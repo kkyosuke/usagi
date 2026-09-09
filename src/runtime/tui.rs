@@ -65,8 +65,7 @@ use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
     self, BannerScreenRunner, ControllerBackendComposition, ControllerBackendFactory,
-    ControllerHost, Exit, MetricsPort, Start, WorkspaceCreateCompletion, WorkspaceCreateEffect,
-    WorkspaceLoader, WorkspaceSnapshot,
+    ControllerHost, Exit, MetricsPort, Start,
 };
 use usagi_tui::usecase::application::agent_runtime_ports::{
     AgentCommandPort, AgentPaneAdmission, ExactAgentResume, SerializedPaneLaunchPort,
@@ -96,10 +95,14 @@ use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSubscription,
 };
+use usagi_tui::usecase::application::work_run_control::WorkRunPort;
 use usagi_tui::usecase::application::work_run_control::{
     WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
+use usagi_tui::usecase::application::{
+    WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceLoader, WorkspaceSnapshot,
+};
 use usagi_tui::usecase::doctor::{self, DoctorPort};
 use usagi_tui::usecase::overview;
 use usagi_tui::usecase::overview::SessionCommand;
@@ -2232,7 +2235,7 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
 struct DaemonWorkRunPort;
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=agent_ipc_e2e
-impl presentation::WorkRunPort for DaemonWorkRunPort {
+impl WorkRunPort for DaemonWorkRunPort {
     fn snapshot(
         &mut self,
         workspace: WorkspaceId,
@@ -5655,17 +5658,16 @@ mod tests {
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
     use usagi_tui::presentation::views::workspace::ProjectedSession;
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
-    use usagi_tui::presentation::{
-        ControllerBackendFactory, ControllerHost, ControllerHostAction, WorkspaceCreateEffect,
-        WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
-    };
-    use usagi_tui::usecase::application::Key;
+    use usagi_tui::presentation::{ControllerBackendFactory, ControllerHost, ControllerHostAction};
     use usagi_tui::usecase::application::controller::{
         AppState, BackendEvent, Effect, EntryEvent, EntryState, EntryWorkspace, EnvironmentEntry,
         NewEvent, NewForm, NewMode, NewRequest, NewState, Notice, Overlay, PreviewFileFilter,
         Target, update, update_entry, update_new,
     };
     use usagi_tui::usecase::application::runtime_ports::RestoreConnectionPort;
+    use usagi_tui::usecase::application::{
+        Key, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
+    };
     use usagi_tui::usecase::terminal_input::{
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers, PointerEvent, PointerKind,
     };

@@ -7,8 +7,8 @@ use std::io::{self, Read, Write};
 use crate::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext, TerminalResponse};
 use serde_json::json;
 use usagi_core::infrastructure::ipc::{
-    Bootstrap, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
-    ResponseOutcome, ServerHello, ServerProtocol, negotiate, read_json_frame, write_json_frame,
+    Bootstrap, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, ProtocolError, ResponseOutcome,
+    ServerHello, ServerProtocol, negotiate, read_json_frame, write_json_frame,
 };
 
 /// The generation authority one client connection is served under.
@@ -235,56 +235,29 @@ fn handshake_admitted_with_authority(
     }
 }
 
-/// Dispatch requests without leaking presentation-local state mutation back to
-/// callers. Session and Agent operations are admitted durably by their
-/// producer-supplied operation id; terminal requests retain their typed body
-/// for the terminal owner to process.
+/// Reject a request which reached the end of the daemon's typed router.
+///
+/// Every supported request is handled by an owning adapter before this point.
+/// Reaching this function therefore means either that the body is malformed or
+/// that a newly introduced request has not yet been wired to an owner. Failing
+/// closed prevents a syntactically similar mutation from being reported as
+/// accepted without performing its effect.
 #[must_use]
-pub fn dispatch(
+pub fn reject_unhandled_request(
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: serde_json::Value,
+    _body: serde_json::Value,
     hello: &ServerHello,
 ) -> Envelope {
-    let kind = body.get("kind").and_then(serde_json::Value::as_str);
-    let (outcome, body) = if matches!(kind, Some("dispatch_tool" | "supervisor_tool")) {
-        (
-            ResponseOutcome::Error(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "daemon tool action is not implemented",
-            )),
-            json!(null),
-        )
-    } else {
-        let outcome = kind
-            .filter(|kind| {
-                matches!(
-                    *kind,
-                    "rollover"
-                        | "session"
-                        | "agent"
-                        | "restart_agents"
-                        | "resume_agent"
-                        | "resume_agent_with_current_integration"
-                        | "dispatch"
-                )
-            })
-            .and_then(|_| body.get("operation_id"))
-            .and_then(serde_json::Value::as_str)
-            .map_or(ResponseOutcome::Ok, |operation_id| {
-                ResponseOutcome::Accepted {
-                    operation_id: OperationId(operation_id.to_owned()),
-                    operation_revision: 1,
-                }
-            });
-        (outcome, body)
-    };
     Envelope {
         protocol: hello.protocol,
         daemon_generation: hello.daemon_generation.clone(),
         kind: EnvelopeKind::Response {
             request_id,
-            outcome,
-            body,
+            outcome: ResponseOutcome::Error(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid or unhandled daemon request",
+            )),
+            body: json!(null),
         },
     }
 }
@@ -296,7 +269,7 @@ pub fn handle_connection(
     writer: &mut dyn Write,
     server: &ServerProtocol,
 ) -> io::Result<()> {
-    let mut dispatch_request = dispatch;
+    let mut dispatch_request = reject_unhandled_request;
     handle_connection_with(reader, writer, server, &mut dispatch_request)
 }
 
@@ -740,7 +713,13 @@ impl ResponseOutcomeBody for Envelope {
     fn kind_response(self) -> (ResponseOutcome, serde_json::Value) {
         match self.kind {
             EnvelopeKind::Response { outcome, body, .. } => (outcome, body),
-            _ => (ResponseOutcome::Ok, json!(null)),
+            _ => (
+                ResponseOutcome::Error(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "daemon dispatcher returned a non-response envelope",
+                )),
+                json!(null),
+            ),
         }
     }
 }
@@ -1008,7 +987,7 @@ mod tests {
         _: usagi_core::domain::id::ConnectionId,
         _: usagi_core::domain::id::ClientId,
     ) -> Envelope {
-        dispatch(request_id, body, hello)
+        reject_unhandled_request(request_id, body, hello)
     }
     #[test]
     fn handshake_returns_hello_and_preserves_build_as_diagnostic() {
@@ -1167,7 +1146,7 @@ mod tests {
             admitted,
             &mut |request_id, body, hello| {
                 dispatched += 1;
-                dispatch(request_id, body, hello)
+                reject_unhandled_request(request_id, body, hello)
             },
         )
         .unwrap();
@@ -1345,7 +1324,7 @@ mod tests {
                 &mut terminal,
                 &mut |request_id, body, hello, _connection, _client| {
                     dispatched += 1;
-                    dispatch(request_id, body, hello)
+                    reject_unhandled_request(request_id, body, hello)
                 },
             )
             .unwrap();
@@ -1513,8 +1492,9 @@ mod tests {
             })
         };
 
-        let mut serve_ordinary =
-            |request_id, _, hello: &ServerHello, _, _| dispatch(request_id, json!(null), hello);
+        let mut serve_ordinary = |request_id, _, hello: &ServerHello, _, _| {
+            reject_unhandled_request(request_id, json!(null), hello)
+        };
 
         // Two independent connections from the same client incarnation.
         let mut owner = RecordingTerminal::default();
@@ -2048,7 +2028,16 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(terminal.disconnects, 1);
 
-        assert_eq!(event.kind_response(), (ResponseOutcome::Ok, json!(null)));
+        assert!(matches!(
+            event.kind_response(),
+            (
+                ResponseOutcome::Error(ProtocolError {
+                    code: ErrorCode::Unavailable,
+                    ..
+                }),
+                body
+            ) if body.is_null()
+        ));
     }
     #[test]
     fn connection_rejects_normal_message_before_handshake() {
@@ -2302,7 +2291,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_preserves_the_request_correlation_and_body() {
+    fn unhandled_dispatch_rejects_unknown_requests_without_echoing() {
         let hello = handshake(
             &mut Cursor::new({
                 let mut bytes = Vec::new();
@@ -2314,7 +2303,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let reply = dispatch(
+        let reply = reject_unhandled_request(
             usagi_core::infrastructure::ipc::RequestId("r".into()),
             json!({"x": 1}),
             &hello,
@@ -2330,14 +2319,17 @@ mod tests {
             reply.kind,
             EnvelopeKind::Response {
                 request_id: usagi_core::infrastructure::ipc::RequestId(ref value),
-                outcome: ResponseOutcome::Ok,
+                outcome: ResponseOutcome::Error(ProtocolError {
+                    code: ErrorCode::InvalidArgument,
+                    ..
+                }),
                 body,
-            } if value == "r" && body == json!({"x": 1})
+            } if value == "r" && body.is_null()
         ));
     }
 
     #[test]
-    fn dispatch_rejects_unimplemented_daemon_tool_families_without_echoing() {
+    fn unhandled_dispatch_rejects_tool_families_without_echoing() {
         let hello = handshake(
             &mut Cursor::new({
                 let mut bytes = Vec::new();
@@ -2350,7 +2342,7 @@ mod tests {
         .unwrap()
         .unwrap();
         for kind in ["dispatch_tool", "supervisor_tool"] {
-            let reply = dispatch(
+            let reply = reject_unhandled_request(
                 usagi_core::infrastructure::ipc::RequestId("r".into()),
                 json!({"kind": kind, "action": "placeholder", "secret": "do not echo"}),
                 &hello,
@@ -2365,13 +2357,13 @@ mod tests {
                     }),
                     body,
                     ..
-                } if message.contains("not implemented") && body.is_null()
+                } if message.contains("unhandled") && body.is_null()
             ));
         }
     }
 
     #[test]
-    fn dispatch_admits_every_mutating_agent_request_with_its_producer_operation() {
+    fn unhandled_dispatch_never_admits_incomplete_mutating_requests() {
         let hello = handshake(
             &mut Cursor::new({
                 let mut bytes = Vec::new();
@@ -2390,7 +2382,7 @@ mod tests {
             "resume_agent_with_current_integration",
             "dispatch",
         ] {
-            let reply = dispatch(
+            let reply = reject_unhandled_request(
                 usagi_core::infrastructure::ipc::RequestId("r".into()),
                 json!({"kind": kind, "operation_id": "operation"}),
                 &hello,
@@ -2398,9 +2390,13 @@ mod tests {
             assert!(matches!(
                 reply.kind,
                 EnvelopeKind::Response {
-                    outcome: ResponseOutcome::Accepted { operation_id: OperationId(ref value), operation_revision: 1 },
+                    outcome: ResponseOutcome::Error(ProtocolError {
+                        code: ErrorCode::InvalidArgument,
+                        ..
+                    }),
+                    body,
                     ..
-                } if value == "operation"
+                } if body.is_null()
             ));
         }
     }

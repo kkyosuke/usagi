@@ -106,10 +106,10 @@ use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
 };
-pub use crate::usecase::application::work_run_control::WorkRunPort;
 use crate::usecase::application::work_run_control::{
     WORK_RUN_ACTION_UNCONFIRMED, WorkRunControl, WorkRunControlAction, WorkRunControlError,
     WorkRunControlMode, WorkRunControlOutcome, WorkRunControlRequest, WorkRunControlResult,
+    WorkRunPort,
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal, open_failure_notice};
 use crate::usecase::overview::SessionCommand;
@@ -119,18 +119,19 @@ use crate::usecase::terminal_input::{
 };
 use usagi_core::usecase::settings::SettingsPort;
 
-pub use crate::usecase::application::agent_runtime_ports::{
+#[cfg(test)]
+use crate::usecase::application::WorkspaceCreateCompletion;
+use crate::usecase::application::agent_runtime_ports::{
     AgentCommandPort, AgentCommandPortFactory, AgentPaneAdmission, ExactAgentResume,
-    PaneLaunchCommandPort, SerializedPaneLaunchPort,
+    PaneLaunchCommandPort, SerializedPaneLaunchPort, TerminalCommandPort,
 };
-pub use crate::usecase::application::runtime_ports::{
+use crate::usecase::application::runtime_ports::{
     DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
     GardenInventoryPort, RestoreConnectionPort, SessionCommandPort, SessionCommandPortFactory,
     SessionCommandResult, SessionRefreshPort, SessionWorktreeScanPort,
 };
-pub use crate::usecase::application::{
-    WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader,
-    WorkspaceSnapshot,
+use crate::usecase::application::{
+    WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
 };
 
 /// Keeps an embedder without a daemon launch client safe: every pane launch
@@ -187,11 +188,11 @@ impl DesktopNotificationPort for NoDesktopNotifications {
 /// Bridges the workspace [`AgentCommandPort`] into the [`TerminalStreamPort`]
 /// expected by a [`TerminalSession`], so the session coordinator stays free of
 /// the wider Agent launch vocabulary.
-struct AgentStreamPort<'a>(&'a mut dyn AgentCommandPort);
+struct AgentStreamPort<'a, T: TerminalCommandPort + ?Sized>(&'a mut T);
 
-impl TerminalStreamPort for AgentStreamPort<'_> {
+impl<T: TerminalCommandPort + ?Sized> TerminalStreamPort for AgentStreamPort<'_, T> {
     fn connection_epoch(&self) -> Option<u64> {
-        self.0.terminal_connection_epoch()
+        self.0.connection_epoch()
     }
 
     fn resize(
@@ -199,7 +200,7 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
         terminal: &TerminalRef,
         geometry: Geometry,
     ) -> Result<Geometry, TerminalError> {
-        self.0.resize_terminal(terminal, geometry)
+        self.0.resize(terminal, geometry)
     }
 
     fn attach(
@@ -207,14 +208,14 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
         terminal: &TerminalRef,
         geometry: Geometry,
     ) -> Result<TerminalAttach, TerminalError> {
-        self.0.attach_terminal(terminal, geometry)
+        self.0.attach(terminal, geometry)
     }
     fn poll(
         &mut self,
         terminal: &TerminalRef,
         after_offset: u64,
     ) -> Result<Vec<TerminalChunk>, TerminalError> {
-        self.0.poll_terminal(terminal, after_offset)
+        self.0.poll(terminal, after_offset)
     }
     fn input(
         &mut self,
@@ -225,7 +226,7 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
         bytes: &[u8],
     ) -> Result<TerminalInputOutcome, TerminalError> {
         self.0
-            .input_terminal(terminal, subscription, input_seq, operation, bytes)
+            .input(terminal, subscription, input_seq, operation, bytes)
     }
     fn input_outcome(
         &mut self,
@@ -233,11 +234,10 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
         operation: OperationId,
         input_len: usize,
     ) -> Result<TerminalInputResolution, TerminalError> {
-        self.0
-            .terminal_input_outcome(terminal, operation, input_len)
+        self.0.input_outcome(terminal, operation, input_len)
     }
     fn detach(&mut self, terminal: &TerminalRef, subscription: TerminalSubscription) {
-        self.0.detach_terminal(terminal, subscription);
+        self.0.detach(terminal, subscription);
     }
 }
 
@@ -1596,7 +1596,13 @@ impl BrowserOpener for UnavailableBrowserOpener {
 /// nothing, so Home keeps the snapshot it opened with.
 struct UnavailableSessionRefreshPort;
 
-impl SessionRefreshPort for UnavailableSessionRefreshPort {}
+impl SessionRefreshPort for UnavailableSessionRefreshPort {
+    fn wake(&mut self) {}
+
+    fn take(&mut self) -> Option<Result<SessionCommandResult, String>> {
+        None
+    }
+}
 
 /// 既定では session command を接続しない factory。
 ///
@@ -10618,6 +10624,8 @@ mod tests {
     }
 
     impl SessionRefreshPort for ScheduledSessionRefreshPort {
+        fn wake(&mut self) {}
+
         fn take(&mut self) -> Option<Result<SessionCommandResult, String>> {
             self.takes += 1;
             (self.takes == self.publish_on_take)
@@ -26989,6 +26997,10 @@ mod tests {
             }
         }
 
+        fn record_unite(&mut self, _paths: &[PathBuf]) -> io::Result<()> {
+            Ok(())
+        }
+
         fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
             self.activate_error
                 .map_or(Ok(()), |error| Err(io::Error::other(error)))
@@ -30453,7 +30465,7 @@ mod tests {
         );
         assert_eq!(
             port.resize_terminal(&terminal, Geometry { cols: 80, rows: 24 }),
-            Ok(Geometry { cols: 80, rows: 24 })
+            Err(TerminalError::Unavailable)
         );
         assert_eq!(
             port.attach_terminal(&terminal, Geometry { cols: 80, rows: 24 }),
@@ -30473,11 +30485,9 @@ mod tests {
             ),
             Err(TerminalError::Unavailable)
         );
-        // A port with no durable ledger answers unknown rather than guessing,
-        // which keeps a lost acknowledgement latched instead of resent (#519).
         assert_eq!(
             port.terminal_input_outcome(&terminal, OperationId::new(), 1),
-            Ok(TerminalInputResolution::Unknown)
+            Err(TerminalError::Unavailable)
         );
         // Detach is a no-op default and must not panic.
         port.detach_terminal(&terminal, TerminalSubscription { id: 1, epoch: 1 });
@@ -30491,9 +30501,7 @@ mod tests {
             ),
             Err("terminal launch is unavailable".to_owned())
         );
-        // The default discovers no runtimes, so an embedder without a daemon
-        // simply opens a workspace with no restored panes.
-        assert_eq!(port.list_terminals(), Ok(Vec::new()));
+        assert_eq!(port.list_terminals(), Err(TerminalError::Unavailable));
     }
 
     #[test]
@@ -31885,7 +31893,13 @@ mod tests {
 
     impl SessionCommandPort for CountedPort {}
 
-    impl SessionRefreshPort for CountedPort {}
+    impl SessionRefreshPort for CountedPort {
+        fn wake(&mut self) {}
+
+        fn take(&mut self) -> Option<Result<SessionCommandResult, String>> {
+            None
+        }
+    }
 
     impl AgentCommandPort for CountedPort {
         fn launch(

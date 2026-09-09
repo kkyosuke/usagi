@@ -359,6 +359,25 @@ struct CallerDispatchReservation {
     worker_runtime_id: AgentRuntimeId,
 }
 
+/// Complete start intent passed from the public admission variants to the
+/// single durable start transaction. Grouping these fields keeps workspace,
+/// artifact, worker, and caller-dispatch fences together instead of allowing
+/// positional `Option` arguments to be swapped accidentally.
+struct SupervisorStartRequest<'a> {
+    caller: &'a str,
+    workspace: Option<WorkspaceId>,
+    operation_id: &'a str,
+    root_task: String,
+    root_artifact_contract: ArtifactContract,
+    artifact_repository: Option<GitHubRepository>,
+    worker_profile_id: Option<AgentProfileId>,
+    worker_semantic_digest: Option<String>,
+    caller_dispatch: Option<&'a CallerDispatchReservation>,
+    initial_tasks: Vec<InitialTask>,
+    policy_selector: Option<String>,
+    now: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ControlReservation {
     semantic_digest: String,
@@ -1101,20 +1120,20 @@ impl SupervisorRuntime {
         policy_selector: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
-        self.start_scoped(
+        self.start_scoped(SupervisorStartRequest {
             caller,
-            None,
+            workspace: None,
             operation_id,
             root_task,
-            NO_ARTIFACT_CONTRACT,
-            None,
-            None,
-            None,
-            None,
+            root_artifact_contract: NO_ARTIFACT_CONTRACT,
+            artifact_repository: None,
+            worker_profile_id: None,
+            worker_semantic_digest: None,
+            caller_dispatch: None,
             initial_tasks,
             policy_selector,
             now,
-        )
+        })
     }
 
     /// Starts a run owned by one daemon-admitted workspace. This is the
@@ -1136,20 +1155,20 @@ impl SupervisorRuntime {
         policy_selector: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
-        self.start_scoped(
+        self.start_scoped(SupervisorStartRequest {
             caller,
-            Some(workspace),
+            workspace: Some(workspace),
             operation_id,
             root_task,
-            NO_ARTIFACT_CONTRACT,
-            None,
-            None,
-            None,
-            None,
+            root_artifact_contract: NO_ARTIFACT_CONTRACT,
+            artifact_repository: None,
+            worker_profile_id: None,
+            worker_semantic_digest: None,
+            caller_dispatch: None,
             initial_tasks,
             policy_selector,
             now,
-        )
+        })
     }
 
     /// Reserves a generic Supervisor root together with the authenticated
@@ -1200,27 +1219,28 @@ impl SupervisorRuntime {
             .dispatch
             .admission(dispatch_run_id)?
             .context("supervisor caller admission does not exist")?;
-        self.start_scoped(
+        let caller_dispatch = CallerDispatchReservation {
+            dispatch_run_id,
+            worker_session_id: worker.session_id,
+            worker_agent_id: dispatch.agent_id,
+            worker_runtime_id: worker.agent_runtime_id,
+        };
+        self.start_scoped(SupervisorStartRequest {
             caller,
-            Some(workspace),
+            workspace: Some(workspace),
             operation_id,
             root_task,
-            NO_ARTIFACT_CONTRACT,
-            None,
-            Some(agent.runtime),
-            Some(usagi_core::infrastructure::ipc::agent_operation_digest(
+            root_artifact_contract: NO_ARTIFACT_CONTRACT,
+            artifact_repository: None,
+            worker_profile_id: Some(agent.runtime),
+            worker_semantic_digest: Some(usagi_core::infrastructure::ipc::agent_operation_digest(
                 &admission.semantic_key,
             )),
-            Some(&CallerDispatchReservation {
-                dispatch_run_id,
-                worker_session_id: worker.session_id,
-                worker_agent_id: dispatch.agent_id,
-                worker_runtime_id: worker.agent_runtime_id,
-            }),
-            Vec::new(),
+            caller_dispatch: Some(&caller_dispatch),
+            initial_tasks: Vec::new(),
             policy_selector,
             now,
-        )
+        })
     }
 
     /// Durably reserves the Goal run before the Agent process is spawned. This
@@ -1239,20 +1259,20 @@ impl SupervisorRuntime {
         policy_selector: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
-        self.start_scoped(
+        self.start_scoped(SupervisorStartRequest {
             caller,
-            Some(workspace),
+            workspace: Some(workspace),
             operation_id,
-            goal.instruction,
-            GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
-            Some(goal.artifact_repository),
-            None,
-            None,
-            None,
-            Vec::new(),
+            root_task: goal.instruction,
+            root_artifact_contract: GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            artifact_repository: Some(goal.artifact_repository),
+            worker_profile_id: None,
+            worker_semantic_digest: None,
+            caller_dispatch: None,
+            initial_tasks: Vec::new(),
             policy_selector,
             now,
-        )
+        })
     }
 
     /// Goal reservation variant which also pins the selected Agent runtime
@@ -1273,20 +1293,20 @@ impl SupervisorRuntime {
         policy_selector: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
-        self.start_scoped(
+        self.start_scoped(SupervisorStartRequest {
             caller,
-            Some(workspace),
+            workspace: Some(workspace),
             operation_id,
-            goal.instruction,
-            GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
-            Some(goal.artifact_repository),
-            Some(worker_profile_id),
-            Some(worker_semantic_digest),
-            None,
-            Vec::new(),
+            root_task: goal.instruction,
+            root_artifact_contract: GOAL_REVIEW_READY_ARTIFACT_CONTRACT,
+            artifact_repository: Some(goal.artifact_repository),
+            worker_profile_id: Some(worker_profile_id),
+            worker_semantic_digest: Some(worker_semantic_digest),
+            caller_dispatch: None,
+            initial_tasks: Vec::new(),
             policy_selector,
             now,
-        )
+        })
     }
 
     /// Starts a Goal run and binds its root task to an already admitted
@@ -3245,22 +3265,22 @@ impl SupervisorRuntime {
         Ok(self.finalize_terminal_tasks(run, now)?.query())
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    fn start_scoped(
-        &self,
-        caller: &str,
-        workspace: Option<WorkspaceId>,
-        operation_id: &str,
-        root_task: String,
-        root_artifact_contract: ArtifactContract,
-        artifact_repository: Option<GitHubRepository>,
-        worker_profile_id: Option<AgentProfileId>,
-        worker_semantic_digest: Option<String>,
-        caller_dispatch: Option<&CallerDispatchReservation>,
-        initial_tasks: Vec<InitialTask>,
-        policy_selector: Option<String>,
-        now: DateTime<Utc>,
-    ) -> Result<SupervisorRunQuery> {
+    #[allow(clippy::too_many_lines)]
+    fn start_scoped(&self, request: SupervisorStartRequest<'_>) -> Result<SupervisorRunQuery> {
+        let SupervisorStartRequest {
+            caller,
+            workspace,
+            operation_id,
+            root_task,
+            root_artifact_contract,
+            artifact_repository,
+            worker_profile_id,
+            worker_semantic_digest,
+            caller_dispatch,
+            initial_tasks,
+            policy_selector,
+            now,
+        } = request;
         validate_start_input(
             operation_id,
             &root_task,

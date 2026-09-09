@@ -1732,6 +1732,12 @@ NoReport、起動時 reconcile、明示 wake は対象 run の有限な tick を
 `SupervisorRecovery` worker が durable deadline と未収束effectだけを周期的に再評価する。client connection は
 recovery の生存条件ではなく、tick は新しいworkerを推測してspawnしない。
 
+Supervisor run の全 start variant は、workspace、artifact contract / repository、worker profile / semantic digest、
+caller dispatch fence を一つの typed start request に組み立ててから、単一の durable start transaction へ渡す。
+独立した positional `Option` 群は使わないため、profile と digest、workspace と caller dispatch など異なる意味の値を
+呼出順で取り違えない。IPC accept lifetime も同様に、tenant、terminal、Agent、projection、metrics、Supervisor、shutdown を
+一つの composition context として所有し、accept 関数の引数順を service wiring の契約にしない。
+
 supervisor の durable caller は socket の `ConnectionId` ではない。daemon 発行の live MCP credential から検証した
 root/session と Agent scope を、handshake の client incarnation と束縛した descriptor を semantic retry と全 ownership
 check が共用する。同じ client の再接続と process 内 generation rollover は authority を維持する。foreign incarnation、

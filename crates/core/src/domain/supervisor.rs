@@ -290,15 +290,6 @@ impl SupervisorRunState {
         )
     }
 
-    /// Compatibility alias for callers compiled against the original API.
-    /// This does not mean the run can be discarded: use [`Self::is_finished`]
-    /// for retention and idempotency decisions.
-    #[deprecated(note = "use blocks_ordinary_events or is_finished for the intended policy")]
-    #[must_use]
-    pub const fn terminal(self) -> bool {
-        self.blocks_ordinary_events()
-    }
-
     /// Whether the run is immutable history and can be removed by retention or
     /// have its start-idempotency reservation recycled.
     #[must_use]
@@ -1710,11 +1701,6 @@ mod tests {
     #[test]
     fn escalation_is_quiescent_but_not_finished_history() {
         assert!(SupervisorRunState::Escalated.blocks_ordinary_events());
-        #[allow(deprecated)]
-        {
-            assert!(SupervisorRunState::Escalated.terminal());
-            assert!(!SupervisorRunState::Running.terminal());
-        }
         assert!(!SupervisorRunState::Escalated.is_finished());
         assert!(SupervisorRunState::Succeeded.is_finished());
         assert!(SupervisorRunState::Failed.is_finished());

@@ -130,12 +130,10 @@ impl SessionCommandResult {
 /// Resident session-inventory observation lane.
 pub trait SessionRefreshPort: Send {
     /// Requests an immediate out-of-cadence observation without blocking.
-    fn wake(&mut self) {}
+    fn wake(&mut self);
 
     /// Drains the newest completed snapshot.
-    fn take(&mut self) -> Option<Result<SessionCommandResult, String>> {
-        None
-    }
+    fn take(&mut self) -> Option<Result<SessionCommandResult, String>>;
 }
 
 /// Creates a fresh session command port for each workspace launch.
