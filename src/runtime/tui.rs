@@ -9803,6 +9803,7 @@ mod tests {
         let session = SessionId::new();
         let runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let projected = ProjectedSession {
+            branch: "usagi/demo".into(),
             id: session,
             label: "demo".to_owned(),
             detail: "human".to_owned(),

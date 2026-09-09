@@ -76,6 +76,7 @@ TUI が開いたら、次の順に進めます。
 3. Diff と PR の状態を確認しながら作業する。
 
 次回からは `usagi` を起動し、Open / Recent から workspace を選べます。
+Session Garden では庭と右側の session 一覧から作業状況を確認し、各 Agent を開けます。
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は
 [キーバインド](document/11-keybindings.md) を参照してください。
 

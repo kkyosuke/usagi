@@ -1,9 +1,11 @@
-use usagi_core::domain::id::{AgentRuntimeId, SessionId};
+use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
-use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render};
+use usagi_tui::presentation::widgets::garden::sidebar::{SessionDetails, ViewOptions, render};
+use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession};
 
 fn main() {
     let sessions = sample_sessions();
+    sidebar_scene(&sessions);
     scene("120x24 · restored meadow", 24, 120, &sessions, 1, false);
     scene("120x24 · reduced motion", 24, 120, &sessions, 1, true);
     scene("120x24 · session 0 件", 24, 120, &[], 1, false);
@@ -18,6 +20,16 @@ fn main() {
     );
     inactive.agents_observed = false;
     inactive.agents.clear();
+    for session in &mut open_projects {
+        session.sidebar.project = Some((
+            WorkspaceId::parse("00000000-0000-4000-8000-000000000099").unwrap(),
+            "alpha".into(),
+        ));
+    }
+    inactive.sidebar.project = Some((
+        WorkspaceId::parse("00000000-0000-4000-8000-000000000098").unwrap(),
+        "beta".into(),
+    ));
     open_projects.push(inactive);
     scene_in_scope(
         "120x24 · 2 open projects",
@@ -66,6 +78,51 @@ fn main() {
         &sessions,
         1,
         false,
+    );
+}
+
+fn sidebar_scene(sessions: &[GardenSession]) {
+    let mut reference = sessions[..3].to_vec();
+    for session in &mut reference {
+        session.sidebar.project = Some((
+            WorkspaceId::parse("00000000-0000-4000-8000-000000000099").unwrap(),
+            "acme-web".into(),
+        ));
+    }
+    reference[0].sidebar.name = "checkout-flow-v2".into();
+    reference[0].sidebar.branch = "feature/checkout-flow-v2".into();
+    reference[1].sidebar.name = "checkout-baseline".into();
+    reference[1].sidebar.branch = "feature/checkout-baseline".into();
+    reference[1].agents.clear();
+    reference[2].sidebar.name = "Improve agent handoff summary".into();
+    reference[2].sidebar.branch = "feature/agent-handoff-summary".into();
+    reference[2].sidebar.project = Some((
+        WorkspaceId::parse("00000000-0000-4000-8000-000000000098").unwrap(),
+        "acme-internal".into(),
+    ));
+    reference[2].selected = true;
+    reference[2].agents = (0..4)
+        .map(|index| GardenAgent {
+            runtime_id: AgentRuntimeId::parse(&format!("{index:08x}-0000-4000-8000-000000000088"))
+                .unwrap(),
+            phase: if index == 0 {
+                AgentPhase::Running
+            } else {
+                AgentPhase::Ended
+            },
+        })
+        .collect();
+    for (index, session) in reference.iter_mut().enumerate() {
+        session.selected = index == 2;
+        session.label = session.sidebar.name.clone();
+    }
+    scene_in_scope(
+        "160x32 · project/session sidebar",
+        32,
+        160,
+        "2 open projects",
+        &reference,
+        (1, true),
     );
 }
 
@@ -141,8 +198,18 @@ fn scene_in_scope(
     animation: (u64, bool),
 ) {
     let (tick, reduced_motion) = animation;
-    let frame = render(height, width, scope, sessions, tick, reduced_motion)
-        .expect("the sample uses Garden-compatible terminal sizes");
+    let frame = render(
+        height,
+        width,
+        scope,
+        sessions,
+        ViewOptions {
+            tick,
+            reduced_motion,
+            scroll: 0,
+        },
+    )
+    .expect("the sample uses Garden-compatible terminal sizes");
     println!("--- {caption} ---");
     println!("{}\n", frame.rows.join("\n"));
 }
@@ -154,6 +221,11 @@ fn sample(
     agent_phase: AgentPhase,
 ) -> GardenSession {
     GardenSession {
+        sidebar: SessionDetails {
+            name: label.into(),
+            branch: format!("usagi/{label}"),
+            project: None,
+        },
         id: SessionId::parse(id).expect("sample IDs are canonical UUIDs"),
         label: label.to_owned(),
         lifecycle,
@@ -178,6 +250,11 @@ fn sample_agents(
     agents: &[(&str, AgentPhase)],
 ) -> GardenSession {
     GardenSession {
+        sidebar: SessionDetails {
+            name: label.into(),
+            branch: format!("usagi/{label}"),
+            project: None,
+        },
         id: SessionId::parse(id).expect("sample IDs are canonical UUIDs"),
         label: label.to_owned(),
         lifecycle,

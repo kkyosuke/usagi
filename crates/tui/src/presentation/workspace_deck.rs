@@ -76,6 +76,11 @@ impl CachedGardenSession {
     fn garden_session(&self, observed: bool) -> GardenSession {
         let observed = observed && self.projected.lifecycle == SessionLifecycle::Available;
         GardenSession {
+            sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails {
+                name: self.projected.label.clone(),
+                branch: self.projected.branch.clone(),
+                ..Default::default()
+            },
             id: self.projected.id,
             label: self.projected.label.clone(),
             lifecycle: self.projected.lifecycle,
@@ -667,6 +672,7 @@ fn project_labeled(
     slot: &WorkspaceSlot,
     multiple_projects: bool,
 ) -> GardenSession {
+    session.sidebar.project = Some((slot.workspace_id, slot.label.clone()));
     if multiple_projects {
         session.label = format!("{} / {}", slot.label, session.label);
     }
@@ -1758,6 +1764,7 @@ mod tests {
         );
         assert_eq!(deck.path_for_workspace(WorkspaceId::new()), None);
         let active = vec![GardenSession {
+            sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
             id: alpha.session_ids[0],
             label: "◆ Manager · build".to_owned(),
             lifecycle: SessionLifecycle::Available,

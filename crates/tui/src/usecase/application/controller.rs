@@ -1298,6 +1298,7 @@ pub struct AppState {
     /// behind an invisible overlay. The renderer injects this layout fact; the
     /// reducer uses it to admit both automatic and manual opening consistently.
     garden_available: bool,
+    garden_sidebar_scroll: usize,
     /// Last session press eligible to become the first half of a double click.
     /// The controller owns this stable identity after hit-testing; the shell
     /// supplies only coordinates and a monotonic timestamp.
@@ -1507,6 +1508,7 @@ impl AppState {
             mascot_tick: 0,
             size: None,
             garden_available: true,
+            garden_sidebar_scroll: 0,
             pending_session_click: None,
             has_live_pane: false,
             has_pane_tab: false,
@@ -1525,6 +1527,12 @@ impl AppState {
     pub const fn route(&self) -> Route {
         self.route
     }
+    /// Requested scroll offset in the Garden session list.
+    #[must_use]
+    pub const fn garden_sidebar_scroll(&self) -> usize {
+        self.garden_sidebar_scroll
+    }
+
     /// 最前面 overlay。閉じても [`route`](Self::route) は変わらない。
     #[must_use]
     pub const fn overlay(&self) -> Option<Overlay> {
@@ -2480,6 +2488,8 @@ pub enum AppEvent {
 /// rectangles the garden renderer returns for the frame currently on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GardenClick {
+    /// Scroll only the session list, keeping Garden and the covered Home intact.
+    Scroll { offset: usize },
     /// A session's plot. Its stable project/session pair becomes the process
     /// shell's visit target; this reducer activates it only when `workspace`
     /// names its own Home.
@@ -5052,8 +5062,8 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             Vec::new()
         }
         Overlay::Daemon => update_daemon_control(state, &key),
-        // The Garden has no hidden viewport. Every key is a wake-up consumed
-        // before Home, including the arrow keys used by other surfaces.
+        // Presentation resolves list scrolling against the drawn viewport as
+        // GardenClick::Scroll. Any key reaching this reducer wakes Home.
         Overlay::Garden => {
             state.overlay = None;
             Vec::new()
@@ -6526,14 +6536,20 @@ fn garden_may_auto_open(state: &AppState) -> bool {
 /// Reduce a click the presentation layer already resolved against the garden's
 /// own hitboxes.
 ///
-/// Every click closes the Garden; only a rabbit also activates a session. A session that
+/// List scrolling keeps the Garden open. Other clicks close it; a target also
+/// activates its session. A session that
 /// disappeared from the snapshot between the frame and the press is a stale
 /// target, so it closes the garden and does nothing else.
 fn update_garden_click(state: &mut AppState, click: GardenClick) -> Vec<Effect> {
     if state.overlay != Some(Overlay::Garden) {
         return Vec::new();
     }
+    if let GardenClick::Scroll { offset } = click {
+        state.garden_sidebar_scroll = offset;
+        return Vec::new();
+    }
     state.overlay = None;
+    state.garden_sidebar_scroll = 0;
     let GardenClick::Visit {
         workspace, session, ..
     } = click
@@ -11621,6 +11637,37 @@ mod tests {
         state.overlay = Some(Overlay::Garden);
         assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)).is_empty());
         assert_eq!(state.overlay(), None);
+    }
+
+    #[test]
+    fn garden_list_scroll_keeps_home_selection_and_does_not_emit_effects() {
+        let (workspace, a, b) = ids();
+        let mut state = AppState::home(workspace, vec![a, b]);
+        let selected = state.selected();
+        let active = state.active();
+        assert!(
+            update(
+                &mut state,
+                AppEvent::GardenClick(GardenClick::Scroll { offset: 8 })
+            )
+            .is_empty()
+        );
+        assert_eq!(state.garden_sidebar_scroll(), 0);
+        let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        assert!(
+            update(
+                &mut state,
+                AppEvent::GardenClick(GardenClick::Scroll { offset: 8 })
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert_eq!(state.garden_sidebar_scroll(), 8);
+        assert_eq!(state.selected(), selected);
+        assert_eq!(state.active(), active);
+        assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)).is_empty());
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.garden_sidebar_scroll(), 0);
     }
 
     #[test]

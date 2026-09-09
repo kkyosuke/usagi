@@ -94,6 +94,7 @@ fn runtime(workspace: WorkspaceId, session: SessionId) -> AgentRuntimeRef {
 
 fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
     ProjectedSession {
+        branch: format!("usagi/{label}"),
         id,
         label: label.into(),
         detail: "fixture".into(),

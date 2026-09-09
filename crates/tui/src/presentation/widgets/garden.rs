@@ -5,6 +5,7 @@
 //! frame と同じ layout から [`GardenHitbox`] も返すため、
 //! 後続実装は座標から session identity を再計算せず click target を解決できる。
 
+pub mod sidebar;
 mod world;
 
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
@@ -94,6 +95,8 @@ const SOIL: [&str; 3] = [
 /// Garden に渡す、表示に必要な session 情報だけの projection。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GardenSession {
+    /// Display metadata for the project/session list; never used as identity.
+    pub sidebar: sidebar::SessionDetails,
     pub id: SessionId,
     pub label: String,
     pub lifecycle: SessionLifecycle,
@@ -1702,6 +1705,7 @@ mod tests {
         phase: AgentPhase,
     ) -> GardenSession {
         GardenSession {
+            sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
             id: SessionId::parse(id).expect("fixture id"),
             label: label.to_owned(),
             lifecycle,
@@ -2148,6 +2152,7 @@ mod tests {
         let mut reversed = shuffled.clone();
         reversed.reverse();
         let make_session = |agents| GardenSession {
+            sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
             id: SessionId::parse(STEADY_ID).expect("fixture id"),
             label: "many".to_owned(),
             lifecycle: SessionLifecycle::Available,
@@ -2181,6 +2186,7 @@ mod tests {
         let folded = agent("40000000-0000-4000-8000-000000000001", AgentPhase::Ended);
         let hidden = agent("50000000-0000-4000-8000-000000000001", AgentPhase::Exited);
         let sessions = vec![GardenSession {
+            sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
             id: SessionId::parse(STEADY_ID).expect("fixture id"),
             label: "many".to_owned(),
             lifecycle: SessionLifecycle::Available,
@@ -2282,6 +2288,7 @@ mod tests {
             100,
             "x",
             &[GardenSession {
+                sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
                 id: SessionId::parse(STEADY_ID).expect("fixture id"),
                 label: "empty".to_owned(),
                 lifecycle: SessionLifecycle::Available,
@@ -2309,6 +2316,7 @@ mod tests {
             100,
             "2 open projects",
             &[GardenSession {
+                sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
                 id: SessionId::parse(STEADY_ID).expect("fixture id"),
                 label: "other / review".to_owned(),
                 lifecycle: SessionLifecycle::Available,
@@ -2338,6 +2346,7 @@ mod tests {
             (SessionLifecycle::Failed, "cached · failed"),
         ] {
             let cached = GardenSession {
+                sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
                 id: SessionId::parse(STEADY_ID).expect("fixture id"),
                 label: "other / review".to_owned(),
                 lifecycle,
@@ -2744,6 +2753,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let make_session = |agents| GardenSession {
+            sidebar: crate::presentation::widgets::garden::sidebar::SessionDetails::default(),
             id: SessionId::parse(STEADY_ID).expect("fixture id"),
             label: "many".to_owned(),
             lifecycle: SessionLifecycle::Available,

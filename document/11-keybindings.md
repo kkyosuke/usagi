@@ -244,7 +244,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Root Shell | `Ctrl-O [` / `Ctrl-O ]` | terminal tab選択 |
 | Root Shell | `Ctrl-O z` / `Ctrl-O x` | 高さ切替 / terminal終了 |
 | Root Shell | `Ctrl-O ↑` / `Ctrl-O ↓` / `Ctrl-O End` | scroll |
-| Garden | `←` / `→` | 横pan |
+| Garden | `↑` / `↓`、`Page Up` / `Page Down` | 右の session 一覧をスクロール（幅 99 桁以上） |
 | Garden | その他のキー / paste | wakeして閉じる |
 
 前面に入力modal / drawerがないworkspaceの `?`、live paneの `Ctrl-O ?`、全画面の `Ctrl-?` / `Ctrl-/` は

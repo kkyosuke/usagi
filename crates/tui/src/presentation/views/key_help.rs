@@ -367,7 +367,10 @@ impl Context {
                 ("Ctrl-O ↑ / ↓ / End", "scroll / live bottom"),
                 ("Ctrl-O t", "close Shell"),
             ],
-            Self::Garden => &[("← / →", "pan"), ("any other key", "wake and close")],
+            Self::Garden => &[
+                ("↑ / ↓ · PgUp / PgDn", "scroll session list"),
+                ("any other key", "wake and close"),
+            ],
         }
     }
 
