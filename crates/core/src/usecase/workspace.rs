@@ -23,9 +23,7 @@ use crate::domain::issue::IssueStatus;
 use crate::domain::pullrequest::PrLink;
 use crate::domain::recent::{Recent, Unite, UniteOverview};
 use crate::domain::workspace::{Workspace, WorkspaceOverview, validate_workspace_name};
-use crate::infrastructure::store::issue::IssueStore;
-use crate::infrastructure::store::state::WorkspaceStateStore;
-use crate::infrastructure::store::workspace::Storage;
+use crate::usecase::ports::WorkspaceRepository;
 
 /// Resolve `path` to a registered workspace, registering it when necessary, and
 /// stamp its `updated_at` with `now`.
@@ -49,7 +47,11 @@ use crate::infrastructure::store::workspace::Storage;
 ///
 /// Returns an error when the registry lock cannot be acquired or the registry
 /// cannot be read or written.
-pub fn open(storage: &Storage, path: &Path, now: DateTime<Utc>) -> Result<Workspace> {
+pub fn open(
+    storage: &impl WorkspaceRepository,
+    path: &Path,
+    now: DateTime<Utc>,
+) -> Result<Workspace> {
     register_resolved(storage, path, None, now)
 }
 
@@ -71,7 +73,7 @@ pub fn open(storage: &Storage, path: &Path, now: DateTime<Utc>) -> Result<Worksp
 /// Returns an error when the registry lock cannot be acquired or the registry
 /// cannot be read or written.
 pub fn register(
-    storage: &Storage,
+    storage: &impl WorkspaceRepository,
     path: &Path,
     name: &str,
     now: DateTime<Utc>,
@@ -82,18 +84,19 @@ pub fn register(
 }
 
 fn register_resolved(
-    storage: &Storage,
+    storage: &impl WorkspaceRepository,
     path: &Path,
     name: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<Workspace> {
-    let _lock = storage.lock()?;
-    let mut workspaces = storage.load_workspaces()?;
-    let (workspace, persist) = resolve_or_register(&mut workspaces, path, name, now)?;
-    if persist {
-        storage.save_workspaces(&workspaces)?;
-    }
-    Ok(workspace)
+    storage.transact(|transaction| {
+        let mut workspaces = transaction.load_workspaces()?;
+        let (workspace, persist) = resolve_or_register(&mut workspaces, path, name, now)?;
+        if persist {
+            transaction.save_workspaces(&workspaces)?;
+        }
+        Ok(workspace)
+    })
 }
 
 /// Remove the registered workspaces whose paths are in `paths`.
@@ -107,24 +110,28 @@ fn register_resolved(
 ///
 /// Returns an error when the registry lock cannot be acquired or the registry
 /// cannot be read or written.
-pub fn remove(storage: &Storage, paths: &[std::path::PathBuf]) -> Result<Vec<Workspace>> {
+pub fn remove(
+    storage: &impl WorkspaceRepository,
+    paths: &[std::path::PathBuf],
+) -> Result<Vec<Workspace>> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    let _lock = storage.lock()?;
-    let mut workspaces = storage.load_workspaces()?;
-    let mut removed = Vec::new();
-    workspaces.retain(|workspace| {
-        let should_remove = paths.iter().any(|path| path == &workspace.path);
-        if should_remove {
-            removed.push(workspace.clone());
+    storage.transact(|transaction| {
+        let mut workspaces = transaction.load_workspaces()?;
+        let mut removed = Vec::new();
+        workspaces.retain(|workspace| {
+            let should_remove = paths.iter().any(|path| path == &workspace.path);
+            if should_remove {
+                removed.push(workspace.clone());
+            }
+            !should_remove
+        });
+        if !removed.is_empty() {
+            transaction.save_workspaces(&workspaces)?;
         }
-        !should_remove
-    });
-    if !removed.is_empty() {
-        storage.save_workspaces(&workspaces)?;
-    }
-    Ok(removed)
+        Ok(removed)
+    })
 }
 
 /// Build recent-list entries for all registered workspaces, ordered by
@@ -140,10 +147,13 @@ pub fn remove(storage: &Storage, paths: &[std::path::PathBuf]) -> Result<Vec<Wor
 ///
 /// Returns an error when the global workspace registry cannot be read. Errors
 /// confined to an individual registered workspace are degraded to zero counts.
-pub fn recent(storage: &Storage) -> Result<Vec<Recent>> {
+pub fn recent(storage: &impl WorkspaceRepository) -> Result<Vec<Recent>> {
     let mut workspaces = storage.load_workspaces()?;
     workspaces.sort_by_key(|workspace| std::cmp::Reverse(workspace.updated_at));
-    let overviews = workspaces.into_iter().map(overview_for).collect::<Vec<_>>();
+    let overviews = workspaces
+        .into_iter()
+        .map(|workspace| overview_for(storage, workspace))
+        .collect::<Vec<_>>();
     let mut recent = overviews
         .iter()
         .cloned()
@@ -184,7 +194,7 @@ pub fn recent(storage: &Storage) -> Result<Vec<Recent>> {
 ///
 /// Returns an error when the Unite store cannot be locked, read, or written.
 pub fn touch_unite(
-    storage: &Storage,
+    storage: &impl WorkspaceRepository,
     paths: &[std::path::PathBuf],
     now: DateTime<Utc>,
 ) -> Result<()> {
@@ -197,14 +207,15 @@ pub fn touch_unite(
     if paths.len() < 2 {
         return Ok(());
     }
-    let _lock = storage.lock()?;
-    let mut unites = storage.load_unites()?;
-    if let Some(existing) = unites.iter_mut().find(|unite| unite.paths == paths) {
-        existing.updated_at = now;
-    } else {
-        unites.push(Unite::new(paths, now));
-    }
-    storage.save_unites(&unites)
+    storage.transact(|transaction| {
+        let mut unites = transaction.load_unites()?;
+        if let Some(existing) = unites.iter_mut().find(|unite| unite.paths == paths) {
+            existing.updated_at = now;
+        } else {
+            unites.push(Unite::new(paths, now));
+        }
+        transaction.save_unites(&unites)
+    })
 }
 
 /// The kind of New-project operation being pre-validated.
@@ -365,11 +376,8 @@ fn available_name(workspaces: &[Workspace], base: &str) -> String {
     }
 }
 
-fn overview_for(workspace: Workspace) -> WorkspaceOverview {
-    let state = WorkspaceStateStore::new(&workspace.path)
-        .load()
-        .ok()
-        .flatten();
+fn overview_for(storage: &impl WorkspaceRepository, workspace: Workspace) -> WorkspaceOverview {
+    let state = storage.workspace_state(&workspace.path).ok().flatten();
     let session_count = state.as_ref().map_or(0, |state| state.sessions.len());
     let pr_count = state.as_ref().map_or(0, |state| {
         state
@@ -380,8 +388,8 @@ fn overview_for(workspace: Workspace) -> WorkspaceOverview {
             .collect::<HashSet<_>>()
             .len()
     });
-    let open_issue_count = IssueStore::new(&workspace.path)
-        .summaries()
+    let open_issue_count = storage
+        .issue_summaries(&workspace.path)
         .map_or(0, |issues| {
             issues
                 .iter()

@@ -19,6 +19,7 @@ use crate::domain::workspace_state::WorkspaceState;
 use crate::infrastructure::paths::project_data_dir;
 use crate::infrastructure::persistence::json_file;
 use crate::infrastructure::persistence::store_lock::StoreLock;
+use crate::usecase::ports::{WorkspaceStateRepository, WorkspaceStateTransaction};
 
 const STATE_FILE: &str = "state.json";
 
@@ -76,6 +77,38 @@ impl WorkspaceStateStore {
     /// file cannot be written.
     pub fn save(&self, state: &WorkspaceState) -> Result<()> {
         json_file::write_versioned(&self.dir, &self.state_path(), state)
+    }
+}
+
+struct LockedWorkspaceState<'a> {
+    store: &'a WorkspaceStateStore,
+    _lock: StoreLock,
+}
+
+impl WorkspaceStateTransaction for LockedWorkspaceState<'_> {
+    fn load(&self) -> Result<Option<WorkspaceState>> {
+        WorkspaceStateStore::load(self.store)
+    }
+
+    fn save(&self, state: &WorkspaceState) -> Result<()> {
+        WorkspaceStateStore::save(self.store, state)
+    }
+}
+
+impl WorkspaceStateRepository for WorkspaceStateStore {
+    fn load(&self) -> Result<Option<WorkspaceState>> {
+        WorkspaceStateStore::load(self)
+    }
+
+    fn transact<T>(
+        &self,
+        operation: impl FnOnce(&dyn WorkspaceStateTransaction) -> Result<T>,
+    ) -> Result<T> {
+        let transaction = LockedWorkspaceState {
+            store: self,
+            _lock: self.lock()?,
+        };
+        operation(&transaction)
     }
 }
 

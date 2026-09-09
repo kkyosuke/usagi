@@ -2,16 +2,17 @@
 //!
 //! The application-level operations called by the agent-facing MCP tools
 //! (`memory_*`): save (create or overwrite by name), fetch, list, and
-//! delete a durable agent memory. Each takes the injected [`MemoryStore`] and,
-//! for [`save`], the current time (`now`), so this layer stays clock-free and
-//! testable; the concrete store and clock are bound by the caller.
+//! delete a durable agent memory. Each takes the injected
+//! [`MemoryRepository`](crate::usecase::ports::MemoryRepository) and, for
+//! [`save`], the current time (`now`), so this layer stays clock-free and
+//! testable; infrastructure binds the concrete store.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::domain::memory::{Memory, MemorySummary, MemoryType, slugify};
-use crate::infrastructure::store::memory::MemoryStore;
+use crate::usecase::ports::MemoryRepository;
 
 /// The fields supplied when saving a memory. `name` is slugified into the
 /// filename-safe identity by [`save`]; the timestamps are assigned there.
@@ -54,23 +55,24 @@ pub struct MemoryFilter {
 /// # Errors
 ///
 /// Returns an error when the store cannot be read or written.
-pub fn save(store: &MemoryStore, spec: NewMemory, now: DateTime<Utc>) -> Result<Memory> {
+pub fn save(store: &impl MemoryRepository, spec: NewMemory, now: DateTime<Utc>) -> Result<Memory> {
     let name = slugify(&spec.name);
-    let lock = store.lock()?;
-    let created_at = store
-        .read_locked(&name)?
-        .map_or(now, |existing| existing.created_at);
-    let memory = Memory {
-        name,
-        title: spec.title,
-        kind: spec.kind,
-        related: spec.related,
-        created_at,
-        updated_at: now,
-        body: spec.body,
-    };
-    store.write_locked(&lock, &memory)?;
-    Ok(memory)
+    store.transact(|transaction| {
+        let created_at = transaction
+            .get(&name)?
+            .map_or(now, |existing| existing.created_at);
+        let memory = Memory {
+            name,
+            title: spec.title,
+            kind: spec.kind,
+            related: spec.related,
+            created_at,
+            updated_at: now,
+            body: spec.body,
+        };
+        transaction.save(&memory)?;
+        Ok(memory)
+    })
 }
 
 /// Fetch one memory by name, or `None` when it does not exist.
@@ -79,8 +81,8 @@ pub fn save(store: &MemoryStore, spec: NewMemory, now: DateTime<Utc>) -> Result<
 ///
 /// Returns an error when the name is unsafe or the backing file cannot be read
 /// or parsed.
-pub fn get(store: &MemoryStore, name: &str) -> Result<Option<Memory>> {
-    store.read(name)
+pub fn get(store: &impl MemoryRepository, name: &str) -> Result<Option<Memory>> {
+    store.get(name)
 }
 
 /// Metadata summaries for every memory, in name order.
@@ -89,7 +91,7 @@ pub fn get(store: &MemoryStore, name: &str) -> Result<Option<Memory>> {
 ///
 /// Returns an error when the index cannot be read and the markdown source cannot
 /// be rescanned.
-pub fn list(store: &MemoryStore) -> Result<Vec<MemorySummary>> {
+pub fn list(store: &impl MemoryRepository) -> Result<Vec<MemorySummary>> {
     store.summaries()
 }
 
@@ -100,43 +102,44 @@ pub fn list(store: &MemoryStore) -> Result<Vec<MemorySummary>> {
 ///
 /// Returns an error when a new memory has no title or persistence fails.
 pub fn save_partial(
-    store: &MemoryStore,
+    store: &impl MemoryRepository,
     name: &str,
     patch: MemoryPatch,
     now: DateTime<Utc>,
 ) -> Result<Memory> {
     let slug = slugify(name);
-    let lock = store.lock()?;
-    let memory = if let Some(mut memory) = store.read_locked(&slug)? {
-        if let Some(title) = patch.title {
-            memory.title = title;
-        }
-        if let Some(kind) = patch.kind {
-            memory.kind = kind;
-        }
-        if let Some(related) = patch.related {
-            memory.related = related;
-        }
-        if let Some(body) = patch.body {
-            memory.body = body;
-        }
-        memory.updated_at = now;
-        memory
-    } else {
-        Memory {
-            name: slug,
-            title: patch
-                .title
-                .ok_or_else(|| anyhow::anyhow!("`title` is required when creating a new memory"))?,
-            kind: patch.kind.unwrap_or_default(),
-            related: patch.related.unwrap_or_default(),
-            created_at: now,
-            updated_at: now,
-            body: patch.body.unwrap_or_default(),
-        }
-    };
-    store.write_locked(&lock, &memory)?;
-    Ok(memory)
+    store.transact(|transaction| {
+        let memory = if let Some(mut memory) = transaction.get(&slug)? {
+            if let Some(title) = patch.title {
+                memory.title = title;
+            }
+            if let Some(kind) = patch.kind {
+                memory.kind = kind;
+            }
+            if let Some(related) = patch.related {
+                memory.related = related;
+            }
+            if let Some(body) = patch.body {
+                memory.body = body;
+            }
+            memory.updated_at = now;
+            memory
+        } else {
+            Memory {
+                name: slug,
+                title: patch.title.ok_or_else(|| {
+                    anyhow::anyhow!("`title` is required when creating a new memory")
+                })?,
+                kind: patch.kind.unwrap_or_default(),
+                related: patch.related.unwrap_or_default(),
+                created_at: now,
+                updated_at: now,
+                body: patch.body.unwrap_or_default(),
+            }
+        };
+        transaction.save(&memory)?;
+        Ok(memory)
+    })
 }
 
 /// Search memory names, titles, and bodies case-insensitively, optionally
@@ -146,7 +149,7 @@ pub fn save_partial(
 ///
 /// Returns an error when the store cannot be scanned or indexed.
 pub fn search(
-    store: &MemoryStore,
+    store: &impl MemoryRepository,
     query: &str,
     filter: &MemoryFilter,
 ) -> Result<Vec<MemorySummary>> {
@@ -155,14 +158,14 @@ pub fn search(
         store.summaries()?
     } else {
         store
-            .scan_sources_lenient()?
+            .sources()?
             .into_iter()
             .filter(|source| {
-                source.entry.name.to_lowercase().contains(&needle)
-                    || source.entry.title.to_lowercase().contains(&needle)
-                    || source.entry.body.to_lowercase().contains(&needle)
+                source.memory.name.to_lowercase().contains(&needle)
+                    || source.memory.title.to_lowercase().contains(&needle)
+                    || source.memory.body.to_lowercase().contains(&needle)
             })
-            .map(|source| source.entry.summary(&source.file))
+            .map(|source| source.memory.summary(&source.file))
             .collect()
     };
     summaries.retain(|summary| filter.kind.is_none_or(|kind| summary.kind == kind));
@@ -176,8 +179,8 @@ pub fn search(
 ///
 /// Returns an error when the name is unsafe, the lock cannot be taken, or the
 /// file cannot be removed.
-pub fn delete(store: &MemoryStore, name: &str) -> Result<bool> {
-    store.remove(name)
+pub fn delete(store: &impl MemoryRepository, name: &str) -> Result<bool> {
+    store.delete(name)
 }
 
 #[cfg(test)]

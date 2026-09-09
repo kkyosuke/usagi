@@ -39,20 +39,6 @@ pub fn snapshot<P: PrInventoryPort>(
     })
 }
 
-impl PrInventoryPort for crate::infrastructure::store::pr_inventory::PrInventoryStore {
-    type Error = anyhow::Error;
-    fn load(&self) -> Result<BTreeMap<SessionId, PrInventory>, Self::Error> {
-        Ok(self.load()?.sessions)
-    }
-    fn save(&self, sessions: &BTreeMap<SessionId, PrInventory>) -> Result<(), Self::Error> {
-        self.save(
-            &crate::infrastructure::store::pr_inventory::PrInventoryStoreSnapshot {
-                sessions: sessions.clone(),
-            },
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

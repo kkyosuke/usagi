@@ -12,12 +12,17 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::issue::IssueSummary;
 use crate::domain::recent::Unite;
 use crate::domain::settings::Settings;
 use crate::domain::workspace::{Workspace, validate_workspace_name};
+use crate::domain::workspace_state::WorkspaceState;
 use crate::infrastructure::paths::data_dir;
 use crate::infrastructure::persistence::json_file;
 use crate::infrastructure::persistence::store_lock::StoreLock;
+use crate::infrastructure::store::issue::IssueStore;
+use crate::infrastructure::store::state::WorkspaceStateStore;
+use crate::usecase::ports::{WorkspaceRegistryTransaction, WorkspaceRepository};
 
 const WORKSPACES_FILE: &str = "workspaces.json";
 const SETTINGS_FILE: &str = "settings.json";
@@ -195,6 +200,58 @@ impl Storage {
         let touched = workspace.clone();
         self.save_workspaces(&workspaces)?;
         Ok(Some(touched))
+    }
+}
+
+struct LockedWorkspaceRegistry<'a> {
+    storage: &'a Storage,
+    _lock: StoreLock,
+}
+
+impl WorkspaceRegistryTransaction for LockedWorkspaceRegistry<'_> {
+    fn load_workspaces(&self) -> Result<Vec<Workspace>> {
+        self.storage.load_workspaces()
+    }
+
+    fn save_workspaces(&self, workspaces: &[Workspace]) -> Result<()> {
+        self.storage.save_workspaces(workspaces)
+    }
+
+    fn load_unites(&self) -> Result<Vec<Unite>> {
+        self.storage.load_unites()
+    }
+
+    fn save_unites(&self, unites: &[Unite]) -> Result<()> {
+        self.storage.save_unites(unites)
+    }
+}
+
+impl WorkspaceRepository for Storage {
+    fn transact<T>(
+        &self,
+        operation: impl FnOnce(&dyn WorkspaceRegistryTransaction) -> Result<T>,
+    ) -> Result<T> {
+        let transaction = LockedWorkspaceRegistry {
+            storage: self,
+            _lock: self.lock()?,
+        };
+        operation(&transaction)
+    }
+
+    fn load_workspaces(&self) -> Result<Vec<Workspace>> {
+        Storage::load_workspaces(self)
+    }
+
+    fn load_unites(&self) -> Result<Vec<Unite>> {
+        Storage::load_unites(self)
+    }
+
+    fn workspace_state(&self, root: &Path) -> Result<Option<WorkspaceState>> {
+        WorkspaceStateStore::new(root).load()
+    }
+
+    fn issue_summaries(&self, root: &Path) -> Result<Vec<IssueSummary>> {
+        IssueStore::new(root).summaries()
     }
 }
 

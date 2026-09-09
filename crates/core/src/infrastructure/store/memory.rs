@@ -26,6 +26,7 @@ use crate::infrastructure::persistence::markdown_store::{
 };
 use crate::infrastructure::persistence::store_lock::StoreLock;
 use crate::infrastructure::store::MutationOutcome;
+use crate::usecase::ports::{MemoryRepository, MemorySource, MemoryTransaction};
 
 const MEMORY_DIR_NAME: &str = "memory";
 const TOC_FILE: &str = "MEMORY.md";
@@ -318,6 +319,57 @@ impl MemoryStore {
                 "memory derived rebuild remains scheduled after read: {error:#}"
             ));
         }
+    }
+}
+
+struct LockedMemoryStore<'a> {
+    store: &'a MemoryStore,
+    lock: StoreLock,
+}
+
+impl MemoryTransaction for LockedMemoryStore<'_> {
+    fn get(&self, name: &str) -> Result<Option<Memory>> {
+        self.store.read_locked(name)
+    }
+
+    fn save(&self, memory: &Memory) -> Result<()> {
+        self.store.write_locked(&self.lock, memory).map(|_| ())
+    }
+}
+
+impl MemoryRepository for MemoryStore {
+    fn transact<T>(
+        &self,
+        operation: impl FnOnce(&dyn MemoryTransaction) -> Result<T>,
+    ) -> Result<T> {
+        let transaction = LockedMemoryStore {
+            store: self,
+            lock: self.lock()?,
+        };
+        operation(&transaction)
+    }
+
+    fn get(&self, name: &str) -> Result<Option<Memory>> {
+        self.read(name)
+    }
+
+    fn summaries(&self) -> Result<Vec<MemorySummary>> {
+        MemoryStore::summaries(self)
+    }
+
+    fn sources(&self) -> Result<Vec<MemorySource>> {
+        Ok(self
+            .scan_sources_lenient()?
+            .into_iter()
+            .map(|source| MemorySource {
+                memory: source.entry,
+                file: source.file,
+            })
+            .collect())
+    }
+
+    fn delete(&self, name: &str) -> Result<bool> {
+        self.remove(name)
     }
 }
 

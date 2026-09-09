@@ -3,9 +3,9 @@
 //! The application-level operations called by the agent-facing MCP tools
 //! (`issue_*`): create (allocating the next number),
 //! fetch, list, update, and delete a task issue. Each takes the injected
-//! [`IssueStore`] and, for the mutating operations, the current time (`now`), so
-//! this layer stays clock-free and fully testable; the concrete store and clock
-//! are bound by the caller.
+//! [`IssueRepository`](crate::usecase::ports::IssueRepository) and, for the
+//! mutating operations, the current time (`now`), so this layer stays clock-free
+//! and fully testable; infrastructure binds the concrete store.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
-use crate::infrastructure::store::issue::{IssueSourceSnapshot, IssueStore};
+use crate::usecase::ports::{IssueRepository, IssueSourceSnapshot};
 
 #[cfg(test)]
 thread_local! {
@@ -173,49 +173,50 @@ pub fn ensure_write_allowed(repo_root: &Path) -> Result<()> {
 ///
 /// Returns an error when a matching retry resolves to an ambiguous number, or
 /// when the store cannot allocate a number or write the issue.
-pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<Issue> {
-    let lock = store.lock()?;
-    if let Some(matching) = store
-        .source_snapshot_locked(&lock)?
-        .sources
-        .into_iter()
-        .find(|source| matches_new_issue_source(&source.issue, &spec))
-    {
-        let source_number = matching.filename_number.context(format!(
-            "matching issue source {} has no numeric filename prefix",
-            matching.file
-        ))?;
-        #[cfg(test)]
-        run_create_retry_validation_hook();
-        let existing = store.read_locked(source_number)?.context(format!(
-            "matching issue source {} disappeared while validating create retry",
-            matching.file
-        ))?;
-        if !matches_new_issue_source(&existing, &spec) {
-            bail!(
-                "matching issue source {} changed while validating create retry",
+pub fn create(store: &impl IssueRepository, spec: NewIssue, now: DateTime<Utc>) -> Result<Issue> {
+    store.transact(|transaction| {
+        if let Some(matching) = transaction
+            .source_snapshot()?
+            .sources
+            .into_iter()
+            .find(|source| matches_new_issue_source(&source.issue, &spec))
+        {
+            let source_number = matching.filename_number.context(format!(
+                "matching issue source {} has no numeric filename prefix",
                 matching.file
-            );
+            ))?;
+            #[cfg(test)]
+            run_create_retry_validation_hook();
+            let existing = transaction.get(source_number)?.context(format!(
+                "matching issue source {} disappeared while validating create retry",
+                matching.file
+            ))?;
+            if !matches_new_issue_source(&existing, &spec) {
+                bail!(
+                    "matching issue source {} changed while validating create retry",
+                    matching.file
+                );
+            }
+            return Ok(existing);
         }
-        return Ok(existing);
-    }
-    let number = store.reserve_next_number()?;
-    let issue = Issue {
-        number,
-        title: spec.title,
-        status: IssueStatus::default(),
-        priority: spec.priority,
-        labels: spec.labels,
-        dependson: spec.dependson,
-        related: spec.related,
-        parent: spec.parent,
-        milestone: spec.milestone,
-        created_at: now,
-        updated_at: now,
-        body: spec.body,
-    };
-    store.write_locked(&lock, &issue)?;
-    Ok(issue)
+        let number = transaction.reserve_next_number()?;
+        let issue = Issue {
+            number,
+            title: spec.title,
+            status: IssueStatus::default(),
+            priority: spec.priority,
+            labels: spec.labels,
+            dependson: spec.dependson,
+            related: spec.related,
+            parent: spec.parent,
+            milestone: spec.milestone,
+            created_at: now,
+            updated_at: now,
+            body: spec.body,
+        };
+        transaction.save(&issue)?;
+        Ok(issue)
+    })
 }
 
 /// Match the durable identity of an initial create request. Timestamps and the
@@ -240,8 +241,8 @@ fn matches_new_issue_source(issue: &Issue, spec: &NewIssue) -> bool {
 ///
 /// Returns an error when the backing file cannot be read or parsed, or when
 /// multiple source files claim `number`.
-pub fn get(store: &IssueStore, number: u32) -> Result<Option<Issue>> {
-    store.read(number)
+pub fn get(store: &impl IssueRepository, number: u32) -> Result<Option<Issue>> {
+    store.get(number)
 }
 
 /// Metadata summaries for every issue, in number order.
@@ -250,7 +251,7 @@ pub fn get(store: &IssueStore, number: u32) -> Result<Option<Issue>> {
 ///
 /// Returns an error when the index cannot be read and the markdown source cannot
 /// be rescanned.
-pub fn list(store: &IssueStore) -> Result<Vec<IssueSummary>> {
+pub fn list(store: &impl IssueRepository) -> Result<Vec<IssueSummary>> {
     store.summaries()
 }
 
@@ -260,7 +261,11 @@ pub fn list(store: &IssueStore) -> Result<Vec<IssueSummary>> {
 /// # Errors
 ///
 /// Returns an error when the store cannot be scanned or indexed.
-pub fn search(store: &IssueStore, query: &str, filter: &IssueFilter) -> Result<Vec<ListedIssue>> {
+pub fn search(
+    store: &impl IssueRepository,
+    query: &str,
+    filter: &IssueFilter,
+) -> Result<Vec<ListedIssue>> {
     Ok(search_snapshot(store.source_snapshot()?, query, filter))
 }
 
@@ -399,45 +404,46 @@ pub fn to_prompt(issue: &Issue) -> String {
 /// Returns an error when the issue cannot be read unambiguously or the write
 /// fails.
 pub fn update(
-    store: &IssueStore,
+    store: &impl IssueRepository,
     number: u32,
     patch: IssuePatch,
     now: DateTime<Utc>,
 ) -> Result<Option<Issue>> {
-    let lock = store.lock()?;
-    let Some(mut issue) = store.read_locked(number)? else {
-        return Ok(None);
-    };
-    if let Some(title) = patch.title {
-        issue.title = title;
-    }
-    if let Some(status) = patch.status {
-        issue.status = status;
-    }
-    if let Some(priority) = patch.priority {
-        issue.priority = priority;
-    }
-    if let Some(labels) = patch.labels {
-        issue.labels = labels;
-    }
-    if let Some(dependson) = patch.dependson {
-        issue.dependson = dependson;
-    }
-    if let Some(related) = patch.related {
-        issue.related = related;
-    }
-    if let Some(parent) = patch.parent {
-        issue.parent = parent;
-    }
-    if let Some(milestone) = patch.milestone {
-        issue.milestone = milestone;
-    }
-    if let Some(body) = patch.body {
-        issue.body = body;
-    }
-    issue.updated_at = now;
-    store.write_locked(&lock, &issue)?;
-    Ok(Some(issue))
+    store.transact(|transaction| {
+        let Some(mut issue) = transaction.get(number)? else {
+            return Ok(None);
+        };
+        if let Some(title) = patch.title {
+            issue.title = title;
+        }
+        if let Some(status) = patch.status {
+            issue.status = status;
+        }
+        if let Some(priority) = patch.priority {
+            issue.priority = priority;
+        }
+        if let Some(labels) = patch.labels {
+            issue.labels = labels;
+        }
+        if let Some(dependson) = patch.dependson {
+            issue.dependson = dependson;
+        }
+        if let Some(related) = patch.related {
+            issue.related = related;
+        }
+        if let Some(parent) = patch.parent {
+            issue.parent = parent;
+        }
+        if let Some(milestone) = patch.milestone {
+            issue.milestone = milestone;
+        }
+        if let Some(body) = patch.body {
+            issue.body = body;
+        }
+        issue.updated_at = now;
+        transaction.save(&issue)?;
+        Ok(Some(issue))
+    })
 }
 
 /// Delete the issue numbered `number`, returning whether one was removed.
@@ -446,8 +452,8 @@ pub fn update(
 ///
 /// Returns an error when the lock cannot be taken, the issue number is
 /// ambiguous, or a file cannot be removed.
-pub fn delete(store: &IssueStore, number: u32) -> Result<bool> {
-    store.remove(number)
+pub fn delete(store: &impl IssueRepository, number: u32) -> Result<bool> {
+    store.delete(number)
 }
 
 #[cfg(test)]

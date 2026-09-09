@@ -26,6 +26,10 @@ use crate::infrastructure::persistence::markdown_store::{
 use crate::infrastructure::persistence::store_lock::StoreLock;
 use crate::infrastructure::store::MutationOutcome;
 use crate::infrastructure::store::issue_number_sequence::IssueNumberSequence;
+use crate::usecase::ports::{
+    IssueRepository, IssueSource as PortIssueSource,
+    IssueSourceSnapshot as PortIssueSourceSnapshot, IssueTransaction,
+};
 
 const ISSUES_DIR_NAME: &str = "issues";
 
@@ -339,8 +343,9 @@ impl IssueStore {
     pub(crate) fn source_snapshot_after_lock_for_test(
         &self,
         observe: impl FnMut(SourceSnapshotLockPhase),
-    ) -> Result<IssueSourceSnapshot> {
+    ) -> Result<PortIssueSourceSnapshot> {
         self.source_snapshot_observing_lock(observe)
+            .map(port_snapshot)
     }
 
     /// Capture a source snapshot while the caller already holds this store's
@@ -737,6 +742,72 @@ impl IssueStore {
             all = all.max(maximum);
         }
         Ok(all)
+    }
+}
+
+struct LockedIssueStore<'a> {
+    store: &'a IssueStore,
+    lock: StoreLock,
+}
+
+fn port_snapshot(snapshot: IssueSourceSnapshot) -> PortIssueSourceSnapshot {
+    PortIssueSourceSnapshot {
+        sources: snapshot
+            .sources
+            .into_iter()
+            .map(|source| PortIssueSource {
+                issue: source.issue,
+                file: source.file,
+                filename_number: source.filename_number,
+            })
+            .collect(),
+        claims: snapshot.claims,
+    }
+}
+
+impl IssueTransaction for LockedIssueStore<'_> {
+    fn get(&self, number: u32) -> Result<Option<Issue>> {
+        self.store.read_locked(number)
+    }
+
+    fn source_snapshot(&self) -> Result<PortIssueSourceSnapshot> {
+        self.store
+            .source_snapshot_locked(&self.lock)
+            .map(port_snapshot)
+    }
+
+    fn reserve_next_number(&self) -> Result<u32> {
+        self.store.reserve_next_number()
+    }
+
+    fn save(&self, issue: &Issue) -> Result<()> {
+        self.store.write_locked(&self.lock, issue).map(|_| ())
+    }
+}
+
+impl IssueRepository for IssueStore {
+    fn transact<T>(&self, operation: impl FnOnce(&dyn IssueTransaction) -> Result<T>) -> Result<T> {
+        let transaction = LockedIssueStore {
+            store: self,
+            lock: self.lock()?,
+        };
+        operation(&transaction)
+    }
+
+    fn get(&self, number: u32) -> Result<Option<Issue>> {
+        self.read(number)
+    }
+
+    fn summaries(&self) -> Result<Vec<IssueSummary>> {
+        IssueStore::summaries(self)
+    }
+
+    fn source_snapshot(&self) -> Result<PortIssueSourceSnapshot> {
+        IssueStore::source_snapshot(self).map(port_snapshot)
+    }
+
+    fn delete(&self, number: u32) -> Result<bool> {
+        self.remove(number)
     }
 }
 

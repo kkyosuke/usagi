@@ -19,17 +19,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-/// The repository-relative directory holding usagi's per-project metadata.
-pub const STATE_DIR: &str = ".usagi";
+pub use crate::domain::workspace_layout::{SESSIONS_DIR, STATE_DIR};
 
 /// The directory name used by development runtime state.
 pub const DEV_DIR: &str = "dev";
 /// The directory name used by local runtime state.
 pub const LOCAL_DIR: &str = "local";
-
-/// The directory under [`STATE_DIR`] that holds session worktrees, one per
-/// session: `<repo>/.usagi/sessions/<name>`.
-pub const SESSIONS_DIR: &str = "sessions";
 
 /// The directory under [`STATE_DIR`] holding the workspace-scoped daemon fence.
 ///

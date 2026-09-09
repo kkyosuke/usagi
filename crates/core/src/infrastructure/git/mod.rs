@@ -13,6 +13,7 @@
 //! the path alone does not, because git prefers the repository, index, object
 //! database and configuration named by its environment ([`environment`]).
 
+pub mod clean;
 pub mod clone;
 pub mod diff;
 pub mod environment;
@@ -20,6 +21,7 @@ pub mod repo;
 pub mod runner;
 pub mod worktree;
 
+pub use clean::observe_repository;
 pub use clone::clone;
 pub use diff::{DiffStatus, diff_status};
 pub use environment::confined_git_command;

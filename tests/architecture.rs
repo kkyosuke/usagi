@@ -331,6 +331,12 @@ fn source_layers_follow_the_documented_dependency_matrix() {
         &root.join("crates/core/src/infrastructure"),
         &["presentation"],
     ));
+    let core_usecase = root.join("crates/core/src/usecase");
+    let mut core_usecase_violations = layer_violations(&core_usecase, &["infrastructure"]);
+    for transitional_ipc_client in ["client.rs", "owner_routing.rs"] {
+        core_usecase_violations.remove(&core_usecase.join(transitional_ipc_client));
+    }
+    violations.extend(core_usecase_violations);
     for face in ["daemon", "tui"] {
         violations.extend(layer_violations(
             &root.join("crates").join(face).join("src/usecase"),

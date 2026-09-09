@@ -5,7 +5,7 @@
 //! operations the note / todo / decision surfaces call — the MCP
 //! `session_note_* / session_todo_* / session_decision_*` tools and the TUI —
 //! reading and writing that scratchpad through the injected
-//! [`WorkspaceStateStore`].
+//! [`WorkspaceStateRepository`](crate::usecase::ports::WorkspaceStateRepository).
 //!
 //! A [`Target`] selects whose scratchpad to touch: a named session or the
 //! workspace root. Mutations hold the store lock across load→edit→save and
@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 
 use crate::domain::note::{Scratchpad, SessionDecision, SessionTodo};
 use crate::domain::workspace_state::WorkspaceState;
-use crate::infrastructure::store::state::WorkspaceStateStore;
+use crate::usecase::ports::WorkspaceStateRepository;
 
 /// Whose scratchpad an operation targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +58,7 @@ fn scratchpad_mut<'a>(
 
 /// Read the target's scratchpad, or a default (empty) one when there is no
 /// `state.json` or the target session does not exist.
-fn read(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Scratchpad> {
+fn read(store: &impl WorkspaceStateRepository, target: Target<'_>) -> Result<Scratchpad> {
     Ok(store
         .load()?
         .as_ref()
@@ -70,22 +70,23 @@ fn read(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Scratchpad> {
 /// Apply `edit` to the target's scratchpad and persist, stamping `now`. Returns
 /// `false` (without writing) when the target session does not exist.
 fn mutate(
-    store: &WorkspaceStateStore,
+    store: &impl WorkspaceStateRepository,
     target: Target<'_>,
     now: DateTime<Utc>,
     edit: impl FnOnce(&mut Scratchpad) -> bool,
 ) -> Result<bool> {
-    let _lock = store.lock()?;
-    let mut state = store.load()?.unwrap_or_default();
-    let Some(pad) = scratchpad_mut(&mut state, target) else {
-        return Ok(false);
-    };
-    if !edit(pad) {
-        return Ok(false);
-    }
-    state.updated_at = now;
-    store.save(&state)?;
-    Ok(true)
+    store.transact(|transaction| {
+        let mut state = transaction.load()?.unwrap_or_default();
+        let Some(pad) = scratchpad_mut(&mut state, target) else {
+            return Ok(false);
+        };
+        if !edit(pad) {
+            return Ok(false);
+        }
+        state.updated_at = now;
+        transaction.save(&state)?;
+        Ok(true)
+    })
 }
 
 /// The target's free-form note, or `None` when unset (or the target is absent).
@@ -93,7 +94,7 @@ fn mutate(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
-pub fn note(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Option<String>> {
+pub fn note(store: &impl WorkspaceStateRepository, target: Target<'_>) -> Result<Option<String>> {
     Ok(read(store, target)?.note.filter(|n| !n.is_empty()))
 }
 
@@ -104,7 +105,7 @@ pub fn note(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Option<St
 ///
 /// Returns an error when the store cannot be locked, read, or written.
 pub fn set_note(
-    store: &WorkspaceStateStore,
+    store: &impl WorkspaceStateRepository,
     target: Target<'_>,
     note: &str,
     now: DateTime<Utc>,
@@ -124,7 +125,10 @@ pub fn set_note(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
-pub fn todos(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<SessionTodo>> {
+pub fn todos(
+    store: &impl WorkspaceStateRepository,
+    target: Target<'_>,
+) -> Result<Vec<SessionTodo>> {
     Ok(read(store, target)?.todos)
 }
 
@@ -135,7 +139,7 @@ pub fn todos(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<Sess
 ///
 /// Returns an error when the store cannot be locked, read, or written.
 pub fn add_todo(
-    store: &WorkspaceStateStore,
+    store: &impl WorkspaceStateRepository,
     target: Target<'_>,
     text: &str,
     now: DateTime<Utc>,
@@ -154,7 +158,7 @@ pub fn add_todo(
 ///
 /// Returns an error when the store cannot be locked, read, or written.
 pub fn update_todo(
-    store: &WorkspaceStateStore,
+    store: &impl WorkspaceStateRepository,
     target: Target<'_>,
     index: usize,
     done: Option<bool>,
@@ -182,7 +186,7 @@ pub fn update_todo(
 ///
 /// Returns an error when the store cannot be locked, read, or written.
 pub fn remove_todo(
-    store: &WorkspaceStateStore,
+    store: &impl WorkspaceStateRepository,
     target: Target<'_>,
     index: usize,
     now: DateTime<Utc>,
@@ -201,7 +205,10 @@ pub fn remove_todo(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
-pub fn decisions(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<SessionDecision>> {
+pub fn decisions(
+    store: &impl WorkspaceStateRepository,
+    target: Target<'_>,
+) -> Result<Vec<SessionDecision>> {
     Ok(read(store, target)?.decisions)
 }
 
@@ -212,7 +219,7 @@ pub fn decisions(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<
 ///
 /// Returns an error when the store cannot be locked, read, or written.
 pub fn log_decision(
-    store: &WorkspaceStateStore,
+    store: &impl WorkspaceStateRepository,
     target: Target<'_>,
     text: &str,
     now: DateTime<Utc>,
