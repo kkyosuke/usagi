@@ -148,7 +148,7 @@ numbered_docs.each_with_index do |path, position|
 end
 
 work_run_input = read.call("crates/tui/src/usecase/terminal_input.rs")
-work_run_client = read.call("crates/core/src/usecase/client.rs")
+work_run_client = read.call("crates/core/src/infrastructure/client.rs")
 tui_spec = read.call("document/03-tui.md")
 ipc_spec = read.call("document/04-ipc.md")
 root_readme = read.call("README.md")
