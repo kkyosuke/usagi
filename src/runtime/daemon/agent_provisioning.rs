@@ -4,6 +4,7 @@
 //! materialization. Socket admission, runtime ownership, and background-worker
 //! orchestration remain in the parent composition module.
 
+use super::secure_path::{InvalidOwnedDirectory, validate_owned_directory};
 use super::{
     AGENT_PHASE_HOOK_EVENTS, Arc, BTreeMap, BTreeSet, ClaudeProvision, ClaudeProvisionFailure,
     ClaudeProvisioner, CodexProvision, CodexProvisionFailure, CodexProvisioner, DefaultModel,
@@ -798,6 +799,12 @@ pub(super) enum ClaudeSandboxPolicyError {
     ProtectedWorkspaceAncestor,
 }
 
+impl From<InvalidOwnedDirectory> for ClaudeSandboxPolicyError {
+    fn from(_: InvalidOwnedDirectory) -> Self {
+        Self::InvalidWritableRoot
+    }
+}
+
 /// daemon が確定した、1 回の launch 分の sandbox policy 入力。
 pub(super) struct SandboxPolicyInputs<'a> {
     pub(super) mode: SandboxMode,
@@ -935,40 +942,6 @@ pub(super) fn validate_sandbox_backend(path: &Path) -> Result<(), ClaudeSandboxP
         }
     }
     Ok(())
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
-pub(super) fn validate_owned_directory(path: &Path) -> Result<(), ClaudeSandboxPolicyError> {
-    if !path.is_absolute() || path == Path::new("/") {
-        return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
-    }
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
-    if !metadata.file_type().is_dir() || path_has_symlink_component(path) {
-        return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
-        }
-    }
-    Ok(())
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
-pub(super) fn path_has_symlink_component(path: &Path) -> bool {
-    path.ancestors().any(|component| {
-        std::fs::symlink_metadata(component).map_or(true, |metadata| {
-            metadata.file_type().is_symlink() && !is_macos_system_firmlink(component)
-        })
-    })
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_policy_accepts_the_per_user_cache_root
-pub(super) fn is_macos_system_firmlink(path: &Path) -> bool {
-    cfg!(target_os = "macos") && matches!(path.to_str(), Some("/var" | "/tmp" | "/etc"))
 }
 
 /// macOS の per-user cache root（`confstr(_CS_DARWIN_USER_CACHE_DIR)`）を canonical path で確定する。

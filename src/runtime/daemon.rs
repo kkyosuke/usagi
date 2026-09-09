@@ -1,6 +1,7 @@
 //! daemon 面へ Unix process / socket / signal を接続する composition adapter。
 
 mod agent_provisioning;
+mod secure_path;
 mod tenant_control;
 
 #[cfg(test)]
@@ -19,8 +20,9 @@ use agent_provisioning::{
 };
 use agent_provisioning::{
     DiscardJournal, RootClaudeProvisioner, RootCodexProvisioner,
-    repair_agent_codex_arg0_permissions, resolve_sandbox_cache_dir, validate_owned_directory,
+    repair_agent_codex_arg0_permissions, resolve_sandbox_cache_dir,
 };
+use secure_path::validate_owned_directory;
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};

@@ -512,6 +512,8 @@ fn daemon_agent_provisioning_stays_in_its_product_boundary() {
         .expect("daemon composition source is readable");
     let provisioning = fs::read_to_string(root.join("src/runtime/daemon/agent_provisioning.rs"))
         .expect("agent provisioning source is readable");
+    let secure_path = fs::read_to_string(root.join("src/runtime/daemon/secure_path.rs"))
+        .expect("daemon secure-path source is readable");
 
     assert!(composition.contains("mod agent_provisioning;"));
     for symbol in [
@@ -533,6 +535,8 @@ fn daemon_agent_provisioning_stays_in_its_product_boundary() {
     }
     assert!(!composition.contains("use agent_provisioning::*;"));
     assert!(!provisioning.contains("use super::*;"));
+    assert!(!provisioning.contains("fn validate_owned_directory("));
+    assert!(secure_path.contains("fn validate_owned_directory("));
     assert!(
         provisioning.lines().count() <= 1_400,
         "agent provisioning grew beyond its reviewable product boundary"
