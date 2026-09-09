@@ -3,7 +3,7 @@
 //! This suite deliberately drives only pure reducers and the fake backend seam.
 //! It is safe to run in CI without a PTY, daemon socket, clock, or terminal.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -20,10 +20,6 @@ use usagi_tui::presentation::widgets::display_width;
 use usagi_tui::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, Feedback, Overlay, SafeError, SafeMessage,
     TabDirection, Target, TargetPhase, update,
-};
-use usagi_tui::usecase::application::lifecycle::{
-    DaemonEvent, Effect as LifecycleEffect, Event, Interaction, LifecycleState, Mode, PendingRow,
-    SessionRow, Target as LifecycleTarget, update as update_lifecycle,
 };
 use usagi_tui::usecase::application::pane::{
     LivePane, PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
@@ -45,31 +41,6 @@ fn selected_terminal_window_rejects_empty_reversed_and_out_of_bounds_ranges() {
                 .rows_with_scrollback_window_selection(start, end, anchor, focus)
                 .is_empty()
         );
-    }
-}
-
-/// Fake lifecycle adapter: records requests and replays daemon events in the
-/// explicit order supplied by a scenario.  New parity cases can reuse this
-/// without adding IO or timing to their fixture.
-#[derive(Debug, Default)]
-struct FakeLifecycleBackend {
-    effects: Vec<LifecycleEffect>,
-    events: VecDeque<DaemonEvent>,
-}
-
-impl FakeLifecycleBackend {
-    fn scripted(events: impl IntoIterator<Item = DaemonEvent>) -> Self {
-        Self {
-            effects: Vec::new(),
-            events: events.into_iter().collect(),
-        }
-    }
-
-    fn dispatch_and_replay(&mut self, state: &mut LifecycleState, effects: Vec<LifecycleEffect>) {
-        self.effects.extend(effects);
-        while let Some(event) = self.events.pop_front() {
-            let _ = update_lifecycle(state, Event::Daemon(event));
-        }
     }
 }
 
@@ -133,100 +104,6 @@ fn strip_ansi(text: &str) -> String {
         }
     }
     output
-}
-
-#[test]
-fn scripted_fake_lifecycle() {
-    let workspace = WorkspaceId::new();
-    let created = SessionId::new();
-    let create = OperationId::new();
-    let mut state = LifecycleState::new(workspace, Vec::new());
-    let mut backend = FakeLifecycleBackend::scripted([
-        DaemonEvent::Accepted {
-            operation_id: create,
-            row: PendingRow::Creating {
-                label: "alpha".into(),
-            },
-        },
-        DaemonEvent::Progress {
-            operation_id: create,
-            revision: 1,
-            message: "creating".into(),
-        },
-        DaemonEvent::Succeeded {
-            operation_id: create,
-            revision: 2,
-            created: Some(SessionRow {
-                id: created,
-                label: "alpha".into(),
-            }),
-        },
-    ]);
-
-    let effects = update_lifecycle(
-        &mut state,
-        Event::RequestCreate {
-            operation_id: create,
-            label: "alpha".into(),
-        },
-    );
-    backend.dispatch_and_replay(&mut state, effects);
-
-    assert_eq!(backend.effects.len(), 1);
-    assert_eq!(
-        state.sessions(),
-        &[SessionRow {
-            id: created,
-            label: "alpha".into()
-        }]
-    );
-    assert_eq!(
-        state.selected(),
-        usagi_tui::usecase::application::lifecycle::Selection::Target(LifecycleTarget::Session(
-            created
-        ))
-    );
-    assert_eq!(state.active(), LifecycleTarget::Session(created));
-    assert_eq!(state.mode(), Mode::Closeup);
-    assert!(state.pending().is_empty());
-
-    let remove = OperationId::new();
-    let mut backend = FakeLifecycleBackend::scripted([
-        DaemonEvent::Accepted {
-            operation_id: remove,
-            row: PendingRow::Removing {
-                row: SessionRow {
-                    id: created,
-                    label: "alpha".into(),
-                },
-            },
-        },
-        DaemonEvent::Failed {
-            operation_id: remove,
-            revision: 1,
-            message: "safe remove failure".into(),
-        },
-    ]);
-    let effects = update_lifecycle(
-        &mut state,
-        Event::RequestRemove {
-            operation_id: remove,
-            session: created,
-        },
-    );
-    backend.dispatch_and_replay(&mut state, effects);
-
-    assert_eq!(
-        state.sessions(),
-        &[SessionRow {
-            id: created,
-            label: "alpha".into()
-        }]
-    );
-    assert_eq!(state.error(), Some("safe remove failure"));
-    assert_eq!(state.interaction_count(), 0);
-    let _ = update_lifecycle(&mut state, Event::Interaction(Interaction::RightClick));
-    assert_eq!(state.interaction_count(), 1);
 }
 
 #[test]
@@ -562,62 +439,9 @@ impl TerminalPort for ResumeFixturePort {
 }
 
 #[test]
-fn resume_compatibility_fixture_falls_back_for_missing_stale_and_old_state() {
+fn terminal_resume_falls_back_for_missing_and_stale_inventory() {
     let workspace = WorkspaceId::new();
-    let removed_session = SessionId::new();
     let surviving_session = SessionId::new();
-
-    // A saved target is an identity, not a row index. A refreshed snapshot that
-    // no longer contains it migrates both selection and action target to root.
-    let mut lifecycle = LifecycleState::new(
-        workspace,
-        vec![SessionRow {
-            id: removed_session,
-            label: "old".into(),
-        }],
-    );
-    let create = OperationId::new();
-    let _ = update_lifecycle(
-        &mut lifecycle,
-        Event::RequestCreate {
-            operation_id: create,
-            label: "select old target".into(),
-        },
-    );
-    let _ = update_lifecycle(
-        &mut lifecycle,
-        Event::Daemon(DaemonEvent::Accepted {
-            operation_id: create,
-            row: PendingRow::Creating {
-                label: "select old target".into(),
-            },
-        }),
-    );
-    let _ = update_lifecycle(
-        &mut lifecycle,
-        Event::Daemon(DaemonEvent::Succeeded {
-            operation_id: create,
-            revision: 1,
-            created: Some(SessionRow {
-                id: removed_session,
-                label: "old".into(),
-            }),
-        }),
-    );
-    let _ = update_lifecycle(
-        &mut lifecycle,
-        Event::Snapshot {
-            sessions: vec![SessionRow {
-                id: surviving_session,
-                label: "current".into(),
-            }],
-        },
-    );
-    assert_eq!(
-        lifecycle.selected(),
-        usagi_tui::usecase::application::lifecycle::Selection::Target(LifecycleTarget::Root)
-    );
-    assert_eq!(lifecycle.active(), LifecycleTarget::Root);
 
     let saved = terminal(workspace, surviving_session);
     let pane = PaneState::with_live(

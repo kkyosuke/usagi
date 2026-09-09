@@ -10,8 +10,6 @@
 //! - [`note`] — session / root の scratchpad 操作（note / todo / decision）を
 //!   `state.json` 上で行う（`session_note_* / session_todo_* / session_decision_*`
 //!   と TUI が呼ぶ中身）。
-//! - [`session`] — git worktree と repo `state.json` を合成する session lifecycle
-//!   （create / remove）と state 操作（list / get / touch / record / `remove_record`）。
 //! - [`workspace`] — global registry 上の workspace open（path 解決・登録・touch）と、
 //!   welcome 画面向け recent overview の構築。
 //! - [`workspace_guard`] — エージェントのツール呼び出しを cwd（session / root モード）に応じて
@@ -41,7 +39,6 @@ pub mod memory;
 pub mod note;
 pub mod owner_routing;
 pub mod pr_inventory;
-pub mod session;
 pub mod session_state;
 pub mod settings;
 pub mod terminal_observation;

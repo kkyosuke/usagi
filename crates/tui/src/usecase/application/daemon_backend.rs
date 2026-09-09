@@ -9,8 +9,8 @@
 //! mutating view state directly from a command handler.
 //!
 //! Only the port traits and the routing live here.  The real IO — a daemon IPC
-//! client, [`super::agent_runtime::AgentRuntimeHost`], the terminal launch
-//! adapter, and the notes/environment store — is supplied by the composition
+//! client, Agent and terminal launch ports, and the notes/environment store —
+//! is supplied by the composition
 //! root (`src/runtime/tui.rs`) as concrete port implementations.  Those
 //! implementations are the only place a worker thread or a socket is created,
 //! so the executor itself stays fully testable with in-memory fakes and no
@@ -155,9 +155,8 @@ pub trait SessionCommandPort {
 
 /// Agent / generic-terminal / tab operations for the active workspace panes.
 ///
-/// The real implementation bundles [`super::agent_runtime::AgentRuntimeHost`]
-/// (Agent launch), the terminal launch adapter (`OpenTerminal`), and the pane
-/// runtime (`SelectTab`).  These are synchronous against the pane state; live
+/// The real implementation bundles Agent launch, terminal launch, and pane
+/// runtime (`SelectTab`) ports. These are synchronous against the pane state; live
 /// pane availability reaches the reducer through the runtime loop's poll in a
 /// later stage, not through [`Completions`].
 pub trait AgentPort {
