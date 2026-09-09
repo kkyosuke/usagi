@@ -446,6 +446,7 @@ pub enum LifecycleError {
     UnsupportedVersion,
     InvalidSessionName,
     DuplicateSessionName,
+    DuplicateSessionId,
     InvalidTransition,
     StaleCompletion,
     MissingSession,
@@ -487,10 +488,14 @@ impl WorkspaceLifecycleState {
             return Err(LifecycleError::UnsupportedVersion);
         }
         let mut names = std::collections::BTreeSet::new();
+        let mut ids = std::collections::BTreeSet::new();
         for session in &self.sessions {
             validate_session_name(&session.name)?;
             if !names.insert(&session.name) {
                 return Err(LifecycleError::DuplicateSessionName);
+            }
+            if !ids.insert(session.session_id) {
+                return Err(LifecycleError::DuplicateSessionId);
             }
         }
         Ok(())
@@ -1156,6 +1161,16 @@ mod tests {
         assert_eq!(
             duplicate.validate(),
             Err(LifecycleError::DuplicateSessionName)
+        );
+
+        let mut duplicate_id = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        let first = ManagedSession::adopt_available("first".into(), now());
+        let mut second = ManagedSession::adopt_available("second".into(), now());
+        second.session_id = first.session_id;
+        duplicate_id.sessions.extend([first, second]);
+        assert_eq!(
+            duplicate_id.validate(),
+            Err(LifecycleError::DuplicateSessionId)
         );
     }
 

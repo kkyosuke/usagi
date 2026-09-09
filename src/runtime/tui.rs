@@ -3526,6 +3526,16 @@ struct LifecycleSnapshot {
     session_roles: BTreeMap<SessionId, SessionRoleProjection>,
 }
 
+fn validate_unique_session_ids(sessions: &[ManagedSession]) -> Result<(), String> {
+    let ids = sessions
+        .iter()
+        .map(|session| session.session_id)
+        .collect::<Vec<_>>();
+    usagi_tui::usecase::application::runtime_identities_are_valid(sessions.len(), &ids)
+        .then_some(())
+        .ok_or_else(|| "daemon session snapshot has duplicate session IDs".to_owned())
+}
+
 impl LifecycleSnapshot {
     /// Sessions the sidebar lists: usable `Available` checkouts, `Failed`
     /// reservations, and `Deleting` rows whose teardown is still running. A
@@ -3689,8 +3699,10 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
-        let sessions = serde_json::from_value(serde_json::Value::Array(session_values.clone()))
-            .map_err(|error| format!("invalid daemon session snapshot: {error}"))?;
+        let sessions: Vec<ManagedSession> =
+            serde_json::from_value(serde_json::Value::Array(session_values.clone()))
+                .map_err(|error| format!("invalid daemon session snapshot: {error}"))?;
+        validate_unique_session_ids(&sessions)?;
         Ok(LifecycleSnapshot {
             workspace_id,
             root_worktree_id,
@@ -8046,6 +8058,24 @@ mod tests {
             probe_path(&temporary.path().join("missing")),
             usagi_core::usecase::workspace::WorkspaceProbe::Missing
         ));
+    }
+
+    #[test]
+    fn lifecycle_parser_rejects_duplicate_session_ids() {
+        let mut first =
+            ManagedSession::new_creating("first".into(), OperationId::new(), Utc::now());
+        first.lifecycle = SessionLifecycle::Available;
+        let mut duplicate = first.clone();
+        duplicate.name = "duplicate-id".to_owned();
+        assert!(
+            lifecycle_snapshot(&json!({
+                "revision": 1,
+                "workspace_id": WorkspaceId::new(),
+                "root_worktree_id": usagi_core::domain::id::WorktreeId::new(),
+                "sessions": [first, duplicate]
+            }))
+            .is_err()
+        );
     }
 
     #[test]

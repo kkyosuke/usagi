@@ -132,6 +132,7 @@ use crate::usecase::application::runtime_ports::{
 };
 use crate::usecase::application::{
     WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
+    runtime_identities_are_valid,
 };
 
 /// Keeps an embedder without a daemon launch client safe: every pane launch
@@ -3525,8 +3526,8 @@ fn session_name_for(ui: &WorkspaceIoRuntime, session: SessionId) -> Option<Strin
 }
 
 /// Reconcile sidebar rows and the IDs used by Agent/terminal requests as one
-/// daemon-authoritative observation.  Legacy/test ports may provide rows only;
-/// they retain the existing non-runtime projection behaviour.
+/// daemon-authoritative observation. Rows without a complete, unique identity
+/// set are dropped so no display name or stale ID can become an action target.
 fn apply_session_projection(
     ui: &mut WorkspaceIoRuntime,
     sessions: Option<Vec<usagi_core::domain::session::SessionRecord>>,
@@ -3539,14 +3540,16 @@ fn apply_session_projection(
         return;
     };
     let lifecycles = session_lifecycles.unwrap_or_default();
-    if let Some(session_ids) = session_ids.filter(|ids| ids.len() == sessions.len()) {
+    if let Some(session_ids) =
+        session_ids.filter(|ids| runtime_identities_are_valid(sessions.len(), ids))
+    {
         ui.workspace
             .replace_sessions_with_runtime_ids(sessions, session_ids.clone());
         if let Some(agent) = ui.agent.as_mut() {
             // Only usable (attachable) sessions can host an Agent. A Failed row
             // owns its name and is now listed, but must never become an Agent
             // launch target, so gate the allowed set by `can_use`. A session with
-            // no lifecycle entry (legacy path) stays allowed as before.
+            // no lifecycle entry stays allowed as before.
             agent.sessions = session_ids
                 .iter()
                 .copied()
@@ -3558,7 +3561,13 @@ fn apply_session_projection(
                 .collect();
         }
     } else {
-        ui.workspace.replace_sessions(sessions);
+        // Rows without daemon-issued identities are not actionable. Drop the
+        // whole observation instead of retaining or fabricating stale targets.
+        ui.workspace
+            .replace_sessions_with_runtime_ids(Vec::new(), Vec::new());
+        if let Some(agent) = ui.agent.as_mut() {
+            agent.sessions.clear();
+        }
     }
     ui.workspace.set_session_lifecycles(lifecycles);
     ui.workspace
@@ -3648,11 +3657,8 @@ fn drain_session_refresh(
     };
     match result {
         Ok(result) => {
-            let ids = result
-                .session_ids
-                .clone()
-                .unwrap_or_else(|| ui.workspace.session_ids().to_vec());
             adopt_session_snapshot(ui, result);
+            let ids = ui.workspace.session_ids().to_vec();
             if let Some(completions) = pending_session_refresh.take() {
                 completions.emit(AppEvent::Backend(BackendEvent::Sessions(ids)));
             }
@@ -11444,7 +11450,7 @@ mod tests {
                 })
                 .collect(),
         );
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
         let mut pointer_gesture = false;
 
@@ -12142,8 +12148,22 @@ mod tests {
         }
     }
 
+    fn empty_state(name: &str) -> WorkspaceState {
+        let mut state = state(name);
+        state.sessions.clear();
+        state
+    }
+
+    fn snapshot_with_generated_runtime_ids(
+        workspace: Workspace,
+        state: WorkspaceState,
+    ) -> WorkspaceSnapshot {
+        let session_ids = state.sessions.iter().map(|_| SessionId::new()).collect();
+        WorkspaceSnapshot::with_runtime_ids(workspace, state, WorkspaceId::new(), session_ids)
+    }
+
     fn snapshot(name: &str) -> WorkspaceSnapshot {
-        WorkspaceSnapshot::new(ws(name), state(name))
+        snapshot_with_generated_runtime_ids(ws(name), state(name))
     }
 
     fn snapshot_with_sessions(name: &str, session_names: &[&str]) -> WorkspaceSnapshot {
@@ -12157,7 +12177,7 @@ mod tests {
                 ..template.clone()
             })
             .collect();
-        WorkspaceSnapshot::new(ws(name), workspace_state)
+        snapshot_with_generated_runtime_ids(ws(name), workspace_state)
     }
 
     #[test]
@@ -12829,6 +12849,8 @@ mod tests {
         let records = ui.workspace.sessions().to_vec();
         super::apply_session_projection(&mut ui, None, None, None, None, None);
         super::apply_session_projection(&mut ui, Some(records.clone()), None, None, None, None);
+        assert!(ui.workspace.sessions().is_empty());
+        assert!(ui.workspace.session_ids().is_empty());
         super::apply_session_projection(
             &mut ui,
             Some(records),
@@ -13792,7 +13814,7 @@ mod tests {
     fn goal_host_action_creates_one_root_pending_pane_and_preserves_the_goal() {
         let workspace = WorkspaceId::new();
         let operation = OperationId::new();
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let mut pending = std::collections::HashMap::new();
@@ -14262,7 +14284,7 @@ mod tests {
         let continuation = AgentContinuationRef::new();
         let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
         let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
             .with_agent_tab_intent(
@@ -14367,7 +14389,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
         let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
@@ -14423,11 +14445,13 @@ mod tests {
             WorkspaceRuntime::new(workspace, Vec::new()),
             WorkspaceRuntime::new(workspace, vec![session]),
         ] {
-            let view = WorkspaceView::with_runtime_ids(
-                ws("demo"),
-                state("demo"),
-                runtime.state().sessions().to_vec(),
-            );
+            let session_ids = runtime.state().sessions().to_vec();
+            let view_state = if session_ids.is_empty() {
+                empty_state("demo")
+            } else {
+                state("demo")
+            };
+            let view = WorkspaceView::with_runtime_ids(ws("demo"), view_state, session_ids);
             let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
             let (sender, receiver) = std::sync::mpsc::channel();
             sender
@@ -16725,9 +16749,8 @@ mod tests {
         super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
         assert!(backend.drain_events().is_empty());
 
-        // A legacy port that answers with rows but no stable identities leaves
-        // the adopted ids alone, and the completion still reports the set Home
-        // currently holds rather than an empty one.
+        // Rows without stable identities are not actionable: the projection and
+        // completion both fail closed instead of retaining the previous target.
         let (completions, events) =
             crate::usecase::application::daemon_backend::Completions::channel();
         pending_refresh = Some(completions);
@@ -16744,10 +16767,55 @@ mod tests {
                 revision: Some(8),
             }));
         super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
+        assert!(ui.workspace.sessions().is_empty());
+        assert!(ui.workspace.session_ids().is_empty());
         assert!(matches!(
             events.try_recv().unwrap(),
-            AppEvent::Backend(BackendEvent::Sessions(ids)) if ids == vec![published]
+            AppEvent::Backend(BackendEvent::Sessions(ids)) if ids.is_empty()
         ));
+    }
+
+    #[test]
+    fn malformed_session_identity_refreshes_clear_rows_ids_and_agent_targets() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let mut records = state("demo").sessions;
+        records.push(SessionRecord {
+            name: "second".to_owned(),
+            root: "/tmp/demo/.usagi/sessions/second".into(),
+            ..records[0].clone()
+        });
+
+        for invalid_ids in [None, Some(vec![first]), Some(vec![first, first])] {
+            let view = WorkspaceView::with_runtime_ids(
+                ws("demo"),
+                WorkspaceState {
+                    sessions: records.clone(),
+                    ..WorkspaceState::default()
+                },
+                vec![first, second],
+            );
+            let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+                .with_agent_context(
+                    workspace,
+                    vec![first, second],
+                    Box::new(UnavailableAgentCommandPort),
+                );
+
+            super::apply_session_projection(
+                &mut ui,
+                Some(records.clone()),
+                invalid_ids,
+                None,
+                None,
+                None,
+            );
+
+            assert!(ui.workspace.sessions().is_empty());
+            assert!(ui.workspace.session_ids().is_empty());
+            assert!(ui.agent.as_ref().unwrap().sessions.is_empty());
+        }
     }
 
     /// A lane that fails reports it once through the parked completion and
@@ -16886,7 +16954,7 @@ mod tests {
     fn controller_loop_opens_the_create_form_from_the_new_session_row() {
         // An empty workspace shows only root and `+ new session`, so one Down
         // reaches the create entry deterministically.
-        let snapshot = WorkspaceSnapshot::new(
+        let snapshot = snapshot_with_generated_runtime_ids(
             ws("empty"),
             WorkspaceState {
                 sessions: Vec::new(),
@@ -16974,7 +17042,7 @@ mod tests {
         // preserves a raw control byte as U+0001, and carries Home as Home. All
         // three must enter the same controller form and lifecycle dispatch path.
         for create_key in [Key::LineStart, Key::Char('\u{1}'), Key::Home] {
-            let snapshot = WorkspaceSnapshot::new(
+            let snapshot = snapshot_with_generated_runtime_ids(
                 ws("empty"),
                 WorkspaceState {
                     sessions: Vec::new(),
@@ -19150,7 +19218,7 @@ mod tests {
             scroll,
         ));
 
-        let empty_view = WorkspaceView::with_runtime_ids(ws("empty"), state("empty"), vec![]);
+        let empty_view = WorkspaceView::with_runtime_ids(ws("empty"), empty_state("empty"), vec![]);
         let mut empty_ui =
             WorkspaceIoRuntime::new(empty_view, Box::new(UnavailableSessionCommandPort));
         let mut empty_runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![]);
@@ -19735,7 +19803,7 @@ mod tests {
         });
         let durable = Arc::new(Mutex::new(intent));
         let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
             .with_agent_tab_intent(
@@ -20018,7 +20086,7 @@ mod tests {
     #[test]
     fn director_projection_covers_picker_empty_and_launching_states() {
         let workspace = WorkspaceId::new();
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         runtime.set_agent_models(
@@ -20092,7 +20160,7 @@ mod tests {
                 select,
             });
         }
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
             .with_agent_tab_intent(
@@ -20151,7 +20219,7 @@ mod tests {
     fn director_pointer_uses_the_drawer_viewport() {
         let workspace = WorkspaceId::new();
         let terminal = scoped_terminal_ref(workspace, None);
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(
                 workspace,
@@ -20219,7 +20287,7 @@ mod tests {
     fn root_terminal_pointer_and_wheel_use_the_bottom_drawer_viewport() {
         let workspace = WorkspaceId::new();
         let terminal = scoped_terminal_ref(workspace, None);
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
@@ -20285,7 +20353,7 @@ mod tests {
     #[test]
     fn root_generic_host_request_is_admitted_and_untracked_resume_completion_is_inert() {
         let workspace = WorkspaceId::new();
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort));
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
@@ -20345,7 +20413,7 @@ mod tests {
     #[test]
     fn restore_without_agent_intent_caches_inventory_and_refresh_clears_it() {
         let workspace = WorkspaceId::new();
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let fence = runtime.restore_fence();
@@ -20925,7 +20993,7 @@ mod tests {
         assert!(!committed.cas_conflict);
         assert_eq!(committed.intent.targets[0].selected, Some(continuation));
 
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
         let observation = ui
             .observe_agent_tabs(
@@ -20942,7 +21010,7 @@ mod tests {
         ui.mutate_agent_intent(AgentTabIntentMutation::Dismiss { continuation })
             .unwrap();
 
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(workspace, BTreeSet::new(), Box::new(LoadFailingIntentPort));
         assert_eq!(
@@ -21334,9 +21402,13 @@ mod tests {
             },
         ));
 
+        let mut view_state = state("demo");
+        let mut added_record = view_state.sessions[0].clone();
+        added_record.name = "added-session".to_owned();
+        view_state.sessions.push(added_record);
         let view = WorkspaceView::with_runtime_ids(
             ws("demo"),
-            state("demo"),
+            view_state,
             vec![original_session, added_session],
         );
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
@@ -23860,7 +23932,7 @@ mod tests {
         initial.revision = 1;
         let durable = Arc::new(Mutex::new(initial));
         let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
             .with_agent_tab_intent(
@@ -24206,7 +24278,7 @@ mod tests {
         // Nothing is saved yet, so both root conversations are projected from
         // their terminal fence alone (#599) and neither has a continuation.
         let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
             .with_agent_tab_intent(
@@ -25264,7 +25336,7 @@ mod tests {
         run_with_director.root_agent_id = Some(runtime_id);
         let run_id = run_with_director.supervisor_run_id;
         let overview_runs = super::WorkRunProjection::fresh(vec![run_with_director]);
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
         ui.agent_inventory = Some(AgentInventory {
             workspace_id: workspace,
@@ -25331,7 +25403,7 @@ mod tests {
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let operation = OperationId::new();
         let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
         assert!(!super::select_director_selection(
             TabSelection::Pending(operation),
@@ -26250,7 +26322,7 @@ mod tests {
         );
         selection.extend(TerminalPoint { row: 0, column: 4 });
         controls.begin_selection(selection);
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
         let mut term = FakeTerminal::default();
         assert!(forward_live_terminal_input(
@@ -26529,7 +26601,7 @@ mod tests {
                 row: 0,
             },
         ));
-        let empty_view = WorkspaceView::with_runtime_ids(ws("empty"), state("empty"), vec![]);
+        let empty_view = WorkspaceView::with_runtime_ids(ws("empty"), empty_state("empty"), vec![]);
         let empty_ui = WorkspaceIoRuntime::new(empty_view, Box::new(UnavailableSessionCommandPort));
         let mut detached_controls = LiveTerminalControls::default();
         detached_controls.sync_focus(runtime.focused_terminal().as_ref());
@@ -32080,7 +32152,7 @@ mod tests {
 
         // An Agent context with no active managed target stops at the runtime
         // target boundary before looking for an interrupted tab.
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
         let mut inactive = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort));
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());

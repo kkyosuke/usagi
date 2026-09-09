@@ -384,6 +384,9 @@ active を変更しない。session が 0 件なら selected / active はとも�
 `+ new session` action を暗黙には選択しない。矢印で action row を明示選択して `Enter` / `t` を入力するか、
 `Ctrl-A` を入力した場合だけ作成フォームを開く。
 
+session row と daemon 発行の `SessionId` は同じ snapshot から同数かつ ID が一意な組として受け取り、常に一組として置き換える。
+identity が欠ける、件数が一致しない、または ID が重複する refresh は全行を非actionableとして破棄し、表示名や以前のIDから補完しない。
+
 Closeup の `agent` / `terminal` action は active managed session の `SessionId` から scope を導出する。
 managed session が無い Home は Closeup を開かず、これらの effect を発行しない。`Target::Root` と
 `session_id: None` は daemon の workspace-root scope 語彙として残るが、通常 Home の Closeup entry からは
