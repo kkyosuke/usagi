@@ -8,23 +8,21 @@ use super::{
     AgentAdmission, AgentDecisionWaker, AgentProfileId, AgentReadiness, AgentReadinessPreflight,
     AgentRuntime, AgentRuntimeRef, AmbiguousIssueNumber, Arc, ArtifactVerification,
     ArtifactVerificationRequest, ArtifactVerificationStatus, ArtifactVerifier, BTreeMap, BTreeSet,
-    BackgroundWorker, ConnectionId, ConnectionWorkspace, CurrentLocatorFile,
-    DEFAULT_GENERATION_LIMIT, DaemonRequest, DeferredDecisionWaker, Deserialize, DispatchStore,
-    DispatchToolAction, Envelope, EnvelopeKind, ErrorCode, ErrorLog, FailureTransitionLog,
-    GenerationFence, GenerationRegistry, GenerationRegistryFile, GhProcess, INBOX_PAGE_MAX,
-    InboxCursor, InitialTask, MetricsObserver, MetricsSample, MutexGuard, OperationId, Ordering,
-    Path, PathBuf, PeerProcess, PendingDaemonAgentRestart, ResponseOutcome,
-    SUPERVISOR_RECOVERY_TICK, SessionId, SessionRuntimeError, SessionScopeResolver,
-    SharedAgentRuntime, SharedMetricsBroker, SharedPrInventory, SharedProcessResourceSampler,
-    SharedSessionRuntime, SharedSupervisorRuntime, SharedTerminalRuntime, ShutdownRequest,
-    SupervisorRuntime, SupervisorToolAction, SystemGit, TeardownSignal, Tenant, TerminalId,
-    TerminalPipelineMetrics, UnixStandbyProbe, UserDecisionStore, WorkspaceId, Workspaces,
-    aggregate_agent_status, bounded_supervisor_query, clear_pending_daemon_agent_restart,
-    current_build, observe_generation_process, output_pipeline_counters, paths,
-    perform_compensating_remove, perform_create, perform_delegated_create,
-    perform_remove_with_merged_head, pr_projection_counters, process_start_identity,
-    recover_rollover, restore_pending_daemon_agents, rollover_trigger, validate_owned_directory,
-    write_pending_daemon_agent_restart,
+    ConnectionId, ConnectionWorkspace, CurrentLocatorFile, DEFAULT_GENERATION_LIMIT, DaemonRequest,
+    DeferredDecisionWaker, Deserialize, DispatchStore, DispatchToolAction, Envelope, EnvelopeKind,
+    ErrorCode, ErrorLog, GenerationFence, GenerationRegistry, GenerationRegistryFile, GhProcess,
+    INBOX_PAGE_MAX, InboxCursor, InitialTask, MetricsObserver, MetricsSample, MutexGuard,
+    OperationId, Ordering, Path, PathBuf, PeerProcess, PendingDaemonAgentRestart, ResponseOutcome,
+    SessionId, SessionRuntimeError, SessionScopeResolver, SharedAgentRuntime, SharedMetricsBroker,
+    SharedPrInventory, SharedProcessResourceSampler, SharedSessionRuntime, SharedSupervisorRuntime,
+    SharedTerminalRuntime, SupervisorRuntime, SupervisorToolAction, SystemGit, TeardownSignal,
+    Tenant, TerminalId, TerminalPipelineMetrics, UnixStandbyProbe, UserDecisionStore, WorkspaceId,
+    Workspaces, aggregate_agent_status, bounded_supervisor_query,
+    clear_pending_daemon_agent_restart, current_build, observe_generation_process,
+    output_pipeline_counters, paths, perform_compensating_remove, perform_create,
+    perform_delegated_create, perform_remove_with_merged_head, pr_projection_counters,
+    process_start_identity, recover_rollover, restore_pending_daemon_agents, rollover_trigger,
+    validate_owned_directory, write_pending_daemon_agent_restart,
 };
 
 pub(super) struct DispatchToolContext<'a> {
@@ -997,70 +995,6 @@ pub(super) fn record_goal_artifact_verification(
         .record_artifact_verification(request, verification, chrono::Utc::now())
         .map(drop)
         .map_err(supervisor_error)
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
-pub(super) fn start_supervisor_recovery(
-    supervisor: SharedSupervisorRuntime,
-    agent: SharedAgentRuntime,
-    workspaces: Workspaces,
-    shutdown: Arc<ShutdownRequest>,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    std::thread::Builder::new()
-        .name("usagi-supervisor-recovery".to_owned())
-        .spawn(move || {
-            let worker_health =
-                shutdown.monitor_background_worker(BackgroundWorker::SupervisorRecovery);
-            let mut promotion_log = FailureTransitionLog::default();
-            let mut worker_log = FailureTransitionLog::default();
-            let mut artifact_log = FailureTransitionLog::default();
-            let mut state_log = FailureTransitionLog::default();
-            while !shutdown.is_requested() {
-                let now = chrono::Utc::now();
-                let failure = reconcile_pending_supervisor_promotions(&supervisor, &agent)
-                    .err()
-                    .map(|error| format!("supervisor promotion reconciliation deferred: {error}"));
-                if let Some(entry) = promotion_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                let failure = reconcile_aborted_supervisor_workers(&supervisor, &agent)
-                    .err()
-                    .map(|error| {
-                        format!("supervisor worker termination reconciliation deferred: {error}")
-                    });
-                if let Some(entry) = worker_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                let failure = reconcile_pending_goal_artifacts(&supervisor, &workspaces, now)
-                    .err()
-                    .map(|error| {
-                        format!("Goal artifact verification reconciliation deferred: {error}")
-                    });
-                if let Some(entry) = artifact_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                let failure = supervisor.lock().map_or_else(
-                    |_| {
-                        Some("supervisor state reconciliation deferred: runtime unavailable".into())
-                    },
-                    |runtime| {
-                        runtime
-                            .tick_all(now, &mut AgentDecisionWaker { agent: &agent })
-                            .err()
-                            .map(|error| {
-                                format!("supervisor state reconciliation deferred: {error}")
-                            })
-                    },
-                );
-                if let Some(entry) = state_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                if shutdown.wait_for_tick(SUPERVISOR_RECOVERY_TICK) {
-                    break;
-                }
-            }
-            worker_health.finish_planned();
-        })
 }
 
 pub(super) fn reconcile_aborted_supervisor_workers(

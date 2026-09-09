@@ -5,8 +5,34 @@ mod dispatch;
 mod secure_path;
 mod tenant_control;
 
-#[allow(clippy::wildcard_imports)] // Dispatch is a child boundary of this composition module.
-use dispatch::*;
+use dispatch::{
+    DispatchToolContext, SessionDispatchContext, authenticated_supervisor_caller,
+    clean_orphan_session_resources, daemon_request_surface, dispatch_agent,
+    dispatch_agent_phase_report, dispatch_codex_session_capture, dispatch_dispatch,
+    dispatch_dispatch_tool, dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot,
+    dispatch_rollover, dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
+    dispatch_supervisor_tool, dispatch_user_decision, envelope, expected_client_disconnect,
+    reconcile_aborted_supervisor_workers, reconcile_orphan_delegations,
+    reconcile_pending_goal_artifacts, reconcile_pending_supervisor_promotions,
+    reconcile_startup_supervisor_promotions, reconcile_startup_supervisor_workers,
+    request_mcp_credential, run_agent_readiness, unexpected_daemon_response_entry,
+};
+
+#[cfg(test)]
+use dispatch::{
+    AuthenticatedSupervisorCaller, PendingPromotionCandidate, PendingPromotionKind,
+    best_effort_merged_pr_head, compensate_delegation, exact_merged_pr_head,
+    finish_supervisor_promotion_reconciliation, goal_supervisor_caller, lock_agent_runtime,
+    lock_supervisor_runtime, map_inbox_query_error, project_reported_pr,
+    promotion_admission_matches, prompt_supervisor_retry, reconcile_supervisor_promotion,
+    reconcile_supervisor_promotion_outcome, reconcile_supervisor_promotions,
+    reconcile_supervisor_run_workers, record_supervisor_promotion_result,
+    require_stable_supervisor_fence, require_supervisor_reservation_presence,
+    required_payload_string, reserve_goal_supervisor_run, resolve_goal_artifact_repository,
+    safe_log_token, session_response_envelope, start_goal_supervisor_run,
+    supervisor_caller_descriptor, supervisor_control_error, supervisor_control_unconfirmed,
+    supervisor_error,
+};
 
 #[cfg(test)]
 use agent_provisioning::{
@@ -8325,6 +8351,70 @@ fn start_daemon_agent_restart_recovery(
                     break;
                 }
             }
+        })
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
+fn start_supervisor_recovery(
+    supervisor: SharedSupervisorRuntime,
+    agent: SharedAgentRuntime,
+    workspaces: Workspaces,
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("usagi-supervisor-recovery".to_owned())
+        .spawn(move || {
+            let worker_health =
+                shutdown.monitor_background_worker(BackgroundWorker::SupervisorRecovery);
+            let mut promotion_log = FailureTransitionLog::default();
+            let mut worker_log = FailureTransitionLog::default();
+            let mut artifact_log = FailureTransitionLog::default();
+            let mut state_log = FailureTransitionLog::default();
+            while !shutdown.is_requested() {
+                let now = chrono::Utc::now();
+                let failure = reconcile_pending_supervisor_promotions(&supervisor, &agent)
+                    .err()
+                    .map(|error| format!("supervisor promotion reconciliation deferred: {error}"));
+                if let Some(entry) = promotion_log.changed(failure) {
+                    ErrorLog::record(&entry);
+                }
+                let failure = reconcile_aborted_supervisor_workers(&supervisor, &agent)
+                    .err()
+                    .map(|error| {
+                        format!("supervisor worker termination reconciliation deferred: {error}")
+                    });
+                if let Some(entry) = worker_log.changed(failure) {
+                    ErrorLog::record(&entry);
+                }
+                let failure = reconcile_pending_goal_artifacts(&supervisor, &workspaces, now)
+                    .err()
+                    .map(|error| {
+                        format!("Goal artifact verification reconciliation deferred: {error}")
+                    });
+                if let Some(entry) = artifact_log.changed(failure) {
+                    ErrorLog::record(&entry);
+                }
+                let failure = supervisor.lock().map_or_else(
+                    |_| {
+                        Some("supervisor state reconciliation deferred: runtime unavailable".into())
+                    },
+                    |runtime| {
+                        runtime
+                            .tick_all(now, &mut AgentDecisionWaker { agent: &agent })
+                            .err()
+                            .map(|error| {
+                                format!("supervisor state reconciliation deferred: {error}")
+                            })
+                    },
+                );
+                if let Some(entry) = state_log.changed(failure) {
+                    ErrorLog::record(&entry);
+                }
+                if shutdown.wait_for_tick(SUPERVISOR_RECOVERY_TICK) {
+                    break;
+                }
+            }
+            worker_health.finish_planned();
         })
 }
 

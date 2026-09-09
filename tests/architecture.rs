@@ -514,6 +514,13 @@ fn daemon_request_dispatch_stays_out_of_the_socket_and_lifecycle_composition_mod
         .expect("daemon dispatch source is readable");
 
     assert!(composition.contains("mod dispatch;"));
+    assert!(
+        !composition.contains("use dispatch::*;"),
+        "daemon dispatch must expose an explicit composition surface"
+    );
+    assert!(composition.contains("fn start_supervisor_recovery("));
+    assert!(!dispatch.contains("fn start_supervisor_recovery("));
+    assert!(!dispatch.contains("usagi-supervisor-recovery"));
     for symbol in [
         "fn dispatch_agent(",
         "fn dispatch_session(",
