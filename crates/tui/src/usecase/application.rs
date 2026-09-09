@@ -15,16 +15,10 @@ use usagi_core::domain::session_lifecycle::SessionLifecycleProjection;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::domain::workspace_state::WorkspaceState;
 
-/// Daemon-authoritative Agent launch adapter for Closeup panes.
-pub mod agent_launch;
-/// v2 controller effect と daemon-owned Agent pane runtime を結合する host。
-pub mod agent_runtime;
 /// Runtime Agent/terminal launch and stream boundaries.
 pub mod agent_runtime_ports;
 /// Agent tab の表示 intent を daemon inventory と照合する純粋 reducer と永続化 port。
 pub mod agent_tab_intent;
-/// exited tombstone を read-only completed tab へ投影する純粋 reducer（#525）。
-pub mod completed_tab;
 /// Home の application controller。端末や daemon wire 型に依存しない reducer と
 /// fake backend seam を提供する。
 pub mod controller;
@@ -36,11 +30,6 @@ pub mod environment_source;
 /// interrupted Agent runtime を tab へ投影し、tab 単位の明示 resume を検証する
 /// 純粋 reducer（#510）。
 pub mod interrupted_tab;
-/// Session create/remove の pending 表示と safe landing を扱う純粋 reducer。
-pub mod lifecycle;
-/// daemon SessionLifecycle の effect / replay / snapshot を lifecycle reducer へ
-/// 接続する adapter。
-pub mod lifecycle_adapter;
 /// Closeup の terminal / Agent tab と placeholder を扱う純粋 reducer。
 pub mod pane;
 /// daemon terminal inventory/stream と pane reducer を結合する client-side state machine。
@@ -49,8 +38,6 @@ pub mod pane_runtime;
 pub mod pr;
 /// IO-free runtime boundaries used by the controller composition.
 pub mod runtime_ports;
-/// daemon-owned generic terminal launch / attach adapter for Closeup panes.
-pub mod terminal_launch;
 /// Pure http(s) URL detection and validation over the ANSI-free terminal grid.
 pub mod terminal_link;
 /// Rendering wrapper over the shared core VT parser, projecting the screen into

@@ -10066,6 +10066,25 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_feedback_refreshes_prs_for_the_current_session_set() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+
+        for feedback in [Feedback::Reconnected, Feedback::ResyncRequired] {
+            assert_eq!(
+                update(
+                    &mut state,
+                    AppEvent::Backend(BackendEvent::Feedback(feedback.clone())),
+                ),
+                vec![Effect::SyncPullRequestTargets {
+                    sessions: vec![first, second],
+                }]
+            );
+            assert_eq!(state.feedback(), Some(&feedback));
+        }
+    }
+
+    #[test]
     fn navigation_wraps_up_and_ignores_non_command_characters() {
         let (workspace, first, _) = ids();
         let mut state = AppState::home(workspace, vec![first]);

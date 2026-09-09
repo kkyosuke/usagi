@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "total": 530,
+  "total": 523,
   "owners": {
     "core": 9,
     "daemon": 366,
     "root-cli": 40,
-    "tui": 115
+    "tui": 108
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
@@ -22,7 +22,6 @@
     "crates/daemon/src/infrastructure/unix_transport.rs": 36,
     "crates/daemon/src/usecase/resources/mod.rs": 4,
     "crates/daemon/src/usecase/stop.rs": 1,
-    "crates/tui/src/infrastructure/daemon.rs": 1,
     "crates/tui/src/presentation/frame.rs": 1,
     "crates/tui/src/presentation/live_terminal.rs": 1,
     "crates/tui/src/presentation/mod.rs": 12,
@@ -36,13 +35,10 @@
     "crates/tui/src/presentation/widgets/modal.rs": 1,
     "crates/tui/src/presentation/widgets/session_tab.rs": 1,
     "crates/tui/src/usecase/application.rs": 1,
-    "crates/tui/src/usecase/application/agent_launch.rs": 2,
-    "crates/tui/src/usecase/application/agent_runtime.rs": 2,
     "crates/tui/src/usecase/application/controller.rs": 1,
     "crates/tui/src/usecase/application/daemon_backend.rs": 1,
     "crates/tui/src/usecase/application/pane.rs": 1,
     "crates/tui/src/usecase/application/pr.rs": 1,
-    "crates/tui/src/usecase/application/terminal_launch.rs": 2,
     "crates/tui/src/usecase/application/terminal_screen.rs": 1,
     "crates/tui/src/usecase/application/terminal_selection.rs": 1,
     "crates/tui/src/usecase/application/terminal_session.rs": 1,
