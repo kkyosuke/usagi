@@ -514,12 +514,25 @@ fn daemon_agent_provisioning_stays_in_its_product_boundary() {
         .expect("agent provisioning source is readable");
 
     assert!(composition.contains("mod agent_provisioning;"));
-    assert!(!composition.contains("struct RootCodexProvisioner"));
-    assert!(!composition.contains("struct RootClaudeProvisioner"));
-    assert!(!composition.contains("fn claude_sandbox_launcher("));
-    assert!(provisioning.contains("struct RootCodexProvisioner"));
-    assert!(provisioning.contains("struct RootClaudeProvisioner"));
-    assert!(provisioning.contains("fn claude_sandbox_launcher("));
+    for symbol in [
+        "struct RootCodexProvisioner",
+        "struct RootClaudeProvisioner",
+        "fn claude_sandbox_launcher(",
+        "fn working_directories(",
+        "fn effective_role_instruction(",
+        "fn repair_agent_codex_arg0_permissions(",
+    ] {
+        assert!(
+            !composition.contains(symbol),
+            "{symbol} must stay out of the daemon socket/lifecycle composition"
+        );
+        assert!(
+            provisioning.contains(symbol),
+            "{symbol} must remain owned by Agent provisioning"
+        );
+    }
+    assert!(!composition.contains("use agent_provisioning::*;"));
+    assert!(!provisioning.contains("use super::*;"));
     assert!(
         provisioning.lines().count() <= 1_400,
         "agent provisioning grew beyond its reviewable product boundary"

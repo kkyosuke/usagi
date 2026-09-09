@@ -3,7 +3,24 @@
 mod agent_provisioning;
 mod tenant_control;
 
-use agent_provisioning::*;
+#[cfg(test)]
+use agent_provisioning::{
+    CLAUDE_PROGRAM, ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs,
+    claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
+    claude_settings_arguments, claude_system_prompt_arguments, claude_writable_roots,
+    codex_developer_instructions_arguments, codex_integration_arguments,
+    codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
+    effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
+    lexical_prefix_overlaps_path, mcp_environment, mcp_environment_allowlist, prompt_scope,
+    repair_codex_arg0_permissions, repair_codex_arg0_permissions_with_limit,
+    root_agent_writable_roots, root_memory_store_root, sandbox_mode, session_git_common_dir,
+    session_git_policy, toml_basic_string, validate_claude_sandbox_policy,
+    validate_root_git_common_dir_policy,
+};
+use agent_provisioning::{
+    DiscardJournal, RootClaudeProvisioner, RootCodexProvisioner,
+    repair_agent_codex_arg0_permissions, resolve_sandbox_cache_dir, validate_owned_directory,
+};
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -857,84 +874,6 @@ fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness 
         | ChildObservation::ObservationFailed => AgentReadiness::Unavailable,
     }
 }
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
-fn working_directories(
-    workspaces: &Workspaces,
-    context: &ProvisionContext,
-) -> Result<(PathBuf, PathBuf), ()> {
-    // The launch names its workspace, so the runtime that materializes it is the
-    // one holding that identity. A daemon serving several workspaces would
-    // otherwise provision every Agent from the workspace it was started in.
-    let tenant = workspaces.workspace(context.scope.workspace_id).ok_or(())?;
-    let runtime = tenant.runtime().lock().map_err(|_| ())?;
-    let workspace_root = runtime.repository_root().to_path_buf();
-    // A workspace-root launch has no session; its trusted cwd is the repository
-    // root. A session launch resolves that session's worktree path.
-    let working_directory = match context.scope.session_id {
-        None => runtime
-            .resolve_root_scope(context.scope.workspace_id, context.scope.worktree_id)
-            .map_err(|_| ()),
-        Some(session) => runtime
-            .resolve_scope(
-                context.scope.workspace_id,
-                session,
-                context.scope.worktree_id,
-            )
-            .map(|scope| scope.path)
-            .map_err(|_| ()),
-    }?;
-    Ok((working_directory, workspace_root))
-}
-
-/// Resolves only safe role identity under the session lock, then reads the
-/// current definition from the registered workspace catalog. The instruction
-/// remains in this ephemeral provision path and is never copied into a launch
-/// request, durable snapshot, dispatch record, response, or log.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
-fn effective_role_instruction(
-    workspaces: &Workspaces,
-    data_home: &paths::DataHome,
-    workspace_root: &Path,
-    context: &ProvisionContext,
-) -> Result<Option<(usagi_core::domain::role::RoleId, String)>, ()> {
-    use usagi_core::domain::role::RoleScope;
-
-    let assigned = match context.scope.session_id {
-        Some(session_id) => workspaces
-            .workspace(context.scope.workspace_id)
-            .ok_or(())?
-            .runtime()
-            .lock()
-            .map_err(|_| ())?
-            .session_role(session_id)
-            .map_err(|_| ())?,
-        None => None,
-    };
-    let catalog = usagi_core::infrastructure::role_catalog::load_effective(
-        &data_home.selected(),
-        workspace_root,
-    )
-    .map_err(|_| ())?;
-    let scope = if context.scope.session_id.is_some() {
-        RoleScope::Session
-    } else {
-        RoleScope::Root
-    };
-    // A legacy managed session remains generic even if a catalog is introduced
-    // later. Root launches have no durable session assignment and therefore
-    // resolve the current root default at each launch.
-    let selected = if context.scope.session_id.is_some() && assigned.is_none() {
-        None
-    } else {
-        catalog.resolve(assigned.as_ref(), scope).map_err(|_| ())?
-    };
-    let Some(selected) = selected else {
-        return Ok(None);
-    };
-    let definition = catalog.roles.get(&selected).ok_or(())?;
-    Ok(Some((selected, definition.instructions.clone())))
-}
-
 /// Resolves the workspace a connecting client will act on, adopting it when the
 /// client selected one this daemon does not hold yet.
 ///
@@ -3648,27 +3587,6 @@ fn spawn_decision_maintenance(
             }
             worker_health.finish_planned();
         })
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=repairs_reused_codex_arg0_files_before_launch
-fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
-    // Repair only stale directory modes before the Agent owner mutex exists.
-    // Codex performs the lock-aware deletion itself after startup.
-    for program in [
-        DefaultModel::OpenAi.command(),
-        DefaultModel::SakanaAi.command(),
-    ] {
-        if let Ok(roots) = root_agent_writable_roots(sandbox_home, program) {
-            for root in roots {
-                if let Err(error) = repair_codex_arg0_permissions(&root) {
-                    ErrorLog::record(&format!(
-                        "could not repair Codex arg0 temp permissions: {:?}",
-                        error.kind()
-                    ));
-                }
-            }
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Composition injects each Agent dependency separately.
