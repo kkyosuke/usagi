@@ -665,34 +665,46 @@ mod tests {
     }
 
     #[test]
-    fn legacy_unix_control_alias_reaches_the_prefix_classifier_as_its_original_byte() {
+    fn legacy_unix_control_aliases_reach_the_prefix_classifier_without_losing_digits() {
         use usagi_tui::usecase::terminal_input::{
             LiveInputClassifier, LiveInputOutput, LiveTerminalAction,
         };
 
-        let source = FakeSource::with([
-            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
-            // Crossterm's Unix legacy parser projects raw 0x1d (Ctrl-]) this
-            // way, which is indistinguishable from physical Ctrl-5.
-            Event::Key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL)),
-        ]);
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0)
-            .with_legacy_unix_control_aliases(true);
-        let mut classifier = LiveInputClassifier::default();
-        let RuntimeEvent::Input(leader) = pump.next(T0).unwrap() else {
-            panic!("leader must remain a live input");
-        };
-        assert_eq!(
-            classifier.classify(Duration::ZERO, leader),
-            LiveInputOutput::Swallowed
-        );
-        let RuntimeEvent::Input(follow_up) = pump.next(T0).unwrap() else {
-            panic!("follow-up must remain a live input");
-        };
-        assert_eq!(
-            classifier.classify(Duration::from_millis(1), follow_up),
-            LiveInputOutput::Action(LiveTerminalAction::NextTab)
-        );
+        for (character, expected) in [
+            ('4', LiveTerminalAction::ActivateWorkspace(4)),
+            ('5', LiveTerminalAction::NextTab),
+            ('6', LiveTerminalAction::ActivateWorkspace(6)),
+            ('7', LiveTerminalAction::KeyboardHelp),
+        ] {
+            let source = FakeSource::with([
+                Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+                // Crossterm's Unix legacy parser projects raw 0x1c..=0x1f
+                // as Ctrl-4..=Ctrl-7. Reserved legacy bytes win, while bytes
+                // without a reserved meaning retain their digit shortcut.
+                Event::Key(KeyEvent::new(
+                    KeyCode::Char(character),
+                    KeyModifiers::CONTROL,
+                )),
+            ]);
+            let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0)
+                .with_legacy_unix_control_aliases(true);
+            let mut classifier = LiveInputClassifier::default();
+            let RuntimeEvent::Input(leader) = pump.next(T0).unwrap() else {
+                panic!("leader must remain a live input");
+            };
+            assert_eq!(
+                classifier.classify(Duration::ZERO, leader),
+                LiveInputOutput::Swallowed
+            );
+            let RuntimeEvent::Input(follow_up) = pump.next(T0).unwrap() else {
+                panic!("follow-up must remain a live input");
+            };
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), follow_up),
+                LiveInputOutput::Action(expected),
+                "legacy Ctrl-{character}"
+            );
+        }
     }
 
     #[test]

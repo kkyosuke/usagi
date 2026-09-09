@@ -694,8 +694,10 @@ pub(crate) fn prefix_help_entries(
 }
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
-    if !key.raw_bytes.is_empty() {
-        return prefix_bytes_action(&key.raw_bytes);
+    if !key.raw_bytes.is_empty()
+        && let Some(action) = prefix_bytes_action(&key.raw_bytes)
+    {
+        return Some(action);
     }
     if let Some(byte) = control_byte_from_key_code(key.code) {
         return prefix_control_byte_action(byte);
