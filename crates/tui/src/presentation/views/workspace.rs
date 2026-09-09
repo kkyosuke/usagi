@@ -1280,18 +1280,15 @@ impl Mode {
 ///
 /// Home row state, selection, input, and rendering live in the controller
 /// (`AppState`/`render_home`); this view only holds the registry record, the
-/// session records and their stable identities, and the non-persistent metrics
-/// and Git observations the runtime refreshes each frame.
+/// session records, their stable identities, and daemon-owned lifecycle/role
+/// projections. Frame-local metrics and Git observations live in the
+/// application-layer `MetricsProjection` instead of this view cache.
 #[derive(Debug, Clone)]
 pub struct Workspace {
     record: WorkspaceRecord,
     state: WorkspaceState,
     /// Stable daemon session identities, aligned with `state.sessions`.
     session_ids: Vec<SessionId>,
-    /// 最新の daemon observation。永続 workspace state には保存しない。
-    metrics: Option<DaemonMetrics>,
-    /// Non-persistent, asynchronously refreshed Git observations by stable ID.
-    git_diffs: BTreeMap<SessionId, GitDiff>,
     /// Daemon-authoritative lifecycle projection by stable ID. Non-persistent;
     /// refreshed from each lifecycle snapshot. A session absent from this map
     /// is treated as `Available`.
@@ -1325,8 +1322,6 @@ impl Workspace {
             record: workspace,
             state,
             session_ids,
-            metrics: None,
-            git_diffs: BTreeMap::new(),
             session_lifecycles: BTreeMap::new(),
             session_roles: BTreeMap::new(),
             material_revision: 0,
@@ -1380,30 +1375,6 @@ impl Workspace {
         if changed {
             self.material_revision = self.material_revision.saturating_add(1);
         }
-    }
-
-    /// Replaces the daemon-observed metrics shown in the sidebar footer area.
-    pub fn set_metrics(&mut self, metrics: Option<DaemonMetrics>) {
-        self.metrics = metrics;
-    }
-
-    /// The daemon metrics observation last stored by the runtime, for the
-    /// controller `HomeProjection::with_metrics` projection.
-    #[must_use]
-    pub fn metrics(&self) -> Option<DaemonMetrics> {
-        self.metrics.clone()
-    }
-
-    /// Replace the completed Git observations without blocking the renderer.
-    pub fn set_git_diffs(&mut self, diffs: BTreeMap<SessionId, GitDiff>) {
-        self.git_diffs = diffs;
-    }
-
-    /// The completed Git observations keyed by session, for the controller
-    /// `HomeProjection::with_git_diffs` projection.
-    #[must_use]
-    pub fn git_diffs(&self) -> &BTreeMap<SessionId, GitDiff> {
-        &self.git_diffs
     }
 
     /// Replace the daemon-authoritative lifecycle projection keyed by stable ID.
@@ -7090,46 +7061,6 @@ mod tests {
         assert!(left_rows[bottom + 5].contains("[switch]"));
         assert_eq!(home.selected, state.selected());
         assert_eq!(home.active, state.active());
-    }
-
-    #[test]
-    fn metrics_and_git_diff_getters_return_the_stored_projections() {
-        let mut ws = workspace();
-        assert!(ws.metrics().is_none());
-        assert!(ws.git_diffs().is_empty());
-
-        let metrics = usagi_core::usecase::client::DaemonMetrics {
-            schema_version: 3,
-            sampled_at_ms: 1,
-            cpu_percent_hundredths: 0,
-            resident_memory_bytes: 0,
-            active_subscribers: 1,
-            dropped_updates: 0,
-            terminal_dropped_bytes: 0,
-            terminal_coalesced_bytes: 0,
-            terminal_backpressured_bytes: 0,
-            pr_projection_dropped_bytes: 0,
-            pr_projection_coalesced_bytes: 0,
-            pr_projection_gaps: 0,
-            agent_concurrency: Some(AgentConcurrency {
-                in_use: 0,
-                limit: 16,
-            }),
-            failed_background_workers: 0,
-        };
-        ws.set_metrics(Some(metrics.clone()));
-        assert_eq!(ws.metrics(), Some(metrics));
-
-        let session = SessionId::new();
-        let diff = GitDiff {
-            base: "origin/main".into(),
-            ahead: 1,
-            behind: 0,
-            added: 2,
-            removed: 1,
-        };
-        ws.set_git_diffs(BTreeMap::from([(session, diff.clone())]));
-        assert_eq!(ws.git_diffs().get(&session), Some(&diff));
     }
 
     #[test]
