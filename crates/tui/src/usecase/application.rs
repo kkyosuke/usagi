@@ -38,6 +38,8 @@ pub mod environment_source;
 /// interrupted Agent runtime を tab へ投影し、tab 単位の明示 resume を検証する
 /// 純粋 reducer（#510）。
 pub mod interrupted_tab;
+/// Daemon metrics / Git observation ports and application-owned polling flow.
+pub mod metrics;
 /// Closeup の terminal / Agent tab と placeholder を扱う純粋 reducer。
 pub mod pane;
 /// daemon terminal inventory/stream と pane reducer を結合する client-side state machine。

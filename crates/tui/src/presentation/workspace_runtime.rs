@@ -34,7 +34,7 @@ use crate::presentation::views::root_terminal_drawer::{
     RootTerminalDrawerProjection, RootTerminalTabProjection,
 };
 use crate::presentation::views::workspace::{
-    GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
+    HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
 };
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
@@ -45,6 +45,7 @@ use crate::usecase::application::interrupted_tab::{
     InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
     resume_command,
 };
+use crate::usecase::application::metrics::GitDiff;
 use crate::usecase::application::pane::{
     InterruptedPane, LivePane, PaneEvent, PaneInputOwner, PaneKind, PaneRegistry,
     PaneRegistryEffect, PaneRegistryEvent, PaneSelection, PaneState, PaneTab, PaneTabCommand,

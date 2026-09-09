@@ -10,7 +10,6 @@
 pub mod frame;
 pub mod layouts;
 pub mod live_terminal;
-pub mod metrics;
 pub mod theme;
 pub mod views;
 pub mod widgets;
@@ -40,12 +39,10 @@ use usagi_core::domain::supervisor::{MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, Sup
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
-use usagi_core::usecase::client::DaemonMetrics;
 use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::vt_screen::RetainedRowMotion;
 
 use crate::presentation::live_terminal::{LiveTerminalControls, PointerRelease};
-use crate::presentation::metrics::{MetricsBackend, MetricsProjection};
 use crate::presentation::theme::{Color, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::create_session_error_modal;
@@ -64,7 +61,7 @@ use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::work_run::WorkRunProjection;
 use crate::presentation::views::workspace::{
-    self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
+    self, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
     Workspace as WorkspaceView, garden_click_at, garden_fits, home_header_action_at, render_home,
     render_home_at, right_pane_tab_at, terminal_point_at,
 };
@@ -97,6 +94,9 @@ use crate::usecase::application::daemon_backend::{
     WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
+use crate::usecase::application::metrics::{
+    GitDiff, MetricsBackend, MetricsPort, MetricsPortFactory, MetricsProjection,
+};
 use crate::usecase::application::pane::{PaneKind, PaneRegistry, PaneTab, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
@@ -906,40 +906,6 @@ fn garden_shell_owned_wake(key: &Key) -> bool {
     )
 }
 
-/// Pulls the latest safe daemon observation at a TUI redraw boundary.
-pub trait MetricsPort {
-    /// Compatibility observation hook for simple embedders. Production ports
-    /// override [`Self::poll_updates`] to avoid materializing unchanged values.
-    fn latest(&mut self) -> Option<DaemonMetrics> {
-        None
-    }
-
-    /// Compatibility Git snapshot hook. Change-driven ports should override
-    /// [`Self::poll_updates`] and move only changed material instead.
-    fn git_diffs(&mut self, _sessions: &[(SessionId, PathBuf)]) -> BTreeMap<SessionId, GitDiff> {
-        BTreeMap::new()
-    }
-
-    /// Return only observations that changed since the previous poll. `sessions`
-    /// is supplied only when the daemon session projection changed, so an idle
-    /// frame neither clones cwd paths nor rescans active IDs.
-    fn poll_updates(
-        &mut self,
-        sessions: Option<&[(SessionId, PathBuf)]>,
-    ) -> Vec<metrics::MetricsUpdate> {
-        let mut updates = vec![metrics::MetricsUpdate::Metrics(self.latest())];
-        if let Some(sessions) = sessions {
-            updates.push(metrics::MetricsUpdate::GitDiffs(self.git_diffs(sessions)));
-        }
-        updates
-    }
-}
-
-/// Creates a fresh metrics port for every workspace opened from the screen graph.
-pub trait MetricsPortFactory {
-    fn create(&mut self) -> Box<dyn MetricsPort>;
-}
-
 struct NoMetrics;
 impl MetricsPort for NoMetrics {}
 
@@ -1674,7 +1640,7 @@ impl SessionCommandPortFactory for UnavailableSessionCommandPortFactory {
 /// [`WorkspaceRuntime`]: the session-create worker, the daemon-authoritative
 /// session cache ([`WorkspaceView`]), pane launch workers, and live terminal
 /// streams. Daemon metrics / git diffs are refluxed separately through
-/// [`metrics::MetricsBackend`]. Home row state, input, and rendering belong to
+/// [`MetricsBackend`]. Home row state, input, and rendering belong to
 /// the controller (`AppState`/`render_home`), not here.
 struct WorkspaceIoRuntime {
     workspace: WorkspaceView,

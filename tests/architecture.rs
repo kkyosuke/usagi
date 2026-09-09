@@ -442,6 +442,8 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
         "EnvironmentStorePort",
         "ExternalTerminalPort",
         "GardenInventoryPort",
+        "MetricsPort",
+        "MetricsPortFactory",
         "PaneLaunchCommandPort",
         "RestoreConnectionPort",
         "SessionCommandPort",

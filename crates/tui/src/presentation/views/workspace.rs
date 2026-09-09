@@ -55,6 +55,7 @@ use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, GardenClick, HomeMode, Notice, PrOverlay,
     PreviewOverlay, Selection, SessionRoleProjection, Target, TargetPhase,
 };
+use crate::usecase::application::metrics::GitDiff;
 use crate::usecase::application::pane::{
     PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab, TabSelection,
 };
@@ -195,19 +196,6 @@ pub struct ProjectedSession {
 
 /// Keep the common one-digit badge column stable even before a PR is detected.
 const PR_RESERVE_WIDTH: usize = 3;
-
-/// Read-only Git facts supplied asynchronously by the composition layer.
-///
-/// A missing value means inspection has not completed or Git could not provide
-/// a meaningful comparison; it is intentionally not rendered as an error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitDiff {
-    pub base: String,
-    pub ahead: usize,
-    pub behind: usize,
-    pub added: usize,
-    pub removed: usize,
-}
 
 impl ProjectedSession {
     /// daemon snapshot record を、stable identity を保った sidebar projection へ変換する。

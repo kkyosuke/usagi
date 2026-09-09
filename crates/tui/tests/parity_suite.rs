@@ -14,13 +14,14 @@ use usagi_core::domain::id::{
 use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer, Span};
 use usagi_tui::presentation::views::workspace::{
-    GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
+    HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
 };
 use usagi_tui::presentation::widgets::display_width;
 use usagi_tui::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, Feedback, Overlay, SafeError, SafeMessage,
     TabDirection, Target, TargetPhase, update,
 };
+use usagi_tui::usecase::application::metrics::GitDiff;
 use usagi_tui::usecase::application::pane::{
     LivePane, PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
 };
