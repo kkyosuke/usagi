@@ -62,10 +62,9 @@ use usagi_daemon::infrastructure::session_worktree::SystemGit;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
-use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
     self, BannerScreenRunner, ControllerBackendComposition, ControllerBackendFactory,
-    ControllerHost, Exit, MetricsPort, Start,
+    ControllerHost, Exit, Start,
 };
 use usagi_tui::usecase::application::agent_runtime_ports::{
     AgentCommandPort, AgentPaneAdmission, ExactAgentResume, SerializedPaneLaunchPort,
@@ -84,6 +83,7 @@ use usagi_tui::usecase::application::daemon_backend::{
     DecisionPort as BackendDecisionPort, OverlayPort as BackendOverlayPort,
     TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
+use usagi_tui::usecase::application::metrics::{GitDiff, MetricsPort, MetricsUpdate};
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
 use usagi_tui::usecase::application::runtime_ports::{
@@ -1296,7 +1296,7 @@ struct DaemonMetricsPort {
 
 impl DaemonMetricsPort {
     // Composition-only adapter: it spawns the real daemon lane and uses the
-    // monotonic clock. The presentation `MetricsPort` is covered with fakes.
+    // monotonic clock. The application `MetricsPort` is covered with fakes.
     #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=production_metrics_projection_contract
     fn new() -> Self {
         Self {
@@ -1314,7 +1314,7 @@ impl MetricsPort for DaemonMetricsPort {
     fn poll_updates(
         &mut self,
         sessions: Option<&[(usagi_core::domain::id::SessionId, PathBuf)]>,
-    ) -> Vec<presentation::metrics::MetricsUpdate> {
+    ) -> Vec<MetricsUpdate> {
         let mut updates = Vec::new();
         // The first frame that wants a sample starts the lane; a composition
         // nobody draws never reaches the daemon.
@@ -1326,7 +1326,7 @@ impl MetricsPort for DaemonMetricsPort {
             && self.latest != sample
         {
             self.latest.clone_from(&sample);
-            updates.push(presentation::metrics::MetricsUpdate::Metrics(sample));
+            updates.push(MetricsUpdate::Metrics(sample));
         }
         let mut git_changed = false;
         if let Some(sessions) = sessions {
@@ -1385,9 +1385,7 @@ impl MetricsPort for DaemonMetricsPort {
             self.last_git_refresh = Some(Instant::now());
         }
         if git_changed {
-            updates.push(presentation::metrics::MetricsUpdate::GitDiffs(
-                self.git_diffs.clone(),
-            ));
+            updates.push(MetricsUpdate::GitDiffs(self.git_diffs.clone()));
         }
         updates
     }

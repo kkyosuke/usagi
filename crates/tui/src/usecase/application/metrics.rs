@@ -11,12 +11,10 @@
 //! [`MetricsUpdate`] values through a drain the shell consumes into a
 //! [`MetricsProjection`] cache — the same one-way discipline
 //! (`poll -> drain -> apply -> render`) as
-//! [`crate::usecase::application::daemon_backend::DaemonBackend`].  The event
-//! type stays in the presentation layer on purpose: [`GitDiff`] is a
-//! presentation projection, so routing it through the usecase-layer
-//! `controller::BackendEvent` would invert the crate's dependency direction.
-//! The design's hint permits exactly this alternative — a drain that returns
-//! shell material directly instead of passing through the reducer.
+//! [`crate::usecase::application::daemon_backend::DaemonBackend`]. The
+//! observation types and ports live in the application layer so the
+//! composition root never implements contracts owned by rendering. Presentation
+//! consumes the resulting projection without participating in polling policy.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -26,8 +24,18 @@ use usagi_core::domain::id::SessionId;
 use usagi_core::usecase::client::DaemonMetrics;
 use usagi_core::usecase::daemon_health::DaemonHealthTracker;
 
-use crate::presentation::MetricsPort;
-use crate::presentation::views::workspace::GitDiff;
+/// Read-only Git facts supplied asynchronously by the composition layer.
+///
+/// A missing value means inspection has not completed or Git could not provide
+/// a meaningful comparison; it is intentionally not rendered as an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitDiff {
+    pub base: String,
+    pub ahead: usize,
+    pub behind: usize,
+    pub added: usize,
+    pub removed: usize,
+}
 
 /// One changed metrics / git-diff observation returned by [`MetricsBackend`].
 ///
@@ -39,6 +47,36 @@ pub enum MetricsUpdate {
     Metrics(Option<DaemonMetrics>),
     /// The latest completed per-session git diffs.
     GitDiffs(BTreeMap<SessionId, GitDiff>),
+}
+
+/// Pulls the latest safe daemon observation at an application polling boundary.
+pub trait MetricsPort {
+    /// Compatibility observation hook for simple embedders. Production ports
+    /// override [`Self::poll_updates`] to avoid materializing unchanged values.
+    fn latest(&mut self) -> Option<DaemonMetrics> {
+        None
+    }
+
+    /// Compatibility Git snapshot hook. Change-driven ports should override
+    /// [`Self::poll_updates`] and move only changed material instead.
+    fn git_diffs(&mut self, _sessions: &[(SessionId, PathBuf)]) -> BTreeMap<SessionId, GitDiff> {
+        BTreeMap::new()
+    }
+
+    /// Return only observations that changed since the previous poll. `sessions`
+    /// is supplied only when the daemon session projection changed.
+    fn poll_updates(&mut self, sessions: Option<&[(SessionId, PathBuf)]>) -> Vec<MetricsUpdate> {
+        let mut updates = vec![MetricsUpdate::Metrics(self.latest())];
+        if let Some(sessions) = sessions {
+            updates.push(MetricsUpdate::GitDiffs(self.git_diffs(sessions)));
+        }
+        updates
+    }
+}
+
+/// Creates a fresh metrics port for every workspace opened from the screen graph.
+pub trait MetricsPortFactory {
+    fn create(&mut self) -> Box<dyn MetricsPort>;
 }
 
 /// Shell-owned projection cache for the controller Home frame.
@@ -168,9 +206,8 @@ impl MetricsBackend {
 
 #[cfg(test)]
 mod tests {
+    use super::{GitDiff, MetricsPort};
     use super::{MetricsBackend, MetricsProjection, MetricsUpdate};
-    use crate::presentation::MetricsPort;
-    use crate::presentation::views::workspace::GitDiff;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
