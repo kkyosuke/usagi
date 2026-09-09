@@ -12,6 +12,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::usecase::application::daemon_health::{
+    DaemonHealth, DaemonHealthTracker, HealthLevel, HealthReason,
+};
 use chrono::{DateTime, Utc};
 use usagi_core::domain::agent::{
     AgentInventory, AgentRuntimeInventoryState, ProviderResumeProjection, ProviderResumeReason,
@@ -26,10 +29,7 @@ use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::supervisor::SupervisorRunState;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
-use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
-use usagi_core::usecase::daemon_health::{
-    DaemonHealth, DaemonHealthTracker, HealthLevel, HealthReason,
-};
+use usagi_core::infrastructure::client::{AgentConcurrency, DaemonMetrics};
 use usagi_core::usecase::session_state::SessionStateCounts;
 
 use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
@@ -3462,9 +3462,11 @@ mod tests {
 
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
+    use crate::usecase::application::daemon_health::{
+        DaemonHealth, DaemonHealthTracker, HealthReason,
+    };
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
-    use usagi_core::usecase::daemon_health::{DaemonHealth, DaemonHealthTracker, HealthReason};
     use usagi_core::usecase::session_state::SessionStateCounts;
 
     #[test]
@@ -6621,7 +6623,7 @@ mod tests {
         // Daemon metrics feed the sidecar beside the rabbit without adding rows, so
         // the reservation the hit-test assumes stays constant — including the
         // second row the Agent concurrency projection occupies.
-        let metrics = usagi_core::usecase::client::DaemonMetrics {
+        let metrics = usagi_core::infrastructure::client::DaemonMetrics {
             schema_version: 3,
             sampled_at_ms: 42,
             cpu_percent_hundredths: 123,
@@ -7065,7 +7067,7 @@ mod tests {
 
     #[test]
     fn home_metrics_sidecar_renders_the_daemon_metrics_row() {
-        let metrics = usagi_core::usecase::client::DaemonMetrics {
+        let metrics = usagi_core::infrastructure::client::DaemonMetrics {
             schema_version: 3,
             sampled_at_ms: 42,
             cpu_percent_hundredths: 123,
@@ -7158,7 +7160,7 @@ mod tests {
     /// inventing a count.
     #[test]
     fn home_sidecar_degrades_when_the_daemon_omits_agent_concurrency() {
-        let mut metrics = usagi_core::usecase::client::DaemonMetrics {
+        let mut metrics = usagi_core::infrastructure::client::DaemonMetrics {
             schema_version: 3,
             sampled_at_ms: 42,
             cpu_percent_hundredths: 123,
@@ -7175,7 +7177,7 @@ mod tests {
             failed_background_workers: 0,
         };
         let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let render = |metrics: &usagi_core::usecase::client::DaemonMetrics| {
+        let render = |metrics: &usagi_core::infrastructure::client::DaemonMetrics| {
             render_home(
                 30,
                 100,
@@ -7258,7 +7260,7 @@ mod tests {
 
     // ── daemon health indicator ─────────────────────────────────────────────
     //
-    // 判定そのものは `usagi_core::usecase::daemon_health` の単体テストが固定する。
+    // 判定そのものは `crate::usecase::application::daemon_health` の単体テストが固定する。
     // ここで固定するのは「正常時は何も足さない」「異常時は短い安全な理由を出す」
     // 「狭幅で溢れない」という描画側の契約である。
 
@@ -7266,8 +7268,8 @@ mod tests {
         u64::try_from(clock.timestamp_millis()).expect("test clock is after the epoch")
     }
 
-    fn health_metrics(sampled_at_ms: u64) -> usagi_core::usecase::client::DaemonMetrics {
-        usagi_core::usecase::client::DaemonMetrics {
+    fn health_metrics(sampled_at_ms: u64) -> usagi_core::infrastructure::client::DaemonMetrics {
+        usagi_core::infrastructure::client::DaemonMetrics {
             schema_version: 3,
             sampled_at_ms,
             cpu_percent_hundredths: 120,

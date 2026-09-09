@@ -13,11 +13,11 @@ use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
+use usagi_core::infrastructure::client::ClientError;
 use usagi_core::infrastructure::ipc::{
     BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, ProtocolError,
     build_artifact_decision, build_rollover_trigger, is_workspace_mismatch,
 };
-use usagi_core::usecase::client::ClientError;
 
 // `daemon start` confirms the PID record before the subsequently published IPC
 // endpoint becomes connectable. Leave room for that bounded publication on a
@@ -373,8 +373,8 @@ mod tests {
     };
     use std::cell::Cell;
     use std::io;
+    use usagi_core::infrastructure::client::ClientError;
     use usagi_core::infrastructure::ipc::{BuildIdentity, build_rollover_trigger};
-    use usagi_core::usecase::client::ClientError;
 
     #[derive(Debug)]
     struct Endpoint {
@@ -887,8 +887,8 @@ mod tests {
 
     #[test]
     fn a_daemon_serving_another_workspace_is_neither_started_recovered_nor_replaced() {
+        use usagi_core::infrastructure::client::ClientError;
         use usagi_core::infrastructure::ipc::{ClientWorkspace, workspace_admission};
-        use usagi_core::usecase::client::ClientError;
 
         let refusal = workspace_admission(
             Some(&ClientWorkspace::Bound {

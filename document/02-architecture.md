@@ -518,18 +518,17 @@ read-modify-write の原子性は transaction callback の契約として port �
 Git を使う cleanup inventory も infrastructure adapter、観測結果から候補を決める処理は usecase とする。
 これにより保存方式と application policy を明確に分離し、fake port で usecase を検証できる。
 
-IPC client の wire 語彙と接続 state machine は段階的に分離中であり、現時点の
-`usecase/client.rs` と `usecase/owner_routing.rs` だけは `core infrastructure::ipc` を参照する。
-この 2 ファイルは architecture test の明示 allowlist とし、他の core usecase から concrete
-infrastructure への依存追加は拒否する。
+IPC client の wire 語彙、接続 state machine、generation routing は
+`usagi-core/infrastructure` に置く。core usecase から concrete infrastructure への依存は
+architecture test で例外なく拒否する。
 
-実装依存行列は次のとおり（`○` は参照可、`△` は上記 2 ファイルだけの移行中例外、`—` は同一領域、空欄は禁止）。
+実装依存行列は次のとおり（`○` は参照可、`—` は同一領域、空欄は禁止）。
 domain は常に内側に留まる。
 
 | 参照元 | core domain | core usecase | core technical boundary | 同じ面の usecase | 同じ面の infrastructure | 同じ面の presentation |
 |---|---:|---:|---:|---:|---:|---:|
 | core domain | — |  |  | - | - | - |
-| core usecase | ○ | — | △ | - | - | - |
+| core usecase | ○ | — |  | - | - | - |
 | core technical boundary | ○ | ○ | — | - | - | - |
 | face usecase | ○ | ○ | ○ | — |  |  |
 | face infrastructure | ○ | ○ | ○ | ○ | — |  |
@@ -639,8 +638,8 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | `state.json` などの store・IPC プロトコル型・git 操作 | `crates/core/src/infrastructure/` |
 | workspace の登録・touch・recent overview 構築、セッション作成・設定解決など両面が使うロジック | `crates/core/src/usecase/` |
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
-| planned restart 中の client 側 request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | `crates/core/src/usecase/owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
-| 表示専用 daemon metrics から診断専用 health（level と閉じた理由語彙）を作る判定 | `crates/core/src/usecase/daemon_health.rs`。sample 列と現在時刻だけの純関数で、実時計は引数として受ける。port・polling・sample を畳む cache は `crates/tui/src/usecase/application/metrics.rs`、表示文言と狭幅の縮退は `crates/tui/src/presentation/views/workspace.rs`（正本は [3. TUI](03-tui.md#daemon-health-indicator)） |
+| daemon IPC の request/reply 語彙、client connection state machine、planned restart 中の request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | `crates/core/src/infrastructure/client.rs` / `owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
+| 表示専用 daemon metrics から診断専用 health（level と閉じた理由語彙）を作る判定 | `crates/tui/src/usecase/application/daemon_health.rs`。TUI-local な sample 列と現在時刻だけの純関数で、実時計は引数として受ける。port・polling・sample を畳む cache は同層の `metrics.rs`、表示文言と狭幅の縮退は `crates/tui/src/presentation/views/workspace.rs`（正本は [3. TUI](03-tui.md#daemon-health-indicator)） |
 | 環境変数 binding の語彙・2 層スコープの合成・子プロセス環境への解決方針 | `crates/core/src/domain/settings/env.rs` と `crates/core/src/usecase/env.rs`（`SecretResolver` port を注入）。並列解決と実 `op` subprocess は `crates/core/src/infrastructure/env_resolver.rs`、設定の読み出しと解決キャッシュは合成ルートの `src/runtime/user_env.rs`（正本は [9. 環境変数設定](09-env.md)） |
 | product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
 | Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |

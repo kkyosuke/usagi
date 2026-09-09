@@ -6,9 +6,11 @@
 
 use std::sync::Arc;
 
+use usagi_core::infrastructure::client::{
+    DaemonRequest, TenantAction, TenantInventory, TenantSummary,
+};
 use usagi_core::infrastructure::ipc::{Envelope, ErrorCode, ProtocolError, ResponseOutcome};
 use usagi_core::infrastructure::paths;
-use usagi_core::usecase::client::{DaemonRequest, TenantAction, TenantInventory, TenantSummary};
 use usagi_daemon::usecase::tenant::{RetireError, TenantRegistry};
 
 use super::{

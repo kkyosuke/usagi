@@ -44,11 +44,11 @@ use usagi_core::domain::terminal_launch::{
     DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalLaunchRequest,
     TerminalLaunchScope, TerminalLaunchValidationError, TerminalProfileId,
 };
-use usagi_core::infrastructure::ipc::{DEFAULT_MAX_FRAME_BYTES, write_json_frame};
-use usagi_core::usecase::agent::AgentProfileCatalog;
-use usagi_core::usecase::client::{
+use usagi_core::infrastructure::client::{
     AgentLaunchIntent, TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
+use usagi_core::infrastructure::ipc::{DEFAULT_MAX_FRAME_BYTES, write_json_frame};
+use usagi_core::usecase::agent::AgentProfileCatalog;
 use usagi_core::usecase::vt_screen::{
     ActiveBuffer, Geometry as ScreenGeometry, RowCheckpoint, ScreenCheckpoint, VtScreen,
 };

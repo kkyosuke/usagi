@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::Path;
 
 use serde_json::Value;
-use usagi_core::usecase::client::{DispatchToolAction, SessionAction, SupervisorToolAction};
+use usagi_core::infrastructure::client::{DispatchToolAction, SessionAction, SupervisorToolAction};
 
 /// Descriptor-owned execution destination. A route cannot be advertised without
 /// being attached to the same descriptor as its metadata and policy.

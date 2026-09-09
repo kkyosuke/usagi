@@ -15,7 +15,7 @@ use std::io::{self, Read, Write};
 
 use serde::Deserialize;
 use usagi_core::domain::session_lifecycle::AgentPhase as ReportedPhase;
-use usagi_core::usecase::client::{DaemonRequest, McpCallerContext};
+use usagi_core::infrastructure::client::{DaemonRequest, McpCallerContext};
 
 use crate::cli::{Run, RunOutcome};
 

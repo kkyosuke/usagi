@@ -1067,7 +1067,7 @@ continuation で別 incarnation へ fallback しない。TUI の projection 契�
 planned restart 中は old generation が draining のまま自分の PTY を持ち続け、new generation が
 active として新規 launch を受ける。この間 client は「current endpoint 一つ」では old generation の
 terminal に到達できず、推測で new active へ送れば別 terminal に effect を与える。client 側の
-routing 契約は `usagi-core` の `usecase::owner_routing` が正本であり、次の表がその全体である。
+routing 契約は `usagi-core` の `infrastructure::owner_routing` が正本であり、次の表がその全体である。
 
 | request | 配送先 |
 |---|---|

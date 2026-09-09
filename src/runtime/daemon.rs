@@ -32,6 +32,11 @@ use usagi_core::domain::id::{
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::DefaultModel;
 use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
+use usagi_core::infrastructure::client::{
+    ClientError, ClientPolicy, DaemonClient, DaemonRestartAgents, DeadlineConnection,
+    DeadlineStream, IpcClient, MonotonicClock, PolicyClient, TerminalLaneBudget,
+};
+use usagi_core::infrastructure::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
     ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator, WorkspaceFence,
@@ -54,11 +59,6 @@ use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::infrastructure::workspace_state;
 use usagi_core::usecase::claude_sandbox::{self, SandboxMode};
-use usagi_core::usecase::client::{
-    ClientError, ClientPolicy, DaemonClient, DaemonRestartAgents, DeadlineConnection,
-    DeadlineStream, IpcClient, MonotonicClock, PolicyClient, TerminalLaneBudget,
-};
-use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::child_identity::UnixChildProbe;
 use usagi_daemon::infrastructure::generation_registry::{
     CurrentLocatorFile, GenerationRegistryFile, read_registry_document,
@@ -2566,7 +2566,7 @@ impl AgentTerminalActor for SharedAgent {
     fn handle(
         &mut self,
         context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
-        request: usagi_core::usecase::client::TerminalRequest,
+        request: usagi_core::infrastructure::client::TerminalRequest,
     ) -> TerminalOutcome {
         match self.runtime.lock() {
             Ok(mut agent) => AgentTerminalActor::handle(&mut *agent, context, request),
@@ -3344,7 +3344,7 @@ impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
     fn handle(
         &mut self,
         context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
-        request: usagi_core::usecase::client::TerminalRequest,
+        request: usagi_core::infrastructure::client::TerminalRequest,
     ) -> Result<
         usagi_daemon::usecase::terminal_owner::TerminalResponse,
         usagi_core::infrastructure::ipc::ProtocolError,
@@ -6030,8 +6030,8 @@ fn dispatch_agent_tool(
         AgentProfileId, AgentStatus, InboxKind, ModelSelector, StructuredResult,
     };
     use usagi_core::domain::id::{AgentId, OperationId};
+    use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
 
     #[derive(Deserialize)]
     struct SessionPayload {
@@ -6369,7 +6369,7 @@ fn dispatch_agent_tool(
                         ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
                     })?
                     .handle(
-                        usagi_core::usecase::client::SessionAction::Create,
+                        usagi_core::infrastructure::client::SessionAction::Create,
                         &operation_id,
                         &serde_json::json!({
                         "name": session_name,
@@ -7592,8 +7592,8 @@ fn dispatch_supervisor_snapshot(
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot;
+    use usagi_core::infrastructure::client::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    use usagi_core::usecase::client::DaemonRequest;
 
     let result = (|| {
         let Ok(DaemonRequest::SupervisorSnapshot {
@@ -7664,8 +7664,8 @@ fn dispatch_supervisor_control(
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use chrono::Utc;
     use usagi_core::domain::supervisor::SupervisorRunState;
+    use usagi_core::infrastructure::client::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    use usagi_core::usecase::client::DaemonRequest;
 
     let result = (|| {
         let Ok(DaemonRequest::SupervisorControl {
@@ -8005,8 +8005,8 @@ fn dispatch_pr_snapshot(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::client::{DaemonRequest, PrAction};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    use usagi_core::usecase::client::{DaemonRequest, PrAction};
     let result = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
         .and_then(|request| match request {
@@ -8122,7 +8122,7 @@ fn dispatch_user_decision(
                 ..
             } => Some((action, payload, caller_context, false)),
             DaemonRequest::UserDecision { action, payload } => {
-                use usagi_core::usecase::client::TuiUserDecisionAction;
+                use usagi_core::infrastructure::client::TuiUserDecisionAction;
                 let action = match action {
                     TuiUserDecisionAction::Get => DispatchToolAction::UserDecisionGet,
                     TuiUserDecisionAction::List => DispatchToolAction::UserDecisionList,
@@ -8410,8 +8410,8 @@ fn dispatch_dispatch(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::client::{DaemonRequest, SessionAction};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    use usagi_core::usecase::client::{DaemonRequest, SessionAction};
     let Some((operation_id, intent)) = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
         .and_then(|request| match request {
@@ -8746,8 +8746,8 @@ fn dispatch_metrics(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::client::{DaemonRequest, MetricsAction};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    use usagi_core::usecase::client::{DaemonRequest, MetricsAction};
 
     let action = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
@@ -8843,7 +8843,7 @@ fn dispatch_session(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::usecase::client::DaemonRequest;
+    use usagi_core::infrastructure::client::DaemonRequest;
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
         .and_then(|request| match request {
@@ -8890,8 +8890,8 @@ fn dispatch_mcp_child_claim(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::client::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    use usagi_core::usecase::client::DaemonRequest;
 
     let result = (|| {
         if !matches!(
@@ -8992,13 +8992,13 @@ fn dispatch_mcp_child_claim(
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 fn session_response_envelope(
-    action: usagi_core::usecase::client::SessionAction,
+    action: usagi_core::infrastructure::client::SessionAction,
     result: Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::client::SessionAction;
     use usagi_core::infrastructure::ipc::ResponseOutcome;
-    use usagi_core::usecase::client::SessionAction;
     match result {
         Ok(reply) => {
             let outcome = if matches!(action, SessionAction::Create | SessionAction::Remove) {
@@ -9101,7 +9101,7 @@ fn session_response_envelope(
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn exact_merged_pr_head(
-    inventory: Option<usagi_core::usecase::client::PrSnapshot>,
+    inventory: Option<usagi_core::infrastructure::client::PrSnapshot>,
     branch_head: Option<String>,
 ) -> Option<String> {
     inventory.and_then(|inventory| {
@@ -9319,12 +9319,12 @@ fn clean_orphan_session_resources(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn dispatch_session_action(
     context: &SessionDispatchContext<'_>,
-    action: usagi_core::usecase::client::SessionAction,
+    action: usagi_core::infrastructure::client::SessionAction,
     operation_id: &str,
     payload: &serde_json::Value,
 ) -> Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError> {
+    use usagi_core::infrastructure::client::SessionAction;
     use usagi_core::infrastructure::store::{issue::IssueStore, state::WorkspaceStateStore};
-    use usagi_core::usecase::client::SessionAction;
     use usagi_core::usecase::{issue, note};
     use usagi_daemon::usecase::agent_ipc::PromptMode;
 
@@ -10106,7 +10106,7 @@ fn delegate_brief(
     operation_id: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
-    use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
+    use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
 
     let bound = context.bound;
     let teardown = context.teardown;
@@ -10458,8 +10458,11 @@ fn reconcile_orphan_delegations(
 }
 
 enum AgentDispatchRequest {
-    Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
-    Goal(String, usagi_core::usecase::client::AgentGoalIntent),
+    Launch(
+        String,
+        usagi_core::infrastructure::client::AgentLaunchIntent,
+    ),
+    Goal(String, usagi_core::infrastructure::client::AgentGoalIntent),
     Inventory(WorkspaceId),
     WorkspaceObservation(WorkspaceId),
     Diagnose(
@@ -10617,7 +10620,7 @@ fn goal_supervisor_caller(workspace: WorkspaceId) -> String {
 fn reserve_goal_supervisor_run(
     supervisor: &SharedSupervisorRuntime,
     operation_id: &str,
-    intent: &usagi_core::usecase::client::AgentGoalIntent,
+    intent: &usagi_core::infrastructure::client::AgentGoalIntent,
     artifact_repository: usagi_core::domain::pr_inventory::GitHubRepository,
     worker_profile_id: AgentProfileId,
 ) -> Result<
@@ -10642,7 +10645,7 @@ fn reserve_goal_supervisor_run(
             ),
             worker_profile_id,
             usagi_core::infrastructure::ipc::agent_operation_digest(
-                &usagi_core::usecase::client::agent_goal_semantic_key(intent),
+                &usagi_core::infrastructure::client::agent_goal_semantic_key(intent),
             ),
             Some("standard".into()),
             Utc::now(),
@@ -10654,7 +10657,7 @@ fn resolve_goal_artifact_repository(
     supervisor: &SharedSupervisorRuntime,
     scope: &dyn SessionScopeResolver,
     operation_id: &str,
-    intent: &usagi_core::usecase::client::AgentGoalIntent,
+    intent: &usagi_core::infrastructure::client::AgentGoalIntent,
 ) -> Result<
     usagi_core::domain::pr_inventory::GitHubRepository,
     usagi_core::infrastructure::ipc::ProtocolError,
@@ -10726,7 +10729,7 @@ fn bind_delegated_supervisor_dispatch(
 fn start_goal_supervisor_run(
     supervisor: &SharedSupervisorRuntime,
     operation_id: &str,
-    intent: &usagi_core::usecase::client::AgentGoalIntent,
+    intent: &usagi_core::infrastructure::client::AgentGoalIntent,
     worker: &usagi_core::domain::id::AgentRuntimeRef,
 ) -> Result<
     usagi_core::domain::supervisor::SupervisorRunQuery,
@@ -11225,8 +11228,8 @@ fn dispatch_agent(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::client::DaemonRequest;
     use usagi_core::infrastructure::ipc::ResponseOutcome;
-    use usagi_core::usecase::client::DaemonRequest;
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
         .and_then(|request| match request {
@@ -11441,7 +11444,7 @@ fn run_agent_readiness(
 fn dispatch_agent_after_preflight(
     agent: &SharedAgentRuntime,
     operation_id: &str,
-    intent: &usagi_core::usecase::client::DispatchIntent,
+    intent: &usagi_core::infrastructure::client::DispatchIntent,
     session: SessionId,
     scope: &dyn SessionScopeResolver,
     planned_worker: Option<&usagi_core::domain::agent::Agent>,
@@ -14015,7 +14018,7 @@ impl StandbyProbe for UnixStandbyProbe<'_> {
         })?;
         let mut stream = connect_generation(
             self.data_dir,
-            &usagi_core::usecase::owner_routing::TrustedEndpoint {
+            &usagi_core::infrastructure::owner_routing::TrustedEndpoint {
                 generation,
                 // Only the endpoint spelling is used by the connect; the role is
                 // carried for the caller's own bookkeeping.
@@ -15391,8 +15394,8 @@ impl IpcRolloverRequester<'_> {
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         let body = match reply {
-            usagi_core::usecase::client::DaemonReply::Ok(body)
-            | usagi_core::usecase::client::DaemonReply::Accepted { body, .. } => body,
+            usagi_core::infrastructure::client::DaemonReply::Ok(body)
+            | usagi_core::infrastructure::client::DaemonReply::Accepted { body, .. } => body,
         };
         serde_json::from_value(body)
             .map(Some)
@@ -15520,7 +15523,7 @@ impl IpcRolloverRequester<'_> {
     /// exposes `generation_rolled_over` to the command immediately following a
     /// successful restart.
     fn successor_is_serving(&self, standby: &DaemonRecord, operation: &OperationId) -> bool {
-        use usagi_core::usecase::client::{DaemonReply, TenantAction};
+        use usagi_core::infrastructure::client::{DaemonReply, TenantAction};
 
         let Some(generation) = read_registry_document(self.data_dir)
             .ok()
@@ -15648,7 +15651,7 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
         if !committed
             && result
                 .as_ref()
-                .is_err_and(usagi_core::usecase::client::ClientError::is_transport_failure)
+                .is_err_and(usagi_core::infrastructure::client::ClientError::is_transport_failure)
         {
             // A transport failure cannot distinguish a request that never
             // arrived from a reply lost while W2 was becoming observable.
@@ -16194,7 +16197,7 @@ fn run_inner(
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         client
             .request(DaemonRequest::Tenant {
-                action: usagi_core::usecase::client::TenantAction::Retire,
+                action: usagi_core::infrastructure::client::TenantAction::Retire,
                 root: Some(root.clone()),
                 force,
             })
@@ -16370,7 +16373,7 @@ fn run_inner(
 /// deliberately leaves the presentation layer's existing status text intact.
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn append_live_tenant_inventory(out: &mut dyn Write) {
-    use usagi_core::usecase::client::{DaemonReply, TenantAction, TenantInventory};
+    use usagi_core::infrastructure::client::{DaemonReply, TenantAction, TenantInventory};
 
     let Ok(mut client) = existing_policy_client(ClientPolicy::cli(), ClientWorkspace::Unbound)
     else {
@@ -16649,7 +16652,7 @@ pub(crate) fn deadline_transport(
 /// sent. A lane keeps one connection across requests (its attachments and input
 /// ledger live there), so the budget is per request rather than per connection.
 pub(crate) fn rearm_lane(client: &mut LaneClient, budget_ms: u64) {
-    usagi_core::usecase::client::DaemonSession::rearm(client, budget_ms);
+    usagi_core::infrastructure::client::DaemonSession::rearm(client, budget_ms);
 }
 
 /// Borrows a lane's underlying socket, for composition-owned passive
@@ -17258,14 +17261,16 @@ pub(crate) fn sync_after_update(
     if published_build != expected_build {
         let workspace = owner
             .request(DaemonRequest::Session {
-                action: usagi_core::usecase::client::SessionAction::List,
+                action: usagi_core::infrastructure::client::SessionAction::List,
                 operation_id: usagi_core::domain::id::OperationId::new().to_string(),
                 payload: serde_json::json!({}),
             })
             .and_then(|reply| {
                 let body = match reply {
-                    usagi_core::usecase::client::DaemonReply::Ok(body)
-                    | usagi_core::usecase::client::DaemonReply::Accepted { body, .. } => body,
+                    usagi_core::infrastructure::client::DaemonReply::Ok(body)
+                    | usagi_core::infrastructure::client::DaemonReply::Accepted { body, .. } => {
+                        body
+                    }
                 };
                 serde_json::from_value::<WorkspaceId>(body["workspace_id"].clone()).map_err(|_| {
                     ClientError::Unavailable(
@@ -17284,8 +17289,10 @@ pub(crate) fn sync_after_update(
             })
             .and_then(|reply| {
                 let body = match reply {
-                    usagi_core::usecase::client::DaemonReply::Ok(body)
-                    | usagi_core::usecase::client::DaemonReply::Accepted { body, .. } => body,
+                    usagi_core::infrastructure::client::DaemonReply::Ok(body)
+                    | usagi_core::infrastructure::client::DaemonReply::Accepted { body, .. } => {
+                        body
+                    }
                 };
                 serde_json::from_value::<usagi_core::domain::agent::AgentIntegrationDiagnosis>(body)
                     .map_err(|_| {
@@ -17326,7 +17333,7 @@ pub(crate) fn sync_after_update(
         )));
     }
     if let Err(error) = current.request(DaemonRequest::Tenant {
-        action: usagi_core::usecase::client::TenantAction::Inventory,
+        action: usagi_core::infrastructure::client::TenantAction::Inventory,
         root: None,
         force: false,
     }) {
@@ -17388,10 +17395,13 @@ pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient,
 /// directory every other lane in this process uses ([`paths::data_dir`] is
 /// process-stable), so there is no second authority to disagree with.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
-fn route_cache(data_dir: &Path) -> &'static Mutex<usagi_core::usecase::owner_routing::RouteCache> {
-    static CACHE: OnceLock<Mutex<usagi_core::usecase::owner_routing::RouteCache>> = OnceLock::new();
+fn route_cache(
+    data_dir: &Path,
+) -> &'static Mutex<usagi_core::infrastructure::owner_routing::RouteCache> {
+    static CACHE: OnceLock<Mutex<usagi_core::infrastructure::owner_routing::RouteCache>> =
+        OnceLock::new();
     CACHE.get_or_init(|| {
-        Mutex::new(usagi_core::usecase::owner_routing::RouteCache::new(
+        Mutex::new(usagi_core::infrastructure::owner_routing::RouteCache::new(
             usagi_daemon::infrastructure::generation_registry::TrustedGenerationDirectory::new(
                 data_dir,
             ),
@@ -17427,7 +17437,7 @@ pub(crate) fn invalidate_routes() {
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 fn owner_endpoint(
     generation: usagi_core::domain::id::DaemonGeneration,
-) -> Result<usagi_core::usecase::owner_routing::TrustedEndpoint, ClientError> {
+) -> Result<usagi_core::infrastructure::owner_routing::TrustedEndpoint, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let mut cache = route_cache(&data_dir)
@@ -17446,7 +17456,7 @@ fn owner_endpoint(
 /// terminal whose owner is merely busy from being reaped.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 pub(crate) fn trusted_generations()
--> Result<Vec<usagi_core::usecase::owner_routing::TrustedEndpoint>, ClientError> {
+-> Result<Vec<usagi_core::infrastructure::owner_routing::TrustedEndpoint>, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let mut cache = route_cache(&data_dir)
@@ -17520,7 +17530,7 @@ pub(crate) fn owner_client(
     if opened.daemon_generation().0 != generation.as_str() {
         invalidate_routes();
         return Err(
-            usagi_core::usecase::owner_routing::RoutingError::UnknownGeneration(generation)
+            usagi_core::infrastructure::owner_routing::RoutingError::UnknownGeneration(generation)
                 .to_client_error(),
         );
     }
@@ -17541,7 +17551,7 @@ pub(crate) fn owner_client(
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_draining_generation_refuses_control_and_still_serves_its_own_terminals
 fn connect_draining(
     policy: ClientPolicy,
-    endpoint: &usagi_core::usecase::owner_routing::TrustedEndpoint,
+    endpoint: &usagi_core::infrastructure::owner_routing::TrustedEndpoint,
     connect_budget_ms: u64,
 ) -> Result<LaneClient, ClientError> {
     let data_dir =
@@ -17999,7 +18009,7 @@ mod tests {
         },
         terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId},
     };
-    use usagi_core::usecase::client::{
+    use usagi_core::infrastructure::client::{
         TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
     };
     use usagi_daemon::presentation::ipc::encode_terminal_response;
@@ -18960,7 +18970,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        let child_semantic = usagi_core::usecase::client::agent_dispatch_semantic_key(
+        let child_semantic = usagi_core::infrastructure::client::agent_dispatch_semantic_key(
             "child-session",
             planned_child.agent_id,
             &reserved_child.prompt,
@@ -20452,7 +20462,7 @@ mod tests {
             lane.read(&mut byte).unwrap_err().kind(),
             std::io::ErrorKind::TimedOut
         );
-        usagi_core::usecase::client::RearmableStream::rearm(&mut lane, 40);
+        usagi_core::infrastructure::client::RearmableStream::rearm(&mut lane, 40);
         assert!(lane.write(b"x").is_ok());
         drop(peer);
     }
@@ -20953,7 +20963,7 @@ mod tests {
             let mut runtime = tenant.runtime().lock().unwrap();
             let created = runtime
                 .handle(
-                    usagi_core::usecase::client::SessionAction::Create,
+                    usagi_core::infrastructure::client::SessionAction::Create,
                     &usagi_core::domain::id::OperationId::new().to_string(),
                     &serde_json::json!({"name": "kept"}),
                 )
@@ -24020,8 +24030,10 @@ mod tests {
 
     #[test]
     fn a_panicked_background_worker_reports_danger_and_requests_shutdown() {
-        use usagi_core::usecase::client::MetricsAction;
-        use usagi_core::usecase::daemon_health::{DaemonHealth, DaemonHealthTracker, HealthReason};
+        use usagi_core::infrastructure::client::MetricsAction;
+        use usagi_tui::usecase::application::daemon_health::{
+            DaemonHealth, DaemonHealthTracker, HealthReason,
+        };
 
         let shutdown = Arc::new(ShutdownRequest::new());
         let handle = spawn_retention_gc_worker(
@@ -24307,10 +24319,10 @@ mod tests {
         sampler: &SharedProcessResourceSampler,
         pipeline: &TerminalPipelineMetrics,
         observer: &mut Option<MetricsObserver>,
-        action: usagi_core::usecase::client::MetricsAction,
-    ) -> usagi_core::usecase::client::DaemonMetrics {
+        action: usagi_core::infrastructure::client::MetricsAction,
+    ) -> usagi_core::infrastructure::client::DaemonMetrics {
+        use usagi_core::infrastructure::client::DaemonRequest;
         use usagi_core::infrastructure::ipc::{EnvelopeKind, ResponseOutcome};
-        use usagi_core::usecase::client::DaemonRequest;
 
         let response = dispatch_metrics(
             broker,
@@ -24330,7 +24342,7 @@ mod tests {
 
     #[test]
     fn production_snapshot_polling_does_not_drop_but_a_slow_observer_does() {
-        use usagi_core::usecase::client::MetricsAction;
+        use usagi_core::infrastructure::client::MetricsAction;
 
         let broker = Arc::new(Mutex::new(MetricsBroker::default()));
         let sampler = Arc::new(Mutex::new(ProcessResourceSampler { previous: None }));
@@ -24401,7 +24413,7 @@ mod tests {
     /// lock: a display-only tick may never wait behind a launch (#644).
     #[test]
     fn production_metrics_report_agent_concurrency_without_taking_the_agent_lock() {
-        use usagi_core::usecase::client::{AgentConcurrency, MetricsAction};
+        use usagi_core::infrastructure::client::{AgentConcurrency, MetricsAction};
 
         let gauge = AgentConcurrencyGauge::default();
         let broker = Arc::new(Mutex::new(MetricsBroker::with_agent_concurrency(
@@ -24485,8 +24497,8 @@ mod tests {
 
     #[test]
     fn failed_create_and_remove_replay_as_error_envelopes_without_success_hooks() {
+        use usagi_core::infrastructure::client::SessionAction;
         use usagi_core::infrastructure::ipc::{EnvelopeKind, ErrorCode, ResponseOutcome};
-        use usagi_core::usecase::client::SessionAction;
 
         for action in [SessionAction::Create, SessionAction::Remove] {
             let response = session_response_envelope(
@@ -24521,7 +24533,8 @@ mod tests {
         inventory.discover([identity.clone()]);
         inventory.entries.get_mut(&identity).unwrap().state = PrState::Merged;
         inventory.entries.get_mut(&identity).unwrap().head_oid = Some(head.clone());
-        let snapshot = usagi_core::usecase::client::PrSnapshot::from((session, inventory.clone()));
+        let snapshot =
+            usagi_core::infrastructure::client::PrSnapshot::from((session, inventory.clone()));
         assert_eq!(
             exact_merged_pr_head(Some(snapshot), Some(head.clone())),
             Some(head.clone())
@@ -24530,7 +24543,7 @@ mod tests {
         inventory.entries.get_mut(&identity).unwrap().state = PrState::Open;
         assert_eq!(
             exact_merged_pr_head(
-                Some(usagi_core::usecase::client::PrSnapshot::from((
+                Some(usagi_core::infrastructure::client::PrSnapshot::from((
                     session,
                     inventory.clone()
                 ))),
@@ -24541,7 +24554,7 @@ mod tests {
         inventory.entries.get_mut(&identity).unwrap().state = PrState::Merged;
         assert_eq!(
             exact_merged_pr_head(
-                Some(usagi_core::usecase::client::PrSnapshot::from((
+                Some(usagi_core::infrastructure::client::PrSnapshot::from((
                     session, inventory
                 ))),
                 Some("b".repeat(40))
@@ -24550,7 +24563,7 @@ mod tests {
         );
         assert_eq!(
             exact_merged_pr_head(
-                Some(usagi_core::usecase::client::PrSnapshot::from((
+                Some(usagi_core::infrastructure::client::PrSnapshot::from((
                     session,
                     PrInventory::default()
                 ))),
@@ -27599,7 +27612,7 @@ instructions = "{instructions}"
         let run = usagi_core::domain::id::OperationId::new().to_string();
         let envelope_for = |reconcile: DelegationReconcile, code: ErrorCode| {
             session_response_envelope(
-                usagi_core::usecase::client::SessionAction::DelegateBrief,
+                usagi_core::infrastructure::client::SessionAction::DelegateBrief,
                 Err(SessionRuntimeError::Delegation(DelegationFailure {
                     code,
                     message: "dispatch runtime executable is unavailable".into(),
@@ -28835,8 +28848,8 @@ instructions = "{instructions}"
         use chrono::Utc;
         use usagi_core::domain::id::OperationId;
         use usagi_core::domain::supervisor::{SupervisorRunDeletion, SupervisorWorkspaceCommand};
+        use usagi_core::infrastructure::client::DaemonRequest;
         use usagi_core::infrastructure::ipc::{EnvelopeKind, ResponseOutcome};
-        use usagi_core::usecase::client::DaemonRequest;
         use usagi_daemon::usecase::session_runtime::SessionRuntime;
 
         let temporary = tempfile::tempdir().unwrap();
@@ -28950,8 +28963,8 @@ instructions = "{instructions}"
         }
     }
 
-    fn goal_intent(workspace: WorkspaceId) -> usagi_core::usecase::client::AgentGoalIntent {
-        usagi_core::usecase::client::AgentGoalIntent {
+    fn goal_intent(workspace: WorkspaceId) -> usagi_core::infrastructure::client::AgentGoalIntent {
+        usagi_core::infrastructure::client::AgentGoalIntent {
             workspace,
             profile: None,
             goal: "prepare the requested change for review".into(),
@@ -29090,8 +29103,8 @@ instructions = "{instructions}"
     #[test]
     fn goal_supervisor_promotion_maps_a_poisoned_owner_to_unavailable() {
         use usagi_core::domain::id::AgentId;
+        use usagi_core::infrastructure::client::{AgentGoalIntent, agent_goal_semantic_key};
         use usagi_core::infrastructure::store::dispatch::DispatchStore;
-        use usagi_core::usecase::client::{AgentGoalIntent, agent_goal_semantic_key};
 
         let temporary = tempfile::tempdir().unwrap();
         let workspace = WorkspaceId::new();

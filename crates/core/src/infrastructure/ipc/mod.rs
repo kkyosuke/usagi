@@ -165,7 +165,7 @@ pub const WORKSPACE_FENCE_CAPABILITY: &str = Capability::WorkspaceFence.wire_nam
 /// generation behind: a client without it would send an old generation's attach,
 /// input, or resize to the new active daemon, which either fails or lands on a
 /// different terminal. The routing contract itself is
-/// [`crate::usecase::owner_routing`], and the handoff admission that requires it
+/// [`crate::infrastructure::owner_routing`], and the handoff admission that requires it
 /// of every participant is the daemon's rollover gate (#508).
 pub const OWNER_GENERATION_ROUTING_CAPABILITY: &str =
     Capability::OwnerGenerationRouting.wire_name();
@@ -497,7 +497,7 @@ pub struct ServerHello {
 
 /// The authority a serving generation advertises for itself.
 ///
-/// A client only ever *binds* to `Active` (`usecase::client` refuses anything
+/// A client only ever *binds* to `Active` (`infrastructure::client` refuses anything
 /// else as an owner), so the other roles exist to let a peer say what it is
 /// rather than to widen what a client may trust. `Standby` is what a generation
 /// that has bound a private endpoint but publishes no locator answers with: it
@@ -1116,8 +1116,8 @@ pub fn terminal_input_digest(target: &str, bytes: &[u8]) -> String {
 /// digest of the canonical semantic key beside the recorded final and the client
 /// refuses a final whose digest differs from the one it computed for its own
 /// request. `semantic_key` is the canonical intent string produced by
-/// [`agent_launch_semantic_key`](crate::usecase::client::agent_launch_semantic_key)
-/// or [`agent_resume_semantic_key`](crate::usecase::client::agent_resume_semantic_key);
+/// [`agent_launch_semantic_key`](crate::infrastructure::client::agent_launch_semantic_key)
+/// or [`agent_resume_semantic_key`](crate::infrastructure::client::agent_resume_semantic_key);
 /// it is length-prefixed so no key can collide with another through the domain
 /// separator.
 #[must_use]

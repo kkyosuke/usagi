@@ -1600,7 +1600,7 @@ impl PrSnapshotPort for UnavailablePrSnapshotPort {
     fn snapshot(
         &mut self,
         _session: SessionId,
-    ) -> Result<usagi_core::usecase::client::PrSnapshot, String> {
+    ) -> Result<usagi_core::infrastructure::client::PrSnapshot, String> {
         Err("Pull Request data is unavailable.".to_owned())
     }
 }
@@ -6081,8 +6081,8 @@ fn home_frame_material(
     workspace_name: &str,
     _root_cwd: &Path,
     sessions: &[ProjectedSession],
-    metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
-    health: usagi_core::usecase::daemon_health::DaemonHealthTracker,
+    metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
+    health: crate::usecase::application::daemon_health::DaemonHealthTracker,
     git_diffs: &BTreeMap<SessionId, GitDiff>,
     terminal_view: Option<TerminalViewProjection>,
     create_pending: Option<&str>,
@@ -6122,8 +6122,8 @@ fn home_frame_material_shared(
     runtime: &WorkspaceRuntime,
     workspace_name: &str,
     sessions: Arc<[ProjectedSession]>,
-    metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
-    health: usagi_core::usecase::daemon_health::DaemonHealthTracker,
+    metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
+    health: crate::usecase::application::daemon_health::DaemonHealthTracker,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
     managed_terminal_view: Option<Arc<TerminalViewProjection>>,
     root_terminal_view: Option<&TerminalViewProjection>,
@@ -6306,8 +6306,8 @@ fn render_controller_frame(
     workspace_name: &str,
     root_cwd: &Path,
     sessions: &[ProjectedSession],
-    metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
-    health: usagi_core::usecase::daemon_health::DaemonHealthTracker,
+    metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
+    health: crate::usecase::application::daemon_health::DaemonHealthTracker,
     git_diffs: &BTreeMap<SessionId, GitDiff>,
     terminal_view: Option<TerminalViewProjection>,
     create_pending: Option<&str>,
@@ -10495,15 +10495,15 @@ mod tests {
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
+    use crate::usecase::application::daemon_health::DaemonHealthTracker;
     use tempfile::tempdir;
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
     use usagi_core::domain::workspace_state::WorkspaceState;
-    use usagi_core::usecase::client::DaemonMetrics;
-    use usagi_core::usecase::daemon_health::DaemonHealthTracker;
+    use usagi_core::infrastructure::client::DaemonMetrics;
 
     /// The unobserved default: diagnostic health draws no indicator, so a frame
     /// test keeps asserting the healthy Home frame. The judgement itself is
-    /// covered by `usagi_core::usecase::daemon_health` and by the sidecar tests
+    /// covered by `crate::usecase::application::daemon_health` and by the sidecar tests
     /// in [`views::workspace`].
     fn health() -> DaemonHealthTracker {
         DaemonHealthTracker::default()

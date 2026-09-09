@@ -7,7 +7,7 @@
 //! scope's [`TerminalAction::Inventory`] at a bounded cadence on its own thread
 //! and reports which tracked terminals the daemon no longer lists as live.
 //!
-//! [`TerminalAction::Inventory`]: usagi_core::usecase::client::TerminalAction::Inventory
+//! [`TerminalAction::Inventory`]: usagi_core::infrastructure::client::TerminalAction::Inventory
 //!
 //! The contract this lane deliberately keeps narrow:
 //!

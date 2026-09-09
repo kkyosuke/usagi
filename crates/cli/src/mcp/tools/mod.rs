@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
-use usagi_core::usecase::client::{DispatchToolAction, SessionAction, SupervisorToolAction};
+use usagi_core::infrastructure::client::{DispatchToolAction, SessionAction, SupervisorToolAction};
 
 use super::tool::{CallerPolicy, Tool, ToolDescriptor, ToolRoute, validate_schema_definition};
 
@@ -218,7 +218,7 @@ mod tests {
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
     use std::path::Path;
     use usagi_core::domain::user_decision::UserDecisionPolicy;
-    use usagi_core::usecase::client::SessionAction;
+    use usagi_core::infrastructure::client::SessionAction;
 
     struct FixtureTool(&'static str);
     impl Tool for FixtureTool {

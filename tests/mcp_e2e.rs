@@ -23,12 +23,12 @@ use usagi_core::domain::{
     role::RoleId,
     user_decision::UserDecision,
 };
-use usagi_core::infrastructure::store::{
-    DerivedState, issue::IssueStore, memory::MemoryStore, user_decision::UserDecisionStore,
-};
-use usagi_core::usecase::client::{
+use usagi_core::infrastructure::client::{
     DaemonClient, DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent,
     TuiUserDecisionAction,
+};
+use usagi_core::infrastructure::store::{
+    DerivedState, issue::IssueStore, memory::MemoryStore, user_decision::UserDecisionStore,
 };
 
 #[test]

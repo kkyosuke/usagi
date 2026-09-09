@@ -20,8 +20,8 @@ use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+use usagi_core::infrastructure::client::{DaemonRequest, SessionAction};
 use usagi_core::usecase::claude_sandbox::SandboxMode;
-use usagi_core::usecase::client::{DaemonRequest, SessionAction};
 
 /// 配布 binary に同梱され、その build identity に束縛された self-update installer。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -976,29 +976,29 @@ mod tests {
         for (argv, action) in [
             (
                 ["usagi", "session", "create", "a"].as_slice(),
-                usagi_core::usecase::client::SessionAction::Create,
+                usagi_core::infrastructure::client::SessionAction::Create,
             ),
             (
                 ["usagi", "session", "remove", "a"].as_slice(),
-                usagi_core::usecase::client::SessionAction::Remove,
+                usagi_core::infrastructure::client::SessionAction::Remove,
             ),
             (
                 ["usagi", "session", "sleep", "a"].as_slice(),
-                usagi_core::usecase::client::SessionAction::Sleep,
+                usagi_core::infrastructure::client::SessionAction::Sleep,
             ),
             (
                 ["usagi", "session", "setup", "a", "echo ok"].as_slice(),
-                usagi_core::usecase::client::SessionAction::Setup,
+                usagi_core::infrastructure::client::SessionAction::Setup,
             ),
             (
                 ["usagi", "session", "prompt", "a", "hi"].as_slice(),
-                usagi_core::usecase::client::SessionAction::Prompt,
+                usagi_core::infrastructure::client::SessionAction::Prompt,
             ),
         ] {
             let parsed = Cli::try_parse_from(argv).unwrap().command.unwrap();
             let (request, _) = super::execute(parsed);
             assert!(
-                matches!(request, RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session { action: actual, .. }) if actual == action)
+                matches!(request, RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::Session { action: actual, .. }) if actual == action)
             );
         }
         assert!(matches!(
@@ -1026,7 +1026,7 @@ mod tests {
         });
         assert!(matches!(
             exact,
-            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::ResumeAgent { target: actual, .. })
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::ResumeAgent { target: actual, .. })
                 if actual == target
         ));
         let (inventory, _) = super::execute(Command::Session {
@@ -1036,7 +1036,7 @@ mod tests {
         });
         assert!(matches!(
             inventory,
-            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::AgentInventory { workspace, .. })
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::AgentInventory { workspace, .. })
                 if workspace == target.workspace_id
         ));
 
@@ -1071,8 +1071,8 @@ mod tests {
         let (outcome, _) = super::execute(parsed);
         assert!(matches!(
             outcome,
-            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session {
-                action: usagi_core::usecase::client::SessionAction::Create,
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::Session {
+                action: usagi_core::infrastructure::client::SessionAction::Create,
                 payload,
                 ..
             }) if payload == serde_json::json!({"name":"review-auth", "role":"reviewer"})
@@ -1092,8 +1092,8 @@ mod tests {
         let (outcome, _) = super::execute(parsed);
         assert!(matches!(
             outcome,
-            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session {
-                action: usagi_core::usecase::client::SessionAction::Create,
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::Session {
+                action: usagi_core::infrastructure::client::SessionAction::Create,
                 payload,
                 ..
             }) if payload == serde_json::json!({
@@ -1121,8 +1121,8 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session {
-                action: usagi_core::usecase::client::SessionAction::Remove,
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::Session {
+                action: usagi_core::infrastructure::client::SessionAction::Remove,
                 payload,
                 ..
             }) if payload == serde_json::json!({

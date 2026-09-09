@@ -675,7 +675,7 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
     pub fn snapshot(
         &mut self,
         session: SessionId,
-    ) -> Result<usagi_core::usecase::client::PrSnapshot, P::Error> {
+    ) -> Result<usagi_core::infrastructure::client::PrSnapshot, P::Error> {
         self.hydrate()?;
         let inventory = self.sessions.get(&session).cloned().unwrap_or_default();
         Ok((session, inventory).into())
@@ -688,7 +688,7 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
     pub fn snapshots(
         &mut self,
         sessions: &[SessionId],
-    ) -> Result<Vec<usagi_core::usecase::client::PrSnapshot>, P::Error> {
+    ) -> Result<Vec<usagi_core::infrastructure::client::PrSnapshot>, P::Error> {
         self.hydrate()?;
         Ok(sessions
             .iter()

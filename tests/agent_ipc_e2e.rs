@@ -28,14 +28,14 @@ use usagi_core::domain::supervisor::{
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
-use usagi_core::infrastructure::ipc::ErrorCode;
-use usagi_core::infrastructure::store::workspace::Storage;
-use usagi_core::usecase::client::{
+use usagi_core::infrastructure::client::{
     AgentGoalIntent, AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonReply,
     DaemonRequest, IpcClient, McpCallerContext, SessionAction, TerminalAction, TerminalGeometry,
     TerminalLaunchIntent, TerminalRequest,
 };
-use usagi_core::usecase::owner_routing::GenerationDirectory;
+use usagi_core::infrastructure::ipc::ErrorCode;
+use usagi_core::infrastructure::owner_routing::GenerationDirectory;
+use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::generation_registry::{
     TrustedGenerationDirectory, read_registry_document,
 };
@@ -457,7 +457,7 @@ fn client_ready(
                 // still named, or failing an accepted connection closed under its
                 // pre-handshake bounds. Production treats exactly these as
                 // retryable on a fresh connection, because nothing was dispatched
-                // (`PolicyClient` in `usagi_core::usecase::client`), so this
+                // (`PolicyClient` in `usagi_core::infrastructure::client`), so this
                 // readiness wait does too rather than turning one lost connection
                 // into a suite failure. A *framed* refusal is definitive and is
                 // surfaced immediately below.
@@ -625,7 +625,7 @@ fn launch_intent(
 /// another intent cannot be correlated to it (#522).
 fn expected_digest(intent: &AgentLaunchIntent) -> String {
     usagi_core::infrastructure::ipc::agent_operation_digest(
-        &usagi_core::usecase::client::agent_launch_semantic_key(intent),
+        &usagi_core::infrastructure::client::agent_launch_semantic_key(intent),
     )
 }
 
@@ -1165,7 +1165,7 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
     assert_eq!(
         body["semantic_digest"],
         usagi_core::infrastructure::ipc::agent_operation_digest(
-            &usagi_core::usecase::client::agent_goal_semantic_key(&intent)
+            &usagi_core::infrastructure::client::agent_goal_semantic_key(&intent)
         )
     );
     let terminal: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
@@ -2153,7 +2153,7 @@ fn root_restart_rolls_over_two_real_generic_ptys_without_a_readiness_retry() {
     .expect("restart returns with a successor that completes the first handshake");
     successor
         .request(DaemonRequest::Tenant {
-            action: usagi_core::usecase::client::TenantAction::Inventory,
+            action: usagi_core::infrastructure::client::TenantAction::Inventory,
             root: None,
             force: false,
         })
