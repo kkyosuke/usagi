@@ -63,9 +63,12 @@ session の Closeup に留まる。terminal が Control と Option（Alt）の�
 | `Ctrl+Option+←` / `Ctrl+Option+→` | PreviousWorkspace / NextWorkspace | 前 / 次の project |
 
 `Ctrl-O` の次の入力は 1 秒以内に行う。workspace の route・modal・drawer・pane の有無にかかわらず、
-2打目はすべて `Ctrl` の有無を同一視するため、たとえば
+keyboard enhancement 対応terminalでは2打目の `Ctrl` の有無を同一視するため、たとえば
 `Ctrl-O p` と `Ctrl-O Ctrl-P`、`Ctrl-O [` と `Ctrl-O Ctrl-[` はそれぞれ同じ操作になる。
 従来型terminalが `Ctrl-[` / `Ctrl-]` を raw `0x1b` / `0x1d` として送る場合も、前 / 次のtabとして扱う。
+この形式では `Ctrl-[` と `Ctrl-3`、`Ctrl-]` と `Ctrl-5` を区別できないため、leader 待機中はtab移動を優先する。
+project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して数字を入力する。同様に raw `0x1f` はhelpを
+優先するため、project 7 は `Ctrl` を離して選ぶ。
 
 | 入力 | action | 動作 |
 |---|---|---|
