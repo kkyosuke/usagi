@@ -1,4 +1,4 @@
-//! Workspace-owned runtime/model allowlists and executable lookup boundary.
+//! Workspace-owned runtime/model allowlists, session setup, and executable lookup.
 //!
 //! Both MCP schema publication and daemon launch admission use this module so
 //! a snapshot can never become an authorization source.
@@ -9,9 +9,12 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
+use anyhow::Context as _;
 use serde::Deserialize;
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 use crate::domain::settings::{AvailableModels, DefaultModel};
+use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
 const CONFIG_PATH: &str = ".usagi/config.toml";
 
@@ -78,6 +81,8 @@ pub fn observe_available_models(locator: &dyn ExecutableLocator) -> AvailableMod
 struct WorkspaceConfig {
     #[serde(default)]
     agents: BTreeMap<String, RuntimeConfig>,
+    #[serde(default)]
+    session: SessionConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -86,7 +91,13 @@ struct RuntimeConfig {
     models: Vec<String>,
 }
 
-/// Runtime/model configuration read from a workspace's `.usagi/config.toml`.
+#[derive(Debug, Default, Deserialize)]
+struct SessionConfig {
+    #[serde(default)]
+    setup_commands: Vec<String>,
+}
+
+/// Agent configuration read from `.usagi/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceAgentConfig {
     runtimes: BTreeMap<String, Vec<String>>,
@@ -169,6 +180,93 @@ impl WorkspaceAgentConfig {
     }
 }
 
+/// Session configuration read from `.usagi/config.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceSessionConfig {
+    setup_commands: Vec<String>,
+}
+
+impl WorkspaceSessionConfig {
+    /// Reads session configuration, defaulting to no setup commands when the
+    /// file is missing, unreadable, or malformed.
+    #[must_use]
+    pub fn read(workspace: &Path) -> Self {
+        Self::load(workspace).unwrap_or_default()
+    }
+
+    /// Reads session configuration while preserving malformed or unreadable
+    /// files as errors for interactive editors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an existing config cannot be read or parsed.
+    pub fn load(workspace: &Path) -> anyhow::Result<Self> {
+        let path = workspace.join(CONFIG_PATH);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error))
+                    .context(format!("failed to read {}", path.display()));
+            }
+        };
+        let parsed = toml::from_str::<WorkspaceConfig>(&text)
+            .context(format!("failed to parse {}", path.display()))?;
+        Ok(Self {
+            setup_commands: normalize_setup_commands(parsed.session.setup_commands),
+        })
+    }
+
+    /// Atomically replaces only `[session].setup_commands`, preserving all
+    /// other TOML values, ordering, and comments in the workspace config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the config is unreadable or malformed, when
+    /// `[session]` is not a table, or when the locked atomic write fails.
+    pub fn save_setup_commands(workspace: &Path, setup_commands: &[String]) -> anyhow::Result<()> {
+        let path = workspace.join(CONFIG_PATH);
+        let _lock = StoreLock::acquire(&workspace.join(".usagi"))?;
+        let mut document = match fs::read_to_string(&path) {
+            Ok(text) => text
+                .parse::<DocumentMut>()
+                .context(format!("failed to parse {}", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+            Err(error) => {
+                return Err(anyhow::Error::new(error))
+                    .context(format!("failed to read {}", path.display()));
+            }
+        };
+        if !document.contains_key("session") {
+            document["session"] = Item::Table(Table::new());
+        }
+        let session = document["session"]
+            .as_table_mut()
+            .context("workspace config [session] must be a table")?;
+        let mut commands = Array::new();
+        for command in normalize_setup_commands(setup_commands.iter().cloned()) {
+            commands.push(command);
+        }
+        session["setup_commands"] = value(commands);
+        json_file::write_text_atomic(&path, &document.to_string())
+    }
+
+    /// Shell command lines run in order after a managed session worktree is built.
+    #[must_use]
+    pub fn setup_commands(&self) -> &[String] {
+        &self.setup_commands
+    }
+}
+
+fn normalize_setup_commands(commands: impl IntoIterator<Item = String>) -> Vec<String> {
+    commands
+        .into_iter()
+        .filter(|command| !command.trim().is_empty())
+        .collect()
+}
+
 fn valid_models(models: Vec<String>) -> Option<Vec<String>> {
     (!models.is_empty()
         && models
@@ -185,8 +283,8 @@ mod tests {
     use crate::domain::settings::DefaultModel;
 
     use super::{
-        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, observe_available_models,
-        supported_agent_runtimes,
+        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, WorkspaceSessionConfig,
+        observe_available_models, supported_agent_runtimes,
     };
     use tempfile::tempdir;
 
@@ -206,7 +304,7 @@ mod tests {
         std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
         std::fs::write(
             workspace.path().join(".usagi/config.toml"),
-            "[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n[agents.sakana-ai]\nmodels = [\"fugu-model\"]\n",
+            "[session]\nsetup_commands = [\"first\", \"  \", \"second\"]\n[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n[agents.sakana-ai]\nmodels = [\"fugu-model\"]\n",
         )
         .unwrap();
         let config = WorkspaceAgentConfig::read(workspace.path());
@@ -214,15 +312,29 @@ mod tests {
         assert!(!config.allows("claude", "opus"));
         assert!(config.models("codex").is_empty());
         assert!(config.allows("sakana-ai", "fugu-model"));
+        assert_eq!(
+            WorkspaceSessionConfig::read(workspace.path()).setup_commands(),
+            ["first", "second"]
+        );
 
         assert!(
             WorkspaceAgentConfig::read(workspace.path().join("missing").as_path())
                 .allows("claude", "default")
         );
+        assert!(
+            WorkspaceSessionConfig::read(workspace.path().join("missing").as_path())
+                .setup_commands()
+                .is_empty()
+        );
         std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [toml").unwrap();
         assert!(
             WorkspaceAgentConfig::read(workspace.path())
                 .models("claude")
+                .is_empty()
+        );
+        assert!(
+            WorkspaceSessionConfig::read(workspace.path())
+                .setup_commands()
                 .is_empty()
         );
         std::fs::remove_file(workspace.path().join(".usagi/config.toml")).unwrap();
@@ -232,7 +344,81 @@ mod tests {
                 .models("claude")
                 .is_empty()
         );
+        assert!(WorkspaceSessionConfig::load(workspace.path()).is_err());
+        assert!(
+            WorkspaceSessionConfig::save_setup_commands(
+                workspace.path(),
+                &["cargo test".to_owned()]
+            )
+            .is_err()
+        );
         assert!(config.models("unknown").is_empty());
+    }
+
+    #[test]
+    fn session_setup_writer_preserves_other_toml_and_round_trips_atomically() {
+        let workspace = tempdir().unwrap();
+        assert!(
+            WorkspaceSessionConfig::load(workspace.path())
+                .unwrap()
+                .setup_commands()
+                .is_empty()
+        );
+        WorkspaceSessionConfig::save_setup_commands(
+            workspace.path(),
+            &["npm install".to_owned(), "  ".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            WorkspaceSessionConfig::load(workspace.path())
+                .unwrap()
+                .setup_commands(),
+            ["npm install"]
+        );
+
+        let path = workspace.path().join(".usagi/config.toml");
+        std::fs::write(
+            &path,
+            "# keep this comment\n[agents.claude]\nmodels = [\"sonnet\"]\n\n[session]\n# setup note\nsetup_commands = [\"old\"]\n",
+        )
+        .unwrap();
+        WorkspaceSessionConfig::save_setup_commands(
+            workspace.path(),
+            &["cargo fetch".to_owned(), "cargo test".to_owned()],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep this comment"));
+        assert!(text.contains("# setup note"));
+        assert!(text.contains("models = [\"sonnet\"]"));
+        assert_eq!(
+            WorkspaceSessionConfig::load(workspace.path())
+                .unwrap()
+                .setup_commands(),
+            ["cargo fetch", "cargo test"]
+        );
+        assert!(WorkspaceAgentConfig::read(workspace.path()).allows("claude", "sonnet"));
+    }
+
+    #[test]
+    fn session_setup_writer_rejects_malformed_or_non_table_session_without_overwriting() {
+        let workspace = tempdir().unwrap();
+        let dir = workspace.path().join(".usagi");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        for source in ["not = [toml", "session = \"invalid\"\n"] {
+            std::fs::write(&path, source).unwrap();
+            assert!(WorkspaceSessionConfig::load(workspace.path()).is_err());
+            assert!(
+                WorkspaceSessionConfig::save_setup_commands(
+                    workspace.path(),
+                    &["cargo test".to_owned()]
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        }
     }
 
     #[test]

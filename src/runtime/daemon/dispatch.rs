@@ -420,30 +420,25 @@ pub(super) fn dispatch_agent_tool(
                 .map_err(|error| {
                     ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
                 })?;
-                let created = bound
-                    .sessions()
-                    .lock()
-                    .map_err(|_| {
-                        ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
-                    })?
-                    .handle(
-                        usagi_core::infrastructure::client::SessionAction::Create,
-                        &operation_id,
-                        &serde_json::json!({
+                let created = perform_create(
+                    bound.sessions(),
+                    &SystemGit,
+                    &operation_id,
+                    &serde_json::json!({
                         "name": session_name,
                         "role": requested_role,
                         "parent_session_id": caller.session_id,
                         "creator_agent_id": caller.agent_id,
-                        }),
-                    )
-                    .map_err(|error| {
-                        let code = match &error {
-                            SessionRuntimeError::PermissionDenied => ErrorCode::PermissionDenied,
-                            SessionRuntimeError::RoleConflict(..) => ErrorCode::RevisionConflict,
-                            _ => ErrorCode::InvalidArgument,
-                        };
-                        ProtocolError::new(code, error.safe_message())
-                    })?;
+                    }),
+                )
+                .map_err(|error| {
+                    let code = match &error {
+                        SessionRuntimeError::PermissionDenied => ErrorCode::PermissionDenied,
+                        SessionRuntimeError::RoleConflict(..) => ErrorCode::RevisionConflict,
+                        _ => ErrorCode::InvalidArgument,
+                    };
+                    ProtocolError::new(code, error.safe_message())
+                })?;
                 let (session_id, parent_session_id) =
                     session_lineage_by_name(&created.body, &session_name).ok_or_else(|| {
                         ProtocolError::new(
@@ -2410,7 +2405,7 @@ pub(super) fn dispatch_dispatch(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::client::{DaemonRequest, SessionAction};
+    use usagi_core::infrastructure::client::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
     let Some((operation_id, intent)) = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
@@ -2429,27 +2424,29 @@ pub(super) fn dispatch_dispatch(
         );
     };
     let session_id = (|| {
-        let mut runtime = bound.sessions().lock().map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
-        })?;
-        let snapshot = runtime.snapshot().map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::Unavailable,
-                "daemon could not read managed sessions",
-            )
-        })?;
+        let snapshot = bound
+            .sessions()
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .snapshot()
+            .map_err(|_| {
+                ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "daemon could not read managed sessions",
+                )
+            })?;
         if let Some(id) = session_id_by_name(&snapshot, &intent.session_name) {
             return Ok(id);
         }
-        let created = runtime
-            .handle(
-                SessionAction::Create,
-                &operation_id,
-                &serde_json::json!({"name": intent.session_name}),
-            )
-            .map_err(|error| {
-                ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message())
-            })?;
+        let created = perform_create(
+            bound.sessions(),
+            &SystemGit,
+            &operation_id,
+            &serde_json::json!({"name": intent.session_name}),
+        )
+        .map_err(|error| ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message()))?;
         session_id_by_name(&created.body, &intent.session_name).ok_or_else(|| {
             ProtocolError::new(ErrorCode::Unavailable, "created session is not available")
         })
@@ -3784,20 +3781,17 @@ pub(super) fn dispatch_session_action(
                 .ok_or(SessionRuntimeError::InvalidRequest)?;
             let prompt = issue::to_prompt(&issue);
             let requested_role = payload.get("role").cloned();
-            let mut created = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .handle(
-                    SessionAction::Create,
-                    operation_id,
-                    &serde_json::json!({
-                        "name": name,
-                        "role": requested_role,
-                        "parent_session_id": caller.and_then(|caller| caller.session_id),
-                        "creator_agent_id": caller.map(|caller| caller.agent_id),
-                    }),
-                )?;
+            let mut created = perform_create(
+                bound.sessions(),
+                &SystemGit,
+                operation_id,
+                &serde_json::json!({
+                    "name": name,
+                    "role": requested_role,
+                    "parent_session_id": caller.and_then(|caller| caller.session_id),
+                    "creator_agent_id": caller.map(|caller| caller.agent_id),
+                }),
+            )?;
             let id = record_session_lineage(agent, workspace, &created.body, &name)?;
             if caller.is_some()
                 && let Some(sessions) = created
@@ -4244,7 +4238,17 @@ pub(super) fn delegate_brief(
             "parent_session_id": caller.session_id,
             "creator_agent_id": caller.agent_id,
         }),
-    )?;
+    )
+    .map_err(|error| {
+        compensate_failed_delegated_initialize(
+            bound.sessions(),
+            teardown,
+            &caller,
+            &name,
+            operation_id,
+            error,
+        )
+    })?;
     let id = session_id_by_name(&created.body, &name).ok_or(SessionRuntimeError::Storage)?;
     if record_session_lineage(agent, workspace, &created.body, &name).is_err() {
         return Err(compensate_delegation(
@@ -4406,6 +4410,43 @@ pub(super) fn delegate_brief(
         "terminal": admission.terminal,
         "completed": admission.completed,
     }))
+}
+
+/// Compensates a delegated create only when its exact durable operation failed.
+///
+/// Setup is part of create, so a failed configured command happens before
+/// dispatch but after the worktree exists. Matching the exact failed journal
+/// entry keeps that deterministic failure inside delegation's existing atomic
+/// rollback contract without risking an older same-name session on a
+/// pre-effect error.
+pub(super) fn compensate_failed_delegated_initialize(
+    sessions: &SharedSessionRuntime,
+    teardown: &TeardownSignal,
+    caller: &usagi_core::domain::agent::CallerRef,
+    name: &str,
+    operation_id: &str,
+    error: SessionRuntimeError,
+) -> SessionRuntimeError {
+    let failed_session_id = sessions.lock().ok().and_then(|runtime| {
+        runtime
+            .failed_delegated_initialize_id(operation_id, name, caller)
+            .ok()
+            .flatten()
+    });
+    let Some(session_id) = failed_session_id else {
+        return error;
+    };
+    compensate_delegation(
+        sessions,
+        teardown,
+        session_id,
+        name,
+        operation_id,
+        usagi_core::infrastructure::ipc::ProtocolError::new(
+            usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
+            error.safe_message(),
+        ),
+    )
 }
 
 /// Rolls a delegated create back, or reports why it must not be rolled back.

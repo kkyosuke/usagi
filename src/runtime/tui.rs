@@ -48,6 +48,7 @@ use usagi_core::infrastructure::ipc::{TerminalInputReplayMode, TerminalSnapshotM
 use usagi_core::infrastructure::role_catalog::{
     CatalogLayer, read_layer_source, write_layer_source,
 };
+use usagi_core::infrastructure::runtime_model::WorkspaceSessionConfig;
 use usagi_core::infrastructure::session_snapshot::SessionListSnapshot;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
@@ -4106,6 +4107,25 @@ impl SettingsPort for PersistentSettingsPort {
             }
         }
         Ok(())
+    }
+
+    fn read_workspace_setup_commands(&mut self) -> std::io::Result<Vec<String>> {
+        let workspace = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| io_error("session setup requires an opened workspace"))?;
+        WorkspaceSessionConfig::load(workspace.workspace_root())
+            .map(|config| config.setup_commands().to_vec())
+            .map_err(io_error)
+    }
+
+    fn save_workspace_setup_commands(&mut self, commands: &[String]) -> std::io::Result<()> {
+        let workspace = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| io_error("session setup requires an opened workspace"))?;
+        WorkspaceSessionConfig::save_setup_commands(workspace.workspace_root(), commands)
+            .map_err(io_error)
     }
 }
 
@@ -9258,6 +9278,12 @@ mod tests {
         };
 
         assert!(settings.read(SettingsScope::Global).is_err());
+        assert!(settings.read_workspace_setup_commands().is_err());
+        assert!(
+            settings
+                .save_workspace_setup_commands(&["cargo test".to_owned()])
+                .is_err()
+        );
         assert!(
             settings
                 .save(SettingsScope::Workspace, &Settings::default())
@@ -9456,6 +9482,42 @@ mod tests {
         let local = WorkspaceSettingsStore::new(&workspace).load().unwrap();
         assert_eq!(local.issue_enabled, Some(false));
         assert_eq!(local.env, workspace_env);
+    }
+
+    #[test]
+    fn settings_port_round_trips_session_setup_without_replacing_workspace_config() {
+        let temporary = tempfile::tempdir().unwrap();
+        let global_dir = temporary.path().join("global");
+        let workspace = temporary.path().join("workspace");
+        let config_dir = workspace.join(".usagi");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            "# retained\n[agents.claude]\nmodels = [\"sonnet\"]\n",
+        )
+        .unwrap();
+        let mut port = PersistentSettingsPort {
+            storage: Storage::new(&global_dir),
+            workspace: None,
+        };
+        assert!(port.read_workspace_setup_commands().is_err());
+        assert!(
+            port.save_workspace_setup_commands(&["cargo test".to_owned()])
+                .is_err()
+        );
+
+        port.select_workspace(&workspace).unwrap();
+        assert!(port.read_workspace_setup_commands().unwrap().is_empty());
+        port.save_workspace_setup_commands(&["cargo fetch".to_owned(), "cargo test".to_owned()])
+            .unwrap();
+        assert_eq!(
+            port.read_workspace_setup_commands().unwrap(),
+            ["cargo fetch", "cargo test"]
+        );
+        let source = std::fs::read_to_string(config_path).unwrap();
+        assert!(source.contains("# retained"));
+        assert!(source.contains("models = [\"sonnet\"]"));
     }
 
     #[test]

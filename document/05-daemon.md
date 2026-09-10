@@ -10,6 +10,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [この文書の読み方](#この文書の読み方)
 - [authority と lifecycle](#authority-と-lifecycle)
 - [session tree と ignore rules](#session-tree-と-ignore-rules)
+  - [session 作成後の setup command](#session-作成後の-setup-command)
 - [daemon process lifecycle](#daemon-process-lifecycle)
 - [planned replacement](#planned-replacement)
 - [service supervision](#service-supervision)
@@ -92,6 +93,35 @@ workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり�
 |---|---|---|
 | `sessions/<name>` | directory | session worktree（または mirror した session tree） |
 | `daemon/daemon.lock` | lock file | workspace 単位の単一 daemon fence。owner の pid を 1 行持つ。この `daemon/` だけが daemon-private（`0700`） |
+
+### session 作成後の setup command
+
+workspace root の `.usagi/config.toml` に setup command を設定すると、daemon は session worktree の構築直後に
+その worktree を current directory として上から順に実行する。設定例は次のとおりである。
+開いている workspace の Overview から `config` を実行し、`Session setup` 行で Enter を押しても同じ配列を
+1 行 1 command の editor で保存できる。UI の入力操作と保存契約は [TUI の session setup editor](03-tui.md#session-setup-editor) を参照する。
+
+```toml
+[session]
+setup_commands = [
+  "npm install",
+  "cp .env.example .env",
+]
+```
+
+各要素は `/bin/sh -lc` に渡す 1 command line であり、空白だけの要素は無視する。設定は create の admission 時に
+workspace root から読み、その session incarnation の immutable `setup_plan` として保存してから実行する。このため
+実行中に config が変わっても command 列は変わらない。config file が無い場合は何も実行しない。
+
+setup 中は lifecycle を `initializing` とし、任意長の command 実行中に共有 session lock を保持しない。全 command を
+保存順に試し、すべて成功した場合だけ `available` にする。1 件でも失敗した場合は安全な command index と
+`failed(initialize)` を永続化し、通常の session create では作成済み worktree を残す。`session_delegate_brief` は
+dispatch 前の確定失敗として既存の durable compensation を開始するため、最終的に worktree と branch を削除する
+（[7. MCPサーバのdelegationのatomicity](07-mcp.md#delegation-の-atomicity)）。command の標準入出力や本文は client の error に載せない。
+durable `setup_plan` も client projection には公開しない。
+daemon が `initializing` のまま中断した場合も、非冪等 command の実行有無を証明できないため自動再実行せず
+`failed(initialize)` に収束する。setup command は daemon process の権限で実行されるため、信頼できる workspace config
+だけに設定する。
 
 ## daemon process lifecycle
 

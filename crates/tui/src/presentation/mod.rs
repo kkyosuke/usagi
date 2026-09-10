@@ -8,6 +8,7 @@
 //! 色は [`theme`] が意味的な役割で一元管理する（役割→具体色の単一情報源）。
 
 mod banner;
+mod config_setup;
 pub mod frame;
 pub mod layouts;
 pub mod live_terminal;
@@ -20,6 +21,10 @@ pub mod workspace_runtime;
 
 pub use banner::{BannerScreenRunner, write_banner};
 pub use startup::{StartupSplash, play_startup_splash};
+
+#[cfg(test)]
+use config_setup::save_setup_commands_responsive;
+use config_setup::{save_config_source_responsive, step_setup_commands_editor};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
@@ -1281,8 +1286,8 @@ enum ConfigStep {
     /// writes, then on success holds the `done` frame before returning home; a
     /// failed write stays on Config with an error for retry.
     Save,
-    /// A validated environment write should be persisted by the caller.
-    SaveEnvironment,
+    /// A validated multiline editor write should be persisted by the caller.
+    SaveSource,
 }
 
 /// Draw one complete highlight sweep across the pending Save button. Settings
@@ -1382,7 +1387,7 @@ enum WorkspaceConfigStep {
     Stay,
     Back,
     Save,
-    SaveEnvironment,
+    SaveSource,
 }
 
 /// New 画面でキー `key` を処理した結果の遷移。
@@ -2899,13 +2904,13 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
                 ..
             } if config.scope() == usagi_core::usecase::settings::SettingsScope::Global => {
                 if settings.background_operations() {
-                    return ConfigStep::SaveEnvironment;
+                    return ConfigStep::SaveSource;
                 }
                 config.save_environment(settings);
             }
             Key::Enter if config.is_environment_save_focused() => {
                 if settings.background_operations() {
-                    return ConfigStep::SaveEnvironment;
+                    return ConfigStep::SaveSource;
                 }
                 config.save_environment(settings);
             }
@@ -2928,6 +2933,9 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
         }
         return ConfigStep::Stay;
     }
+    if config.is_editing_setup_commands() {
+        return step_setup_commands_editor(config, key, settings);
+    }
     match key {
         Key::Up | Key::Char('k') => {
             config.previous_field();
@@ -2949,6 +2957,7 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
         // dirty Save row is focused with no save already in flight, so a rapid
         // second Enter cannot start a second save.
         Key::Enter if config.open_environment(settings) => ConfigStep::Stay,
+        Key::Enter if config.open_setup_commands(settings) => ConfigStep::Stay,
         Key::Enter if config.open_team_picker() => ConfigStep::Stay,
         Key::Enter if config.begin_save() => ConfigStep::Save,
         Key::Escape => ConfigStep::Back,
@@ -2969,7 +2978,7 @@ fn step_workspace_config(
         ConfigStep::Stay | ConfigStep::Quit => WorkspaceConfigStep::Stay,
         ConfigStep::Back => WorkspaceConfigStep::Back,
         ConfigStep::Save => WorkspaceConfigStep::Save,
-        ConfigStep::SaveEnvironment => WorkspaceConfigStep::SaveEnvironment,
+        ConfigStep::SaveSource => WorkspaceConfigStep::SaveSource,
     }
 }
 
@@ -3025,8 +3034,8 @@ fn run_workspace_config(
                     return Ok(());
                 }
             }
-            WorkspaceConfigStep::SaveEnvironment => {
-                let _ = save_environment_responsive(term, &mut form, settings);
+            WorkspaceConfigStep::SaveSource => {
+                let _ = save_config_source_responsive(term, &mut form, settings);
             }
         }
     }
@@ -3035,6 +3044,8 @@ fn run_workspace_config(
 fn config_help_context(config: &Config) -> KeyHelpContext {
     if config.is_selecting_team() {
         KeyHelpContext::TeamPicker
+    } else if config.is_editing_setup_commands() {
+        KeyHelpContext::SessionSetupEditor
     } else if config.is_editing_environment() {
         KeyHelpContext::EnvironmentEditor
     } else {
@@ -9924,9 +9935,9 @@ pub fn run_screen_graph_with_backend_and_notice(
                         screen = Screen::Welcome;
                     }
                 }
-                ConfigStep::SaveEnvironment => {
+                ConfigStep::SaveSource => {
                     drawn_material = None;
-                    let _ = save_environment_responsive(term, &mut config_form, settings);
+                    let _ = save_config_source_responsive(term, &mut config_form, settings);
                 }
             },
         }

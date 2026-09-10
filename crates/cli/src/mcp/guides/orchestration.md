@@ -192,6 +192,11 @@ scratchpad、次の run にも再利用する知見は memory、実装 backlog �
 省略時は workspace の `HEAD` を使う。
 optional `role` は effective role catalog の ID である。省略時の default 解決と scope 検証は daemon が行い、
 既存 session では保存済み role と同一なら冪等、不一致なら conflict になる。role instruction 本文は wire に載らない。
+workspace root の `.usagi/config.toml` に `[session].setup_commands` があれば、daemon は作成した worktree を cwd に
+各 command を `/bin/sh -lc` で保存順に実行し、すべて成功してから session を available にする。失敗時は worktree を
+残して lifecycle を `failed(initialize)` にし、中断後も非冪等 command を自動再実行しない。ただし
+`session_delegate_brief` の setup 失敗は dispatch 前の確定失敗なので、delegation の atomicity に従って durable
+compensation を開始する。
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call",

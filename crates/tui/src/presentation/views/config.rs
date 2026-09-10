@@ -128,6 +128,7 @@ pub enum Field {
     TerminalLimit,
     PrAutoOpen,
     Environment,
+    SessionSetup,
     DefaultModel,
     DefaultBranch,
     WorkMode,
@@ -172,6 +173,9 @@ pub struct Config {
     save_animation_frame: usize,
     environment_editor: Option<EnvironmentSourceEditor>,
     environment_error: Option<String>,
+    setup_commands: Vec<String>,
+    setup_commands_editor: Option<EnvironmentSourceEditor>,
+    setup_commands_error: Option<String>,
     team_picker: Option<TeamPicker>,
 }
 
@@ -197,7 +201,18 @@ impl Config {
         scope: SettingsScope,
         available_models: AvailableAgentModels,
     ) -> Self {
-        let (saved, error) = read_scope(port, scope);
+        let (saved, mut error) = read_scope(port, scope);
+        let setup_commands = if scope == SettingsScope::Workspace {
+            match port.read_workspace_setup_commands() {
+                Ok(commands) => commands,
+                Err(setup_error) => {
+                    error = Some(format!("Load failed: {setup_error}"));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let draft = available_models
             .first()
             .filter(|_| !available_models.contains(saved.default_model))
@@ -221,6 +236,9 @@ impl Config {
             save_animation_frame: 0,
             environment_editor: None,
             environment_error: None,
+            setup_commands,
+            setup_commands_editor: None,
+            setup_commands_error: None,
             team_picker: None,
         }
     }
@@ -272,7 +290,7 @@ impl Config {
                 Field::ModalSelectionMode => Field::TerminalLimit,
                 Field::TerminalLimit => Field::Environment,
                 Field::Environment => Field::DefaultModel,
-                Field::DefaultModel | Field::DefaultBranch => Field::WorkMode,
+                Field::DefaultModel | Field::DefaultBranch | Field::SessionSetup => Field::WorkMode,
                 Field::WorkMode => Field::TeamTemplate,
                 Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
@@ -283,7 +301,8 @@ impl Config {
             SettingsScope::Workspace => match self.field {
                 Field::DefaultModel => Field::Environment,
                 Field::Environment => Field::DefaultBranch,
-                Field::DefaultBranch => Field::WorkMode,
+                Field::DefaultBranch => Field::SessionSetup,
+                Field::SessionSetup => Field::WorkMode,
                 Field::WorkMode => Field::TeamTemplate,
                 Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
@@ -314,7 +333,9 @@ impl Config {
                 Field::ModalSelectionMode => Field::Icons,
                 Field::TerminalLimit => Field::ModalSelectionMode,
                 Field::Environment => Field::TerminalLimit,
-                Field::DefaultModel | Field::DefaultBranch => Field::Environment,
+                Field::DefaultModel | Field::DefaultBranch | Field::SessionSetup => {
+                    Field::Environment
+                }
                 Field::Issue => Field::TeamTemplate,
                 Field::TeamTemplate => Field::WorkMode,
                 Field::WorkMode => Field::DefaultModel,
@@ -326,7 +347,8 @@ impl Config {
                 Field::Environment => Field::DefaultModel,
                 Field::Issue => Field::TeamTemplate,
                 Field::TeamTemplate => Field::WorkMode,
-                Field::WorkMode => Field::DefaultBranch,
+                Field::WorkMode => Field::SessionSetup,
+                Field::SessionSetup => Field::DefaultBranch,
                 Field::DefaultBranch => Field::Environment,
                 Field::Memory => Field::Issue,
                 Field::Save => Field::Memory,
@@ -531,7 +553,9 @@ impl Config {
             Field::WorkMode => self.cycle_work_mode(),
             Field::Issue => self.cycle_issue_enabled(),
             Field::Memory => self.cycle_memory_enabled(),
-            Field::TeamTemplate | Field::Environment | Field::Save => return false,
+            Field::TeamTemplate | Field::Environment | Field::SessionSetup | Field::Save => {
+                return false;
+            }
         }
         true
     }
@@ -690,6 +714,101 @@ impl Config {
         self.environment_error = None;
     }
 
+    /// Whether the session setup command editor currently owns Config input.
+    #[must_use]
+    pub fn is_editing_setup_commands(&self) -> bool {
+        self.setup_commands_editor.is_some()
+    }
+
+    /// Read the latest workspace setup commands and open their multiline editor.
+    pub fn open_setup_commands(&mut self, port: &mut dyn SettingsPort) -> bool {
+        if self.scope != SettingsScope::Workspace || self.field != Field::SessionSetup {
+            return false;
+        }
+        match port.read_workspace_setup_commands() {
+            Ok(commands)
+                if commands
+                    .iter()
+                    .all(|command| !command.contains(['\r', '\n'])) =>
+            {
+                self.setup_commands_editor =
+                    Some(EnvironmentSourceEditor::new(commands.join("\n")));
+                self.setup_commands = commands;
+                self.setup_commands_error = None;
+                self.notice = None;
+            }
+            Ok(_) => {
+                self.notice = Some(
+                    "Load failed: multiline setup commands must be edited in .usagi/config.toml"
+                        .to_owned(),
+                );
+            }
+            Err(error) => self.notice = Some(format!("Load failed: {error}")),
+        }
+        true
+    }
+
+    /// Mutable access to the open setup source, clearing stale validation feedback.
+    pub fn setup_commands_editor_mut(&mut self) -> Option<&mut EnvironmentSourceEditor> {
+        self.setup_commands_error = None;
+        self.setup_commands_editor.as_mut()
+    }
+
+    /// Whether Enter should save the setup source instead of inserting a newline.
+    #[must_use]
+    pub fn is_setup_commands_save_focused(&self) -> bool {
+        self.setup_commands_editor
+            .as_ref()
+            .is_some_and(EnvironmentSourceEditor::is_save_focused)
+    }
+
+    /// Persist the current setup command source synchronously.
+    pub fn save_setup_commands(&mut self, port: &mut dyn SettingsPort) -> bool {
+        let Some(commands) = self.setup_commands_save_request() else {
+            return false;
+        };
+        let result = port.save_workspace_setup_commands(&commands);
+        self.finish_setup_commands_save(commands, result)
+    }
+
+    /// Validate and snapshot setup commands for an off-thread write.
+    pub fn setup_commands_save_request(&mut self) -> Option<Vec<String>> {
+        let editor = self.setup_commands_editor.as_ref()?;
+        match parse_setup_commands_source(editor.value()) {
+            Ok(commands) => Some(commands),
+            Err(error) => {
+                self.setup_commands_error = Some(error);
+                None
+            }
+        }
+    }
+
+    /// Settle a setup command write performed by the caller.
+    pub fn finish_setup_commands_save(
+        &mut self,
+        commands: Vec<String>,
+        result: std::io::Result<()>,
+    ) -> bool {
+        match result {
+            Ok(()) => {
+                self.setup_commands = commands;
+                self.setup_commands_editor = None;
+                self.notice = Some("Session setup saved".to_owned());
+                true
+            }
+            Err(error) => {
+                self.setup_commands_error = Some(format!("Save failed: {error}"));
+                false
+            }
+        }
+    }
+
+    /// Discard the setup command modal's unsaved draft.
+    pub fn cancel_setup_commands(&mut self) {
+        self.setup_commands_editor = None;
+        self.setup_commands_error = None;
+    }
+
     /// Returns whether the focused row is the enabled Save action.
     #[must_use]
     pub fn can_save(&self) -> bool {
@@ -779,6 +898,21 @@ impl Config {
     }
 }
 
+fn parse_setup_commands_source(source: &str) -> Result<Vec<String>, String> {
+    let mut commands = Vec::new();
+    for (index, raw_line) in source.lines().enumerate() {
+        let command = raw_line.trim();
+        if command.is_empty() {
+            continue;
+        }
+        if command.contains('\0') {
+            return Err(format!("line {}: commands cannot contain NUL", index + 1));
+        }
+        commands.push(command.to_owned());
+    }
+    Ok(commands)
+}
+
 fn read_scope(port: &mut dyn SettingsPort, scope: SettingsScope) -> (Settings, Option<String>) {
     match port.read(scope) {
         Ok(settings) => (settings, None),
@@ -797,6 +931,8 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
     });
     if let Some(editor) = config.environment_editor.as_ref() {
         render_environment_over(raw_height, raw_width, &base, config, editor)
+    } else if let Some(editor) = config.setup_commands_editor.as_ref() {
+        render_setup_commands_over(raw_height, raw_width, &base, config, editor)
     } else if let Some(picker) = config.team_picker {
         render_team_picker_over(raw_height, raw_width, &base, picker)
     } else {
@@ -820,7 +956,6 @@ pub fn render_over(
             modal::content_line(&line, MODAL_INNER_WIDTH)
         }
     }));
-    lines.push(String::new());
     lines.push(modal::footer(MODAL_FOOTER));
     let config_base = modal::render_body_over(
         raw_height,
@@ -833,6 +968,8 @@ pub fn render_over(
     );
     if let Some(editor) = config.environment_editor.as_ref() {
         render_environment_over(raw_height, raw_width, &config_base, config, editor)
+    } else if let Some(editor) = config.setup_commands_editor.as_ref() {
+        render_setup_commands_over(raw_height, raw_width, &config_base, config, editor)
     } else if let Some(picker) = config.team_picker {
         render_team_picker_over(raw_height, raw_width, &config_base, picker)
     } else {
@@ -1041,6 +1178,60 @@ fn render_environment_over(
     )
 }
 
+fn render_setup_commands_over(
+    height: usize,
+    width: usize,
+    base: &[String],
+    config: &Config,
+    editor: &EnvironmentSourceEditor,
+) -> Vec<String> {
+    let mut lines = vec![
+        modal::caption("workspace session setup"),
+        modal::caption("one shell command per line"),
+        String::new(),
+    ];
+    lines.extend(environment_textarea(
+        editor.value(),
+        editor.cursor(),
+        editor.is_save_focused(),
+    ));
+    // Keep validation feedback from moving the textarea when it appears.
+    lines.push(String::new());
+    lines.push(
+        config
+            .setup_commands_error
+            .as_deref()
+            .map_or_else(String::new, |error| {
+                Role::Danger
+                    .style()
+                    .paint(&modal::content_line(error, ENVIRONMENT_INNER_WIDTH))
+            }),
+    );
+    lines.push(String::new());
+    let marker = modal::selection_marker(editor.is_save_focused());
+    let button = Role::Success.style().bold().paint("[ Save ]");
+    let padding =
+        widgets::centered_padding(ENVIRONMENT_INNER_WIDTH, widgets::display_width(&button));
+    lines.push(format!(
+        "{}{}{}",
+        " ".repeat(padding.saturating_sub(widgets::display_width(&marker))),
+        marker,
+        button
+    ));
+    lines.push(String::new());
+    lines.push(modal::footer(
+        "Enter: newline/save   Tab: switch   Esc: cancel",
+    ));
+    modal::render_over(
+        height,
+        width,
+        base,
+        "Session setup",
+        ENVIRONMENT_INNER_WIDTH,
+        &lines,
+    )
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct EnvironmentSource<'a> {
     pub(super) scope: SettingsScope,
@@ -1126,6 +1317,7 @@ fn workspace_rows(config: &Config) -> Vec<String> {
     let environment_index = usize::from(!config.available_models.is_empty());
     lines.insert(environment_index, environment_row(config));
     lines.insert(environment_index + 1, default_branch_row(config));
+    lines.insert(environment_index + 2, setup_commands_row(config));
     lines
 }
 
@@ -1151,6 +1343,17 @@ fn environment_row(config: &Config) -> String {
         "Env",
         &format!("{} variables", config.settings().env.len()),
         config.field() == Field::Environment,
+        false,
+    )
+}
+
+fn setup_commands_row(config: &Config) -> String {
+    let count = config.setup_commands.len();
+    let noun = if count == 1 { "command" } else { "commands" };
+    select::bracketed(
+        "Session setup",
+        &format!("{count} {noun}"),
+        config.field() == Field::SessionSetup,
         false,
     )
 }
@@ -1336,8 +1539,11 @@ mod tests {
     struct FakeSettingsPort {
         global: Settings,
         workspace: Settings,
+        setup_commands: Vec<String>,
         fail_read: Option<SettingsScope>,
         fail_save: bool,
+        fail_setup_read: bool,
+        fail_setup_save: bool,
     }
 
     #[test]
@@ -1397,10 +1603,25 @@ mod tests {
             }
             Ok(())
         }
+
+        fn read_workspace_setup_commands(&mut self) -> io::Result<Vec<String>> {
+            if self.fail_setup_read {
+                return Err(io::Error::other("setup unavailable"));
+            }
+            Ok(self.setup_commands.clone())
+        }
+
+        fn save_workspace_setup_commands(&mut self, commands: &[String]) -> io::Result<()> {
+            if self.fail_setup_save {
+                return Err(io::Error::other("config unavailable"));
+            }
+            self.setup_commands = commands.to_vec();
+            Ok(())
+        }
     }
 
     fn move_to_field(config: &mut Config, target: Field) {
-        for _ in 0..=12 {
+        for _ in 0..=13 {
             if config.field() == target {
                 break;
             }
@@ -1597,6 +1818,100 @@ mod tests {
 
         assert_eq!(port.global.env["GLOBAL"], "kept");
         assert_eq!(port.workspace.env["LOCAL"], "only");
+    }
+
+    #[test]
+    fn workspace_session_setup_opens_edits_and_saves_one_command_per_line() {
+        let mut port = FakeSettingsPort {
+            setup_commands: vec!["npm install".to_owned()],
+            ..FakeSettingsPort::default()
+        };
+        let mut config =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        assert!(!config.open_setup_commands(&mut port));
+        move_to_field(&mut config, Field::SessionSetup);
+        assert!(!config.cycle_selected(true));
+        assert!(
+            render_over(28, 90, &vec![String::new(); 28], &config)
+                .join("\n")
+                .contains("[ 1 command ]")
+        );
+
+        port.setup_commands = vec!["cargo fetch".to_owned()];
+        assert!(config.open_setup_commands(&mut port));
+        assert!(config.is_editing_setup_commands());
+        let frame = render(28, 90, &config).join("\n");
+        assert!(frame.contains("Session setup"));
+        assert!(frame.contains("cargo fetch"));
+        let editor = config.setup_commands_editor_mut().unwrap();
+        editor.move_edge(true);
+        editor.newline();
+        editor.paste(" cargo test \r\n\n");
+        editor.toggle_save_focus(true);
+        assert!(config.is_setup_commands_save_focused());
+        assert!(config.save_setup_commands(&mut port));
+        assert_eq!(port.setup_commands, ["cargo fetch", "cargo test"]);
+        assert!(!config.is_editing_setup_commands());
+        assert_eq!(config.notice(), Some("Session setup saved"));
+
+        assert!(config.open_setup_commands(&mut port));
+        config.setup_commands_editor_mut().unwrap().insert("\0");
+        assert!(!config.save_setup_commands(&mut port));
+        assert!(config.is_editing_setup_commands());
+        assert!(
+            render(28, 90, &config)
+                .join("\n")
+                .contains("cannot contain NUL")
+        );
+        config.cancel_setup_commands();
+        assert!(!config.is_editing_setup_commands());
+        assert!(config.setup_commands_editor_mut().is_none());
+        assert!(!config.save_setup_commands(&mut port));
+    }
+
+    #[test]
+    fn workspace_session_setup_reports_load_and_save_failures_without_losing_input() {
+        let mut port = FakeSettingsPort::default();
+        let mut config =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        move_to_field(&mut config, Field::SessionSetup);
+
+        port.fail_setup_save = true;
+        assert!(config.open_setup_commands(&mut port));
+        config
+            .setup_commands_editor_mut()
+            .unwrap()
+            .insert("cargo test");
+        assert!(!config.save_setup_commands(&mut port));
+        assert!(config.is_editing_setup_commands());
+        assert!(render(28, 90, &config).join("\n").contains("Save failed"));
+        config.cancel_setup_commands();
+
+        port.fail_setup_read = true;
+        assert!(config.open_setup_commands(&mut port));
+        assert!(!config.is_editing_setup_commands());
+        assert_eq!(config.notice(), Some("Load failed: setup unavailable"));
+        port.fail_setup_read = false;
+        port.setup_commands = vec!["printf 'first\nsecond'".to_owned()];
+        assert!(config.open_setup_commands(&mut port));
+        assert_eq!(
+            config.notice(),
+            Some("Load failed: multiline setup commands must be edited in .usagi/config.toml")
+        );
+
+        let mut global = Config::load(&mut port);
+        global.field = Field::SessionSetup;
+        assert!(!global.open_setup_commands(&mut port));
+
+        let mut unavailable = FakeSettingsPort {
+            fail_setup_read: true,
+            ..FakeSettingsPort::default()
+        };
+        let failed = Config::load_workspace_with_available_models(
+            &mut unavailable,
+            AvailableAgentModels::all(),
+        );
+        assert_eq!(failed.notice(), Some("Load failed: setup unavailable"));
     }
 
     #[test]
@@ -1859,6 +2174,7 @@ mod tests {
         assert!(frame.contains("Issue"));
         assert!(frame.contains("Memory"));
         assert!(frame.contains("Env") && frame.contains("[ 0 variables ]"));
+        assert!(frame.contains("Session setup") && frame.contains("[ 0 commands ]"));
         assert!(!frame.contains("Scope:"));
         assert!(!frame.contains("Theme"));
         assert!(!frame.contains("Modal mode"));
@@ -1880,11 +2196,15 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::WorkMode);
         config.previous_field();
+        assert_eq!(config.field(), Field::SessionSetup);
+        config.previous_field();
         assert_eq!(config.field(), Field::DefaultBranch);
         config.previous_field();
         assert_eq!(config.field(), Field::Environment);
         config.next_field();
         assert_eq!(config.field(), Field::DefaultBranch);
+        config.next_field();
+        assert_eq!(config.field(), Field::SessionSetup);
         config.next_field();
         assert_eq!(config.field(), Field::WorkMode);
         config.next_field();
@@ -2228,7 +2548,7 @@ mod tests {
         assert_eq!(config.settings().default_branch, None);
 
         assert!(config.cycle_selected(false));
-        for _ in 0..5 {
+        for _ in 0..6 {
             config.next_field();
         }
         assert!(config.begin_save());
@@ -2273,6 +2593,7 @@ mod tests {
         assert!(!config.open_team_picker());
         config.cycle_team_card(true);
         config.move_team_picker_vertical(true);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -2355,6 +2676,7 @@ mod tests {
                 &mut port,
                 AvailableAgentModels::all(),
             );
+            restored.next_field();
             restored.next_field();
             restored.next_field();
             restored.next_field();
