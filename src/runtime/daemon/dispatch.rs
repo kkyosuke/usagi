@@ -4238,7 +4238,17 @@ pub(super) fn delegate_brief(
             "parent_session_id": caller.session_id,
             "creator_agent_id": caller.agent_id,
         }),
-    )?;
+    )
+    .map_err(|error| {
+        compensate_failed_delegated_initialize(
+            bound.sessions(),
+            teardown,
+            &caller,
+            &name,
+            operation_id,
+            error,
+        )
+    })?;
     let id = session_id_by_name(&created.body, &name).ok_or(SessionRuntimeError::Storage)?;
     if record_session_lineage(agent, workspace, &created.body, &name).is_err() {
         return Err(compensate_delegation(
@@ -4400,6 +4410,43 @@ pub(super) fn delegate_brief(
         "terminal": admission.terminal,
         "completed": admission.completed,
     }))
+}
+
+/// Compensates a delegated create only when its exact durable operation failed.
+///
+/// Setup is part of create, so a failed configured command happens before
+/// dispatch but after the worktree exists. Matching the exact failed journal
+/// entry keeps that deterministic failure inside delegation's existing atomic
+/// rollback contract without risking an older same-name session on a
+/// pre-effect error.
+pub(super) fn compensate_failed_delegated_initialize(
+    sessions: &SharedSessionRuntime,
+    teardown: &TeardownSignal,
+    caller: &usagi_core::domain::agent::CallerRef,
+    name: &str,
+    operation_id: &str,
+    error: SessionRuntimeError,
+) -> SessionRuntimeError {
+    let failed_session_id = sessions.lock().ok().and_then(|runtime| {
+        runtime
+            .failed_delegated_initialize_id(operation_id, name, caller)
+            .ok()
+            .flatten()
+    });
+    let Some(session_id) = failed_session_id else {
+        return error;
+    };
+    compensate_delegation(
+        sessions,
+        teardown,
+        session_id,
+        name,
+        operation_id,
+        usagi_core::infrastructure::ipc::ProtocolError::new(
+            usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
+            error.safe_message(),
+        ),
+    )
 }
 
 /// Rolls a delegated create back, or reports why it must not be rolled back.

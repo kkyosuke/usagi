@@ -1144,6 +1144,53 @@ impl SessionRuntime {
         }
     }
 
+    /// Resolves the initialization failure created by one exact delegated operation.
+    ///
+    /// Composite delegation uses this after create returns an error: only a
+    /// record whose operation, origin, name, creator, and terminal state all
+    /// match may be compensated. A pre-effect role or idempotency error must
+    /// never remove an older session that merely has the requested name.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or invalid-operation error when the durable state or
+    /// operation identity cannot be read.
+    pub fn failed_delegated_initialize_id(
+        &self,
+        operation_id: &str,
+        name: &str,
+        caller: &CallerRef,
+    ) -> Result<Option<SessionId>, SessionRuntimeError> {
+        let operation_id =
+            OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
+        let state = self.state()?;
+        let delegated_key = semantic_key(SessionAction::DelegateBrief, name);
+        let failed_operation = state.operations.iter().any(|operation| {
+            operation.operation_id == operation_id
+                && operation.status == OperationStatus::Failed
+                && names_session_operation(&operation.semantic_key, &delegated_key)
+        });
+        if !failed_operation {
+            return Ok(None);
+        }
+        Ok(state
+            .sessions
+            .into_iter()
+            .find(|session| {
+                session.name == name
+                    && session.operation_id == Some(operation_id)
+                    && session.lifecycle
+                        == usagi_core::domain::session_lifecycle::SessionLifecycle::Failed
+                    && session
+                        .failure
+                        .as_ref()
+                        .is_some_and(|failure| failure.stage == FailureStage::Initialize)
+                    && session.parent_session_id == caller.session_id
+                    && session.creator_agent_id == Some(caller.agent_id)
+            })
+            .map(|session| session.session_id))
+    }
+
     /// Allows a new name, or proves that an existing record belongs to the
     /// exact Agent. This is the pre-effect guard for create-or-reuse tools.
     ///
@@ -1476,6 +1523,14 @@ impl SessionRuntime {
             io,
             ..
         } = in_flight;
+        // Other sessions may have advanced the workspace-wide revision while
+        // this create's Git effect ran without the shared lock. Rebuild the
+        // revision component from the current state while retaining every
+        // stable identity in the admitted fence.
+        let create_fence = self.refresh_session_fence(
+            &create_fence,
+            usagi_core::domain::session_lifecycle::SessionLifecycle::Creating,
+        )?;
         match result {
             Ok(()) => {
                 let setup_plan = (!setup_commands.is_empty()).then(|| SetupPlan {
@@ -1575,6 +1630,13 @@ impl SessionRuntime {
             name,
             ..
         } = in_flight;
+        // Setup also runs without the shared lock and can outlive unrelated
+        // lifecycle mutations. Refresh only the workspace revision; all
+        // operation/session incarnation fields remain fenced to this worker.
+        let fence = self.refresh_session_fence(
+            &fence,
+            usagi_core::domain::session_lifecycle::SessionLifecycle::Initializing,
+        )?;
         match result {
             Ok(()) => {
                 let completed = self
@@ -1611,6 +1673,35 @@ impl SessionRuntime {
                 Err(failure)
             }
         }
+    }
+
+    fn refresh_session_fence(
+        &self,
+        admitted: &CompletionFence,
+        expected_lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle,
+    ) -> Result<CompletionFence, SessionRuntimeError> {
+        let state = self.state()?;
+        if state.workspace_id != admitted.workspace_id {
+            return Err(SessionRuntimeError::Storage);
+        }
+        let session_id = admitted.session_id.ok_or(SessionRuntimeError::Storage)?;
+        let session = state
+            .sessions
+            .iter()
+            .find(|session| {
+                session.session_id == session_id
+                    && session.operation_id == Some(admitted.operation_id)
+                    && session.attempt == admitted.lifecycle_attempt
+                    && session.lifecycle == expected_lifecycle
+            })
+            .ok_or(SessionRuntimeError::Storage)?;
+        let refreshed = fence(&state, session, admitted.operation_id)
+            .filter(|refreshed| {
+                refreshed.owner_daemon_generation == admitted.owner_daemon_generation
+                    && refreshed.execution_attempt == admitted.execution_attempt
+            })
+            .ok_or(SessionRuntimeError::Storage)?;
+        Ok(refreshed)
     }
 
     /// Removes a session synchronously: admit, tear down, finalize, all on this
@@ -2669,10 +2760,14 @@ fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Va
         .as_array_mut()
         .expect("managed sessions serialize as an array")
     {
-        session
+        let session = session
             .as_object_mut()
-            .expect("managed sessions serialize as objects")
-            .remove("creator_agent_id");
+            .expect("managed sessions serialize as objects");
+        session.remove("creator_agent_id");
+        // Setup command bodies belong to the trusted root configuration and
+        // durable recovery state. Session-scoped callers may list lifecycle
+        // rows, but never need the command text to act on their capabilities.
+        session.remove("setup_plan");
     }
     json!({
         "workspace_id": state.workspace_id,
@@ -5316,6 +5411,72 @@ instructions = "direct"
     }
 
     #[test]
+    fn create_and_setup_completion_refresh_the_fence_after_unrelated_mutations() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(repository.join(".usagi")).unwrap();
+        std::fs::write(
+            repository.join(".usagi/config.toml"),
+            "[session]\nsetup_commands = [\"configured\"]\n",
+        )
+        .unwrap();
+        let mut runtime = SessionRuntime::open(
+            repository,
+            &temporary.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+            SetupSessionWorktreeIo {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                fail_on: None,
+                runtime: Arc::new(Mutex::new(None)),
+                observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        )
+        .unwrap();
+
+        let first = match runtime
+            .begin_create(CreateOrigin::Direct, &operation(), &json!({"name":"first"}))
+            .unwrap()
+        {
+            SessionCreateStep::Pending(in_flight) => in_flight,
+            SessionCreateStep::Done(_) => panic!("fresh create must need a worktree effect"),
+        };
+        // Completing another session advances the workspace revision after the
+        // first create captured its admission fence.
+        runtime
+            .handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"during-create"}),
+            )
+            .unwrap();
+        let initializing = match runtime.finish_create(*first, Ok(())).unwrap() {
+            SessionCreateCompletion::Initializing(in_flight) => in_flight,
+            SessionCreateCompletion::Done(_) => panic!("configured create must initialize"),
+        };
+
+        // The setup fence must likewise survive an unrelated lifecycle change
+        // while the configured command is running.
+        runtime
+            .handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"during-setup"}),
+            )
+            .unwrap();
+        runtime.finish_initialize(initializing, Ok(())).unwrap();
+
+        let state = runtime.state().unwrap();
+        assert_eq!(state.sessions.len(), 3);
+        assert!(
+            state
+                .sessions
+                .iter()
+                .all(|session| session.lifecycle == SessionLifecycle::Available)
+        );
+    }
+
+    #[test]
     fn setup_failure_is_durable_and_does_not_skip_later_commands_or_replay() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = temporary.path().join("repository");
@@ -5374,6 +5535,11 @@ instructions = "direct"
         assert_eq!(
             state.sessions[0].setup_plan.as_ref().unwrap().commands,
             ["fail", "fail", "after"]
+        );
+        assert!(
+            runtime.lock().unwrap().snapshot().unwrap()["sessions"][0]
+                .get("setup_plan")
+                .is_none()
         );
 
         assert!(matches!(

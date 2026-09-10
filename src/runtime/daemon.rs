@@ -21,9 +21,9 @@ use dispatch::{
 #[cfg(test)]
 use dispatch::{
     AuthenticatedSupervisorCaller, PendingPromotionCandidate, PendingPromotionKind,
-    best_effort_merged_pr_head, compensate_delegation, exact_merged_pr_head,
-    finish_supervisor_promotion_reconciliation, goal_supervisor_caller, lock_agent_runtime,
-    lock_supervisor_runtime, map_inbox_query_error, project_reported_pr,
+    best_effort_merged_pr_head, compensate_delegation, compensate_failed_delegated_initialize,
+    exact_merged_pr_head, finish_supervisor_promotion_reconciliation, goal_supervisor_caller,
+    lock_agent_runtime, lock_supervisor_runtime, map_inbox_query_error, project_reported_pr,
     promotion_admission_matches, prompt_supervisor_retry, reconcile_supervisor_promotion,
     reconcile_supervisor_promotion_outcome, reconcile_supervisor_promotions,
     reconcile_supervisor_run_workers, record_supervisor_promotion_result,
@@ -20546,6 +20546,102 @@ instructions = "{instructions}"
         assert_ne!(orphan, dispatched);
     }
 
+    #[test]
+    fn a_failed_delegated_setup_is_compensated_before_dispatch() {
+        use usagi_core::domain::agent::CallerRef;
+        use usagi_daemon::usecase::session_runtime::{DelegationReconcile, SessionRuntimeError};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(repository.join(".usagi")).unwrap();
+        std::fs::write(
+            repository.join(".usagi/config.toml"),
+            "[session]\nsetup_commands = [\"fail\"]\n",
+        )
+        .unwrap();
+        let sessions = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                repository,
+                &temporary.path().join("daemon"),
+                DaemonGeneration::new(),
+                AlwaysSuccessfulGit,
+                FailingSetupSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        let caller = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        };
+        let operation_id = usagi_core::domain::id::OperationId::new().to_string();
+        let create_error = perform_delegated_create(
+            &sessions,
+            &AlwaysSuccessfulGit,
+            &operation_id,
+            &serde_json::json!({
+                "name": "setup-failed",
+                "parent_session_id": caller.session_id,
+                "creator_agent_id": caller.agent_id,
+            }),
+        )
+        .unwrap_err();
+        let teardown = TeardownSignal::new();
+
+        let compensated = compensate_failed_delegated_initialize(
+            &sessions,
+            &teardown,
+            &caller,
+            "setup-failed",
+            &operation_id,
+            create_error,
+        );
+
+        let SessionRuntimeError::Delegation(failure) = compensated else {
+            panic!("the failed setup must report delegation reconciliation");
+        };
+        assert_eq!(failure.reconcile, DelegationReconcile::Compensated);
+        assert_eq!(failure.run_operation_id, operation_id);
+        let pending = sessions.lock().unwrap().pending_teardowns().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].name, "setup-failed");
+        assert!(teardown.wait(std::time::Duration::from_millis(1)));
+
+        // A pre-effect error with another operation ID must not compensate an
+        // already-existing session that happens to have the requested name.
+        std::fs::remove_file(
+            sessions
+                .lock()
+                .unwrap()
+                .repository_root()
+                .join(".usagi/config.toml"),
+        )
+        .unwrap();
+        perform_create(
+            &sessions,
+            &AlwaysSuccessfulGit,
+            &usagi_core::domain::id::OperationId::new().to_string(),
+            &serde_json::json!({
+                "name": "existing",
+                "parent_session_id": caller.session_id,
+                "creator_agent_id": caller.agent_id,
+            }),
+        )
+        .unwrap();
+        let pre_effect = SessionRuntimeError::InvalidRole("refused".into());
+        assert_eq!(
+            compensate_failed_delegated_initialize(
+                &sessions,
+                &teardown,
+                &caller,
+                "existing",
+                &usagi_core::domain::id::OperationId::new().to_string(),
+                pre_effect.clone(),
+            ),
+            pre_effect
+        );
+        assert!(sessions.lock().unwrap().session_id("existing").is_ok());
+    }
+
     /// Whether a failed dispatch rolls its session back is decided by the failure,
     /// not by the caller: an unknown spawn outcome must keep the worktree, because
     /// a worker may be running in it (#611).
@@ -20736,6 +20832,48 @@ instructions = "{instructions}"
                 stdout: String::new(),
                 stderr: String::new(),
             })
+        }
+    }
+
+    /// Worktree IO used to prove that a deterministic setup failure enters the
+    /// delegated-create compensation path before worker dispatch.
+    struct FailingSetupSessionWorktreeIo;
+    impl usagi_daemon::usecase::session_runtime::SessionWorktreeIo
+        for FailingSetupSessionWorktreeIo
+    {
+        fn remove_file_best_effort(&self, _: &Path) {}
+        fn path_occupied(&self, _: &Path) -> bool {
+            false
+        }
+        fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+            Some(path.to_path_buf())
+        }
+        fn is_repo_root(&self, _: &Path) -> bool {
+            false
+        }
+        fn is_linked_worktree(&self, _: &Path) -> bool {
+            true
+        }
+        fn build_session_tree(
+            &self,
+            _: &dyn usagi_core::infrastructure::git::GitRunner,
+            _: &Path,
+            _: &Path,
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn run_setup_command(&self, _: &Path, _: &str) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("injected setup failure"))
+        }
+        fn remove_session_tree(
+            &self,
+            _: &dyn usagi_core::infrastructure::git::GitRunner,
+            _: &Path,
+            _: bool,
+        ) -> anyhow::Result<()> {
+            Ok(())
         }
     }
 

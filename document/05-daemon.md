@@ -113,7 +113,10 @@ workspace root から読み、その session incarnation の immutable `setup_pl
 
 setup 中は lifecycle を `initializing` とし、任意長の command 実行中に共有 session lock を保持しない。全 command を
 保存順に試し、すべて成功した場合だけ `available` にする。1 件でも失敗した場合は安全な command index と
-`failed(initialize)` を永続化し、作成済み worktree を残す。command の標準入出力や本文は client の error に載せない。
+`failed(initialize)` を永続化し、通常の session create では作成済み worktree を残す。`session_delegate_brief` は
+dispatch 前の確定失敗として既存の durable compensation を開始するため、最終的に worktree と branch を削除する
+（[7. MCPサーバのdelegationのatomicity](07-mcp.md#delegation-の-atomicity)）。command の標準入出力や本文は client の error に載せない。
+durable `setup_plan` も client projection には公開しない。
 daemon が `initializing` のまま中断した場合も、非冪等 command の実行有無を証明できないため自動再実行せず
 `failed(initialize)` に収束する。setup command は daemon process の権限で実行されるため、信頼できる workspace config
 だけに設定する。
