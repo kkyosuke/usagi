@@ -234,11 +234,13 @@ fn sidebar_dense_fallback_keeps_only_agent_targets_in_the_meadow() {
                 AgentRuntimeId::parse(&format!("{index:08x}-0000-4000-8000-000000000002")).unwrap(),
             phase: AgentPhase::Running,
         }));
+    let mut empty = session(1);
+    empty.agents.clear();
     let view = render(
         13,
         99,
         "repo",
-        std::slice::from_ref(&value),
+        &[value.clone(), empty.clone()],
         ViewOptions::default(),
     )
     .unwrap();
@@ -251,6 +253,7 @@ fn sidebar_dense_fallback_keeps_only_agent_targets_in_the_meadow() {
     assert_eq!(meadow_targets.len(), value.agents.len());
     assert!(meadow_targets.iter().all(|hitbox| hitbox.agent.is_some()));
     assert!(!plain(&view).contains(&value.label));
+    assert!(!plain(&view).contains(&empty.label));
 }
 
 #[test]
