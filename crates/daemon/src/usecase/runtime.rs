@@ -1726,9 +1726,6 @@ impl RuntimeCoordinator {
         {
             return Err(RuntimeError::ProviderResumeMismatch);
         }
-        if record.provider_resume.as_ref() == Some(&provider_resume) {
-            return Ok(());
-        }
         record.provider_resume = Some(provider_resume);
         self.persist(store)
     }
