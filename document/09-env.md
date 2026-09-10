@@ -118,5 +118,11 @@ PTY を所有するのは daemon なので、**daemon が起動時に自分で 2
 
 - 設定 env は端末特性を上書きできるが、daemon が子を daemon 自身へ結び付けるための値（MCP 配線・
   credential）を置き換えることはできない。
+- 端末特性は明示的な allowlist だけで、親環境を無差別にコピーしない（`GH_TOKEN` などの secret は child へ
+  渡らない）。この allowlist の内容と供給元の優先順は
+  [5. daemon#terminal launch environment](05-daemon.md#terminal-launch-environment) が正本である。
+- allowlist のうち `USER` だけは継承値ではなく、daemon が起動時に自分の実 effective UID から解決した
+  OS ユーザー名を渡す（正本は [5. daemon#`USER` の解決](05-daemon.md#user-の解決)）。設定 env の `USER` は
+  この解決値も上書きする。
 - durable な launch snapshot に載るのは**変数名の allowlist だけ**で、値・secret は載らない。
 - 反映は**新しく開く pane から**。既に動いている pane は起動時の環境を保ち続ける。

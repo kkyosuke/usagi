@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 523,
+  "total": 524,
   "owners": {
     "core": 10,
-    "daemon": 366,
+    "daemon": 367,
     "root-cli": 40,
     "tui": 107
   },
@@ -17,6 +17,7 @@
     "crates/core/src/usecase/vt_screen.rs": 1,
     "crates/daemon/src/infrastructure/child_identity.rs": 5,
     "crates/daemon/src/infrastructure/generation_registry.rs": 7,
+    "crates/daemon/src/infrastructure/os_user.rs": 1,
     "crates/daemon/src/infrastructure/pty.rs": 3,
     "crates/daemon/src/infrastructure/resource_store.rs": 12,
     "crates/daemon/src/infrastructure/session_worktree.rs": 11,

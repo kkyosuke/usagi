@@ -1332,7 +1332,30 @@ path・argv・environment・root worktree identity を指定することはで�
 | `TERM_PROGRAM` / `TERM_PROGRAM_VERSION` | macOS Terminal などの terminal 固有設定を引き継ぐ |
 | `TERM_SESSION_ID` | child では空にして、Terminal.app 固有の session 保存・復元を無効化する |
 | `ZDOTDIR` / `XDG_CONFIG_HOME` | shell の user configuration の位置を引き継ぐ |
+| `USER` | 親の値を引き継がず、daemon 自身の実 effective UID から解決した OS ユーザー名を渡す |
 | その他・secret | profile resolution は収集・保存・転送せず、PTY child は daemon の ambient environment から継承しない |
+
+### `USER` の解決
+
+`USER` はこの表で唯一、親から引き継がずに daemon が**解決して**渡す変数である。継承した値は起動元の環境が
+選んだ文字列にすぎず、daemon が実際に動作している account と一致する保証がない。一方 macOS の Keychain を使う
+child（Claude Code など）は保存済み credential を `$USER` で索引するため、実際に動作している account の名前で
+なければ端末で済ませた認証を再利用できず、別 entry を作る。
+
+したがって daemon は**起動時に一度だけ**、自分の実 effective UID を passwd database（`getpwuid_r`）で
+OS ユーザー名へ解決し、その値を public terminal environment に入れる。解決結果は process 内で 1 回だけ求めるため、
+launch ごとに passwd database を引き直さず、`id` のような subprocess も起動しない。
+
+| 状態 | 渡す値 |
+|---|---|
+| 実 effective UID から解決できた | 解決した OS ユーザー名（継承値より優先する） |
+| 解決できず、継承値が使える（非空・NUL なし） | 継承値 |
+| どちらも使えない | `USER` を渡さない（他の変数と pane の起動は妨げない） |
+
+解決できない環境（UID に対応する passwd entry が無い container など）でも spawn は失敗させない。これは
+解決できなかった binding だけを落として pane を開く [9. 環境変数設定#secret の解決](09-env.md#secret-の解決)
+の fail-safe と同じ方針である。設定 env は下表の優先順で terminal profile より後に載るため、利用者は `USER` を
+明示的に上書きできる。
 
 実 PTY の spawn 境界は親 environment を必ず clear し、次の許可済み live source だけから child environment を
 再構築する。この表が供給元と同名 key の優先順の正本であり、下の source ほど優先する。

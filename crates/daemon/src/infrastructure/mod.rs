@@ -11,6 +11,8 @@ pub mod child_identity;
 /// Durable cross-process generation authority: the registry document and the
 /// current locator, bound to the daemon data directory.
 pub mod generation_registry;
+/// OS resolution of the user this daemon process runs as.
+pub mod os_user;
 /// The daemon's concrete pseudo-terminal adapter.  Presentation surfaces only
 /// ever receive terminal stream data through IPC; they do not own this IO.
 pub mod pty;
