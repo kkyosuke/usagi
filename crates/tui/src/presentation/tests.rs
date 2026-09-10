@@ -65,8 +65,8 @@ use crate::usecase::application::controller::WorkspaceDrawerFocus;
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, DirectorConsoleParent, DirectorNew, DirectorRoute,
     Effect, EnvironmentEntry, GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode, NewRequest, Overlay,
-    PendingToken, PreviewFileFilter, RoleEditorScope, Route, SessionCreateIntent,
-    SessionRoleCatalog, TabDirection, Target,
+    PendingToken, PreviewFileFilter, RoleEditorScope, Route, SessionCreateIntent, TabDirection,
+    Target,
 };
 use crate::usecase::application::daemon_backend::{
     Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -82,7 +82,6 @@ use chrono::{DateTime, Duration, Timelike, Utc};
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -4584,133 +4583,6 @@ fn unavailable_backend_reports_pr_copy_and_dismiss_errors() {
         dismiss_events.recv().unwrap(),
         AppEvent::Backend(BackendEvent::Notice(_))
     ));
-}
-
-#[test]
-fn session_role_catalog_filters_scope_and_falls_back_on_invalid_source() {
-    let root = tempdir().unwrap();
-    let data_home = root.path().join("home");
-    let workspace = root.path().join("workspace");
-    std::fs::create_dir_all(&data_home).unwrap();
-    std::fs::write(
-            data_home.join("roles.toml"),
-            "version = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n[roles.director]\nsummary = \"Direct\"\nscopes = [\"root\"]\ninstructions = \"direct\"\n",
-        )
-        .unwrap();
-
-    let catalog = super::session_role_catalog(Some(&data_home), &workspace);
-    assert_eq!(catalog.default.unwrap().as_str(), "coder");
-    assert_eq!(catalog.roles.len(), 1);
-    assert_eq!(catalog.roles[0].id.as_str(), "coder");
-
-    std::fs::write(data_home.join("roles.toml"), "version = 99\n").unwrap();
-    assert_eq!(
-        super::session_role_catalog(Some(&data_home), &workspace),
-        SessionRoleCatalog::default()
-    );
-    assert_eq!(
-        super::session_role_catalog(None, &workspace),
-        SessionRoleCatalog::default()
-    );
-}
-
-#[test]
-fn branch_choices_include_remote_defaults_and_skip_other_symbolic_aliases() {
-    assert_eq!(
-        super::parse_session_branch_choices(
-            "refs/heads/main \nrefs/heads/feature \nrefs/heads/current refs/heads/main\nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/alias refs/remotes/origin/main\nrefs/remotes/origin/main \nrefs/remotes/upstream/HEAD refs/remotes/other/main\nnot-a-ref\n"
-        ),
-        vec![
-            crate::usecase::application::controller::BranchChoice {
-                label: "local:main".into(),
-                refname: "refs/heads/main".into(),
-            },
-            crate::usecase::application::controller::BranchChoice {
-                label: "local:feature".into(),
-                refname: "refs/heads/feature".into(),
-            },
-            crate::usecase::application::controller::BranchChoice {
-                label: "remote:origin/(default)".into(),
-                refname: "refs/remotes/origin/HEAD".into(),
-            },
-            crate::usecase::application::controller::BranchChoice {
-                label: "remote:origin/main".into(),
-                refname: "refs/remotes/origin/main".into(),
-            },
-        ]
-    );
-}
-
-#[test]
-fn branch_catalog_falls_back_when_git_cannot_start() {
-    let root = tempdir().unwrap();
-    let branches = vec![crate::usecase::application::controller::BranchChoice {
-        label: "local:main".into(),
-        refname: "refs/heads/main".into(),
-    }];
-
-    assert!(
-            super::branch_default_from_output(
-                Err(std::io::Error::other("git unavailable")),
-                &branches,
-            )
-            .is_none()
-        );
-    assert!(
-        super::branch_default_from_output(
-            Command::new("git").arg("not-a-command").output(),
-            &branches,
-        )
-        .is_none()
-    );
-    assert!(
-            super::branch_default_from_output(
-                Command::new("git").arg("--version").output(),
-                &branches,
-            )
-            .is_none()
-        );
-    assert_eq!(
-        super::session_branch_catalog(&root.path().join("missing"), None),
-        crate::usecase::application::controller::SessionBranchCatalog::default()
-    );
-}
-
-#[test]
-fn branch_catalog_reads_the_current_local_branch() {
-    let root = tempdir().unwrap();
-    let git = |arguments: &[&str]| {
-        Command::new("git")
-            .arg("-C")
-            .arg(root.path())
-            .args(arguments)
-            .status()
-            .unwrap()
-    };
-    assert!(git(&["init", "--initial-branch=main"]).success());
-    assert!(git(&["config", "user.name", "fixture"]).success());
-    assert!(git(&["config", "user.email", "fixture@example.invalid"]).success());
-    std::fs::write(root.path().join("tracked"), "base\n").unwrap();
-    assert!(git(&["add", "tracked"]).success());
-    assert!(git(&["commit", "-m", "base"]).success());
-
-    let catalog = super::session_branch_catalog(root.path(), None);
-
-    assert_eq!(catalog.default.as_deref(), Some("refs/heads/main"));
-    assert_eq!(
-        catalog.branches,
-        vec![crate::usecase::application::controller::BranchChoice {
-            label: "local:main".into(),
-            refname: "refs/heads/main".into(),
-        }]
-    );
-
-    assert!(git(&["branch", "feature"]).success());
-    let configured = super::session_branch_catalog(root.path(), Some("refs/heads/feature"));
-    assert_eq!(configured.default.as_deref(), Some("refs/heads/feature"));
-
-    let stale = super::session_branch_catalog(root.path(), Some("refs/heads/missing"));
-    assert_eq!(stale.default.as_deref(), Some("refs/heads/main"));
 }
 
 #[test]
@@ -21739,6 +21611,9 @@ impl super::ControllerBackendFactory for CountingBackendFactory {
             )
             .with_decisions(Box::new(self.port()))
             .with_overlay(Box::new(UnavailableBackendPort)),
+            // Uncounted like restore: the branch-catalog worker briefly clones
+            // this stateless port and may finish after the frame loop returns.
+            session_catalogs: Arc::new(super::UnavailableSessionCatalogPort),
             session_commands: Box::new(self.port()),
             session_refresh: Box::new(self.port()),
             agent_commands: Box::new(self.port()),

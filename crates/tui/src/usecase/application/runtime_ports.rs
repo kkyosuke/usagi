@@ -16,7 +16,9 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::env::EnvScope;
 
-use super::controller::{BackendEvent, EnvironmentEntry, SessionRoleProjection};
+use super::controller::{
+    BackendEvent, EnvironmentEntry, SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection,
+};
 use crate::usecase::overview::SessionCommand;
 
 /// Platform-native terminal launch boundary.
@@ -146,4 +148,17 @@ pub trait SessionCommandPortFactory {
 pub trait SessionWorktreeScanPort {
     /// Returns directory names directly under `<workspace>/.usagi/sessions`.
     fn scan(&mut self, workspace: &Path) -> Vec<String>;
+}
+
+/// Workspace-local role and Git-ref discovery for the create-session form.
+///
+/// The controller consumes typed catalogs while the composition adapter owns
+/// filesystem and process IO. The shared port is thread-safe because branch
+/// discovery runs off the render thread.
+pub trait SessionCatalogPort: Send + Sync {
+    /// Returns the effective session-role choices for `workspace`.
+    fn roles(&self, workspace: &Path) -> SessionRoleCatalog;
+
+    /// Returns branch choices and the effective default for `workspace`.
+    fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog;
 }
