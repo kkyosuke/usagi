@@ -152,17 +152,41 @@ fn an_agent_child_runs_with_the_resolved_user_unless_the_configured_env_replaces
     assert_no_secret_reached(&child);
 }
 
+/// The OS's own answer about the current account, when it can give one.
+///
+/// The comparison has to be conditional, because the two environments where
+/// this returns nothing are exactly the ones the product documents as a normal
+/// fallback: a minimal container may carry no `id` at all, and a UID with no
+/// passwd entry makes `id -un` fail. Requiring an answer would fail the test on
+/// precisely the platforms whose behaviour the fallback exists for. Any other
+/// spawn failure is a broken fixture, not a platform without an account, so it
+/// still fails.
+fn reported_user_name() -> Option<String> {
+    let reported = match std::process::Command::new("id").arg("-un").output() {
+        Ok(reported) => reported,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("`id` could not be run: {error}"),
+    };
+    if !reported.status.success() {
+        return None;
+    }
+    let name = String::from_utf8(reported.stdout).ok()?.trim().to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 #[test]
 fn the_resolved_name_is_the_account_the_process_actually_runs_as() {
     let resolved = effective_user_name();
-    let reported = std::process::Command::new("/usr/bin/id")
-        .arg("-un")
-        .output()
-        .expect("the platform reports the current user");
-    assert!(reported.status.success());
-    let reported = String::from_utf8(reported.stdout)
-        .expect("the reported user name is UTF-8")
-        .trim()
-        .to_owned();
-    assert_eq!(resolved, Some(reported));
+    match reported_user_name() {
+        // The OS answered, so the resolver must name the same account — this is
+        // what makes the injected value the one a keychain is indexed by.
+        Some(reported) => assert_eq!(resolved, Some(reported)),
+        // Nothing to compare against. Either outcome is allowed here; what the
+        // resolver must never do is hand back a name a child cannot use.
+        None => assert!(
+            resolved
+                .as_deref()
+                .is_none_or(|name| !name.is_empty() && !name.contains('\0'))
+        ),
+    }
 }
