@@ -2809,6 +2809,22 @@ mod tests {
         observed_unlocked: Arc<std::sync::atomic::AtomicBool>,
     }
 
+    fn pending_create(step: SessionCreateStep) -> Option<Box<SessionCreateInFlight>> {
+        match step {
+            SessionCreateStep::Pending(in_flight) => Some(in_flight),
+            SessionCreateStep::Done(_) => None,
+        }
+    }
+
+    fn pending_initialize(
+        completion: SessionCreateCompletion,
+    ) -> Option<SessionInitializeInFlight> {
+        match completion {
+            SessionCreateCompletion::Initializing(in_flight) => Some(in_flight),
+            SessionCreateCompletion::Done(_) => None,
+        }
+    }
+
     struct OrphanSessionWorktreeIo {
         entries: Vec<String>,
         linked: bool,
@@ -3070,6 +3086,58 @@ mod tests {
         fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn specialized_worktree_fakes_keep_their_noop_contracts_explicit() {
+        let session_root = Path::new("session");
+        let remove_calls = Arc::new(AtomicUsize::new(0));
+        let orphan = OrphanSessionWorktreeIo {
+            entries: Vec::new(),
+            linked: false,
+            remove_calls: Arc::clone(&remove_calls),
+        };
+        orphan.run_setup_command(session_root, "ignored").unwrap();
+
+        let confinement = ConfinementIo::new(Arc::clone(&remove_calls));
+        confinement
+            .run_setup_command(session_root, "ignored")
+            .unwrap();
+        FailingSessionWorktreeIo
+            .run_setup_command(session_root, "ignored")
+            .unwrap();
+
+        let fake = FakeSessionWorktreeIo {
+            occupied: false,
+            build_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        fake.run_setup_command(session_root, "ignored").unwrap();
+
+        let setup = SetupSessionWorktreeIo {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            fail_on: None,
+            runtime: Arc::new(Mutex::new(None)),
+            observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        assert_eq!(
+            setup.canonical_path(session_root),
+            Some(session_root.into())
+        );
+        assert!(setup.is_linked_worktree(session_root));
+        setup
+            .remove_session_tree(&FakeGit::ok(), session_root, false)
+            .unwrap();
+    }
+
+    #[test]
+    fn create_step_extractors_distinguish_completed_steps() {
+        let reply = SessionReply {
+            operation_id: String::new(),
+            revision: 0,
+            body: Value::Null,
+        };
+        assert!(pending_create(SessionCreateStep::Done(reply.clone())).is_none());
+        assert!(pending_initialize(SessionCreateCompletion::Done(reply)).is_none());
     }
 
     struct BranchExistsGit;
@@ -5434,13 +5502,12 @@ instructions = "direct"
         )
         .unwrap();
 
-        let first = match runtime
-            .begin_create(CreateOrigin::Direct, &operation(), &json!({"name":"first"}))
-            .unwrap()
-        {
-            SessionCreateStep::Pending(in_flight) => in_flight,
-            SessionCreateStep::Done(_) => panic!("fresh create must need a worktree effect"),
-        };
+        let first = pending_create(
+            runtime
+                .begin_create(CreateOrigin::Direct, &operation(), &json!({"name":"first"}))
+                .unwrap(),
+        )
+        .unwrap();
         // Completing another session advances the workspace revision after the
         // first create captured its admission fence.
         runtime
@@ -5450,10 +5517,8 @@ instructions = "direct"
                 &json!({"name":"during-create"}),
             )
             .unwrap();
-        let initializing = match runtime.finish_create(*first, Ok(())).unwrap() {
-            SessionCreateCompletion::Initializing(in_flight) => in_flight,
-            SessionCreateCompletion::Done(_) => panic!("configured create must initialize"),
-        };
+        let initializing =
+            pending_initialize(runtime.finish_create(*first, Ok(())).unwrap()).unwrap();
 
         // The setup fence must likewise survive an unrelated lifecycle change
         // while the configured command is running.
@@ -5473,6 +5538,75 @@ instructions = "direct"
                 .sessions
                 .iter()
                 .all(|session| session.lifecycle == SessionLifecycle::Available)
+        );
+    }
+
+    #[test]
+    fn create_and_setup_completion_rejects_a_different_workspace_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(repository.join(".usagi")).unwrap();
+        std::fs::write(
+            repository.join(".usagi/config.toml"),
+            "[session]\nsetup_commands = [\"configured\"]\n",
+        )
+        .unwrap();
+        let mut runtime = SessionRuntime::open(
+            repository,
+            &temporary.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+            SetupSessionWorktreeIo {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                fail_on: None,
+                runtime: Arc::new(Mutex::new(None)),
+                observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        )
+        .unwrap();
+        let create = pending_create(
+            runtime
+                .begin_create(
+                    CreateOrigin::Direct,
+                    &operation(),
+                    &json!({"name":"create"}),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let admitted_workspace_id = create.fence.workspace_id;
+        let mut state = runtime.state().unwrap();
+        let revision = state.state_revision;
+        state.workspace_id = WorkspaceId::new();
+        runtime.store.replace_if_revision(revision, &state).unwrap();
+        assert!(matches!(
+            runtime.finish_create(*create, Ok(())),
+            Err(SessionRuntimeError::Storage)
+        ));
+
+        let mut state = runtime.state().unwrap();
+        let revision = state.state_revision;
+        state.workspace_id = admitted_workspace_id;
+        runtime.store.replace_if_revision(revision, &state).unwrap();
+        let create = pending_create(
+            runtime
+                .begin_create(
+                    CreateOrigin::Direct,
+                    &operation(),
+                    &json!({"name":"initialize"}),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let initialize =
+            pending_initialize(runtime.finish_create(*create, Ok(())).unwrap()).unwrap();
+        let mut state = runtime.state().unwrap();
+        let revision = state.state_revision;
+        state.workspace_id = WorkspaceId::new();
+        runtime.store.replace_if_revision(revision, &state).unwrap();
+        assert_eq!(
+            runtime.finish_initialize(initialize, Ok(())).unwrap_err(),
+            SessionRuntimeError::Storage
         );
     }
 
@@ -5578,17 +5712,16 @@ instructions = "direct"
             },
         )
         .unwrap();
-        let in_flight = match runtime
-            .begin_create(
-                CreateOrigin::Direct,
-                &operation(),
-                &json!({"name":"interrupted"}),
-            )
-            .unwrap()
-        {
-            SessionCreateStep::Pending(in_flight) => in_flight,
-            SessionCreateStep::Done(_) => panic!("fresh create must need a worktree effect"),
-        };
+        let in_flight = pending_create(
+            runtime
+                .begin_create(
+                    CreateOrigin::Direct,
+                    &operation(),
+                    &json!({"name":"interrupted"}),
+                )
+                .unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
             runtime.finish_create(*in_flight, Ok(())).unwrap(),
             SessionCreateCompletion::Initializing(_)
