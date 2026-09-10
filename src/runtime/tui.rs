@@ -21,14 +21,12 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
+use usagi_core::domain::agent::ProviderResumeProjection;
 use usagi_core::domain::id::{RequestId, SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
-use usagi_core::domain::session_lifecycle::{
-    AgentPhase, ManagedSession, SessionLifecycleProjection,
-};
+use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycleProjection};
 use usagi_core::domain::settings::{
     EnvBindings, IconMode, LocalSettings, Settings, format_env_bindings, parse_env_bindings,
 };
@@ -50,6 +48,7 @@ use usagi_core::infrastructure::ipc::{TerminalInputReplayMode, TerminalSnapshotM
 use usagi_core::infrastructure::role_catalog::{
     CatalogLayer, read_layer_source, write_layer_source,
 };
+use usagi_core::infrastructure::session_snapshot::SessionListSnapshot;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -3623,94 +3622,48 @@ impl LifecycleSnapshot {
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=lifecycle_parser_projection_and_safe_error_mapping_cover_every_branch
 fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, String> {
     let result = (|| {
-        let object = value
-            .as_object()
-            .ok_or_else(|| "invalid daemon session snapshot".to_owned())?;
-        let revision = object
-            .get("revision")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| "daemon session snapshot has no revision".to_owned())?;
-        let workspace_id = object
-            .get("workspace_id")
-            .cloned()
-            .ok_or_else(|| "daemon session snapshot has no workspace ID".to_owned())
-            .and_then(|id| {
-                serde_json::from_value(id)
-                    .map_err(|_| "daemon session snapshot has an invalid workspace ID".to_owned())
-            })?;
-        let root_worktree_id = object
-            .get("root_worktree_id")
-            .cloned()
-            .ok_or_else(|| "daemon session snapshot has no root worktree ID".to_owned())
-            .and_then(|id| {
-                serde_json::from_value(id).map_err(|_| {
-                    "daemon session snapshot has an invalid root worktree ID".to_owned()
-                })
-            })?;
-        let session_values = object
-            .get("sessions")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| "daemon session snapshot has no sessions".to_owned())?;
-        let agent_resumes = session_values
+        let snapshot = serde_json::from_value::<SessionListSnapshot>(value.clone())
+            .map_err(|error| format!("invalid daemon session snapshot: {error}"))?;
+        let agent_resumes = snapshot
+            .sessions
             .iter()
-            .map(provider_resume_projection)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
+            .filter_map(|item| {
+                item.runtime.as_ref().map(|runtime| {
+                    (
+                        item.session.session_id,
+                        runtime.provider_resume_projection(),
+                    )
+                })
+            })
             .collect();
-        let session_roles = session_values
+        let session_roles = snapshot
+            .sessions
             .iter()
             .map(|item| {
-                let session_id = serde_json::from_value(
-                    item.get("session_id")
-                        .cloned()
-                        .ok_or_else(|| "daemon role projection has no session ID".to_owned())?,
-                )
-                .map_err(|_| "daemon role projection has an invalid session ID".to_owned())?;
-                let role_id = item
-                    .get("role_id")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| "daemon role projection has an invalid role ID".to_owned())?
-                    .flatten();
-                let role_summary = item
-                    .get("role_summary")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned);
-                let parent_session_id = item
-                    .get("parent_session_id")
-                    .filter(|value| !value.is_null())
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| "daemon organization parent is invalid".to_owned())?;
-                let agent_status = item
-                    .get("agent_status")
-                    .filter(|value| !value.is_null())
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| "daemon organization status is invalid".to_owned())?;
-                Ok((
-                    session_id,
+                (
+                    item.session.session_id,
                     SessionRoleProjection {
-                        role_id,
-                        role_summary,
-                        parent_session_id,
-                        agent_status,
+                        role_id: item.session.role_id.clone(),
+                        role_summary: item.role_summary.clone(),
+                        parent_session_id: item.session.parent_session_id,
+                        agent_status: item
+                            .runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.agent_status),
                     },
-                ))
+                )
             })
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
-        let sessions: Vec<ManagedSession> =
-            serde_json::from_value(serde_json::Value::Array(session_values.clone()))
-                .map_err(|error| format!("invalid daemon session snapshot: {error}"))?;
+            .collect();
+        let sessions = snapshot
+            .sessions
+            .into_iter()
+            .map(|item| item.session)
+            .collect::<Vec<_>>();
         validate_unique_session_ids(&sessions)?;
         Ok(LifecycleSnapshot {
-            workspace_id,
-            root_worktree_id,
-            revision,
+            workspace_id: snapshot.workspace_id,
+            root_worktree_id: snapshot.root_worktree_id,
+            revision: snapshot.revision,
             sessions,
             agent_resumes,
             session_roles,
@@ -3727,47 +3680,6 @@ fn record_lifecycle_snapshot_error(result: &Result<LifecycleSnapshot, String>) {
         // Persist only the schema error, never the raw IPC body.
         ErrorLog::record(&format!("daemon lifecycle snapshot rejected: {error}"));
     }
-}
-
-fn provider_resume_projection(
-    item: &serde_json::Value,
-) -> Result<Option<(SessionId, ProviderResumeProjection)>, String> {
-    let Some(phase) = item.get("agent_phase") else {
-        return Ok(None);
-    };
-    let phase = phase
-        .as_str()
-        .ok_or_else(|| "daemon Agent phase is invalid".to_owned())?;
-    let phase =
-        AgentPhase::parse_token(phase).ok_or_else(|| "daemon Agent phase is unknown".to_owned())?;
-    let session = item
-        .get("session_id")
-        .cloned()
-        .ok_or_else(|| "daemon Agent projection has no session ID".to_owned())
-        .and_then(|value| {
-            serde_json::from_value(value)
-                .map_err(|_| "daemon Agent projection has an invalid session ID".to_owned())
-        })?;
-    let resumable = item
-        .get("agent_resumable")
-        .and_then(serde_json::Value::as_bool)
-        .ok_or_else(|| "daemon Agent resume availability is invalid".to_owned())?;
-    let reason = item
-        .get("agent_resume_reason")
-        .cloned()
-        .ok_or_else(|| "daemon Agent resume reason is missing".to_owned())
-        .and_then(|value| {
-            serde_json::from_value::<ProviderResumeReason>(value)
-                .map_err(|_| "daemon Agent resume reason is invalid".to_owned())
-        })?;
-    Ok(Some((
-        session,
-        ProviderResumeProjection {
-            interrupted: matches!(phase, AgentPhase::Interrupted | AgentPhase::Sleeping),
-            resumable,
-            reason,
-        },
-    )))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_session_completion_contract
@@ -5270,11 +5182,11 @@ mod tests {
         decode_work_run_snapshot_reply, exact_agent_resume_request, global_icon_mode,
         lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
         metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
-        provider_resume_projection, reduced_motion_from_environment, remove_session_payload,
-        reply_geometry, resolve_workspace_path, session_cadence, session_snapshot_result,
-        terminal_copy_key, terminal_inventory_matches_scope, tui_error_entry,
-        validate_workspace_directory, version_detail, version_result_from_observation,
-        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
+        reduced_motion_from_environment, remove_session_payload, reply_geometry,
+        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, tui_error_entry, validate_workspace_directory,
+        version_detail, version_result_from_observation, work_run_control_client_error,
+        workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -5674,7 +5586,6 @@ mod tests {
         );
     }
     use serde_json::json;
-    use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{
         AgentContinuationRef, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
         TerminalRef, WorkspaceId, WorktreeId,
@@ -7837,101 +7748,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_resume_projection_accepts_only_the_safe_typed_wire_vocabulary() {
-        let session = SessionId::new();
-        let item = json!({
-            "session_id": session,
-            "agent_phase": "interrupted",
-            "agent_resumable": true,
-            "agent_resume_reason": "explicit_resume_available",
-        });
-        assert_eq!(
-            provider_resume_projection(&item).unwrap(),
-            Some((
-                session,
-                ProviderResumeProjection {
-                    interrupted: true,
-                    resumable: true,
-                    reason: ProviderResumeReason::ExplicitResumeAvailable,
-                },
-            ))
-        );
-        assert_eq!(provider_resume_projection(&json!({})).unwrap(), None);
-        assert_eq!(
-            provider_resume_projection(&json!({
-                "session_id": session,
-                "agent_phase": "sleeping",
-                "agent_resumable": true,
-                "agent_resume_reason": "explicit_resume_available",
-            }))
-            .unwrap(),
-            Some((
-                session,
-                ProviderResumeProjection {
-                    interrupted: true,
-                    resumable: true,
-                    reason: ProviderResumeReason::ExplicitResumeAvailable,
-                },
-            ))
-        );
-        assert_eq!(
-            provider_resume_projection(&json!({
-                "session_id": session,
-                "agent_phase": "running",
-                "agent_resumable": false,
-                "agent_resume_reason": "live_or_ownership_unknown",
-            }))
-            .unwrap(),
-            Some((
-                session,
-                ProviderResumeProjection {
-                    interrupted: false,
-                    resumable: false,
-                    reason: ProviderResumeReason::LiveOrOwnershipUnknown,
-                },
-            ))
-        );
-        let malformed = [
-            json!({ "agent_phase": 1 }),
-            json!({
-                "session_id": session,
-                "agent_phase": "unknown",
-                "agent_resumable": false,
-                "agent_resume_reason": "provider_metadata_unavailable",
-            }),
-            json!({ "agent_phase": "interrupted" }),
-            json!({
-                "session_id": "not-a-session-id",
-                "agent_phase": "interrupted",
-                "agent_resumable": false,
-                "agent_resume_reason": "provider_metadata_unavailable",
-            }),
-            json!({
-                "session_id": session,
-                "agent_phase": "interrupted",
-                "agent_resume_reason": "provider_metadata_unavailable",
-            }),
-            json!({
-                "session_id": session,
-                "agent_phase": "interrupted",
-                "agent_resumable": false,
-            }),
-        ];
-        for item in malformed {
-            assert!(provider_resume_projection(&item).is_err());
-        }
-        assert!(
-            provider_resume_projection(&json!({
-                "session_id": session,
-                "agent_phase": "interrupted",
-                "agent_resumable": false,
-                "agent_resume_reason": "provider raw output",
-            }))
-            .is_err()
-        );
-    }
-
-    #[test]
     fn tui_agent_resume_helpers_use_the_shared_exact_wire_contract() {
         let workspace = WorkspaceId::new();
         let operation = OperationId::new();
@@ -8097,7 +7913,19 @@ mod tests {
         let managed_object = managed_value.as_object_mut().unwrap();
         managed_object.insert("role_summary".to_owned(), json!("Writes code"));
         managed_object.insert("parent_session_id".to_owned(), json!(parent_session_id));
+        managed_object.insert("agent_phase".to_owned(), json!("running"));
+        managed_object.insert("agent_resumable".to_owned(), json!(false));
+        managed_object.insert(
+            "agent_resume_reason".to_owned(),
+            json!("live_or_ownership_unknown"),
+        );
         managed_object.insert("agent_status".to_owned(), json!("running"));
+        managed_object.insert("parent_session_name".to_owned(), json!("parent"));
+        managed_object.insert("organization_depth".to_owned(), json!(2));
+        managed_object.insert(
+            "organization_path".to_owned(),
+            json!(["Director", "parent", "fresh"]),
+        );
         let parsed = lifecycle_snapshot(&json!({
             "revision": 1,
             "workspace_id": WorkspaceId::new(),

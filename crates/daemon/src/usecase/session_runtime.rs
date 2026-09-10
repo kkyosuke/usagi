@@ -973,6 +973,7 @@ impl SessionRuntime {
                     "session_id": session.session_id,
                     "role_id": session.role_id,
                     "role_summary": session.role_id.as_ref().and_then(|id| catalog.as_ref()?.roles.get(id).map(|role| role.summary.clone())),
+                    "parent_session_id": session.parent_session_id,
                     "lifecycle": session.lifecycle,
                     "agent_phase": "none",
                     "worktrees": [{
@@ -6582,6 +6583,7 @@ instructions = "code"
         let reply = runtime
             .handle(SessionAction::Status, &operation(), &json!({}))
             .unwrap();
+        assert!(reply.body["sessions"][0]["parent_session_id"].is_null());
         assert_eq!(reply.body["sessions"][0]["worktrees"][0]["status"], "dirty");
         assert_eq!(
             reply.body["sessions"][1]["worktrees"][0]["status"],
