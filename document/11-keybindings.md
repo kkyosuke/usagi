@@ -141,6 +141,11 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 | Environment editor | 矢印、`Home` / `End` | caret移動 |
 | Environment editor | 文字 / paste / `Backspace` / `Delete` | source編集 |
 | Environment editor | `Esc` | cancel |
+| Session setup editor | `Enter` | textareaでは改行、Saveでは保存 |
+| Session setup editor | `Tab` | textarea / Save移動 |
+| Session setup editor | 矢印、`Home` / `End` | caret移動 |
+| Session setup editor | 文字 / paste / `Backspace` / `Delete` | 1行1commandのsource編集 |
+| Session setup editor | `Esc` | cancel |
 | Roles editor | `Tab` | global / workspace scope |
 | Roles editor | `Ctrl-S` | 保存 |
 | Roles editor | `↑` / `↓`、`PgUp` / `PgDn` | 行 / page移動 |

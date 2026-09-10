@@ -98,6 +98,8 @@ workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり�
 
 workspace root の `.usagi/config.toml` に setup command を設定すると、daemon は session worktree の構築直後に
 その worktree を current directory として上から順に実行する。設定例は次のとおりである。
+開いている workspace の Overview から `config` を実行し、`Session setup` 行で Enter を押しても同じ配列を
+1 行 1 command の editor で保存できる。UI の入力操作と保存契約は [TUI の session setup editor](03-tui.md#session-setup-editor) を参照する。
 
 ```toml
 [session]

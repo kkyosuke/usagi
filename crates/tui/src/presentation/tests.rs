@@ -41,7 +41,8 @@ use super::{
     run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
     run_workspace_controller_with_backend_and_config,
     run_workspace_controller_with_backend_and_settings, run_workspace_deck_with_backend_and_config,
-    run_workspace_loading, safe_session_error, save_config_responsive, save_environment_responsive,
+    run_workspace_loading, safe_session_error, save_config_responsive,
+    save_config_source_responsive, save_environment_responsive, save_setup_commands_responsive,
     select_right_pane_tab, select_root_terminal_tab, sidebar_pointer_event, step_config, step_new,
     step_open, step_workspace_config, terminal_geometry, visit_garden_agent, welcome_action,
     workspace_drawer_header_key, workspace_has_unsaved_surface, workspace_loading_visible,
@@ -17285,6 +17286,17 @@ fn entry_help_resolves_every_entry_surface_and_config_submode() {
         super::config_help_context(&environment),
         HelpContext::EnvironmentEditor
     );
+
+    let mut setup =
+        Config::load_workspace_with_available_models(&mut settings, AvailableAgentModels::all());
+    for _ in 0..3 {
+        let _ = step_config(&mut setup, Key::Down, &mut settings);
+    }
+    let _ = step_config(&mut setup, Key::Enter, &mut settings);
+    assert_eq!(
+        super::config_help_context(&setup),
+        HelpContext::SessionSetupEditor
+    );
 }
 
 #[test]
@@ -17522,6 +17534,8 @@ fn step_config_saves_only_from_the_dirty_save_row() {
 struct RecordingSettingsPort {
     saves: usize,
     environment_saves: usize,
+    setup_saves: usize,
+    setup_commands: Vec<String>,
     background: bool,
     fail_save: bool,
 }
@@ -17568,6 +17582,7 @@ fn overview_config_saves_the_current_workspace_and_returns_to_home() {
     keys.extend("config".chars().map(Key::Char));
     keys.extend([
         Key::Enter,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
@@ -17715,10 +17730,72 @@ impl SettingsPort for RecordingSettingsPort {
         self.environment_saves += 1;
         Ok(())
     }
+
+    fn read_workspace_setup_commands(&mut self) -> io::Result<Vec<String>> {
+        Ok(self.setup_commands.clone())
+    }
+
+    fn save_workspace_setup_commands(&mut self, commands: &[String]) -> io::Result<()> {
+        self.setup_saves += 1;
+        self.setup_commands = commands.to_vec();
+        Ok(())
+    }
 }
 
 #[test]
-fn production_config_and_environment_writes_use_the_responsive_worker_path() {
+fn step_config_routes_workspace_session_setup_editor_input_and_cancel() {
+    let mut settings = RecordingSettingsPort::default();
+    let mut config =
+        Config::load_workspace_with_available_models(&mut settings, AvailableAgentModels::all());
+    for _ in 0..3 {
+        let _ = step_config(&mut config, Key::Down, &mut settings);
+    }
+    let _ = step_config(&mut config, Key::Enter, &mut settings);
+    assert!(config.is_editing_setup_commands());
+    for key in [
+        Key::Char('x'),
+        Key::Paste("y".to_owned()),
+        Key::Backspace,
+        Key::Left,
+        Key::Delete,
+        Key::Paste("one\r\ntwo".to_owned()),
+        Key::Up,
+        Key::Down,
+        Key::Home,
+        Key::Right,
+        Key::End,
+        Key::LineStart,
+        Key::LineEnd,
+        Key::Enter,
+        Key::Paste("three".to_owned()),
+        Key::Tab,
+        Key::Other,
+        Key::Tab,
+        Key::Management {
+            action: AppKey::SaveRoles,
+            passthrough: vec![19],
+        },
+    ] {
+        let _ = step_config(&mut config, key, &mut settings);
+    }
+    let _ = step_config(&mut config, Key::Escape, &mut settings);
+    assert!(!config.is_editing_setup_commands());
+    assert_eq!(settings.setup_saves, 0);
+
+    let _ = step_config(&mut config, Key::Enter, &mut settings);
+    let _ = step_config(
+        &mut config,
+        Key::Paste("cargo fetch\ncargo test".to_owned()),
+        &mut settings,
+    );
+    let _ = step_config(&mut config, Key::Tab, &mut settings);
+    let _ = step_config(&mut config, Key::Enter, &mut settings);
+    assert!(!config.is_editing_setup_commands());
+    assert_eq!(settings.setup_commands, ["cargo fetch", "cargo test"]);
+}
+
+#[test]
+fn production_config_and_source_writes_use_the_responsive_worker_path() {
     let mut settings = RecordingSettingsPort {
         background: true,
         ..RecordingSettingsPort::default()
@@ -17750,20 +17827,45 @@ fn production_config_and_environment_writes_use_the_responsive_worker_path() {
     let _ = step_config(&mut environment, Key::Tab, &mut settings);
     assert!(matches!(
         step_config(&mut environment, Key::Enter, &mut settings),
-        ConfigStep::SaveEnvironment
+        ConfigStep::SaveSource
     ));
-    assert!(save_environment_responsive(
+    assert!(save_config_source_responsive(
         &mut term,
         &mut environment,
         &mut settings,
     ));
 
+    let mut setup =
+        Config::load_workspace_with_available_models(&mut settings, AvailableAgentModels::all());
+    for _ in 0..3 {
+        let _ = step_config(&mut setup, Key::Down, &mut settings);
+    }
+    let _ = step_config(&mut setup, Key::Enter, &mut settings);
+    let _ = step_config(
+        &mut setup,
+        Key::Paste("cargo fetch\ncargo test".to_owned()),
+        &mut settings,
+    );
+    let _ = step_config(&mut setup, Key::Tab, &mut settings);
+    assert!(matches!(
+        step_config(&mut setup, Key::Enter, &mut settings),
+        ConfigStep::SaveSource
+    ));
+    assert!(save_config_source_responsive(
+        &mut term,
+        &mut setup,
+        &mut settings,
+    ));
+
     assert_eq!(settings.saves, 1);
     assert_eq!(settings.environment_saves, 1);
+    assert_eq!(settings.setup_saves, 1);
+    assert_eq!(settings.setup_commands, ["cargo fetch", "cargo test"]);
     assert_eq!(environment.settings().env["A"], "1");
     let painted = term.frames.iter().flatten().cloned().collect::<String>();
     assert!(painted.contains("Saving settings…"));
     assert!(painted.contains("Saving environment…"));
+    assert!(painted.contains("Saving session setup…"));
 }
 
 #[test]
@@ -17776,6 +17878,11 @@ fn responsive_save_helpers_cover_empty_and_inline_environment_requests() {
     let mut term = ResponsiveLoadingTerminal::default();
     assert!(!save_config_responsive(&mut term, &mut clean, &mut background, None).unwrap());
     assert!(!save_environment_responsive(
+        &mut term,
+        &mut clean,
+        &mut background
+    ));
+    assert!(!save_setup_commands_responsive(
         &mut term,
         &mut clean,
         &mut background
@@ -17800,6 +17907,20 @@ fn responsive_save_helpers_cover_empty_and_inline_environment_requests() {
         &mut inline
     ));
     assert_eq!(inline.environment_saves, 1);
+
+    let mut setup =
+        Config::load_workspace_with_available_models(&mut inline, AvailableAgentModels::all());
+    for _ in 0..3 {
+        let _ = step_config(&mut setup, Key::Down, &mut inline);
+    }
+    let _ = step_config(&mut setup, Key::Enter, &mut inline);
+    let _ = step_config(&mut setup, Key::Paste("cargo test".to_owned()), &mut inline);
+    assert!(save_setup_commands_responsive(
+        &mut term,
+        &mut setup,
+        &mut inline,
+    ));
+    assert_eq!(inline.setup_commands, ["cargo test"]);
 }
 
 #[test]
@@ -17820,11 +17941,11 @@ fn background_environment_shortcut_reaches_both_config_surfaces() {
     };
     assert!(matches!(
         step_config(&mut config, save.clone(), &mut settings),
-        ConfigStep::SaveEnvironment
+        ConfigStep::SaveSource
     ));
     assert!(matches!(
         step_workspace_config(&mut config, save, &mut settings),
-        WorkspaceConfigStep::SaveEnvironment
+        WorkspaceConfigStep::SaveSource
     ));
 }
 
@@ -17854,6 +17975,42 @@ fn workspace_config_dispatches_background_environment_save() {
     .unwrap();
 
     assert_eq!(settings.environment_saves, 1);
+}
+
+#[test]
+fn workspace_config_dispatches_background_session_setup_save() {
+    let base = vec!["home".to_owned(); 28];
+    let mut settings = RecordingSettingsPort {
+        background: true,
+        ..RecordingSettingsPort::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Down,
+        Key::Down,
+        Key::Down,
+        Key::Enter,
+        Key::Paste("cargo fetch\ncargo test".to_owned()),
+        Key::Tab,
+        Key::Enter,
+        Key::Escape,
+    ]);
+
+    run_workspace_config(
+        &mut term,
+        &mut settings,
+        AvailableAgentModels::all(),
+        &[],
+        &base,
+    )
+    .unwrap();
+
+    assert_eq!(settings.setup_saves, 1);
+    assert_eq!(settings.setup_commands, ["cargo fetch", "cargo test"]);
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Session setup"))
+    );
 }
 
 #[test]
@@ -17916,9 +18073,10 @@ const CONFIG_SAVE_KEYS: [Key; 13] = [
 ];
 
 // Workspace Config starts on Agent and contains Agent → env → Base branch →
-// Workflow → Team → Issue → Memory → Save.
-const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 9] = [
+// Session setup → Workflow → Team → Issue → Memory → Save.
+const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 10] = [
     Key::Right,
+    Key::Down,
     Key::Down,
     Key::Down,
     Key::Down,
