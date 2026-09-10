@@ -1,14 +1,15 @@
-//! エージェント統合フックの内部コマンド置き場。Codex の `SessionStart` structured
-//! capture、Claude の `PreToolUse` / Stop など、agent harness が自動実行する入口を
+//! エージェント統合フックの内部コマンド置き場。Claude / Codex の `SessionStart`
+//! structured capture や `PreToolUse` / Stop など、agent harness が自動実行する入口を
 //! 人間向けコマンド（[`crate::cli::commands`]）から分離する。
 //!
-//! MCP tool と違い、Claude のフックはシェルコマンドしか呼べないので、この統合は CLI
-//! コマンドとして持つしかない。`--help` には出さない（`hide = true`）が、CLI コマンド
-//! ツリーの一部として同じ `Run` dispatch に載る。
+//! provider の command hook から呼び出せるよう、この統合は hidden CLI コマンドとして
+//! 持つ。`--help` には出さない（`hide = true`）が、CLI コマンドツリーの一部として同じ
+//! `Run` dispatch に載る。
 //!
-//! Codex capture は documented stdin JSON を private daemon request に変換する。Claude の
-//! `guard-workspace` は `PreToolUse` payload を検査し、worktree を出るツール呼び出しを deny する
-//! （判定は [`usagi_core::usecase::workspace_guard`]）。phase 報告はまだ枠だけで終了コード 0 を返す。
+//! lifecycle phase と `SessionStart` の current provider ID は documented stdin JSON から
+//! private daemon request へ変換する。Claude の `guard-workspace` は `PreToolUse` payload を
+//! 検査し、worktree を出るツール呼び出しを deny する（判定は
+//! [`usagi_core::usecase::workspace_guard`]）。
 
 pub mod agent_phase;
 pub mod claude_sandbox;

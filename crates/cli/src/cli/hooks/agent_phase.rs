@@ -4,8 +4,8 @@
 //! （例: `ended`）を引数に渡して呼ぶ。人手で叩くものではない（`--help` 非表示）。フックは
 //! 終了コードだけを見るため、標準出力には何も書かない。
 //!
-//! 報告元の runtime は daemon が発行して process environment に閉じ込めた credential だけで
-//! 束縛する（caller は runtime / session / path を名指しできない）。phase 引数は
+//! 報告元の runtime は daemon が hook process の OS peer lineage から exact live runtime を
+//! 解決して束縛する（caller は runtime / session / path を名指しできない）。phase 引数は
 //! [`usagi_core::domain::session_lifecycle::AgentPhase`] の closed vocabulary であり、hook の
 //! stdin JSON が名乗る `hook_event_name` が usagi の配線どおりその phase を意味することも
 //! 検証する。実 stdin と env の読み取りは合成ルートが束ね、この module は純粋な request
