@@ -21,12 +21,13 @@ use std::time::Duration;
 use serde_json::Value;
 use usagi_core::domain::agent::{
     AgentProfile, AgentProfileId, AgentResumeTarget, DurableLaunchSnapshot,
-    EnvironmentVariableName, LaunchMode, LaunchPlan, ProviderResumeReason,
+    EnvironmentVariableName, LaunchMode, LaunchPlan, ProviderResumeReason, ProviderSessionId,
 };
 use usagi_core::domain::id::{
     ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
     TerminalRef, WorkspaceId, WorktreeId,
 };
+use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_core::domain::terminal_launch::TerminalLaunchScope;
 use usagi_core::domain::terminal_visibility::{CompletedTerminalEntry, TerminalVisibilityState};
 use usagi_core::infrastructure::client::{AgentLaunchIntent, TerminalRequest};
@@ -316,6 +317,38 @@ fn finish_real_pty(
             Err(error) => panic!("real PTY produced no exit before the timeout: {error}"),
         }
     }
+}
+
+fn report_real_session_start(
+    runtime: &mut AgentRuntime,
+    store: &SharedMemoryStore,
+    terminal: &TerminalRef,
+    native_session_id: &str,
+) {
+    let process = store
+        .0
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .records
+        .iter()
+        .find(|record| &record.runtime.terminal == terminal)
+        .unwrap()
+        .process
+        .clone()
+        .unwrap();
+    let credential = runtime
+        .hook_credential(process.pid, process.pid, process.process_group)
+        .unwrap()
+        .to_owned();
+    runtime
+        .report_agent_phase_with_session(
+            &credential,
+            AgentPhase::Ready,
+            Some(ProviderSessionId::new(native_session_id).unwrap()),
+        )
+        .unwrap();
 }
 
 // ---- happy path: a real shell PTY streams output and commits an exit --------
@@ -787,7 +820,7 @@ impl ClaudeProvisioner for UnavailableBinaryProvisioner {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // One production fixture covers every legacy status over exact histories.
+#[allow(clippy::too_many_lines)] // One production fixture covers every resume status over exact histories.
 fn production_resume_status_distinguishes_exact_claude_histories() {
     let binaries = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink("/usr/bin/true", binaries.path().join("claude")).unwrap();
@@ -858,6 +891,11 @@ fn production_resume_status_distinguishes_exact_claude_histories() {
     let first = runtime
         .launch(&OperationId::new().to_string(), &history, &scope)
         .unwrap();
+    assert_eq!(
+        runtime.session_resume_status(session),
+        (false, ProviderResumeReason::LiveOrOwnershipUnknown)
+    );
+    report_real_session_start(&mut runtime, &store, &first.terminal, "first-session");
     finish_real_pty(&mut runtime, &observations, &first.terminal);
     assert_eq!(
         runtime.session_resume_status(session),
@@ -893,11 +931,13 @@ fn production_resume_status_distinguishes_exact_claude_histories() {
     assert_eq!(double_click.terminal, replacement.terminal);
     assert_eq!(double_click.resume_relation, replacement.resume_relation);
     assert_eq!(spawns.load(Ordering::SeqCst), 2);
+    report_real_session_start(&mut runtime, &store, &replacement.terminal, "first-session");
     finish_real_pty(&mut runtime, &observations, &replacement.terminal);
 
     let second = runtime
         .launch(&OperationId::new().to_string(), &history, &scope)
         .unwrap();
+    report_real_session_start(&mut runtime, &store, &second.terminal, "second-session");
     finish_real_pty(&mut runtime, &observations, &second.terminal);
     assert_eq!(
         runtime.session_resume_status(session),
@@ -907,6 +947,7 @@ fn production_resume_status_distinguishes_exact_claude_histories() {
     let live = runtime
         .launch(&OperationId::new().to_string(), &history, &scope)
         .unwrap();
+    report_real_session_start(&mut runtime, &store, &live.terminal, "live-session");
     assert_eq!(
         runtime.session_resume_status(session),
         (false, ProviderResumeReason::LiveOrOwnershipUnknown)
