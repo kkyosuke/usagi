@@ -28,7 +28,7 @@ use usagi_core::domain::id::{
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pr_inventory::{PrEntry, PrState};
 use usagi_core::domain::presentation_text::{
-    presentation_character_is_safe, presentation_text_is_safe,
+    presentation_character_is_safe, presentation_text_is_safe, sanitize_presentation_line,
 };
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{
@@ -3588,7 +3588,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 } else {
                     overlay.lines = lines
                         .iter()
-                        .map(|line| preview::sanitize_preview_line(line))
+                        .map(|line| sanitize_presentation_line(line))
                         .collect();
                     overlay.scroll = 0;
                     overlay.search.clear();

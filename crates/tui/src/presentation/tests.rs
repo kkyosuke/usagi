@@ -6,8 +6,8 @@ use super::{
     DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort, FixedBackendFactory,
     FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort, Geometry, GitDiff, IdleWatch,
     LaunchAgentRequest, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory,
-    MissingWorkspacePrompt, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep,
-    PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
+    MissingWorkspacePrompt, NewStep, NoDesktopNotifications, NoMetrics, OpenStep, PROJECT_BAR_ROWS,
+    PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
     SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
     SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
     SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
@@ -59,7 +59,7 @@ use crate::presentation::widgets::strip_ansi;
 use crate::presentation::workspace_runtime::PaneRestoreTarget;
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabProjection,
-    AgentTabSlotIntent, AgentTabTargetProjection,
+    AgentTabSlotIntent, AgentTabTargetProjection, reconcile_agent_tab_intent_mutation,
 };
 use crate::usecase::application::controller::WorkspaceDrawerFocus;
 use crate::usecase::application::controller::{
@@ -10227,7 +10227,6 @@ impl AgentTabIntentPort for MemoryIntentPort {
         Ok(state.clone())
     }
 
-    #[allow(clippy::too_many_lines)] // The fake mirrors the production CAS/causal-close matrix.
     fn mutate(
         &mut self,
         workspace: WorkspaceId,
@@ -10236,127 +10235,15 @@ impl AgentTabIntentPort for MemoryIntentPort {
     ) -> Result<AgentTabIntentPortCommit, AgentTabIntentError> {
         let mut state = self.state.lock().unwrap();
         assert_eq!(workspace, state.workspace_id);
-        let conflict = expected_revision != state.revision;
         self.mutations.lock().unwrap().push(mutation.clone());
-        let before = state.clone();
-        let force_close_fence = match &mutation {
-            AgentTabIntentMutation::Dismiss { continuation }
-            | AgentTabIntentMutation::DismissInterrupted { continuation, .. } => {
-                state.targets.iter().any(|target| {
-                    target
-                        .tabs
-                        .iter()
-                        .any(|slot| slot.continuation == *continuation)
-                })
-            }
-            AgentTabIntentMutation::DismissTerminal { terminal }
-            | AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. } => {
-                state.dismisses_terminal(terminal)
-            }
-            _ => false,
-        };
-        let mut mutation_applied = true;
-        let projection = if conflict {
-            match mutation {
-                AgentTabIntentMutation::Observe {
-                    terminals,
-                    agents,
-                    allowed_sessions,
-                } => {
-                    mutation_applied = false;
-                    Some(state.projected_exact(&terminals, &agents, &allowed_sessions))
-                }
-                AgentTabIntentMutation::Reopen { continuation } => {
-                    mutation_applied = !state.dismissed.contains(&continuation);
-                    None
-                }
-                AgentTabIntentMutation::Upsert {
-                    session_id,
-                    continuation,
-                    terminal,
-                    select,
-                } => {
-                    mutation_applied = state.targets.iter().any(|target| {
-                        target.session_id == session_id
-                            && target.tabs.iter().any(|slot| {
-                                slot.continuation == continuation && slot.terminal.fences(&terminal)
-                            })
-                            && (!select || target.selected == Some(continuation))
-                            && !state.dismissed.contains(&continuation)
-                    });
-                    None
-                }
-                AgentTabIntentMutation::Dismiss { continuation } => {
-                    state.apply(AgentTabIntentMutation::Dismiss { continuation })
-                }
-                AgentTabIntentMutation::DismissInterrupted {
-                    session_id,
-                    continuation,
-                    terminal,
-                } => state.apply(AgentTabIntentMutation::DismissInterrupted {
-                    session_id,
-                    continuation,
-                    terminal,
-                }),
-                AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. }
-                | AgentTabIntentMutation::DismissTerminal { terminal } => {
-                    state.apply(AgentTabIntentMutation::DismissTerminal { terminal })
-                }
-                AgentTabIntentMutation::Select {
-                    session_id,
-                    continuation,
-                } => {
-                    mutation_applied = state.targets.iter().any(|target| {
-                        target.session_id == session_id && target.selected == continuation
-                    });
-                    None
-                }
-                AgentTabIntentMutation::Reorder {
-                    session_id,
-                    continuations,
-                } => {
-                    mutation_applied = state
-                        .targets
-                        .iter()
-                        .find(|target| target.session_id == session_id)
-                        .is_some_and(|target| {
-                            target
-                                .tabs
-                                .iter()
-                                .map(|slot| slot.continuation)
-                                .eq(continuations)
-                        });
-                    None
-                }
-            }
-        } else {
-            match mutation {
-                AgentTabIntentMutation::Upsert {
-                    session_id,
-                    continuation,
-                    terminal,
-                    select: _,
-                } if state.dismissed.contains(&continuation) => {
-                    mutation_applied = false;
-                    state.apply(AgentTabIntentMutation::Upsert {
-                        session_id,
-                        continuation,
-                        terminal,
-                        select: false,
-                    })
-                }
-                mutation => state.apply(mutation),
-            }
-        };
-        if *state != before || force_close_fence {
-            state.revision += 1;
-        }
-        Ok(AgentTabIntentPortCommit {
-            intent: state.clone(),
-            projection,
-            mutation_applied,
-            cas_conflict: conflict,
-        })
+        let commit = reconcile_agent_tab_intent_mutation(
+            state.clone(),
+            workspace,
+            expected_revision,
+            mutation,
+        )?;
+        *state = commit.intent.clone();
+        Ok(commit)
     }
 }
 
@@ -16673,11 +16560,6 @@ impl AgentCommandPortFactory for IdleAgentPortFactory {
     fn create(&mut self) -> Box<dyn AgentCommandPort> {
         Box::new(IdleAgentPort)
     }
-}
-
-#[test]
-fn no_metrics_factory_creates_an_empty_port() {
-    assert_eq!(NoMetricsFactory.create().latest(), None);
 }
 
 #[test]

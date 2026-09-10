@@ -497,20 +497,6 @@ fn update_preview_finder(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
     Vec::new()
 }
 
-pub(super) fn sanitize_preview_line(line: &str) -> String {
-    line.chars()
-        .map(|character| {
-            if character == '\t' {
-                ' '
-            } else if presentation_character_is_safe(character) {
-                character
-            } else {
-                '\u{fffd}'
-            }
-        })
-        .collect()
-}
-
 fn pop_last_grapheme(value: &mut String) {
     if let Some((start, _)) = value.grapheme_indices(true).next_back() {
         value.truncate(start);
