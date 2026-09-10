@@ -1,13 +1,13 @@
 ---
 number: 735
 title: "fix(daemon): PTY child へ実 effective UID 由来の USER を注入する"
-status: in-progress
+status: done
 priority: high
 labels: [v2, daemon, env, agent, terminal]
 dependson: []
 related: []
 created_at: 2026-09-11T00:00:00+00:00
-updated_at: 2026-09-11T00:00:00+00:00
+updated_at: 2026-09-11T01:00:00+00:00
 ---
 
 ## 問題
@@ -41,10 +41,10 @@ macOS の Claude Code はログイン credential を Keychain へ保存すると
 
 ## 受入条件
 
-- [ ] public terminal environment に `USER` が含まれ、値は daemon の実 effective UID から解決した OS ユーザー名である。
-- [ ] 解決は daemon process ごとに一度で、launch ごとに subprocess を起動しない。
-- [ ] 解決値は継承した `USER` より優先し、解決失敗時は妥当な継承値へ fallback し、双方無効なら変数を落とす。
-- [ ] root scope・全 managed session、generic terminal と Agent の共通 PTY 境界の双方へ届く。
-- [ ] 親環境の無差別コピーを行わず、secret（`GH_TOKEN` / `OP_SERVICE_ACCOUNT_TOKEN` など）は child へ渡らない。
-- [ ] unit test と実 PTY の integration test があり、coverage 100% を維持する。
-- [ ] `document/05-daemon.md` の terminal launch environment と `document/09-env.md` を更新する。
+- [x] public terminal environment に `USER` が含まれ、値は daemon の実 effective UID から解決した OS ユーザー名である。
+- [x] 解決は daemon process ごとに一度で、launch ごとに subprocess を起動しない。
+- [x] 解決値は継承した `USER` より優先し、解決失敗時は妥当な継承値へ fallback し、双方無効なら変数を落とす。
+- [x] root scope・全 managed session、generic terminal と Agent の共通 PTY 境界の双方へ届く。
+- [x] 親環境の無差別コピーを行わず、secret（`GH_TOKEN` / `OP_SERVICE_ACCOUNT_TOKEN` など）は child へ渡らない。
+- [x] unit test と実 PTY の integration test があり、coverage 100% を維持する。
+- [x] `document/05-daemon.md` の terminal launch environment と `document/09-env.md` を更新する。
