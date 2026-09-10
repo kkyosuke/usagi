@@ -18185,20 +18185,32 @@ instructions = "{instructions}"
 
     /// The public environment both PTY owners start from names the account this
     /// daemon runs as, because a keychain client in the child is indexed by it
-    /// (#735). The value comes from the effective UID, and only falls back to an
-    /// inherited name when the platform cannot answer.
+    /// (#735).
+    ///
+    /// The expectation is the platform adapter's own answer, not this
+    /// composition re-run: what is under test here is that the composition
+    /// actually wires the resolved name in rather than leaving the inherited one
+    /// to win. That the adapter's answer is the real account is held separately
+    /// by `usagi-daemon`'s `terminal_user_environment` integration test, which
+    /// compares it against the OS.
     #[test]
     fn the_public_terminal_environment_names_the_user_the_daemon_runs_as() {
         let environment = terminal_environment();
-        // One answer per process: no launch re-asks the passwd database, and no
-        // launch shells out to ask.
-        assert_eq!(resolved_os_user(), resolved_os_user());
-        let expected = resolved_os_user().map(str::to_owned).or_else(|| {
-            std::env::var("USER")
-                .ok()
-                .filter(|value| !value.is_empty() && !value.contains('\0'))
-        });
-        assert_eq!(environment.get("USER").cloned(), expected);
+        let resolved = usagi_daemon::infrastructure::os_user::effective_user_name();
+        match resolved.as_ref() {
+            Some(user) => assert_eq!(environment.get("USER"), Some(user)),
+            // Only a platform that cannot answer reaches the inherited value,
+            // and an unusable one leaves the variable absent.
+            None => assert_eq!(
+                environment.get("USER").cloned(),
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.is_empty() && !value.contains('\0'))
+            ),
+        }
+        // The memoized accessor answers with the same name the adapter gives,
+        // which is what every launch after the first one reads.
+        assert_eq!(resolved_os_user(), resolved.as_deref());
         assert!(!environment.contains_key("GH_TOKEN"));
         assert!(!environment.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
     }

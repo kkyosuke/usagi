@@ -1,6 +1,6 @@
 ---
 number: 735
-title: "fix(daemon): PTY child へ実 effective UID 由来の USER を注入する"
+title: "fix(daemon): PTY child へ effective UID 由来の USER を注入する"
 status: done
 priority: high
 labels: [v2, daemon, env, agent, terminal]
@@ -31,7 +31,7 @@ macOS の Claude Code はログイン credential を Keychain へ保存すると
 
 - 親 terminal の全環境コピーは**採用しない**。`GH_TOKEN` などの secret が Agent / terminal child へ漏れる。
   既存の明示的 allowlist と secret 分離をそのまま維持する。
-- 値の出どころは継承した `USER` ではなく、**daemon 自身の実 effective UID** とする。daemon 起動時に一度だけ
+- 値の出どころは継承した `USER` ではなく、**daemon 自身の effective UID（`geteuid`）** とする。daemon 起動時に一度だけ
   `getpwuid_r` で OS ユーザー名へ解決し、launch ごとに `id` 等の subprocess を起動しない。
 - 解決値を public terminal environment に加える。generic terminal と Claude / Codex / sakana Agent は同じ
   PTY spawn 境界を通るため、root scope と全 managed session の両方へ同じ経路で届く。
@@ -41,7 +41,7 @@ macOS の Claude Code はログイン credential を Keychain へ保存すると
 
 ## 受入条件
 
-- [x] public terminal environment に `USER` が含まれ、値は daemon の実 effective UID から解決した OS ユーザー名である。
+- [x] public terminal environment に `USER` が含まれ、値は daemon の effective UID から解決した OS ユーザー名である。
 - [x] 解決は daemon process ごとに一度で、launch ごとに subprocess を起動しない。
 - [x] 解決値は継承した `USER` より優先し、解決失敗時は妥当な継承値へ fallback し、双方無効なら変数を落とす。
 - [x] root scope・全 managed session、generic terminal と Agent の共通 PTY 境界の双方へ届く。

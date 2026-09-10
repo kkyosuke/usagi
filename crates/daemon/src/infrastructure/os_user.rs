@@ -8,6 +8,12 @@
 //!
 //! Resolution is a single library call, not a subprocess: the daemon asks once
 //! at startup and every PTY launch afterwards reuses that answer.
+//!
+//! The two decisions the lookup makes — how far to grow the scratch buffer, and
+//! what one `getpwuid_r` return means — are pure functions here
+//! ([`grown`], [`Attempt::of`]) with their own tests. Only the syscall itself is
+//! excluded from coverage, so a wrong retry bound or an inverted null check
+//! cannot hide behind the platform call.
 
 use std::ffi::CStr;
 
@@ -20,6 +26,37 @@ const INITIAL_BUFFER_BYTES: usize = 1024;
 /// use, and an unbounded retry loop would be a memory amplifier driven by the
 /// platform's directory service.
 const MAXIMUM_BUFFER_BYTES: usize = 64 * 1024;
+
+/// What one `getpwuid_r` return means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Attempt {
+    /// The entry was written and its name can be read.
+    Resolved,
+    /// The scratch buffer was too small; retry with a larger one.
+    Grow,
+    /// No entry for this UID, or a platform that cannot answer.
+    Unavailable,
+}
+
+impl Attempt {
+    /// Classifies a completed call. Both glibc and Darwin return the errno as
+    /// the result value (never `-1`), and report "no such user" as success with
+    /// a null result pointer, so a zero return alone does not mean resolved.
+    fn of(code: libc::c_int, found: bool, named: bool) -> Self {
+        if code == libc::ERANGE {
+            Self::Grow
+        } else if code == 0 && found && named {
+            Self::Resolved
+        } else {
+            Self::Unavailable
+        }
+    }
+}
+
+/// The next scratch capacity to try, or `None` once the bound is reached.
+fn grown(capacity: usize) -> Option<usize> {
+    (capacity < MAXIMUM_BUFFER_BYTES).then(|| capacity.saturating_mul(2))
+}
 
 /// The OS user name for this process's effective UID, or `None` when the
 /// platform cannot answer.
@@ -50,16 +87,46 @@ pub fn effective_user_name() -> Option<String> {
                 &raw mut found,
             )
         };
-        if code == libc::ERANGE && capacity < MAXIMUM_BUFFER_BYTES {
-            capacity *= 2;
-            continue;
+        match Attempt::of(code, !found.is_null(), !entry.pw_name.is_null()) {
+            Attempt::Grow => capacity = grown(capacity)?,
+            Attempt::Unavailable => return None,
+            // SAFETY: a resolved entry's `pw_name` is a NUL-terminated string
+            // inside `buffer`, which outlives this borrow.
+            Attempt::Resolved => {
+                let name = unsafe { CStr::from_ptr(entry.pw_name) };
+                return name.to_str().ok().map(str::to_owned);
+            }
         }
-        if code != 0 || found.is_null() || entry.pw_name.is_null() {
-            return None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Attempt, INITIAL_BUFFER_BYTES, MAXIMUM_BUFFER_BYTES, grown};
+
+    #[test]
+    fn a_too_small_buffer_grows_up_to_the_bound_and_then_gives_up() {
+        let mut capacity = INITIAL_BUFFER_BYTES;
+        let mut attempts = 0;
+        while let Some(larger) = grown(capacity) {
+            assert!(larger > capacity, "a retry must enlarge the buffer");
+            capacity = larger;
+            attempts += 1;
+            assert!(attempts < 64, "the retry loop must be bounded");
         }
-        // SAFETY: a found entry's `pw_name` is a NUL-terminated string inside
-        // `buffer`, which outlives this borrow.
-        let name = unsafe { CStr::from_ptr(entry.pw_name) };
-        return name.to_str().ok().map(str::to_owned);
+        assert!(capacity >= MAXIMUM_BUFFER_BYTES);
+        assert_eq!(grown(capacity), None);
+    }
+
+    #[test]
+    fn only_a_written_and_named_entry_counts_as_resolved() {
+        assert_eq!(Attempt::of(0, true, true), Attempt::Resolved);
+        // A UID with no passwd entry: success, but nothing was written.
+        assert_eq!(Attempt::of(0, false, true), Attempt::Unavailable);
+        assert_eq!(Attempt::of(0, true, false), Attempt::Unavailable);
+        assert_eq!(Attempt::of(libc::ERANGE, false, false), Attempt::Grow);
+        for code in [libc::ENOENT, libc::EPERM, libc::EIO] {
+            assert_eq!(Attempt::of(code, true, true), Attempt::Unavailable);
+        }
     }
 }

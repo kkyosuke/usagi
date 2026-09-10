@@ -1332,7 +1332,7 @@ path・argv・environment・root worktree identity を指定することはで�
 | `TERM_PROGRAM` / `TERM_PROGRAM_VERSION` | macOS Terminal などの terminal 固有設定を引き継ぐ |
 | `TERM_SESSION_ID` | child では空にして、Terminal.app 固有の session 保存・復元を無効化する |
 | `ZDOTDIR` / `XDG_CONFIG_HOME` | shell の user configuration の位置を引き継ぐ |
-| `USER` | 親の値を引き継がず、daemon 自身の実 effective UID から解決した OS ユーザー名を渡す |
+| `USER` | 親の値を引き継がず、daemon 自身の effective UID（`geteuid`）から解決した OS ユーザー名を渡す |
 | その他・secret | profile resolution は収集・保存・転送せず、PTY child は daemon の ambient environment から継承しない |
 
 ### `USER` の解決
@@ -1342,13 +1342,13 @@ path・argv・environment・root worktree identity を指定することはで�
 child（Claude Code など）は保存済み credential を `$USER` で索引するため、実際に動作している account の名前で
 なければ端末で済ませた認証を再利用できず、別 entry を作る。
 
-したがって daemon は**起動時に一度だけ**、自分の実 effective UID を passwd database（`getpwuid_r`）で
+したがって daemon は**起動時に一度だけ**、自分の effective UID（`geteuid`）を passwd database（`getpwuid_r`）で
 OS ユーザー名へ解決し、その値を public terminal environment に入れる。解決結果は process 内で 1 回だけ求めるため、
 launch ごとに passwd database を引き直さず、`id` のような subprocess も起動しない。
 
 | 状態 | 渡す値 |
 |---|---|
-| 実 effective UID から解決できた | 解決した OS ユーザー名（継承値より優先する） |
+| effective UID から解決できた | 解決した OS ユーザー名（継承値より優先する） |
 | 解決できず、継承値が使える（非空・NUL なし） | 継承値 |
 | どちらも使えない | `USER` を渡さない（他の変数と pane の起動は妨げない） |
 

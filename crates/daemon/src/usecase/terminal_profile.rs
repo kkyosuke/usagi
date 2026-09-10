@@ -299,6 +299,19 @@ mod tests {
         environment
     }
 
+    /// `USER` has to stay in the array as well as in the composition:
+    /// [`LoginShellProfile::preserved_environment`] filters the generic
+    /// terminal's environment by the array a second time, so dropping the name
+    /// there would strip it from generic terminals while Agent panes kept it —
+    /// half of the very defect this exists to prevent.
+    #[test]
+    fn the_resolved_name_stays_in_the_shared_allowlist() {
+        assert!(
+            super::TERMINAL_ENVIRONMENT_VARIABLES.contains(&super::USER_ENVIRONMENT_VARIABLE),
+            "both the composition and the login-shell profile filter by this array"
+        );
+    }
+
     #[test]
     fn the_resolved_user_wins_over_an_inherited_one_and_no_secret_is_copied() {
         let inherited = daemon_environment(Some("inherited-user"));
