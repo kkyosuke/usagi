@@ -312,7 +312,20 @@ fn with_user_environment(
 }
 
 fn terminal_environment() -> BTreeMap<String, String> {
-    public_terminal_environment(|name| std::env::var(name).ok(), resolved_os_user())
+    terminal_environment_from(|name| std::env::var(name).ok())
+}
+
+/// The same composition against an injected reader of the daemon's own
+/// environment.
+///
+/// Splitting it out is what makes the `USER` precedence observable: on a
+/// developer machine the inherited name usually equals the resolved one, so a
+/// test reading the real environment cannot tell "the resolver won" from "the
+/// inherited value happened to match".
+fn terminal_environment_from(
+    inherited: impl Fn(&str) -> Option<String>,
+) -> BTreeMap<String, String> {
+    public_terminal_environment(inherited, resolved_os_user())
 }
 
 /// The OS user name this daemon runs as, resolved from its effective UID once
@@ -18214,6 +18227,15 @@ instructions = "{instructions}"
         // The memoized accessor answers with the same name the adapter gives,
         // which is what every launch after the first one reads.
         assert_eq!(resolved_os_user(), resolved.as_deref());
+
+        // Against an inherited name that is deliberately not this account, the
+        // precedence is observable: dropping the resolved name from the
+        // composition would export the sentinel instead.
+        let sentinel = terminal_environment_from(|_| Some("inherited-sentinel".to_owned()));
+        assert_eq!(
+            sentinel.get("USER").map(String::as_str),
+            resolved_os_user().or(Some("inherited-sentinel"))
+        );
         assert!(!environment.contains_key("GH_TOKEN"));
         assert!(!environment.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
     }

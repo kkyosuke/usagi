@@ -58,6 +58,14 @@ fn grown(capacity: usize) -> Option<usize> {
     (capacity < MAXIMUM_BUFFER_BYTES).then(|| capacity.saturating_mul(2))
 }
 
+/// The owned name of a resolved entry, or `None` for one this daemon cannot
+/// carry in an environment value. A passwd name is bytes to the platform, but an
+/// environment value here is a `String`, so a non-UTF-8 name is treated as no
+/// answer and falls back like any other unresolvable one.
+fn owned_name(name: &CStr) -> Option<String> {
+    name.to_str().ok().map(str::to_owned)
+}
+
 /// The OS user name for this process's effective UID, or `None` when the
 /// platform cannot answer.
 ///
@@ -87,22 +95,35 @@ pub fn effective_user_name() -> Option<String> {
                 &raw mut found,
             )
         };
+        // Both pointers are read before the outcome is known, which POSIX leaves
+        // unspecified for a failed call. That is only a null comparison, never a
+        // dereference, and `entry` is zeroed before every call, so the bytes are
+        // initialized whatever the platform did or did not write. Do not turn
+        // either read into a dereference.
         match Attempt::of(code, !found.is_null(), !entry.pw_name.is_null()) {
             Attempt::Grow => capacity = grown(capacity)?,
             Attempt::Unavailable => return None,
             // SAFETY: a resolved entry's `pw_name` is a NUL-terminated string
             // inside `buffer`, which outlives this borrow.
-            Attempt::Resolved => {
-                let name = unsafe { CStr::from_ptr(entry.pw_name) };
-                return name.to_str().ok().map(str::to_owned);
-            }
+            Attempt::Resolved => return owned_name(unsafe { CStr::from_ptr(entry.pw_name) }),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Attempt, INITIAL_BUFFER_BYTES, MAXIMUM_BUFFER_BYTES, grown};
+    use super::{Attempt, INITIAL_BUFFER_BYTES, MAXIMUM_BUFFER_BYTES, grown, owned_name};
+    use std::ffi::CString;
+
+    #[test]
+    fn a_name_the_environment_cannot_carry_is_no_answer() {
+        assert_eq!(
+            owned_name(&CString::new("kyosuke").unwrap()).as_deref(),
+            Some("kyosuke")
+        );
+        // A passwd name is bytes to the platform; this one is not UTF-8.
+        assert_eq!(owned_name(&CString::new([0xff, 0xfe]).unwrap()), None);
+    }
 
     #[test]
     fn a_too_small_buffer_grows_up_to_the_bound_and_then_gives_up() {
