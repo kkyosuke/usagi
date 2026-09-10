@@ -761,6 +761,27 @@ impl AgentTabIntentError {
     }
 }
 
+/// Failures produced by the IO-free mutation policy itself.
+///
+/// Store-only failures such as a future schema or a lock conflict cannot be
+/// constructed here, so adapters do not need unreachable match arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTabIntentMutationError {
+    /// The accepted causal write could not advance its revision.
+    Unavailable,
+    /// The proposed mutation or revision could not be trusted.
+    InvalidMutation,
+}
+
+impl From<AgentTabIntentMutationError> for AgentTabIntentError {
+    fn from(error: AgentTabIntentMutationError) -> Self {
+        match error {
+            AgentTabIntentMutationError::Unavailable => Self::Unavailable,
+            AgentTabIntentMutationError::InvalidMutation => Self::InvalidMutation,
+        }
+    }
+}
+
 /// Reconcile one mutation against the latest durable value under a caller-held
 /// store lock.
 ///
@@ -770,9 +791,9 @@ impl AgentTabIntentError {
 ///
 /// # Errors
 ///
-/// Returns [`AgentTabIntentError::InvalidMutation`] when the expected revision
+/// Returns [`AgentTabIntentMutationError::InvalidMutation`] when the expected revision
 /// is ahead of durable state or the resulting state fails validation. Revision
-/// exhaustion is reported as [`AgentTabIntentError::Unavailable`] because the
+/// exhaustion is reported as [`AgentTabIntentMutationError::Unavailable`] because the
 /// accepted causal write cannot be published.
 #[allow(clippy::too_many_lines)]
 pub fn reconcile_agent_tab_intent_mutation(
@@ -780,10 +801,10 @@ pub fn reconcile_agent_tab_intent_mutation(
     expected_workspace: WorkspaceId,
     expected_revision: u64,
     mutation: AgentTabIntentMutation,
-) -> Result<AgentTabIntentPortCommit, AgentTabIntentError> {
+) -> Result<AgentTabIntentPortCommit, AgentTabIntentMutationError> {
     let cas_conflict = current.revision != expected_revision;
     if expected_revision > current.revision {
-        return Err(AgentTabIntentError::InvalidMutation);
+        return Err(AgentTabIntentMutationError::InvalidMutation);
     }
     let before = current.clone();
     // An accepted close is a causal write even when this key is already
@@ -922,10 +943,10 @@ pub fn reconcile_agent_tab_intent_mutation(
         current.revision = current
             .revision
             .checked_add(1)
-            .ok_or(AgentTabIntentError::Unavailable)?;
+            .ok_or(AgentTabIntentMutationError::Unavailable)?;
         current
             .validate(expected_workspace)
-            .map_err(|_| AgentTabIntentError::InvalidMutation)?;
+            .map_err(|_| AgentTabIntentMutationError::InvalidMutation)?;
     }
     Ok(AgentTabIntentPortCommit {
         intent: current,
@@ -1771,6 +1792,14 @@ mod tests {
             assert!(!error.safe_message().is_empty());
             assert!(!error.safe_message().contains(&workspace_text));
         }
+        assert_eq!(
+            AgentTabIntentError::from(AgentTabIntentMutationError::Unavailable),
+            AgentTabIntentError::Unavailable
+        );
+        assert_eq!(
+            AgentTabIntentError::from(AgentTabIntentMutationError::InvalidMutation),
+            AgentTabIntentError::InvalidMutation
+        );
     }
 
     #[test]

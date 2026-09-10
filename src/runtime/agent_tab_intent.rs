@@ -9,7 +9,8 @@ use fs2::FileExt;
 use usagi_core::domain::id::WorkspaceId;
 use usagi_tui::usecase::application::agent_tab_intent::{
     AGENT_TAB_INTENT_SCHEMA, AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation,
-    AgentTabIntentPort, AgentTabIntentPortCommit, reconcile_agent_tab_intent_mutation,
+    AgentTabIntentMutationError, AgentTabIntentPort, AgentTabIntentPortCommit,
+    reconcile_agent_tab_intent_mutation,
 };
 
 static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -205,19 +206,13 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                 mutation,
             )
             .map_err(|error| match error {
-                AgentTabIntentError::Unavailable => {
+                AgentTabIntentMutationError::Unavailable => {
                     io::Error::other("Agent tab intent revision exhausted")
                 }
-                AgentTabIntentError::ReadOnlySchema => io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "future Agent tab intent schema is read-only",
+                AgentTabIntentMutationError::InvalidMutation => io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid Agent tab intent mutation",
                 ),
-                AgentTabIntentError::ConcurrentChange | AgentTabIntentError::InvalidMutation => {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid Agent tab intent mutation",
-                    )
-                }
             })?;
             if commit.intent.revision != revision {
                 Self::write_unlocked(path, &commit.intent)?;
