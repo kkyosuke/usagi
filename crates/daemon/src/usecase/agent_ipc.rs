@@ -66,7 +66,7 @@ use usagi_core::domain::terminal_visibility::VisibilityOutcome;
 
 use super::{
     orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
-    runtime::{OutputJournal, PtySpawner, RuntimeCoordinator, RuntimeError},
+    runtime::{OutputJournal, ProviderResumeWrite, PtySpawner, RuntimeCoordinator, RuntimeError},
     terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
     terminal_owner::{
         TerminalOwner as TerminalOwnerPort, TerminalRequestContext, TerminalResponse,
@@ -2373,7 +2373,12 @@ impl AgentRuntime {
             last_known_phase: Some(ProviderResumePhase::Running),
         };
         self.coordinator
-            .record_provider_resume(runtime, reference, &mut *self.store)
+            .write_provider_resume(
+                runtime,
+                reference,
+                ProviderResumeWrite::Attach,
+                &mut *self.store,
+            )
             .map_err(map_runtime_error)
     }
 
@@ -2408,7 +2413,12 @@ impl AgentRuntime {
             last_known_phase: Some(ProviderResumePhase::Starting),
         };
         self.coordinator
-            .replace_provider_resume(runtime, reference, &mut *self.store)
+            .write_provider_resume(
+                runtime,
+                reference,
+                ProviderResumeWrite::Replace,
+                &mut *self.store,
+            )
             .map_err(map_runtime_error)?;
         Ok(true)
     }
@@ -5217,7 +5227,12 @@ mod tests {
         );
         agent
             .coordinator
-            .record_provider_resume(&runtime, resume, &mut *agent.store)
+            .write_provider_resume(
+                &runtime,
+                resume,
+                ProviderResumeWrite::Attach,
+                &mut *agent.store,
+            )
             .unwrap();
 
         assert_eq!(agent.sleep_session(session), Ok(1));
