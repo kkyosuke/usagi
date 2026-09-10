@@ -477,6 +477,29 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
 }
 
 #[test]
+fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_module() {
+    let root = workspace_root();
+    let composition = fs::read_to_string(root.join("crates/tui/src/presentation/mod.rs"))
+        .expect("TUI presentation source is readable");
+    let tests = fs::read_to_string(root.join("crates/tui/src/presentation/tests.rs"))
+        .expect("TUI presentation tests are readable");
+    let observation =
+        fs::read_to_string(root.join("crates/tui/src/usecase/application/observation_lane.rs"))
+            .expect("TUI observation policy is readable");
+
+    assert!(composition.contains("mod tests;"));
+    assert!(!composition.contains("mod tests {"));
+    assert!(tests.contains("#![coverage(off)]"));
+    assert!(observation.contains("struct ObservationLane"));
+    assert!(!composition.contains("struct GardenObservation {"));
+    assert!(!composition.contains("struct WorkRunObservation {"));
+    assert!(
+        composition.lines().count() <= 11_000,
+        "TUI presentation composition grew beyond its reviewable boundary"
+    );
+}
+
+#[test]
 fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_module() {
     let root = workspace_root();
     let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))

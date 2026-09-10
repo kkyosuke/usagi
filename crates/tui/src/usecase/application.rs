@@ -42,6 +42,8 @@ pub mod environment_source;
 pub mod interrupted_tab;
 /// Daemon metrics / Git observation ports and application-owned polling flow.
 pub mod metrics;
+/// Single-flight cadence policy shared by background observation lanes.
+pub mod observation_lane;
 /// Closeup の terminal / Agent tab と placeholder を扱う純粋 reducer。
 pub mod pane;
 /// daemon terminal inventory/stream と pane reducer を結合する client-side state machine。
