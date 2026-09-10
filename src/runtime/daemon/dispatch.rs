@@ -3315,43 +3315,6 @@ pub(super) fn clean_orphan_session_resources(
     }))
 }
 
-#[derive(Deserialize)]
-struct SessionListBaseItem {
-    #[serde(flatten)]
-    session: usagi_core::domain::session_lifecycle::ManagedSession,
-    #[serde(default)]
-    role_summary: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SessionListBaseSnapshot {
-    workspace_id: WorkspaceId,
-    root_worktree_id: usagi_core::domain::id::WorktreeId,
-    revision: u64,
-    sessions: Vec<SessionListBaseItem>,
-}
-
-#[derive(Deserialize)]
-struct SessionStatusBaseItem {
-    name: String,
-    session_id: SessionId,
-    #[serde(default)]
-    role_id: Option<usagi_core::domain::role::RoleId>,
-    #[serde(default)]
-    role_summary: Option<String>,
-    lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle,
-    #[serde(default)]
-    parent_session_id: Option<SessionId>,
-    worktrees: Vec<usagi_core::infrastructure::session_snapshot::SessionWorktreeStatus>,
-}
-
-#[derive(Deserialize)]
-struct SessionStatusBaseSnapshot {
-    workspace_id: WorkspaceId,
-    revision: u64,
-    sessions: Vec<SessionStatusBaseItem>,
-}
-
 fn session_organization(
     id: SessionId,
     names: &BTreeMap<SessionId, String>,
@@ -3525,11 +3488,9 @@ pub(super) fn dispatch_session_action(
             };
             status.body = match action {
                 SessionAction::List | SessionAction::Overview => {
-                    use usagi_core::infrastructure::session_snapshot::{
-                        SessionListItem, SessionListSnapshot,
-                    };
+                    use usagi_core::infrastructure::session_snapshot::SessionListSnapshot;
 
-                    let snapshot = serde_json::from_value::<SessionListBaseSnapshot>(status.body)
+                    let snapshot = serde_json::from_value::<SessionListSnapshot>(status.body)
                         .map_err(|_| SessionRuntimeError::Storage)?;
                     let names = snapshot
                         .sessions
@@ -3549,14 +3510,13 @@ pub(super) fn dispatch_session_action(
                                 .as_ref()
                                 .is_none_or(|visible| visible.contains(&item.session.session_id))
                         })
-                        .map(|item| SessionListItem {
-                            runtime: Some(runtime_observation(
+                        .map(|mut item| {
+                            item.runtime = Some(runtime_observation(
                                 item.session.session_id,
                                 &names,
                                 &parents,
-                            )),
-                            session: item.session,
-                            role_summary: item.role_summary,
+                            ));
+                            item
                         })
                         .collect();
                     serde_json::to_value(SessionListSnapshot {
@@ -3568,11 +3528,9 @@ pub(super) fn dispatch_session_action(
                     .map_err(|_| SessionRuntimeError::Storage)?
                 }
                 SessionAction::Status => {
-                    use usagi_core::infrastructure::session_snapshot::{
-                        SessionStatusItem, SessionStatusSnapshot,
-                    };
+                    use usagi_core::infrastructure::session_snapshot::SessionStatusSnapshot;
 
-                    let snapshot = serde_json::from_value::<SessionStatusBaseSnapshot>(status.body)
+                    let snapshot = serde_json::from_value::<SessionStatusSnapshot>(status.body)
                         .map_err(|_| SessionRuntimeError::Storage)?;
                     let names = snapshot
                         .sessions
@@ -3592,15 +3550,9 @@ pub(super) fn dispatch_session_action(
                                 .as_ref()
                                 .is_none_or(|visible| visible.contains(&item.session_id))
                         })
-                        .map(|item| SessionStatusItem {
-                            runtime: runtime_observation(item.session_id, &names, &parents),
-                            name: item.name,
-                            session_id: item.session_id,
-                            role_id: item.role_id,
-                            role_summary: item.role_summary,
-                            lifecycle: item.lifecycle,
-                            parent_session_id: item.parent_session_id,
-                            worktrees: item.worktrees,
+                        .map(|mut item| {
+                            item.runtime = runtime_observation(item.session_id, &names, &parents);
+                            item
                         })
                         .collect();
                     serde_json::to_value(SessionStatusSnapshot {

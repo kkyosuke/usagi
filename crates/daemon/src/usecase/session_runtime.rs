@@ -11,14 +11,14 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use serde_json::{Value, json};
-use usagi_core::domain::agent::CallerRef;
+use usagi_core::domain::agent::{CallerRef, ProviderResumeReason};
 use usagi_core::domain::id::{
     AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
-    DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal, OperationStatus,
-    WorkspaceLifecycleState, validate_session_name,
+    AgentPhase, DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal,
+    OperationStatus, WorkspaceLifecycleState, validate_session_name,
 };
 use usagi_core::infrastructure::client::SessionAction;
 use usagi_core::infrastructure::git::{GitRunner, delete_branch};
@@ -26,6 +26,10 @@ use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_dir};
 use usagi_core::infrastructure::persistence::json_file;
+use usagi_core::infrastructure::session_snapshot::{
+    SessionListItem, SessionListSnapshot, SessionRuntimeObservation, SessionStatusItem,
+    SessionStatusSnapshot, SessionWorktreeStatus,
+};
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
@@ -968,28 +972,40 @@ impl SessionRuntime {
                 } else {
                     "local"
                 };
-                Ok(json!({
-                    "name": session.name,
-                    "session_id": session.session_id,
-                    "role_id": session.role_id,
-                    "role_summary": session.role_id.as_ref().and_then(|id| catalog.as_ref()?.roles.get(id).map(|role| role.summary.clone())),
-                    "parent_session_id": session.parent_session_id,
-                    "lifecycle": session.lifecycle,
-                    "agent_phase": "none",
-                    "worktrees": [{
-                        "path": root,
-                        "branch": branch.stdout.trim(),
-                        "status": status,
-                        "dirty": dirty,
-                        "merged": merged,
+                Ok(SessionStatusItem {
+                    name: session.name.clone(),
+                    session_id: session.session_id,
+                    role_id: session.role_id.clone(),
+                    role_summary: session.role_id.as_ref().and_then(|id| {
+                        catalog
+                            .as_ref()?
+                            .roles
+                            .get(id)
+                            .map(|role| role.summary.clone())
+                    }),
+                    lifecycle: session.lifecycle,
+                    parent_session_id: session.parent_session_id,
+                    worktrees: vec![SessionWorktreeStatus {
+                        path: root,
+                        branch: branch.stdout.trim().to_owned(),
+                        status: status.to_owned(),
+                        dirty,
+                        merged,
                     }],
-                }))
+                    runtime: unobserved_runtime(&session.name),
+                })
             })
             .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
+        let body = serde_json::to_value(SessionStatusSnapshot {
+            workspace_id: state.workspace_id,
+            revision: state.state_revision,
+            sessions,
+        })
+        .map_err(|_| SessionRuntimeError::Storage)?;
         Ok(SessionReply {
             operation_id: operation_id.to_owned(),
             revision: state.state_revision,
-            body: json!({"workspace_id": state.workspace_id, "revision": state.state_revision, "sessions": sessions}),
+            body,
         })
     }
 
@@ -2427,34 +2443,49 @@ fn names_session_operation(semantic_key: &str, action_and_name: &str) -> bool {
             .is_some_and(|role| role.starts_with(':'))
 }
 
+fn unobserved_runtime(session_name: &str) -> SessionRuntimeObservation {
+    SessionRuntimeObservation {
+        agent_phase: AgentPhase::Absent,
+        agent_resumable: false,
+        agent_resume_reason: ProviderResumeReason::ProviderMetadataUnavailable,
+        agent_status: None,
+        parent_session_name: None,
+        organization_depth: 1,
+        organization_path: vec!["Director".to_owned(), session_name.to_owned()],
+    }
+}
+
 fn projected_snapshot(
     state: &WorkspaceLifecycleState,
     root_worktree_id: WorktreeId,
     data_home: &Path,
     repo_root: &Path,
 ) -> Value {
-    let mut value = snapshot(state, root_worktree_id);
     let catalog =
         usagi_core::infrastructure::role_catalog::load_effective(data_home, repo_root).ok();
-    project_role_summaries(&mut value, catalog.as_ref());
-    value
-}
-
-/// Applies current catalog display metadata without changing lifecycle truth.
-fn project_role_summaries(value: &mut Value, catalog: Option<&EffectiveRoleCatalog>) {
-    let items = value["sessions"]
-        .as_array_mut()
-        .expect("lifecycle snapshot always contains a sessions array");
-    for item in items {
-        let role_id = item
-            .get("role_id")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<RoleId>(value).ok());
-        let summary = role_id
-            .as_ref()
-            .and_then(|id| catalog?.roles.get(id).map(|role| role.summary.clone()));
-        item["role_summary"] = json!(summary);
-    }
+    let sessions = state
+        .sessions
+        .iter()
+        .cloned()
+        .map(|session| SessionListItem {
+            role_summary: session.role_id.as_ref().and_then(|id| {
+                catalog
+                    .as_ref()?
+                    .roles
+                    .get(id)
+                    .map(|role| role.summary.clone())
+            }),
+            session,
+            runtime: None,
+        })
+        .collect();
+    serde_json::to_value(SessionListSnapshot {
+        workspace_id: state.workspace_id,
+        root_worktree_id,
+        revision: state.state_revision,
+        sessions,
+    })
+    .expect("typed lifecycle snapshot is serializable")
 }
 
 /// The completion fence for one session operation, taken from the journal entry
