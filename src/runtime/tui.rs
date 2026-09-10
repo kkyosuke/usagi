@@ -74,7 +74,7 @@ use usagi_tui::usecase::application::agent_tab_intent::{
 };
 use usagi_tui::usecase::application::controller::{
     AppEvent, AppKey, BackendEvent, DaemonAction, EnvironmentEntry, NewRequest, Notice,
-    PendingToken, PreviewFileFilter, RoleChoice, RoleEditorScope, SafeError, SafeMessage,
+    PendingToken, PreviewFileFilter, RoleEditorScope, SafeError, SafeMessage, SessionBranchCatalog,
     SessionRoleCatalog, SessionRoleProjection, Target, classify_management_input,
 };
 use usagi_tui::usecase::application::daemon_backend::{
@@ -87,8 +87,11 @@ use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
 use usagi_tui::usecase::application::runtime_ports::{
     DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
-    RestoreConnectionPort, SessionCommandPort, SessionCommandResult, SessionRefreshPort,
-    SessionWorktreeScanPort,
+    RestoreConnectionPort, SessionBranchCatalogPort, SessionCatalogPort, SessionCommandPort,
+    SessionCommandResult, SessionRefreshPort, SessionWorktreeScanPort,
+};
+use usagi_tui::usecase::application::session_catalog::{
+    project_branch_catalog, project_branch_default, project_session_role_catalog,
 };
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
@@ -479,24 +482,8 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
                 &self.role_workspace,
             )
         {
-            let roles = catalog
-                .roles
-                .into_iter()
-                .filter(|(_, definition)| {
-                    definition
-                        .scopes
-                        .contains(&usagi_core::domain::role::RoleScope::Session)
-                })
-                .map(|(id, definition)| RoleChoice {
-                    id,
-                    summary: definition.summary,
-                })
-                .collect();
             completions.emit(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
-                SessionRoleCatalog {
-                    roles,
-                    default: catalog.defaults.session,
-                },
+                project_session_role_catalog(catalog),
             )));
         }
     }
@@ -1094,6 +1081,70 @@ struct ProductionBackendFactory {
 /// Filesystem adapter for the inline session-create collision hint.
 struct FsSessionWorktreeScanPort;
 
+/// Production adapter for create-session role and Git-ref discovery.
+struct ProductionSessionCatalogPort {
+    data_home: PathBuf,
+}
+
+/// Process-only adapter created for one detached branch-discovery worker.
+/// It owns no workspace-resident connection or other teardown-sensitive state.
+struct ProductionSessionBranchCatalogPort;
+
+impl SessionBranchCatalogPort for ProductionSessionBranchCatalogPort {
+    fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog {
+        discover_branch_catalog(workspace, configured_default)
+    }
+}
+
+impl SessionCatalogPort for ProductionSessionCatalogPort {
+    fn roles(&self, workspace: &Path) -> SessionRoleCatalog {
+        usagi_core::infrastructure::role_catalog::load_effective(&self.data_home, workspace)
+            .ok()
+            .map(project_session_role_catalog)
+            .unwrap_or_default()
+    }
+
+    fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog {
+        discover_branch_catalog(workspace, configured_default)
+    }
+
+    fn branch_worker(&self) -> Box<dyn SessionBranchCatalogPort> {
+        Box::new(ProductionSessionBranchCatalogPort)
+    }
+}
+
+fn discover_branch_catalog(
+    workspace: &Path,
+    configured_default: Option<&str>,
+) -> SessionBranchCatalog {
+    let refs = usagi_core::infrastructure::git::confined_git_command(workspace)
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(symref)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .output();
+    let refs = match refs {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        Ok(_) | Err(_) => return SessionBranchCatalog::default(),
+    };
+    let mut catalog = project_branch_catalog(&refs, None, configured_default);
+    if catalog.default.is_some() {
+        return catalog;
+    }
+    let symbolic_head = usagi_core::infrastructure::git::confined_git_command(workspace)
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    catalog.default = project_branch_default(&catalog.branches, symbolic_head.as_deref());
+    catalog
+}
+
 fn child_directory_names(parent: &Path) -> std::io::Result<Vec<String>> {
     let mut names = std::fs::read_dir(parent)?
         .filter_map(Result::ok)
@@ -1211,9 +1262,12 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         let data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let (restore_connection, restore_publisher) =
-            DaemonRestoreConnectionPort::channel(data_dir);
+            DaemonRestoreConnectionPort::channel(data_dir.clone());
         ControllerBackendComposition {
             backend,
+            session_catalogs: Box::new(ProductionSessionCatalogPort {
+                data_home: data_dir.clone(),
+            }),
             session_commands: Box::new(DaemonSessionCommandPort),
             // The resident session-inventory lane. It is a separate client from
             // `session_commands` on purpose: a user-initiated create/remove and
@@ -5169,30 +5223,32 @@ mod tests {
         DaemonRequest, DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort,
         FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET,
         LaneConnection, LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort,
-        ProductionBackendFactory, ProductionDaemonControl, RepoEnvironmentStore, RoleEditorScope,
-        SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
-        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
-        TerminalSubscription, VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError,
-        WorkRunControlResult, agent_goal_request, agent_inventory_request, agent_launch_request,
-        child_directory_names, classify_terminal_input, classify_workspace_directory,
-        correlate_agent_goal, correlate_agent_launch, created_session_hook, daemon_control_error,
-        daemon_control_result, daemon_error_reason, decision_cadence, decode_agent_admission,
-        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
-        decode_terminal_inventory, decode_terminal_poll, decode_work_run_control_reply,
-        decode_work_run_snapshot_reply, exact_agent_resume_request, global_icon_mode,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
-        reduced_motion_from_environment, remove_session_payload, reply_geometry,
-        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, tui_error_entry, validate_workspace_directory,
-        version_detail, version_result_from_observation, work_run_control_client_error,
-        workspace_directory_missing, workspace_open_error,
+        ProductionBackendFactory, ProductionDaemonControl, ProductionSessionCatalogPort,
+        RepoEnvironmentStore, RoleEditorScope, SessionBranchCatalog, SessionRoleCatalog,
+        SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
+        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, TerminalSubscription,
+        VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
+        agent_goal_request, agent_inventory_request, agent_launch_request, child_directory_names,
+        classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
+        correlate_agent_launch, created_session_hook, daemon_control_error, daemon_control_result,
+        daemon_error_reason, decision_cadence, decode_agent_admission, decode_attach_screen,
+        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
+        decode_terminal_poll, decode_work_run_control_reply, decode_work_run_snapshot_reply,
+        exact_agent_resume_request, global_icon_mode, lifecycle_snapshot, load_screen_graph_data,
+        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
+        pr_snapshot_events, probe_path, reduced_motion_from_environment, remove_session_payload,
+        reply_geometry, resolve_workspace_path, session_cadence, session_snapshot_result,
+        terminal_copy_key, terminal_inventory_matches_scope, tui_error_entry,
+        validate_workspace_directory, version_detail, version_result_from_observation,
+        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use usagi_core::infrastructure::bounded_process::ChildObservation;
-    use usagi_tui::usecase::application::runtime_ports::SessionWorktreeScanPort;
+    use usagi_tui::usecase::application::runtime_ports::{
+        SessionCatalogPort, SessionWorktreeScanPort,
+    };
 
     #[test]
     fn reduced_motion_environment_accepts_only_the_documented_opt_in() {
@@ -8736,6 +8792,73 @@ mod tests {
     }
 
     #[test]
+    fn session_catalog_adapter_filters_roles_and_falls_back_on_invalid_source() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data_home = temporary.path().join("home");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&data_home).unwrap();
+        std::fs::write(
+            data_home.join("roles.toml"),
+            "version = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n[roles.director]\nsummary = \"Direct\"\nscopes = [\"root\"]\ninstructions = \"direct\"\n",
+        )
+        .unwrap();
+        let port = ProductionSessionCatalogPort { data_home };
+
+        let catalog = port.roles(&workspace);
+        assert_eq!(catalog.default.unwrap().as_str(), "coder");
+        assert_eq!(catalog.roles.len(), 1);
+        assert_eq!(catalog.roles[0].id.as_str(), "coder");
+
+        std::fs::write(port.data_home.join("roles.toml"), "version = 99\n").unwrap();
+        assert_eq!(port.roles(&workspace), SessionRoleCatalog::default());
+    }
+
+    #[test]
+    fn session_catalog_adapter_reads_current_and_configured_local_branches() {
+        let temporary = tempfile::tempdir().unwrap();
+        let git = |arguments: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(temporary.path())
+                .args(arguments)
+                .status()
+                .unwrap()
+        };
+        assert!(git(&["init", "--initial-branch=main"]).success());
+        assert!(git(&["config", "user.name", "fixture"]).success());
+        assert!(git(&["config", "user.email", "fixture@example.invalid"]).success());
+        std::fs::write(temporary.path().join("tracked"), "base\n").unwrap();
+        assert!(git(&["add", "tracked"]).success());
+        assert!(git(&["commit", "-m", "base"]).success());
+        let port = ProductionSessionCatalogPort {
+            data_home: temporary.path().join("home"),
+        };
+
+        let catalog = port.branches(temporary.path(), None);
+        assert_eq!(catalog.default.as_deref(), Some("refs/heads/main"));
+        assert_eq!(catalog.branches.len(), 1);
+        assert_eq!(catalog.branches[0].refname, "refs/heads/main");
+
+        assert!(git(&["branch", "feature"]).success());
+        assert_eq!(
+            port.branches(temporary.path(), Some("refs/heads/feature"))
+                .default
+                .as_deref(),
+            Some("refs/heads/feature")
+        );
+        assert_eq!(
+            port.branches(temporary.path(), Some("refs/heads/missing"))
+                .default
+                .as_deref(),
+            Some("refs/heads/main")
+        );
+        assert_eq!(
+            port.branches(&temporary.path().join("missing"), None),
+            SessionBranchCatalog::default()
+        );
+    }
+
+    #[test]
     fn opening_a_workspace_this_daemon_does_not_serve_is_a_presentable_refusal() {
         let opened = std::path::Path::new("/workspace/other");
         let refusal = usagi_core::infrastructure::ipc::workspace_admission(
@@ -9689,7 +9812,6 @@ mod tests {
             24,
             80,
             "demo",
-            "/tmp/demo",
             &[projected],
             None,
             &std::collections::BTreeMap::new(),

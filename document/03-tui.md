@@ -889,6 +889,8 @@ frame から追い出したのに続き、**ローカルのファイル IO と�
 restore の再試行は期限どおり始まり、キー入力は同じ tick で処理される。skip は入力から反映までの latency を増やさない。
 Home の時計 material は分単位へ丸め、session membership の集合は workspace revision が変わったときだけ再構築する。
 branch catalog の Git subprocess も Home の初回描画後に one-shot worker で読み、完了時だけ material を更新する。
+worker は workspace-resident catalog port を共有せず、接続を持たない専用 adapter を factory から受け取るため、
+Git が停止しても workspace の teardown と次 workspace の composition を妨げない。
 mouse wheel の同方向・同一 cell の burst は terminal adapter が steps 付きの 1 input へ畳み、移動量を保ったまま
 1 回の再描画で反映する。pointer が別 surface へ移った event は畳まず FIFO 順を保つ。
 

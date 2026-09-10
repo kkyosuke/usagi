@@ -80,8 +80,8 @@ use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState,
     DirectorConsoleParent, DirectorNew, DirectorRoute, Effect, EnvironmentEntry, ExitChoice,
     Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay, PendingToken,
-    PreviewFileFilter, RoleChoice, Route, SessionBranchCatalog, SessionRoleCatalog,
-    SessionRoleProjection, Target, WorkspaceDrawerFocus,
+    PreviewFileFilter, Route, SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection,
+    Target, WorkspaceDrawerFocus,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -128,8 +128,9 @@ use crate::usecase::application::agent_runtime_ports::{
 };
 use crate::usecase::application::runtime_ports::{
     DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
-    GardenInventoryPort, RestoreConnectionPort, SessionCommandPort, SessionCommandPortFactory,
-    SessionCommandResult, SessionRefreshPort, SessionWorktreeScanPort,
+    GardenInventoryPort, RestoreConnectionPort, SessionBranchCatalogPort, SessionCatalogPort,
+    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SessionRefreshPort,
+    SessionWorktreeScanPort,
 };
 use crate::usecase::application::{
     WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
@@ -1019,6 +1020,9 @@ impl BackendAgentPort for ControllerHost {
 /// Complete production port set for one opened workspace.
 pub struct ControllerBackendComposition {
     pub backend: DaemonBackend,
+    /// Workspace-local role and Git ref discovery. Detached work receives a
+    /// fresh worker adapter, so this resident port follows workspace teardown.
+    pub session_catalogs: Box<dyn SessionCatalogPort>,
     pub session_commands: Box<dyn SessionCommandPort>,
     /// Resident session-inventory lane. It never shares the command port's
     /// connection, so a slow user-initiated create/remove and the background
@@ -1090,6 +1094,30 @@ struct UnavailableRestoreConnectionPort;
 impl RestoreConnectionPort for UnavailableRestoreConnectionPort {
     fn take_reconnected_epoch(&mut self) -> Option<u64> {
         None
+    }
+}
+
+struct UnavailableSessionCatalogPort;
+
+struct UnavailableSessionBranchCatalogPort;
+
+impl SessionBranchCatalogPort for UnavailableSessionBranchCatalogPort {
+    fn branches(&self, _: &Path, _: Option<&str>) -> SessionBranchCatalog {
+        SessionBranchCatalog::default()
+    }
+}
+
+impl SessionCatalogPort for UnavailableSessionCatalogPort {
+    fn roles(&self, _: &Path) -> SessionRoleCatalog {
+        SessionRoleCatalog::default()
+    }
+
+    fn branches(&self, _: &Path, _: Option<&str>) -> SessionBranchCatalog {
+        SessionBranchCatalog::default()
+    }
+
+    fn branch_worker(&self) -> Box<dyn SessionBranchCatalogPort> {
+        Box::new(UnavailableSessionBranchCatalogPort)
     }
 }
 
@@ -4102,13 +4130,8 @@ fn projection_build_counts() -> (usize, usize) {
 fn project_controller_sessions(ui: &WorkspaceIoRuntime, state: &AppState) -> Vec<ProjectedSession> {
     #[cfg(test)]
     SESSION_PROJECTION_BUILDS.set(SESSION_PROJECTION_BUILDS.get() + 1);
-    let known_sessions = ui
+    let observed = ui
         .workspace
-        .session_ids()
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    ui.workspace
         .sessions()
         .iter()
         .zip(ui.workspace.session_ids())
@@ -4131,35 +4154,10 @@ fn project_controller_sessions(ui: &WorkspaceIoRuntime, state: &AppState) -> Vec
                 // the daemon says so, not only until the local command returns.
                 projected.removing |= projection.lifecycle == SessionLifecycle::Deleting;
             }
-            projected.role_id = ui
-                .workspace
-                .session_roles()
-                .get(id)
-                .and_then(|role| role.role_id.as_ref())
-                .map(ToString::to_string);
-            if let Some(role) = ui.workspace.session_roles().get(id) {
-                projected.parent_session_id = role.parent_session_id;
-                projected.organization_depth = 0;
-                let mut parent = role.parent_session_id;
-                let mut seen = BTreeSet::from([*id]);
-                while let Some(parent_id) = parent
-                    && known_sessions.contains(&parent_id)
-                    && seen.insert(parent_id)
-                {
-                    projected.organization_depth += 1;
-                    parent = ui
-                        .workspace
-                        .session_roles()
-                        .get(&parent_id)
-                        .and_then(|projection| projection.parent_session_id);
-                }
-            }
-            if let Some(prs) = state.session_prs(*id) {
-                projected.pr_count = crate::presentation::views::workspace::visible_pr_entries(prs);
-            }
             projected
         })
-        .collect()
+        .collect::<Vec<_>>();
+    crate::presentation::views::workspace::project_sessions(state, &observed)
 }
 
 /// Render a single static Home frame from a workspace snapshot, using the same
@@ -4201,13 +4199,8 @@ pub fn render_home_snapshot(
         })
         .collect();
     let state = AppState::home(snapshot.workspace_id, snapshot.session_ids.clone());
-    let projection = HomeProjection::from_state(
-        &state,
-        &snapshot.workspace.name,
-        &snapshot.workspace.path,
-        &sessions,
-    )
-    .with_icon_mode(icon_mode);
+    let projection = HomeProjection::from_state(&state, &snapshot.workspace.name, &sessions)
+        .with_icon_mode(icon_mode);
     let mut frame = Vec::with_capacity(height);
     frame.push(project_bar(&WorkspaceDeck::new(snapshot), width).line);
     frame.extend(render_home(
@@ -5983,7 +5976,6 @@ fn home_frame_material(
     width: usize,
     runtime: &WorkspaceRuntime,
     workspace_name: &str,
-    _root_cwd: &Path,
     sessions: &[ProjectedSession],
     metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
@@ -6208,7 +6200,6 @@ fn render_controller_frame(
     width: usize,
     runtime: &WorkspaceRuntime,
     workspace_name: &str,
-    root_cwd: &Path,
     sessions: &[ProjectedSession],
     metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
@@ -6221,7 +6212,6 @@ fn render_controller_frame(
         width,
         runtime,
         workspace_name,
-        root_cwd,
         sessions,
         metrics,
         health,
@@ -7008,7 +6998,7 @@ fn cached_workspace_switch_frame(
             AppEvent::FocusSession(session),
         );
     }
-    let projection = HomeProjection::from_state(&state, slot.label(), slot.path(), &sessions)
+    let projection = HomeProjection::from_state(&state, slot.label(), &sessions)
         .with_icon_mode(deck.icon_mode());
     let projection = if show_progress {
         projection.with_content_loading(status, frame)
@@ -7514,6 +7504,7 @@ fn drive_workspace_controller(
     let garden_reduced_motion = backend_factory.garden_reduced_motion();
     let (host, host_rx) = ControllerHost::channel();
     let composition = backend_factory.create(&snapshot, host);
+    let session_catalogs = composition.session_catalogs;
     let mut backend = composition.backend;
     let mut browser = composition.browser;
     let mut restore_commands = Some(composition.restore_commands);
@@ -7557,8 +7548,7 @@ fn drive_workspace_controller(
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     let mut pending_garden_agent = None;
     runtime.set_pr_auto_open(pr_auto_open);
-    let data_home = usagi_core::infrastructure::paths::data_dir().ok();
-    let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
+    let role_catalog = session_catalogs.roles(&root_cwd);
     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
         role_catalog,
     )));
@@ -7568,13 +7558,13 @@ fn drive_workspace_controller(
     let (branch_catalog_sender, branch_catalog_receiver) = mpsc::channel();
     let branch_catalog_root = root_cwd.clone();
     let branch_catalog_default = default_branch.clone();
+    let branch_catalogs = session_catalogs.branch_worker();
     let _ = std::thread::Builder::new()
         .name("tui-branch-catalog".to_owned())
         .spawn(move || {
-            let _ = branch_catalog_sender.send(session_branch_catalog(
-                &branch_catalog_root,
-                branch_catalog_default.as_deref(),
-            ));
+            let _ = branch_catalog_sender.send(
+                branch_catalogs.branches(&branch_catalog_root, branch_catalog_default.as_deref()),
+            );
         });
     runtime.set_agent_models(available_models, default_model);
     runtime.set_work_mode(work_mode);
@@ -8775,7 +8765,6 @@ fn drive_workspace_controller(
                     width,
                     &runtime,
                     &workspace_name,
-                    &root_cwd,
                     &sessions,
                     metrics_projection.metrics(),
                     metrics_projection.health(),
@@ -8789,7 +8778,7 @@ fn drive_workspace_controller(
                 // that exact composition behind Config; otherwise the Home
                 // projection is drawn one row too high while the modal is open.
                 let base = compose_workspace_shell_frame(deck, height, width, &home);
-                let branch_catalog = session_branch_catalog(
+                let branch_catalog = session_catalogs.branches(
                     &root_cwd,
                     usagi_core::usecase::settings::read_for_workspace_entry(context.settings)
                         .default_branch
@@ -8816,11 +8805,11 @@ fn drive_workspace_controller(
                 runtime.set_agent_models(context.available_models, effective.default_model);
                 runtime.set_work_mode(effective.work_mode);
                 let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
-                    session_branch_catalog(&root_cwd, effective.default_branch.as_deref()),
+                    session_catalogs.branches(&root_cwd, effective.default_branch.as_deref()),
                 )));
                 // Team selection changes the effective role catalog immediately
                 // for the next session creation or Agent launch.
-                let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
+                let role_catalog = session_catalogs.roles(&root_cwd);
                 let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
                     role_catalog,
                 )));
@@ -8837,117 +8826,6 @@ fn drive_workspace_controller(
             }
         }
     }
-}
-
-fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> SessionRoleCatalog {
-    data_home
-        .and_then(|data_home| {
-            usagi_core::infrastructure::role_catalog::load_effective(data_home, workspace_root).ok()
-        })
-        .map(|catalog| {
-            let roles = catalog
-                .roles
-                .into_iter()
-                .filter(|(_, definition)| {
-                    definition
-                        .scopes
-                        .contains(&usagi_core::domain::role::RoleScope::Session)
-                })
-                .map(|(id, definition)| RoleChoice {
-                    id,
-                    summary: definition.summary,
-                })
-                .collect();
-            SessionRoleCatalog {
-                roles,
-                default: catalog.defaults.session,
-            }
-        })
-        .unwrap_or_default()
-}
-
-/// Reads local and remote-tracking branch identities for the create picker.
-/// A remote's symbolic `HEAD` is exposed as its `(default)` choice; other
-/// symbolic aliases are omitted. A failure shrinks the picker to the daemon's
-/// legacy `HEAD` default instead of making the workspace unusable.
-fn session_branch_catalog(
-    workspace_root: &Path,
-    configured_default: Option<&str>,
-) -> SessionBranchCatalog {
-    let output = usagi_core::infrastructure::git::confined_git_command(workspace_root)
-        .args([
-            "for-each-ref",
-            "--format=%(refname) %(symref)",
-            "refs/heads",
-            "refs/remotes",
-        ])
-        .output();
-    let output = match output {
-        Ok(output) if output.status.success() => output,
-        Ok(_) | Err(_) => return SessionBranchCatalog::default(),
-    };
-    let branches = parse_session_branch_choices(&String::from_utf8_lossy(&output.stdout));
-    let default = configured_default
-        .filter(|configured| branches.iter().any(|branch| branch.refname == *configured))
-        .map(str::to_owned)
-        .or_else(|| {
-            branch_default_from_output(
-                usagi_core::infrastructure::git::confined_git_command(workspace_root)
-                    .args(["symbolic-ref", "--quiet", "HEAD"])
-                    .output(),
-                &branches,
-            )
-        });
-    SessionBranchCatalog { branches, default }
-}
-
-fn branch_default_from_output(
-    output: io::Result<std::process::Output>,
-    branches: &[BranchChoice],
-) -> Option<String> {
-    let output = match output {
-        Ok(output) if output.status.success() => output,
-        Ok(_) | Err(_) => return None,
-    };
-    let refname = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if branches.iter().any(|branch| branch.refname == refname) {
-        Some(refname)
-    } else {
-        None
-    }
-}
-
-fn parse_session_branch_choices(output: &str) -> Vec<BranchChoice> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let (refname, symref) = line.split_once(' ').unwrap_or((line, ""));
-            let label = if symref.is_empty() {
-                refname
-                    .strip_prefix("refs/heads/")
-                    .map(|name| format!("local:{name}"))
-                    .or_else(|| {
-                        refname
-                            .strip_prefix("refs/remotes/")
-                            .map(|name| format!("remote:{name}"))
-                    })
-            } else {
-                remote_default_branch_label(refname, symref)
-            }?;
-            Some(BranchChoice {
-                label,
-                refname: refname.to_owned(),
-            })
-        })
-        .collect()
-}
-
-fn remote_default_branch_label(refname: &str, symref: &str) -> Option<String> {
-    let name = refname.strip_prefix("refs/remotes/")?;
-    let remote = name.strip_suffix("/HEAD")?;
-    let target_prefix = format!("refs/remotes/{remote}/");
-    (!remote.is_empty() && symref.starts_with(&target_prefix) && symref != refname)
-        .then(|| format!("remote:{remote}/(default)"))
 }
 
 /// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
@@ -9117,6 +8995,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
                     .unwrap_or_else(|| Box::new(UnavailableBackendPort)),
             )
             .with_overlay(Box::new(UnavailableBackendPort)),
+            session_catalogs: Box::new(UnavailableSessionCatalogPort),
             session_commands: self
                 .sessions
                 .take()
@@ -9461,6 +9340,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
         );
         ControllerBackendComposition {
             backend,
+            session_catalogs: Box::new(UnavailableSessionCatalogPort),
             session_commands: self.sessions.create(),
             session_refresh: Box::new(UnavailableSessionRefreshPort),
             agent_commands,
