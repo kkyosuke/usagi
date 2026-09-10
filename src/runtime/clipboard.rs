@@ -72,10 +72,12 @@ mod real_io {
     }
 }
 
-#[allow(dead_code)] // Non-host variants are selected by the platform-independent fallback tests.
 enum Platform {
+    #[cfg(any(test, target_os = "macos"))]
     Macos,
+    #[cfg(any(test, target_os = "windows"))]
     Windows,
+    #[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
     Unix,
 }
 
@@ -107,22 +109,26 @@ fn write_with_fallbacks(
 }
 
 fn commands_for(platform: &Platform, wayland: bool, x11: bool) -> Vec<ClipboardCommand> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let _ = (wayland, x11);
     match platform {
-        Platform::Macos => {
-            return vec![ClipboardCommand {
-                program: "pbcopy",
-                arguments: &[],
-            }];
-        }
-        Platform::Windows => {
-            return vec![ClipboardCommand {
-                program: "clip.exe",
-                arguments: &[],
-            }];
-        }
-        Platform::Unix => {}
+        #[cfg(any(test, target_os = "macos"))]
+        Platform::Macos => vec![ClipboardCommand {
+            program: "pbcopy",
+            arguments: &[],
+        }],
+        #[cfg(any(test, target_os = "windows"))]
+        Platform::Windows => vec![ClipboardCommand {
+            program: "clip.exe",
+            arguments: &[],
+        }],
+        #[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
+        Platform::Unix => unix_commands(wayland, x11),
     }
+}
 
+#[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
+fn unix_commands(wayland: bool, x11: bool) -> Vec<ClipboardCommand> {
     // Linux and the other Unix targets may expose either protocol. Prefer the
     // current session's native protocol, then try the other one so remote and
     // nested desktop sessions remain usable.
