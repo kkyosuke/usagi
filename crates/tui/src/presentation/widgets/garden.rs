@@ -258,7 +258,10 @@ fn render_with_session_homes(
     show_session_homes: bool,
 ) -> Option<GardenFrame> {
     garden_layout(height, width)?;
-    if world::fits(height, width) {
+    // The sidebar already owns all session labels and session-level targets.
+    // Its meadow therefore uses the label-free world renderer down to the
+    // Garden's minimum size instead of falling back to duplicate compact cards.
+    if !show_session_homes || world::fits(height, width) {
         return Some(if show_session_homes {
             world::render(
                 height,
@@ -498,8 +501,50 @@ fn render_dense(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
+    render_dense_with_session_context(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        tick,
+        reduced_motion,
+        true,
+    )
+}
+
+fn render_dense_without_session_context(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<GardenFrame> {
+    render_dense_with_session_context(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        tick,
+        reduced_motion,
+        false,
+    )
+}
+
+fn render_dense_with_session_context(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+    show_session_context: bool,
+) -> Option<GardenFrame> {
     let layout = garden_layout(height, width)?;
     let mut items = dense_items(sessions);
+    if !show_session_context {
+        items.retain(|item| item.agent.is_some());
+    }
     let glyph_capacity = layout
         .body_height
         .saturating_mul(layout.content_width / DenseMode::Glyph.minimum_width());
@@ -510,7 +555,13 @@ fn render_dense(
         // the presentation fallback instead of panicking on stale empty sessions.
         items.retain(|item| item.agent.is_some());
     }
-    let mode = dense_mode(layout, items.len());
+    let mode = if show_session_context {
+        dense_mode(layout, items.len())
+    } else {
+        // At this last-resort density the sidebar carries names and statuses;
+        // the meadow only needs one stable, clickable glyph per Agent.
+        DenseMode::Glyph
+    };
     let card_height = mode.height();
     let max_columns = (layout.content_width / mode.minimum_width()).max(1);
     let columns = items.len().min(max_columns).max(1);
@@ -766,7 +817,7 @@ fn canonical_tick_with_session_homes(
     show_session_homes: bool,
 ) -> Option<u64> {
     let layout = garden_layout(height, width)?;
-    if world::fits(height, width) {
+    if !show_session_homes || world::fits(height, width) {
         return Some(if show_session_homes {
             world::canonical_tick(height, width, sessions, tick, reduced_motion)
         } else {

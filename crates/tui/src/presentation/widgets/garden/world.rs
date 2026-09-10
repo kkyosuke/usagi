@@ -531,15 +531,26 @@ fn render_with_session_homes(
     if agent_rows > canvas.height - SCENERY_HEIGHT {
         // At this physical limit even two-cell rabbits plus the scenery cannot
         // fit. Spend the complete body on Agents instead of overlapping targets.
-        return super::render_dense(
-            height,
-            width,
-            workspace_name,
-            sessions,
-            tick,
-            reduced_motion,
-        )
-        .expect("spacious terminals meet the compact minimum");
+        return if show_session_homes {
+            super::render_dense(
+                height,
+                width,
+                workspace_name,
+                sessions,
+                tick,
+                reduced_motion,
+            )
+        } else {
+            super::render_dense_without_session_context(
+                height,
+                width,
+                workspace_name,
+                sessions,
+                tick,
+                reduced_motion,
+            )
+        }
+        .expect("the world renderer is called above the Garden minimum");
     }
     let home_budget = show_session_homes
         .then(|| (canvas.height / 3).min(canvas.height - SCENERY_HEIGHT - agent_rows));

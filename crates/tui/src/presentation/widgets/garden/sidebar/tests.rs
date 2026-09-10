@@ -187,10 +187,70 @@ fn sidebar_breakpoint_preserves_small_garden_and_clips_cjk_names() {
                 view.hitboxes.iter().any(|hitbox| hitbox.agent.is_none()),
                 "without a sidebar the session home remains the navigation target"
             );
+        } else {
+            let sidebar = view.sidebar.unwrap();
+            assert!(
+                !plain(&view).contains(&value.label),
+                "the meadow must not repeat session labels at the sidebar breakpoint"
+            );
+            assert!(
+                view.hitboxes
+                    .iter()
+                    .filter(|hitbox| hitbox.column < sidebar.column)
+                    .all(|hitbox| hitbox.agent.is_some()),
+                "the meadow must not retain session-level targets beside the sidebar"
+            );
         }
+    }
+    for height in [13, 17] {
+        let view = render(
+            height,
+            160,
+            "repo",
+            std::slice::from_ref(&value),
+            ViewOptions::default(),
+        )
+        .unwrap();
+        let sidebar = view.sidebar.unwrap();
+        assert!(!plain(&view).contains(&value.label));
+        assert!(
+            view.hitboxes
+                .iter()
+                .filter(|hitbox| hitbox.column < sidebar.column)
+                .all(|hitbox| hitbox.agent.is_some())
+        );
     }
     assert!(render(12, 160, "repo", &[], ViewOptions::default()).is_none());
     assert!(render(24, 63, "repo", &[], ViewOptions::default()).is_none());
+}
+
+#[test]
+fn sidebar_dense_fallback_keeps_only_agent_targets_in_the_meadow() {
+    let mut value = session(0);
+    value
+        .agents
+        .extend((1..182).map(|index| super::super::GardenAgent {
+            runtime_id:
+                AgentRuntimeId::parse(&format!("{index:08x}-0000-4000-8000-000000000002")).unwrap(),
+            phase: AgentPhase::Running,
+        }));
+    let view = render(
+        13,
+        99,
+        "repo",
+        std::slice::from_ref(&value),
+        ViewOptions::default(),
+    )
+    .unwrap();
+    let sidebar = view.sidebar.unwrap();
+    let meadow_targets = view
+        .hitboxes
+        .iter()
+        .filter(|hitbox| hitbox.column < sidebar.column)
+        .collect::<Vec<_>>();
+    assert_eq!(meadow_targets.len(), value.agents.len());
+    assert!(meadow_targets.iter().all(|hitbox| hitbox.agent.is_some()));
+    assert!(!plain(&view).contains(&value.label));
 }
 
 #[test]
