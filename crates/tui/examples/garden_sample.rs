@@ -100,7 +100,6 @@ fn sidebar_scene(sessions: &[GardenSession]) {
         WorkspaceId::parse("00000000-0000-4000-8000-000000000098").unwrap(),
         "acme-internal".into(),
     ));
-    reference[2].selected = true;
     reference[2].agents = (0..4)
         .map(|index| GardenAgent {
             runtime_id: AgentRuntimeId::parse(&format!("{index:08x}-0000-4000-8000-000000000088"))
@@ -112,8 +111,7 @@ fn sidebar_scene(sessions: &[GardenSession]) {
             },
         })
         .collect();
-    for (index, session) in reference.iter_mut().enumerate() {
-        session.selected = index == 2;
+    for session in &mut reference {
         session.label = session.sidebar.name.clone();
     }
     scene_in_scope(
@@ -229,7 +227,6 @@ fn sample(
         id: SessionId::parse(id).expect("sample IDs are canonical UUIDs"),
         label: label.to_owned(),
         lifecycle,
-        selected: false,
         failure_summary: (lifecycle == SessionLifecycle::Failed)
             .then(|| "safe sample failure".to_owned()),
         agents_observed: true,
@@ -258,7 +255,6 @@ fn sample_agents(
         id: SessionId::parse(id).expect("sample IDs are canonical UUIDs"),
         label: label.to_owned(),
         lifecycle,
-        selected: true,
         failure_summary: None,
         agents_observed: true,
         pending_decisions: 0,

@@ -1017,7 +1017,6 @@ fn garden_arrow_wakes_home_without_reaching_the_surface_behind_it() {
                             id: SessionId::new(),
                             label: format!("project-{index} / session-{index}"),
                             lifecycle: SessionLifecycle::Available,
-                            selected: false,
                             failure_summary: None,
                             agents_observed: false,
                             agents: Vec::new(),
@@ -1085,7 +1084,6 @@ fn garden_list_keys_and_wheel_scroll_without_waking_the_terminal() {
                 id: session,
                 label: "many agents".into(),
                 lifecycle: SessionLifecycle::Available,
-                selected: false,
                 failure_summary: None,
                 agents_observed: true,
                 agents: (0..30)
@@ -1314,7 +1312,6 @@ fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
                 id: session,
                 label: "other / review".to_owned(),
                 lifecycle: SessionLifecycle::Available,
-                selected: false,
                 failure_summary: None,
                 agents_observed: true,
                 agents: vec![crate::presentation::widgets::garden::GardenAgent {

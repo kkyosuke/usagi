@@ -527,7 +527,6 @@ fn project_garden_sessions(
                 id: session.id,
                 label: garden_session_label(session, &names),
                 lifecycle: session.lifecycle,
-                selected: state.selected() == Selection::Target(Target::Session(session.id)),
                 failure_summary: session.failure_summary.clone(),
                 agents_observed: true,
                 pending_decisions: pending_decisions
@@ -756,9 +755,9 @@ impl HomeProjection {
             return self;
         };
         let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        self.garden_tick = widgets::garden::canonical_tick(
+        self.garden_tick = widgets::garden::sidebar::canonical_tick(
             height,
-            widgets::garden::sidebar::scene_width(width),
+            width,
             sessions,
             tick,
             self.garden_motion.is_reduced(),
@@ -3810,6 +3809,18 @@ mod tests {
         out
     }
 
+    fn sidebar_session_ids(frame: &widgets::garden::sidebar::GardenView) -> BTreeSet<SessionId> {
+        let sidebar = frame.sidebar.expect("the Garden has a sidebar");
+        frame
+            .hitboxes
+            .iter()
+            .map(|hitbox| {
+                assert!(hitbox.column >= sidebar.column && hitbox.agent.is_none());
+                hitbox.session_id
+            })
+            .collect()
+    }
+
     fn projected_session(id: SessionId, label: &str, cwd: &str) -> ProjectedSession {
         ProjectedSession {
             branch: format!("usagi/{label}"),
@@ -5620,7 +5631,6 @@ mod tests {
         );
         let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
         let garden = home.garden_sessions.as_ref().expect("garden projection");
-        assert!(garden[0].selected);
         assert_eq!(
             garden[4].failure_summary.as_deref(),
             Some("worktree missing")
@@ -5633,8 +5643,8 @@ mod tests {
                 .any(|agent| agent.phase == AgentPhase::Running)
         );
 
-        // A wide viewport keeps every detailed plot in this aggregate phase fixture;
-        // narrower terminals condense the same material without a second viewport.
+        // A wide viewport keeps every Agent in the meadow and puts session detail
+        // exclusively in the right list; narrower terminals retain the old plots.
         let frame = render_home_at(24, 540, &home, now());
         let text = frame
             .iter()
@@ -5649,9 +5659,9 @@ mod tests {
         assert!(!text.contains("Agents"));
         assert!(!text.contains(AGENT_ICON));
         assert!(text.contains("waiting"));
-        assert!(text.contains("1 run · 1 done"));
+        assert!(text.contains("2 agents"));
+        assert!(text.contains("completed"));
         assert!(!text.contains("> s0"));
-        assert!(text.contains("failed · worktree missing"));
         assert!(text.contains("s0"));
 
         let fallback = render_home_at(24, 540, &home.clone().with_icon_mode(IconMode::Text), now());
@@ -5743,9 +5753,9 @@ mod tests {
             phase: AgentPhase::Running,
         }));
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        // 注意順（waiting が先）の glyph と短い状態内訳を示す。
-        assert!(text.contains("◆ ●"), "{text}");
-        assert!(text.contains("1 wait · 1 run"), "{text}");
+        // 右一覧は注意順（waiting が先）で各 Agent の状態を示す。
+        assert!(text.contains("◆ waiting"), "{text}");
+        assert!(text.contains("● running"), "{text}");
         assert!(!text.contains("no agents"));
     }
 
@@ -5914,7 +5924,6 @@ mod tests {
                     id: SessionId::new(),
                     label: "other / review".to_owned(),
                     lifecycle: SessionLifecycle::Available,
-                    selected: false,
                     failure_summary: None,
                     agents_observed: false,
                     agents: Vec::new(),
@@ -5927,8 +5936,8 @@ mod tests {
         assert_eq!(unchanged, home);
     }
 
-    /// click 解決は frame と同じ layout 呼び出しの hitbox に当てる。うさぎに当たれば
-    /// その plot に束縛された stable `SessionId`、外れれば wake-up。
+    /// click 解決は frame と同じ layout 呼び出しの hitbox に当てる。右一覧の session
+    /// 行に当たれば stable `SessionId`、外れれば wake-up。
     #[test]
     fn a_garden_click_resolves_against_the_drawn_plots() {
         let workspace = WorkspaceId::new();
@@ -5947,16 +5956,11 @@ mod tests {
         let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
 
         let frame = garden_frame(24, 100, &home, now()).expect("the garden owns this frame");
-        // Every session keeps its plot target as well as its list rows.
+        // The list is the only session-level target when it is visible.
         assert_eq!(
-            frame
-                .hitboxes
-                .iter()
-                .filter(|hitbox| hitbox.column < frame.sidebar.unwrap().column)
-                .count(),
-            ids.len()
+            sidebar_session_ids(&frame),
+            ids.iter().copied().collect::<BTreeSet<_>>()
         );
-        assert!(frame.hitboxes.iter().all(|hitbox| hitbox.agent.is_none()));
         for hitbox in &frame.hitboxes {
             let column = u16::try_from(hitbox.column + hitbox.width / 2).expect("fits a u16");
             let row = u16::try_from(hitbox.row + hitbox.height / 2).expect("fits a u16");
@@ -5967,7 +5971,7 @@ mod tests {
                     session: hitbox.session_id,
                     agent: None,
                 }),
-                "the centre of a plot is its own usagi"
+                "the centre of a session row visits that session"
             );
         }
 
@@ -5986,7 +5990,6 @@ mod tests {
                     id: foreign_session,
                     label: "other / review".to_owned(),
                     lifecycle: SessionLifecycle::Available,
-                    selected: false,
                     failure_summary: None,
                     agents_observed: true,
                     agents: vec![widgets::garden::GardenAgent {
@@ -6097,7 +6100,6 @@ mod tests {
                         id: session,
                         label: format!("project-{index} / session-{index}"),
                         lifecycle: SessionLifecycle::Available,
-                        selected: false,
                         failure_summary: None,
                         agents_observed: false,
                         agents: Vec::new(),
@@ -6194,14 +6196,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(rabbits.len(), 2);
-        // うさぎは巣穴より先に並ぶ。複数の動く sprite が重なった cell では、
+        // うさぎは右一覧の session 行より先に並ぶ。複数の動く sprite が重なった cell では、
         // 実際に後から描かれた（hitbox 上は先頭の）うさぎを click 対象にする。
-        let home_hitbox = frame
+        let session_row_hitbox = frame
             .hitboxes
             .iter()
             .position(|hitbox| hitbox.agent.is_none())
-            .expect("the home itself is a target");
-        assert_eq!(home_hitbox, 2);
+            .expect("the sidebar session row is a target");
+        assert_eq!(session_row_hitbox, 2);
         for rabbit in rabbits {
             let column = u16::try_from(rabbit.column + rabbit.width / 2).expect("fits a u16");
             let row = u16::try_from(rabbit.row + rabbit.height / 2).expect("fits a u16");
@@ -6224,16 +6226,16 @@ mod tests {
                     .any(|runtime| Some(runtime.agent_runtime_id) == rabbit.agent)
             );
         }
-        // nameplate 行は巣穴そのものなので、agent を名指さない。
-        let nameplate = frame.hitboxes[home_hitbox];
+        // 右一覧の session 行は Agent を名指さない。
+        let session_row = frame.hitboxes[session_row_hitbox];
         assert_eq!(
             garden_click_at(
                 24,
                 100,
                 &home,
                 now(),
-                u16::try_from(nameplate.column).expect("fits a u16"),
-                u16::try_from(nameplate.row).expect("fits a u16"),
+                u16::try_from(session_row.column).expect("fits a u16"),
+                u16::try_from(session_row.row).expect("fits a u16"),
             ),
             Some(GardenClick::Visit {
                 workspace,
