@@ -21543,6 +21543,24 @@ impl super::SessionWorktreeScanPort for CountedPort {
     }
 }
 
+impl super::SessionCatalogPort for CountedPort {
+    fn roles(&self, _workspace: &Path) -> super::SessionRoleCatalog {
+        super::SessionRoleCatalog::default()
+    }
+
+    fn branches(
+        &self,
+        _workspace: &Path,
+        _configured_default: Option<&str>,
+    ) -> super::SessionBranchCatalog {
+        super::SessionBranchCatalog::default()
+    }
+
+    fn branch_worker(&self) -> Box<dyn super::SessionBranchCatalogPort> {
+        Box::new(super::UnavailableSessionBranchCatalogPort)
+    }
+}
+
 impl super::GardenInventoryPort for CountedPort {
     fn inventory(&mut self, _workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String> {
         Err("Agent inventory is unavailable".to_owned())
@@ -21570,8 +21588,10 @@ impl BackendDecisionPort for CountedPort {
 /// a hung restore observation (#551, fixed by
 /// `blocked_restore_inventory_never_blocks_render_or_quit`). Its drop
 /// therefore happens on that worker and is not ordered against the next
-/// workspace's composition.
-const RESIDENT_PORTS_PER_COMPOSITION: usize = 12;
+/// workspace's composition. Branch discovery also uses a detached worker, but
+/// its adapter is freshly created by the counted resident catalog port and
+/// shares no teardown-sensitive resource with it.
+const RESIDENT_PORTS_PER_COMPOSITION: usize = 13;
 
 /// A production-shaped factory whose every port counts its own drop, and
 /// which records how many ports had been dropped when each workspace's
@@ -21595,6 +21615,21 @@ impl CountingBackendFactory {
     }
 }
 
+#[test]
+fn branch_catalog_worker_does_not_keep_the_resident_catalog_alive() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let catalog: Box<dyn super::SessionCatalogPort> = Box::new(CountedPort(Arc::clone(&drops)));
+    let worker = catalog.branch_worker();
+
+    drop(catalog);
+
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        worker.branches(Path::new("/tmp/workspace"), None),
+        super::SessionBranchCatalog::default()
+    );
+}
+
 impl super::ControllerBackendFactory for CountingBackendFactory {
     fn create(
         &mut self,
@@ -21611,9 +21646,9 @@ impl super::ControllerBackendFactory for CountingBackendFactory {
             )
             .with_decisions(Box::new(self.port()))
             .with_overlay(Box::new(UnavailableBackendPort)),
-            // Uncounted like restore: the branch-catalog worker briefly clones
-            // this stateless port and may finish after the frame loop returns.
-            session_catalogs: Arc::new(super::UnavailableSessionCatalogPort),
+            // Counted resident port. Its worker factory returns a separate,
+            // deliberately stateless adapter that may finish after this frame.
+            session_catalogs: Box::new(self.port()),
             session_commands: Box::new(self.port()),
             session_refresh: Box::new(self.port()),
             agent_commands: Box::new(self.port()),
@@ -21910,10 +21945,10 @@ fn a_settings_binding_failure_while_opening_a_workspace_propagates() {
     }
 }
 
-/// #556 acceptance: leaving tears the workspace down. Every port of the
-/// first composition — command clients, resident lanes, restore worker
-/// connection, metrics — is dropped before the second composition exists, so
-/// no pump or subscription of the workspace that was left is still running.
+/// #556 acceptance: leaving tears the workspace down. Every resident port of
+/// the first composition — including the session catalog — is dropped before
+/// the second composition exists. Detached restore and branch adapters have an
+/// explicitly separate lifetime and own no resident connection.
 #[test]
 fn leaving_a_workspace_drops_every_port_before_the_next_one_is_created() {
     let mut term = FakeTerminal::with_keys(&[

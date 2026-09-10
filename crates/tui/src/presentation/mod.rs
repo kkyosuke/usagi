@@ -128,8 +128,9 @@ use crate::usecase::application::agent_runtime_ports::{
 };
 use crate::usecase::application::runtime_ports::{
     DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
-    GardenInventoryPort, RestoreConnectionPort, SessionCatalogPort, SessionCommandPort,
-    SessionCommandPortFactory, SessionCommandResult, SessionRefreshPort, SessionWorktreeScanPort,
+    GardenInventoryPort, RestoreConnectionPort, SessionBranchCatalogPort, SessionCatalogPort,
+    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SessionRefreshPort,
+    SessionWorktreeScanPort,
 };
 use crate::usecase::application::{
     WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
@@ -1019,9 +1020,9 @@ impl BackendAgentPort for ControllerHost {
 /// Complete production port set for one opened workspace.
 pub struct ControllerBackendComposition {
     pub backend: DaemonBackend,
-    /// Workspace-local role and Git ref discovery, shared with the one-shot
-    /// branch worker so neither filesystem nor process IO belongs to rendering.
-    pub session_catalogs: Arc<dyn SessionCatalogPort>,
+    /// Workspace-local role and Git ref discovery. Detached work receives a
+    /// fresh worker adapter, so this resident port follows workspace teardown.
+    pub session_catalogs: Box<dyn SessionCatalogPort>,
     pub session_commands: Box<dyn SessionCommandPort>,
     /// Resident session-inventory lane. It never shares the command port's
     /// connection, so a slow user-initiated create/remove and the background
@@ -1098,6 +1099,14 @@ impl RestoreConnectionPort for UnavailableRestoreConnectionPort {
 
 struct UnavailableSessionCatalogPort;
 
+struct UnavailableSessionBranchCatalogPort;
+
+impl SessionBranchCatalogPort for UnavailableSessionBranchCatalogPort {
+    fn branches(&self, _: &Path, _: Option<&str>) -> SessionBranchCatalog {
+        SessionBranchCatalog::default()
+    }
+}
+
 impl SessionCatalogPort for UnavailableSessionCatalogPort {
     fn roles(&self, _: &Path) -> SessionRoleCatalog {
         SessionRoleCatalog::default()
@@ -1105,6 +1114,10 @@ impl SessionCatalogPort for UnavailableSessionCatalogPort {
 
     fn branches(&self, _: &Path, _: Option<&str>) -> SessionBranchCatalog {
         SessionBranchCatalog::default()
+    }
+
+    fn branch_worker(&self) -> Box<dyn SessionBranchCatalogPort> {
+        Box::new(UnavailableSessionBranchCatalogPort)
     }
 }
 
@@ -7491,7 +7504,7 @@ fn drive_workspace_controller(
     let garden_reduced_motion = backend_factory.garden_reduced_motion();
     let (host, host_rx) = ControllerHost::channel();
     let composition = backend_factory.create(&snapshot, host);
-    let session_catalogs = Arc::clone(&composition.session_catalogs);
+    let session_catalogs = composition.session_catalogs;
     let mut backend = composition.backend;
     let mut browser = composition.browser;
     let mut restore_commands = Some(composition.restore_commands);
@@ -7545,7 +7558,7 @@ fn drive_workspace_controller(
     let (branch_catalog_sender, branch_catalog_receiver) = mpsc::channel();
     let branch_catalog_root = root_cwd.clone();
     let branch_catalog_default = default_branch.clone();
-    let branch_catalogs = Arc::clone(&session_catalogs);
+    let branch_catalogs = session_catalogs.branch_worker();
     let _ = std::thread::Builder::new()
         .name("tui-branch-catalog".to_owned())
         .spawn(move || {
@@ -8982,7 +8995,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
                     .unwrap_or_else(|| Box::new(UnavailableBackendPort)),
             )
             .with_overlay(Box::new(UnavailableBackendPort)),
-            session_catalogs: Arc::new(UnavailableSessionCatalogPort),
+            session_catalogs: Box::new(UnavailableSessionCatalogPort),
             session_commands: self
                 .sessions
                 .take()
@@ -9327,7 +9340,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
         );
         ControllerBackendComposition {
             backend,
-            session_catalogs: Arc::new(UnavailableSessionCatalogPort),
+            session_catalogs: Box::new(UnavailableSessionCatalogPort),
             session_commands: self.sessions.create(),
             session_refresh: Box::new(UnavailableSessionRefreshPort),
             agent_commands,

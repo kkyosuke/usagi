@@ -450,6 +450,7 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
         "MetricsPortFactory",
         "PaneLaunchCommandPort",
         "RestoreConnectionPort",
+        "SessionBranchCatalogPort",
         "SessionCatalogPort",
         "SessionCommandPort",
         "SessionCommandPortFactory",
@@ -487,8 +488,12 @@ fn tui_presentation_discovers_session_catalogs_through_an_application_port() {
             .expect("TUI runtime ports are readable");
 
     assert!(ports.contains("trait SessionCatalogPort"));
+    assert!(ports.contains("trait SessionBranchCatalogPort"));
+    assert!(ports.contains("fn branch_worker(&self) -> Box<dyn SessionBranchCatalogPort>"));
     assert!(presentation.contains("session_catalogs.roles("));
     assert!(presentation.contains("session_catalogs.branches("));
+    assert!(presentation.contains("session_catalogs.branch_worker()"));
+    assert!(!presentation.contains("Arc::clone(&session_catalogs)"));
     for forbidden in [
         "infrastructure::role_catalog",
         "infrastructure::git::confined_git_command",

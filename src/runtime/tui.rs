@@ -74,9 +74,8 @@ use usagi_tui::usecase::application::agent_tab_intent::{
 };
 use usagi_tui::usecase::application::controller::{
     AppEvent, AppKey, BackendEvent, DaemonAction, EnvironmentEntry, NewRequest, Notice,
-    PendingToken, PreviewFileFilter, RoleChoice, RoleEditorScope, SafeError, SafeMessage,
-    SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection, Target,
-    classify_management_input,
+    PendingToken, PreviewFileFilter, RoleEditorScope, SafeError, SafeMessage, SessionBranchCatalog,
+    SessionRoleCatalog, SessionRoleProjection, Target, classify_management_input,
 };
 use usagi_tui::usecase::application::daemon_backend::{
     Completions, DaemonBackend, DaemonControlPort as BackendDaemonControlPort,
@@ -88,11 +87,11 @@ use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
 use usagi_tui::usecase::application::runtime_ports::{
     DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
-    RestoreConnectionPort, SessionCatalogPort, SessionCommandPort, SessionCommandResult,
-    SessionRefreshPort, SessionWorktreeScanPort,
+    RestoreConnectionPort, SessionBranchCatalogPort, SessionCatalogPort, SessionCommandPort,
+    SessionCommandResult, SessionRefreshPort, SessionWorktreeScanPort,
 };
 use usagi_tui::usecase::application::session_catalog::{
-    project_branch_catalog, project_branch_default,
+    project_branch_catalog, project_branch_default, project_session_role_catalog,
 };
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
@@ -483,24 +482,8 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
                 &self.role_workspace,
             )
         {
-            let roles = catalog
-                .roles
-                .into_iter()
-                .filter(|(_, definition)| {
-                    definition
-                        .scopes
-                        .contains(&usagi_core::domain::role::RoleScope::Session)
-                })
-                .map(|(id, definition)| RoleChoice {
-                    id,
-                    summary: definition.summary,
-                })
-                .collect();
             completions.emit(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
-                SessionRoleCatalog {
-                    roles,
-                    default: catalog.defaults.session,
-                },
+                project_session_role_catalog(catalog),
             )));
         }
     }
@@ -1103,60 +1086,63 @@ struct ProductionSessionCatalogPort {
     data_home: PathBuf,
 }
 
+/// Process-only adapter created for one detached branch-discovery worker.
+/// It owns no workspace-resident connection or other teardown-sensitive state.
+struct ProductionSessionBranchCatalogPort;
+
+impl SessionBranchCatalogPort for ProductionSessionBranchCatalogPort {
+    fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog {
+        discover_branch_catalog(workspace, configured_default)
+    }
+}
+
 impl SessionCatalogPort for ProductionSessionCatalogPort {
     fn roles(&self, workspace: &Path) -> SessionRoleCatalog {
         usagi_core::infrastructure::role_catalog::load_effective(&self.data_home, workspace)
             .ok()
-            .map(|catalog| {
-                let roles = catalog
-                    .roles
-                    .into_iter()
-                    .filter(|(_, definition)| {
-                        definition
-                            .scopes
-                            .contains(&usagi_core::domain::role::RoleScope::Session)
-                    })
-                    .map(|(id, definition)| RoleChoice {
-                        id,
-                        summary: definition.summary,
-                    })
-                    .collect();
-                SessionRoleCatalog {
-                    roles,
-                    default: catalog.defaults.session,
-                }
-            })
+            .map(project_session_role_catalog)
             .unwrap_or_default()
     }
 
     fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog {
-        let refs = usagi_core::infrastructure::git::confined_git_command(workspace)
-            .args([
-                "for-each-ref",
-                "--format=%(refname) %(symref)",
-                "refs/heads",
-                "refs/remotes",
-            ])
-            .output();
-        let refs = match refs {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout).into_owned()
-            }
-            Ok(_) | Err(_) => return SessionBranchCatalog::default(),
-        };
-        let mut catalog = project_branch_catalog(&refs, None, configured_default);
-        if catalog.default.is_some() {
-            return catalog;
-        }
-        let symbolic_head = usagi_core::infrastructure::git::confined_git_command(workspace)
-            .args(["symbolic-ref", "--quiet", "HEAD"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
-        catalog.default = project_branch_default(&catalog.branches, symbolic_head.as_deref());
-        catalog
+        discover_branch_catalog(workspace, configured_default)
     }
+
+    fn branch_worker(&self) -> Box<dyn SessionBranchCatalogPort> {
+        Box::new(ProductionSessionBranchCatalogPort)
+    }
+}
+
+fn discover_branch_catalog(
+    workspace: &Path,
+    configured_default: Option<&str>,
+) -> SessionBranchCatalog {
+    let refs = usagi_core::infrastructure::git::confined_git_command(workspace)
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(symref)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .output();
+    let refs = match refs {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        Ok(_) | Err(_) => return SessionBranchCatalog::default(),
+    };
+    let mut catalog = project_branch_catalog(&refs, None, configured_default);
+    if catalog.default.is_some() {
+        return catalog;
+    }
+    let symbolic_head = usagi_core::infrastructure::git::confined_git_command(workspace)
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    catalog.default = project_branch_default(&catalog.branches, symbolic_head.as_deref());
+    catalog
 }
 
 fn child_directory_names(parent: &Path) -> std::io::Result<Vec<String>> {
@@ -1279,7 +1265,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             DaemonRestoreConnectionPort::channel(data_dir.clone());
         ControllerBackendComposition {
             backend,
-            session_catalogs: Arc::new(ProductionSessionCatalogPort {
+            session_catalogs: Box::new(ProductionSessionCatalogPort {
                 data_home: data_dir.clone(),
             }),
             session_commands: Box::new(DaemonSessionCommandPort),

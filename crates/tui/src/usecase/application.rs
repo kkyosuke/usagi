@@ -52,7 +52,8 @@ pub mod pane_runtime;
 pub mod pr;
 /// IO-free runtime boundaries used by the controller composition.
 pub mod runtime_ports;
-/// Pure projection of observed repository refs into create-session choices.
+/// Pure projection of observed role catalogs and repository refs into
+/// create-session choices.
 pub mod session_catalog;
 /// Pure http(s) URL detection and validation over the ANSI-free terminal grid.
 pub mod terminal_link;

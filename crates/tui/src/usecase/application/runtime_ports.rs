@@ -150,15 +150,29 @@ pub trait SessionWorktreeScanPort {
     fn scan(&mut self, workspace: &Path) -> Vec<String>;
 }
 
+/// Worker-local Git-ref discovery for the create-session form.
+///
+/// Implementations are freshly created by [`SessionCatalogPort`] and may
+/// outlive the workspace frame when a Git subprocess stalls. They must not
+/// borrow or share workspace-resident connections or other teardown-sensitive
+/// resources.
+pub trait SessionBranchCatalogPort: Send {
+    /// Returns branch choices and the effective default for `workspace`.
+    fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog;
+}
+
 /// Workspace-local role and Git-ref discovery for the create-session form.
 ///
 /// The controller consumes typed catalogs while the composition adapter owns
-/// filesystem and process IO. The shared port is thread-safe because branch
-/// discovery runs off the render thread.
-pub trait SessionCatalogPort: Send + Sync {
+/// filesystem and process IO. Synchronous refreshes stay on this resident port;
+/// detached discovery receives a fresh, explicitly worker-local adapter.
+pub trait SessionCatalogPort: Send {
     /// Returns the effective session-role choices for `workspace`.
     fn roles(&self, workspace: &Path) -> SessionRoleCatalog;
 
     /// Returns branch choices and the effective default for `workspace`.
     fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog;
+
+    /// Creates an adapter owned exclusively by one detached discovery worker.
+    fn branch_worker(&self) -> Box<dyn SessionBranchCatalogPort>;
 }

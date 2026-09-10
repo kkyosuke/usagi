@@ -1,6 +1,26 @@
-//! Pure projection of Git ref observations into create-session branch choices.
+//! Pure projection of role and Git-ref observations into create-session catalogs.
 
-use super::controller::{BranchChoice, SessionBranchCatalog};
+use usagi_core::domain::role::{EffectiveRoleCatalog, RoleScope};
+
+use super::controller::{BranchChoice, RoleChoice, SessionBranchCatalog, SessionRoleCatalog};
+
+/// Build the create-session role catalog from an effective domain catalog.
+#[must_use]
+pub fn project_session_role_catalog(catalog: EffectiveRoleCatalog) -> SessionRoleCatalog {
+    let roles = catalog
+        .roles
+        .into_iter()
+        .filter(|(_, definition)| definition.scopes.contains(&RoleScope::Session))
+        .map(|(id, definition)| RoleChoice {
+            id,
+            summary: definition.summary,
+        })
+        .collect();
+    SessionRoleCatalog {
+        roles,
+        default: catalog.defaults.session,
+    }
+}
 
 /// Build the create-session branch catalog from already observed Git output.
 ///
@@ -68,8 +88,58 @@ fn remote_default_branch_label(refname: &str, symref: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::project_branch_catalog;
-    use crate::usecase::application::controller::BranchChoice;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use usagi_core::domain::role::{
+        EffectiveRoleCatalog, RoleDefaults, RoleDefinition, RoleId, RoleScope,
+    };
+
+    use super::{project_branch_catalog, project_session_role_catalog};
+    use crate::usecase::application::controller::{BranchChoice, RoleChoice, SessionRoleCatalog};
+
+    #[test]
+    fn role_projection_keeps_only_session_roles_and_the_session_default() {
+        let session = RoleId::new("coder").unwrap();
+        let root = RoleId::new("director").unwrap();
+        let catalog = EffectiveRoleCatalog {
+            configured: true,
+            defaults: RoleDefaults {
+                root: Some(root.clone()),
+                session: Some(session.clone()),
+            },
+            roles: BTreeMap::from([
+                (
+                    session.clone(),
+                    RoleDefinition {
+                        summary: "Code".into(),
+                        scopes: BTreeSet::from([RoleScope::Session]),
+                        instructions: "code".into(),
+                        delegation: None,
+                    },
+                ),
+                (
+                    root,
+                    RoleDefinition {
+                        summary: "Direct".into(),
+                        scopes: BTreeSet::from([RoleScope::Root]),
+                        instructions: "direct".into(),
+                        delegation: None,
+                    },
+                ),
+            ]),
+        };
+
+        assert_eq!(
+            project_session_role_catalog(catalog),
+            SessionRoleCatalog {
+                roles: vec![RoleChoice {
+                    id: session.clone(),
+                    summary: "Code".into(),
+                }],
+                default: Some(session),
+            }
+        );
+    }
 
     #[test]
     fn projection_includes_remote_defaults_and_skips_symbolic_aliases() {
