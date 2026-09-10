@@ -7349,6 +7349,56 @@ mod tests {
     }
 
     #[test]
+    fn session_start_capture_ignores_headless_and_rejects_unsupported_profiles() {
+        let mut runtime = structured_claude_runtime();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace: WorkspaceId::new(),
+                    session: Some(SessionId::new()),
+                    profile: None,
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+
+        let mut snapshot = runtime.coordinator.snapshot();
+        snapshot.records[0].launch.request.mode = LaunchMode::Headless;
+        runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        runtime
+            .report_agent_phase_with_session(
+                &credential,
+                AgentPhase::Ready,
+                Some(ProviderSessionId::new("ignored-headless-session").unwrap()),
+            )
+            .unwrap();
+        assert!(
+            runtime.coordinator.snapshot().records[0]
+                .provider_resume
+                .is_none()
+        );
+
+        let mut snapshot = runtime.coordinator.snapshot();
+        snapshot.records[0].launch.request.mode = LaunchMode::Interactive;
+        snapshot.records[0].launch.request.profile_id = AgentProfileId::new("shell").unwrap();
+        snapshot.records[0].launch.plan.profile_id = AgentProfileId::new("shell").unwrap();
+        runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        assert_eq!(
+            runtime
+                .report_agent_phase_with_session(
+                    &credential,
+                    AgentPhase::Ready,
+                    Some(ProviderSessionId::new("unsupported-session").unwrap()),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
     fn stale_process_local_credentials_fail_closed_at_structured_boundaries() {
         let mut runtime = codex_runtime();
         let admission = runtime

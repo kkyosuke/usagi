@@ -3443,6 +3443,12 @@ mod tests {
             refined.as_ref().and_then(|value| value.last_known_phase),
             Some(ProviderResumePhase::Running)
         );
+        let mut mismatched = refined.clone().unwrap();
+        mismatched.adapter_revision += 1;
+        assert_eq!(
+            c.replace_provider_resume(&runtime, mismatched, &mut store),
+            Err(RuntimeError::ProviderResumeMismatch)
+        );
         // The refinement never touches liveness.
         assert_eq!(
             refined.map(|value| value.last_known_status),
