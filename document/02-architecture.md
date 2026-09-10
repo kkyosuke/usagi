@@ -701,7 +701,7 @@ stream、error detail に残らない。
 Claude の実効 argv は次の順序に固定する。
 
 ```text
-provision 引数 -> --session-id/--resume? -> mode 引数 -> --model <model>? -> -- -> initial prompt
+provision 引数 -> --resume <captured-id>? -> mode 引数 -> --model <model>? -> -- -> initial prompt
 ```
 
 dispatch / delegate 由来の initial prompt は untrusted な opaque data であり、存在する場合は必ず option
@@ -1029,14 +1029,15 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   `PreToolUse` の phase 報告とライフサイクル event
   （`SessionStart` / `UserPromptSubmit` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
   と `guard-workspace` は両 mode に配線する。root の guard は file write と unsafe shell/Git を deny し、OS sandbox
-  も checkout と Git common dir の書き込みを拒否する。
+  も checkout と Git common dir の書き込みを拒否する。`SessionStart` の同じ phase hook は payload の
+  current provider session ID も phase と一緒に報告する。
 - **Codex inline hooks**: daemon が `features.hooks = true` と lifecycle hook のinline TOMLを起動引数へ渡す。
   `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` / `SessionEnd` を
   Claude と同じphaseへ写し、Codex の `PostToolUse` は `waiting` を報告する。`approval_policy = "never"` の起動では
   発火しない `PermissionRequest` と、Codex の hook event でない `Notification` は配線しない。inline hook は Codex
   自身の通常の trust review を通し、daemon は hook trust を一括 bypass しない。
-  新規会話の`SessionStart(startup)`だけはphase報告に加えてprovider session IDをcaptureし、resume/clear/compactでは
-  phaseだけを報告する。
+  Claude と同様、すべての `SessionStart` は同じ phase hook で current provider session ID と phase を一緒に報告する。
+  これにより startup / resume / clear / compact、および Claude の fork 後の現在の会話へ durable resume metadata が追従する。
 - **`TMPDIR` 伝播**: agent child は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable
   root に足す。この policy path は daemon bootstrap が trusted environment から独立に確定・検証し、両 mode へ
   同じように渡す（agent child の環境変数は policy 解決に使わない）。

@@ -24,9 +24,9 @@ use super::runtime::{
 #[cfg(test)]
 mod fixture;
 
-/// Revision 4 requires explicit Codex hook trust and removes the unreachable
-/// `PermissionRequest` hook from the structured integration.
-pub const PROFILE_REVISION: u32 = 4;
+/// Revision 5 captures the current provider conversation and lifecycle phase
+/// atomically through the common `SessionStart` hook.
+pub const PROFILE_REVISION: u32 = 5;
 
 /// The non-secret outcome that the renderer may use to build a durable plan.
 pub struct CodexProvision {

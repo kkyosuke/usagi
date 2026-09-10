@@ -1180,8 +1180,6 @@ pub(super) fn mcp_environment(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 pub(super) fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
-    let capture_command = format!("{} codex-session-capture", shell_quote(command));
-    let capture_command = serde_json::to_string(&capture_command).map_err(|_| ())?;
     let mut arguments = codex_product_mcp_arguments(command);
     arguments.extend(["-c".into(), r"features.hooks = true".into()]);
     for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
@@ -1194,17 +1192,12 @@ pub(super) fn codex_integration_arguments(command: &Path) -> Result<Vec<String>,
         let phase_command = format!("{} agent-phase {}", shell_quote(command), phase.as_token());
         let phase_command = serde_json::to_string(&phase_command).map_err(|_| ())?;
         let timeout = if event == "SessionEnd" { 3 } else { 10 };
-        let groups = if event == "SessionStart" {
-            // Only a new conversation may establish provider resume identity;
-            // phase reporting also applies to resume/clear/compact starts.
-            format!(
-                r#"[{{ matcher = "^startup$", hooks = [{{ type = "command", command = {capture_command}, timeout = 10 }}] }}, {{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
-            )
-        } else {
-            format!(
-                r#"[{{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
-            )
-        };
+        // `agent-phase ready` consumes the same SessionStart payload and sends
+        // both its current session ID and phase in one private request. This
+        // keeps startup, resume, clear, and compact transitions ordered.
+        let groups = format!(
+            r#"[{{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
+        );
         arguments.extend(["-c".into(), format!("hooks.{event} = {groups}")]);
     }
     Ok(arguments)

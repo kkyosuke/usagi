@@ -10264,15 +10264,16 @@ fn dispatch_agent_phase_report(
         .and_then(|request| match request {
             DaemonRequest::AgentPhaseReport {
                 phase,
+                native_session_id,
                 caller_context,
-            } => Some((phase, caller_context)),
+            } => Some((phase, native_session_id, caller_context)),
             _ => None,
         });
     let result = request
         .ok_or_else(|| {
             ProtocolError::new(ErrorCode::InvalidArgument, "agent phase report is invalid")
         })
-        .and_then(|(phase, caller_context)| {
+        .and_then(|(phase, native_session_id, caller_context)| {
             let mut agent = agent.lock().map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
             })?;
@@ -10291,7 +10292,7 @@ fn dispatch_agent_phase_report(
                         "phase hook process does not belong to a live Agent runtime",
                     )
                 })?;
-            agent.report_agent_phase(&credential, phase)
+            agent.report_agent_phase_with_session(&credential, phase, native_session_id)
         });
     let outcome = match result {
         Ok(()) => ResponseOutcome::Ok,
@@ -23339,9 +23340,9 @@ mod tests {
             .iter()
             .find(|argument| argument.starts_with("hooks.SessionStart = "))
             .unwrap();
-        assert!(session_start.contains("matcher = \"^startup$\""));
-        assert!(session_start.contains("codex-session-capture"));
         assert!(session_start.contains("agent-phase ready"));
+        assert!(!session_start.contains("matcher"));
+        assert!(!session_start.contains("codex-session-capture"));
         let session_end = codex
             .iter()
             .find(|argument| argument.starts_with("hooks.SessionEnd = "))
@@ -23414,7 +23415,6 @@ mod tests {
 
         let calls = std::fs::read_to_string(log).unwrap();
         for expected in [
-            "codex-session-capture|",
             "agent-phase ready|",
             "agent-phase running|",
             "agent-phase waiting|",
@@ -23423,7 +23423,7 @@ mod tests {
         ] {
             assert!(calls.contains(expected), "missing {expected}: {calls}");
         }
-        assert_eq!(calls.lines().count(), 7, "{calls}");
+        assert_eq!(calls.lines().count(), 6, "{calls}");
     }
 
     #[test]

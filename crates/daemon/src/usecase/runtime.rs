@@ -1720,13 +1720,37 @@ impl RuntimeCoordinator {
         record.provider_resume = Some(provider_resume);
         self.persist(store)
     }
+    /// Replaces the current provider conversation after the exact live runtime
+    /// reports a documented `SessionStart`. A single provider process can move
+    /// to another conversation through `/clear` or an interactive resume, so
+    /// this boundary deliberately permits the native ID to change while all
+    /// daemon-owned runtime, scope, and adapter fences remain exact.
+    pub fn replace_provider_resume(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        provider_resume: ProviderResumeRef,
+        store: &mut dyn RuntimeStore,
+    ) -> Result<(), RuntimeError> {
+        let record = self.record_mut(runtime)?;
+        if record.state != RuntimeState::Running
+            || record.launch.request.scope != provider_resume.scope
+            || record.launch.plan.profile_revision != provider_resume.adapter_revision
+        {
+            return Err(RuntimeError::ProviderResumeMismatch);
+        }
+        if record.provider_resume.as_ref() == Some(&provider_resume) {
+            return Ok(());
+        }
+        record.provider_resume = Some(provider_resume);
+        self.persist(store)
+    }
     /// Refines only the safe phase of an existing provider resume reference for
     /// a live runtime.
     ///
     /// Process death stays observation-owned: this path never writes
     /// `last_known_status`, and a runtime which is not `Running` is refused so a
     /// late report cannot make a reconciled or exited record look alive.  A
-    /// record without provider metadata (for example Codex before its
+    /// record without provider metadata (for example Claude or Codex before its
     /// structured capture) is a no-op rather than a synthesized reference, and
     /// an unchanged phase does not persist a snapshot.
     pub fn record_provider_phase(

@@ -1492,6 +1492,7 @@ fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
     let forged = client
         .request(DaemonRequest::AgentPhaseReport {
             phase: AgentPhase::Waiting,
+            native_session_id: None,
             caller_context: Some(McpCallerContext {
                 credential: "forged-credential".into(),
             }),
@@ -1506,6 +1507,7 @@ fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
     let empty = client
         .request(DaemonRequest::AgentPhaseReport {
             phase: AgentPhase::Ready,
+            native_session_id: None,
             caller_context: Some(McpCallerContext {
                 credential: String::new(),
             }),
