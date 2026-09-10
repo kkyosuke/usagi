@@ -500,6 +500,36 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
 }
 
 #[test]
+fn tui_controller_keeps_entry_new_and_tests_in_their_bounded_contexts() {
+    let root = workspace_root();
+    let controller =
+        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller.rs"))
+            .expect("TUI Home controller is readable");
+    let entry =
+        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/entry.rs"))
+            .expect("TUI entry controller is readable");
+    let new = fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/new.rs"))
+        .expect("TUI new-workspace controller is readable");
+    let tests =
+        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/tests.rs"))
+            .expect("TUI controller tests are readable");
+
+    for module in ["mod entry;", "mod new;", "mod tests;"] {
+        assert!(controller.contains(module));
+    }
+    assert!(!controller.contains("mod tests {"));
+    assert!(!controller.contains("pub struct EntryState"));
+    assert!(!controller.contains("pub struct NewState"));
+    assert!(entry.contains("pub fn update_entry("));
+    assert!(new.contains("pub fn update_new("));
+    assert!(tests.contains("#![coverage(off)]"));
+    assert!(
+        controller.lines().count() <= 6_500,
+        "TUI Home controller grew beyond its reviewable boundary"
+    );
+}
+
+#[test]
 fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_module() {
     let root = workspace_root();
     let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))

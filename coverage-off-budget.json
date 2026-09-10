@@ -36,7 +36,7 @@
     "crates/tui/src/presentation/widgets/modal.rs": 1,
     "crates/tui/src/presentation/widgets/session_tab.rs": 1,
     "crates/tui/src/usecase/application.rs": 1,
-    "crates/tui/src/usecase/application/controller.rs": 1,
+    "crates/tui/src/usecase/application/controller/tests.rs": 1,
     "crates/tui/src/usecase/application/daemon_backend.rs": 1,
     "crates/tui/src/usecase/application/pane.rs": 1,
     "crates/tui/src/usecase/application/pr.rs": 1,
