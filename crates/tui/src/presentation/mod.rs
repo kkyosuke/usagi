@@ -910,13 +910,6 @@ fn garden_shell_owned_wake(key: &Key) -> bool {
 struct NoMetrics;
 impl MetricsPort for NoMetrics {}
 
-struct NoMetricsFactory;
-impl MetricsPortFactory for NoMetricsFactory {
-    fn create(&mut self) -> Box<dyn MetricsPort> {
-        Box::new(NoMetrics)
-    }
-}
-
 /// Actions whose stateful host remains in the terminal loop while
 /// [`DaemonBackend`] is the sole controller-effect dispatcher.
 pub enum ControllerHostAction {
@@ -9254,41 +9247,6 @@ pub fn run_with_settings(
         None,
         None,
         AvailableAgentModels::all(),
-    )
-}
-
-/// Run the screen graph while limiting Config's Agent model choices to installed CLIs.
-///
-/// # Errors
-///
-/// Returns workspace loading or terminal IO failures from the screen graph.
-#[allow(clippy::too_many_arguments)]
-#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
-pub fn run_with_settings_and_agent_port_factory_and_model_availability(
-    term: &mut dyn Terminal,
-    workspaces: Vec<Workspace>,
-    recent: Vec<Recent>,
-    now: DateTime<Utc>,
-    start: Start,
-    loader: &mut dyn WorkspaceLoader,
-    settings: &mut dyn SettingsPort,
-    session_commands: &mut dyn SessionCommandPortFactory,
-    agent_commands: &mut dyn AgentCommandPortFactory,
-    available_models: AvailableAgentModels,
-) -> io::Result<Exit> {
-    let mut metrics = NoMetricsFactory;
-    run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
-        term,
-        workspaces,
-        recent,
-        now,
-        start,
-        loader,
-        settings,
-        session_commands,
-        agent_commands,
-        available_models,
-        &mut metrics,
     )
 }
 

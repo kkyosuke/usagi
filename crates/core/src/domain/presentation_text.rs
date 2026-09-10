@@ -26,9 +26,32 @@ pub fn presentation_text_is_safe(value: &str) -> bool {
     value.chars().all(presentation_character_is_safe)
 }
 
+/// Normalize one untrusted text line for terminal presentation.
+///
+/// Tabs become one stable cell and unsafe controls become the replacement
+/// character. Callers may apply this at multiple trust boundaries while still
+/// sharing one policy implementation.
+#[must_use]
+pub fn sanitize_presentation_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character == '\t' {
+                ' '
+            } else if presentation_character_is_safe(character) {
+                character
+            } else {
+                '\u{fffd}'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{presentation_character_is_safe, presentation_text_is_safe};
+    use super::{
+        presentation_character_is_safe, presentation_text_is_safe, sanitize_presentation_line,
+    };
 
     #[test]
     fn ordinary_unicode_is_safe() {
@@ -48,5 +71,13 @@ mod tests {
         ] {
             assert!(!presentation_text_is_safe(value), "{value:?}");
         }
+    }
+
+    #[test]
+    fn line_sanitizer_keeps_safe_unicode_and_normalizes_unsafe_cells() {
+        assert_eq!(
+            sanitize_presentation_line("a\tb\n日本語\u{202e}"),
+            "a b\u{fffd}日本語\u{fffd}"
+        );
     }
 }

@@ -230,16 +230,18 @@ pub fn terminal_point_at(
 ) -> Option<TerminalPoint> {
     let drawer = geometry(raw_height, raw_width);
     let viewport = terminal_viewport(raw_height, raw_width);
-    let column = usize::from(column).checked_sub(drawer.left.saturating_add(2))?;
-    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(4))?;
-    if column >= viewport.cols || content_row >= viewport.rows {
-        return None;
-    }
-    let start = widgets::live_terminal::window_start(rows_len, viewport.rows, scroll);
-    Some(TerminalPoint {
-        row: start + content_row,
+    widgets::live_terminal::retained_point_at(
+        widgets::live_terminal::ViewportGeometry {
+            left: drawer.left.saturating_add(2),
+            top: drawer.top.saturating_add(4),
+            rows: viewport.rows,
+            cols: viewport.cols,
+        },
+        rows_len,
+        scroll,
         column,
-    })
+        row,
+    )
 }
 
 /// Whether a frame-cell press lands on the drawer's right-aligned `New`

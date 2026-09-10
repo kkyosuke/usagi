@@ -195,16 +195,18 @@ pub fn terminal_point_at_for_mode(
 ) -> Option<TerminalPoint> {
     let drawer = geometry_for_mode(raw_height, raw_width, available_width, full_height);
     let viewport = terminal_viewport_for_mode(raw_height, raw_width, available_width, full_height);
-    let column = usize::from(column).checked_sub(2)?;
-    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(3))?;
-    if column >= viewport.cols || content_row >= viewport.rows {
-        return None;
-    }
-    let start = widgets::live_terminal::window_start(rows_len, viewport.rows, scroll);
-    Some(TerminalPoint {
-        row: start + content_row,
+    widgets::live_terminal::retained_point_at(
+        widgets::live_terminal::ViewportGeometry {
+            left: 2,
+            top: drawer.top.saturating_add(3),
+            rows: viewport.rows,
+            cols: viewport.cols,
+        },
+        rows_len,
+        scroll,
         column,
-    })
+        row,
+    )
 }
 
 /// Resolve a click on the visible terminal-only tab strip.
