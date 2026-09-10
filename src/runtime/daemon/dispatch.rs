@@ -3515,7 +3515,8 @@ pub(super) fn dispatch_session_action(
                                 item.session.session_id,
                                 &names,
                                 &parents,
-                            ));
+                            ))
+                            .into();
                             item
                         })
                         .collect();

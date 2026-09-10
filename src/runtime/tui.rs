@@ -3657,7 +3657,7 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
         let sessions = snapshot
             .sessions
             .into_iter()
-            .map(|item| item.session)
+            .map(|item| item.session.into())
             .collect::<Vec<_>>();
         validate_unique_session_ids(&sessions)?;
         Ok(LifecycleSnapshot {

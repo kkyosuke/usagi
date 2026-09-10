@@ -2475,8 +2475,8 @@ fn projected_snapshot(
                     .get(id)
                     .map(|role| role.summary.clone())
             }),
-            session,
-            runtime: None,
+            session: session.into(),
+            runtime: None.into(),
         })
         .collect();
     serde_json::to_value(SessionListSnapshot {
