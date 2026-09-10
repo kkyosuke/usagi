@@ -204,11 +204,20 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                 expected_revision,
                 mutation,
             )
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid Agent tab intent mutation",
-                )
+            .map_err(|error| match error {
+                AgentTabIntentError::Unavailable => {
+                    io::Error::other("Agent tab intent revision exhausted")
+                }
+                AgentTabIntentError::ReadOnlySchema => io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "future Agent tab intent schema is read-only",
+                ),
+                AgentTabIntentError::ConcurrentChange | AgentTabIntentError::InvalidMutation => {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid Agent tab intent mutation",
+                    )
+                }
             })?;
             if commit.intent.revision != revision {
                 Self::write_unlocked(path, &commit.intent)?;

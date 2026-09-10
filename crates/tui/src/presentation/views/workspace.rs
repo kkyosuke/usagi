@@ -2034,21 +2034,22 @@ pub fn terminal_point_at(
     let split = panes::split(width, LEFT_WIDTH);
     // The divider occupies one column between the panes.
     let right_left = split.left.saturating_add(1);
-    let column = usize::from(column).checked_sub(right_left)?;
-    let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
-    let content_row = body_row.checked_sub(widgets::live_terminal::RIGHT_PANE_CONTENT_TOP)?;
     let body_height = height.saturating_sub(CHROME_ROWS);
     let content_cap = body_height.saturating_sub(
         widgets::live_terminal::RIGHT_PANE_CONTENT_TOP + widgets::live_terminal::FOOTER_ROWS,
     );
-    if content_row >= content_cap {
-        return None;
-    }
-    let start = widgets::live_terminal::window_start(rows_len, content_cap, scroll);
-    Some(TerminalPoint {
-        row: start + content_row,
+    widgets::live_terminal::retained_point_at(
+        widgets::live_terminal::ViewportGeometry {
+            left: right_left,
+            top: CHROME_ROWS + widgets::live_terminal::RIGHT_PANE_CONTENT_TOP,
+            rows: content_cap,
+            cols: split.right,
+        },
+        rows_len,
+        scroll,
         column,
-    })
+        row,
+    )
 }
 
 /// Resolve a click on the right-pane chip row to its displayed tab index.

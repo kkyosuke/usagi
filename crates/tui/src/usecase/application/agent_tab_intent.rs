@@ -771,8 +771,9 @@ impl AgentTabIntentError {
 /// # Errors
 ///
 /// Returns [`AgentTabIntentError::InvalidMutation`] when the expected revision
-/// is ahead of durable state, the revision is exhausted, or the resulting state
-/// fails validation.
+/// is ahead of durable state or the resulting state fails validation. Revision
+/// exhaustion is reported as [`AgentTabIntentError::Unavailable`] because the
+/// accepted causal write cannot be published.
 #[allow(clippy::too_many_lines)]
 pub fn reconcile_agent_tab_intent_mutation(
     mut current: AgentTabIntent,
@@ -921,7 +922,7 @@ pub fn reconcile_agent_tab_intent_mutation(
         current.revision = current
             .revision
             .checked_add(1)
-            .ok_or(AgentTabIntentError::InvalidMutation)?;
+            .ok_or(AgentTabIntentError::Unavailable)?;
         current
             .validate(expected_workspace)
             .map_err(|_| AgentTabIntentError::InvalidMutation)?;
