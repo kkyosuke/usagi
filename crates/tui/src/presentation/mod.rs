@@ -4102,13 +4102,8 @@ fn projection_build_counts() -> (usize, usize) {
 fn project_controller_sessions(ui: &WorkspaceIoRuntime, state: &AppState) -> Vec<ProjectedSession> {
     #[cfg(test)]
     SESSION_PROJECTION_BUILDS.set(SESSION_PROJECTION_BUILDS.get() + 1);
-    let known_sessions = ui
+    let observed = ui
         .workspace
-        .session_ids()
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    ui.workspace
         .sessions()
         .iter()
         .zip(ui.workspace.session_ids())
@@ -4131,35 +4126,10 @@ fn project_controller_sessions(ui: &WorkspaceIoRuntime, state: &AppState) -> Vec
                 // the daemon says so, not only until the local command returns.
                 projected.removing |= projection.lifecycle == SessionLifecycle::Deleting;
             }
-            projected.role_id = ui
-                .workspace
-                .session_roles()
-                .get(id)
-                .and_then(|role| role.role_id.as_ref())
-                .map(ToString::to_string);
-            if let Some(role) = ui.workspace.session_roles().get(id) {
-                projected.parent_session_id = role.parent_session_id;
-                projected.organization_depth = 0;
-                let mut parent = role.parent_session_id;
-                let mut seen = BTreeSet::from([*id]);
-                while let Some(parent_id) = parent
-                    && known_sessions.contains(&parent_id)
-                    && seen.insert(parent_id)
-                {
-                    projected.organization_depth += 1;
-                    parent = ui
-                        .workspace
-                        .session_roles()
-                        .get(&parent_id)
-                        .and_then(|projection| projection.parent_session_id);
-                }
-            }
-            if let Some(prs) = state.session_prs(*id) {
-                projected.pr_count = crate::presentation::views::workspace::visible_pr_entries(prs);
-            }
             projected
         })
-        .collect()
+        .collect::<Vec<_>>();
+    crate::presentation::views::workspace::project_sessions(state, &observed)
 }
 
 /// Render a single static Home frame from a workspace snapshot, using the same
@@ -4201,13 +4171,8 @@ pub fn render_home_snapshot(
         })
         .collect();
     let state = AppState::home(snapshot.workspace_id, snapshot.session_ids.clone());
-    let projection = HomeProjection::from_state(
-        &state,
-        &snapshot.workspace.name,
-        &snapshot.workspace.path,
-        &sessions,
-    )
-    .with_icon_mode(icon_mode);
+    let projection = HomeProjection::from_state(&state, &snapshot.workspace.name, &sessions)
+        .with_icon_mode(icon_mode);
     let mut frame = Vec::with_capacity(height);
     frame.push(project_bar(&WorkspaceDeck::new(snapshot), width).line);
     frame.extend(render_home(
@@ -5983,7 +5948,6 @@ fn home_frame_material(
     width: usize,
     runtime: &WorkspaceRuntime,
     workspace_name: &str,
-    _root_cwd: &Path,
     sessions: &[ProjectedSession],
     metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
@@ -6208,7 +6172,6 @@ fn render_controller_frame(
     width: usize,
     runtime: &WorkspaceRuntime,
     workspace_name: &str,
-    root_cwd: &Path,
     sessions: &[ProjectedSession],
     metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
@@ -6221,7 +6184,6 @@ fn render_controller_frame(
         width,
         runtime,
         workspace_name,
-        root_cwd,
         sessions,
         metrics,
         health,
@@ -7008,7 +6970,7 @@ fn cached_workspace_switch_frame(
             AppEvent::FocusSession(session),
         );
     }
-    let projection = HomeProjection::from_state(&state, slot.label(), slot.path(), &sessions)
+    let projection = HomeProjection::from_state(&state, slot.label(), &sessions)
         .with_icon_mode(deck.icon_mode());
     let projection = if show_progress {
         projection.with_content_loading(status, frame)
@@ -8775,7 +8737,6 @@ fn drive_workspace_controller(
                     width,
                     &runtime,
                     &workspace_name,
-                    &root_cwd,
                     &sessions,
                     metrics_projection.metrics(),
                     metrics_projection.health(),

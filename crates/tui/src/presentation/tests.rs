@@ -704,7 +704,6 @@ fn an_idle_home_grows_a_garden_whose_usagi_is_one_click_from_its_closeup() {
         prs: Vec::new(),
     };
     let sessions = vec![ProjectedSession::from_record(session, &record)];
-    let root = PathBuf::from("/tmp/demo");
     let no_diffs = BTreeMap::new();
     let clock = now();
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
@@ -714,7 +713,6 @@ fn an_idle_home_grows_a_garden_whose_usagi_is_one_click_from_its_closeup() {
             80,
             runtime,
             "demo",
-            &root,
             &sessions,
             None,
             health(),
@@ -828,7 +826,6 @@ fn garden_routes_click_and_pointer_down_through_the_drawn_frame_hit_test() {
         prs: Vec::new(),
     };
     let sessions = vec![ProjectedSession::from_record(session, &record)];
-    let root = PathBuf::from("/tmp/demo");
     let no_diffs = BTreeMap::new();
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
@@ -849,7 +846,6 @@ fn garden_routes_click_and_pointer_down_through_the_drawn_frame_hit_test() {
             80,
             &runtime,
             "demo",
-            &root,
             &sessions,
             None,
             health(),
@@ -910,7 +906,6 @@ fn garden_frame_material_uses_every_open_projects_projection() {
             220,
             &runtime,
             "alpha",
-            &alpha.workspace.path,
             &sessions,
             None,
             health(),
@@ -997,7 +992,6 @@ fn garden_arrow_wakes_home_without_reaching_the_surface_behind_it() {
         80,
         &runtime,
         "demo",
-        Path::new("/tmp/demo"),
         &[],
         None,
         health(),
@@ -1055,7 +1049,6 @@ fn documented_garden_minimum_includes_the_project_bar_row() {
 fn garden_list_keys_and_wheel_scroll_without_waking_the_terminal() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
-    let root = PathBuf::from("/tmp/demo");
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
@@ -1066,7 +1059,6 @@ fn garden_list_keys_and_wheel_scroll_without_waking_the_terminal() {
         120,
         &runtime,
         "demo",
-        &root,
         &[],
         None,
         health(),
@@ -1286,7 +1278,6 @@ fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
     let foreign_workspace = WorkspaceId::new();
     let session = SessionId::new();
     let agent = AgentRuntimeId::new();
-    let root = PathBuf::from("/tmp/demo");
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
     let mut material = home_frame_material(
@@ -1294,7 +1285,6 @@ fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
         120,
         &runtime,
         "demo",
-        &root,
         &[],
         None,
         health(),
@@ -1673,7 +1663,6 @@ fn failed_delete_selection_renders_the_force_remove_confirmation() {
         80,
         &runtime,
         "demo",
-        Path::new("/tmp/demo"),
         &[projected],
         None,
         health(),
@@ -2346,8 +2335,9 @@ fn director_organization_projects_statuses_hierarchy_and_orphans() {
         ]
     );
 
-    let state = crate::usecase::application::controller::AppState::home(WorkspaceId::new(), ids);
-    let projected = super::project_controller_sessions(&ui, &state);
+    let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), ids);
+    super::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let projected = super::project_controller_sessions(&ui, runtime.state());
     assert_eq!(
         projected
             .iter()
@@ -4325,7 +4315,6 @@ fn render_controller_frame_composites_the_home_and_overlays() {
     };
     let sessions = std::slice::from_ref(&projected);
     let git = std::collections::BTreeMap::new();
-    let root = std::path::Path::new("/work");
     // Every case here composites the same Home geometry; only the runtime
     // and its session rows vary. Diagnostic health uses its unobserved
     // default so these assertions stay about the overlays.
@@ -4335,7 +4324,6 @@ fn render_controller_frame_composites_the_home_and_overlays() {
             80,
             runtime,
             "atlas",
-            root,
             sessions,
             None,
             health(),
@@ -4432,7 +4420,6 @@ fn render_controller_frame_composites_terminal_launch_failure() {
         80,
         &runtime,
         "atlas",
-        std::path::Path::new("/work"),
         &[],
         None,
         health(),
@@ -4461,7 +4448,6 @@ fn render_controller_frame_composites_agent_launch_failure() {
         80,
         &runtime,
         "atlas",
-        std::path::Path::new("/work"),
         &[],
         None,
         health(),
@@ -4537,7 +4523,6 @@ fn closeup_environment_editor_is_composited_over_home() {
         80,
         &runtime,
         "atlas",
-        std::path::Path::new("/work"),
         &sessions,
         None,
         health(),
@@ -4758,7 +4743,6 @@ fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
     };
     let workspace = WorkspaceId::new();
     let git = std::collections::BTreeMap::new();
-    let root = std::path::Path::new("/work");
 
     let idle = WorkspaceRuntime::new(workspace, Vec::new());
     let pending = render_controller_frame(
@@ -4766,7 +4750,6 @@ fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
         80,
         &idle,
         "atlas",
-        root,
         &[],
         None,
         health(),
@@ -4784,7 +4767,6 @@ fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
         80,
         &idle,
         "atlas",
-        root,
         &[],
         None,
         health(),
@@ -4806,7 +4788,6 @@ fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
         80,
         &ticked,
         "atlas",
-        root,
         &[],
         None,
         health(),
@@ -5831,7 +5812,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         prs: Vec::new(),
     };
     let sessions = vec![ProjectedSession::from_record(session, &record)];
-    let root = PathBuf::from("/tmp/demo");
     let no_diffs = BTreeMap::new();
     let clock = super::relative_time_clock(now()) + Duration::seconds(10);
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
@@ -5842,7 +5822,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
             80,
             runtime,
             "demo",
-            &root,
             &sessions,
             None,
             health(),
@@ -5885,7 +5864,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -5904,7 +5882,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -5919,7 +5896,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -5934,7 +5910,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -5951,7 +5926,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         StaticMetrics.latest(),
         health(),
@@ -5968,7 +5942,7 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
     let mut observed = DaemonHealthTracker::default();
     observed.observe(&StaticMetrics.latest().expect("static metrics"));
     let health_material = home_frame_material(
-        20, 80, &runtime, "demo", &root, &sessions, None, observed, &no_diffs, None, None, clock,
+        20, 80, &runtime, "demo", &sessions, None, observed, &no_diffs, None, None, clock,
     );
     assert_ne!(health_material, base, "a health observation did not redraw");
 
@@ -5988,7 +5962,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -6012,7 +5985,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -6030,7 +6002,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &root_drawer,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -6054,7 +6025,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -6098,7 +6068,6 @@ fn garden_motion_uses_the_logical_clock_inside_one_relative_time_minute() {
         prs: Vec::new(),
     };
     let sessions = vec![ProjectedSession::from_record(session, &record)];
-    let root = PathBuf::from("/tmp/demo");
     let no_diffs = BTreeMap::new();
     let clock = super::relative_time_clock(now()) + Duration::seconds(10);
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
@@ -6126,7 +6095,6 @@ fn garden_motion_uses_the_logical_clock_inside_one_relative_time_minute() {
             100,
             runtime,
             "demo",
-            &root,
             &sessions,
             None,
             health(),
@@ -9216,7 +9184,7 @@ fn drawer_header_buttons_remain_active_while_the_director_picker_owns_input() {
         DirectorNew::Choosing(_)
     ));
 
-    let home = HomeProjection::from_state(runtime.state(), "demo", Path::new("/work"), &[]);
+    let home = HomeProjection::from_state(runtime.state(), "demo", &[]);
     let director_click = Key::Click { column: 99, row: 0 };
     assert_eq!(
         workspace_drawer_header_key(
@@ -9281,7 +9249,7 @@ fn drawer_header_buttons_remain_active_while_the_director_picker_owns_input() {
 
     // Once closed, the same visible button belongs to the ordinary Home
     // route instead of this close-only priority seam.
-    let closed = HomeProjection::from_state(runtime.state(), "demo", Path::new("/work"), &[]);
+    let closed = HomeProjection::from_state(runtime.state(), "demo", &[]);
     assert_eq!(
         apply_drawer_header_while_director_open(&mut runtime, &director_click, 100, &closed),
         None
@@ -21024,7 +20992,6 @@ fn selecting_an_unresumable_tab_prompts_then_keeps_or_removes_exact_history() {
         80,
         &runtime,
         "demo",
-        Path::new("/tmp/demo"),
         &[],
         None,
         health(),
@@ -21161,7 +21128,6 @@ fn selecting_an_interrupted_rabbit_opens_the_same_unresumable_prompt() {
         80,
         &runtime,
         "demo",
-        Path::new("/tmp/demo"),
         &[ProjectedSession::from_record(session, &record)],
         None,
         health(),

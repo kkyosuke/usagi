@@ -9689,7 +9689,6 @@ mod tests {
             24,
             80,
             "demo",
-            "/tmp/demo",
             &[projected],
             None,
             &std::collections::BTreeMap::new(),
