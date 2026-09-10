@@ -414,6 +414,14 @@ pub trait OutputJournal {
     fn append(&mut self, output: &Output) -> Result<(), ()>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderResumeWrite {
+    /// Adds metadata only when it is absent or already byte-for-byte equal.
+    Attach,
+    /// Replaces the current conversation after a documented `SessionStart`.
+    Replace,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeError {
     Adapter(AdapterError),
@@ -1697,23 +1705,24 @@ impl RuntimeCoordinator {
     ) -> Result<&DurableRuntimeRecord, RuntimeError> {
         self.record(runtime)
     }
-    /// Records an ID obtained from a documented provider-owned structured
-    /// channel. The complete runtime and launch scope must still fence the
-    /// record; callers cannot repair or infer legacy metadata by name/path.
-    pub fn record_provider_resume(
+    /// Writes an ID obtained from a documented provider-owned structured
+    /// channel. `Attach` protects an existing conversation while `Replace`
+    /// admits `/clear` and interactive resume transitions. Both modes retain
+    /// the complete runtime, launch scope, and adapter fences.
+    pub fn write_provider_resume(
         &mut self,
         runtime: &AgentRuntimeRef,
         provider_resume: ProviderResumeRef,
+        write: ProviderResumeWrite,
         store: &mut dyn RuntimeStore,
     ) -> Result<(), RuntimeError> {
         let record = self.record_mut(runtime)?;
         if record.state != RuntimeState::Running
             || record.launch.request.scope != provider_resume.scope
             || record.launch.plan.profile_revision != provider_resume.adapter_revision
-            || record
-                .provider_resume
-                .as_ref()
-                .is_some_and(|existing| existing != &provider_resume)
+            || record.provider_resume.as_ref().is_some_and(|existing| {
+                write == ProviderResumeWrite::Attach && existing != &provider_resume
+            })
         {
             return Err(RuntimeError::ProviderResumeMismatch);
         }
@@ -1726,7 +1735,7 @@ impl RuntimeCoordinator {
     /// Process death stays observation-owned: this path never writes
     /// `last_known_status`, and a runtime which is not `Running` is refused so a
     /// late report cannot make a reconciled or exited record look alive.  A
-    /// record without provider metadata (for example Codex before its
+    /// record without provider metadata (for example Claude or Codex before its
     /// structured capture) is a no-op rather than a synthesized reference, and
     /// an unchanged phase does not persist a snapshot.
     pub fn record_provider_phase(
@@ -2901,7 +2910,7 @@ mod tests {
         )
         .unwrap();
         coordinator
-            .record_provider_resume(
+            .write_provider_resume(
                 &runtime,
                 ProviderResumeRef {
                     provider: ProviderKind::Claude,
@@ -2912,6 +2921,7 @@ mod tests {
                     last_known_status: ProviderResumeStatus::Active,
                     last_known_phase: Some(ProviderResumePhase::Running),
                 },
+                ProviderResumeWrite::Attach,
                 &mut store,
             )
             .unwrap();
@@ -3240,7 +3250,7 @@ mod tests {
             last_known_phase: Some(ProviderResumePhase::Running),
         };
         coordinator
-            .record_provider_resume(&runtime, reference, &mut store)
+            .write_provider_resume(&runtime, reference, ProviderResumeWrite::Attach, &mut store)
             .unwrap();
 
         assert_eq!(coordinator.occupied_slots(), 1);
@@ -3405,7 +3415,7 @@ mod tests {
             last_known_status: ProviderResumeStatus::Active,
             last_known_phase: Some(ProviderResumePhase::Starting),
         };
-        c.record_provider_resume(&runtime, reference, &mut store)
+        c.write_provider_resume(&runtime, reference, ProviderResumeWrite::Attach, &mut store)
             .unwrap();
         let saves = store.0.len();
         c.record_provider_phase(&runtime, ProviderResumePhase::Starting, &mut store)
@@ -3418,6 +3428,27 @@ mod tests {
         assert_eq!(
             refined.as_ref().and_then(|value| value.last_known_phase),
             Some(ProviderResumePhase::Running)
+        );
+        let (unknown, _) = refs(&request);
+        assert_eq!(
+            c.write_provider_resume(
+                &unknown,
+                refined.clone().unwrap(),
+                ProviderResumeWrite::Replace,
+                &mut store,
+            ),
+            Err(RuntimeError::UnknownRuntime)
+        );
+        let mut mismatched = refined.clone().unwrap();
+        mismatched.adapter_revision += 1;
+        assert_eq!(
+            c.write_provider_resume(
+                &runtime,
+                mismatched,
+                ProviderResumeWrite::Replace,
+                &mut store,
+            ),
+            Err(RuntimeError::ProviderResumeMismatch)
         );
         // The refinement never touches liveness.
         assert_eq!(

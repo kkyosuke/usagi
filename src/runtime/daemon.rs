@@ -17685,9 +17685,9 @@ mod tests {
             .iter()
             .find(|argument| argument.starts_with("hooks.SessionStart = "))
             .unwrap();
-        assert!(session_start.contains("matcher = \"^startup$\""));
-        assert!(session_start.contains("codex-session-capture"));
         assert!(session_start.contains("agent-phase ready"));
+        assert!(!session_start.contains("matcher"));
+        assert!(!session_start.contains("codex-session-capture"));
         let session_end = codex
             .iter()
             .find(|argument| argument.starts_with("hooks.SessionEnd = "))
@@ -17760,7 +17760,6 @@ mod tests {
 
         let calls = std::fs::read_to_string(log).unwrap();
         for expected in [
-            "codex-session-capture|",
             "agent-phase ready|",
             "agent-phase running|",
             "agent-phase waiting|",
@@ -17769,7 +17768,7 @@ mod tests {
         ] {
             assert!(calls.contains(expected), "missing {expected}: {calls}");
         }
-        assert_eq!(calls.lines().count(), 7, "{calls}");
+        assert_eq!(calls.lines().count(), 6, "{calls}");
     }
 
     #[test]

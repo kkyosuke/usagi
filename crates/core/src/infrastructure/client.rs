@@ -115,6 +115,10 @@ pub enum DaemonRequest {
     /// and the phase itself is a closed non-sensitive vocabulary.
     AgentPhaseReport {
         phase: AgentPhase,
+        /// Present only for `SessionStart`. Both supported providers expose
+        /// the current opaque conversation ID in that documented hook payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_session_id: Option<ProviderSessionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
@@ -1254,8 +1258,42 @@ impl<S: Read + Write> DaemonClient for IpcClient<S> {
 #[cfg(test)]
 mod metrics_schema_tests {
     use super::{
-        AgentConcurrency, DaemonMetrics, DaemonRequest, DaemonRestartAgents, MetricsAction,
+        AgentConcurrency, AgentPhase, DaemonMetrics, DaemonRequest, DaemonRestartAgents,
+        McpCallerContext, MetricsAction, ProviderSessionId,
     };
+
+    #[test]
+    fn agent_phase_report_keeps_old_hooks_compatible_and_carries_session_start_identity() {
+        let legacy = serde_json::json!({
+            "kind": "agent_phase_report",
+            "phase": "ready",
+            "caller_context": {"credential": "runtime-secret"}
+        });
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(legacy).unwrap(),
+            DaemonRequest::AgentPhaseReport {
+                phase: AgentPhase::Ready,
+                native_session_id: None,
+                caller_context: Some(McpCallerContext {
+                    credential: "runtime-secret".into(),
+                }),
+            }
+        );
+
+        let current = DaemonRequest::AgentPhaseReport {
+            phase: AgentPhase::Ready,
+            native_session_id: Some(ProviderSessionId::new("provider-session").unwrap()),
+            caller_context: None,
+        };
+        assert_eq!(
+            serde_json::to_value(current).unwrap(),
+            serde_json::json!({
+                "kind": "agent_phase_report",
+                "phase": "ready",
+                "native_session_id": "provider-session"
+            })
+        );
+    }
 
     #[test]
     fn rollover_request_round_trips_with_its_durable_operation() {
@@ -3372,6 +3410,7 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::AgentPhaseReport {
                 phase: AgentPhase::Waiting,
+                native_session_id: None,
                 caller_context: Some(McpCallerContext {
                     credential: "runtime-secret".into(),
                 }),

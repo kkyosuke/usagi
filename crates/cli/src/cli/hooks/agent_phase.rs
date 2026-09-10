@@ -4,8 +4,8 @@
 //! （例: `ended`）を引数に渡して呼ぶ。人手で叩くものではない（`--help` 非表示）。フックは
 //! 終了コードだけを見るため、標準出力には何も書かない。
 //!
-//! 報告元の runtime は daemon が発行して process environment に閉じ込めた credential だけで
-//! 束縛する（caller は runtime / session / path を名指しできない）。phase 引数は
+//! 報告元の runtime は daemon が hook process の OS peer lineage から exact live runtime を
+//! 解決して束縛する（caller は runtime / session / path を名指しできない）。phase 引数は
 //! [`usagi_core::domain::session_lifecycle::AgentPhase`] の closed vocabulary であり、hook の
 //! stdin JSON が名乗る `hook_event_name` が usagi の配線どおりその phase を意味することも
 //! 検証する。実 stdin と env の読み取りは合成ルートが束ね、この module は純粋な request
@@ -14,7 +14,9 @@
 use std::io::{self, Read, Write};
 
 use serde::Deserialize;
-use usagi_core::domain::session_lifecycle::AgentPhase as ReportedPhase;
+use usagi_core::domain::{
+    agent::ProviderSessionId, session_lifecycle::AgentPhase as ReportedPhase,
+};
 use usagi_core::infrastructure::client::{DaemonRequest, McpCallerContext};
 
 use crate::cli::{Run, RunOutcome};
@@ -32,11 +34,13 @@ impl Run for AgentPhase {
     }
 }
 
-/// hook JSON のうち、この報告が読む唯一の field。`transcript_path` や `session_id` などの
-/// 他 field は deserialize 対象にせず、file も開かない。
+/// hook JSON のうち、この報告が読む field。`session_id` は `SessionStart` でだけ
+/// daemon へ渡し、`transcript_path` などの他 field は deserialize 対象にせず file も開かない。
 #[derive(Debug, Deserialize)]
 struct PhaseHookInput {
     hook_event_name: String,
+    #[serde(default)]
+    session_id: Option<ProviderSessionId>,
 }
 
 /// Safe input failure. It deliberately carries neither the reported phase nor
@@ -68,8 +72,9 @@ impl std::error::Error for PhaseInputError {}
 /// # Errors
 ///
 /// Returns a non-sensitive error for an unknown phase token, malformed JSON, an
-/// event which usagi does not wire to that phase, or a missing daemon-issued
-/// runtime credential. Authentication is derived from the hook process at the daemon.
+/// event which usagi does not wire to that phase, a `SessionStart` payload
+/// without its provider session ID, or a missing daemon-issued runtime
+/// credential. Authentication is derived from the hook process at the daemon.
 pub fn request_from_hook(
     reader: &mut dyn Read,
     phase: &str,
@@ -90,8 +95,14 @@ pub fn request_from_hook(
     if canonical != Some(phase) && !legacy_post_tool {
         return Err(PhaseInputError::WrongEvent);
     }
+    let native_session_id = if input.hook_event_name == "SessionStart" {
+        Some(input.session_id.ok_or(PhaseInputError::InvalidPayload)?)
+    } else {
+        None
+    };
     Ok(DaemonRequest::AgentPhaseReport {
         phase,
+        native_session_id,
         caller_context: credential
             .filter(|value| !value.is_empty())
             .map(|credential| McpCallerContext { credential }),
@@ -145,21 +156,24 @@ mod tests {
                 Some("runtime-secret".into()),
             )
             .unwrap();
-            assert_eq!(
-                serde_json::to_value(request).unwrap(),
-                serde_json::json!({
-                    "kind": "agent_phase_report",
-                    "phase": phase,
-                    "caller_context": {"credential": "runtime-secret"}
-                })
-            );
+            let mut expected = serde_json::json!({
+                "kind": "agent_phase_report",
+                "phase": phase,
+                "caller_context": {"credential": "runtime-secret"}
+            });
+            if event == "SessionStart" {
+                expected["native_session_id"] = serde_json::json!("provider-session");
+            }
+            assert_eq!(serde_json::to_value(request).unwrap(), expected);
         }
     }
 
     #[test]
     fn legacy_post_tool_use_running_hook_remains_compatible() {
         let request = request_from_hook(
-            &mut Cursor::new(br#"{"hook_event_name":"PostToolUse"}"#),
+            &mut Cursor::new(
+                br#"{"session_id":"provider-session","hook_event_name":"PostToolUse"}"#,
+            ),
             "running",
             Some("runtime-secret".to_owned()),
         )
@@ -195,6 +209,12 @@ mod tests {
                 PhaseInputError::InvalidPayload,
             ),
             (
+                br#"{"hook_event_name":"SessionStart"}"#.as_slice(),
+                "ready",
+                Some("runtime-secret".to_owned()),
+                PhaseInputError::InvalidPayload,
+            ),
+            (
                 // `Stop` は `ended` にだけ配線されており、別 phase を名乗れない。
                 br#"{"hook_event_name":"Stop"}"#.as_slice(),
                 "waiting",
@@ -208,7 +228,7 @@ mod tests {
             assert!(!error.to_string().contains("runtime-secret"));
         }
         let request = request_from_hook(
-            &mut Cursor::new(br#"{"hook_event_name":"Stop"}"#),
+            &mut Cursor::new(br#"{"session_id":"provider-session","hook_event_name":"Stop"}"#),
             "ended",
             None,
         )

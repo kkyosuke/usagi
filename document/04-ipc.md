@@ -597,11 +597,13 @@ client は final として受けずに安全に失敗する。
 
 ## Codex structured capture request
 
-`codex_session_capture` kind は、daemon が Codex の `SessionStart(startup)` command hook にだけ注入する
-private request である。documented hook JSON の current `session_id` と、同じ process provision にだけ存在する
-daemon-minted credential を持つ。client は runtime / session / provider / path を指定できず、daemon は credential
-から exact live Codex runtime を逆引きして structured capture 境界へ渡す。成功 response は body を持たず、
-provider ID を返さない。
+`codex_session_capture` kind は profile revision 4 以前の Codex `SessionStart(startup)` command hook と、
+更新済み daemon binary の組み合わせを受けるためだけに残す互換 request である。新しい integration は
+[`agent_phase_report`](#agent-phase-report-request) へ一本化する。旧 request は documented hook JSON の current
+`session_id` と、同じ process provision にだけ存在する daemon-minted credential を持つ。client は runtime /
+session / provider / path を指定できず、daemon は credential から exact live Codex runtime を逆引きする。同じ
+structured ID が新旧 hook から重複報告された場合だけ冪等に受理し、別 ID による置換は共通 `SessionStart`
+request 以外から許可しない。成功 response は body を持たず、provider ID を返さない。
 
 credential の欠落・不一致・失効、hook event / JSON / provider ID の不正、runtime の非 live、永続化失敗は safe error
 であり、metadata を作らない。request の native ID はこの capture の入力でだけ一時的に IPC を通り、通常の Agent /
@@ -612,10 +614,10 @@ session request、response、event、status projection、error detail には現�
 ## agent phase report request
 
 `agent_phase_report` kind は、daemon が起動した agent のライフサイクルフックだけが送る private request である。
-field は closed vocabulary の `phase`（`ready` / `running` / `waiting` / `ended` / `exited`）と、同じ process
-provision にだけ存在する daemon-minted credential の 2 つだけである。client は runtime / session / worktree /
-path / provider を指定できず、daemon は credential から exact live runtime を逆引きする。成功 response は
-body を持たない。
+field は closed vocabulary の `phase`（`ready` / `running` / `waiting` / `ended` / `exited`）、
+`SessionStart` でだけ current producer が付ける opaque `native_session_id`、同じ process provision にだけ存在する
+daemon-minted credential である。client は runtime / session / worktree / path / provider を指定できず、daemon は
+credential から exact live runtime を、runtime profile から provider を決める。成功 response は body を持たない。
 
 phase は wire に載る前に hook 側で検証する。共通 validator の lifecycle vocabulary は `SessionStart` /
 `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd` である。
@@ -623,6 +625,9 @@ Claude はこのうち `PreToolUse` を含む対応 event を、Codex は `Sessi
 `PostToolUse` / `Stop` / `SessionEnd` だけを配線する。Codex は `approval_policy = "never"` で起動するため
 `PermissionRequest` は発火せず、`Notification` も Codex event ではない。event と phase の対応が hook input の
 `hook_event_name` と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
+`SessionStart` では current `session_id` を同じ request に載せ、conversation ID の capture / 置換と `ready`
+phase を一度の durable mutation として処理する。`ready` 以外に native ID を付けた報告は拒否する。旧 hook
+producer の ID 無し `ready` は phase だけを反映して wire compatibility を保つが、新しい resume metadata は作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
 
 daemon 側では credential の欠落・不一致・失効、runtime の非 live、malformed body、永続化失敗が safe error に
