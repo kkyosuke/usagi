@@ -58,6 +58,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   ├── runtime/          # 実 IO adapter（各面のライブラリ port を接続）
 │   │   ├── cli.rs        # CLI outcome、実 git、TUI / daemon への bridge
 │   │   ├── daemon.rs     # Unix socket・signal・process・daemon record / lock
+│   │   ├── daemon/dispatch.rs # admitted request と daemon owner / store の composition adapter
 │   │   ├── daemon/agent_provisioning.rs # provider argv・sandbox・role・MCP 注入の合成
 │   │   └── tui.rs        # crossterm terminal と workspace filesystem adapter
 │   └── tui_input.rs      # crossterm event を TUI 非依存の入力語彙へ変換
@@ -93,7 +94,11 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │           ├── lib.rs
 │           ├── usecase/         # TUI に閉じた application ロジック（画面グラフの遷移・イベント状態機械）
 │           │   ├── application        # 起動画面 EntryScreen と ScreenRunner への dispatch、Home controller
-│           │   │   ├── controller/    # Entry/Home の純粋 reducer、typed attach effect、TUI-local fake backend
+│           │   │   ├── controller/    # Entry / New / Home の純粋 reducer（bounded context と tests を分離）
+│           │   │   │   ├── entry      # Welcome / Open の typed attach flow
+│           │   │   │   ├── new        # workspace clone / register の validation と retry flow
+│           │   │   │   └── tests      # controller module unit contracts と fake backend
+│           │   │   ├── observation_lane # background observation の single-flight / cadence policy
 │           │   │   ├── pane/          # Closeup tab / placeholder の純粋 reducer
 │           │   │   └── pane_runtime/  # daemon inventory / stream を pane へ結合する client state
 │           │   ├── terminal_input     # live pane の端末非依存入力語彙・bytes encoder・prefix classifier
@@ -104,6 +109,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │           ├── infrastructure/  # attach クライアント（daemon への IPC クライアント側）・端末バックエンド
 │           └── presentation/    # 画面描画・キー入力マッピング・起動バナー runner
 │               ├── frame            # ANSI/Unicode 幅をセル grid にする pure frame diff（端末 write は adapter 側）
+│               ├── tests            # presentation composition の module unit contracts
 │               ├── workspace_deck   # process-level project tab membership / overlay reducer / bar projection
 │               ├── theme            # 色テーマ（意味的な役割→具体色の単一情報源。ANSI SGR を吐く）
 │               ├── views/            # 各画面の view（splash / welcome / open / new / config / home）
@@ -641,6 +647,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
 | daemon IPC の request/reply 語彙、client connection state machine、planned restart 中の request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | `crates/core/src/infrastructure/client.rs` / `owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
 | 表示専用 daemon metrics から診断専用 health（level と閉じた理由語彙）を作る判定 | `crates/tui/src/usecase/application/daemon_health.rs`。TUI-local な sample 列と現在時刻だけの純関数で、実時計は引数として受ける。port・polling・sample を畳む cache は同層の `metrics.rs`、表示文言と狭幅の縮退は `crates/tui/src/presentation/views/workspace.rs`（正本は [3. TUI](03-tui.md#daemon-health-indicator)） |
+| TUI background observation の single-flight / cadence / failure backoff 判定 | `crates/tui/src/usecase/application/observation_lane.rs`。presentation は Garden / Work Run 固有の cadence と worker 実行だけを所有し、共有 admission state machine を重複実装しない |
 | 環境変数 binding の語彙・2 層スコープの合成・子プロセス環境への解決方針 | `crates/core/src/domain/settings/env.rs` と `crates/core/src/usecase/env.rs`（`SecretResolver` port を注入）。並列解決と実 `op` subprocess は `crates/core/src/infrastructure/env_resolver.rs`、設定の読み出しと解決キャッシュは合成ルートの `src/runtime/user_env.rs`（正本は [9. 環境変数設定](09-env.md)） |
 | product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
 | Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |
@@ -648,12 +655,13 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/`。terminal の JSON decode、action/payload 照合、negotiated snapshot の応答整形を担い、`usecase::terminal_owner` の typed application port を呼ぶ |
 | Codex / Claude の Agent 起動 materialization | 合成ルートの `src/runtime/daemon/agent_provisioning.rs`。provider argv、sandbox policy、role/system prompt、workspace 別 environment と MCP tool family の注入だけを束ねる。socket admission、runtime ownership、background worker lifecycle は `src/runtime/daemon.rs` に残す |
+| admitted daemon request と concrete owner / store の接続 | 合成ルートの `src/runtime/daemon/dispatch.rs`。request family ごとの decode・authorization・response shaping を、注入済みの daemon runtime / store へ接続する composition adapter とする。Unix socket accept、signal、process lifecycle、background worker ownership は `src/runtime/daemon.rs` に残し、daemon の business rule は `crates/daemon/src/usecase/`、transport-independent な server loop は `crates/daemon/src/presentation/ipc.rs` に残す |
 | live tenant の inventory / explicit retire を registry・session・Agent・generic terminal owner へ結合する unbound control | 合成ルートの `src/runtime/daemon/tenant_control.rs`。socket accept / lifecycle 全体は `src/runtime/daemon.rs` に残し、tenant policy を同じ巨大 module へ戻さない |
 | 各画面の描画（view） | `crates/tui/` の `presentation/views/` |
 | 画面をまたぐ再利用 UI 部品（widget） | `crates/tui/` の `presentation/widgets/` |
 | 色（意味的な役割→具体色）・色定数 | `crates/tui/` の `presentation/theme` |
 | 領域配置・ペイン分割・chrome（layout）。マスコットを頂く全画面の共通 chrome は `layouts/mascot_screen`（welcome / config が共有） | `crates/tui/` の `presentation/layouts/` |
-| 画面グラフの遷移・イベント状態機械 | `crates/tui/` の `usecase/`。Entry / New / Home controller は `usecase/application/controller.rs` で state / event / effect を純粋に還元する。Welcome / Open / Recent が選んだ `WorkspaceId` は attach completion と照合し、同じ ID の Home snapshot だけで Home を初期化する。New は Clone の git→project/registry と Existing の project/registry 登録を TUI-local backend port へ effect として渡し、operation token で completion を照合する。validation / backend failure は form を保持したまま同じ request を retry でき、成功時だけ Home を初期化する。遅延・不一致の completion は無視し、daemon wire は backend port の外へ閉じる |
+| 画面グラフの遷移・イベント状態機械 | `crates/tui/` の `usecase/`。Home controller は `usecase/application/controller.rs`、Welcome / Open attach flow は `controller/entry.rs`、workspace clone / register flow は `controller/new.rs` で state / event / effect を純粋に還元する。Welcome / Open / Recent が選んだ `WorkspaceId` は attach completion と照合し、同じ ID の Home snapshot だけで Home を初期化する。New は Clone の git→project/registry と Existing の project/registry 登録を TUI-local backend port へ effect として渡し、operation token で completion を照合する。validation / backend failure は form を保持したまま同じ request を retry でき、成功時だけ Home を初期化する。遅延・不一致の completion は無視し、daemon wire は backend port の外へ閉じる |
 | Closeup terminal / Agent tab の placeholder・選択維持・attach policy | `crates/tui/` の `usecase/application/pane.rs`。pure reducer は stable `TerminalRef` と `OperationId` だけを受け取り、`pane_runtime.rs` が daemon inventory / stream、resume / resync、input、geometry dedupe と client-only detach を結合する。`AgentRuntime` は controller が発行した `LaunchAgent` effect だけを session-scoped host へ渡し、profile、operation、terminal identity を表示名や local process に置き換えない |
 | Agent tab の durable display intent | `crates/tui/src/usecase/application/agent_tab_intent.rs` が `AgentTabIntent` domain、reconcile、typed persistence port を所有する。UI 固有の order / selection と interrupted lineage の dismissal を `usagi-core` domain へ入れない。合成ルート `src/runtime/agent_tab_intent.rs` が secret-free な `<data-dir>/tui/workspaces/<workspace-id>/agent-tabs.json` を private directory/file として扱い、file lock、revision CAS、atomic publish、schema 1 legacy dismissal の一回限りの migration、corrupt quarantine を束縛する。future schema は元 bytes を変更しない read-only error とする |
 | Overview コマンドの解釈・dispatch | `crates/tui/` の `usecase/overview/`（ハンドラは `overview/commands/`） |
@@ -662,7 +670,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | attach クライアント・端末バックエンド | `crates/tui/` の `infrastructure/` |
 | CLI サブコマンドの引数解析・dispatch・結果整形 | `crates/cli/` の `cli/`（ハンドラは `cli/commands/`） |
 | MCP サーバ（JSON-RPC の解釈・dispatch・tool アダプタ） | `crates/cli/` の `mcp/`（アダプタは `mcp/tools/`） |
-| 各面への dispatch と実 IO の注入 | ルート `src/`（実 IO の注入のみ。テスト可能なロジックは crates へ） |
+| 各面への dispatch、concrete adapter 間の合成、実 IO の注入 | ルート `src/`。面をまたがない business rule は crates へ置き、ルートには concrete runtime / store / transport の接続だけを残す |
 | macOS LaunchAgent の plist 供給・load / unload | ルート `src/runtime/launchd.rs`。launchd は前景 `daemon serve` の process supervision のみを担い、daemon lock や session state の権威を持たない |
 
 ### Agent launch boundary

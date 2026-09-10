@@ -477,6 +477,75 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
 }
 
 #[test]
+fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_module() {
+    let root = workspace_root();
+    let composition = fs::read_to_string(root.join("crates/tui/src/presentation/mod.rs"))
+        .expect("TUI presentation source is readable");
+    let tests = fs::read_to_string(root.join("crates/tui/src/presentation/tests.rs"))
+        .expect("TUI presentation tests are readable");
+    let observation =
+        fs::read_to_string(root.join("crates/tui/src/usecase/application/observation_lane.rs"))
+            .expect("TUI observation policy is readable");
+
+    assert!(composition.contains("mod tests;"));
+    assert!(!composition.contains("mod tests {"));
+    assert!(tests.contains("#![coverage(off)]"));
+    assert!(observation.contains("struct ObservationLane"));
+    assert!(!composition.contains("struct GardenObservation {"));
+    assert!(!composition.contains("struct WorkRunObservation {"));
+    assert!(
+        composition.lines().count() <= 11_000,
+        "TUI presentation composition grew beyond its reviewable boundary"
+    );
+}
+
+#[test]
+fn tui_controller_keeps_entry_new_and_tests_in_their_bounded_contexts() {
+    let root = workspace_root();
+    let controller =
+        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller.rs"))
+            .expect("TUI Home controller is readable");
+    let entry =
+        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/entry.rs"))
+            .expect("TUI entry controller is readable");
+    let new = fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/new.rs"))
+        .expect("TUI new-workspace controller is readable");
+    let tests =
+        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/tests.rs"))
+            .expect("TUI controller tests are readable");
+
+    for module in ["mod entry;", "mod new;", "mod tests;"] {
+        assert!(controller.contains(module));
+    }
+    assert!(!controller.contains("mod tests {"));
+    assert!(!controller.contains("pub struct EntryState"));
+    assert!(!controller.contains("pub struct NewState"));
+    assert!(entry.contains("pub fn update_entry("));
+    assert!(new.contains("pub fn update_new("));
+    assert!(tests.contains("#![coverage(off)]"));
+    assert!(
+        controller.lines().count() <= 6_500,
+        "TUI Home controller grew beyond its reviewable boundary"
+    );
+}
+
+#[test]
+fn clipboard_platform_variants_are_compiled_only_for_their_targets_or_tests() {
+    let root = workspace_root();
+    let source = fs::read_to_string(root.join("src/runtime/clipboard.rs"))
+        .expect("clipboard adapter is readable");
+
+    assert!(!source.contains("allow(dead_code)"));
+    assert!(source.contains("#[cfg(any(test, target_os = \"macos\"))]"));
+    assert!(source.contains("#[cfg(any(test, target_os = \"windows\"))]"));
+    assert!(
+        source.contains(
+            "#[cfg(any(test, not(any(target_os = \"macos\", target_os = \"windows\"))))]"
+        )
+    );
+}
+
+#[test]
 fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_module() {
     let root = workspace_root();
     let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
@@ -503,6 +572,51 @@ fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_modul
     assert!(tenant.contains("pub(super) fn dispatch("));
     assert!(tenant.contains("fn inventory("));
     assert!(tenant.contains("fn retire("));
+}
+
+#[test]
+fn daemon_request_dispatch_stays_out_of_the_socket_and_lifecycle_composition_module() {
+    let root = workspace_root();
+    let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
+        .expect("daemon composition source is readable");
+    let dispatch = fs::read_to_string(root.join("src/runtime/daemon/dispatch.rs"))
+        .expect("daemon dispatch source is readable");
+
+    assert!(composition.contains("mod dispatch;"));
+    assert!(
+        !composition.contains("use dispatch::*;"),
+        "daemon dispatch must expose an explicit composition surface"
+    );
+    assert!(composition.contains("fn start_supervisor_recovery("));
+    assert!(!dispatch.contains("fn start_supervisor_recovery("));
+    assert!(!dispatch.contains("usagi-supervisor-recovery"));
+    for symbol in [
+        "fn dispatch_agent(",
+        "fn dispatch_session(",
+        "fn dispatch_supervisor_tool(",
+        "fn dispatch_user_decision(",
+        "fn dispatch_metrics(",
+    ] {
+        assert!(
+            !composition.contains(symbol),
+            "{symbol} must stay out of socket and process lifecycle composition"
+        );
+        assert!(
+            dispatch.contains(symbol),
+            "{symbol} must remain owned by the request dispatch adapter"
+        );
+    }
+    assert!(
+        !dispatch
+            .lines()
+            .take(10)
+            .any(|line| line.trim_start().starts_with("#![coverage(off)]")),
+        "moving dispatch must not exclude the module from coverage"
+    );
+    assert!(
+        dispatch.lines().count() <= 6_000,
+        "daemon request dispatch grew beyond its reviewable boundary"
+    );
 }
 
 #[test]
