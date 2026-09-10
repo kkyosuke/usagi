@@ -20838,9 +20838,7 @@ instructions = "{instructions}"
     /// Worktree IO used to prove that a deterministic setup failure enters the
     /// delegated-create compensation path before worker dispatch.
     struct FailingSetupSessionWorktreeIo;
-    impl usagi_daemon::usecase::session_runtime::SessionWorktreeIo
-        for FailingSetupSessionWorktreeIo
-    {
+    impl usagi_daemon::usecase::session_runtime::SessionWorktreeIo for FailingSetupSessionWorktreeIo {
         fn remove_file_best_effort(&self, _: &Path) {}
         fn path_occupied(&self, _: &Path) -> bool {
             false

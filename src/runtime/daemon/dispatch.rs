@@ -2405,7 +2405,7 @@ pub(super) fn dispatch_dispatch(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::client::{DaemonRequest, SessionAction};
+    use usagi_core::infrastructure::client::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
     let Some((operation_id, intent)) = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
