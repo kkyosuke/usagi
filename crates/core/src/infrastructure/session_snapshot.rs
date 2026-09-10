@@ -251,7 +251,9 @@ mod tests {
             "parent_session_name",
         ] {
             assert!(
-                encoded[field].is_null(),
+                encoded
+                    .as_object()
+                    .is_some_and(|object| object.get(field) == Some(&serde_json::Value::Null)),
                 "{field} must remain explicit null"
             );
         }
@@ -327,9 +329,10 @@ mod tests {
         };
 
         let encoded = serde_json::to_value(&snapshot).unwrap();
-        assert!(encoded["sessions"][0]["role_id"].is_null());
-        assert!(encoded["sessions"][0]["role_summary"].is_null());
-        assert!(encoded["sessions"][0]["parent_session_id"].is_null());
+        let item = encoded["sessions"][0].as_object().unwrap();
+        for field in ["role_id", "role_summary", "parent_session_id"] {
+            assert_eq!(item.get(field), Some(&serde_json::Value::Null));
+        }
         assert_eq!(
             serde_json::from_value::<SessionStatusSnapshot>(encoded).unwrap(),
             snapshot
