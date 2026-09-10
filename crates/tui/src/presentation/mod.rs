@@ -7,23 +7,27 @@
 //! 領域配置（[`layouts`]）。view が layout で領域を割り、そこへ widget を配置する。
 //! 色は [`theme`] が意味的な役割で一元管理する（役割→具体色の単一情報源）。
 
+mod banner;
 pub mod frame;
 pub mod layouts;
 pub mod live_terminal;
+mod startup;
 pub mod theme;
 pub mod views;
 pub mod widgets;
 pub mod workspace_deck;
 pub mod workspace_runtime;
 
+pub use banner::{BannerScreenRunner, write_banner};
+pub use startup::{StartupSplash, play_startup_splash};
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use chrono::{DateTime, Timelike, Utc};
-use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{
     AgentInventory, AgentProfileId, AgentResumeTarget, AgentRuntimeInventoryState,
     AgentWorkspaceObservation, ProviderResumeProjection,
@@ -57,7 +61,6 @@ use crate::presentation::views::pr_modal;
 use crate::presentation::views::quit_modal;
 use crate::presentation::views::root_terminal_drawer;
 use crate::presentation::views::scratchpad_modal;
-use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::work_run::WorkRunProjection;
 use crate::presentation::views::workspace::{
@@ -112,7 +115,7 @@ use crate::usecase::application::work_run_control::{
     WorkRunControlMode, WorkRunControlOutcome, WorkRunControlRequest, WorkRunControlResult,
     WorkRunPort,
 };
-use crate::usecase::application::{Key, ScreenRunner, Terminal, open_failure_notice};
+use crate::usecase::application::{Key, Terminal, open_failure_notice};
 use crate::usecase::overview::SessionCommand;
 use crate::usecase::terminal_input::{
     LiveTerminalAction, PointerEvent, PointerKind, WHEEL_LINES, encode_mouse_wheel,
@@ -1220,15 +1223,6 @@ impl BackendOverlayPort for UnavailableBackendPort {
     fn open_pull_request(&mut self, _: String, completions: Completions) {
         unavailable_completion(&completions, "browser opening is unavailable");
     }
-}
-
-/// 起動バナーを `out` に書き出す。
-///
-/// # Errors
-///
-/// `out` への書き込みに失敗した場合、そのエラーを返す。
-pub fn write_banner(out: &mut impl Write, info: &AppInfo) -> std::io::Result<()> {
-    writeln!(out, "{}", info.describe())
 }
 
 /// 対話ループが終了する理由。
@@ -9939,64 +9933,6 @@ pub fn run_screen_graph_with_backend_and_notice(
     }
 }
 
-/// Welcome 起動エフェクトを再生し、実際に描いたフレーム数を返す。
-///
-/// **打鍵で中断できる**。フレーム間の待機は [`Terminal::wait_for_key`] で行い、
-/// キーが届いた時点で残りのフレームを捨てて抜ける。中断に使ったキーは
-/// **スキップとして消費する**（「何かキーを押すと飛ばせる」の標準的な契約）。
-/// これは splash 中に紛れ込んだ端末由来のバイトを次の画面へ流し込まないという
-/// 意味でもあり、入力を読まなかった以前の実装よりも取り違えが起きにくい。
-/// 起こし待ちの tick と端末リサイズは打鍵ではないため、アニメーションの速度を保つ。
-///
-/// # Errors
-///
-/// 端末サイズの取得、描画、フレーム間待機のいずれかに失敗した場合、そのエラーを返す。
-pub fn play_startup_splash(term: &mut dyn Terminal) -> io::Result<usize> {
-    for frame in 0..splash::FRAMES {
-        let (height, width) = term.size()?;
-        term.draw(&splash::render(height, width, frame))?;
-        match term.wait_for_key(splash::ANIM_TICK)? {
-            // 起こし待ちの tick とリサイズは入力ではない。次のフレームは先頭で
-            // 端末サイズを読み直すので、リサイズもそのまま追従する。
-            None | Some(Key::Other | Key::Resize) => {}
-            // それ以外の打鍵は残りのアニメーションをスキップする。
-            Some(_) => return Ok(frame + 1),
-        }
-    }
-    Ok(splash::FRAMES)
-}
-
-/// 起動スプラッシュの再生権。**1 プロセスで 1 回だけ**再生する。
-///
-/// workspace を離れて戻ってきた Welcome は「起動」ではないため、2 回目以降の
-/// [`Self::play`] は 0 フレームで何も描かない。プロセス内で workspace を切り替える
-/// たびに 1.5 秒のアニメーションを見せないための policy であり、合成ルートの都合では
-/// なくこの層が持つ（#556）。
-#[derive(Debug, Default)]
-pub struct StartupSplash {
-    played: bool,
-}
-
-impl StartupSplash {
-    /// まだ再生していない splash を作る。
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { played: false }
-    }
-
-    /// 初回だけ splash を再生し、描いたフレーム数を返す。2 回目以降は 0 を返す。
-    ///
-    /// # Errors
-    ///
-    /// 再生中の端末操作に失敗した場合、そのエラーを返す。
-    pub fn play(&mut self, term: &mut dyn Terminal) -> io::Result<usize> {
-        if std::mem::replace(&mut self.played, true) {
-            return Ok(0);
-        }
-        play_startup_splash(term)
-    }
-}
-
 /// Run the screen graph with transient default settings. Embedders that own a
 /// settings backend should call [`run_with_settings`] and inject its port.
 ///
@@ -10041,85 +9977,6 @@ impl SettingsPort for DefaultSettingsPort {
         _settings: &usagi_core::domain::settings::Settings,
     ) -> io::Result<()> {
         Ok(())
-    }
-}
-
-/// 選ばれた非対話画面を出力する runner。
-///
-/// 通常 entry は識別行を、Doctor は注入された診断結果を出力する。出力先とアプリ情報は
-/// 呼び出し側から注入するため、実 stdout を直接所有しない。
-pub struct BannerScreenRunner<'a, W: Write + ?Sized> {
-    out: &'a mut W,
-    info: &'a AppInfo,
-    doctor_report: Option<&'a crate::usecase::doctor::DoctorReport>,
-}
-
-impl<'a, W: Write + ?Sized> BannerScreenRunner<'a, W> {
-    /// 注入された出力先とアプリ情報から runner を作る。
-    #[must_use]
-    pub fn new(out: &'a mut W, info: &'a AppInfo) -> Self {
-        Self {
-            out,
-            info,
-            doctor_report: None,
-        }
-    }
-
-    /// Doctor の診断結果を表示する runner を作る。
-    #[must_use]
-    pub fn with_doctor_report(
-        out: &'a mut W,
-        info: &'a AppInfo,
-        report: &'a crate::usecase::doctor::DoctorReport,
-    ) -> Self {
-        Self {
-            out,
-            info,
-            doctor_report: Some(report),
-        }
-    }
-
-    /// 画面を識別する `label` をアプリ情報とともに一行で書き出す。
-    fn write_screen(&mut self, label: &str) -> io::Result<()> {
-        writeln!(self.out, "{}: {label}", self.info.describe())
-    }
-}
-
-impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
-    fn welcome(&mut self) -> io::Result<()> {
-        self.write_screen("welcome TUI")
-    }
-
-    fn workspace(&mut self, path: &Path) -> io::Result<()> {
-        self.write_screen(&format!("workspace TUI ({})", path.display()))
-    }
-
-    fn config(&mut self) -> io::Result<()> {
-        self.write_screen("config TUI")
-    }
-
-    fn doctor(&mut self) -> io::Result<()> {
-        let report = self.doctor_report.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "doctor report is required")
-        })?;
-        writeln!(self.out, "{}: doctor", self.info.describe())?;
-        for check in &report.checks {
-            let status = match check.status {
-                crate::usecase::doctor::CheckStatus::Pass => "ok",
-                crate::usecase::doctor::CheckStatus::Warning => "warn",
-                crate::usecase::doctor::CheckStatus::Fail => "error",
-            };
-            writeln!(self.out, "[{status}] {}: {}", check.name, check.detail)?;
-        }
-        writeln!(
-            self.out,
-            "{}",
-            if report.is_healthy() {
-                "result: healthy"
-            } else {
-                "result: problems found"
-            }
-        )
     }
 }
 
