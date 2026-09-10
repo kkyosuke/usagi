@@ -26,11 +26,11 @@ use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_dir};
 use usagi_core::infrastructure::persistence::json_file;
+use usagi_core::infrastructure::runtime_model::WorkspaceSessionConfig;
 use usagi_core::infrastructure::session_snapshot::{
     SessionListItem, SessionListSnapshot, SessionRuntimeObservation, SessionStatusItem,
     SessionStatusSnapshot, SessionWorktreeStatus,
 };
-use usagi_core::infrastructure::runtime_model::WorkspaceSessionConfig;
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
@@ -2701,16 +2701,23 @@ fn projected_snapshot(
         .sessions
         .iter()
         .cloned()
-        .map(|session| SessionListItem {
-            role_summary: session.role_id.as_ref().and_then(|id| {
+        .map(|mut session| {
+            let role_summary = session.role_id.as_ref().and_then(|id| {
                 catalog
                     .as_ref()?
                     .roles
                     .get(id)
                     .map(|role| role.summary.clone())
-            }),
-            session: session.into(),
-            runtime: None.into(),
+            });
+            // Setup command bodies are durable recovery state, not client
+            // observation data. Keep them out of typed list projections just
+            // as mutation snapshots do below.
+            session.setup_plan = None;
+            SessionListItem {
+                role_summary,
+                session: session.into(),
+                runtime: None.into(),
+            }
         })
         .collect();
     serde_json::to_value(SessionListSnapshot {
