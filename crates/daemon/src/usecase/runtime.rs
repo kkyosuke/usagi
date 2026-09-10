@@ -1732,10 +1732,11 @@ impl RuntimeCoordinator {
         store: &mut dyn RuntimeStore,
     ) -> Result<(), RuntimeError> {
         let record = self.record_mut(runtime)?;
-        if record.state != RuntimeState::Running
-            || record.launch.request.scope != provider_resume.scope
-            || record.launch.plan.profile_revision != provider_resume.adapter_revision
-        {
+        let runtime_is_live = record.state == RuntimeState::Running;
+        let scope_matches = record.launch.request.scope == provider_resume.scope;
+        let adapter_matches =
+            record.launch.plan.profile_revision == provider_resume.adapter_revision;
+        if !runtime_is_live || !scope_matches || !adapter_matches {
             return Err(RuntimeError::ProviderResumeMismatch);
         }
         if record.provider_resume.as_ref() == Some(&provider_resume) {
