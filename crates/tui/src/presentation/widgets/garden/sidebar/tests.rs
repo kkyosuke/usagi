@@ -301,6 +301,33 @@ fn inactive_empty_and_dispatch_states_are_explicit() {
 }
 
 #[test]
+fn session_summary_preserves_every_session_only_state_in_the_sidebar() {
+    let mut value = session(0);
+    assert_eq!(session_row_summary(&value, 1), "1 agent");
+    assert_eq!(session_row_summary(&value, 2), "2 agents");
+
+    value.agents_observed = false;
+    assert_eq!(session_row_summary(&value, 0), "project inactive");
+    value.agents_observed = true;
+    value.pending_decisions = 1;
+    assert_eq!(session_row_summary(&value, 1), "action · 1 decision");
+    value.pending_decisions = 2;
+    assert_eq!(session_row_summary(&value, 1), "action · 2 decisions");
+
+    value.pending_decisions = 0;
+    value.lifecycle = SessionLifecycle::Failed;
+    assert_eq!(session_row_summary(&value, 0), "failed");
+    value.failure_summary = Some("worktree missing".into());
+    assert_eq!(session_row_summary(&value, 0), "failed · worktree missing");
+
+    value.lifecycle = SessionLifecycle::Available;
+    value.pr_merged = true;
+    assert_eq!(session_row_summary(&value, 0), "PR merged!");
+    value.pr_merged = false;
+    assert_eq!(session_row_summary(&value, 0), "No agent activity.");
+}
+
+#[test]
 fn list_uses_attention_order_and_reduced_motion_is_deterministic() {
     let mut value = session(0);
     let mut waiting = session(1).agents[0];
