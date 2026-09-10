@@ -18197,16 +18197,19 @@ instructions = "{instructions}"
     fn the_public_terminal_environment_names_the_user_the_daemon_runs_as() {
         let environment = terminal_environment();
         let resolved = usagi_daemon::infrastructure::os_user::effective_user_name();
-        match resolved.as_ref() {
-            Some(user) => assert_eq!(environment.get("USER"), Some(user)),
-            // Only a platform that cannot answer reaches the inherited value,
-            // and an unusable one leaves the variable absent.
-            None => assert_eq!(
-                environment.get("USER").cloned(),
-                std::env::var("USER")
-                    .ok()
-                    .filter(|value| !value.is_empty() && !value.contains('\0'))
-            ),
+        if let Some(user) = resolved.as_ref() {
+            // The ordinary case on any machine with a passwd entry: the child
+            // receives the resolved account, and an inherited name never wins.
+            assert_eq!(environment.get("USER"), Some(user));
+        } else {
+            // A platform that cannot answer never invents a name. Which value
+            // the fallback then picks is pinned by `terminal_profile`'s unit
+            // tests, which do not need such a platform to run.
+            assert!(
+                environment
+                    .get("USER")
+                    .is_none_or(|value| !value.is_empty() && !value.contains('\0'))
+            );
         }
         // The memoized accessor answers with the same name the adapter gives,
         // which is what every launch after the first one reads.
