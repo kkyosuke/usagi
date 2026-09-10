@@ -307,8 +307,18 @@ fn session_summary_preserves_every_session_only_state_in_the_sidebar() {
     assert_eq!(session_row_summary(&value, 2), "2 agents");
 
     value.agents_observed = false;
-    assert_eq!(session_row_summary(&value, 0), "project inactive");
+    for (lifecycle, expected) in [
+        (SessionLifecycle::Available, "project inactive"),
+        (SessionLifecycle::Creating, "cached · creating"),
+        (SessionLifecycle::Initializing, "cached · creating"),
+        (SessionLifecycle::Deleting, "cached · deleting"),
+        (SessionLifecycle::Failed, "cached · failed"),
+    ] {
+        value.lifecycle = lifecycle;
+        assert_eq!(session_row_summary(&value, 0), expected);
+    }
     value.agents_observed = true;
+    value.lifecycle = SessionLifecycle::Available;
     value.pending_decisions = 1;
     assert_eq!(session_row_summary(&value, 1), "action · 1 decision");
     value.pending_decisions = 2;

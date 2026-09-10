@@ -1170,14 +1170,15 @@ inactive project の pending decision は resident controller がなく観測し
 
 ### responsive layout
 
-右の一覧は幅の約 30%（34〜48 桁）を使う。残る庭が 80 桁 × 18 行以上なら、池・餌場・木を持つ共通の庭を表示する。
-この共通の庭では session 名と状態を右の一覧だけに置き、庭の下側には重複する巣穴や立札を描かず、
+幅 99 桁以上では、右の一覧が幅の約 30%（34〜48 桁）を使う。右一覧がある場合は、残る 64 桁 × 13 行以上の領域に
+池・餌場・木を持つ共通の庭を表示する。この共通の庭では session 名と状態を右の一覧だけに置き、
+庭の下側には重複する巣穴や立札を描かず、
 その領域もうさぎの移動に使う。
 うさぎは画面内の互いに重ならない範囲で歩行・飲水・食事・休息を繰り返す。端末寸法と総 Agent 数から歩ける範囲を
 均等に割り当て、全羽が収まる最大の姿（従来の 4 行のうさぎ、2 行の小さなうさぎ、2 桁の `兎`）を選ぶ。
 Agent が増えても池・餌場・木を残す。session 内の羽数による上限は設けない。
 
-これより小さい端末では従来の compact 表示を使う。全 session と各 session の 3 羽以下の Agent が収まる場合は
+右一覧が無く、庭が 80 桁 × 18 行未満の場合は従来の compact 表示を使う。全 session と各 session の 3 羽以下の Agent が収まる場合は
 28 桁 × 8 行の区画を並べ、それ以外は 14 桁 × 2 行の card、8 桁 × 1 行の line、2 桁 × 1 行の glyph の順に縮める。
 Agent のいない session も残すが、立札の容量を超える異常な session 数では Agent を優先する。
 右の一覧が無い共通の庭では、session の入口を保つため巣穴と立札を庭の下側へ並べ、Agent を収めるために
@@ -1194,8 +1195,9 @@ terminal output、provider-native ID を受け取らない。
 
 project 見出しに session 件数を添え、各 session の状態記号・表示名・managed branch・Agent 件数を並べる。
 branch は canonical session name から得た `usagi/<name>` で、変更可能な表示名や project 名から推測しない。
-Agent は注目順に 1 runtime 1 行で表示し、状態の文言と短い runtime ID を添える。未観測の project は
-`project inactive` と表示する。Home 側の選択状態は Garden の一覧に表示しない。
+Agent は注目順に 1 runtime 1 行で表示し、状態の文言と短い runtime ID を添える。未観測の project は lifecycle が
+`Available` なら `project inactive`、遷移中または失敗済みなら `cached · creating` / `cached · deleting` /
+`cached · failed` と表示する。Home 側の選択状態は Garden の一覧に表示しない。
 
 | 操作 | 動作 |
 |---|---|

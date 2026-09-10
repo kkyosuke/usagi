@@ -305,7 +305,7 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession) {
 
 fn session_row_summary(session: &GardenSession, agent_count: usize) -> String {
     if !session.agents_observed {
-        return "project inactive".to_owned();
+        return super::inactive_status(session).to_owned();
     }
     if session.pending_decisions > 0 {
         let noun = if session.pending_decisions == 1 {
