@@ -16,7 +16,6 @@ fn session(index: usize) -> GardenSession {
         id: SessionId::parse(&format!("{index:08x}-0000-4000-8000-000000000001")).unwrap(),
         label: format!("acme-web / session-{index}"),
         lifecycle: SessionLifecycle::Available,
-        selected: false,
         failure_summary: None,
         agents_observed: true,
         agents: vec![super::super::GardenAgent {
@@ -41,7 +40,6 @@ fn plain(view: &GardenView) -> String {
 #[test]
 fn grouped_list_keeps_project_identity_and_exact_session_agent_targets() {
     let mut sessions = vec![session(0), session(1), session(2)];
-    sessions[1].selected = true;
     sessions[2].sidebar.project.as_mut().unwrap().0 = WorkspaceId::new();
     let view = render(32, 160, "2 projects", &sessions, ViewOptions::default()).unwrap();
     let sidebar = view.sidebar.unwrap();
@@ -52,8 +50,22 @@ fn grouped_list_keeps_project_identity_and_exact_session_agent_targets() {
         "same labels do not merge different projects"
     );
     assert!(text.contains("feature/session-1"), "{text}");
-    assert!(text.contains("╭ ● session-1"), "{text}");
+    assert!(text.contains("  ● session-1"), "{text}");
+    assert!(!text.contains('›'), "{text}");
+    assert!(!text.contains('╰'), "{text}");
+    assert!(!text.contains("││"), "{text}");
     assert!(text.contains("running  00000001"), "{text}");
+    assert!(
+        !text.contains("acme-web / session-0"),
+        "the meadow must not repeat session labels already shown in the sidebar: {text}"
+    );
+    assert!(
+        view.hitboxes
+            .iter()
+            .filter(|hitbox| hitbox.column < sidebar.column)
+            .all(|hitbox| hitbox.agent.is_some()),
+        "the meadow must not retain duplicate session-home targets"
+    );
     for session in &sessions {
         let targets = view
             .hitboxes
@@ -171,10 +183,77 @@ fn sidebar_breakpoint_preserves_small_garden_and_clips_cjk_names() {
                 super::super::render(24, width, "repo", std::slice::from_ref(&value), 0, false)
                     .unwrap()
             );
+            assert!(
+                view.hitboxes.iter().any(|hitbox| hitbox.agent.is_none()),
+                "without a sidebar the session home remains the navigation target"
+            );
+        } else {
+            let sidebar = view.sidebar.unwrap();
+            assert!(
+                !plain(&view).contains(&value.label),
+                "the meadow must not repeat session labels at the sidebar breakpoint"
+            );
+            assert!(
+                view.hitboxes
+                    .iter()
+                    .filter(|hitbox| hitbox.column < sidebar.column)
+                    .all(|hitbox| hitbox.agent.is_some()),
+                "the meadow must not retain session-level targets beside the sidebar"
+            );
         }
+    }
+    for height in [13, 17] {
+        let view = render(
+            height,
+            160,
+            "repo",
+            std::slice::from_ref(&value),
+            ViewOptions::default(),
+        )
+        .unwrap();
+        let sidebar = view.sidebar.unwrap();
+        assert!(!plain(&view).contains(&value.label));
+        assert!(
+            view.hitboxes
+                .iter()
+                .filter(|hitbox| hitbox.column < sidebar.column)
+                .all(|hitbox| hitbox.agent.is_some())
+        );
     }
     assert!(render(12, 160, "repo", &[], ViewOptions::default()).is_none());
     assert!(render(24, 63, "repo", &[], ViewOptions::default()).is_none());
+}
+
+#[test]
+fn sidebar_dense_fallback_keeps_only_agent_targets_in_the_meadow() {
+    let mut value = session(0);
+    value
+        .agents
+        .extend((1..182).map(|index| super::super::GardenAgent {
+            runtime_id:
+                AgentRuntimeId::parse(&format!("{index:08x}-0000-4000-8000-000000000002")).unwrap(),
+            phase: AgentPhase::Running,
+        }));
+    let mut empty = session(1);
+    empty.agents.clear();
+    let view = render(
+        13,
+        99,
+        "repo",
+        &[value.clone(), empty.clone()],
+        ViewOptions::default(),
+    )
+    .unwrap();
+    let sidebar = view.sidebar.unwrap();
+    let meadow_targets = view
+        .hitboxes
+        .iter()
+        .filter(|hitbox| hitbox.column < sidebar.column)
+        .collect::<Vec<_>>();
+    assert_eq!(meadow_targets.len(), value.agents.len());
+    assert!(meadow_targets.iter().all(|hitbox| hitbox.agent.is_some()));
+    assert!(!plain(&view).contains(&value.label));
+    assert!(!plain(&view).contains(&empty.label));
 }
 
 #[test]
@@ -211,10 +290,54 @@ fn inactive_empty_and_dispatch_states_are_explicit() {
         plain(&render(24, 120, "repo", &[value], ViewOptions::default()).unwrap())
             .contains("failed  00000000")
     );
+    let mut failed = session(0);
+    failed.lifecycle = SessionLifecycle::Failed;
+    failed.failure_summary = Some("worktree missing".into());
+    assert!(
+        plain(&render(24, 120, "repo", &[failed], ViewOptions::default()).unwrap())
+            .contains("failed · worktree missing")
+    );
     assert!(
         plain(&render(24, 120, "repo", &[], ViewOptions::default()).unwrap())
             .contains("No sessions")
     );
+}
+
+#[test]
+fn session_summary_preserves_every_session_only_state_in_the_sidebar() {
+    let mut value = session(0);
+    assert_eq!(session_row_summary(&value, 1), "1 agent");
+    assert_eq!(session_row_summary(&value, 2), "2 agents");
+
+    value.agents_observed = false;
+    for (lifecycle, expected) in [
+        (SessionLifecycle::Available, "project inactive"),
+        (SessionLifecycle::Creating, "cached · creating"),
+        (SessionLifecycle::Initializing, "cached · creating"),
+        (SessionLifecycle::Deleting, "cached · deleting"),
+        (SessionLifecycle::Failed, "cached · failed"),
+    ] {
+        value.lifecycle = lifecycle;
+        assert_eq!(session_row_summary(&value, 0), expected);
+    }
+    value.agents_observed = true;
+    value.lifecycle = SessionLifecycle::Available;
+    value.pending_decisions = 1;
+    assert_eq!(session_row_summary(&value, 1), "action · 1 decision");
+    value.pending_decisions = 2;
+    assert_eq!(session_row_summary(&value, 1), "action · 2 decisions");
+
+    value.pending_decisions = 0;
+    value.lifecycle = SessionLifecycle::Failed;
+    assert_eq!(session_row_summary(&value, 0), "failed");
+    value.failure_summary = Some("worktree missing".into());
+    assert_eq!(session_row_summary(&value, 0), "failed · worktree missing");
+
+    value.lifecycle = SessionLifecycle::Available;
+    value.pr_merged = true;
+    assert_eq!(session_row_summary(&value, 0), "PR merged!");
+    value.pr_merged = false;
+    assert_eq!(session_row_summary(&value, 0), "No agent activity.");
 }
 
 #[test]

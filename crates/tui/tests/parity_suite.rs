@@ -4,7 +4,7 @@
 //! It is safe to run in CI without a PTY, daemon socket, clock, or terminal.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::id::{
@@ -214,12 +214,8 @@ fn quit_phase_error_redaction() {
         AppEvent::Backend(BackendEvent::Feedback(Feedback::TerminalError(safe))),
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
-    let projection = HomeProjection::from_state(
-        &state,
-        "東京",
-        Path::new("/work/root"),
-        &[session_projection(session, "開発")],
-    );
+    let projection =
+        HomeProjection::from_state(&state, "東京", &[session_projection(session, "開発")]);
     let frame = render_home(10, 160, &projection)
         .into_iter()
         .map(|line| strip_ansi(&line))
@@ -241,20 +237,12 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
     // frame clock. Keep this layout fixture independent of the calendar.
     projected_session.last_modified = Utc::now();
     let mut state = AppState::home(workspace, vec![session]);
-    let switch_projection = HomeProjection::from_state(
-        &state,
-        "東京",
-        Path::new("/work/root"),
-        std::slice::from_ref(&projected_session),
-    );
+    let switch_projection =
+        HomeProjection::from_state(&state, "東京", std::slice::from_ref(&projected_session));
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
-    let projection = HomeProjection::from_state(
-        &state,
-        "東京",
-        Path::new("/work/root"),
-        std::slice::from_ref(&projected_session),
-    );
+    let projection =
+        HomeProjection::from_state(&state, "東京", std::slice::from_ref(&projected_session));
 
     let lines = render_home(8, 40, &projection);
     assert!(lines.iter().all(|line| display_width(line) <= 40));
@@ -322,12 +310,8 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
         )
     );
     assert_eq!(state.overlay(), None);
-    let projection = HomeProjection::from_state(
-        &state,
-        "fixture",
-        Path::new("/work/root"),
-        &[session_projection(session, "alpha")],
-    );
+    let projection =
+        HomeProjection::from_state(&state, "fixture", &[session_projection(session, "alpha")]);
     let frame = render_home(24, 80, &projection).join("\n");
     assert!(!frame.contains("Closeup: alpha"));
     assert!(frame.contains("a: agent / t: terminal / Enter: actions"));
@@ -335,12 +319,8 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
     // Enter explicitly opens the tab-less action modal.
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert_eq!(state.overlay(), Some(Overlay::Closeup));
-    let projection = HomeProjection::from_state(
-        &state,
-        "fixture",
-        Path::new("/work/root"),
-        &[session_projection(session, "alpha")],
-    );
+    let projection =
+        HomeProjection::from_state(&state, "fixture", &[session_projection(session, "alpha")]);
     assert!(
         render_home(24, 80, &projection)
             .join("\n")
@@ -359,12 +339,8 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
     );
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
     assert_eq!(state.overlay(), None);
-    let projection = HomeProjection::from_state(
-        &state,
-        "fixture",
-        Path::new("/work/root"),
-        &[session_projection(session, "alpha")],
-    );
+    let projection =
+        HomeProjection::from_state(&state, "fixture", &[session_projection(session, "alpha")]);
     assert!(
         !render_home(24, 80, &projection)
             .join("\n")
@@ -514,8 +490,7 @@ fn home_frame_golden_covers_sidebar_git_diffs() {
             },
         ),
     ]);
-    let home = HomeProjection::from_state(&state, "atlas", Path::new("/work/root"), &[alpha, beta])
-        .with_git_diffs(&diffs);
+    let home = HomeProjection::from_state(&state, "atlas", &[alpha, beta]).with_git_diffs(&diffs);
 
     let actual = render_home(14, 60, &home)
         .iter()
@@ -574,7 +549,7 @@ fn home_frame_golden_covers_live_terminal_viewport() {
     let mut builder = session_projection(session, "builder");
     // Relative time renders against the frame clock; keep the layout stable.
     builder.last_modified = Utc::now();
-    let home = HomeProjection::from_state(&state, "atlas", Path::new("/work/root"), &[builder])
+    let home = HomeProjection::from_state(&state, "atlas", &[builder])
         .with_pane(&pane)
         .with_terminal_view(Some(view));
 

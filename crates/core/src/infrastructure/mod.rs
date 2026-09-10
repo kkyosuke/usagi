@@ -33,5 +33,6 @@ pub mod paths;
 pub mod persistence;
 pub mod role_catalog;
 pub mod runtime_model;
+pub mod session_snapshot;
 pub mod store;
 pub mod workspace_state;

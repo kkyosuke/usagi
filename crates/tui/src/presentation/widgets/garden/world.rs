@@ -471,6 +471,45 @@ pub(super) fn render(
     tick: u64,
     reduced_motion: bool,
 ) -> GardenFrame {
+    render_with_session_homes(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        tick,
+        reduced_motion,
+        true,
+    )
+}
+
+pub(super) fn render_without_session_homes(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) -> GardenFrame {
+    render_with_session_homes(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        tick,
+        reduced_motion,
+        false,
+    )
+}
+
+fn render_with_session_homes(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+    show_session_homes: bool,
+) -> GardenFrame {
     let tick = if reduced_motion {
         0
     } else {
@@ -492,17 +531,29 @@ pub(super) fn render(
     if agent_rows > canvas.height - SCENERY_HEIGHT {
         // At this physical limit even two-cell rabbits plus the scenery cannot
         // fit. Spend the complete body on Agents instead of overlapping targets.
-        return super::render_dense(
-            height,
-            width,
-            workspace_name,
-            sessions,
-            tick,
-            reduced_motion,
-        )
-        .expect("spacious terminals meet the compact minimum");
+        return if show_session_homes {
+            super::render_dense(
+                height,
+                width,
+                workspace_name,
+                sessions,
+                tick,
+                reduced_motion,
+            )
+        } else {
+            super::render_dense_without_session_context(
+                height,
+                width,
+                workspace_name,
+                sessions,
+                tick,
+                reduced_motion,
+            )
+        }
+        .expect("the world renderer is called above the Garden minimum");
     }
-    let home_budget = (canvas.height / 3).min(canvas.height - SCENERY_HEIGHT - agent_rows);
+    let home_budget = show_session_homes
+        .then(|| (canvas.height / 3).min(canvas.height - SCENERY_HEIGHT - agent_rows));
     draw_meadow(&mut canvas, workspace_name, tick);
     draw_pond(
         &mut canvas,
@@ -515,7 +566,10 @@ pub(super) fn render(
     let tree_x = coordinate(canvas.width - 10);
     draw_tree(&mut canvas, Point { x: tree_x, y: 0 });
 
-    let (home_areas, home_height) = homes(&canvas, sessions.len(), home_budget);
+    let (home_areas, home_height) = home_budget.map_or_else(
+        || (Vec::new(), 0),
+        |budget| homes(&canvas, sessions.len(), budget),
+    );
     let meadow = Area {
         x: 0,
         y: SCENERY_HEIGHT,
@@ -815,17 +869,55 @@ pub(super) fn canonical_tick(
     tick: u64,
     reduced_motion: bool,
 ) -> u64 {
+    canonical_tick_with_session_homes(height, width, sessions, tick, reduced_motion, true)
+}
+
+pub(super) fn canonical_tick_without_session_homes(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) -> u64 {
+    canonical_tick_with_session_homes(height, width, sessions, tick, reduced_motion, false)
+}
+
+fn canonical_tick_with_session_homes(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+    show_session_homes: bool,
+) -> u64 {
     if reduced_motion {
         return 0;
     }
     let tick = tick % ANIMATION_CYCLE_TICKS;
-    let expected = render(height, width, "canonical", sessions, tick, false);
+    let expected = render_with_session_homes(
+        height,
+        width,
+        "canonical",
+        sessions,
+        tick,
+        false,
+        show_session_homes,
+    );
     let mut canonical = tick;
     // The sky changes every two ticks; only an immediately preceding identical
     // frame can be held. Include hitboxes so a moving click target also redraws.
     for distance in 1..=2 {
         let candidate = (tick + ANIMATION_CYCLE_TICKS - distance) % ANIMATION_CYCLE_TICKS;
-        if render(height, width, "canonical", sessions, candidate, false) != expected {
+        if render_with_session_homes(
+            height,
+            width,
+            "canonical",
+            sessions,
+            candidate,
+            false,
+            show_session_homes,
+        ) != expected
+        {
             break;
         }
         canonical = candidate;

@@ -6,8 +6,8 @@ use super::{
     DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort, FixedBackendFactory,
     FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort, Geometry, GitDiff, IdleWatch,
     LaunchAgentRequest, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory,
-    MissingWorkspacePrompt, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep,
-    PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
+    MissingWorkspacePrompt, NewStep, NoDesktopNotifications, NoMetrics, OpenStep, PROJECT_BAR_ROWS,
+    PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
     SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
     SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
     SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
@@ -59,14 +59,14 @@ use crate::presentation::widgets::strip_ansi;
 use crate::presentation::workspace_runtime::PaneRestoreTarget;
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabProjection,
-    AgentTabSlotIntent, AgentTabTargetProjection,
+    AgentTabSlotIntent, AgentTabTargetProjection, reconcile_agent_tab_intent_mutation,
 };
 use crate::usecase::application::controller::WorkspaceDrawerFocus;
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, DirectorConsoleParent, DirectorNew, DirectorRoute,
     Effect, EnvironmentEntry, GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode, NewRequest, Overlay,
-    PendingToken, PreviewFileFilter, RoleEditorScope, Route, SessionCreateIntent,
-    SessionRoleCatalog, TabDirection, Target,
+    PendingToken, PreviewFileFilter, RoleEditorScope, Route, SessionCreateIntent, TabDirection,
+    Target,
 };
 use crate::usecase::application::daemon_backend::{
     Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -82,7 +82,6 @@ use chrono::{DateTime, Duration, Timelike, Utc};
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -704,7 +703,6 @@ fn an_idle_home_grows_a_garden_whose_usagi_is_one_click_from_its_closeup() {
         prs: Vec::new(),
     };
     let sessions = vec![ProjectedSession::from_record(session, &record)];
-    let root = PathBuf::from("/tmp/demo");
     let no_diffs = BTreeMap::new();
     let clock = now();
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
@@ -714,7 +712,6 @@ fn an_idle_home_grows_a_garden_whose_usagi_is_one_click_from_its_closeup() {
             80,
             runtime,
             "demo",
-            &root,
             &sessions,
             None,
             health(),
@@ -828,7 +825,6 @@ fn garden_routes_click_and_pointer_down_through_the_drawn_frame_hit_test() {
         prs: Vec::new(),
     };
     let sessions = vec![ProjectedSession::from_record(session, &record)];
-    let root = PathBuf::from("/tmp/demo");
     let no_diffs = BTreeMap::new();
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
@@ -849,7 +845,6 @@ fn garden_routes_click_and_pointer_down_through_the_drawn_frame_hit_test() {
             80,
             &runtime,
             "demo",
-            &root,
             &sessions,
             None,
             health(),
@@ -910,7 +905,6 @@ fn garden_frame_material_uses_every_open_projects_projection() {
             220,
             &runtime,
             "alpha",
-            &alpha.workspace.path,
             &sessions,
             None,
             health(),
@@ -997,7 +991,6 @@ fn garden_arrow_wakes_home_without_reaching_the_surface_behind_it() {
         80,
         &runtime,
         "demo",
-        Path::new("/tmp/demo"),
         &[],
         None,
         health(),
@@ -1017,7 +1010,6 @@ fn garden_arrow_wakes_home_without_reaching_the_surface_behind_it() {
                             id: SessionId::new(),
                             label: format!("project-{index} / session-{index}"),
                             lifecycle: SessionLifecycle::Available,
-                            selected: false,
                             failure_summary: None,
                             agents_observed: false,
                             agents: Vec::new(),
@@ -1056,7 +1048,6 @@ fn documented_garden_minimum_includes_the_project_bar_row() {
 fn garden_list_keys_and_wheel_scroll_without_waking_the_terminal() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
-    let root = PathBuf::from("/tmp/demo");
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
@@ -1067,7 +1058,6 @@ fn garden_list_keys_and_wheel_scroll_without_waking_the_terminal() {
         120,
         &runtime,
         "demo",
-        &root,
         &[],
         None,
         health(),
@@ -1085,7 +1075,6 @@ fn garden_list_keys_and_wheel_scroll_without_waking_the_terminal() {
                 id: session,
                 label: "many agents".into(),
                 lifecycle: SessionLifecycle::Available,
-                selected: false,
                 failure_summary: None,
                 agents_observed: true,
                 agents: (0..30)
@@ -1288,7 +1277,6 @@ fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
     let foreign_workspace = WorkspaceId::new();
     let session = SessionId::new();
     let agent = AgentRuntimeId::new();
-    let root = PathBuf::from("/tmp/demo");
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
     let mut material = home_frame_material(
@@ -1296,7 +1284,6 @@ fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
         120,
         &runtime,
         "demo",
-        &root,
         &[],
         None,
         health(),
@@ -1314,7 +1301,6 @@ fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
                 id: session,
                 label: "other / review".to_owned(),
                 lifecycle: SessionLifecycle::Available,
-                selected: false,
                 failure_summary: None,
                 agents_observed: true,
                 agents: vec![crate::presentation::widgets::garden::GardenAgent {
@@ -1676,7 +1662,6 @@ fn failed_delete_selection_renders_the_force_remove_confirmation() {
         80,
         &runtime,
         "demo",
-        Path::new("/tmp/demo"),
         &[projected],
         None,
         health(),
@@ -2349,8 +2334,9 @@ fn director_organization_projects_statuses_hierarchy_and_orphans() {
         ]
     );
 
-    let state = crate::usecase::application::controller::AppState::home(WorkspaceId::new(), ids);
-    let projected = super::project_controller_sessions(&ui, &state);
+    let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), ids);
+    super::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let projected = super::project_controller_sessions(&ui, runtime.state());
     assert_eq!(
         projected
             .iter()
@@ -4328,7 +4314,6 @@ fn render_controller_frame_composites_the_home_and_overlays() {
     };
     let sessions = std::slice::from_ref(&projected);
     let git = std::collections::BTreeMap::new();
-    let root = std::path::Path::new("/work");
     // Every case here composites the same Home geometry; only the runtime
     // and its session rows vary. Diagnostic health uses its unobserved
     // default so these assertions stay about the overlays.
@@ -4338,7 +4323,6 @@ fn render_controller_frame_composites_the_home_and_overlays() {
             80,
             runtime,
             "atlas",
-            root,
             sessions,
             None,
             health(),
@@ -4435,7 +4419,6 @@ fn render_controller_frame_composites_terminal_launch_failure() {
         80,
         &runtime,
         "atlas",
-        std::path::Path::new("/work"),
         &[],
         None,
         health(),
@@ -4464,7 +4447,6 @@ fn render_controller_frame_composites_agent_launch_failure() {
         80,
         &runtime,
         "atlas",
-        std::path::Path::new("/work"),
         &[],
         None,
         health(),
@@ -4540,7 +4522,6 @@ fn closeup_environment_editor_is_composited_over_home() {
         80,
         &runtime,
         "atlas",
-        std::path::Path::new("/work"),
         &sessions,
         None,
         health(),
@@ -4605,133 +4586,6 @@ fn unavailable_backend_reports_pr_copy_and_dismiss_errors() {
 }
 
 #[test]
-fn session_role_catalog_filters_scope_and_falls_back_on_invalid_source() {
-    let root = tempdir().unwrap();
-    let data_home = root.path().join("home");
-    let workspace = root.path().join("workspace");
-    std::fs::create_dir_all(&data_home).unwrap();
-    std::fs::write(
-            data_home.join("roles.toml"),
-            "version = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n[roles.director]\nsummary = \"Direct\"\nscopes = [\"root\"]\ninstructions = \"direct\"\n",
-        )
-        .unwrap();
-
-    let catalog = super::session_role_catalog(Some(&data_home), &workspace);
-    assert_eq!(catalog.default.unwrap().as_str(), "coder");
-    assert_eq!(catalog.roles.len(), 1);
-    assert_eq!(catalog.roles[0].id.as_str(), "coder");
-
-    std::fs::write(data_home.join("roles.toml"), "version = 99\n").unwrap();
-    assert_eq!(
-        super::session_role_catalog(Some(&data_home), &workspace),
-        SessionRoleCatalog::default()
-    );
-    assert_eq!(
-        super::session_role_catalog(None, &workspace),
-        SessionRoleCatalog::default()
-    );
-}
-
-#[test]
-fn branch_choices_include_remote_defaults_and_skip_other_symbolic_aliases() {
-    assert_eq!(
-        super::parse_session_branch_choices(
-            "refs/heads/main \nrefs/heads/feature \nrefs/heads/current refs/heads/main\nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/alias refs/remotes/origin/main\nrefs/remotes/origin/main \nrefs/remotes/upstream/HEAD refs/remotes/other/main\nnot-a-ref\n"
-        ),
-        vec![
-            crate::usecase::application::controller::BranchChoice {
-                label: "local:main".into(),
-                refname: "refs/heads/main".into(),
-            },
-            crate::usecase::application::controller::BranchChoice {
-                label: "local:feature".into(),
-                refname: "refs/heads/feature".into(),
-            },
-            crate::usecase::application::controller::BranchChoice {
-                label: "remote:origin/(default)".into(),
-                refname: "refs/remotes/origin/HEAD".into(),
-            },
-            crate::usecase::application::controller::BranchChoice {
-                label: "remote:origin/main".into(),
-                refname: "refs/remotes/origin/main".into(),
-            },
-        ]
-    );
-}
-
-#[test]
-fn branch_catalog_falls_back_when_git_cannot_start() {
-    let root = tempdir().unwrap();
-    let branches = vec![crate::usecase::application::controller::BranchChoice {
-        label: "local:main".into(),
-        refname: "refs/heads/main".into(),
-    }];
-
-    assert!(
-            super::branch_default_from_output(
-                Err(std::io::Error::other("git unavailable")),
-                &branches,
-            )
-            .is_none()
-        );
-    assert!(
-        super::branch_default_from_output(
-            Command::new("git").arg("not-a-command").output(),
-            &branches,
-        )
-        .is_none()
-    );
-    assert!(
-            super::branch_default_from_output(
-                Command::new("git").arg("--version").output(),
-                &branches,
-            )
-            .is_none()
-        );
-    assert_eq!(
-        super::session_branch_catalog(&root.path().join("missing"), None),
-        crate::usecase::application::controller::SessionBranchCatalog::default()
-    );
-}
-
-#[test]
-fn branch_catalog_reads_the_current_local_branch() {
-    let root = tempdir().unwrap();
-    let git = |arguments: &[&str]| {
-        Command::new("git")
-            .arg("-C")
-            .arg(root.path())
-            .args(arguments)
-            .status()
-            .unwrap()
-    };
-    assert!(git(&["init", "--initial-branch=main"]).success());
-    assert!(git(&["config", "user.name", "fixture"]).success());
-    assert!(git(&["config", "user.email", "fixture@example.invalid"]).success());
-    std::fs::write(root.path().join("tracked"), "base\n").unwrap();
-    assert!(git(&["add", "tracked"]).success());
-    assert!(git(&["commit", "-m", "base"]).success());
-
-    let catalog = super::session_branch_catalog(root.path(), None);
-
-    assert_eq!(catalog.default.as_deref(), Some("refs/heads/main"));
-    assert_eq!(
-        catalog.branches,
-        vec![crate::usecase::application::controller::BranchChoice {
-            label: "local:main".into(),
-            refname: "refs/heads/main".into(),
-        }]
-    );
-
-    assert!(git(&["branch", "feature"]).success());
-    let configured = super::session_branch_catalog(root.path(), Some("refs/heads/feature"));
-    assert_eq!(configured.default.as_deref(), Some("refs/heads/feature"));
-
-    let stale = super::session_branch_catalog(root.path(), Some("refs/heads/missing"));
-    assert_eq!(stale.default.as_deref(), Some("refs/heads/main"));
-}
-
-#[test]
 fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
     // Once a create request is in flight, the shell threads its name here and
     // the sidebar draws a three-line loading skeleton just above `+ new
@@ -4761,7 +4615,6 @@ fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
     };
     let workspace = WorkspaceId::new();
     let git = std::collections::BTreeMap::new();
-    let root = std::path::Path::new("/work");
 
     let idle = WorkspaceRuntime::new(workspace, Vec::new());
     let pending = render_controller_frame(
@@ -4769,7 +4622,6 @@ fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
         80,
         &idle,
         "atlas",
-        root,
         &[],
         None,
         health(),
@@ -4787,7 +4639,6 @@ fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
         80,
         &idle,
         "atlas",
-        root,
         &[],
         None,
         health(),
@@ -4809,7 +4660,6 @@ fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
         80,
         &ticked,
         "atlas",
-        root,
         &[],
         None,
         health(),
@@ -5834,7 +5684,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         prs: Vec::new(),
     };
     let sessions = vec![ProjectedSession::from_record(session, &record)];
-    let root = PathBuf::from("/tmp/demo");
     let no_diffs = BTreeMap::new();
     let clock = super::relative_time_clock(now()) + Duration::seconds(10);
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
@@ -5845,7 +5694,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
             80,
             runtime,
             "demo",
-            &root,
             &sessions,
             None,
             health(),
@@ -5888,7 +5736,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -5907,7 +5754,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -5922,7 +5768,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -5937,7 +5782,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -5954,7 +5798,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         StaticMetrics.latest(),
         health(),
@@ -5971,7 +5814,7 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
     let mut observed = DaemonHealthTracker::default();
     observed.observe(&StaticMetrics.latest().expect("static metrics"));
     let health_material = home_frame_material(
-        20, 80, &runtime, "demo", &root, &sessions, None, observed, &no_diffs, None, None, clock,
+        20, 80, &runtime, "demo", &sessions, None, observed, &no_diffs, None, None, clock,
     );
     assert_ne!(health_material, base, "a health observation did not redraw");
 
@@ -5991,7 +5834,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -6015,7 +5857,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -6033,7 +5874,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &root_drawer,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -6057,7 +5897,6 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         80,
         &runtime,
         "demo",
-        &root,
         &sessions,
         None,
         health(),
@@ -6101,7 +5940,6 @@ fn garden_motion_uses_the_logical_clock_inside_one_relative_time_minute() {
         prs: Vec::new(),
     };
     let sessions = vec![ProjectedSession::from_record(session, &record)];
-    let root = PathBuf::from("/tmp/demo");
     let no_diffs = BTreeMap::new();
     let clock = super::relative_time_clock(now()) + Duration::seconds(10);
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
@@ -6129,7 +5967,6 @@ fn garden_motion_uses_the_logical_clock_inside_one_relative_time_minute() {
             100,
             runtime,
             "demo",
-            &root,
             &sessions,
             None,
             health(),
@@ -9219,7 +9056,7 @@ fn drawer_header_buttons_remain_active_while_the_director_picker_owns_input() {
         DirectorNew::Choosing(_)
     ));
 
-    let home = HomeProjection::from_state(runtime.state(), "demo", Path::new("/work"), &[]);
+    let home = HomeProjection::from_state(runtime.state(), "demo", &[]);
     let director_click = Key::Click { column: 99, row: 0 };
     assert_eq!(
         workspace_drawer_header_key(
@@ -9284,7 +9121,7 @@ fn drawer_header_buttons_remain_active_while_the_director_picker_owns_input() {
 
     // Once closed, the same visible button belongs to the ordinary Home
     // route instead of this close-only priority seam.
-    let closed = HomeProjection::from_state(runtime.state(), "demo", Path::new("/work"), &[]);
+    let closed = HomeProjection::from_state(runtime.state(), "demo", &[]);
     assert_eq!(
         apply_drawer_header_while_director_open(&mut runtime, &director_click, 100, &closed),
         None
@@ -10230,7 +10067,6 @@ impl AgentTabIntentPort for MemoryIntentPort {
         Ok(state.clone())
     }
 
-    #[allow(clippy::too_many_lines)] // The fake mirrors the production CAS/causal-close matrix.
     fn mutate(
         &mut self,
         workspace: WorkspaceId,
@@ -10239,127 +10075,15 @@ impl AgentTabIntentPort for MemoryIntentPort {
     ) -> Result<AgentTabIntentPortCommit, AgentTabIntentError> {
         let mut state = self.state.lock().unwrap();
         assert_eq!(workspace, state.workspace_id);
-        let conflict = expected_revision != state.revision;
         self.mutations.lock().unwrap().push(mutation.clone());
-        let before = state.clone();
-        let force_close_fence = match &mutation {
-            AgentTabIntentMutation::Dismiss { continuation }
-            | AgentTabIntentMutation::DismissInterrupted { continuation, .. } => {
-                state.targets.iter().any(|target| {
-                    target
-                        .tabs
-                        .iter()
-                        .any(|slot| slot.continuation == *continuation)
-                })
-            }
-            AgentTabIntentMutation::DismissTerminal { terminal }
-            | AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. } => {
-                state.dismisses_terminal(terminal)
-            }
-            _ => false,
-        };
-        let mut mutation_applied = true;
-        let projection = if conflict {
-            match mutation {
-                AgentTabIntentMutation::Observe {
-                    terminals,
-                    agents,
-                    allowed_sessions,
-                } => {
-                    mutation_applied = false;
-                    Some(state.projected_exact(&terminals, &agents, &allowed_sessions))
-                }
-                AgentTabIntentMutation::Reopen { continuation } => {
-                    mutation_applied = !state.dismissed.contains(&continuation);
-                    None
-                }
-                AgentTabIntentMutation::Upsert {
-                    session_id,
-                    continuation,
-                    terminal,
-                    select,
-                } => {
-                    mutation_applied = state.targets.iter().any(|target| {
-                        target.session_id == session_id
-                            && target.tabs.iter().any(|slot| {
-                                slot.continuation == continuation && slot.terminal.fences(&terminal)
-                            })
-                            && (!select || target.selected == Some(continuation))
-                            && !state.dismissed.contains(&continuation)
-                    });
-                    None
-                }
-                AgentTabIntentMutation::Dismiss { continuation } => {
-                    state.apply(AgentTabIntentMutation::Dismiss { continuation })
-                }
-                AgentTabIntentMutation::DismissInterrupted {
-                    session_id,
-                    continuation,
-                    terminal,
-                } => state.apply(AgentTabIntentMutation::DismissInterrupted {
-                    session_id,
-                    continuation,
-                    terminal,
-                }),
-                AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. }
-                | AgentTabIntentMutation::DismissTerminal { terminal } => {
-                    state.apply(AgentTabIntentMutation::DismissTerminal { terminal })
-                }
-                AgentTabIntentMutation::Select {
-                    session_id,
-                    continuation,
-                } => {
-                    mutation_applied = state.targets.iter().any(|target| {
-                        target.session_id == session_id && target.selected == continuation
-                    });
-                    None
-                }
-                AgentTabIntentMutation::Reorder {
-                    session_id,
-                    continuations,
-                } => {
-                    mutation_applied = state
-                        .targets
-                        .iter()
-                        .find(|target| target.session_id == session_id)
-                        .is_some_and(|target| {
-                            target
-                                .tabs
-                                .iter()
-                                .map(|slot| slot.continuation)
-                                .eq(continuations)
-                        });
-                    None
-                }
-            }
-        } else {
-            match mutation {
-                AgentTabIntentMutation::Upsert {
-                    session_id,
-                    continuation,
-                    terminal,
-                    select: _,
-                } if state.dismissed.contains(&continuation) => {
-                    mutation_applied = false;
-                    state.apply(AgentTabIntentMutation::Upsert {
-                        session_id,
-                        continuation,
-                        terminal,
-                        select: false,
-                    })
-                }
-                mutation => state.apply(mutation),
-            }
-        };
-        if *state != before || force_close_fence {
-            state.revision += 1;
-        }
-        Ok(AgentTabIntentPortCommit {
-            intent: state.clone(),
-            projection,
-            mutation_applied,
-            cas_conflict: conflict,
-        })
+        let commit = reconcile_agent_tab_intent_mutation(
+            state.clone(),
+            workspace,
+            expected_revision,
+            mutation,
+        )?;
+        *state = commit.intent.clone();
+        Ok(commit)
     }
 }
 
@@ -16679,11 +16403,6 @@ impl AgentCommandPortFactory for IdleAgentPortFactory {
 }
 
 #[test]
-fn no_metrics_factory_creates_an_empty_port() {
-    assert_eq!(NoMetricsFactory.create().latest(), None);
-}
-
-#[test]
 fn idle_agent_port_is_safe_when_an_unexpected_launch_is_requested() {
     let mut port = IdleAgentPort;
     let error = port
@@ -21145,7 +20864,6 @@ fn selecting_an_unresumable_tab_prompts_then_keeps_or_removes_exact_history() {
         80,
         &runtime,
         "demo",
-        Path::new("/tmp/demo"),
         &[],
         None,
         health(),
@@ -21282,7 +21000,6 @@ fn selecting_an_interrupted_rabbit_opens_the_same_unresumable_prompt() {
         80,
         &runtime,
         "demo",
-        Path::new("/tmp/demo"),
         &[ProjectedSession::from_record(session, &record)],
         None,
         health(),
@@ -21826,6 +21543,24 @@ impl super::SessionWorktreeScanPort for CountedPort {
     }
 }
 
+impl super::SessionCatalogPort for CountedPort {
+    fn roles(&self, _workspace: &Path) -> super::SessionRoleCatalog {
+        super::SessionRoleCatalog::default()
+    }
+
+    fn branches(
+        &self,
+        _workspace: &Path,
+        _configured_default: Option<&str>,
+    ) -> super::SessionBranchCatalog {
+        super::SessionBranchCatalog::default()
+    }
+
+    fn branch_worker(&self) -> Box<dyn super::SessionBranchCatalogPort> {
+        Box::new(super::UnavailableSessionBranchCatalogPort)
+    }
+}
+
 impl super::GardenInventoryPort for CountedPort {
     fn inventory(&mut self, _workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String> {
         Err("Agent inventory is unavailable".to_owned())
@@ -21853,8 +21588,10 @@ impl BackendDecisionPort for CountedPort {
 /// a hung restore observation (#551, fixed by
 /// `blocked_restore_inventory_never_blocks_render_or_quit`). Its drop
 /// therefore happens on that worker and is not ordered against the next
-/// workspace's composition.
-const RESIDENT_PORTS_PER_COMPOSITION: usize = 12;
+/// workspace's composition. Branch discovery also uses a detached worker, but
+/// its adapter is freshly created by the counted resident catalog port and
+/// shares no teardown-sensitive resource with it.
+const RESIDENT_PORTS_PER_COMPOSITION: usize = 13;
 
 /// A production-shaped factory whose every port counts its own drop, and
 /// which records how many ports had been dropped when each workspace's
@@ -21878,6 +21615,21 @@ impl CountingBackendFactory {
     }
 }
 
+#[test]
+fn branch_catalog_worker_does_not_keep_the_resident_catalog_alive() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let catalog: Box<dyn super::SessionCatalogPort> = Box::new(CountedPort(Arc::clone(&drops)));
+    let worker = catalog.branch_worker();
+
+    drop(catalog);
+
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        worker.branches(Path::new("/tmp/workspace"), None),
+        super::SessionBranchCatalog::default()
+    );
+}
+
 impl super::ControllerBackendFactory for CountingBackendFactory {
     fn create(
         &mut self,
@@ -21894,6 +21646,9 @@ impl super::ControllerBackendFactory for CountingBackendFactory {
             )
             .with_decisions(Box::new(self.port()))
             .with_overlay(Box::new(UnavailableBackendPort)),
+            // Counted resident port. Its worker factory returns a separate,
+            // deliberately stateless adapter that may finish after this frame.
+            session_catalogs: Box::new(self.port()),
             session_commands: Box::new(self.port()),
             session_refresh: Box::new(self.port()),
             agent_commands: Box::new(self.port()),
@@ -22190,10 +21945,10 @@ fn a_settings_binding_failure_while_opening_a_workspace_propagates() {
     }
 }
 
-/// #556 acceptance: leaving tears the workspace down. Every port of the
-/// first composition — command clients, resident lanes, restore worker
-/// connection, metrics — is dropped before the second composition exists, so
-/// no pump or subscription of the workspace that was left is still running.
+/// #556 acceptance: leaving tears the workspace down. Every resident port of
+/// the first composition — including the session catalog — is dropped before
+/// the second composition exists. Detached restore and branch adapters have an
+/// explicitly separate lifetime and own no resident connection.
 #[test]
 fn leaving_a_workspace_drops_every_port_before_the_next_one_is_created() {
     let mut term = FakeTerminal::with_keys(&[

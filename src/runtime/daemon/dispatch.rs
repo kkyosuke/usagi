@@ -3315,6 +3315,36 @@ pub(super) fn clean_orphan_session_resources(
     }))
 }
 
+fn session_organization(
+    id: SessionId,
+    names: &BTreeMap<SessionId, String>,
+    parents: &BTreeMap<SessionId, Option<SessionId>>,
+) -> (Option<String>, usize, Vec<String>) {
+    let parent = parents.get(&id).copied().flatten();
+    let parent_name = parent.and_then(|parent| names.get(&parent).cloned());
+    let mut lineage = Vec::new();
+    let mut cursor = Some(id);
+    let mut seen = BTreeSet::new();
+    while let Some(member) = cursor
+        && seen.insert(member)
+    {
+        lineage.push(member);
+        cursor = parents
+            .get(&member)
+            .copied()
+            .flatten()
+            .filter(|parent| names.contains_key(parent));
+    }
+    lineage.reverse();
+    let mut path = vec!["Director".to_owned()];
+    path.extend(
+        lineage
+            .iter()
+            .filter_map(|member| names.get(member).cloned()),
+    );
+    (parent_name, lineage.len(), path)
+}
+
 #[allow(clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 pub(super) fn dispatch_session_action(
@@ -3435,99 +3465,106 @@ pub(super) fn dispatch_session_action(
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
             let store = runtime.dispatch_store();
             let agents = store.agents().map_err(|_| SessionRuntimeError::Storage)?;
-            if let Some(items) = status
-                .body
-                .get_mut("sessions")
-                .and_then(serde_json::Value::as_array_mut)
-            {
-                for item in items.iter_mut() {
-                    if let Some(id) = item
-                        .get("session_id")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                    {
-                        item["agent_phase"] = serde_json::json!(runtime.session_phase(id));
-                        let (resumable, reason) = runtime.session_resume_status(id);
-                        item["agent_resumable"] = serde_json::json!(resumable);
-                        item["agent_resume_reason"] = serde_json::json!(reason);
-                        item["agent_status"] = serde_json::json!(aggregate_agent_status(
-                            agents
-                                .iter()
-                                .filter(|agent| agent.session_id == Some(id))
-                                .map(|agent| agent.status),
-                        ));
-                        // Parentage is immutable lifecycle metadata captured when
-                        // the session is created. A later dispatch into an existing
-                        // session must never reorganize it.
-                        if item.get("parent_session_id").is_none() {
-                            item["parent_session_id"] = serde_json::Value::Null;
-                        }
-                    }
-                }
-                let names = items
-                    .iter()
-                    .filter_map(|item| {
-                        Some((
-                            serde_json::from_value(item.get("session_id")?.clone()).ok()?,
-                            item.get("name")?.as_str()?.to_owned(),
-                        ))
-                    })
-                    .collect::<BTreeMap<SessionId, String>>();
-                let parents = items
-                    .iter()
-                    .filter_map(|item| {
-                        let id = serde_json::from_value(item.get("session_id")?.clone()).ok()?;
-                        let parent = item
-                            .get("parent_session_id")
-                            .filter(|value| !value.is_null())
-                            .cloned()
-                            .and_then(|value| serde_json::from_value(value).ok());
-                        Some((id, parent))
-                    })
-                    .collect::<BTreeMap<SessionId, Option<SessionId>>>();
-                for item in items.iter_mut() {
-                    let Some(id) = item
-                        .get("session_id")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                    else {
-                        continue;
-                    };
-                    let parent = parents.get(&id).copied().flatten();
-                    item["parent_session_name"] =
-                        serde_json::json!(parent.and_then(|id| names.get(&id)));
-                    let mut lineage = Vec::new();
-                    let mut cursor = Some(id);
-                    let mut seen = BTreeSet::new();
-                    while let Some(member) = cursor
-                        && seen.insert(member)
-                    {
-                        lineage.push(member);
-                        cursor = parents
-                            .get(&member)
-                            .copied()
-                            .flatten()
-                            .filter(|parent| names.contains_key(parent));
-                    }
-                    lineage.reverse();
-                    item["organization_depth"] = serde_json::json!(lineage.len());
-                    let mut path = vec!["Director".to_owned()];
-                    path.extend(
-                        lineage
+            let runtime_observation = |id, names: &_, parents: &_| {
+                use usagi_core::infrastructure::session_snapshot::SessionRuntimeObservation;
+
+                let (parent_session_name, organization_depth, organization_path) =
+                    session_organization(id, names, parents);
+                let (agent_resumable, agent_resume_reason) = runtime.session_resume_status(id);
+                SessionRuntimeObservation {
+                    agent_phase: runtime.session_phase(id),
+                    agent_resumable,
+                    agent_resume_reason,
+                    agent_status: aggregate_agent_status(
+                        agents
                             .iter()
-                            .filter_map(|member| names.get(member).cloned()),
-                    );
-                    item["organization_path"] = serde_json::json!(path);
+                            .filter(|agent| agent.session_id == Some(id))
+                            .map(|agent| agent.status),
+                    ),
+                    parent_session_name,
+                    organization_depth,
+                    organization_path,
                 }
-                if let Some(visible) = visible.as_ref() {
-                    items.retain(|item| {
-                        item.get("session_id")
-                            .cloned()
-                            .and_then(|value| serde_json::from_value(value).ok())
-                            .is_some_and(|id| visible.contains(&id))
-                    });
+            };
+            status.body = match action {
+                SessionAction::List | SessionAction::Overview => {
+                    use usagi_core::infrastructure::session_snapshot::SessionListSnapshot;
+
+                    let snapshot = serde_json::from_value::<SessionListSnapshot>(status.body)
+                        .map_err(|_| SessionRuntimeError::Storage)?;
+                    let names = snapshot
+                        .sessions
+                        .iter()
+                        .map(|item| (item.session.session_id, item.session.name.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    let parents = snapshot
+                        .sessions
+                        .iter()
+                        .map(|item| (item.session.session_id, item.session.parent_session_id))
+                        .collect::<BTreeMap<_, _>>();
+                    let sessions = snapshot
+                        .sessions
+                        .into_iter()
+                        .filter(|item| {
+                            visible
+                                .as_ref()
+                                .is_none_or(|visible| visible.contains(&item.session.session_id))
+                        })
+                        .map(|mut item| {
+                            item.runtime = Some(runtime_observation(
+                                item.session.session_id,
+                                &names,
+                                &parents,
+                            ))
+                            .into();
+                            item
+                        })
+                        .collect();
+                    serde_json::to_value(SessionListSnapshot {
+                        workspace_id: snapshot.workspace_id,
+                        root_worktree_id: snapshot.root_worktree_id,
+                        revision: snapshot.revision,
+                        sessions,
+                    })
+                    .map_err(|_| SessionRuntimeError::Storage)?
                 }
-            }
+                SessionAction::Status => {
+                    use usagi_core::infrastructure::session_snapshot::SessionStatusSnapshot;
+
+                    let snapshot = serde_json::from_value::<SessionStatusSnapshot>(status.body)
+                        .map_err(|_| SessionRuntimeError::Storage)?;
+                    let names = snapshot
+                        .sessions
+                        .iter()
+                        .map(|item| (item.session_id, item.name.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    let parents = snapshot
+                        .sessions
+                        .iter()
+                        .map(|item| (item.session_id, item.parent_session_id))
+                        .collect::<BTreeMap<_, _>>();
+                    let sessions = snapshot
+                        .sessions
+                        .into_iter()
+                        .filter(|item| {
+                            visible
+                                .as_ref()
+                                .is_none_or(|visible| visible.contains(&item.session_id))
+                        })
+                        .map(|mut item| {
+                            item.runtime = runtime_observation(item.session_id, &names, &parents);
+                            item
+                        })
+                        .collect();
+                    serde_json::to_value(SessionStatusSnapshot {
+                        workspace_id: snapshot.workspace_id,
+                        revision: snapshot.revision,
+                        sessions,
+                    })
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                }
+                _ => unreachable!(),
+            };
             Ok(status)
         }
         SessionAction::Prompt => {
@@ -5719,4 +5756,41 @@ pub(super) fn unexpected_daemon_response_entry(
         "daemon request failed: surface={surface} request={} code={:?} retry={:?} side_effect={:?} error_id={} message={}",
         request_id, error.code, error.retry_mode, error.side_effect, error_id, error.message,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn organization_projection_is_rooted_bounded_and_cycle_safe() {
+        let parent = SessionId::new();
+        let child = SessionId::new();
+        let names = BTreeMap::from([(parent, "parent".to_owned()), (child, "child".to_owned())]);
+        let parents = BTreeMap::from([(parent, None), (child, Some(parent))]);
+
+        assert_eq!(
+            session_organization(child, &names, &parents),
+            (
+                Some("parent".to_owned()),
+                2,
+                vec![
+                    "Director".to_owned(),
+                    "parent".to_owned(),
+                    "child".to_owned(),
+                ],
+            )
+        );
+
+        let cycle = BTreeMap::from([(parent, Some(child)), (child, Some(parent))]);
+        let (_, depth, path) = session_organization(child, &names, &cycle);
+        assert_eq!(depth, 2);
+        assert_eq!(path.len(), 3);
+
+        let missing = BTreeMap::from([(child, Some(SessionId::new()))]);
+        assert_eq!(
+            session_organization(child, &names, &missing),
+            (None, 1, vec!["Director".to_owned(), "child".to_owned()],)
+        );
+    }
 }

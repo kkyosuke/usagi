@@ -450,6 +450,8 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
         "MetricsPortFactory",
         "PaneLaunchCommandPort",
         "RestoreConnectionPort",
+        "SessionBranchCatalogPort",
+        "SessionCatalogPort",
         "SessionCommandPort",
         "SessionCommandPortFactory",
         "SessionRefreshPort",
@@ -477,24 +479,61 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
 }
 
 #[test]
+fn tui_presentation_discovers_session_catalogs_through_an_application_port() {
+    let root = workspace_root();
+    let presentation = fs::read_to_string(root.join("crates/tui/src/presentation/mod.rs"))
+        .expect("TUI presentation source is readable");
+    let ports =
+        fs::read_to_string(root.join("crates/tui/src/usecase/application/runtime_ports.rs"))
+            .expect("TUI runtime ports are readable");
+
+    assert!(ports.contains("trait SessionCatalogPort"));
+    assert!(ports.contains("trait SessionBranchCatalogPort"));
+    assert!(ports.contains("fn branch_worker(&self) -> Box<dyn SessionBranchCatalogPort>"));
+    assert!(presentation.contains("session_catalogs.roles("));
+    assert!(presentation.contains("session_catalogs.branches("));
+    assert!(presentation.contains("session_catalogs.branch_worker()"));
+    assert!(!presentation.contains("Arc::clone(&session_catalogs)"));
+    for forbidden in [
+        "infrastructure::role_catalog",
+        "infrastructure::git::confined_git_command",
+    ] {
+        assert!(
+            !presentation.contains(forbidden),
+            "session catalog IO belongs to the binary composition adapter: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_module() {
     let root = workspace_root();
     let composition = fs::read_to_string(root.join("crates/tui/src/presentation/mod.rs"))
         .expect("TUI presentation source is readable");
+    let banner = fs::read_to_string(root.join("crates/tui/src/presentation/banner.rs"))
+        .expect("TUI banner presentation is readable");
+    let startup = fs::read_to_string(root.join("crates/tui/src/presentation/startup.rs"))
+        .expect("TUI startup presentation is readable");
     let tests = fs::read_to_string(root.join("crates/tui/src/presentation/tests.rs"))
         .expect("TUI presentation tests are readable");
     let observation =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/observation_lane.rs"))
             .expect("TUI observation policy is readable");
 
-    assert!(composition.contains("mod tests;"));
+    for module in ["mod banner;", "mod startup;", "mod tests;"] {
+        assert!(composition.contains(module));
+    }
     assert!(!composition.contains("mod tests {"));
+    assert!(!composition.contains("pub struct BannerScreenRunner"));
+    assert!(!composition.contains("pub struct StartupSplash"));
+    assert!(banner.contains("pub struct BannerScreenRunner"));
+    assert!(startup.contains("pub struct StartupSplash"));
     assert!(tests.contains("#![coverage(off)]"));
     assert!(observation.contains("struct ObservationLane"));
     assert!(!composition.contains("struct GardenObservation {"));
     assert!(!composition.contains("struct WorkRunObservation {"));
     assert!(
-        composition.lines().count() <= 11_000,
+        composition.lines().count() <= 10_000,
         "TUI presentation composition grew beyond its reviewable boundary"
     );
 }

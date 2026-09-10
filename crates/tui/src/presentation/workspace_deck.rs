@@ -84,7 +84,6 @@ impl CachedGardenSession {
             id: self.projected.id,
             label: self.projected.label.clone(),
             lifecycle: self.projected.lifecycle,
-            selected: false,
             failure_summary: self.projected.failure_summary.clone(),
             agents_observed: observed,
             agents: if observed {
@@ -1773,7 +1772,6 @@ mod tests {
             id: alpha.session_ids[0],
             label: "◆ Manager · build".to_owned(),
             lifecycle: SessionLifecycle::Available,
-            selected: true,
             failure_summary: None,
             agents_observed: true,
             agents: Vec::new(),
