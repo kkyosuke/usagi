@@ -18,7 +18,7 @@ use usagi_core::domain::id::{
 use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
     AgentPhase, DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal,
-    OperationStatus, WorkspaceLifecycleState, validate_session_name,
+    OperationStatus, SetupPlan, WorkspaceLifecycleState, validate_session_name,
 };
 use usagi_core::infrastructure::client::SessionAction;
 use usagi_core::infrastructure::git::{GitRunner, delete_branch};
@@ -30,6 +30,7 @@ use usagi_core::infrastructure::session_snapshot::{
     SessionListItem, SessionListSnapshot, SessionRuntimeObservation, SessionStatusItem,
     SessionStatusSnapshot, SessionWorktreeStatus,
 };
+use usagi_core::infrastructure::runtime_model::WorkspaceSessionConfig;
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
@@ -259,6 +260,12 @@ pub trait SessionWorktreeIo {
         branch: &str,
         base_ref: Option<&str>,
     ) -> anyhow::Result<()>;
+    /// Runs one configured setup command with `session_root` as its cwd.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the shell cannot start or the command exits unsuccessfully.
+    fn run_setup_command(&self, session_root: &Path, command: &str) -> anyhow::Result<()>;
     /// Removes nested linked worktrees and the containing session tree.
     ///
     /// # Errors
@@ -289,7 +296,13 @@ pub struct SessionRuntime {
 /// the lock released.
 enum SessionCreateStep {
     Done(SessionReply),
-    Pending(SessionCreateInFlight),
+    Pending(Box<SessionCreateInFlight>),
+}
+
+/// Outcome after the worktree effect has been durably recorded.
+enum SessionCreateCompletion {
+    Done(SessionReply),
+    Initializing(SessionInitializeInFlight),
 }
 
 /// The reserved-but-not-yet-built state of a create, carried across the lock
@@ -303,6 +316,17 @@ struct SessionCreateInFlight {
     destination: PathBuf,
     branch: String,
     base_ref: Option<String>,
+    setup_commands: Vec<String>,
+    io: Arc<dyn SessionWorktreeIo + Send + Sync>,
+}
+
+/// A durable `Initializing` session whose setup effect runs without the shared lock.
+struct SessionInitializeInFlight {
+    operation_id: OperationId,
+    fence: CompletionFence,
+    name: String,
+    destination: PathBuf,
+    commands: Vec<String>,
     io: Arc<dyn SessionWorktreeIo + Send + Sync>,
 }
 
@@ -446,10 +470,20 @@ fn perform_create_from(
         SessionCreateStep::Done(reply) => Ok(reply),
         SessionCreateStep::Pending(in_flight) => {
             let result = SessionRuntime::execute_create(git, &in_flight);
-            runtime
+            let completion = runtime
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
-                .finish_create(in_flight, result)
+                .finish_create(*in_flight, result)?;
+            match completion {
+                SessionCreateCompletion::Done(reply) => Ok(reply),
+                SessionCreateCompletion::Initializing(in_flight) => {
+                    let result = SessionRuntime::execute_initialize(&in_flight);
+                    runtime
+                        .lock()
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                        .finish_initialize(in_flight, result)
+                }
+            }
         }
     }
 }
@@ -1277,7 +1311,13 @@ impl SessionRuntime {
             SessionCreateStep::Done(reply) => Ok(reply),
             SessionCreateStep::Pending(in_flight) => {
                 let result = Self::execute_create(self.git.as_ref(), &in_flight);
-                self.finish_create(in_flight, result)
+                match self.finish_create(*in_flight, result)? {
+                    SessionCreateCompletion::Done(reply) => Ok(reply),
+                    SessionCreateCompletion::Initializing(in_flight) => {
+                        let result = Self::execute_initialize(&in_flight);
+                        self.finish_initialize(in_flight, result)
+                    }
+                }
             }
         }
     }
@@ -1319,6 +1359,9 @@ impl SessionRuntime {
         }
         let role_id = resolve_create_role(&catalog, existing_session, requested_role.as_ref())?;
         let base_ref = session_base_ref(payload)?;
+        let setup_commands = WorkspaceSessionConfig::read(&self.repo_root)
+            .setup_commands()
+            .to_vec();
         let semantic_key = create_semantic_key(
             origin,
             &name,
@@ -1387,16 +1430,19 @@ impl SessionRuntime {
             .last()
             .ok_or(SessionRuntimeError::Rejected)?;
         let fence = fence(&reserved, session, operation_id).ok_or(SessionRuntimeError::Rejected)?;
-        Ok(SessionCreateStep::Pending(SessionCreateInFlight {
-            operation_id,
-            fence,
-            branch: session_branch(&name),
-            name,
-            workspace_root: self.repo_root.clone(),
-            destination: path,
-            base_ref,
-            io: Arc::clone(&self.io),
-        }))
+        Ok(SessionCreateStep::Pending(Box::new(
+            SessionCreateInFlight {
+                operation_id,
+                fence,
+                branch: session_branch(&name),
+                name,
+                workspace_root: self.repo_root.clone(),
+                destination: path,
+                base_ref,
+                setup_commands,
+                io: Arc::clone(&self.io),
+            },
+        )))
     }
 
     /// Builds the reserved session's worktree. Pure Git/filesystem work that
@@ -1420,31 +1466,56 @@ impl SessionRuntime {
         &mut self,
         in_flight: SessionCreateInFlight,
         result: anyhow::Result<()>,
-    ) -> Result<SessionReply, SessionRuntimeError> {
+    ) -> Result<SessionCreateCompletion, SessionRuntimeError> {
         let SessionCreateInFlight {
             operation_id,
-            fence,
+            fence: create_fence,
             name,
+            destination,
+            setup_commands,
+            io,
             ..
         } = in_flight;
         match result {
             Ok(()) => {
+                let setup_plan = (!setup_commands.is_empty()).then(|| SetupPlan {
+                    commands: setup_commands.clone(),
+                });
                 let completed = self
                     .store
                     .apply(
                         self.generation,
                         LifecycleEvent::CreateCompleted {
-                            fence,
-                            setup_plan: None,
+                            fence: create_fence,
+                            setup_plan,
                         },
                         Utc::now(),
                     )
                     .map_err(|_| SessionRuntimeError::Storage)?;
-                Ok(SessionReply {
-                    operation_id: operation_id.to_string(),
-                    revision: completed.state_revision,
-                    body: snapshot(&completed, self.root_worktree_id),
-                })
+                if setup_commands.is_empty() {
+                    return Ok(SessionCreateCompletion::Done(SessionReply {
+                        operation_id: operation_id.to_string(),
+                        revision: completed.state_revision,
+                        body: snapshot(&completed, self.root_worktree_id),
+                    }));
+                }
+                let session = completed
+                    .sessions
+                    .iter()
+                    .find(|session| session.name == name)
+                    .ok_or(SessionRuntimeError::Storage)?;
+                let fence =
+                    fence(&completed, session, operation_id).ok_or(SessionRuntimeError::Storage)?;
+                Ok(SessionCreateCompletion::Initializing(
+                    SessionInitializeInFlight {
+                        operation_id,
+                        fence,
+                        name,
+                        destination,
+                        commands: setup_commands,
+                        io,
+                    },
+                ))
             }
             Err(error) => {
                 let error = error.to_string();
@@ -1464,10 +1535,75 @@ impl SessionRuntime {
                 let _ = self.store.apply(
                     self.generation,
                     LifecycleEvent::Failed {
-                        fence,
+                        fence: create_fence,
                         failure: Failure {
                             stage: FailureStage::Create,
                             summary: failure.safe_message(),
+                        },
+                    },
+                    Utc::now(),
+                );
+                Err(failure)
+            }
+        }
+    }
+
+    /// Executes every configured command in order, retaining the first failed index.
+    fn execute_initialize(in_flight: &SessionInitializeInFlight) -> Result<(), usize> {
+        let mut first_failure = None;
+        for (index, command) in in_flight.commands.iter().enumerate() {
+            if in_flight
+                .io
+                .run_setup_command(&in_flight.destination, command)
+                .is_err()
+            {
+                first_failure.get_or_insert(index);
+            }
+        }
+        first_failure.map_or(Ok(()), Err)
+    }
+
+    /// Records the fenced terminal outcome of configured session initialization.
+    fn finish_initialize(
+        &mut self,
+        in_flight: SessionInitializeInFlight,
+        result: Result<(), usize>,
+    ) -> Result<SessionReply, SessionRuntimeError> {
+        let SessionInitializeInFlight {
+            operation_id,
+            fence,
+            name,
+            ..
+        } = in_flight;
+        match result {
+            Ok(()) => {
+                let completed = self
+                    .store
+                    .apply(
+                        self.generation,
+                        LifecycleEvent::Completed { fence },
+                        Utc::now(),
+                    )
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                Ok(SessionReply {
+                    operation_id: operation_id.to_string(),
+                    revision: completed.state_revision,
+                    body: snapshot(&completed, self.root_worktree_id),
+                })
+            }
+            Err(index) => {
+                let summary = format!(
+                    "cannot initialize session \"{name}\": setup command {} failed",
+                    index + 1
+                );
+                let failure = SessionRuntimeError::DurableFailure(summary.clone());
+                let _ = self.store.apply(
+                    self.generation,
+                    LifecycleEvent::Failed {
+                        fence,
+                        failure: Failure {
+                            stage: FailureStage::Initialize,
+                            summary,
                         },
                     },
                     Utc::now(),
@@ -1864,13 +2000,20 @@ impl SessionRuntime {
             let Some(operation_id) = session.operation_id else {
                 continue;
             };
+            let failure_stage = if session.lifecycle
+                == usagi_core::domain::session_lifecycle::SessionLifecycle::Initializing
+            {
+                FailureStage::Initialize
+            } else {
+                FailureStage::Create
+            };
             self.store
                 .apply(
                     self.generation,
                     LifecycleEvent::ReconcileInterrupted {
                         session_id: session.session_id,
                         operation_id,
-                        stage: FailureStage::Create,
+                        stage: failure_stage,
                     },
                     Utc::now(),
                 )
@@ -2564,6 +2707,13 @@ mod tests {
         build_calls: Arc<AtomicUsize>,
     }
 
+    struct SetupSessionWorktreeIo {
+        calls: Arc<Mutex<Vec<(PathBuf, String)>>>,
+        fail_on: Option<String>,
+        runtime: Arc<Mutex<Option<std::sync::Weak<Mutex<SessionRuntime>>>>>,
+        observed_unlocked: Arc<std::sync::atomic::AtomicBool>,
+    }
+
     struct OrphanSessionWorktreeIo {
         entries: Vec<String>,
         linked: bool,
@@ -2595,6 +2745,9 @@ mod tests {
             _: &str,
             _: Option<&str>,
         ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn run_setup_command(&self, _: &Path, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
         fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
@@ -2678,6 +2831,9 @@ mod tests {
         ) -> anyhow::Result<()> {
             Ok(())
         }
+        fn run_setup_command(&self, _: &Path, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
         fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
             self.remove_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -2706,6 +2862,9 @@ mod tests {
             _: &str,
             _: Option<&str>,
         ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn run_setup_command(&self, _: &Path, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
         fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
@@ -2749,6 +2908,67 @@ mod tests {
                     "git worktree add failed: {}",
                     output.stderr
                 ))
+            }
+        }
+
+        fn run_setup_command(&self, _: &Path, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SessionWorktreeIo for SetupSessionWorktreeIo {
+        fn remove_file_best_effort(&self, _: &Path) {}
+
+        fn path_occupied(&self, _: &Path) -> bool {
+            false
+        }
+
+        fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+            Some(path.to_path_buf())
+        }
+
+        fn is_repo_root(&self, _: &Path) -> bool {
+            false
+        }
+
+        fn is_linked_worktree(&self, _: &Path) -> bool {
+            true
+        }
+
+        fn build_session_tree(
+            &self,
+            _: &dyn GitRunner,
+            _: &Path,
+            _: &Path,
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn run_setup_command(&self, session_root: &Path, command: &str) -> anyhow::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((session_root.to_path_buf(), command.to_owned()));
+            if let Some(runtime) = self
+                .runtime
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                && runtime.try_lock().is_ok()
+            {
+                self.observed_unlocked.store(true, Ordering::SeqCst);
+            }
+            if self.fail_on.as_deref() == Some(command) {
+                Err(anyhow::anyhow!("injected setup failure"))
+            } else {
+                Ok(())
             }
         }
 
@@ -5042,6 +5262,192 @@ instructions = "direct"
             "the session lock must be released while `git worktree add` runs"
         );
         assert_eq!(reply.body["sessions"][0]["name"], "one");
+    }
+
+    #[test]
+    fn configured_setup_commands_run_in_order_without_holding_the_session_lock() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(repository.join(".usagi")).unwrap();
+        std::fs::write(
+            repository.join(".usagi/config.toml"),
+            "[session]\nsetup_commands = [\"first\", \"  \", \"second\"]\n",
+        )
+        .unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime_probe = Arc::new(Mutex::new(None));
+        let observed_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runtime = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                repository.clone(),
+                &temporary.path().join("daemon"),
+                DaemonGeneration::new(),
+                FakeGit::ok(),
+                SetupSessionWorktreeIo {
+                    calls: Arc::clone(&calls),
+                    fail_on: None,
+                    runtime: Arc::clone(&runtime_probe),
+                    observed_unlocked: Arc::clone(&observed_unlocked),
+                },
+            )
+            .unwrap(),
+        ));
+        *runtime_probe.lock().unwrap() = Some(Arc::downgrade(&runtime));
+
+        let reply = perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"configured"}),
+        )
+        .unwrap();
+
+        let session_root = repository.join(".usagi/sessions/configured");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                (session_root.clone(), "first".into()),
+                (session_root, "second".into())
+            ]
+        );
+        assert!(observed_unlocked.load(Ordering::SeqCst));
+        assert_eq!(reply.body["sessions"][0]["lifecycle"], "available");
+        assert!(reply.body["sessions"][0].get("setup_plan").is_none());
+    }
+
+    #[test]
+    fn setup_failure_is_durable_and_does_not_skip_later_commands_or_replay() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(repository.join(".usagi")).unwrap();
+        std::fs::write(
+            repository.join(".usagi/config.toml"),
+            "[session]\nsetup_commands = [\"fail\", \"fail\", \"after\"]\n",
+        )
+        .unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                repository,
+                &temporary.path().join("daemon"),
+                DaemonGeneration::new(),
+                FakeGit::ok(),
+                SetupSessionWorktreeIo {
+                    calls: Arc::clone(&calls),
+                    fail_on: Some("fail".into()),
+                    runtime: Arc::new(Mutex::new(None)),
+                    observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                },
+            )
+            .unwrap(),
+        ));
+        let operation = operation();
+
+        let error = perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation,
+            &json!({"name":"failed-setup"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            SessionRuntimeError::DurableFailure(
+                "cannot initialize session \"failed-setup\": setup command 1 failed".into()
+            )
+        );
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, command)| command.as_str())
+                .collect::<Vec<_>>(),
+            ["fail", "fail", "after"]
+        );
+        let state = runtime.lock().unwrap().state().unwrap();
+        assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Failed);
+        assert_eq!(
+            state.sessions[0].failure.as_ref().unwrap().stage,
+            FailureStage::Initialize
+        );
+        assert_eq!(
+            state.sessions[0].setup_plan.as_ref().unwrap().commands,
+            ["fail", "fail", "after"]
+        );
+
+        assert!(matches!(
+            perform_create(
+                &runtime,
+                &FakeGit::ok(),
+                &operation,
+                &json!({"name":"failed-setup"}),
+            ),
+            Err(SessionRuntimeError::DurableFailure(_))
+        ));
+        assert_eq!(calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn restart_marks_an_interrupted_setup_as_an_initialize_failure() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(repository.join(".usagi")).unwrap();
+        std::fs::write(
+            repository.join(".usagi/config.toml"),
+            "[session]\nsetup_commands = [\"non-idempotent\"]\n",
+        )
+        .unwrap();
+        let daemon = temporary.path().join("daemon");
+        let mut runtime = SessionRuntime::open(
+            repository.clone(),
+            &daemon,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+            SetupSessionWorktreeIo {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                fail_on: None,
+                runtime: Arc::new(Mutex::new(None)),
+                observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        )
+        .unwrap();
+        let in_flight = match runtime
+            .begin_create(
+                CreateOrigin::Direct,
+                &operation(),
+                &json!({"name":"interrupted"}),
+            )
+            .unwrap()
+        {
+            SessionCreateStep::Pending(in_flight) => in_flight,
+            SessionCreateStep::Done(_) => panic!("fresh create must need a worktree effect"),
+        };
+        assert!(matches!(
+            runtime.finish_create(*in_flight, Ok(())).unwrap(),
+            SessionCreateCompletion::Initializing(_)
+        ));
+        drop(runtime);
+
+        let reopened = SessionRuntime::open(
+            repository,
+            &daemon,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+            SetupSessionWorktreeIo {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                fail_on: None,
+                runtime: Arc::new(Mutex::new(None)),
+                observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        )
+        .unwrap();
+        let state = reopened.state().unwrap();
+        assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Failed);
+        assert_eq!(
+            state.sessions[0].failure.as_ref().unwrap().stage,
+            FailureStage::Initialize
+        );
     }
 
     /// A delegated create journals its origin, which is the only durable trace

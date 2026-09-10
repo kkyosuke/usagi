@@ -20327,6 +20327,9 @@ instructions = "{instructions}"
             ) -> anyhow::Result<()> {
                 Ok(())
             }
+            fn run_setup_command(&self, _: &Path, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
             fn remove_session_tree(
                 &self,
                 _: &dyn usagi_core::infrastructure::git::GitRunner,
@@ -20760,6 +20763,9 @@ instructions = "{instructions}"
             _: &str,
             _: Option<&str>,
         ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn run_setup_command(&self, _: &Path, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
         fn remove_session_tree(

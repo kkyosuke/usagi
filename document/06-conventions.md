@@ -56,7 +56,7 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 | `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
 | `uuid` | v2 resource incarnation の typed ID（UUIDv4）と durable operation ID（UUIDv7） | 本依存 |
 | `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize、`usagi-cli` の MCP サーバの stdio JSON-RPC、`usagi-daemon` の IPC メッセージの wire JSON | 本依存 |
-| `toml` | `usagi-core` infrastructure による `.usagi/config.toml` の runtime/model allowlist と global/workspace `roles.toml` の解析 | 本依存 |
+| `toml` | `usagi-core` infrastructure による `.usagi/config.toml` の runtime/model allowlist・session setup command と global/workspace `roles.toml` の解析 | 本依存 |
 | `sha2` | issue / memory Markdown source set の deterministic fingerprint、build artifact / rollover operation identity、self-update の embedded installer identity | 本依存・build 依存 |
 | `anyhow` | infrastructure（永続化ストア）と MCP store adapter のエラー伝播 | 本依存 |
 | `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当）と、結合テストの重い E2E 直列化ロック | 本依存 |

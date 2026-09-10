@@ -420,30 +420,25 @@ pub(super) fn dispatch_agent_tool(
                 .map_err(|error| {
                     ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
                 })?;
-                let created = bound
-                    .sessions()
-                    .lock()
-                    .map_err(|_| {
-                        ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
-                    })?
-                    .handle(
-                        usagi_core::infrastructure::client::SessionAction::Create,
-                        &operation_id,
-                        &serde_json::json!({
+                let created = perform_create(
+                    bound.sessions(),
+                    &SystemGit,
+                    &operation_id,
+                    &serde_json::json!({
                         "name": session_name,
                         "role": requested_role,
                         "parent_session_id": caller.session_id,
                         "creator_agent_id": caller.agent_id,
-                        }),
-                    )
-                    .map_err(|error| {
-                        let code = match &error {
-                            SessionRuntimeError::PermissionDenied => ErrorCode::PermissionDenied,
-                            SessionRuntimeError::RoleConflict(..) => ErrorCode::RevisionConflict,
-                            _ => ErrorCode::InvalidArgument,
-                        };
-                        ProtocolError::new(code, error.safe_message())
-                    })?;
+                    }),
+                )
+                .map_err(|error| {
+                    let code = match &error {
+                        SessionRuntimeError::PermissionDenied => ErrorCode::PermissionDenied,
+                        SessionRuntimeError::RoleConflict(..) => ErrorCode::RevisionConflict,
+                        _ => ErrorCode::InvalidArgument,
+                    };
+                    ProtocolError::new(code, error.safe_message())
+                })?;
                 let (session_id, parent_session_id) =
                     session_lineage_by_name(&created.body, &session_name).ok_or_else(|| {
                         ProtocolError::new(
@@ -2429,27 +2424,29 @@ pub(super) fn dispatch_dispatch(
         );
     };
     let session_id = (|| {
-        let mut runtime = bound.sessions().lock().map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
-        })?;
-        let snapshot = runtime.snapshot().map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::Unavailable,
-                "daemon could not read managed sessions",
-            )
-        })?;
+        let snapshot = bound
+            .sessions()
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .snapshot()
+            .map_err(|_| {
+                ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "daemon could not read managed sessions",
+                )
+            })?;
         if let Some(id) = session_id_by_name(&snapshot, &intent.session_name) {
             return Ok(id);
         }
-        let created = runtime
-            .handle(
-                SessionAction::Create,
-                &operation_id,
-                &serde_json::json!({"name": intent.session_name}),
-            )
-            .map_err(|error| {
-                ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message())
-            })?;
+        let created = perform_create(
+            bound.sessions(),
+            &SystemGit,
+            &operation_id,
+            &serde_json::json!({"name": intent.session_name}),
+        )
+        .map_err(|error| ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message()))?;
         session_id_by_name(&created.body, &intent.session_name).ok_or_else(|| {
             ProtocolError::new(ErrorCode::Unavailable, "created session is not available")
         })
@@ -3784,20 +3781,17 @@ pub(super) fn dispatch_session_action(
                 .ok_or(SessionRuntimeError::InvalidRequest)?;
             let prompt = issue::to_prompt(&issue);
             let requested_role = payload.get("role").cloned();
-            let mut created = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .handle(
-                    SessionAction::Create,
-                    operation_id,
-                    &serde_json::json!({
-                        "name": name,
-                        "role": requested_role,
-                        "parent_session_id": caller.and_then(|caller| caller.session_id),
-                        "creator_agent_id": caller.map(|caller| caller.agent_id),
-                    }),
-                )?;
+            let mut created = perform_create(
+                bound.sessions(),
+                &SystemGit,
+                operation_id,
+                &serde_json::json!({
+                    "name": name,
+                    "role": requested_role,
+                    "parent_session_id": caller.and_then(|caller| caller.session_id),
+                    "creator_agent_id": caller.map(|caller| caller.agent_id),
+                }),
+            )?;
             let id = record_session_lineage(agent, workspace, &created.body, &name)?;
             if caller.is_some()
                 && let Some(sessions) = created

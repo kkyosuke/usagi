@@ -75,6 +75,9 @@ TUI が開いたら、次の順に進めます。
 2. 作成した session で `agent` または `terminal` を実行する。
 3. Diff と PR の状態を確認しながら作業する。
 
+session 作成直後の環境構築は `.usagi/config.toml` の
+[`[session].setup_commands`](document/05-daemon.md#session-作成後の-setup-command) に設定できます。
+
 次回からは `usagi` を起動し、Open / Recent から workspace を選べます。
 Session Garden では庭と右側の session 一覧から作業状況を確認し、各 Agent を開けます。
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は

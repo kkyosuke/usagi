@@ -1,4 +1,4 @@
-//! Workspace-owned runtime/model allowlists and executable lookup boundary.
+//! Workspace-owned runtime/model allowlists, session setup, and executable lookup.
 //!
 //! Both MCP schema publication and daemon launch admission use this module so
 //! a snapshot can never become an authorization source.
@@ -78,6 +78,8 @@ pub fn observe_available_models(locator: &dyn ExecutableLocator) -> AvailableMod
 struct WorkspaceConfig {
     #[serde(default)]
     agents: BTreeMap<String, RuntimeConfig>,
+    #[serde(default)]
+    session: SessionConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -86,7 +88,13 @@ struct RuntimeConfig {
     models: Vec<String>,
 }
 
-/// Runtime/model configuration read from a workspace's `.usagi/config.toml`.
+#[derive(Debug, Default, Deserialize)]
+struct SessionConfig {
+    #[serde(default)]
+    setup_commands: Vec<String>,
+}
+
+/// Agent configuration read from `.usagi/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceAgentConfig {
     runtimes: BTreeMap<String, Vec<String>>,
@@ -169,6 +177,40 @@ impl WorkspaceAgentConfig {
     }
 }
 
+/// Session configuration read from `.usagi/config.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceSessionConfig {
+    setup_commands: Vec<String>,
+}
+
+impl WorkspaceSessionConfig {
+    /// Reads session configuration, defaulting to no setup commands when the
+    /// file is missing, unreadable, or malformed.
+    #[must_use]
+    pub fn read(workspace: &Path) -> Self {
+        let Ok(text) = fs::read_to_string(workspace.join(CONFIG_PATH)) else {
+            return Self::default();
+        };
+        let Ok(parsed) = toml::from_str::<WorkspaceConfig>(&text) else {
+            return Self::default();
+        };
+        Self {
+            setup_commands: parsed
+                .session
+                .setup_commands
+                .into_iter()
+                .filter(|command| !command.trim().is_empty())
+                .collect(),
+        }
+    }
+
+    /// Shell command lines run in order after a managed session worktree is built.
+    #[must_use]
+    pub fn setup_commands(&self) -> &[String] {
+        &self.setup_commands
+    }
+}
+
 fn valid_models(models: Vec<String>) -> Option<Vec<String>> {
     (!models.is_empty()
         && models
@@ -185,8 +227,8 @@ mod tests {
     use crate::domain::settings::DefaultModel;
 
     use super::{
-        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, observe_available_models,
-        supported_agent_runtimes,
+        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, WorkspaceSessionConfig,
+        observe_available_models, supported_agent_runtimes,
     };
     use tempfile::tempdir;
 
@@ -206,7 +248,7 @@ mod tests {
         std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
         std::fs::write(
             workspace.path().join(".usagi/config.toml"),
-            "[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n[agents.sakana-ai]\nmodels = [\"fugu-model\"]\n",
+            "[session]\nsetup_commands = [\"first\", \"  \", \"second\"]\n[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n[agents.sakana-ai]\nmodels = [\"fugu-model\"]\n",
         )
         .unwrap();
         let config = WorkspaceAgentConfig::read(workspace.path());
@@ -214,15 +256,29 @@ mod tests {
         assert!(!config.allows("claude", "opus"));
         assert!(config.models("codex").is_empty());
         assert!(config.allows("sakana-ai", "fugu-model"));
+        assert_eq!(
+            WorkspaceSessionConfig::read(workspace.path()).setup_commands(),
+            ["first", "second"]
+        );
 
         assert!(
             WorkspaceAgentConfig::read(workspace.path().join("missing").as_path())
                 .allows("claude", "default")
         );
+        assert!(
+            WorkspaceSessionConfig::read(workspace.path().join("missing").as_path())
+                .setup_commands()
+                .is_empty()
+        );
         std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [toml").unwrap();
         assert!(
             WorkspaceAgentConfig::read(workspace.path())
                 .models("claude")
+                .is_empty()
+        );
+        assert!(
+            WorkspaceSessionConfig::read(workspace.path())
+                .setup_commands()
                 .is_empty()
         );
         std::fs::remove_file(workspace.path().join(".usagi/config.toml")).unwrap();
