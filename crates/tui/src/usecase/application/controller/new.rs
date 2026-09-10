@@ -221,7 +221,7 @@ impl NewState {
         self.progress.as_ref()
     }
 
-    fn request(&mut self, request: NewRequest) -> Vec<Effect> {
+    pub(super) fn request(&mut self, request: NewRequest) -> Vec<Effect> {
         if self.pending.is_some() {
             return Vec::new();
         }

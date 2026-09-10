@@ -7475,6 +7475,13 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     let mut new = NewState::new(NewMode::Existing, existing_form());
     assert_eq!(update_new(&mut new, NewEvent::Submit).len(), 1);
     assert!(update_new(&mut new, NewEvent::Submit).is_empty());
+    assert!(
+        new.request(NewRequest::Existing {
+            path: PathBuf::from("/work/existing"),
+            name: "existing".to_owned(),
+        })
+        .is_empty()
+    );
 
     let mut state = AppState::home(workspace, vec![session]);
     assert!(!update_editor_backend(
