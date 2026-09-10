@@ -100,7 +100,6 @@ pub struct GardenSession {
     pub id: SessionId,
     pub label: String,
     pub lifecycle: SessionLifecycle,
-    pub selected: bool,
     pub failure_summary: Option<String>,
     /// Whether the active workspace controller observed Agent membership for
     /// this session. Inactive project snapshots set this false instead of claiming
@@ -216,16 +215,69 @@ pub fn render(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
+    render_with_session_homes(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        tick,
+        reduced_motion,
+        true,
+    )
+}
+
+/// Render the scene without the shared meadow's session homes. The sidebar is
+/// the session navigation surface whenever it is present, so repeating those
+/// labels below the rabbits only consumes meadow space.
+pub(super) fn render_without_session_homes(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<GardenFrame> {
+    render_with_session_homes(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        tick,
+        reduced_motion,
+        false,
+    )
+}
+
+fn render_with_session_homes(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+    show_session_homes: bool,
+) -> Option<GardenFrame> {
     garden_layout(height, width)?;
     if world::fits(height, width) {
-        return Some(world::render(
-            height,
-            width,
-            workspace_name,
-            sessions,
-            tick,
-            reduced_motion,
-        ));
+        return Some(if show_session_homes {
+            world::render(
+                height,
+                width,
+                workspace_name,
+                sessions,
+                tick,
+                reduced_motion,
+            )
+        } else {
+            world::render_without_session_homes(
+                height,
+                width,
+                workspace_name,
+                sessions,
+                tick,
+                reduced_motion,
+            )
+        });
     }
     render_compact(
         height,
@@ -692,15 +744,40 @@ pub fn canonical_tick(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<u64> {
+    canonical_tick_with_session_homes(height, width, sessions, tick, reduced_motion, true)
+}
+
+pub(super) fn canonical_tick_without_session_homes(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<u64> {
+    canonical_tick_with_session_homes(height, width, sessions, tick, reduced_motion, false)
+}
+
+fn canonical_tick_with_session_homes(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+    show_session_homes: bool,
+) -> Option<u64> {
     let layout = garden_layout(height, width)?;
     if world::fits(height, width) {
-        return Some(world::canonical_tick(
-            height,
-            width,
-            sessions,
-            tick,
-            reduced_motion,
-        ));
+        return Some(if show_session_homes {
+            world::canonical_tick(height, width, sessions, tick, reduced_motion)
+        } else {
+            world::canonical_tick_without_session_homes(
+                height,
+                width,
+                sessions,
+                tick,
+                reduced_motion,
+            )
+        });
     }
     if reduced_motion {
         return Some(0);
@@ -1709,7 +1786,6 @@ mod tests {
             id: SessionId::parse(id).expect("fixture id"),
             label: label.to_owned(),
             lifecycle,
-            selected: false,
             failure_summary: None,
             agents_observed: true,
             pending_decisions: 0,
@@ -2156,7 +2232,6 @@ mod tests {
             id: SessionId::parse(STEADY_ID).expect("fixture id"),
             label: "many".to_owned(),
             lifecycle: SessionLifecycle::Available,
-            selected: false,
             failure_summary: None,
             agents_observed: true,
             pending_decisions: 0,
@@ -2190,7 +2265,6 @@ mod tests {
             id: SessionId::parse(STEADY_ID).expect("fixture id"),
             label: "many".to_owned(),
             lifecycle: SessionLifecycle::Available,
-            selected: false,
             failure_summary: None,
             agents_observed: true,
             pending_decisions: 0,
@@ -2292,7 +2366,6 @@ mod tests {
                 id: SessionId::parse(STEADY_ID).expect("fixture id"),
                 label: "empty".to_owned(),
                 lifecycle: SessionLifecycle::Available,
-                selected: false,
                 failure_summary: None,
                 agents_observed: true,
                 pending_decisions: 0,
@@ -2320,7 +2393,6 @@ mod tests {
                 id: SessionId::parse(STEADY_ID).expect("fixture id"),
                 label: "other / review".to_owned(),
                 lifecycle: SessionLifecycle::Available,
-                selected: false,
                 failure_summary: None,
                 agents_observed: false,
                 pending_decisions: 0,
@@ -2350,7 +2422,6 @@ mod tests {
                 id: SessionId::parse(STEADY_ID).expect("fixture id"),
                 label: "other / review".to_owned(),
                 lifecycle,
-                selected: false,
                 failure_summary: Some("old snapshot".to_owned()),
                 agents_observed: false,
                 pending_decisions: 0,
@@ -2712,20 +2783,12 @@ mod tests {
     }
 
     #[test]
-    fn selection_does_not_change_nameplate_and_safe_failure_summary_stays_visible() {
-        let mut selected = session(
+    fn safe_failure_summary_stays_visible() {
+        let selected = session(
             STEADY_ID,
             "chosen",
             SessionLifecycle::Available,
             AgentPhase::Ready,
-        );
-        selected.selected = true;
-        let mut unselected = selected.clone();
-        unselected.selected = false;
-        assert_eq!(
-            super::plot(&selected, 0, false),
-            super::plot(&unselected, 0, false),
-            "Garden does not decorate the selected session"
         );
         let mut failed = session(
             "01000000-0000-4000-8000-000000000001",
@@ -2757,7 +2820,6 @@ mod tests {
             id: SessionId::parse(STEADY_ID).expect("fixture id"),
             label: "many".to_owned(),
             lifecycle: SessionLifecycle::Available,
-            selected: false,
             failure_summary: None,
             agents_observed: true,
             pending_decisions: 0,

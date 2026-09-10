@@ -16,7 +16,6 @@ fn session(index: usize) -> GardenSession {
         id: SessionId::parse(&format!("{index:08x}-0000-4000-8000-000000000001")).unwrap(),
         label: format!("acme-web / session-{index}"),
         lifecycle: SessionLifecycle::Available,
-        selected: false,
         failure_summary: None,
         agents_observed: true,
         agents: vec![super::super::GardenAgent {
@@ -41,7 +40,6 @@ fn plain(view: &GardenView) -> String {
 #[test]
 fn grouped_list_keeps_project_identity_and_exact_session_agent_targets() {
     let mut sessions = vec![session(0), session(1), session(2)];
-    sessions[1].selected = true;
     sessions[2].sidebar.project.as_mut().unwrap().0 = WorkspaceId::new();
     let view = render(32, 160, "2 projects", &sessions, ViewOptions::default()).unwrap();
     let sidebar = view.sidebar.unwrap();
@@ -52,8 +50,22 @@ fn grouped_list_keeps_project_identity_and_exact_session_agent_targets() {
         "same labels do not merge different projects"
     );
     assert!(text.contains("feature/session-1"), "{text}");
-    assert!(text.contains("╭ ● session-1"), "{text}");
+    assert!(text.contains("  ● session-1"), "{text}");
+    assert!(!text.contains('›'), "{text}");
+    assert!(!text.contains('╰'), "{text}");
+    assert!(!text.contains("││"), "{text}");
     assert!(text.contains("running  00000001"), "{text}");
+    assert!(
+        !text.contains("acme-web / session-0"),
+        "the meadow must not repeat session labels already shown in the sidebar: {text}"
+    );
+    assert!(
+        view.hitboxes
+            .iter()
+            .filter(|hitbox| hitbox.column < sidebar.column)
+            .all(|hitbox| hitbox.agent.is_some()),
+        "the meadow must not retain duplicate session-home targets"
+    );
     for session in &sessions {
         let targets = view
             .hitboxes
@@ -171,6 +183,10 @@ fn sidebar_breakpoint_preserves_small_garden_and_clips_cjk_names() {
                 super::super::render(24, width, "repo", std::slice::from_ref(&value), 0, false)
                     .unwrap()
             );
+            assert!(
+                view.hitboxes.iter().any(|hitbox| hitbox.agent.is_none()),
+                "without a sidebar the session home remains the navigation target"
+            );
         }
     }
     assert!(render(12, 160, "repo", &[], ViewOptions::default()).is_none());
@@ -210,6 +226,13 @@ fn inactive_empty_and_dispatch_states_are_explicit() {
     assert!(
         plain(&render(24, 120, "repo", &[value], ViewOptions::default()).unwrap())
             .contains("failed  00000000")
+    );
+    let mut failed = session(0);
+    failed.lifecycle = SessionLifecycle::Failed;
+    failed.failure_summary = Some("worktree missing".into());
+    assert!(
+        plain(&render(24, 120, "repo", &[failed], ViewOptions::default()).unwrap())
+            .contains("failed · worktree missing")
     );
     assert!(
         plain(&render(24, 120, "repo", &[], ViewOptions::default()).unwrap())

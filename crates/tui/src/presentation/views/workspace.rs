@@ -527,7 +527,6 @@ fn project_garden_sessions(
                 id: session.id,
                 label: garden_session_label(session, &names),
                 lifecycle: session.lifecycle,
-                selected: state.selected() == Selection::Target(Target::Session(session.id)),
                 failure_summary: session.failure_summary.clone(),
                 agents_observed: true,
                 pending_decisions: pending_decisions
@@ -756,9 +755,9 @@ impl HomeProjection {
             return self;
         };
         let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        self.garden_tick = widgets::garden::canonical_tick(
+        self.garden_tick = widgets::garden::sidebar::canonical_tick(
             height,
-            widgets::garden::sidebar::scene_width(width),
+            width,
             sessions,
             tick,
             self.garden_motion.is_reduced(),
@@ -5620,7 +5619,6 @@ mod tests {
         );
         let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
         let garden = home.garden_sessions.as_ref().expect("garden projection");
-        assert!(garden[0].selected);
         assert_eq!(
             garden[4].failure_summary.as_deref(),
             Some("worktree missing")
@@ -5633,8 +5631,8 @@ mod tests {
                 .any(|agent| agent.phase == AgentPhase::Running)
         );
 
-        // A wide viewport keeps every detailed plot in this aggregate phase fixture;
-        // narrower terminals condense the same material without a second viewport.
+        // A wide viewport keeps every Agent in the meadow and puts session detail
+        // exclusively in the right list; narrower terminals retain the old plots.
         let frame = render_home_at(24, 540, &home, now());
         let text = frame
             .iter()
@@ -5649,9 +5647,9 @@ mod tests {
         assert!(!text.contains("Agents"));
         assert!(!text.contains(AGENT_ICON));
         assert!(text.contains("waiting"));
-        assert!(text.contains("1 run · 1 done"));
+        assert!(text.contains("2 agents"));
+        assert!(text.contains("completed"));
         assert!(!text.contains("> s0"));
-        assert!(text.contains("failed · worktree missing"));
         assert!(text.contains("s0"));
 
         let fallback = render_home_at(24, 540, &home.clone().with_icon_mode(IconMode::Text), now());
@@ -5914,7 +5912,6 @@ mod tests {
                     id: SessionId::new(),
                     label: "other / review".to_owned(),
                     lifecycle: SessionLifecycle::Available,
-                    selected: false,
                     failure_summary: None,
                     agents_observed: false,
                     agents: Vec::new(),
@@ -5986,7 +5983,6 @@ mod tests {
                     id: foreign_session,
                     label: "other / review".to_owned(),
                     lifecycle: SessionLifecycle::Available,
-                    selected: false,
                     failure_summary: None,
                     agents_observed: true,
                     agents: vec![widgets::garden::GardenAgent {
@@ -6097,7 +6093,6 @@ mod tests {
                         id: session,
                         label: format!("project-{index} / session-{index}"),
                         lifecycle: SessionLifecycle::Available,
-                        selected: false,
                         failure_summary: None,
                         agents_observed: false,
                         agents: Vec::new(),

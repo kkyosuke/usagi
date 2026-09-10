@@ -10,7 +10,6 @@ fn sessions(count: usize) -> Vec<GardenSession> {
             id: SessionId::parse(&format!("{index:08x}-0000-4000-8000-000000000001")).unwrap(),
             label: format!("project / 日本語-{index}"),
             lifecycle: SessionLifecycle::Available,
-            selected: false,
             failure_summary: None,
             agents_observed: true,
             agents: vec![GardenAgent {

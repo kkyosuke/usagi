@@ -3,7 +3,7 @@
 
 use std::ops::Deref;
 
-use usagi_core::domain::id::WorkspaceId;
+use usagi_core::domain::{id::WorkspaceId, session_lifecycle::SessionLifecycle};
 
 use super::{GardenFrame, GardenHitbox, GardenSession, agent_status};
 use crate::presentation::theme::{Role, Style};
@@ -73,14 +73,25 @@ pub fn render(
     options: ViewOptions,
 ) -> Option<GardenView> {
     let left_width = scene_width(width);
-    let mut frame = super::render(
-        height,
-        left_width,
-        scope,
-        sessions,
-        options.tick,
-        options.reduced_motion,
-    )?;
+    let mut frame = if left_width == width {
+        super::render(
+            height,
+            left_width,
+            scope,
+            sessions,
+            options.tick,
+            options.reduced_motion,
+        )?
+    } else {
+        super::render_without_session_homes(
+            height,
+            left_width,
+            scope,
+            sessions,
+            options.tick,
+            options.reduced_motion,
+        )?
+    };
     if left_width == width {
         return Some(GardenView {
             frame,
@@ -149,6 +160,31 @@ pub fn render(
     })
 }
 
+/// Canonicalize the meadow clock against the same responsive scene that
+/// [`render`] draws. A visible sidebar removes the duplicate session homes and
+/// gives their rows back to roaming rabbits.
+#[must_use]
+pub fn canonical_tick(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<u64> {
+    let left_width = scene_width(width);
+    if left_width == width {
+        super::canonical_tick(height, left_width, sessions, tick, reduced_motion)
+    } else {
+        super::canonical_tick_without_session_homes(
+            height,
+            left_width,
+            sessions,
+            tick,
+            reduced_motion,
+        )
+    }
+}
+
 struct ListRow {
     text: String,
     target: Option<GardenHitbox>,
@@ -190,7 +226,7 @@ fn content_rows(sessions: &[GardenSession], scope: &str, width: usize) -> Vec<Li
             target: None,
         });
         for session in group {
-            session_rows(&mut rows, session, width);
+            session_rows(&mut rows, session);
         }
     }
     if sessions.is_empty() {
@@ -202,7 +238,7 @@ fn content_rows(sessions: &[GardenSession], scope: &str, width: usize) -> Vec<Li
     rows
 }
 
-fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession, width: usize) {
+fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession) {
     let target = GardenHitbox {
         session_id: session.id,
         agent: None,
@@ -217,7 +253,6 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession, width: usize) 
     } else {
         &session.sidebar.name
     };
-    let marker = if session.selected { "╭" } else { " " };
     let (style, glyph) = if super::needs_attention(session) {
         (Role::Warning.style(), "◆")
     } else if let Some(agent) = agents.first() {
@@ -229,32 +264,21 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession, width: usize) 
     };
     rows.push(ListRow {
         text: format!(
-            "{marker} {} {}",
+            "  {} {}",
             style.paint(glyph),
             Style::new().bold().paint(name)
         ),
         target: Some(target),
     });
-    let edge = if session.selected { "│" } else { " " };
     if !session.sidebar.branch.is_empty() {
         rows.push(ListRow {
-            text: format!(
-                "{edge}   {}",
-                Style::new().dim().paint(&session.sidebar.branch)
-            ),
+            text: format!("    {}", Style::new().dim().paint(&session.sidebar.branch)),
             target: Some(target),
         });
     }
-    let summary = if !session.agents_observed {
-        "project inactive".to_owned()
-    } else if agents.is_empty() {
-        super::session_summary(session).1
-    } else {
-        let noun = if agents.len() == 1 { "agent" } else { "agents" };
-        format!("{} {noun}", agents.len())
-    };
+    let summary = session_row_summary(session, agents.len());
     rows.push(ListRow {
-        text: format!("{edge}   {}", Style::new().dim().paint(&summary)),
+        text: format!("    {}", Style::new().dim().paint(&summary)),
         target: Some(target),
     });
     for agent in agents {
@@ -262,7 +286,7 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession, width: usize) 
         let runtime = agent.runtime_id.to_string();
         rows.push(ListRow {
             text: format!(
-                "{edge}     {} {}  {}",
+                "      {} {}  {}",
                 style.paint(glyph),
                 style.paint(status),
                 Style::new().dim().paint(&runtime[..8]),
@@ -274,15 +298,37 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession, width: usize) 
         });
     }
     rows.push(ListRow {
-        text: if session.selected {
-            Style::new()
-                .dim()
-                .paint(&format!("╰{}", "─".repeat(width.saturating_sub(2))))
-        } else {
-            String::new()
-        },
+        text: String::new(),
         target: None,
     });
+}
+
+fn session_row_summary(session: &GardenSession, agent_count: usize) -> String {
+    if !session.agents_observed {
+        return "project inactive".to_owned();
+    }
+    if session.pending_decisions > 0 {
+        let noun = if session.pending_decisions == 1 {
+            "decision"
+        } else {
+            "decisions"
+        };
+        return format!("action · {} {noun}", session.pending_decisions);
+    }
+    if session.lifecycle == SessionLifecycle::Failed {
+        return session.failure_summary.as_ref().map_or_else(
+            || "failed".to_owned(),
+            |reason| format!("failed · {reason}"),
+        );
+    }
+    if session.pr_merged {
+        return "PR merged!".to_owned();
+    }
+    if agent_count == 0 {
+        return super::session_summary(session).1;
+    }
+    let noun = if agent_count == 1 { "agent" } else { "agents" };
+    format!("{agent_count} {noun}")
 }
 
 #[cfg(test)]
