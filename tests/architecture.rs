@@ -530,6 +530,22 @@ fn tui_controller_keeps_entry_new_and_tests_in_their_bounded_contexts() {
 }
 
 #[test]
+fn clipboard_platform_variants_are_compiled_only_for_their_targets_or_tests() {
+    let root = workspace_root();
+    let source = fs::read_to_string(root.join("src/runtime/clipboard.rs"))
+        .expect("clipboard adapter is readable");
+
+    assert!(!source.contains("allow(dead_code)"));
+    assert!(source.contains("#[cfg(any(test, target_os = \"macos\"))]"));
+    assert!(source.contains("#[cfg(any(test, target_os = \"windows\"))]"));
+    assert!(
+        source.contains(
+            "#[cfg(any(test, not(any(target_os = \"macos\", target_os = \"windows\"))))]"
+        )
+    );
+}
+
+#[test]
 fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_module() {
     let root = workspace_root();
     let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
