@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 524,
+  "total": 525,
   "owners": {
     "core": 10,
-    "daemon": 367,
+    "daemon": 368,
     "root-cli": 40,
     "tui": 107
   },
@@ -55,6 +55,7 @@
     "src/runtime/clipboard.rs": 1,
     "src/runtime/daemon.rs": 203,
     "src/runtime/daemon/agent_provisioning.rs": 25,
+    "src/runtime/daemon/agent_provisioning/agy.rs": 2,
     "src/runtime/daemon/dispatch.rs": 49,
     "src/runtime/daemon/secure_path.rs": 3,
     "src/runtime/daemon/tenant_control.rs": 5,
