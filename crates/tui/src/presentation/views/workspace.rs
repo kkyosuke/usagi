@@ -1403,9 +1403,31 @@ impl Workspace {
         &self.session_lifecycles
     }
 
+    /// Replace role metadata and group session rows by their saved parentage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal record/identity alignment invariant is violated.
     pub fn set_session_roles(&mut self, roles: BTreeMap<SessionId, SessionRoleProjection>) {
         if self.session_roles != roles {
             self.session_roles = roles;
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
+        // Each snapshot replaces rows in daemon order, even when role metadata
+        // is unchanged. Group descendants before publishing IDs to navigation
+        // and records to rendering, keeping both projections aligned.
+        let order = organization_order(&self.session_ids, &self.session_roles);
+        if order != self.session_ids {
+            let mut records = std::mem::take(&mut self.state.sessions)
+                .into_iter()
+                .zip(self.session_ids.iter().copied())
+                .map(|(record, id)| (id, record))
+                .collect::<HashMap<_, _>>();
+            self.state.sessions = order
+                .iter()
+                .map(|id| records.remove(id).expect("ordered session has a record"))
+                .collect();
+            self.session_ids = order;
             self.material_revision = self.material_revision.saturating_add(1);
         }
     }
@@ -1425,6 +1447,39 @@ impl Workspace {
     pub fn record(&self) -> &WorkspaceRecord {
         &self.record
     }
+}
+
+/// Stable preorder: preserve snapshot order among roots and siblings, while
+/// keeping each subtree together. Missing parents are roots; cycles are visited
+/// once through the fallback seeds, without recursion or losing any session.
+fn organization_order(
+    ids: &[SessionId],
+    roles: &BTreeMap<SessionId, SessionRoleProjection>,
+) -> Vec<SessionId> {
+    let known = ids.iter().copied().collect::<BTreeSet<_>>();
+    let mut children = BTreeMap::<Option<SessionId>, Vec<SessionId>>::new();
+    for id in ids {
+        let parent = roles
+            .get(id)
+            .and_then(|role| role.parent_session_id)
+            .filter(|parent| parent != id && known.contains(parent));
+        children.entry(parent).or_default().push(*id);
+    }
+    let mut emitted = BTreeSet::new();
+    let mut ordered = Vec::with_capacity(ids.len());
+    for seed in children.get(&None).into_iter().flatten().chain(ids) {
+        let mut pending = vec![*seed];
+        while let Some(id) = pending.pop() {
+            if !emitted.insert(id) {
+                continue;
+            }
+            ordered.push(id);
+            if let Some(descendants) = children.get(&Some(id)) {
+                pending.extend(descendants.iter().rev().copied());
+            }
+        }
+    }
+    ordered
 }
 
 // ── header ──────────────────────────────────────────────────────────────────
@@ -3410,6 +3465,42 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn organization_order_preserves_siblings_orphans_and_cycles() {
+        use super::{SessionRoleProjection, organization_order};
+        let ids = (0..8).map(|_| SessionId::new()).collect::<Vec<_>>();
+        let missing = SessionId::new();
+        let roles = BTreeMap::from(
+            [
+                (ids[0], ids[3]),
+                (ids[2], ids[3]),
+                (ids[4], missing),
+                (ids[5], ids[5]),
+                (ids[6], ids[7]),
+                (ids[7], ids[6]),
+            ]
+            .map(|(id, parent)| {
+                (
+                    id,
+                    SessionRoleProjection {
+                        role_id: None,
+                        role_summary: None,
+                        parent_session_id: Some(parent),
+                        agent_status: None,
+                    },
+                )
+            }),
+        );
+        assert_eq!(organization_order(&[], &roles), vec![]);
+        assert_eq!(organization_order(&ids, &BTreeMap::new()), ids);
+        assert_eq!(
+            organization_order(&ids, &roles),
+            vec![
+                ids[1], ids[3], ids[0], ids[2], ids[4], ids[5], ids[6], ids[7]
+            ]
+        );
+    }
+
     use super::{
         AGENT_ICON, AgentConcurrency, CHROME_ROWS, CPU_ICON, CREATE_SKELETON_ROWS, CreateDraft,
         DECISION_NOTICE_ICON, DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction,
