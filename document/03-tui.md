@@ -34,6 +34,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
   - [session 状態別件数](#session-状態別件数)
   - [Agent concurrency](#agent-concurrency)
 - [Closeup pane](#closeup-pane)
+- [Session Workflow タブ](#session-workflow-タブ)
 - [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
 - [Closeup 入力の拒否表示](#closeup-入力の拒否表示)
 - [Closeup Agent の手動確認](#closeup-agent-の手動確認)
@@ -2076,6 +2077,53 @@ request retry、attach を行わない。failure は pending tab を除去し、
 tab-less Closeup の action modal に戻る。TUI の Agent / terminal daemon 接続、request、response correlation / decode
 の異常と、画面全体へ返る未処理の IO error も同じログへ action と safe reason を記録する。request body、argv、
 環境変数、provider 出力は記録しない。
+
+## Session Workflow タブ
+
+この節が session 内の Workflow UI の正本である。Team は session 間の割当を扱い、Workflow は
+選択した session の同じ worktree 内で実装・レビューを進める。Workflow を開いても Team、role、
+session creator、worktree は変更しない。単独実行には既存の `agent` を使う。
+
+Closeup action の `workflow` は、その session の非端末 Workflow タブを開く。既に開いている場合は
+同じタブを選択し、重複して作らない。タブを開くだけでは Agent を起動しない。
+
+```text
+Team
+├─ Session A
+│  └─ Workflow: 実装＋レビュー
+│     ├─ Codex: 実装
+│     └─ Claude: レビュー
+└─ Session B
+   └─ 単独 Agent
+```
+
+| 領域 | 表示・操作 |
+|---|---|
+| 上段 | 工程、修正回数、レビュー対象 SHA、判断待ち・エラーの理由 |
+| 中央 | Workflow の履歴。PageUp / PageDown でスクロールする |
+| 下段 | 開始前は依頼、開始後は追加指示の複数行入力 |
+| 宛先 | 自動（現在の担当）・Codex・Claude。Tab で切り替える |
+
+Enter は改行、Ctrl-S は開始／送信、矢印・Home / End・Delete / Backspace は入力編集である。
+入力下書きは session ごとに保持し、配送中に追記した内容は先行する送信の完了で消さない。
+Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Agent 出力は各 Agent タブで確認する。
+
+開始は daemon に依頼し、Codex の実行環境・認証の確認を経て起動する。既に別の Agent が
+動いている session では開始を拒否し、既存 Agent を勝手に使い回さない。
+レビュー担当の起動は同じ session の認証済み handoff を使うため、runtime/model allowlist と
+既存の role・実行数上限が適用される。
+
+進捗は daemon の保存済み状態から取得する。レビュー判定は対象の依頼 ID と commit SHA に結び付く。
+追加指示は受理時点の exact Agent 宛先に固定し、工程変更後に別の担当へ付け替えない。
+受理済みの指示は `queued`、端末への通知が確認できた指示は `notified`、配送結果を確定できない指示は
+`delivery unconfirmed` と表示する。端末への書き込み成功だけで処理済みとはみなさない。
+応答を失った送信は同じ操作 ID で再試行し、二重の開始や指示を作らない。
+
+タブを閉じても daemon の作業は中止しない。再度 `workflow` を開くと保存済みの進捗を取得する。
+Workflow は PR の自動マージや session/worktree の削除を行わない。
+実装・レビューの進行は起動時の固定指示と同一 session の handoff に従う。修正は最大 3 回を
+指示するが、プロセスを強制停止する上限ではない。進捗の再照合と queued 指示の再通知は
+[snapshot の取得時](04-ipc.md#session-workflow-request)に行う。
 
 ## Closeup の agent CLI 選択
 

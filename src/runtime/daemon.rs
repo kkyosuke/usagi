@@ -4,6 +4,7 @@ mod agent_provisioning;
 mod dispatch;
 mod secure_path;
 mod tenant_control;
+mod workflow;
 
 use dispatch::{
     DispatchToolContext, SessionDispatchContext, authenticated_supervisor_caller,
@@ -4468,6 +4469,7 @@ fn start_ipc_accept_loop(
                                             },
                                             DaemonRequest::SupervisorSnapshot { .. } => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
                                             DaemonRequest::SupervisorControl { .. } => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
+                                            DaemonRequest::WorkflowSnapshot { .. } | DaemonRequest::WorkflowControl { .. } => workflow::dispatch(&agent_launch, &pr_inventory, &bound, request_id, request, hello),
                                             DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
                                             DaemonRequest::Terminal { .. } => usagi_daemon::presentation::ipc::reject_unhandled_request(request_id, body, hello),
                                         }
@@ -22010,6 +22012,319 @@ instructions = "{instructions}"
             ),
         );
         assert_eq!(cancelled, ResponseOutcome::Ok);
+    }
+
+    mod workflow_composition {
+        use super::*;
+        use usagi_core::domain::workflow::{
+            Delivery, Recipient, WorkflowCommand, WorkflowSnapshot,
+        };
+        use usagi_daemon::usecase::codex::{CodexProvision, CodexProvisionFailure};
+
+        struct Ready;
+        impl AgentReadinessProbe for Ready {
+            fn observe(&self, _: &str) -> AgentReadiness {
+                AgentReadiness::Ready
+            }
+        }
+        struct Available;
+        impl usagi_core::infrastructure::runtime_model::ExecutableLocator for Available {
+            fn is_available(&self, _: &str) -> bool {
+                true
+            }
+        }
+        struct Provision(PathBuf);
+        impl CodexProvisioner for Provision {
+            fn provision(
+                &mut self,
+                _: &ProvisionContext,
+            ) -> Result<CodexProvision, CodexProvisionFailure> {
+                Ok(CodexProvision {
+                    working_directory: self.0.clone(),
+                    environment_allowlist: BTreeSet::new(),
+                    spawn: SpawnProvision::new(Vec::new(), Vec::new()),
+                })
+            }
+        }
+        #[derive(Default)]
+        struct Writes {
+            selected: Option<TerminalRef>,
+            entries: Vec<(TerminalRef, Vec<u8>)>,
+        }
+        struct Pty(Arc<Mutex<Writes>>);
+        impl PtySpawner for Pty {
+            fn spawn(
+                &mut self,
+                _: &DurableLaunchSnapshot,
+                _: &SpawnProvision,
+                _: &TerminalRef,
+            ) -> Result<ProcessIdentity, SpawnFailure> {
+                Ok(ProcessIdentity {
+                    pid: 4321,
+                    start_identity: "workflow-test".into(),
+                    process_group: 4321,
+                })
+            }
+            fn terminate_reap(&mut self, _: &TerminalRef) -> Result<(), TerminateReapError> {
+                Ok(())
+            }
+        }
+        impl PtyWriter for Pty {
+            fn select_terminal(&mut self, terminal: &TerminalRef) {
+                self.0.lock().unwrap().selected = Some(terminal.clone());
+            }
+            fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
+                let mut writes = self.0.lock().unwrap();
+                let terminal = writes.selected.clone().unwrap();
+                writes.entries.push((terminal, bytes.to_vec()));
+                Ok(())
+            }
+        }
+        struct Fixture {
+            _directory: tempfile::TempDir,
+            bound: ConnectionWorkspace,
+            agent: SharedAgentRuntime,
+            inventory: SharedPrInventory,
+            workspace: WorkspaceId,
+            session: SessionId,
+            writes: Arc<Mutex<Writes>>,
+        }
+        impl Fixture {
+            fn new() -> Self {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path().join("repository");
+                let sessions = Arc::new(Mutex::new(
+                    SessionRuntime::open(
+                        root.clone(),
+                        &directory.path().join("sessions"),
+                        DaemonGeneration::new(),
+                        AlwaysSuccessfulGit,
+                        PermissiveSessionWorktreeIo,
+                    )
+                    .unwrap(),
+                ));
+                perform_create(
+                    &sessions,
+                    &AlwaysSuccessfulGit,
+                    &usagi_core::domain::id::OperationId::new().to_string(),
+                    &serde_json::json!({"name":"workflow"}),
+                )
+                .unwrap();
+                let workspace = sessions.lock().unwrap().workspace_id().unwrap();
+                let session = sessions.lock().unwrap().session_id("workflow").unwrap();
+                let bound = bound_to(
+                    &directory.path().join("tenants"),
+                    &root,
+                    sessions,
+                    workspace,
+                );
+                let mut registry = AdapterRegistry::new();
+                let adapter = CodexAdapter::new(Provision(root));
+                registry
+                    .register(adapter.profile().clone(), Box::new(adapter))
+                    .unwrap();
+                let writes = Arc::new(Mutex::new(Writes::default()));
+                let owner = AgentRuntime::with_dispatch_and_locator(
+                    DaemonGeneration::new(),
+                    registry,
+                    SupervisorAgentStore,
+                    SupervisorAgentJournal,
+                    Pty(Arc::clone(&writes)),
+                    AgentProfileId::new("codex").unwrap(),
+                    Geometry { cols: 80, rows: 24 },
+                    DispatchStore::new(directory.path().join("dispatch")),
+                    Available,
+                );
+                let agent = Arc::new(SharedAgentState {
+                    owner: Mutex::new(owner),
+                    readiness: Arc::new(Ready),
+                });
+                let inventory =
+                    Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+                        PrInventoryStore::new(directory.path().join("prs")),
+                        GenerationRole::Active,
+                    ))));
+                Self {
+                    _directory: directory,
+                    bound,
+                    agent,
+                    inventory,
+                    workspace,
+                    session,
+                    writes,
+                }
+            }
+            fn call(
+                &self,
+                request: DaemonRequest,
+            ) -> Result<WorkflowSnapshot, usagi_core::infrastructure::ipc::ProtocolError>
+            {
+                let response = workflow::dispatch(
+                    &self.agent,
+                    &self.inventory,
+                    &self.bound,
+                    usagi_core::infrastructure::ipc::RequestId("workflow-test".into()),
+                    request,
+                    &session_test_hello(),
+                );
+                match response.kind {
+                    EnvelopeKind::Response {
+                        outcome: ResponseOutcome::Error(error),
+                        ..
+                    } => Err(error),
+                    EnvelopeKind::Response {
+                        outcome: ResponseOutcome::Ok,
+                        body,
+                        ..
+                    } => Ok(serde_json::from_value(body).unwrap()),
+                    _ => panic!("unexpected workflow envelope"),
+                }
+            }
+            fn control(
+                &self,
+                operation: usagi_core::domain::id::OperationId,
+                command: WorkflowCommand,
+            ) -> Result<WorkflowSnapshot, usagi_core::infrastructure::ipc::ProtocolError>
+            {
+                self.call(DaemonRequest::WorkflowControl {
+                    workspace: self.workspace,
+                    session: self.session,
+                    operation_id: operation,
+                    command,
+                })
+            }
+        }
+
+        #[test]
+        #[allow(clippy::too_many_lines)] // One dispatch fixture tests replay and exact targeting with a concurrent sibling.
+        fn workflow_dispatch_is_scoped_idempotent_and_delivers_only_to_its_exact_agent() {
+            let fixture = Fixture::new();
+            assert!(
+                fixture
+                    .call(DaemonRequest::WorkflowSnapshot {
+                        workspace: fixture.workspace,
+                        session: fixture.session
+                    })
+                    .unwrap()
+                    .run
+                    .is_none()
+            );
+            assert_eq!(
+                fixture
+                    .call(DaemonRequest::WorkflowSnapshot {
+                        workspace: WorkspaceId::new(),
+                        session: fixture.session
+                    })
+                    .unwrap_err()
+                    .code,
+                ErrorCode::OwnershipUnknown
+            );
+            assert!(
+                fixture
+                    .call(DaemonRequest::WorkflowSnapshot {
+                        workspace: fixture.workspace,
+                        session: SessionId::new()
+                    })
+                    .is_err()
+            );
+            assert_eq!(
+                fixture
+                    .call(DaemonRequest::SupervisorSnapshot {
+                        workspace: fixture.workspace
+                    })
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            let operation = usagi_core::domain::id::OperationId::new();
+            assert_eq!(
+                fixture
+                    .control(operation, WorkflowCommand::Start { goal: " ".into() })
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            let command = WorkflowCommand::Start {
+                goal: "Implement feature".into(),
+            };
+            let first = fixture.control(operation, command.clone()).unwrap();
+            assert_eq!(fixture.control(operation, command).unwrap(), first);
+            assert_eq!(
+                fixture
+                    .control(
+                        operation,
+                        WorkflowCommand::Start {
+                            goal: "Changed".into()
+                        }
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::IdempotencyConflict
+            );
+            let run = first.run.unwrap();
+            let sibling_operation = usagi_core::domain::id::OperationId::new().to_string();
+            let sibling_intent = usagi_core::infrastructure::client::AgentLaunchIntent {
+                workspace: fixture.workspace,
+                session: Some(fixture.session),
+                profile: Some(AgentProfileId::new("codex").unwrap()),
+            };
+            let ticket = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .prepare_launch_readiness(&sibling_operation, &sibling_intent)
+                .unwrap();
+            run_agent_readiness(&fixture.agent, ticket.as_ref()).unwrap();
+            let sibling = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .launch_after_readiness(
+                    &sibling_operation,
+                    &sibling_intent,
+                    &fixture.bound.scope_resolver(),
+                    ticket.as_ref(),
+                )
+                .unwrap();
+            let instruction = usagi_core::domain::id::OperationId::new();
+            assert_eq!(
+                fixture
+                    .control(
+                        instruction,
+                        WorkflowCommand::Instruct {
+                            recipient: Recipient::Reviewer,
+                            body: "No reviewer".into()
+                        }
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            let command = WorkflowCommand::Instruct {
+                recipient: Recipient::Implementer,
+                body: "Verify the edge cases".into(),
+            };
+            let delivered = fixture.control(instruction, command.clone()).unwrap();
+            assert_eq!(
+                delivered.run.unwrap().instructions[0].delivery,
+                Delivery::Notified
+            );
+            fixture.control(instruction, command).unwrap();
+            let writes = fixture.writes.lock().unwrap();
+            assert_eq!(writes.entries.len(), 1);
+            let expected = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .runtime_for_operation(run.id)
+                .unwrap()
+                .terminal;
+            assert_eq!(writes.entries[0].0, expected);
+            assert_ne!(writes.entries[0].0, sibling.terminal);
+            assert!(
+                String::from_utf8_lossy(&writes.entries[0].1).contains("Verify the edge cases")
+            );
+        }
     }
 
     #[test]

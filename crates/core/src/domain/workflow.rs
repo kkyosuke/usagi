@@ -17,6 +17,7 @@ pub enum Recipient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
+    Starting,
     Implementing,
     Reviewing,
     Revising,
@@ -29,6 +30,7 @@ impl Phase {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Starting => "Starting",
             Self::Implementing => "Implementing",
             Self::Reviewing => "Reviewing",
             Self::Revising => "Revising",
@@ -43,6 +45,7 @@ impl Phase {
 #[serde(rename_all = "snake_case")]
 pub enum Delivery {
     Queued,
+    Unconfirmed,
     Notified,
     Acknowledged,
 }
@@ -71,13 +74,22 @@ pub struct WorkflowRun {
     pub session: SessionId,
     pub goal: String,
     pub implementer: AgentId,
-    pub reviewer: AgentId,
+    pub reviewer: Option<AgentId>,
     pub phase: Phase,
     pub revision_limit: u8,
     pub revisions: u8,
     pub review: Option<Review>,
     pub waiting_reason: Option<String>,
     pub instructions: Vec<Instruction>,
+    #[serde(default)]
+    pub history: Vec<WorkflowHistoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowHistoryEntry {
+    pub id: OperationId,
+    pub actor: String,
+    pub body: String,
 }
 
 impl WorkflowRun {
@@ -85,17 +97,17 @@ impl WorkflowRun {
     #[must_use]
     pub fn is_valid(&self) -> bool {
         valid_text(&self.goal)
-            && self.implementer != self.reviewer
+            && Some(self.implementer) != self.reviewer
             && (1..=10).contains(&self.revision_limit)
             && self.revisions <= self.revision_limit
     }
 
     #[must_use]
-    pub fn recipient(&self, recipient: Recipient) -> AgentId {
+    pub fn recipient(&self, recipient: Recipient) -> Option<AgentId> {
         match recipient {
             Recipient::Reviewer => self.reviewer,
             Recipient::Automatic if self.phase == Phase::Reviewing => self.reviewer,
-            Recipient::Automatic | Recipient::Implementer => self.implementer,
+            Recipient::Automatic | Recipient::Implementer => Some(self.implementer),
         }
     }
 
@@ -122,7 +134,9 @@ impl WorkflowRun {
         self.instructions.push(Instruction {
             id,
             requested_recipient: recipient,
-            recipient: self.recipient(recipient),
+            recipient: self
+                .recipient(recipient)
+                .ok_or("reviewer is not assigned yet")?,
             body,
             delivery: Delivery::Queued,
         });
@@ -168,7 +182,7 @@ impl WorkflowRun {
         target: &ReviewTarget,
         approved: bool,
     ) -> Result<(), &'static str> {
-        if self.phase != Phase::Reviewing || from != self.reviewer {
+        if self.phase != Phase::Reviewing || Some(from) != self.reviewer {
             return Err("verdict is not from the active reviewer");
         }
         let review = self.review.as_mut().ok_or("no active review")?;
@@ -217,6 +231,19 @@ fn valid_text(text: &str) -> bool {
     !text.trim().is_empty() && text.len() <= 16 * 1024 && !text.contains('\0')
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowSnapshot {
+    pub session: SessionId,
+    pub run: Option<WorkflowRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkflowCommand {
+    Start { goal: String },
+    Instruct { recipient: Recipient, body: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,13 +254,14 @@ mod tests {
             session: SessionId::new(),
             goal: "Implement authentication".into(),
             implementer: AgentId::new(),
-            reviewer: AgentId::new(),
+            reviewer: Some(AgentId::new()),
             phase: Phase::Implementing,
             revision_limit: 3,
             revisions: 0,
             review: None,
             waiting_reason: None,
             instructions: Vec::new(),
+            history: Vec::new(),
         }
     }
 
@@ -266,7 +294,7 @@ mod tests {
         );
         assert_eq!(run.recipient(Recipient::Automatic), run.reviewer);
         assert_eq!(run.recipient(Recipient::Reviewer), run.reviewer);
-        assert_eq!(run.recipient(Recipient::Implementer), run.implementer);
+        assert_eq!(run.recipient(Recipient::Implementer), Some(run.implementer));
         for body in [" ".to_owned(), "\0".into(), "x".repeat(16385)] {
             assert!(
                 run.enqueue(OperationId::new(), Recipient::Automatic, body)
@@ -289,7 +317,10 @@ mod tests {
         let request = OperationId::new();
         let target = target();
         assert!(run.mark_ready(&target.head_sha, true, true).is_err());
-        assert!(run.verdict(run.reviewer, request, &target, true).is_err());
+        assert!(
+            run.verdict(run.reviewer.unwrap(), request, &target, true)
+                .is_err()
+        );
         run.request_review(request, target.clone()).unwrap();
         assert!(run.request_review(request, target.clone()).is_err());
         assert!(
@@ -297,15 +328,19 @@ mod tests {
                 .is_err()
         );
         assert!(
-            run.verdict(run.reviewer, OperationId::new(), &target, true)
+            run.verdict(run.reviewer.unwrap(), OperationId::new(), &target, true)
                 .is_err()
         );
         let stale = ReviewTarget {
             head_sha: "c".repeat(40),
             ..target.clone()
         };
-        assert!(run.verdict(run.reviewer, request, &stale, true).is_err());
-        run.verdict(run.reviewer, request, &target, true).unwrap();
+        assert!(
+            run.verdict(run.reviewer.unwrap(), request, &stale, true)
+                .is_err()
+        );
+        run.verdict(run.reviewer.unwrap(), request, &target, true)
+            .unwrap();
         for (head, checks, pr) in [
             (&stale.head_sha, true, true),
             (&target.head_sha, false, true),
@@ -324,7 +359,8 @@ mod tests {
         for round in 0..=3 {
             let request = OperationId::new();
             run.request_review(request, target.clone()).unwrap();
-            run.verdict(run.reviewer, request, &target, false).unwrap();
+            run.verdict(run.reviewer.unwrap(), request, &target, false)
+                .unwrap();
             if round < 3 {
                 assert_eq!(run.phase, Phase::Revising);
                 assert!(run.request_review(request, target.clone()).is_err());
@@ -345,9 +381,9 @@ mod tests {
         run.goal.clear();
         assert!(!run.is_valid());
         run.goal = "Task".into();
-        run.reviewer = run.implementer;
+        run.reviewer = Some(run.implementer);
         assert!(!run.is_valid());
-        run.reviewer = AgentId::new();
+        run.reviewer = Some(AgentId::new());
         run.revision_limit = 0;
         assert!(!run.is_valid());
         run.revision_limit = 3;
@@ -361,7 +397,7 @@ mod tests {
         assert!(run.request_review(OperationId::new(), invalid).is_err());
         run.phase = Phase::Reviewing;
         assert!(
-            run.verdict(run.reviewer, OperationId::new(), &target(), true)
+            run.verdict(run.reviewer.unwrap(), OperationId::new(), &target(), true)
                 .is_err()
         );
         run.phase = Phase::Verifying;

@@ -139,6 +139,16 @@ pub enum DaemonRequest {
     /// Read the redaction-safe durable Work Runs owned by the connection's
     /// workspace. This TUI-only observation never accepts an Agent credential.
     SupervisorSnapshot { workspace: WorkspaceId },
+    WorkflowSnapshot {
+        workspace: WorkspaceId,
+        session: SessionId,
+    },
+    WorkflowControl {
+        workspace: WorkspaceId,
+        session: SessionId,
+        operation_id: OperationId,
+        command: crate::domain::workflow::WorkflowCommand,
+    },
     /// Mutate one durable Supervisor Run through the workspace-bound human
     /// control plane. The daemon verifies the requested workspace against the
     /// connection and replays the command by its durable operation identity.
@@ -1842,6 +1852,7 @@ impl RetryEligibility {
             | DaemonRequest::AgentInventory { .. }
             | DaemonRequest::AgentWorkspaceObservation { .. }
             | DaemonRequest::SupervisorSnapshot { .. }
+            | DaemonRequest::WorkflowSnapshot { .. }
             | DaemonRequest::DiagnoseAgents { .. }
             | DaemonRequest::PlanDaemonRestartAgents { .. }
             | DaemonRequest::Tenant {
@@ -1891,6 +1902,7 @@ impl RetryEligibility {
             }
             DaemonRequest::Rollover { .. }
             | DaemonRequest::SupervisorControl { .. }
+            | DaemonRequest::WorkflowControl { .. }
             | DaemonRequest::Agent { .. }
             | DaemonRequest::AgentGoal { .. }
             | DaemonRequest::ResumeAgent { .. }

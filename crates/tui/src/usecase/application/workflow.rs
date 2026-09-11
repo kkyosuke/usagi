@@ -1,6 +1,7 @@
 //! Session-local editor state; daemon snapshots remain the progress authority.
 
-use usagi_core::domain::workflow::{Recipient, WorkflowRun};
+use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
+use usagi_core::domain::workflow::{Recipient, WorkflowCommand, WorkflowRun};
 
 use super::environment_source::EnvironmentSourceEditor;
 
@@ -13,6 +14,33 @@ pub struct WorkflowPanel {
     pub loading: bool,
     pub submitting: bool,
     pub history_offset: usize,
+    pub pending: Option<(OperationId, WorkflowCommand)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowJob {
+    pub workspace: WorkspaceId,
+    pub session: SessionId,
+    /// None is a read; Some retains the exact control payload across retries.
+    pub control: Option<(OperationId, WorkflowCommand)>,
+}
+
+pub trait WorkflowPort {
+    fn dispatch(&mut self, job: WorkflowJob, completions: super::daemon_backend::Completions);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowError {
+    pub message: String,
+    /// A lost final response must retry the same operation, never mint a second run.
+    pub unconfirmed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowEdit {
+    Start,
+    End,
+    Delete,
 }
 
 impl WorkflowPanel {
@@ -40,6 +68,24 @@ impl WorkflowPanel {
         if self.draft.value() == submitted_text {
             self.draft.replace("");
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_run(session: SessionId) -> WorkflowRun {
+    WorkflowRun {
+        id: OperationId::new(),
+        session,
+        goal: "Implement login".into(),
+        implementer: usagi_core::domain::id::AgentId::new(),
+        reviewer: Some(usagi_core::domain::id::AgentId::new()),
+        phase: usagi_core::domain::workflow::Phase::Implementing,
+        revision_limit: 3,
+        revisions: 0,
+        review: None,
+        waiting_reason: None,
+        instructions: vec![],
+        history: vec![],
     }
 }
 

@@ -27,6 +27,7 @@ use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 use crate::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
 mod messages;
+pub mod workflows;
 
 const REGISTRY_FILE: &str = "dispatch.json";
 const WORKSPACE_REGISTRY_FILE: &str = "dispatch-workspaces.json";

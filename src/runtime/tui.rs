@@ -1234,6 +1234,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
                 root: snapshot.workspace.path.clone(),
             }),
         )
+        .with_workflow(Box::new(workflow::DaemonWorkflowPort::default()))
         .with_daemon_control(Box::new(ProductionDaemonControl {
             workspace: snapshot.workspace_id,
             root: snapshot.workspace.path.clone(),
@@ -2287,6 +2288,8 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
         }
     }
 }
+
+mod workflow;
 
 struct DaemonWorkRunPort;
 

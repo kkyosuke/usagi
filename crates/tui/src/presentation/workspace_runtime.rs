@@ -550,6 +550,18 @@ impl WorkspaceRuntime {
     /// calling this.
     #[must_use]
     pub fn handle_key(&mut self, key: Key) -> Vec<Effect> {
+        if let Some(session) = self.selected_workflow_session() {
+            use crate::usecase::application::workflow::WorkflowEdit;
+            let edit = match &key {
+                Key::LineStart | Key::Home | Key::Char('\u{1}') => Some(WorkflowEdit::Start),
+                Key::LineEnd | Key::End => Some(WorkflowEdit::End),
+                Key::Delete => Some(WorkflowEdit::Delete),
+                _ => None,
+            };
+            if let Some(edit) = edit {
+                return self.apply_event(AppEvent::WorkflowEdit { session, edit });
+            }
+        }
         // The Overview / Closeup overlays own keyboard input while open: their
         // persisted modal edits its own caret and selection, and the sidebar
         // reducer never sees the key. This is the symmetry the other overlays
@@ -843,6 +855,7 @@ impl WorkspaceRuntime {
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
         let event = match event {
             AppEvent::Key(key) if self.state.overlay().is_none()
+                && self.state.workspace_drawer_focus().is_none()
                 && matches!(self.state.route(), Route::Home(HomeMode::Closeup))
                     && matches!(key, AppKey::Char(_) | AppKey::Paste(_) | AppKey::Enter
                         | AppKey::Backspace | AppKey::Left | AppKey::Right | AppKey::Up
@@ -896,6 +909,22 @@ impl WorkspaceRuntime {
         }
         self.sync_overlay_modals();
         effects
+    }
+
+    fn selected_workflow_session(&self) -> Option<SessionId> {
+        if self.state.overlay().is_some()
+            || self.state.workspace_drawer_focus().is_some()
+            || self.state.route() != Route::Home(HomeMode::Closeup)
+        {
+            return None;
+        }
+        let Some(Target::Session(session)) = self.panes.active() else {
+            return None;
+        };
+        self.panes.active_pane().tabs().iter().any(|tab| {
+            matches!(tab, PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow
+                && self.panes.active_pane().selected() == &PaneSelection::Tab(TabSelection::Ready(ready.operation)))
+        }).then_some(session)
     }
 
     fn remember_root_surface_selection(&mut self, previous: Option<WorkspaceDrawerFocus>) {
@@ -1179,7 +1208,8 @@ impl WorkspaceRuntime {
         operation: OperationId,
         kind: PaneKind,
     ) -> Vec<PaneRegistryEffect> {
-        if matches!(target, Target::Root(_)) && kind == PaneKind::Diff {
+        if matches!(target, Target::Root(_)) && matches!(kind, PaneKind::Diff | PaneKind::Workflow)
+        {
             return Vec::new();
         }
         let effects = reduce_registry(
@@ -1918,6 +1948,15 @@ impl WorkspaceRuntime {
     pub fn on_effect(&mut self, effect: &Effect) {
         match effect {
             Effect::OpenWorkflow { session } => {
+                if !self.state.sessions().contains(session)
+                    || self
+                        .state
+                        .session_lifecycles()
+                        .get(session)
+                        .is_some_and(|state| !state.capabilities().can_use)
+                {
+                    return;
+                }
                 let target = Target::Session(*session);
                 let existing = self.panes.pane(target).and_then(|pane| {
                     pane.tabs().iter().find_map(|tab| match tab {
@@ -2324,7 +2363,9 @@ mod tests {
         let mut runtime = closeup_on(workspace, session);
         type_str(&mut runtime, "workflow");
         let effects = runtime.handle_key(Key::Enter);
-        assert_eq!(effects, vec![Effect::OpenWorkflow { session }]);
+        assert!(
+            matches!(effects.as_slice(), [Effect::OpenWorkflow { session: opened }, Effect::Workflow(_)] if *opened == session)
+        );
         for effect in &effects {
             runtime.on_effect(effect);
         }
@@ -2355,8 +2396,62 @@ mod tests {
                 .value(),
             "Check login\nand errors"
         );
+        let _ = runtime.handle_key(Key::Home);
+        let _ = runtime.handle_key(Key::Delete);
+        let _ = runtime.handle_key(Key::End);
+        type_str(&mut runtime, "!");
+        assert_eq!(
+            runtime
+                .state()
+                .workflow_panel(session)
+                .unwrap()
+                .draft
+                .value(),
+            "heck login\nand errors!"
+        );
         let _ = runtime.apply_event(AppEvent::Key(AppKey::CtrlO));
         assert_eq!(runtime.state().route(), Route::Home(HomeMode::Switch));
+    }
+
+    #[test]
+    fn workflow_tab_rejects_stale_and_unavailable_session_targets() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        runtime.on_effect(&Effect::OpenWorkflow {
+            session: SessionId::new(),
+        });
+        assert!(runtime.panes.active_pane().tabs().is_empty());
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
+            BTreeMap::from([(
+                session,
+                usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: None,
+                    failure_summary: None,
+                },
+            )]),
+        )));
+        runtime.on_effect(&Effect::OpenWorkflow { session });
+        assert!(
+            runtime
+                .panes
+                .pane(Target::Session(session))
+                .unwrap()
+                .tabs()
+                .is_empty()
+        );
+        let _ = runtime.request_pane(
+            Target::Root(workspace),
+            OperationId::new(),
+            PaneKind::Workflow,
+        );
+        assert!(
+            runtime
+                .panes
+                .pane(Target::Root(workspace))
+                .is_none_or(|pane| pane.tabs().is_empty())
+        );
     }
 
     #[test]
