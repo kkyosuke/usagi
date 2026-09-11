@@ -106,9 +106,7 @@ use crate::usecase::application::metrics::{
     GitDiff, MetricsBackend, MetricsPort, MetricsPortFactory, MetricsProjection,
 };
 use crate::usecase::application::observation_lane::ObservationLane;
-use crate::usecase::application::pane::{
-    PaneKind, PaneRegistry, PaneSelection, PaneTab, TabSelection,
-};
+use crate::usecase::application::pane::{PaneKind, PaneRegistry, PaneTab, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
@@ -5061,7 +5059,7 @@ fn apply_restore_completion(
         interrupted,
         &saved_selections,
     );
-    preserve_workflow_selection(runtime, &mut targets);
+    runtime.preserve_workflow_selection(&mut targets);
     let fence_accepted = runtime.restore_snapshot(
         dispatched_interaction,
         dispatched_registry_revision,
@@ -5074,22 +5072,6 @@ fn apply_restore_completion(
     RestoreApply {
         port,
         outcome: RestoreJobOutcome::Applied,
-    }
-}
-
-/// Agent inventory owns live membership, not a user's native Workflow focus.
-fn preserve_workflow_selection(runtime: &WorkspaceRuntime, targets: &mut [PaneRestoreTarget]) {
-    for target in targets {
-        if runtime.panes().pane(target.target).is_some_and(|pane| {
-            pane.tabs().iter().any(|tab| {
-                matches!(tab, PaneTab::Ready(ready)
-                    if ready.kind == PaneKind::Workflow
-                        && pane.selected() == &PaneSelection::Tab(TabSelection::Ready(ready.operation)))
-            })
-        }) {
-            target.selected = None;
-            target.selected_interrupted = None;
-        }
     }
 }
 

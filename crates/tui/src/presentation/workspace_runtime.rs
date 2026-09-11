@@ -135,6 +135,22 @@ pub struct WorkspaceRuntime {
 }
 
 impl WorkspaceRuntime {
+    /// Agent inventory owns live membership, not a user's native Workflow focus.
+    pub(super) fn preserve_workflow_selection(&self, targets: &mut [PaneRestoreTarget]) {
+        for target in targets {
+            if self.panes().pane(target.target).is_some_and(|pane| {
+                pane.tabs().iter().any(|tab| {
+                    matches!(tab, PaneTab::Ready(ready)
+                        if ready.kind == PaneKind::Workflow
+                            && pane.selected() == &PaneSelection::Tab(TabSelection::Ready(ready.operation)))
+                })
+            }) {
+                target.selected = None;
+                target.selected_interrupted = None;
+            }
+        }
+    }
+
     /// Start a Home runtime for `workspace` with the daemon-authoritative
     /// `sessions`. The first managed session is active when present; an empty
     /// snapshot has no active pane target and never falls back to workspace root.
