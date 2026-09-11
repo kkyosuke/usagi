@@ -222,7 +222,7 @@ use usagi_daemon::usecase::terminal_ipc::{
     GENERIC_TERMINAL_LIMIT, GenericTerminalRuntime, ResolvedTerminalScope,
     TerminalScopeResolveError, TerminalScopeResolver,
 };
-use usagi_daemon::usecase::terminal_profile::{LoginShellProfile, TERMINAL_ENVIRONMENT_VARIABLES};
+use usagi_daemon::usecase::terminal_profile::{LoginShellProfile, public_terminal_environment};
 
 use crate::runtime::user_env::{self, UserEnvironment};
 
@@ -312,14 +312,34 @@ fn with_user_environment(
 }
 
 fn terminal_environment() -> BTreeMap<String, String> {
-    TERMINAL_ENVIRONMENT_VARIABLES
-        .into_iter()
-        .filter_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| (name.to_owned(), value))
-        })
-        .collect()
+    terminal_environment_from(|name| std::env::var(name).ok())
+}
+
+/// The same composition against an injected reader of the daemon's own
+/// environment.
+///
+/// Splitting it out is what makes the `USER` precedence observable: on a
+/// developer machine the inherited name usually equals the resolved one, so a
+/// test reading the real environment cannot tell "the resolver won" from "the
+/// inherited value happened to match".
+fn terminal_environment_from(
+    inherited: impl Fn(&str) -> Option<String>,
+) -> BTreeMap<String, String> {
+    public_terminal_environment(inherited, resolved_os_user())
+}
+
+/// The OS user name this daemon runs as, resolved from its effective UID once
+/// per process.
+///
+/// The lookup is a passwd database call, so caching it is what keeps every PTY
+/// launch from re-asking the platform — and what keeps the product from ever
+/// shelling out to `id` on a launch path. The answer cannot change while the
+/// process lives: a running process does not change its effective UID here.
+fn resolved_os_user() -> Option<&'static str> {
+    static RESOLVED: OnceLock<Option<String>> = OnceLock::new();
+    RESOLVED
+        .get_or_init(usagi_daemon::infrastructure::os_user::effective_user_name)
+        .as_deref()
 }
 
 /// The children this process spawned and observed through the OS.
@@ -18174,6 +18194,50 @@ instructions = "{instructions}"
         assert_eq!(agent["SHARED"], "workspace");
         assert_eq!(agent["WORKSPACE_ONLY"], "workspace");
         assert!(!agent.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
+    }
+
+    /// The public environment both PTY owners start from names the account this
+    /// daemon runs as, because a keychain client in the child is indexed by it
+    /// (#735).
+    ///
+    /// The expectation is the platform adapter's own answer, not this
+    /// composition re-run: what is under test here is that the composition
+    /// actually wires the resolved name in rather than leaving the inherited one
+    /// to win. That the adapter's answer is the real account is held separately
+    /// by `usagi-daemon`'s `terminal_user_environment` integration test, which
+    /// compares it against the OS.
+    #[test]
+    fn the_public_terminal_environment_names_the_user_the_daemon_runs_as() {
+        let environment = terminal_environment();
+        let resolved = usagi_daemon::infrastructure::os_user::effective_user_name();
+        if let Some(user) = resolved.as_ref() {
+            // The ordinary case on any machine with a passwd entry: the child
+            // receives the resolved account, and an inherited name never wins.
+            assert_eq!(environment.get("USER"), Some(user));
+        } else {
+            // A platform that cannot answer never invents a name. Which value
+            // the fallback then picks is pinned by `terminal_profile`'s unit
+            // tests, which do not need such a platform to run.
+            assert!(
+                environment
+                    .get("USER")
+                    .is_none_or(|value| !value.is_empty() && !value.contains('\0'))
+            );
+        }
+        // The memoized accessor answers with the same name the adapter gives,
+        // which is what every launch after the first one reads.
+        assert_eq!(resolved_os_user(), resolved.as_deref());
+
+        // Against an inherited name that is deliberately not this account, the
+        // precedence is observable: dropping the resolved name from the
+        // composition would export the sentinel instead.
+        let sentinel = terminal_environment_from(|_| Some("inherited-sentinel".to_owned()));
+        assert_eq!(
+            sentinel.get("USER").map(String::as_str),
+            resolved_os_user().or(Some("inherited-sentinel"))
+        );
+        assert!(!environment.contains_key("GH_TOKEN"));
+        assert!(!environment.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
     }
 
     /// A registry holding exactly one workspace, for tests that exercise a
