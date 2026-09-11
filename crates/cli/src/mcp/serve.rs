@@ -788,7 +788,9 @@ fn execute_tool(
 /// schema keeps the composite operation from ever starting.
 fn agent_selector_schema(snapshot: &RuntimeModelSnapshot, route: ToolRoute) -> Option<Value> {
     match route {
-        ToolRoute::Dispatch(DispatchToolAction::Dispatch) => Some(snapshot.agent_schema()),
+        ToolRoute::Dispatch(DispatchToolAction::Dispatch | DispatchToolAction::AgentHandoff) => {
+            Some(snapshot.agent_schema())
+        }
         ToolRoute::Session(SessionAction::DelegateBrief) => Some(snapshot.new_agent_schema()),
         _ => None,
     }
@@ -1206,7 +1208,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 55);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1252,7 +1254,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 39);
+        assert_eq!(names.len(), 44);
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
@@ -2040,8 +2042,29 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One table exercises every authenticated dispatch route.
     fn dispatch_tools_use_the_injected_daemon_client() {
         for (name, action) in [
+            (
+                "agent_handoff",
+                usagi_core::infrastructure::client::DispatchToolAction::AgentHandoff,
+            ),
+            (
+                "agent_peers",
+                usagi_core::infrastructure::client::DispatchToolAction::AgentPeers,
+            ),
+            (
+                "agent_message",
+                usagi_core::infrastructure::client::DispatchToolAction::AgentMessage,
+            ),
+            (
+                "agent_messages",
+                usagi_core::infrastructure::client::DispatchToolAction::AgentMessages,
+            ),
+            (
+                "agent_message_ack",
+                usagi_core::infrastructure::client::DispatchToolAction::AgentMessageAck,
+            ),
             (
                 "session_dispatch",
                 usagi_core::infrastructure::client::DispatchToolAction::Dispatch,

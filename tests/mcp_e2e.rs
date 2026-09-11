@@ -105,10 +105,10 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 }
 
 #[test]
-fn production_tools_list_fixes_the_51_tool_schema_contract() {
+fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 51);
+    assert_eq!(tools.len(), 56);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -131,7 +131,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 40);
+    assert_eq!(names.len(), 45);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -1917,6 +1917,140 @@ exit 0
         .find(|session| session["name"] == "caller-owned")
         .unwrap();
     assert!(durable["creator_agent_id"].is_string());
+}
+
+#[test]
+fn production_peer_review_request_receives_a_correlated_cross_runtime_verdict() {
+    let mut mcp = McpHarness::start();
+    let credential = mcp.launch_caller();
+    mcp.restart_with_credential(&credential);
+    let caller = tool_text(&mcp.tool("agent_peers", &json!({})))["self_agent_id"].clone();
+    let request_id = OperationId::new();
+    let verdict_id = OperationId::new();
+    let review = json!({"base_sha":"a".repeat(40),"head_sha":"b".repeat(40)});
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"peer-reviewer","version":"1"}}});
+    let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    let read = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_messages","arguments":{"unread_only":true}}});
+    let ack = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_message_ack","arguments":{"message_id":request_id}}});
+    let reply = json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agent_message","arguments":{"message_id":verdict_id,"to_agent_id":caller,"kind":"approved","body":"fixture review passed","in_reply_to":request_id,"review":review}}});
+    // Wait for the actual peer wake before reading; the daemon must commit
+    // the request before notifying this exact runtime. The fixture has no API key.
+    mcp.replace_fixture_agent("claude", &format!(
+        "#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nIFS= read -r notice || exit 1\nprintf '%s\\n' '{initialize}' '{initialized}' '{read}' '{ack}' '{reply}' | \"$USAGI_E2E_USAGI\" mcp >> \"$USAGI_MCP_FIXTURE_LOG\"\n"
+    ));
+    let handoff = mcp.tool("agent_handoff", &json!({"agent":{"runtime":"claude","model":"fixture-claude"},"prompt":"await a peer review request"}));
+    assert!(handoff.get("error").is_none(), "{handoff}");
+    let reviewer = tool_text(&handoff)["agent_id"].clone();
+    let request = mcp.tool("agent_message", &json!({"message_id":request_id,"to_agent_id":reviewer,"kind":"review_request","body":"review this diff","review":review}));
+    assert!(request.get("error").is_none(), "{request}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let verdict = loop {
+        let response = mcp.tool("agent_messages", &json!({"unread_only":true}));
+        assert!(response.get("error").is_none(), "{response}");
+        if let Some(verdict) = tool_text(&response)["messages"].as_array().unwrap().first() {
+            break verdict.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "peer reply missing: {}",
+            fs::read_to_string(mcp.fixture_log()).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(verdict["message_id"], json!(verdict_id));
+    assert_eq!(verdict["from_agent_id"], reviewer);
+    assert_eq!(verdict["kind"], "approved");
+    assert_eq!(verdict["in_reply_to"], json!(request_id));
+    assert_eq!(verdict["review"], review);
+    assert!(
+        mcp.tool("agent_message_ack", &json!({"message_id":verdict_id}))
+            .get("error")
+            .is_none()
+    );
+    let history = tool_text(&mcp.tool("agent_messages", &json!({})));
+    assert!(
+        history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["acknowledged"] == true)
+    );
+}
+
+#[test]
+fn production_same_session_handoff_and_messages_preserve_creator_authority() {
+    let mut mcp = McpHarness::start();
+    let credential = mcp.launch_caller();
+    mcp.restart_with_credential(&credential);
+    let before = tool_text(&mcp.tool("agent_peers", &json!({})));
+    let self_id = before["self_agent_id"].clone();
+    assert_eq!(before["agents"].as_array().unwrap().len(), 1);
+    let handoff = mcp.tool(
+        "agent_handoff",
+        &json!({
+            "agent":{"runtime":"claude","model":"fixture-claude"},
+            "prompt":"review the committed diff without editing"
+        }),
+    );
+    assert!(handoff.get("error").is_none(), "{handoff}");
+    let admission = tool_text(&handoff);
+    assert_eq!(admission["session"], "mcp-caller");
+    assert_ne!(admission["agent_id"], self_id);
+    let peers = tool_text(&mcp.tool("agent_peers", &json!({})));
+    assert_eq!(peers["agents"].as_array().unwrap().len(), 2);
+    assert!(
+        tool_text(&mcp.tool("session_list", &json!({})))["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let denied = mcp.tool("session_get", &json!({"name":"mcp-caller"}));
+    assert!(has_permission_denied(&denied), "{denied}");
+    let message_id = OperationId::new();
+    let request = json!({"message_id":message_id,"to_agent_id":admission["agent_id"],"kind":"review_request","body":"Review committed code only","review":{"base_sha":"a".repeat(40),"head_sha":"b".repeat(40)}});
+    let sent = mcp.tool("agent_message", &request);
+    assert!(sent.get("error").is_none(), "{sent}");
+    assert_eq!(tool_text(&sent)["message"]["from_agent_id"], self_id);
+    assert_eq!(
+        tool_text(&mcp.tool("agent_message", &request)),
+        tool_text(&sent)
+    );
+    let history = tool_text(&mcp.tool("agent_messages", &json!({"limit":1})));
+    assert_eq!(history["next_cursor"], json!(message_id));
+    assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+    assert!(
+        tool_text(&mcp.tool("agent_messages", &json!({"unread_only":true})))["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        mcp.tool("agent_message_ack", &json!({"message_id":message_id}))
+            .get("error")
+            .is_some()
+    );
+    assert!(
+        mcp.tool(
+            "agent_handoff",
+            &json!({"agent":{"id":self_id},"prompt":"self"})
+        )
+        .get("error")
+        .is_some()
+    );
+    assert!(
+        mcp.tool(
+            "agent_handoff",
+            &json!({"agent":{"id":admission["agent_id"]},"prompt":"duplicate"})
+        )
+        .get("error")
+        .is_some()
+    );
+    assert!(
+        tool_text(&mcp.tool("agent_inbox", &json!({})))["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

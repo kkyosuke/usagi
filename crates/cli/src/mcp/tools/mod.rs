@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 51); // issue 6 + memory 4 + session 33 + terminal 2 + supervisor 6
+        assert_eq!(reg.len(), 56); // issue 6 + memory 4 + session 38 + terminal 2 + supervisor 6
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -334,7 +334,7 @@ mod tests {
     fn each_category_contributes_its_tools() {
         assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
-        assert_eq!(super::session::tools().len(), 33);
+        assert_eq!(super::session::tools().len(), 38);
         assert_eq!(super::terminal::tools().len(), 2);
         assert_eq!(super::supervisor::tools().len(), 6);
     }
@@ -381,14 +381,14 @@ mod tests {
             issue: false,
             memory: false,
         });
-        assert_eq!(neither.len(), 40);
+        assert_eq!(neither.len(), 45);
         assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));
     }
 
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
-        assert_eq!(registry.len(), 51);
+        assert_eq!(registry.len(), 56);
         validate_registry(&registry).unwrap();
         for descriptor in &registry {
             assert!(!descriptor.description().is_empty());
@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // The complete 51-tool golden table is intentionally contiguous.
+    #[allow(clippy::too_many_lines)] // The complete tool golden table is intentionally contiguous.
     fn every_tool_name_keeps_its_exact_route_and_caller_policy() {
         use CallerPolicy::{AgentCredential, DaemonProvenance, Public, SessionCredential};
         use DispatchToolAction as Dispatch;
@@ -530,6 +530,31 @@ mod tests {
             (
                 "session_dispatch",
                 ToolRoute::Dispatch(Dispatch::Dispatch),
+                AgentCredential,
+            ),
+            (
+                "agent_handoff",
+                ToolRoute::Dispatch(Dispatch::AgentHandoff),
+                AgentCredential,
+            ),
+            (
+                "agent_peers",
+                ToolRoute::Dispatch(Dispatch::AgentPeers),
+                AgentCredential,
+            ),
+            (
+                "agent_message",
+                ToolRoute::Dispatch(Dispatch::AgentMessage),
+                AgentCredential,
+            ),
+            (
+                "agent_messages",
+                ToolRoute::Dispatch(Dispatch::AgentMessages),
+                AgentCredential,
+            ),
+            (
+                "agent_message_ack",
+                ToolRoute::Dispatch(Dispatch::AgentMessageAck),
                 AgentCredential,
             ),
             (

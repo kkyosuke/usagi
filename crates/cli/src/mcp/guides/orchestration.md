@@ -40,6 +40,21 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 
 ## observe と prompt
 
+同じ session で実装とレビューを分担するときは `agent_peers` で相手の ID を確認する。
+まだ起動していない reviewer は `agent_handoff` に schema の runtime/model とレビュー指示を渡して起動する。
+既存 peer の起動は `agent: {"id":"..."}`、稼働中 peer への追加指示は `agent_message` を使う。
+この入口に session selector はなく、呼び出し元自身の session で動く。session の管理 authority は拡張しない。
+
+Codex が実装・commit した後、Claude へ `kind: "review_request"` と `review: {base_sha, head_sha}` を送る。
+`message_id` は新しい UUIDv7、`to_agent_id` は handoff の応答または peers が返した ID とする。
+Claude は `agent_messages {"unread_only":true}` を読み、編集せず指定 SHA の差分を確認し、
+`in_reply_to` に依頼 ID、`review` に同じ SHA を付けた `approved` または `changes_requested` を送る。
+処理済みの受信は `agent_message_ack` で ACK する。修正後は新しい依頼 ID・SHA で再レビューする。
+送信失敗時の再送は同一 ID・同一内容を使う。通知は補助であり、再開時も未読を確認する。
+会話と判定だけでは run を完了しない。自分の委譲作業を終えたときだけ `agent_complete` を使う。
+同じ worktree と session role を共有するため、編集・commit は実装担当だけが行う。レビュー指示は
+強制 read-only 権限ではない。容量・認可・永続化の詳細は仕様書「同じ session の Agent 間通信」を参照する。
+
 `session_list` は durable session identity の軽量一覧、`session_status` は Git 観測を含む詳細一覧である。
 どちらも認証済み caller が作成した session だけを返す。名前が分かっていても別 caller の session を
 `session_status` / `session_prompt` / `session_remove` / 明示 `session_pr` で操作することはできない。

@@ -24,6 +24,7 @@ pub mod generic_terminal;
 pub mod goal_artifact;
 pub mod metrics;
 pub mod orchestration;
+pub mod peer_messages;
 pub mod pr_inventory;
 pub mod pr_projection;
 pub mod replacement;

@@ -2078,6 +2078,36 @@ impl SupervisorRuntime {
             Some(reserved_worker),
             Some(session_name),
             false,
+            false,
+            now,
+        )
+    }
+
+    /// Reserves an exact peer in the supervised caller's managed session.
+    /// Unlike child-session delegation, an explicit peer handoff may select a
+    /// different runtime; that runtime remains part of the durable fence.
+    ///
+    /// # Errors
+    /// Returns an error for self/cross-session handoff, conflicting replay, or
+    /// Supervisor policy and persistence failures.
+    pub fn reserve_peer_handoff(
+        &self,
+        parent_dispatch_run: OperationId,
+        child_operation_id: &str,
+        instruction: impl AsRef<str>,
+        reserved_worker: &usagi_core::domain::agent::Agent,
+        session_name: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<DelegatedDispatchReservation>> {
+        self.reserve_delegated_dispatch_inner(
+            parent_dispatch_run,
+            child_operation_id,
+            instruction,
+            reserved_worker.session_id,
+            Some(reserved_worker),
+            Some(session_name),
+            false,
+            true,
             now,
         )
     }
@@ -2098,6 +2128,7 @@ impl SupervisorRuntime {
             None,
             None,
             false,
+            false,
             now,
         )
     }
@@ -2112,6 +2143,7 @@ impl SupervisorRuntime {
         reserved_worker: Option<&usagi_core::domain::agent::Agent>,
         session_name: Option<&str>,
         allow_existing_agent_operation: bool,
+        peer_handoff: bool,
         now: DateTime<Utc>,
     ) -> Result<Option<DelegatedDispatchReservation>> {
         let instruction = instruction.as_ref();
@@ -2125,9 +2157,28 @@ impl SupervisorRuntime {
         let Some((mut run, parent_task_id)) = self.supervised_parent(parent_dispatch_run)? else {
             return Ok(None);
         };
-        let worker_profile_id = worker_session_id
-            .map(|_| self.dispatch_profile(parent_dispatch_run))
-            .transpose()?;
+        let worker_profile_id = if peer_handoff {
+            let parent = self
+                .dispatch
+                .run(parent_dispatch_run)?
+                .context("handoff parent dispatch is unavailable")?;
+            let parent_agent = self
+                .dispatch
+                .agent(parent.agent_id)?
+                .context("handoff parent Agent is unavailable")?;
+            let worker = reserved_worker.context("handoff requires an exact peer Agent")?;
+            if parent_agent.session_id.is_none()
+                || worker.session_id != parent_agent.session_id
+                || worker.agent_id == parent.agent_id
+            {
+                anyhow::bail!("handoff requires a distinct Agent in the caller's managed session");
+            }
+            Some(worker.runtime.clone())
+        } else {
+            worker_session_id
+                .map(|_| self.dispatch_profile(parent_dispatch_run))
+                .transpose()?
+        };
         if let Some(worker) = reserved_worker
             && (worker.session_id != worker_session_id
                 || worker_profile_id.as_ref() != Some(&worker.runtime))
@@ -2788,6 +2839,7 @@ impl SupervisorRuntime {
                 None,
                 None,
                 true,
+                false,
                 now,
             )?
             .is_none()
@@ -8840,6 +8892,333 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    fn supervised_peer_fixture() -> (
+        tempfile::TempDir,
+        SupervisorRuntime,
+        WorkspaceId,
+        OperationId,
+        AgentRuntimeRef,
+        Agent,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let parent_operation = OperationId::new();
+        let worker = delegated_worker(workspace);
+        persist_caller_dispatch(&scheduler, workspace, parent_operation, &worker);
+        let parent_id = scheduler
+            .dispatch
+            .run(parent_operation)
+            .unwrap()
+            .unwrap()
+            .agent_id;
+        let mut parent = scheduler.dispatch.agent(parent_id).unwrap().unwrap();
+        parent.runtime = AgentProfileId::new("codex").unwrap();
+        scheduler.dispatch.upsert_agent(workspace, parent).unwrap();
+        scheduler
+            .start_for_workspace_caller_dispatch(
+                "caller",
+                workspace,
+                &OperationId::new().to_string(),
+                "implement and review".into(),
+                None,
+                parent_operation,
+                &worker,
+                now(),
+            )
+            .unwrap();
+        let peer = Agent {
+            agent_id: AgentId::new(),
+            session_id: worker.session_id,
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: ModelSelector::new("default").unwrap(),
+            status: AgentStatus::Idle,
+            current_run: None,
+        };
+        (temp, scheduler, workspace, parent_operation, worker, peer)
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Exercise durable reserve/replay/bind with the exact cross-runtime peer fence.
+    fn supervised_peer_handoff_preserves_cross_runtime_fences_across_restart_and_binding() {
+        let (temp, scheduler, workspace, parent_operation, worker, peer) =
+            supervised_peer_fixture();
+        let operation = OperationId::new().to_string();
+        let reserved = scheduler
+            .reserve_peer_handoff(
+                parent_operation,
+                &operation,
+                "review",
+                &peer,
+                "worker",
+                now(),
+            )
+            .unwrap()
+            .unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let replay = scheduler
+            .reserve_peer_handoff(
+                parent_operation,
+                &operation,
+                "review",
+                &peer,
+                "worker",
+                now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(reserved.prompt, replay.prompt);
+        let child_operation = OperationId::parse(&operation).unwrap();
+        let fence = scheduler
+            .supervision_fence(child_operation)
+            .unwrap()
+            .unwrap();
+        let run = scheduler
+            .supervisor
+            .load(fence.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        let task = &run.tasks[&fence.task_id];
+        assert_eq!(task.promotion_worker_profile_id, Some(peer.runtime.clone()));
+        assert_eq!(task.promotion_worker_agent_id, Some(peer.agent_id));
+        assert_eq!(task.promotion_worker_session_id, peer.session_id);
+        assert_eq!(task.promotion_parent_dispatch_run, Some(parent_operation));
+
+        let mut different_runtime = peer.clone();
+        different_runtime.runtime = AgentProfileId::new("codex").unwrap();
+        let mut different_agent = peer.clone();
+        different_agent.agent_id = AgentId::new();
+        for conflicting in [&different_runtime, &different_agent] {
+            assert!(
+                scheduler
+                    .reserve_peer_handoff(
+                        parent_operation,
+                        &operation,
+                        "review",
+                        conflicting,
+                        "worker",
+                        now()
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            scheduler
+                .reserve_peer_handoff(
+                    parent_operation,
+                    &operation,
+                    "changed",
+                    &peer,
+                    "worker",
+                    now()
+                )
+                .is_err()
+        );
+        assert!(
+            scheduler
+                .reserve_peer_handoff(
+                    parent_operation,
+                    &operation,
+                    "review",
+                    &peer,
+                    "renamed",
+                    now()
+                )
+                .is_err()
+        );
+        let parent_id = scheduler
+            .dispatch
+            .run(parent_operation)
+            .unwrap()
+            .unwrap()
+            .agent_id;
+        let mut admitted = peer.clone();
+        admitted.status = AgentStatus::Running;
+        admitted.current_run = Some(child_operation);
+        scheduler
+            .dispatch
+            .reserve_admission_for_workspace(
+                workspace,
+                admitted.clone(),
+                DispatchRun {
+                    run_id: child_operation,
+                    agent_id: peer.agent_id,
+                    prompt: reserved.prompt.clone(),
+                    started_at: now(),
+                    ended_at: None,
+                    status: RunStatus::Running,
+                },
+                DispatchBinding {
+                    run_id: child_operation,
+                    caller: CallerRef {
+                        session_id: peer.session_id,
+                        agent_id: parent_id,
+                    },
+                    worker: WorkerRef {
+                        session_id: peer.session_id,
+                        agent_id: peer.agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: child_operation,
+                    semantic_key: usagi_core::infrastructure::client::agent_dispatch_semantic_key(
+                        "worker",
+                        peer.agent_id,
+                        &reserved.prompt,
+                    ),
+                    credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .unwrap();
+        let mut wrong_profile = admitted.clone();
+        wrong_profile.runtime = AgentProfileId::new("codex").unwrap();
+        scheduler
+            .dispatch
+            .upsert_agent(workspace, wrong_profile)
+            .unwrap();
+        assert!(
+            scheduler
+                .bind_reserved_delegated_dispatch(&operation, &worker, now())
+                .is_err()
+        );
+        scheduler
+            .dispatch
+            .upsert_agent(workspace, admitted)
+            .unwrap();
+        assert!(
+            scheduler
+                .bind_reserved_delegated_dispatch(&operation, &delegated_worker(workspace), now())
+                .is_err()
+        );
+        scheduler
+            .bind_reserved_delegated_dispatch(&operation, &worker, now())
+            .unwrap()
+            .unwrap();
+        assert!(
+            scheduler
+                .reserve_peer_handoff(
+                    parent_operation,
+                    &operation,
+                    "review",
+                    &peer,
+                    "worker",
+                    now()
+                )
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn supervised_peer_handoff_rejects_self_and_other_sessions_without_relaxing_delegation() {
+        let (_temp, scheduler, _workspace, parent_operation, _worker, peer) =
+            supervised_peer_fixture();
+        let parent = scheduler
+            .dispatch
+            .agent(
+                scheduler
+                    .dispatch
+                    .run(parent_operation)
+                    .unwrap()
+                    .unwrap()
+                    .agent_id,
+            )
+            .unwrap()
+            .unwrap();
+        let mut outside = peer.clone();
+        outside.session_id = Some(SessionId::new());
+        let mut unmanaged = peer.clone();
+        unmanaged.session_id = None;
+        for invalid in [&parent, &outside, &unmanaged] {
+            assert!(
+                scheduler
+                    .reserve_peer_handoff(
+                        parent_operation,
+                        &OperationId::new().to_string(),
+                        "review",
+                        invalid,
+                        "worker",
+                        now()
+                    )
+                    .unwrap_err()
+                    .to_string()
+                    .contains("distinct Agent")
+            );
+        }
+        assert!(
+            scheduler
+                .reserve_delegated_dispatch_for_session(
+                    parent_operation,
+                    &OperationId::new().to_string(),
+                    "review",
+                    peer.session_id.unwrap(),
+                    &peer,
+                    "worker",
+                    now()
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("outside its Supervisor scope")
+        );
+        assert!(
+            scheduler
+                .reserve_peer_handoff(
+                    OperationId::new(),
+                    &OperationId::new().to_string(),
+                    "review",
+                    &peer,
+                    "worker",
+                    now()
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn supervised_peer_handoff_still_obeys_dispatch_budget() {
+        let (_temp, scheduler, _workspace, parent_operation, _worker, peer) =
+            supervised_peer_fixture();
+        let fence = scheduler
+            .supervision_fence(parent_operation)
+            .unwrap()
+            .unwrap();
+        let mut run = scheduler
+            .supervisor
+            .load(fence.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        run.policy.max_dispatches = 1;
+        scheduler.supervisor.initialize(&run).unwrap();
+        let operation = OperationId::new();
+        assert!(
+            scheduler
+                .reserve_peer_handoff(
+                    parent_operation,
+                    &operation.to_string(),
+                    "review",
+                    &peer,
+                    "worker",
+                    now()
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("policy denied")
+        );
+        let escalated = scheduler
+            .supervisor
+            .load(fence.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(escalated.state, SupervisorRunState::Escalated);
+        assert!(
+            !escalated
+                .tasks
+                .contains_key(&delegated_task_id(operation).unwrap())
+        );
+        assert!(scheduler.dispatch.run(operation).unwrap().is_none());
     }
 
     #[test]
