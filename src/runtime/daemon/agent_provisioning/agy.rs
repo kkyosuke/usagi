@@ -19,7 +19,7 @@ use super::{
     configured_mcp_tools, effective_role_instruction, insert_root_git_environment,
     launch_allowlist, launch_environment, launch_system_prompt, mcp_environment, paths,
     prompt_scope, sandbox_mode, session_git_policy, shell_quote, validate_claude_sandbox_policy,
-    validate_owned_directory,
+    validate_isolated_sandbox_root, validate_owned_directory,
 };
 
 /// Resolves the checkout, Antigravity plugin, prompt, environment, and outer
@@ -38,6 +38,7 @@ pub(in crate::runtime::daemon) struct RootAgyProvisioner {
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 impl AgyProvisioner for RootAgyProvisioner {
+    #[allow(clippy::too_many_lines)] // One path keeps AGY plugin isolation, sandbox, prompt, and spawn arguments visibly atomic.
     fn provision(
         &mut self,
         context: &ProvisionContext,
@@ -54,23 +55,8 @@ impl AgyProvisioner for RootAgyProvisioner {
             .then(|| configured_mcp_tools(&self.data_home, &workspace_root))
             .transpose()
             .map_err(|()| AgyProvisionFailure::MaterializationFailed)?;
-        let arguments = agy_plugin_arguments(
-            &self.data_home,
-            context.scope.workspace_id,
-            &self.mcp_command,
-            context.inject_mcp,
-        )
-        .map_err(|()| AgyProvisionFailure::MaterializationFailed)?;
         let user = configured_environment(self.environment.as_ref(), &workspace_root)
             .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
-        let mut spawn = SpawnProvision::new(
-            launch_environment(
-                &user,
-                mcp_environment(context, &self.data_home, &workspace_root)
-                    .map_err(|()| AgyProvisionFailure::MaterializationFailed)?,
-            ),
-            arguments,
-        );
         let session_git = if mode == SandboxMode::Session {
             session_git_policy(&workspace_root, &working_directory)
                 .map_err(|()| AgyProvisionFailure::MaterializationFailed)?
@@ -87,7 +73,10 @@ impl AgyProvisioner for RootAgyProvisioner {
             context.scope.workspace_id,
         )
         .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
-        validate_claude_sandbox_policy(&SandboxPolicyInputs {
+        let mut read_only_roots = prepare_agy_global_config_root(self.sandbox_home.as_deref())?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let policy = SandboxPolicyInputs {
             mode,
             program: DefaultModel::Agy.command(),
             workspace_root: &workspace_root,
@@ -97,8 +86,28 @@ impl AgyProvisioner for RootAgyProvisioner {
             cache_dir: self.sandbox_cache_dir.as_deref(),
             backend: self.sandbox_backend.as_deref(),
             passthrough: self.sandbox_passthrough,
-        })
-        .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
+            read_only_roots: &read_only_roots,
+        };
+        validate_claude_sandbox_policy(&policy)
+            .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
+        let (arguments, integration) = agy_plugin_arguments(
+            &self.data_home,
+            context.scope.workspace_id,
+            &self.mcp_command,
+            context.inject_mcp,
+            self.sandbox_passthrough,
+            &policy,
+        )
+        .map_err(|()| AgyProvisionFailure::MaterializationFailed)?;
+        read_only_roots.extend(integration);
+        let mut spawn = SpawnProvision::new(
+            launch_environment(
+                &user,
+                mcp_environment(context, &self.data_home, &workspace_root)
+                    .map_err(|()| AgyProvisionFailure::MaterializationFailed)?,
+            ),
+            arguments,
+        );
         let protected_root = workspace_root
             .canonicalize()
             .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
@@ -113,6 +122,7 @@ impl AgyProvisioner for RootAgyProvisioner {
                 cache_dir: self.sandbox_cache_dir.as_deref(),
             },
             &sandbox_roots,
+            &read_only_roots,
         )
         .map_err(|()| AgyProvisionFailure::MaterializationFailed)?;
         spawn.set_sandbox_launcher(launcher);
@@ -140,18 +150,71 @@ impl AgyProvisioner for RootAgyProvisioner {
     }
 }
 
-fn agy_plugin_arguments(
+pub(in crate::runtime::daemon) fn agy_plugin_arguments(
     data_home: &paths::DataHome,
     workspace: usagi_core::domain::id::WorkspaceId,
     command: &std::path::Path,
     enabled: bool,
-) -> Result<Vec<String>, ()> {
+    passthrough: bool,
+    policy: &SandboxPolicyInputs<'_>,
+) -> Result<(Vec<String>, Option<PathBuf>), ()> {
     if !enabled {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
+    }
+    let target = agy_integration_root(data_home, workspace)?;
+    if !passthrough {
+        validate_isolated_sandbox_root(policy, &target).map_err(|_| ())?;
     }
     let integration = materialize_agy_plugin(data_home, workspace, command)?;
     let integration = integration.to_str().ok_or(())?;
-    Ok(vec!["--add-dir".to_owned(), integration.to_owned()])
+    Ok((
+        vec!["--add-dir".to_owned(), integration.to_owned()],
+        Some(PathBuf::from(integration)),
+    ))
+}
+
+fn agy_integration_root(
+    data_home: &paths::DataHome,
+    workspace: usagi_core::domain::id::WorkspaceId,
+) -> Result<PathBuf, ()> {
+    let selected = data_home.selected().canonicalize().map_err(|_| ())?;
+    Ok(selected
+        .join("agent-integrations")
+        .join(workspace.to_string())
+        .join("agy"))
+}
+
+/// Ensures AGY's global customization directory exists before it is bound
+/// read-only. Existing hooks, MCP settings, and user plugins are preserved.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agy_global_config_is_read_only_in_the_shipping_sandbox
+fn prepare_agy_global_config_root(
+    home: Option<&std::path::Path>,
+) -> Result<Option<PathBuf>, AgyProvisionFailure> {
+    let Some(home) = home else {
+        return Ok(None);
+    };
+    validate_owned_directory(home).map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
+    let mut current = home.to_path_buf();
+    for component in [".gemini", "config"] {
+        current.push(component);
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        match builder.create(&current) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(AgyProvisionFailure::MaterializationFailed),
+        }
+        validate_owned_directory(&current)
+            .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
+    }
+    current
+        .canonicalize()
+        .map(Some)
+        .map_err(|_| AgyProvisionFailure::MaterializationFailed)
 }
 
 /// Provider-native workspace plugin documents loaded by Antigravity CLI.
@@ -217,11 +280,7 @@ pub(in crate::runtime::daemon) fn materialize_agy_plugin(
     workspace: usagi_core::domain::id::WorkspaceId,
     command: &std::path::Path,
 ) -> Result<PathBuf, ()> {
-    let integration = data_home
-        .selected()
-        .join("agent-integrations")
-        .join(workspace.to_string())
-        .join("agy");
+    let integration = agy_integration_root(data_home, workspace)?;
     let plugin = integration.join(".agents/plugins/usagi-runtime");
     ensure_private_dir_all(&plugin).map_err(|_| ())?;
     validate_owned_directory(&plugin).map_err(|_| ())?;

@@ -18,7 +18,7 @@ use super::{
 mod agy;
 pub(super) use agy::RootAgyProvisioner;
 #[cfg(test)]
-pub(super) use agy::{agy_plugin_documents, materialize_agy_plugin};
+pub(super) use agy::{agy_plugin_arguments, agy_plugin_documents, materialize_agy_plugin};
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(
@@ -213,6 +213,7 @@ impl CodexProvisioner for RootCodexProvisioner {
             cache_dir: self.sandbox_cache_dir.as_deref(),
             backend: self.sandbox_backend.as_deref(),
             passthrough: self.sandbox_passthrough,
+            read_only_roots: &[],
         })
         .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
         let protected_root = workspace_root
@@ -229,6 +230,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                 cache_dir: self.sandbox_cache_dir.as_deref(),
             },
             &sandbox_roots,
+            &[],
         )
         .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         spawn.set_sandbox_launcher(launcher);
@@ -451,14 +453,14 @@ impl RootClaudeProvisioner {
 }
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_root_claude_keeps_the_repository_read_only_and_gets_the_guard_hook
 impl ClaudeProvisioner for RootClaudeProvisioner {
+    #[allow(clippy::too_many_lines)] // One path keeps Claude's sandbox, hooks, prompt, and spawn arguments visibly atomic.
     fn provision(
         &mut self,
         context: &ProvisionContext,
     ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
         let (working_directory, workspace_root) = working_directories(&self.workspaces, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
-        // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
-        // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
+        // Claude は OS sandbox と `guard-workspace` の両方で fail-closed 起動する。
         let mode = sandbox_mode(context);
         let session_git = if mode == SandboxMode::Session {
             session_git_policy(&workspace_root, &working_directory)
@@ -488,6 +490,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             cache_dir: paths.cache_dir,
             backend: paths.backend,
             passthrough: self.sandbox_passthrough,
+            read_only_roots: &[],
         })
         .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
         let sandbox_roots = launch_roots
@@ -504,6 +507,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             &protected_root,
             &paths,
             &sandbox_roots,
+            &[],
         )
         .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         let role =
@@ -826,6 +830,8 @@ pub(super) struct SandboxPolicyInputs<'a> {
     pub(super) cache_dir: Option<&'a Path>,
     pub(super) backend: Option<&'a Path>,
     pub(super) passthrough: bool,
+    /// writable provider state の内側を再び read-only にする、実在・検証済み directory。
+    pub(super) read_only_roots: &'a [PathBuf],
 }
 
 /// launcher へ host path を渡す前に通す policy gate。writable root 集合・`$HOME` 配下の
@@ -844,6 +850,7 @@ pub(super) fn validate_claude_sandbox_policy(
         cache_dir,
         backend,
         passthrough,
+        read_only_roots,
     } = *policy;
     if !cfg!(any(target_os = "macos", target_os = "linux")) {
         return Err(ClaudeSandboxPolicyError::MissingBackend);
@@ -926,8 +933,56 @@ pub(super) fn validate_claude_sandbox_policy(
             return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
         }
     }
+    for root in read_only_roots {
+        validate_owned_directory(root)?;
+        if root
+            .canonicalize()
+            .ok()
+            .as_deref()
+            .is_none_or(|canonical| canonical != root)
+        {
+            return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
+        }
+    }
     Ok(())
 }
+
+/// Materialization target が launcher の完全な write surface と重ならないことを確認する。
+/// target 自体はまだ存在しなくてよく、呼び出し側はこの gate の後にだけ作成する。
+pub(super) fn validate_isolated_sandbox_root(
+    policy: &SandboxPolicyInputs<'_>,
+    target: &Path,
+) -> Result<(), ClaudeSandboxPolicyError> {
+    if target.starts_with(policy.workspace_root) || policy.workspace_root.starts_with(target) {
+        return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
+    }
+    let request = claude_sandbox::SandboxRequest {
+        platform: HOST_SANDBOX_PLATFORM,
+        mode: policy.mode,
+        protected_root: Some(policy.workspace_root.to_path_buf()),
+        backend: None,
+        launch_roots: policy.launch_roots.to_vec(),
+        read_only_roots: policy.read_only_roots.to_vec(),
+        tmpdir: policy.tmpdir.map(Path::to_path_buf),
+        home: policy.home.map(Path::to_path_buf),
+        linux_home_entries: None,
+        cache_dir: policy.cache_dir.map(Path::to_path_buf),
+        passthrough: false,
+        command: vec![policy.program.to_owned()],
+    };
+    if claude_sandbox::writable_surface_overlaps(&request, target) {
+        Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+const HOST_SANDBOX_PLATFORM: claude_sandbox::Platform = claude_sandbox::Platform::MacOs;
+#[cfg(target_os = "linux")]
+const HOST_SANDBOX_PLATFORM: claude_sandbox::Platform = claude_sandbox::Platform::Linux;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const HOST_SANDBOX_PLATFORM: claude_sandbox::Platform = claude_sandbox::Platform::Unsupported;
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_cold_starts_through_the_out_of_sandbox_broker
 pub(super) fn validate_sandbox_backend(path: &Path) -> Result<(), ClaudeSandboxPolicyError> {
@@ -1009,7 +1064,8 @@ pub(super) struct SandboxLauncherPaths<'a> {
     pub(super) cache_dir: Option<&'a Path>,
 }
 
-/// `usagi claude-sandbox --mode <mode> [--writable-root <path>]… --`, the ephemeral
+/// `usagi claude-sandbox --mode <mode> [--writable-root <path>]… [--read-only-root <path>]… --`,
+/// the ephemeral
 /// instruction that makes the spawned child the launcher instead of the bare
 /// product.  Host paths stay out of the durable launch snapshot.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
@@ -1019,6 +1075,7 @@ pub(super) fn claude_sandbox_launcher(
     protected_root: &Path,
     paths: &SandboxLauncherPaths<'_>,
     writable_roots: &[PathBuf],
+    read_only_roots: &[PathBuf],
 ) -> Result<SandboxLauncher, ()> {
     let mut prefix = vec![
         "claude-sandbox".to_owned(),
@@ -1040,6 +1097,10 @@ pub(super) fn claude_sandbox_launcher(
     }
     for root in writable_roots {
         prefix.push("--writable-root".to_owned());
+        prefix.push(root.to_str().ok_or(())?.to_owned());
+    }
+    for root in read_only_roots {
+        prefix.push("--read-only-root".to_owned());
         prefix.push(root.to_str().ok_or(())?.to_owned());
     }
     prefix.push("--".to_owned());

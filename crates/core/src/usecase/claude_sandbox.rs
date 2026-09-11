@@ -13,8 +13,9 @@
 //! （`$TMPDIR`・`/tmp`・`/var/tmp`・起動する agent CLI 自身の state と global config・macOS の
 //! Keychain と system / per-user の MDS cache）を加える。daemon の再起動は sandbox 外の bootstrap broker に
 //! 委譲し、data home は writable root に含めない。sandbox は書き込みだけをこの root 集合に
-//! 閉じ込め、読み取りは許す（読み取り側の論理境界は
-//! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う）。
+//! 閉じ込め、provider state 内の global customization などは [`SandboxRequest::read_only_roots`]
+//! で後段の read-only carve-out に戻す。読み取り側の論理境界は
+//! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う。
 //!
 //! 普遍領域を session から落とすと、agent CLI は**その worktree の中でしか動けない**という以前に
 //! **起動できない**。Claude Code は tool を実行するたびに `$TMPDIR` を無視した固定 path
@@ -110,6 +111,9 @@ pub struct SandboxRequest {
     pub backend: Option<PathBuf>,
     /// provisioner が起動 scope から渡す writable root。
     pub launch_roots: Vec<PathBuf>,
+    /// writable root の内側でも書き込みを再度閉じる read-only carve-out。
+    /// 対象は launcher 起動前に実在・検証済みでなければならない。
+    pub read_only_roots: Vec<PathBuf>,
     /// `$TMPDIR`（あれば）。
     pub tmpdir: Option<PathBuf>,
     /// `$HOME`（あれば）。Claude state・macOS の Keychain に使う。
@@ -177,7 +181,14 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
             None => reject_backend("sandbox-exec"),
             Some(backend) => SandboxPlan::Launch {
                 program: backend.clone(),
-                argv: macos_argv(request.mode, &roots, &prefixes, program, program_args),
+                argv: macos_argv(
+                    request.mode,
+                    &roots,
+                    &prefixes,
+                    &request.read_only_roots,
+                    program,
+                    program_args,
+                ),
             },
         },
         Platform::Linux => match &request.backend {
@@ -189,6 +200,7 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
                     &prefixes,
                     request.home.as_deref(),
                     request.linux_home_entries.as_deref(),
+                    &request.read_only_roots,
                     program,
                     program_args,
                 ),
@@ -228,6 +240,11 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
         });
         if overlaps_workspace {
             return Some("writable prefix が保護対象 workspace と重なります".to_owned());
+        }
+    }
+    for root in &request.read_only_roots {
+        if !root.is_absolute() || root == Path::new("/") || root.to_str().is_none() {
+            return Some("read-only root が安全な absolute path ではありません".to_owned());
         }
     }
     if request.platform == Platform::Linux && !writable_prefixes(request).is_empty() {
@@ -350,17 +367,53 @@ fn writable_prefixes(request: &SandboxRequest) -> Vec<PathBuf> {
     prefixes.into_iter().collect()
 }
 
+/// `candidate` が launcher の実効 writable root / prefix と双方向に重なるかを返す。
+///
+/// daemon-private な provider integration を materialize する前の fail-closed gate が使う。
+/// macOS では `/tmp` などの firmlink 後の `/private` 側も同じ write surface として扱う。
+#[must_use]
+pub fn writable_surface_overlaps(request: &SandboxRequest, candidate: &Path) -> bool {
+    if !candidate.is_absolute() || candidate == Path::new("/") || candidate.to_str().is_none() {
+        return true;
+    }
+    let candidates = if request.platform == Platform::MacOs {
+        macos_write_roots(&[candidate.to_path_buf()])
+    } else {
+        BTreeSet::from([candidate.to_path_buf()])
+    };
+    let roots = if request.platform == Platform::MacOs {
+        macos_write_roots(&writable_roots(request))
+    } else {
+        writable_roots(request).into_iter().collect()
+    };
+    if candidates.iter().any(|candidate| {
+        roots
+            .iter()
+            .any(|root| candidate.starts_with(root) || root.starts_with(candidate))
+    }) {
+        return true;
+    }
+    writable_prefixes(request).iter().any(|prefix| {
+        candidates.iter().any(|candidate| {
+            prefix.starts_with(candidate)
+                || path_has_prefix(candidate, prefix)
+                || candidate.to_str().zip(prefix.to_str()).is_none()
+        })
+    })
+}
+
 /// macOS: `sandbox-exec -p <profile> <program> <args…>`。
 fn macos_argv(
     mode: SandboxMode,
     roots: &[PathBuf],
     prefixes: &[PathBuf],
+    read_only_roots: &[PathBuf],
     program: &str,
     program_args: &[String],
 ) -> Vec<String> {
     let mut argv = vec![
         "-p".to_owned(),
-        macos_profile(mode, roots, prefixes),
+        macos_profile(mode, roots, prefixes, read_only_roots),
         program.to_owned(),
     ];
     argv.extend(program_args.iter().cloned());
@@ -378,7 +431,12 @@ fn macos_argv(
 /// `> /dev/fd/1` を日常的に使い、literal 列挙ではそれらが `Operation not permitted` になるためである。
 /// 代わりに動詞を `file-write-data` に絞ってあるので、`/dev` への node 作成・削除・属性変更は
 /// deny のまま残る。
-fn macos_profile(mode: SandboxMode, roots: &[PathBuf], prefixes: &[PathBuf]) -> String {
+fn macos_profile(
+    mode: SandboxMode,
+    roots: &[PathBuf],
+    prefixes: &[PathBuf],
+    read_only_roots: &[PathBuf],
+) -> String {
     let subpaths = macos_write_roots(roots)
         .iter()
         .fold(String::new(), |mut acc, root| {
@@ -396,8 +454,19 @@ fn macos_profile(mode: SandboxMode, roots: &[PathBuf], prefixes: &[PathBuf]) -> 
             );
             acc
         });
+    let read_only_rules =
+        macos_write_roots(read_only_roots)
+            .iter()
+            .fold(String::new(), |mut acc, root| {
+                let _ = writeln!(
+                    acc,
+                    "(deny file-write* (subpath {}))",
+                    sandbox_string_literal(root)
+                );
+                acc
+            });
     format!(
-        "(version 1)\n;; usagi claude-sandbox mode={}\n(allow default)\n(deny file-write*)\n(allow file-write*\n{subpaths})\n{prefix_rules}(allow file-write-data (subpath \"/dev\"))\n",
+        "(version 1)\n;; usagi claude-sandbox mode={}\n(allow default)\n(deny file-write*)\n(allow file-write*\n{subpaths})\n{prefix_rules}{read_only_rules}(allow file-write-data (subpath \"/dev\"))\n",
         mode.as_str()
     )
 }
@@ -482,6 +551,7 @@ fn linux_argv(
     prefixes: &[PathBuf],
     home: Option<&Path>,
     home_entries: Option<&[PathBuf]>,
+    read_only_roots: &[PathBuf],
     program: &str,
     program_args: &[String],
 ) -> Vec<String> {
@@ -507,6 +577,9 @@ fn linux_argv(
     }
     for root in roots {
         push_linux_bind(&mut argv, "--bind-try", root);
+    }
+    for root in read_only_roots {
+        push_linux_bind(&mut argv, "--ro-bind", root);
     }
     argv.push(program.to_owned());
     argv.extend(program_args.iter().cloned());
@@ -537,6 +610,7 @@ mod tests {
             protected_root: Some(PathBuf::from("/repo")),
             backend: backend.map(PathBuf::from),
             launch_roots: vec![PathBuf::from("/repo/.usagi/sessions/work")],
+            read_only_roots: Vec::new(),
             tmpdir: Some(PathBuf::from("/tmp/user")),
             home: Some(PathBuf::from("/home/dev")),
             linux_home_entries: Some(vec![
@@ -822,6 +896,28 @@ mod tests {
                 .into_reject()
                 .is_some_and(|reason| reason.contains("writable root"))
         );
+
+        for read_only in ["/", "relative"] {
+            let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
+            request.read_only_roots = vec![PathBuf::from(read_only)];
+            assert!(
+                plan(&request)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("read-only root"))
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+            let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
+            request.read_only_roots = vec![PathBuf::from(OsString::from_vec(vec![b'/', 0xff]))];
+            assert!(
+                plan(&request)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("read-only root"))
+            );
+        }
     }
 
     // A session launch that only owns its worktree cannot run the agent at all:
@@ -978,6 +1074,7 @@ mod tests {
             &[PathBuf::from("/home/dev/.claude.json")],
             None,
             None,
+            &[],
             "claude",
             &[],
         );
@@ -1010,6 +1107,104 @@ mod tests {
                     .into_reject()
                     .is_some_and(|reason| reason.contains("writable prefix"))
             );
+        }
+    }
+
+    #[test]
+    fn read_only_carve_out_is_applied_after_writable_grants() {
+        for platform in [Platform::MacOs, Platform::Linux] {
+            let mut request = request(platform, Some("/sandbox"));
+            request.command = vec!["agy".to_owned()];
+            request.read_only_roots = vec![PathBuf::from("/home/dev/.gemini/config")];
+            let (_, argv) = plan(&request).into_launch().unwrap();
+            match platform {
+                Platform::MacOs => {
+                    let profile = &argv[1];
+                    let allow = profile.find("(subpath \"/home/dev/.gemini\")").unwrap();
+                    let deny = profile
+                        .find("(deny file-write* (subpath \"/home/dev/.gemini/config\"))")
+                        .unwrap();
+                    assert!(deny > allow);
+                }
+                Platform::Linux => {
+                    let writable = argv
+                        .windows(3)
+                        .position(|window| {
+                            window[0] == "--bind-try" && window[1] == "/home/dev/.gemini"
+                        })
+                        .unwrap();
+                    let read_only = argv
+                        .windows(3)
+                        .position(|window| {
+                            window[0] == "--ro-bind" && window[1] == "/home/dev/.gemini/config"
+                        })
+                        .unwrap();
+                    assert!(read_only > writable);
+                }
+                Platform::Unsupported => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_root_overlap_covers_universal_state_launch_and_prefix_surfaces() {
+        let mut request = request(Platform::MacOs, Some("/sandbox"));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/private/tmp/usagi/agent-integrations")
+        ));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/private/var/tmp/usagi/agent-integrations")
+        ));
+        request.tmpdir = Some(PathBuf::from("/custom/tmpdir"));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/custom/tmpdir/agent-integrations")
+        ));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.claude/integration")
+        ));
+        for candidate in [
+            "/home/dev/Library/Keychains/integration",
+            "/Library/Keychains/integration",
+            "/private/var/db/mds/integration",
+            "/private/var/folders/ab/cd/C/mds/integration",
+        ] {
+            assert!(writable_surface_overlaps(&request, Path::new(candidate)));
+        }
+        assert!(writable_surface_overlaps(&request, Path::new("/repo")));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.claude.json-integration")
+        ));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.claude.json")
+        ));
+        request.command = vec!["agy".to_owned()];
+        assert!(!writable_surface_overlaps(
+            &request,
+            Path::new("/daemon/agent-integrations/workspace/agy")
+        ));
+        assert!(writable_surface_overlaps(&request, Path::new("relative")));
+        request.platform = Platform::Linux;
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/tmp/agent-integrations")
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+            request.command = vec!["claude".to_owned()];
+            request.home = Some(PathBuf::from(OsString::from_vec(vec![b'/', 0xff])));
+            assert!(writable_surface_overlaps(
+                &request,
+                Path::new("/daemon/agent-integrations")
+            ));
         }
     }
 

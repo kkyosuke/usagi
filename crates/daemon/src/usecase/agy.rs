@@ -23,7 +23,7 @@ use super::runtime::{
 };
 
 /// Revision 2 scopes the plugin to managed launches through a private workspace.
-pub const PROFILE_REVISION: u32 = 2;
+pub const PROFILE_REVISION: u32 = 3;
 
 /// Product-private provisioning result for one Antigravity launch.
 pub struct AgyProvision {

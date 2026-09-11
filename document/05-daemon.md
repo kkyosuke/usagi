@@ -1600,8 +1600,9 @@ server だけである。それ以外の MCP server・shell・ファイル編集
 Antigravity は daemon data の
 `agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/mcp_config.json` から同じ server を起動する。
 daemon は専用 plugin directory だけを atomic update し、その synthetic workspace を private `--add-dir` で managed launch
-へだけ追加する。plugin root は sandbox writable roots に含めないため Agent は設定を永続的に差し替えられず、利用者の
-`~/.gemini/config/`、実 workspace の `.agents/`、他 plugin は変更しない。
+へだけ追加する。plugin root が worktree、provider state、temporary directory を含む実効 writable surface と重なる構成は
+作成前に拒否し、sandbox でも read-only に戻す。さらに managed launch の `~/.gemini/config/` 全体を read-only にして、
+global hooks / MCP / plugins の新規作成・置換を防ぐ。既存 customization と実 workspace の `.agents/` は置換しない。
 
 daemon が provision した live Agent provider の直系 MCP child だけが、起動後の one-shot IPC claim で runtime に結び付く opaque な
 caller credential を受け取る。claim は kernel 由来の peer PID / 親 PID / process group、live runtime、generation と

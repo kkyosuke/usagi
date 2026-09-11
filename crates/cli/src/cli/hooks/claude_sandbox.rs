@@ -1,8 +1,8 @@
-//! `usagi claude-sandbox --mode <session|root> [--writable-root <path>]… -- <program> <args…>`
-//! — OS sandbox の中で Claude を fail-closed 起動する内部コマンド。
+//! `usagi claude-sandbox --mode <session|root> [--writable-root <path>]… [--read-only-root <path>]… -- <program> <args…>`
+//! — OS sandbox の中で Agent CLI を fail-closed 起動する内部コマンド。
 //!
-//! usagi の Claude provisioner が起動 program をこの launcher で包む（`usagi claude-sandbox … --
-//! claude …`）。人手で叩くものではない（`--help` 非表示）。ここは解析済み引数を typed な
+//! usagi の Agent provisioner が起動 program をこの launcher で包む。人手で叩くものではない
+//! （`--help` 非表示）。ここは解析済み引数を typed な
 //! [`RunOutcome::ClaudeSandbox`] にまとめるだけの薄いシムで、daemon bootstrap が確定した backend / policy
 //! path の再検証と実 exec は合成ルートが束ねる。sandbox 計画の純粋な決定部は
 //! [`usagi_core::usecase::claude_sandbox`] にあり、backend 不在・未対応 platform では起動を拒否する
@@ -32,6 +32,8 @@ pub struct ClaudeSandbox {
     pub cache_dir: Option<PathBuf>,
     /// sandbox が書き込みを許す起動固有 root。
     pub writable_roots: Vec<PathBuf>,
+    /// writable root 内を再度読み取り専用にする carve-out。
+    pub read_only_roots: Vec<PathBuf>,
     /// sandbox の中で exec する program と引数。
     pub command: Vec<String>,
 }
@@ -46,6 +48,7 @@ impl Run for ClaudeSandbox {
             home: self.home.clone(),
             cache_dir: self.cache_dir.clone(),
             writable_roots: self.writable_roots.clone(),
+            read_only_roots: self.read_only_roots.clone(),
             command: self.command.clone(),
         })
     }
@@ -82,6 +85,8 @@ mod tests {
             "/repo/.usagi/sessions/work",
             "--writable-root",
             "/repo/.git",
+            "--read-only-root",
+            "/home/dev/.gemini/config",
             "--",
             "claude",
             "--print",
@@ -99,6 +104,7 @@ mod tests {
                     PathBuf::from("/repo/.usagi/sessions/work"),
                     PathBuf::from("/repo/.git"),
                 ],
+                read_only_roots: vec![PathBuf::from("/home/dev/.gemini/config")],
                 command: vec!["claude".to_owned(), "--print".to_owned()],
             }
         );
@@ -129,6 +135,7 @@ mod tests {
                 home: None,
                 cache_dir: Some(PathBuf::from("/private/var/folders/ab/cd/C")),
                 writable_roots: vec![],
+                read_only_roots: vec![],
                 command: vec!["claude".to_owned()],
             }
         );

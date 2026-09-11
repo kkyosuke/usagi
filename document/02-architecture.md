@@ -761,7 +761,7 @@ IPC wire、`gh` enrichment、TUI 表示はこの projection を読む後続の�
 
 agent runtime と generic shell の terminal lifecycle は `usecase::terminal` が正本である。両者は
 `TerminalRuntimeState`、`TerminalReconcileState`、`SpawnFailure` と `TerminalRegistry` を共通で使う。
-違いは terminal を起動する前段だけで、Claude/Codex は terminal launch 子層の adapter、generic shell は
+違いは terminal を起動する前段だけで、Antigravity / Claude / Codex は terminal launch 子層の adapter、generic shell は
 trusted terminal profile resolver として program/cwd/env を解決する。いずれも reservation 後の detach、replay、
 verified exit、reclaim を独自実装しない。
 
@@ -1059,8 +1059,10 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
 - **Antigravity plugin**: daemon は selected data directory の
   `agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を作成・更新し、synthetic workspace を private
   `--add-dir` で managed launch にだけ追加する。`plugin.json`、`mcp_config.json`、`hooks.json` を atomic write し、
-  sandbox writable roots には plugin root を含めない。したがって Agent 自身による永続的な hook 差し替えと、管理外の
-  `agy` への統合残留を防ぎ、利用者の global/workspace plugin や top-level MCP/hook 設定も置換しない。`PreInvocation` で `running` と
+  plugin root は実効 writable root / prefix（worktree、provider state、`TMPDIR`、`/tmp`、`/var/tmp` を含む）との
+  双方向 overlap を作成前に拒否し、sandbox でも明示 read-only に戻す。managed AGY の
+  `~/.gemini/config` も read-only carve-out にするため、Agent 自身による global hook / MCP / plugin の永続注入と、管理外の
+  `agy` への統合残留を防ぐ。利用者の既存 global/workspace customization は読み取れるが置換しない。`PreInvocation` で `running` と
   `conversationId`、`PreToolUse` / `PostToolUse` で `running` / `waiting`、`Stop` で `ended` を報告する。
   hook は stdin を `usagi agent-phase` が一度だけ消費し、daemon が受理した後に Antigravity 所定の JSON を stdout へ返す。
 - **`TMPDIR` 伝播**: agent child は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable
@@ -1093,6 +1095,8 @@ launcher は、**exec する program 自身の state directory** を `$HOME` 配
   Git common dir）と重なる構成を拒否する。
 - grant は両 mode に効く。session の agent CLI も利用者本人の state directory をそのまま使うため、
   onboarding・theme・permission mode・MCP 承認・認証は session をまたいで持続する。
+- `agy` の state root では認証・会話 state を writable に保つ一方、global customization root
+  `~/.gemini/config` を managed launch 中だけ read-only に戻す。既存の hooks / MCP / plugins は保持して読み取れる。
 
 #### agent global config の writable prefix
 

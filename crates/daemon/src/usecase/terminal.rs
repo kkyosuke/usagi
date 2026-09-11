@@ -85,7 +85,7 @@ pub fn output_pipeline_counters() -> OutputPipelineCounters {
 
 /// The durable process state shared by every daemon-owned terminal.
 ///
-/// Agent adapters (Claude/Codex) and the generic shell path differ only in
+/// Agent adapters (Antigravity/Claude/Codex) and the generic shell path differ only in
 /// how they resolve a launch; once a `TerminalRef` is reserved, they use this
 /// same lifecycle vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

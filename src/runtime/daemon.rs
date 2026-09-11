@@ -37,16 +37,17 @@ use dispatch::{
 #[cfg(test)]
 use agent_provisioning::{
     CLAUDE_PROGRAM, ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs,
-    agent_writable_roots, agy_plugin_documents, claude_mcp_arguments, claude_prompt_arguments,
-    claude_sandbox_launcher, claude_settings_arguments, claude_system_prompt_arguments,
-    claude_writable_roots, codex_developer_instructions_arguments, codex_integration_arguments,
-    codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
-    effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
-    lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
+    agent_writable_roots, agy_plugin_arguments, agy_plugin_documents, claude_mcp_arguments,
+    claude_prompt_arguments, claude_sandbox_launcher, claude_settings_arguments,
+    claude_system_prompt_arguments, claude_writable_roots, codex_developer_instructions_arguments,
+    codex_integration_arguments, codex_system_prompt_arguments, configured_environment,
+    configured_mcp_tools, effective_role_instruction, git_common_dir, insert_root_git_environment,
+    launch_environment, lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
     mcp_environment_allowlist, prompt_scope, repair_codex_arg0_permissions,
     repair_codex_arg0_permissions_with_limit, root_agent_writable_roots, root_memory_store_root,
     sandbox_mode, session_git_common_dir, session_git_policy, shell_quote, toml_basic_string,
-    validate_claude_sandbox_policy, validate_root_git_common_dir_policy,
+    validate_claude_sandbox_policy, validate_isolated_sandbox_root,
+    validate_root_git_common_dir_policy,
 };
 use agent_provisioning::{
     DiscardJournal, RootClaudeProvisioner, RootCodexProvisioner,
@@ -18535,6 +18536,112 @@ instructions = "{instructions}"
     }
 
     #[test]
+    fn agy_plugin_arguments_materialize_only_outside_the_write_surface() {
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
+        let workspace = WorkspaceId::new();
+        let policy = SandboxPolicyInputs {
+            mode: SandboxMode::Root,
+            program: DefaultModel::Agy.command(),
+            workspace_root: Path::new("/workspace"),
+            launch_roots: &[],
+            tmpdir: None,
+            home: None,
+            cache_dir: None,
+            backend: None,
+            passthrough: false,
+            read_only_roots: &[],
+        };
+        assert_eq!(
+            agy_plugin_arguments(
+                &data_home,
+                workspace,
+                Path::new("usagi"),
+                false,
+                false,
+                &policy
+            )
+            .unwrap(),
+            (Vec::new(), None)
+        );
+        let (arguments, isolated) = agy_plugin_arguments(
+            &data_home,
+            workspace,
+            Path::new("usagi"),
+            true,
+            false,
+            &policy,
+        )
+        .unwrap();
+        let isolated = isolated.unwrap();
+        assert_eq!(
+            arguments,
+            [
+                "--add-dir".to_owned(),
+                isolated.to_str().unwrap().to_owned()
+            ]
+        );
+
+        let temporary = tempfile::tempdir().unwrap();
+        let temporary_data = paths::DataHome::new(temporary.path(), paths::RuntimeMode::Production);
+        let temporary_policy = SandboxPolicyInputs {
+            tmpdir: Some(temporary.path()),
+            ..policy
+        };
+        assert!(
+            agy_plugin_arguments(
+                &temporary_data,
+                workspace,
+                Path::new("usagi"),
+                true,
+                false,
+                &temporary_policy,
+            )
+            .is_err()
+        );
+        assert!(!temporary.path().join("agent-integrations").exists());
+    }
+
+    #[test]
+    fn agy_integration_rejects_every_effective_sandbox_write_surface() {
+        let roots = [PathBuf::from("/repo/.usagi/sessions/agy")];
+        let policy = SandboxPolicyInputs {
+            mode: SandboxMode::Session,
+            program: DefaultModel::Agy.command(),
+            workspace_root: Path::new("/repo"),
+            launch_roots: &roots,
+            tmpdir: Some(Path::new("/custom/tmpdir")),
+            home: Some(Path::new("/home/dev")),
+            cache_dir: Some(Path::new("/private/var/folders/ab/cd/C")),
+            backend: None,
+            passthrough: false,
+            read_only_roots: &[],
+        };
+        for target in [
+            "/tmp/usagi/agent-integrations",
+            "/var/tmp/usagi/agent-integrations",
+            "/custom/tmpdir/agent-integrations",
+            "/repo/.usagi/sessions/agy/private-plugin",
+            "/repo/daemon-data/agent-integrations",
+            "/home/dev/.gemini/private-plugin",
+        ] {
+            assert_eq!(
+                validate_isolated_sandbox_root(&policy, Path::new(target)),
+                Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
+                "{target} must fail closed"
+            );
+        }
+        assert_eq!(
+            validate_isolated_sandbox_root(
+                &policy,
+                Path::new("/daemon/agent-integrations/workspace/agy")
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn agent_memory_root_is_shared_by_workspace_and_outside_the_checkout() {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -19283,6 +19390,7 @@ instructions = "{instructions}"
             Path::new("/repo"),
             &SandboxLauncherPaths::default(),
             &roots,
+            &[],
         )
         .unwrap();
         assert_eq!(launcher.program, "/opt/usagi/bin/usagi");
@@ -19317,6 +19425,7 @@ instructions = "{instructions}"
                 cache_dir: Some(Path::new("/cache")),
             },
             &roots,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -19373,6 +19482,7 @@ instructions = "{instructions}"
                 ..SandboxLauncherPaths::default()
             },
             &[],
+            &[],
         )
         .unwrap();
         assert!(
@@ -19411,6 +19521,7 @@ instructions = "{instructions}"
                 cache_dir,
                 backend: Some(&backend),
                 passthrough: false,
+                read_only_roots: &[],
             })
         };
         assert_eq!(validate(Some(&cache_root)), Ok(()));
@@ -19431,6 +19542,7 @@ instructions = "{instructions}"
                 cache_dir: Some(&overlapping_root),
                 backend: Some(&backend),
                 passthrough: false,
+                read_only_roots: &[],
             }),
             Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)
         );
@@ -19477,6 +19589,7 @@ instructions = "{instructions}"
                 cache_dir: None,
                 backend: Some(&backend),
                 passthrough: false,
+                read_only_roots: &[],
             })
         };
 
@@ -19546,6 +19659,7 @@ instructions = "{instructions}"
                     cache_dir: None,
                     backend: Some(&backend),
                     passthrough: false,
+                    read_only_roots: &[],
                 }),
                 expected,
                 "{program} state root against a workspace inside ~/.codex"
@@ -19566,6 +19680,7 @@ instructions = "{instructions}"
                     cache_dir: None,
                     backend: Some(&backend),
                     passthrough: false,
+                    read_only_roots: &[],
                 }),
                 Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
                 "the lexical ~/.claude.json* grant must not cover a repository"
@@ -19597,6 +19712,7 @@ instructions = "{instructions}"
             Path::new("/repo"),
             &SandboxLauncherPaths::default(),
             &roots,
+            &[],
         )
         .unwrap();
         assert_eq!(&launcher.prefix[..3], ["claude-sandbox", "--mode", "root"]);

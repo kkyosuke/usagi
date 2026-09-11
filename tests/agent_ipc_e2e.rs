@@ -299,6 +299,13 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
     spawn_daemon(repo, home, path, shell)
 }
 
+fn start_daemon_with_sandbox_home(repo: &Path, home: &Path, path: &Path) -> Daemon {
+    let data_dir = channel_data_dir(home);
+    fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    spawn_daemon_command(repo, home, path, None, None, Some(home))
+}
+
 fn start_daemon_with_source_identity(
     repo: &Path,
     home: &Path,
@@ -309,13 +316,13 @@ fn start_daemon_with_source_identity(
     let data_dir = channel_data_dir(home);
     fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    spawn_daemon_command(repo, home, path, Some(shell), Some(source_identity))
+    spawn_daemon_command(repo, home, path, Some(shell), Some(source_identity), None)
 }
 
 /// Start a daemon against an existing home, as a cold restart does. The data
 /// directory is already published, so it is not re-created here.
 fn spawn_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> Daemon {
-    spawn_daemon_command(repo, home, path, shell, None)
+    spawn_daemon_command(repo, home, path, shell, None, None)
 }
 
 fn spawn_daemon_command(
@@ -324,6 +331,7 @@ fn spawn_daemon_command(
     path: &Path,
     shell: Option<&Path>,
     source_identity: Option<&str>,
+    sandbox_home: Option<&Path>,
 ) -> Daemon {
     let fixture_path = format!("{}:/usr/bin:/bin", path.display());
     let mut command = usagi_command(
@@ -341,6 +349,9 @@ fn spawn_daemon_command(
             usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
             "1",
         );
+    if let Some(sandbox_home) = sandbox_home {
+        command.env("HOME", sandbox_home);
+    }
     if let Some(shell) = shell {
         command.env("SHELL", shell);
     }
@@ -1846,7 +1857,7 @@ fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
     let count = home.path().join("agy-spawn-count");
     let argv = home.path().join("agy-argv");
     write_restartable_agy(&bin, &count, &argv);
-    let daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
     let data_dir = channel_data_dir(home.path());
     let mut first = client(&data_dir);
     let (workspace, session, _) = available_scope(&mut first);
@@ -1876,10 +1887,17 @@ fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
             .join(".gemini/config/plugins/usagi-runtime")
             .exists()
     );
-
+    assert!(home.path().join(".gemini/config").is_dir());
     drop(first);
     drop(daemon);
-    let _restarted = spawn_daemon(repo.path(), home.path(), &bin, None);
+    let _restarted = spawn_daemon_command(
+        repo.path(),
+        home.path(),
+        &bin,
+        None,
+        None,
+        Some(home.path()),
+    );
     let mut second = client(&data_dir);
     let (_, replacement, target) = resume(&mut second, workspace, session);
     assert_eq!(

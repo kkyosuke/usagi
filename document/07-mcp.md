@@ -329,7 +329,8 @@ workspace config 自体が未作成なら `claude/default` を安全な provider
 daemon の selected data directory に
 `agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を materialize し、その synthetic workspace を
 managed launch の private `--add-dir` にだけ渡す。plugin の `mcp_config.json` から同じ `usagi mcp` child を起動し、
-plugin root は sandbox から read-only のままにする。既存の global/workspace MCP 設定は置換しない。
+plugin root は全実効 writable surface との overlap を拒否した上で sandbox から read-only のままにする。managed AGY では
+`~/.gemini/config` 全体も read-only に戻し、既存の global/workspace MCP 設定を読み取れるまま新規作成・置換を防ぐ。
 
 ### delegation の atomicity
 
