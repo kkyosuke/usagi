@@ -257,12 +257,9 @@ pub fn initial_prompt(goal: &str) -> String {
 /// Unknown, stale and missing evidence remain a concrete pending reason.
 /// # Errors
 /// Returns a safe pending reason for every absent or mismatched proof.
-pub fn verify_pr<
-    G: usagi_core::infrastructure::git::GitRunner,
-    P: super::pr_inventory::GhProcessPort,
->(
-    git: &G,
-    gh: &mut P,
+pub fn verify_pr(
+    git: &dyn usagi_core::infrastructure::git::GitRunner,
+    gh: &mut dyn super::pr_inventory::GhProcessPort<Error = std::io::Error>,
     directory: &std::path::Path,
     target: &usagi_core::domain::agent_message::ReviewTarget,
     entries: &[usagi_core::domain::pr_inventory::PrEntry],
@@ -610,6 +607,29 @@ mod tests {
                 .phase,
             Phase::Verifying
         );
+        store
+            .send_message(
+                workspace,
+                &reviewer_caller,
+                resumed,
+                SendMessage {
+                    message_id: OperationId::new(),
+                    to_agent_id: implementer,
+                    kind: MessageKind::Message,
+                    body: "Additional context, not a verdict".into(),
+                    in_reply_to: None,
+                    review: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            snapshot(&store, workspace, session)
+                .unwrap()
+                .run
+                .unwrap()
+                .phase,
+            Phase::Verifying
+        );
     }
 
     struct Git;
@@ -658,13 +678,18 @@ mod tests {
         }
     }
     impl super::super::pr_inventory::GhProcessPort for Gh {
-        type Error = ();
-        fn run(&mut self, program: &str, argv: &[String], timeout: u64) -> Result<String, ()> {
+        type Error = std::io::Error;
+        fn run(
+            &mut self,
+            program: &str,
+            argv: &[String],
+            timeout: u64,
+        ) -> Result<String, Self::Error> {
             assert_eq!(program, "gh");
             assert_eq!(argv[0], "pr");
             assert_eq!(timeout, 5000);
             if self.0 == "unavailable" {
-                return Err(());
+                return Err(std::io::Error::other("fake GitHub failure"));
             }
             Ok(self.0.clone())
         }

@@ -187,7 +187,7 @@ fn synchronized_snapshot(
         .update_workflow(workspace, session, |value| {
             let record = value
                 .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("workflow disappeared"))?;
+                .ok_or(anyhow::anyhow!("workflow disappeared"))?;
             let mut changed = false;
             for proof in authorized {
                 if !record.authorized_operations.contains(&proof) {
@@ -211,7 +211,7 @@ fn synchronized_snapshot(
     workflow::snapshot(store, workspace, session).map_err(unavailable)
 }
 
-fn reconcile_runtime(
+pub(super) fn reconcile_runtime(
     agent: &SharedAgentRuntime,
     workspace: WorkspaceId,
     session: SessionId,
@@ -249,8 +249,8 @@ fn reconcile_runtime(
         implementation
     };
     store.update_workflow(workspace,session,|record| {
-        let record=record.as_mut().ok_or_else(||anyhow::anyhow!("workflow disappeared"))?;
-        let current=record.run.as_mut().ok_or_else(||anyhow::anyhow!("workflow run disappeared"))?;
+        let record=record.as_mut().ok_or(anyhow::anyhow!("workflow disappeared"))?;
+        let current=record.run.as_mut().ok_or(anyhow::anyhow!("workflow run disappeared"))?;
         if current.id!=run.id || current.phase!=run.phase || current.review!=run.review {return Ok(());}
         record.implementation_operation=implementation;
         if selected.is_none() {
@@ -266,18 +266,15 @@ fn reconcile_runtime(
 }
 
 #[allow(clippy::too_many_arguments)] // Keep both external verification ports explicit and injectable.
-pub(super) fn verify_progress<
-    G: usagi_core::infrastructure::git::GitRunner,
-    P: usagi_daemon::usecase::pr_inventory::GhProcessPort,
->(
+pub(super) fn verify_progress(
     store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
     inventory: &SharedPrInventory,
     bound: &ConnectionWorkspace,
     workspace: WorkspaceId,
     session: SessionId,
     run: &usagi_core::domain::workflow::WorkflowRun,
-    git: &G,
-    gh: &mut P,
+    git: &dyn usagi_core::infrastructure::git::GitRunner,
+    gh: &mut dyn usagi_daemon::usecase::pr_inventory::GhProcessPort<Error = std::io::Error>,
 ) -> Result<(), ProtocolError> {
     let scope = bound.scope_resolver();
     if matches!(
@@ -426,6 +423,14 @@ fn deliver(
     let Some(run) = recipient.current_run else {
         return Ok(());
     };
+    if !record
+        .authorized_operations
+        .contains(&(instruction.recipient, run))
+    {
+        // Reusing a stopped Agent identity for a fresh launch is not an exact
+        // workflow resume. Keep the durable instruction queued for its lineage.
+        return Ok(());
+    }
     let prompt = format!(
         "Workflow instruction {operation} (process this ID once):\n{}",
         instruction.body

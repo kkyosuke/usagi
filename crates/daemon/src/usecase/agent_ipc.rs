@@ -1108,7 +1108,13 @@ impl AgentRuntime {
     /// A new launch sharing an Agent ID is never part of this provenance.
     #[must_use]
     pub fn workflow_operation_lineage(&self, operation: OperationId) -> Vec<OperationId> {
-        let snapshot = self.coordinator.snapshot();
+        Self::workflow_lineage(&self.coordinator.snapshot(), operation)
+    }
+
+    fn workflow_lineage(
+        snapshot: &super::runtime::RuntimeStoreSnapshot,
+        operation: OperationId,
+    ) -> Vec<OperationId> {
         let Some(mut record) = snapshot
             .records
             .iter()
@@ -10471,6 +10477,23 @@ mod tests {
             vec![second_operation, resumed_operation]
         );
         assert_eq!(runtime.workflow_live_operation(second_operation), None);
+        assert_eq!(runtime.workflow_live_operation(OperationId::new()), None);
+        let snapshot = runtime.coordinator.snapshot();
+        for replacement in [AgentRuntimeId::new(), resumed.runtime.agent_runtime_id] {
+            let mut broken = snapshot.clone();
+            broken
+                .records
+                .iter_mut()
+                .find(|record| record.operation.operation_id == resumed_operation)
+                .unwrap()
+                .superseded_by = Some(replacement);
+            // Missing/cyclic replacement data cannot invent another admitted
+            // operation or loop forever, even before hydration rejects it.
+            assert_eq!(
+                AgentRuntime::workflow_lineage(&broken, second_operation),
+                vec![second_operation, resumed_operation]
+            );
+        }
     }
 
     #[test]

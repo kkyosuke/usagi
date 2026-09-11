@@ -65,7 +65,20 @@ impl DispatchStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut record = self.workflow(workspace, session)?;
         let result = change(&mut record)?;
-        let mut value = record.context("workflow update must retain a record")?;
+        self.save_workflow(
+            workspace,
+            session,
+            record.context("workflow update must retain a record")?,
+        )?;
+        Ok(result)
+    }
+
+    fn save_workflow(
+        &self,
+        workspace: WorkspaceId,
+        session: SessionId,
+        mut value: WorkflowRecord,
+    ) -> Result<()> {
         while serde_json::to_vec_pretty(&value)?.len() >= MAX_BYTES {
             let history = &mut value
                 .run
@@ -85,7 +98,7 @@ impl DispatchStore {
             &path,
             &value,
         )?;
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -94,31 +107,35 @@ mod tests {
     use super::*;
     #[test]
     fn workflow_write_failure_is_not_reported_as_a_successful_update() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = DispatchStore::new(directory.path());
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let path = store.workflow_path(workspace, session);
-        let parent = path.parent().unwrap();
-        std::fs::create_dir_all(parent).unwrap();
-        let result = store.update_workflow(workspace, session, |record| {
-            *record = Some(WorkflowRecord {
-                version: 1,
-                operation: OperationId::new(),
-                goal: "task".into(),
-                run: None,
-                initial_notified: false,
-                cursor: None,
-                start_error: None,
-                suspended_phase: None,
-                implementation_operation: None,
-                authorized_operations: Vec::new(),
+        for fail in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = DispatchStore::new(directory.path());
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let path = store.workflow_path(workspace, session);
+            let parent = path.parent().unwrap();
+            std::fs::create_dir_all(parent).unwrap();
+            let result = store.update_workflow(workspace, session, |record| {
+                *record = Some(WorkflowRecord {
+                    version: 1,
+                    operation: OperationId::new(),
+                    goal: "task".into(),
+                    run: None,
+                    initial_notified: false,
+                    cursor: None,
+                    start_error: None,
+                    suspended_phase: None,
+                    implementation_operation: None,
+                    authorized_operations: Vec::new(),
+                });
+                if fail {
+                    std::fs::rename(parent, directory.path().join("saved-parent"))?;
+                    std::fs::write(parent, "not a directory")?;
+                }
+                Ok(())
             });
-            std::fs::rename(parent, directory.path().join("saved-parent"))?;
-            std::fs::write(parent, "not a directory")?;
-            Ok(())
-        });
-        assert!(result.is_err());
+            assert_eq!(result.is_err(), fail);
+        }
     }
     #[test]
     fn workflow_capacity_keeps_instructions_and_bounds_the_wire_snapshot() {
@@ -131,25 +148,28 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let operation = OperationId::new();
-        assert!(
-            store
-                .update_workflow(workspace, session, |value| {
-                    *value = Some(WorkflowRecord {
-                        version: 1,
-                        operation,
-                        goal: "x".repeat(MAX_BYTES),
-                        run: None,
-                        initial_notified: false,
-                        cursor: None,
-                        start_error: None,
-                        suspended_phase: None,
-                        implementation_operation: None,
-                        authorized_operations: Vec::new(),
-                    });
-                    Ok(())
-                })
-                .is_err()
-        );
+        for oversized in [true, false] {
+            let result = store.update_workflow(workspace, session, |value| {
+                *value = Some(WorkflowRecord {
+                    version: 1,
+                    operation,
+                    goal: if oversized {
+                        "x".repeat(MAX_BYTES)
+                    } else {
+                        "Task".into()
+                    },
+                    run: None,
+                    initial_notified: false,
+                    cursor: None,
+                    start_error: None,
+                    suspended_phase: None,
+                    implementation_operation: None,
+                    authorized_operations: Vec::new(),
+                });
+                Ok(())
+            });
+            assert_eq!(result.is_err(), oversized);
+        }
         let run = WorkflowRun {
             id: operation,
             session,
@@ -195,14 +215,17 @@ mod tests {
                 .history
                 .is_empty()
         );
-        assert!(
-            store
-                .update_workflow(workspace, session, |value| {
-                    value.as_mut().unwrap().goal = "x".repeat(MAX_BYTES);
-                    Ok(())
-                })
-                .is_err()
-        );
+        for oversized in [true, false] {
+            let result = store.update_workflow(workspace, session, |value| {
+                value.as_mut().unwrap().goal = if oversized {
+                    "x".repeat(MAX_BYTES)
+                } else {
+                    "Task".into()
+                };
+                Ok(())
+            });
+            assert_eq!(result.is_err(), oversized);
+        }
         assert_eq!(
             store.workflow(workspace, session).unwrap().unwrap().goal,
             "Task"
@@ -254,22 +277,27 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            store
-                .update_workflow(workspace, session, |record| -> Result<()> {
+        for conflict in [true, false] {
+            let result = store.update_workflow(workspace, session, |record| -> Result<()> {
+                if conflict {
                     record.as_mut().unwrap().goal.clear();
-                    anyhow::bail!("conflict")
-                })
-                .is_err()
-        );
+                    anyhow::bail!("conflict");
+                }
+                Ok(())
+            });
+            assert_eq!(result.is_err(), conflict);
+        }
         assert_eq!(
             store.workflow(workspace, session).unwrap().unwrap().goal,
             "test"
         );
-        assert!(
-            store
-                .update_workflow(workspace, SessionId::new(), |_| Ok(()))
-                .is_err()
-        );
+        for candidate in [SessionId::new(), session] {
+            assert_eq!(
+                store
+                    .update_workflow(workspace, candidate, |_| Ok(()))
+                    .is_err(),
+                candidate != session
+            );
+        }
     }
 }
