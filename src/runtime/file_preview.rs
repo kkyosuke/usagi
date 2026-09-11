@@ -9,7 +9,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path};
 use std::time::Duration;
 
-use usagi_core::domain::presentation_text::presentation_character_is_safe;
+use usagi_core::domain::presentation_text::{
+    presentation_character_is_safe, sanitize_presentation_line,
+};
 use usagi_core::infrastructure::bounded_process::{
     ChildOutputObservation, ChildPolicy, observe_command_output,
 };
@@ -268,7 +270,7 @@ fn decode_file(bytes: Vec<u8>) -> Result<Vec<String>, FilePreviewError> {
         return Err(FilePreviewError::Binary);
     }
     let text = String::from_utf8(bytes).map_err(|_| FilePreviewError::NotUtf8)?;
-    Ok(text.lines().map(sanitize_line).collect())
+    Ok(text.lines().map(sanitize_presentation_line).collect())
 }
 
 fn valid_relative_path(raw: &str) -> bool {
@@ -276,20 +278,6 @@ fn valid_relative_path(raw: &str) -> bool {
         && Path::new(raw)
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
-}
-
-fn sanitize_line(line: &str) -> String {
-    line.chars()
-        .map(|character| {
-            if character == '\t' {
-                ' '
-            } else if presentation_character_is_safe(character) {
-                character
-            } else {
-                '\u{fffd}'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

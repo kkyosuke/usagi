@@ -66,7 +66,7 @@ use usagi_core::domain::terminal_visibility::VisibilityOutcome;
 
 use super::{
     orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
-    runtime::{OutputJournal, PtySpawner, RuntimeCoordinator, RuntimeError},
+    runtime::{OutputJournal, ProviderResumeWrite, PtySpawner, RuntimeCoordinator, RuntimeError},
     terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
     terminal_owner::{
         TerminalOwner as TerminalOwnerPort, TerminalRequestContext, TerminalResponse,
@@ -1485,10 +1485,27 @@ impl AgentRuntime {
         credential: &str,
         phase: AgentPhase,
     ) -> Result<(), ProtocolError> {
+        self.report_agent_phase_with_session(credential, phase, None)
+    }
+
+    /// Reports a lifecycle phase and, for `SessionStart`, atomically refreshes
+    /// the provider-owned conversation identity carried by the same hook.
+    pub fn report_agent_phase_with_session(
+        &mut self,
+        credential: &str,
+        phase: AgentPhase,
+        native_session_id: Option<ProviderSessionId>,
+    ) -> Result<(), ProtocolError> {
         if !phase.is_reportable() {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
                 "agent phase is not reportable",
+            ));
+        }
+        if native_session_id.is_some() && phase != AgentPhase::Ready {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "provider session ID is only valid for SessionStart",
             ));
         }
         let caller = self.mcp_callers.get(credential).cloned().ok_or_else(|| {
@@ -1503,7 +1520,12 @@ impl AgentRuntime {
                 "agent runtime credential is not live",
             ));
         }
-        if let Some(durable) = durable_provider_phase(phase) {
+        let captured = if let Some(native_session_id) = native_session_id {
+            self.capture_provider_session_start(&caller.runtime, native_session_id)?
+        } else {
+            false
+        };
+        if !captured && let Some(durable) = durable_provider_phase(phase) {
             self.coordinator
                 .record_provider_phase(&caller.runtime, durable, &mut *self.store)
                 .map_err(map_runtime_error)?;
@@ -2357,6 +2379,21 @@ impl AgentRuntime {
                 "provider session metadata does not match the runtime profile",
             ));
         }
+        // An already-running Codex can still have the pre-v5 dedicated capture
+        // hook while the `usagi` executable has been updated in place. The new
+        // combined SessionStart hook and that legacy hook may therefore report
+        // the same ID in either order. Treat the second report as an idempotent
+        // compatibility call instead of letting its older Running projection
+        // conflict with the combined hook's Starting projection.
+        if record.provider_resume.as_ref().is_some_and(|existing| {
+            existing.provider == provider
+                && existing.native_session_id == native_session_id
+                && existing.adapter_revision == record.launch.plan.profile_revision
+                && existing.scope == record.launch.request.scope
+                && existing.provenance == ProviderCaptureProvenance::ProviderStructured
+        }) {
+            return Ok(());
+        }
         let reference = ProviderResumeRef {
             provider,
             native_session_id,
@@ -2367,8 +2404,54 @@ impl AgentRuntime {
             last_known_phase: Some(ProviderResumePhase::Running),
         };
         self.coordinator
-            .record_provider_resume(runtime, reference, &mut *self.store)
+            .write_provider_resume(
+                runtime,
+                reference,
+                ProviderResumeWrite::Attach,
+                &mut *self.store,
+            )
             .map_err(map_runtime_error)
+    }
+
+    /// Refreshes the current interactive conversation from the exact runtime's
+    /// documented `SessionStart` payload. Headless runs still report phase but
+    /// never become resumable conversations.
+    fn capture_provider_session_start(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        native_session_id: ProviderSessionId,
+    ) -> Result<bool, ProtocolError> {
+        let record = self
+            .coordinator
+            .record_for(runtime)
+            .map_err(map_runtime_error)?;
+        if record.launch.request.mode != LaunchMode::Interactive {
+            return Ok(false);
+        }
+        let provider = provider_for_profile(&record.launch.plan.profile_id).ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "runtime profile does not support provider session capture",
+            )
+        })?;
+        let reference = ProviderResumeRef {
+            provider,
+            native_session_id,
+            adapter_revision: record.launch.plan.profile_revision,
+            scope: record.launch.request.scope.clone(),
+            provenance: ProviderCaptureProvenance::ProviderStructured,
+            last_known_status: ProviderResumeStatus::Active,
+            last_known_phase: Some(ProviderResumePhase::Starting),
+        };
+        self.coordinator
+            .write_provider_resume(
+                runtime,
+                reference,
+                ProviderResumeWrite::Replace,
+                &mut *self.store,
+            )
+            .map_err(map_runtime_error)?;
+        Ok(true)
     }
 
     /// Safe interrupted/resume projection for a managed session. Provider IDs
@@ -2439,6 +2522,7 @@ impl AgentRuntime {
             (
                 ProviderKind::Claude,
                 ProviderCaptureProvenance::DaemonIssued
+                    | ProviderCaptureProvenance::ProviderStructured
             ) | (
                 ProviderKind::Codex,
                 ProviderCaptureProvenance::ProviderStructured
@@ -2520,6 +2604,7 @@ impl AgentRuntime {
             (
                 ProviderKind::Claude,
                 ProviderCaptureProvenance::DaemonIssued
+                    | ProviderCaptureProvenance::ProviderStructured
             ) | (
                 ProviderKind::Codex,
                 ProviderCaptureProvenance::ProviderStructured
@@ -4239,10 +4324,15 @@ const fn runtime_inventory_state(
 /// `sakana-ai` is a Codex-compatible CLI, so its retained conversations carry
 /// [`ProviderKind::Codex`] and resume through the same provider metadata.
 fn provider_matches_profile(provider: ProviderKind, profile: &AgentProfileId) -> bool {
-    matches!(
-        (provider, profile.as_str()),
-        (ProviderKind::Claude, "claude") | (ProviderKind::Codex, "codex" | "sakana-ai")
-    )
+    provider_for_profile(profile) == Some(provider)
+}
+
+fn provider_for_profile(profile: &AgentProfileId) -> Option<ProviderKind> {
+    match profile.as_str() {
+        "claude" => Some(ProviderKind::Claude),
+        "codex" | "sakana-ai" => Some(ProviderKind::Codex),
+        _ => None,
+    }
 }
 
 /// Runtime states that still hold the session's Agent slot: a live process or
@@ -4828,6 +4918,39 @@ mod tests {
         }
     }
 
+    /// Keeps broad runtime tests focused on their existing resume scenarios by
+    /// modelling a pre-v5 Claude adapter. Production v5 behavior is exercised
+    /// through `structured_claude_runtime` and the Claude adapter's own tests.
+    struct LegacyClaudeAdapter {
+        inner: ClaudeAdapter<FakeProvisioner>,
+    }
+
+    impl usagi_core::usecase::agent::AgentProfileCatalog for LegacyClaudeAdapter {
+        fn find(&self, profile_id: &AgentProfileId) -> Option<AgentProfile> {
+            self.inner.find(profile_id)
+        }
+    }
+
+    impl AgentAdapter for LegacyClaudeAdapter {
+        fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
+            let mut resolved = self.inner.resolve(request)?;
+            if request.mode == LaunchMode::Interactive && !request.resume {
+                debug_assert!(resolved.provider_resume.is_none());
+                resolved.provider_resume = Some(ProviderResumeRef {
+                    provider: ProviderKind::Claude,
+                    native_session_id: ProviderSessionId::new(OperationId::new().to_string())
+                        .expect("an operation UUID is a valid provider ID"),
+                    adapter_revision: resolved.snapshot.plan.profile_revision,
+                    scope: request.scope.clone(),
+                    provenance: ProviderCaptureProvenance::DaemonIssued,
+                    last_known_status: ProviderResumeStatus::Active,
+                    last_known_phase: Some(ProviderResumePhase::Starting),
+                });
+            }
+            Ok(resolved)
+        }
+    }
+
     struct ProfileOverrideAdapter {
         profile: AgentProfile,
         inner: CodexAdapter<FakeCodexProvisioner>,
@@ -4928,11 +5051,29 @@ mod tests {
 
     fn claude_registry() -> AdapterRegistry {
         let mut registry = AdapterRegistry::new();
+        let adapter = LegacyClaudeAdapter {
+            inner: ClaudeAdapter::new(FakeProvisioner),
+        };
+        let profile = adapter.inner.profile().clone();
+        registry.register(profile, Box::new(adapter)).unwrap();
+        registry
+    }
+
+    fn structured_claude_runtime() -> AgentRuntime {
+        let mut registry = AdapterRegistry::new();
         let adapter = ClaudeAdapter::new(FakeProvisioner);
         registry
             .register(adapter.profile().clone(), Box::new(adapter))
             .unwrap();
-        registry
+        AgentRuntime::new(
+            DaemonGeneration::new(),
+            registry,
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        )
     }
 
     fn runtime() -> AgentRuntime {
@@ -5224,7 +5365,12 @@ mod tests {
         );
         agent
             .coordinator
-            .record_provider_resume(&runtime, resume, &mut *agent.store)
+            .write_provider_resume(
+                &runtime,
+                resume,
+                ProviderResumeWrite::Attach,
+                &mut *agent.store,
+            )
             .unwrap();
 
         assert_eq!(agent.sleep_session(session), Ok(1));
@@ -7164,7 +7310,7 @@ mod tests {
 
     #[test]
     fn reported_phase_refines_a_live_projection_but_never_outranks_observation() {
-        let mut runtime = runtime();
+        let mut runtime = structured_claude_runtime();
         let session = SessionId::new();
         let launch_intent = AgentLaunchIntent {
             workspace: WorkspaceId::new(),
@@ -7180,6 +7326,28 @@ mod tests {
             .unwrap();
         let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
         assert_eq!(runtime.session_phase(session), AgentPhase::Running);
+        assert!(
+            runtime.coordinator.snapshot().records[0]
+                .provider_resume
+                .is_none(),
+            "fresh Claude metadata comes only from SessionStart"
+        );
+
+        runtime
+            .report_agent_phase_with_session(
+                &credential,
+                AgentPhase::Ready,
+                Some(ProviderSessionId::new("claude-session").unwrap()),
+            )
+            .unwrap();
+        let captured = runtime.coordinator.snapshot();
+        let reference = captured.records[0].provider_resume.as_ref().unwrap();
+        assert_eq!(reference.provider, ProviderKind::Claude);
+        assert_eq!(
+            reference.provenance,
+            ProviderCaptureProvenance::ProviderStructured
+        );
+        assert_eq!(runtime.session_phase(session), AgentPhase::Ready);
 
         // Only the daemon-minted credential selects the reporting runtime.
         assert_eq!(
@@ -7189,7 +7357,7 @@ mod tests {
                 .code,
             ErrorCode::OwnershipUnknown
         );
-        assert_eq!(runtime.session_phase(session), AgentPhase::Running);
+        assert_eq!(runtime.session_phase(session), AgentPhase::Ready);
 
         for phase in [
             AgentPhase::Ready,
@@ -7244,6 +7412,142 @@ mod tests {
                 .unwrap_err()
                 .code,
             ErrorCode::OwnershipUnknown
+        );
+    }
+
+    #[test]
+    fn session_start_capture_replaces_the_current_conversation_for_both_providers() {
+        for (mut runtime, profile, provider) in [
+            (structured_claude_runtime(), None, ProviderKind::Claude),
+            (codex_runtime(), Some("codex"), ProviderKind::Codex),
+        ] {
+            let session = SessionId::new();
+            runtime
+                .launch(
+                    &OperationId::new().to_string(),
+                    &AgentLaunchIntent {
+                        workspace: WorkspaceId::new(),
+                        session: Some(session),
+                        profile: profile.map(|value| AgentProfileId::new(value).unwrap()),
+                    },
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap();
+            let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+
+            runtime
+                .report_agent_phase_with_session(
+                    &credential,
+                    AgentPhase::Ready,
+                    Some(ProviderSessionId::new("first-session").unwrap()),
+                )
+                .unwrap();
+            runtime
+                .report_agent_phase_with_session(
+                    &credential,
+                    AgentPhase::Ready,
+                    Some(ProviderSessionId::new("after-clear").unwrap()),
+                )
+                .unwrap();
+            if provider == ProviderKind::Codex {
+                // A v4 dedicated capture hook can overlap a v5 common phase
+                // hook while an already-running process picks up a new binary.
+                runtime
+                    .capture_codex_session(
+                        &credential,
+                        ProviderSessionId::new("after-clear").unwrap(),
+                    )
+                    .unwrap();
+            }
+
+            let snapshot = runtime.coordinator.snapshot();
+            let reference = snapshot.records[0].provider_resume.as_ref().unwrap();
+            assert_eq!(reference.provider, provider);
+            assert_eq!(
+                reference.native_session_id.expose_sensitive(),
+                "after-clear"
+            );
+            assert_eq!(
+                reference.provenance,
+                ProviderCaptureProvenance::ProviderStructured
+            );
+            assert_eq!(reference.last_known_status, ProviderResumeStatus::Active);
+            assert_eq!(
+                reference.last_known_phase,
+                Some(ProviderResumePhase::Starting)
+            );
+            assert_eq!(runtime.session_phase(session), AgentPhase::Ready);
+
+            assert_eq!(
+                runtime
+                    .report_agent_phase_with_session(
+                        &credential,
+                        AgentPhase::Running,
+                        Some(ProviderSessionId::new("forged-transition").unwrap()),
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            assert_eq!(
+                runtime.coordinator.snapshot().records[0]
+                    .provider_resume
+                    .as_ref()
+                    .unwrap()
+                    .native_session_id
+                    .expose_sensitive(),
+                "after-clear"
+            );
+        }
+    }
+
+    #[test]
+    fn session_start_capture_ignores_headless_and_rejects_unsupported_profiles() {
+        let mut runtime = structured_claude_runtime();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace: WorkspaceId::new(),
+                    session: Some(SessionId::new()),
+                    profile: None,
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+
+        let mut snapshot = runtime.coordinator.snapshot();
+        snapshot.records[0].launch.request.mode = LaunchMode::Headless;
+        runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        runtime
+            .report_agent_phase_with_session(
+                &credential,
+                AgentPhase::Ready,
+                Some(ProviderSessionId::new("ignored-headless-session").unwrap()),
+            )
+            .unwrap();
+        assert!(
+            runtime.coordinator.snapshot().records[0]
+                .provider_resume
+                .is_none()
+        );
+
+        let mut snapshot = runtime.coordinator.snapshot();
+        snapshot.records[0].launch.request.mode = LaunchMode::Interactive;
+        snapshot.records[0].launch.request.profile_id = AgentProfileId::new("shell").unwrap();
+        snapshot.records[0].launch.plan.profile_id = AgentProfileId::new("shell").unwrap();
+        runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        assert_eq!(
+            runtime
+                .report_agent_phase_with_session(
+                    &credential,
+                    AgentPhase::Ready,
+                    Some(ProviderSessionId::new("unsupported-session").unwrap()),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
         );
     }
 

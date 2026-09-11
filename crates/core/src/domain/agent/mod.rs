@@ -346,7 +346,7 @@ pub enum ProviderKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCaptureProvenance {
-    /// The daemon issued the ID before a Claude process was spawned.
+    /// A legacy Claude integration issued the ID before the process was spawned.
     DaemonIssued,
     /// A provider-owned, documented structured channel reported the ID.
     ProviderStructured,

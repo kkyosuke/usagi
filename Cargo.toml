@@ -10,7 +10,7 @@
 # 手順の正本は document/06-conventions.md#リリース。
 [package]
 name = "usagi"
-version = "4.6.4"
+version = "4.6.5"
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
@@ -88,6 +88,7 @@ uuid = { version = "1.20", features = ["v4", "v7"] }
 # sha2 は markdown source identity の決定的 fingerprint。
 serde_json = "1.0"
 toml = "1.1"
+toml_edit = "0.25"
 syn = "3.0"
 anyhow = "1.0"
 fs2 = "0.4"

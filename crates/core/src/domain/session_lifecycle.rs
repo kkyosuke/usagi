@@ -844,13 +844,24 @@ fn complete(
     now: DateTime<Utc>,
 ) -> Result<(), LifecycleError> {
     let (pos, operation_pos) = fenced_session(state, fence)?;
-    if state.sessions[pos].lifecycle != SessionLifecycle::Deleting {
-        return Err(LifecycleError::InvalidTransition);
+    match state.sessions[pos].lifecycle {
+        SessionLifecycle::Initializing => {
+            let session = &mut state.sessions[pos];
+            session.lifecycle = SessionLifecycle::Available;
+            session.operation_id = None;
+            session.setup_plan = None;
+            session.changed_at = now;
+        }
+        SessionLifecycle::Deleting => {
+            state.sessions.remove(pos);
+        }
+        SessionLifecycle::Creating | SessionLifecycle::Available | SessionLifecycle::Failed => {
+            return Err(LifecycleError::InvalidTransition);
+        }
     }
-    let op = &mut state.operations[operation_pos];
-    op.status = OperationStatus::Succeeded;
-    op.progress_revision += 1;
-    state.sessions.remove(pos);
+    let operation = &mut state.operations[operation_pos];
+    operation.status = OperationStatus::Succeeded;
+    operation.progress_revision += 1;
     state.changed(now);
     Ok(())
 }
@@ -1013,6 +1024,62 @@ mod tests {
             ),
             Err(LifecycleError::StaleCompletion)
         );
+    }
+
+    #[test]
+    fn successful_initialization_clears_the_setup_plan_and_completes_creation() {
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        let operation = op();
+        reduce(
+            &mut state,
+            LifecycleEvent::ReserveCreate {
+                name: "configured".into(),
+                role_id: None,
+                parent_session_id: None,
+                creator_agent_id: None,
+                operation: operation.clone(),
+            },
+            now(),
+        )
+        .unwrap();
+        let creating = fence(&state, &state.sessions[0], &operation);
+        assert_eq!(
+            reduce(
+                &mut state,
+                LifecycleEvent::Completed {
+                    fence: creating.clone(),
+                },
+                now(),
+            ),
+            Err(LifecycleError::InvalidTransition)
+        );
+        reduce(
+            &mut state,
+            LifecycleEvent::CreateCompleted {
+                fence: creating,
+                setup_plan: Some(SetupPlan {
+                    commands: vec!["first".into(), "second".into()],
+                }),
+            },
+            now(),
+        )
+        .unwrap();
+        assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Initializing);
+        let initializing = fence(&state, &state.sessions[0], &operation);
+
+        reduce(
+            &mut state,
+            LifecycleEvent::Completed {
+                fence: initializing,
+            },
+            now(),
+        )
+        .unwrap();
+
+        assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Available);
+        assert!(state.sessions[0].operation_id.is_none());
+        assert!(state.sessions[0].setup_plan.is_none());
+        assert_eq!(state.operations[0].status, OperationStatus::Succeeded);
     }
     #[test]
     fn delete_recreation_rejects_old_worker() {

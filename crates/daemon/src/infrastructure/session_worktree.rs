@@ -2,6 +2,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use usagi_core::infrastructure::git::{
     GitOutput, GitRunner, add_worktree, confined_git_command, delete_branch, remove_worktree,
@@ -125,6 +126,21 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         Ok(())
     }
 
+    fn run_setup_command(&self, session_root: &Path, command: &str) -> anyhow::Result<()> {
+        let status = Command::new("/bin/sh")
+            .args(["-lc", command])
+            .current_dir(session_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("setup command exited with {status}"))
+        }
+    }
+
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_fs_contract
     fn remove_session_tree(
         &self,
@@ -231,6 +247,25 @@ mod tests {
                 .session_entries(&tmp.path().join("missing"))
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn setup_commands_run_in_the_session_root_and_report_failure() {
+        let session = tempfile::tempdir().unwrap();
+        SystemSessionWorktreeIo
+            .run_setup_command(session.path(), "printf ready > setup-marker")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(session.path().join("setup-marker")).unwrap(),
+            "ready"
+        );
+        assert!(
+            SystemSessionWorktreeIo
+                .run_setup_command(session.path(), "exit 7")
+                .unwrap_err()
+                .to_string()
+                .contains("exit status: 7")
         );
     }
 }

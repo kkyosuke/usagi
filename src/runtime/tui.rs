@@ -21,14 +21,12 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
+use usagi_core::domain::agent::ProviderResumeProjection;
 use usagi_core::domain::id::{RequestId, SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
-use usagi_core::domain::session_lifecycle::{
-    AgentPhase, ManagedSession, SessionLifecycleProjection,
-};
+use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycleProjection};
 use usagi_core::domain::settings::{
     EnvBindings, IconMode, LocalSettings, Settings, format_env_bindings, parse_env_bindings,
 };
@@ -50,6 +48,8 @@ use usagi_core::infrastructure::ipc::{TerminalInputReplayMode, TerminalSnapshotM
 use usagi_core::infrastructure::role_catalog::{
     CatalogLayer, read_layer_source, write_layer_source,
 };
+use usagi_core::infrastructure::runtime_model::WorkspaceSessionConfig;
+use usagi_core::infrastructure::session_snapshot::SessionListSnapshot;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -75,7 +75,7 @@ use usagi_tui::usecase::application::agent_tab_intent::{
 };
 use usagi_tui::usecase::application::controller::{
     AppEvent, AppKey, BackendEvent, DaemonAction, EnvironmentEntry, NewRequest, Notice,
-    PendingToken, PreviewFileFilter, RoleChoice, RoleEditorScope, SafeError, SafeMessage,
+    PendingToken, PreviewFileFilter, RoleEditorScope, SafeError, SafeMessage, SessionBranchCatalog,
     SessionRoleCatalog, SessionRoleProjection, Target, classify_management_input,
 };
 use usagi_tui::usecase::application::daemon_backend::{
@@ -88,8 +88,11 @@ use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
 use usagi_tui::usecase::application::runtime_ports::{
     DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
-    RestoreConnectionPort, SessionCommandPort, SessionCommandResult, SessionRefreshPort,
-    SessionWorktreeScanPort,
+    RestoreConnectionPort, SessionBranchCatalogPort, SessionCatalogPort, SessionCommandPort,
+    SessionCommandResult, SessionRefreshPort, SessionWorktreeScanPort,
+};
+use usagi_tui::usecase::application::session_catalog::{
+    project_branch_catalog, project_branch_default, project_session_role_catalog,
 };
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
@@ -480,24 +483,8 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
                 &self.role_workspace,
             )
         {
-            let roles = catalog
-                .roles
-                .into_iter()
-                .filter(|(_, definition)| {
-                    definition
-                        .scopes
-                        .contains(&usagi_core::domain::role::RoleScope::Session)
-                })
-                .map(|(id, definition)| RoleChoice {
-                    id,
-                    summary: definition.summary,
-                })
-                .collect();
             completions.emit(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
-                SessionRoleCatalog {
-                    roles,
-                    default: catalog.defaults.session,
-                },
+                project_session_role_catalog(catalog),
             )));
         }
     }
@@ -1095,6 +1082,70 @@ struct ProductionBackendFactory {
 /// Filesystem adapter for the inline session-create collision hint.
 struct FsSessionWorktreeScanPort;
 
+/// Production adapter for create-session role and Git-ref discovery.
+struct ProductionSessionCatalogPort {
+    data_home: PathBuf,
+}
+
+/// Process-only adapter created for one detached branch-discovery worker.
+/// It owns no workspace-resident connection or other teardown-sensitive state.
+struct ProductionSessionBranchCatalogPort;
+
+impl SessionBranchCatalogPort for ProductionSessionBranchCatalogPort {
+    fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog {
+        discover_branch_catalog(workspace, configured_default)
+    }
+}
+
+impl SessionCatalogPort for ProductionSessionCatalogPort {
+    fn roles(&self, workspace: &Path) -> SessionRoleCatalog {
+        usagi_core::infrastructure::role_catalog::load_effective(&self.data_home, workspace)
+            .ok()
+            .map(project_session_role_catalog)
+            .unwrap_or_default()
+    }
+
+    fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog {
+        discover_branch_catalog(workspace, configured_default)
+    }
+
+    fn branch_worker(&self) -> Box<dyn SessionBranchCatalogPort> {
+        Box::new(ProductionSessionBranchCatalogPort)
+    }
+}
+
+fn discover_branch_catalog(
+    workspace: &Path,
+    configured_default: Option<&str>,
+) -> SessionBranchCatalog {
+    let refs = usagi_core::infrastructure::git::confined_git_command(workspace)
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(symref)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .output();
+    let refs = match refs {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        Ok(_) | Err(_) => return SessionBranchCatalog::default(),
+    };
+    let mut catalog = project_branch_catalog(&refs, None, configured_default);
+    if catalog.default.is_some() {
+        return catalog;
+    }
+    let symbolic_head = usagi_core::infrastructure::git::confined_git_command(workspace)
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    catalog.default = project_branch_default(&catalog.branches, symbolic_head.as_deref());
+    catalog
+}
+
 fn child_directory_names(parent: &Path) -> std::io::Result<Vec<String>> {
     let mut names = std::fs::read_dir(parent)?
         .filter_map(Result::ok)
@@ -1212,9 +1263,12 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         let data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let (restore_connection, restore_publisher) =
-            DaemonRestoreConnectionPort::channel(data_dir);
+            DaemonRestoreConnectionPort::channel(data_dir.clone());
         ControllerBackendComposition {
             backend,
+            session_catalogs: Box::new(ProductionSessionCatalogPort {
+                data_home: data_dir.clone(),
+            }),
             session_commands: Box::new(DaemonSessionCommandPort),
             // The resident session-inventory lane. It is a separate client from
             // `session_commands` on purpose: a user-initiated create/remove and
@@ -3623,94 +3677,48 @@ impl LifecycleSnapshot {
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=lifecycle_parser_projection_and_safe_error_mapping_cover_every_branch
 fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, String> {
     let result = (|| {
-        let object = value
-            .as_object()
-            .ok_or_else(|| "invalid daemon session snapshot".to_owned())?;
-        let revision = object
-            .get("revision")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| "daemon session snapshot has no revision".to_owned())?;
-        let workspace_id = object
-            .get("workspace_id")
-            .cloned()
-            .ok_or_else(|| "daemon session snapshot has no workspace ID".to_owned())
-            .and_then(|id| {
-                serde_json::from_value(id)
-                    .map_err(|_| "daemon session snapshot has an invalid workspace ID".to_owned())
-            })?;
-        let root_worktree_id = object
-            .get("root_worktree_id")
-            .cloned()
-            .ok_or_else(|| "daemon session snapshot has no root worktree ID".to_owned())
-            .and_then(|id| {
-                serde_json::from_value(id).map_err(|_| {
-                    "daemon session snapshot has an invalid root worktree ID".to_owned()
-                })
-            })?;
-        let session_values = object
-            .get("sessions")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| "daemon session snapshot has no sessions".to_owned())?;
-        let agent_resumes = session_values
+        let snapshot = serde_json::from_value::<SessionListSnapshot>(value.clone())
+            .map_err(|error| format!("invalid daemon session snapshot: {error}"))?;
+        let agent_resumes = snapshot
+            .sessions
             .iter()
-            .map(provider_resume_projection)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
+            .filter_map(|item| {
+                item.runtime.as_ref().map(|runtime| {
+                    (
+                        item.session.session_id,
+                        runtime.provider_resume_projection(),
+                    )
+                })
+            })
             .collect();
-        let session_roles = session_values
+        let session_roles = snapshot
+            .sessions
             .iter()
             .map(|item| {
-                let session_id = serde_json::from_value(
-                    item.get("session_id")
-                        .cloned()
-                        .ok_or_else(|| "daemon role projection has no session ID".to_owned())?,
-                )
-                .map_err(|_| "daemon role projection has an invalid session ID".to_owned())?;
-                let role_id = item
-                    .get("role_id")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| "daemon role projection has an invalid role ID".to_owned())?
-                    .flatten();
-                let role_summary = item
-                    .get("role_summary")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned);
-                let parent_session_id = item
-                    .get("parent_session_id")
-                    .filter(|value| !value.is_null())
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| "daemon organization parent is invalid".to_owned())?;
-                let agent_status = item
-                    .get("agent_status")
-                    .filter(|value| !value.is_null())
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| "daemon organization status is invalid".to_owned())?;
-                Ok((
-                    session_id,
+                (
+                    item.session.session_id,
                     SessionRoleProjection {
-                        role_id,
-                        role_summary,
-                        parent_session_id,
-                        agent_status,
+                        role_id: item.session.role_id.clone(),
+                        role_summary: item.role_summary.clone(),
+                        parent_session_id: item.session.parent_session_id,
+                        agent_status: item
+                            .runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.agent_status),
                     },
-                ))
+                )
             })
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
-        let sessions: Vec<ManagedSession> =
-            serde_json::from_value(serde_json::Value::Array(session_values.clone()))
-                .map_err(|error| format!("invalid daemon session snapshot: {error}"))?;
+            .collect();
+        let sessions = snapshot
+            .sessions
+            .into_iter()
+            .map(|item| item.session.into())
+            .collect::<Vec<_>>();
         validate_unique_session_ids(&sessions)?;
         Ok(LifecycleSnapshot {
-            workspace_id,
-            root_worktree_id,
-            revision,
+            workspace_id: snapshot.workspace_id,
+            root_worktree_id: snapshot.root_worktree_id,
+            revision: snapshot.revision,
             sessions,
             agent_resumes,
             session_roles,
@@ -3727,47 +3735,6 @@ fn record_lifecycle_snapshot_error(result: &Result<LifecycleSnapshot, String>) {
         // Persist only the schema error, never the raw IPC body.
         ErrorLog::record(&format!("daemon lifecycle snapshot rejected: {error}"));
     }
-}
-
-fn provider_resume_projection(
-    item: &serde_json::Value,
-) -> Result<Option<(SessionId, ProviderResumeProjection)>, String> {
-    let Some(phase) = item.get("agent_phase") else {
-        return Ok(None);
-    };
-    let phase = phase
-        .as_str()
-        .ok_or_else(|| "daemon Agent phase is invalid".to_owned())?;
-    let phase =
-        AgentPhase::parse_token(phase).ok_or_else(|| "daemon Agent phase is unknown".to_owned())?;
-    let session = item
-        .get("session_id")
-        .cloned()
-        .ok_or_else(|| "daemon Agent projection has no session ID".to_owned())
-        .and_then(|value| {
-            serde_json::from_value(value)
-                .map_err(|_| "daemon Agent projection has an invalid session ID".to_owned())
-        })?;
-    let resumable = item
-        .get("agent_resumable")
-        .and_then(serde_json::Value::as_bool)
-        .ok_or_else(|| "daemon Agent resume availability is invalid".to_owned())?;
-    let reason = item
-        .get("agent_resume_reason")
-        .cloned()
-        .ok_or_else(|| "daemon Agent resume reason is missing".to_owned())
-        .and_then(|value| {
-            serde_json::from_value::<ProviderResumeReason>(value)
-                .map_err(|_| "daemon Agent resume reason is invalid".to_owned())
-        })?;
-    Ok(Some((
-        session,
-        ProviderResumeProjection {
-            interrupted: matches!(phase, AgentPhase::Interrupted | AgentPhase::Sleeping),
-            resumable,
-            reason,
-        },
-    )))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_session_completion_contract
@@ -4140,6 +4107,25 @@ impl SettingsPort for PersistentSettingsPort {
             }
         }
         Ok(())
+    }
+
+    fn read_workspace_setup_commands(&mut self) -> std::io::Result<Vec<String>> {
+        let workspace = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| io_error("session setup requires an opened workspace"))?;
+        WorkspaceSessionConfig::load(workspace.workspace_root())
+            .map(|config| config.setup_commands().to_vec())
+            .map_err(io_error)
+    }
+
+    fn save_workspace_setup_commands(&mut self, commands: &[String]) -> std::io::Result<()> {
+        let workspace = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| io_error("session setup requires an opened workspace"))?;
+        WorkspaceSessionConfig::save_setup_commands(workspace.workspace_root(), commands)
+            .map_err(io_error)
     }
 }
 
@@ -5257,20 +5243,20 @@ mod tests {
         DaemonRequest, DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort,
         FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET,
         LaneConnection, LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort,
-        ProductionBackendFactory, ProductionDaemonControl, RepoEnvironmentStore, RoleEditorScope,
-        SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
-        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
-        TerminalSubscription, VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError,
-        WorkRunControlResult, agent_goal_request, agent_inventory_request, agent_launch_request,
-        child_directory_names, classify_terminal_input, classify_workspace_directory,
-        correlate_agent_goal, correlate_agent_launch, created_session_hook, daemon_control_error,
-        daemon_control_result, daemon_error_reason, decision_cadence, decode_agent_admission,
-        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
-        decode_terminal_inventory, decode_terminal_poll, decode_work_run_control_reply,
-        decode_work_run_snapshot_reply, exact_agent_resume_request, global_icon_mode,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
-        provider_resume_projection, reduced_motion_from_environment, remove_session_payload,
+        ProductionBackendFactory, ProductionDaemonControl, ProductionSessionCatalogPort,
+        RepoEnvironmentStore, RoleEditorScope, SessionBranchCatalog, SessionRoleCatalog,
+        SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
+        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, TerminalSubscription,
+        VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
+        agent_goal_request, agent_inventory_request, agent_launch_request, child_directory_names,
+        classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
+        correlate_agent_launch, created_session_hook, daemon_control_error, daemon_control_result,
+        daemon_error_reason, decision_cadence, decode_agent_admission, decode_attach_screen,
+        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
+        decode_terminal_poll, decode_work_run_control_reply, decode_work_run_snapshot_reply,
+        exact_agent_resume_request, global_icon_mode, lifecycle_snapshot, load_screen_graph_data,
+        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
+        pr_snapshot_events, probe_path, reduced_motion_from_environment, remove_session_payload,
         reply_geometry, resolve_workspace_path, session_cadence, session_snapshot_result,
         terminal_copy_key, terminal_inventory_matches_scope, tui_error_entry,
         validate_workspace_directory, version_detail, version_result_from_observation,
@@ -5280,7 +5266,9 @@ mod tests {
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use usagi_core::infrastructure::bounded_process::ChildObservation;
-    use usagi_tui::usecase::application::runtime_ports::SessionWorktreeScanPort;
+    use usagi_tui::usecase::application::runtime_ports::{
+        SessionCatalogPort, SessionWorktreeScanPort,
+    };
 
     #[test]
     fn reduced_motion_environment_accepts_only_the_documented_opt_in() {
@@ -5674,7 +5662,6 @@ mod tests {
         );
     }
     use serde_json::json;
-    use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{
         AgentContinuationRef, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
         TerminalRef, WorkspaceId, WorktreeId,
@@ -7837,101 +7824,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_resume_projection_accepts_only_the_safe_typed_wire_vocabulary() {
-        let session = SessionId::new();
-        let item = json!({
-            "session_id": session,
-            "agent_phase": "interrupted",
-            "agent_resumable": true,
-            "agent_resume_reason": "explicit_resume_available",
-        });
-        assert_eq!(
-            provider_resume_projection(&item).unwrap(),
-            Some((
-                session,
-                ProviderResumeProjection {
-                    interrupted: true,
-                    resumable: true,
-                    reason: ProviderResumeReason::ExplicitResumeAvailable,
-                },
-            ))
-        );
-        assert_eq!(provider_resume_projection(&json!({})).unwrap(), None);
-        assert_eq!(
-            provider_resume_projection(&json!({
-                "session_id": session,
-                "agent_phase": "sleeping",
-                "agent_resumable": true,
-                "agent_resume_reason": "explicit_resume_available",
-            }))
-            .unwrap(),
-            Some((
-                session,
-                ProviderResumeProjection {
-                    interrupted: true,
-                    resumable: true,
-                    reason: ProviderResumeReason::ExplicitResumeAvailable,
-                },
-            ))
-        );
-        assert_eq!(
-            provider_resume_projection(&json!({
-                "session_id": session,
-                "agent_phase": "running",
-                "agent_resumable": false,
-                "agent_resume_reason": "live_or_ownership_unknown",
-            }))
-            .unwrap(),
-            Some((
-                session,
-                ProviderResumeProjection {
-                    interrupted: false,
-                    resumable: false,
-                    reason: ProviderResumeReason::LiveOrOwnershipUnknown,
-                },
-            ))
-        );
-        let malformed = [
-            json!({ "agent_phase": 1 }),
-            json!({
-                "session_id": session,
-                "agent_phase": "unknown",
-                "agent_resumable": false,
-                "agent_resume_reason": "provider_metadata_unavailable",
-            }),
-            json!({ "agent_phase": "interrupted" }),
-            json!({
-                "session_id": "not-a-session-id",
-                "agent_phase": "interrupted",
-                "agent_resumable": false,
-                "agent_resume_reason": "provider_metadata_unavailable",
-            }),
-            json!({
-                "session_id": session,
-                "agent_phase": "interrupted",
-                "agent_resume_reason": "provider_metadata_unavailable",
-            }),
-            json!({
-                "session_id": session,
-                "agent_phase": "interrupted",
-                "agent_resumable": false,
-            }),
-        ];
-        for item in malformed {
-            assert!(provider_resume_projection(&item).is_err());
-        }
-        assert!(
-            provider_resume_projection(&json!({
-                "session_id": session,
-                "agent_phase": "interrupted",
-                "agent_resumable": false,
-                "agent_resume_reason": "provider raw output",
-            }))
-            .is_err()
-        );
-    }
-
-    #[test]
     fn tui_agent_resume_helpers_use_the_shared_exact_wire_contract() {
         let workspace = WorkspaceId::new();
         let operation = OperationId::new();
@@ -8097,7 +7989,19 @@ mod tests {
         let managed_object = managed_value.as_object_mut().unwrap();
         managed_object.insert("role_summary".to_owned(), json!("Writes code"));
         managed_object.insert("parent_session_id".to_owned(), json!(parent_session_id));
+        managed_object.insert("agent_phase".to_owned(), json!("running"));
+        managed_object.insert("agent_resumable".to_owned(), json!(false));
+        managed_object.insert(
+            "agent_resume_reason".to_owned(),
+            json!("live_or_ownership_unknown"),
+        );
         managed_object.insert("agent_status".to_owned(), json!("running"));
+        managed_object.insert("parent_session_name".to_owned(), json!("parent"));
+        managed_object.insert("organization_depth".to_owned(), json!(2));
+        managed_object.insert(
+            "organization_path".to_owned(),
+            json!(["Director", "parent", "fresh"]),
+        );
         let parsed = lifecycle_snapshot(&json!({
             "revision": 1,
             "workspace_id": WorkspaceId::new(),
@@ -8908,6 +8812,73 @@ mod tests {
     }
 
     #[test]
+    fn session_catalog_adapter_filters_roles_and_falls_back_on_invalid_source() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data_home = temporary.path().join("home");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&data_home).unwrap();
+        std::fs::write(
+            data_home.join("roles.toml"),
+            "version = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n[roles.director]\nsummary = \"Direct\"\nscopes = [\"root\"]\ninstructions = \"direct\"\n",
+        )
+        .unwrap();
+        let port = ProductionSessionCatalogPort { data_home };
+
+        let catalog = port.roles(&workspace);
+        assert_eq!(catalog.default.unwrap().as_str(), "coder");
+        assert_eq!(catalog.roles.len(), 1);
+        assert_eq!(catalog.roles[0].id.as_str(), "coder");
+
+        std::fs::write(port.data_home.join("roles.toml"), "version = 99\n").unwrap();
+        assert_eq!(port.roles(&workspace), SessionRoleCatalog::default());
+    }
+
+    #[test]
+    fn session_catalog_adapter_reads_current_and_configured_local_branches() {
+        let temporary = tempfile::tempdir().unwrap();
+        let git = |arguments: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(temporary.path())
+                .args(arguments)
+                .status()
+                .unwrap()
+        };
+        assert!(git(&["init", "--initial-branch=main"]).success());
+        assert!(git(&["config", "user.name", "fixture"]).success());
+        assert!(git(&["config", "user.email", "fixture@example.invalid"]).success());
+        std::fs::write(temporary.path().join("tracked"), "base\n").unwrap();
+        assert!(git(&["add", "tracked"]).success());
+        assert!(git(&["commit", "-m", "base"]).success());
+        let port = ProductionSessionCatalogPort {
+            data_home: temporary.path().join("home"),
+        };
+
+        let catalog = port.branches(temporary.path(), None);
+        assert_eq!(catalog.default.as_deref(), Some("refs/heads/main"));
+        assert_eq!(catalog.branches.len(), 1);
+        assert_eq!(catalog.branches[0].refname, "refs/heads/main");
+
+        assert!(git(&["branch", "feature"]).success());
+        assert_eq!(
+            port.branches(temporary.path(), Some("refs/heads/feature"))
+                .default
+                .as_deref(),
+            Some("refs/heads/feature")
+        );
+        assert_eq!(
+            port.branches(temporary.path(), Some("refs/heads/missing"))
+                .default
+                .as_deref(),
+            Some("refs/heads/main")
+        );
+        assert_eq!(
+            port.branches(&temporary.path().join("missing"), None),
+            SessionBranchCatalog::default()
+        );
+    }
+
+    #[test]
     fn opening_a_workspace_this_daemon_does_not_serve_is_a_presentable_refusal() {
         let opened = std::path::Path::new("/workspace/other");
         let refusal = usagi_core::infrastructure::ipc::workspace_admission(
@@ -9307,6 +9278,12 @@ mod tests {
         };
 
         assert!(settings.read(SettingsScope::Global).is_err());
+        assert!(settings.read_workspace_setup_commands().is_err());
+        assert!(
+            settings
+                .save_workspace_setup_commands(&["cargo test".to_owned()])
+                .is_err()
+        );
         assert!(
             settings
                 .save(SettingsScope::Workspace, &Settings::default())
@@ -9505,6 +9482,42 @@ mod tests {
         let local = WorkspaceSettingsStore::new(&workspace).load().unwrap();
         assert_eq!(local.issue_enabled, Some(false));
         assert_eq!(local.env, workspace_env);
+    }
+
+    #[test]
+    fn settings_port_round_trips_session_setup_without_replacing_workspace_config() {
+        let temporary = tempfile::tempdir().unwrap();
+        let global_dir = temporary.path().join("global");
+        let workspace = temporary.path().join("workspace");
+        let config_dir = workspace.join(".usagi");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            "# retained\n[agents.claude]\nmodels = [\"sonnet\"]\n",
+        )
+        .unwrap();
+        let mut port = PersistentSettingsPort {
+            storage: Storage::new(&global_dir),
+            workspace: None,
+        };
+        assert!(port.read_workspace_setup_commands().is_err());
+        assert!(
+            port.save_workspace_setup_commands(&["cargo test".to_owned()])
+                .is_err()
+        );
+
+        port.select_workspace(&workspace).unwrap();
+        assert!(port.read_workspace_setup_commands().unwrap().is_empty());
+        port.save_workspace_setup_commands(&["cargo fetch".to_owned(), "cargo test".to_owned()])
+            .unwrap();
+        assert_eq!(
+            port.read_workspace_setup_commands().unwrap(),
+            ["cargo fetch", "cargo test"]
+        );
+        let source = std::fs::read_to_string(config_path).unwrap();
+        assert!(source.contains("# retained"));
+        assert!(source.contains("models = [\"sonnet\"]"));
     }
 
     #[test]
@@ -9861,7 +9874,6 @@ mod tests {
             24,
             80,
             "demo",
-            "/tmp/demo",
             &[projected],
             None,
             &std::collections::BTreeMap::new(),

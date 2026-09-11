@@ -2,10 +2,10 @@
   "version": 1,
   "total": 523,
   "owners": {
-    "core": 9,
+    "core": 10,
     "daemon": 366,
     "root-cli": 40,
-    "tui": 108
+    "tui": 107
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
@@ -13,6 +13,7 @@
     "crates/cli/src/mcp/tools/issue.rs": 1,
     "crates/core/src/infrastructure/bounded_process.rs": 5,
     "crates/core/src/infrastructure/env_resolver.rs": 3,
+    "crates/core/src/infrastructure/session_snapshot.rs": 1,
     "crates/core/src/usecase/vt_screen.rs": 1,
     "crates/daemon/src/infrastructure/child_identity.rs": 5,
     "crates/daemon/src/infrastructure/generation_registry.rs": 7,
@@ -24,7 +25,7 @@
     "crates/daemon/src/usecase/stop.rs": 1,
     "crates/tui/src/presentation/frame.rs": 1,
     "crates/tui/src/presentation/live_terminal.rs": 1,
-    "crates/tui/src/presentation/mod.rs": 3,
+    "crates/tui/src/presentation/mod.rs": 2,
     "crates/tui/src/presentation/tests.rs": 9,
     "crates/tui/src/presentation/views/create_session_error_modal.rs": 1,
     "crates/tui/src/presentation/views/cleanup_modal.rs": 1,

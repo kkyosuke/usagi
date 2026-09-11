@@ -761,6 +761,201 @@ impl AgentTabIntentError {
     }
 }
 
+/// Failures produced by the IO-free mutation policy itself.
+///
+/// Store-only failures such as a future schema or a lock conflict cannot be
+/// constructed here, so adapters do not need unreachable match arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTabIntentMutationError {
+    /// The accepted causal write could not advance its revision.
+    Unavailable,
+    /// The proposed mutation or revision could not be trusted.
+    InvalidMutation,
+}
+
+impl From<AgentTabIntentMutationError> for AgentTabIntentError {
+    fn from(error: AgentTabIntentMutationError) -> Self {
+        match error {
+            AgentTabIntentMutationError::Unavailable => Self::Unavailable,
+            AgentTabIntentMutationError::InvalidMutation => Self::InvalidMutation,
+        }
+    }
+}
+
+/// Reconcile one mutation against the latest durable value under a caller-held
+/// store lock.
+///
+/// This is the single source of truth for compare-and-swap conflicts and causal
+/// close fencing. Persistence adapters own locking and atomic publication only;
+/// in-memory test ports call this same policy.
+///
+/// # Errors
+///
+/// Returns [`AgentTabIntentMutationError::InvalidMutation`] when the expected revision
+/// is ahead of durable state or the resulting state fails validation. Revision
+/// exhaustion is reported as [`AgentTabIntentMutationError::Unavailable`] because the
+/// accepted causal write cannot be published.
+#[allow(clippy::too_many_lines)]
+pub fn reconcile_agent_tab_intent_mutation(
+    mut current: AgentTabIntent,
+    expected_workspace: WorkspaceId,
+    expected_revision: u64,
+    mutation: AgentTabIntentMutation,
+) -> Result<AgentTabIntentPortCommit, AgentTabIntentMutationError> {
+    let cas_conflict = current.revision != expected_revision;
+    if expected_revision > current.revision {
+        return Err(AgentTabIntentMutationError::InvalidMutation);
+    }
+    let before = current.clone();
+    // An accepted close is a causal write even when this key is already
+    // dismissed. Otherwise a Reopen that loaded the current revision before
+    // this close could clear the newer user intent. Unknown/authoritatively
+    // removed keys remain inert.
+    let force_close_fence = match &mutation {
+        AgentTabIntentMutation::Dismiss { continuation }
+        | AgentTabIntentMutation::DismissInterrupted { continuation, .. } => {
+            current.targets.iter().any(|target| {
+                target
+                    .tabs
+                    .iter()
+                    .any(|slot| slot.continuation == *continuation)
+            })
+        }
+        AgentTabIntentMutation::DismissTerminal { terminal }
+        | AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. } => {
+            current.dismisses_terminal(terminal)
+        }
+        _ => false,
+    };
+    let mut mutation_applied = true;
+    let projection = if cas_conflict {
+        match mutation {
+            AgentTabIntentMutation::Observe {
+                terminals,
+                agents,
+                allowed_sessions,
+            } => {
+                // Observe is not a stable-key delta. Return only a
+                // latest-ref-exact projection, leave bytes untouched, and make
+                // the controller redispatch under a fresh CAS fence before it
+                // changes runtime state.
+                mutation_applied = false;
+                Some(current.projected_exact(&terminals, &agents, &allowed_sessions))
+            }
+            AgentTabIntentMutation::Reopen { continuation } => {
+                // Reopen is anti-monotonic with Dismiss. If this stale writer
+                // still sees the key closed, preserve the latest close and ask
+                // the user to retry.
+                mutation_applied = !current.dismissed.contains(&continuation);
+                None
+            }
+            AgentTabIntentMutation::Upsert {
+                session_id,
+                continuation,
+                terminal,
+                select,
+            } => {
+                // A continuation/selection is a same-key register, not a
+                // commutative delta. A stale admission may only be acknowledged
+                // when the latest state already contains the exact value.
+                let existing = current.targets.iter().find_map(|target| {
+                    target
+                        .tabs
+                        .iter()
+                        .find(|slot| slot.continuation == continuation)
+                        .map(|slot| (target, slot))
+                });
+                mutation_applied = existing.is_some_and(|(target, slot)| {
+                    target.session_id == session_id
+                        && slot.terminal.fences(&terminal)
+                        && (!select || target.selected == Some(continuation))
+                        && !current.dismissed.contains(&continuation)
+                });
+                None
+            }
+            AgentTabIntentMutation::Select {
+                session_id,
+                continuation,
+            } => {
+                mutation_applied = current.targets.iter().any(|target| {
+                    target.session_id == session_id && target.selected == continuation
+                });
+                None
+            }
+            AgentTabIntentMutation::Reorder {
+                session_id,
+                continuations,
+            } => {
+                mutation_applied = current
+                    .targets
+                    .iter()
+                    .find(|target| target.session_id == session_id)
+                    .is_some_and(|target| {
+                        target
+                            .tabs
+                            .iter()
+                            .map(|slot| slot.continuation)
+                            .eq(continuations)
+                    });
+                None
+            }
+            AgentTabIntentMutation::Dismiss { continuation } => {
+                current.apply(AgentTabIntentMutation::Dismiss { continuation })
+            }
+            AgentTabIntentMutation::DismissInterrupted {
+                session_id,
+                continuation,
+                terminal,
+            } => current.apply(AgentTabIntentMutation::DismissInterrupted {
+                session_id,
+                continuation,
+                terminal,
+            }),
+            // A deferred close carries the exact terminal the user saw, so it
+            // merges monotonically. Only the stale successor preview is dropped.
+            AgentTabIntentMutation::DismissTerminal { terminal }
+            | AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. } => {
+                current.apply(AgentTabIntentMutation::DismissTerminal { terminal })
+            }
+        }
+    } else {
+        match mutation {
+            AgentTabIntentMutation::Upsert {
+                session_id,
+                continuation,
+                terminal,
+                select: _,
+            } if current.dismissed.contains(&continuation) => {
+                // Upsert refreshes identity, but only Reopen is allowed to make
+                // an explicitly closed lineage visible again.
+                mutation_applied = false;
+                current.apply(AgentTabIntentMutation::Upsert {
+                    session_id,
+                    continuation,
+                    terminal,
+                    select: false,
+                })
+            }
+            mutation => current.apply(mutation),
+        }
+    };
+    if current != before || force_close_fence {
+        current.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(AgentTabIntentMutationError::Unavailable)?;
+        current
+            .validate(expected_workspace)
+            .map_err(|_| AgentTabIntentMutationError::InvalidMutation)?;
+    }
+    Ok(AgentTabIntentPortCommit {
+        intent: current,
+        projection,
+        mutation_applied,
+        cas_conflict,
+    })
+}
+
 /// Workspace-scoped persistence boundary for the TUI-only display intent.
 /// Implementations apply stable-key mutations under a file lock and return the
 /// merged latest revision after a compare-and-swap conflict.
@@ -1597,6 +1792,14 @@ mod tests {
             assert!(!error.safe_message().is_empty());
             assert!(!error.safe_message().contains(&workspace_text));
         }
+        assert_eq!(
+            AgentTabIntentError::from(AgentTabIntentMutationError::Unavailable),
+            AgentTabIntentError::Unavailable
+        );
+        assert_eq!(
+            AgentTabIntentError::from(AgentTabIntentMutationError::InvalidMutation),
+            AgentTabIntentError::InvalidMutation
+        );
     }
 
     #[test]

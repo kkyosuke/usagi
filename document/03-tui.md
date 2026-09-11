@@ -92,7 +92,7 @@ worker 内の `git clone` 自体は強制終了しないため、処理が完了
 
 Welcome の Config は、`Global` 見出しに全体へ適用する Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Workflow・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
-実行した場合は、Home 上の overlay modal に Agent・Base branch・Workflow・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
+実行した場合は、Home 上の overlay modal に Agent・Environment・Base branch・Session setup・Workflow・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
 `↑↓` で行を、`←→` で値を切り替える。Workflow 行は択一値として `< classic >` / `< goal-driven >` と表示する。
 Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
 `←→` で階層型・フラット・パイプライン型のカードを切り替え、`↑↓` でカード行と独立した `Use no template` actionの間を移動する。`Enter` は選択をdraftへ適用し、
@@ -100,8 +100,8 @@ Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択mo
 
 ![Team template picker](assets/team-template-picker.svg)
 
-dirty な Save 行で `Enter` を押すと保存フローが始まり、実際の settings / Environment の永続化を背景 worker へ渡す。
-描画スレッドはその完了を待つ間も spinner と **`Saving settings…` / `Saving environment…`** を更新する。
+dirty な Save 行で `Enter` を押すと保存フローが始まり、実際の settings / Environment / Session setup の永続化を背景 worker へ渡す。
+描画スレッドはその完了を待つ間も spinner と **`Saving settings…` / `Saving environment…` / `Saving session setup…`** を更新する。
 保存が成功すると Save button が **`saved`** 表示へ変わり、
 短い確認表示ののち、ユーザー操作なしで呼び出し元へ自動的に戻る。Welcome の Config は Welcome へ戻る。
 Overview の Config は、その workspace を settings port に束縛し、live pane と session を背景に維持したまま Home へ戻る。
@@ -246,12 +246,14 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 |---|---|---|
 | Global | build channel ごとの user data directory にある `settings.json` | Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment はすべての workspace に適用する。Agent・Workflow・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
 | Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Workflow・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field は Global を継承する。Workflow の未知 token は自律実行を暗黙に有効化せず `classic` へ縮退する |
+| Workspace session setup | 対象 repository の `.usagi/config.toml` | session worktree 作成直後に順番に実行する command 列を保持する。Global scope はなく、新規 session の admission 時に読み取る |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
 merge して atomic write する。Global Config は Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Agent・Workflow・Team・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
-Workspace Config は Agent・Base branch・Workflow・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
+Workspace Config は Agent・Base branch・Workflow・Team・Issue・Memory、workspace `env`、session setup command を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
+Session setup editor は `.usagi/config.toml` の `[session].setup_commands` だけを atomic に置換し、コメントと `[agents]` を含む他の TOML 設定を保持する。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
 Icons は global-only の `icon_mode`、Terminal PTYs は global-only の `terminal_max_concurrent`、Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Workflow は `work_mode`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。Terminal PTYs は次の daemon generation の起動時に反映され、値域と resource policy は [daemon の capacity pool](05-daemon.md#capacity-pool) を正本とする。
@@ -889,6 +891,8 @@ frame から追い出したのに続き、**ローカルのファイル IO と�
 restore の再試行は期限どおり始まり、キー入力は同じ tick で処理される。skip は入力から反映までの latency を増やさない。
 Home の時計 material は分単位へ丸め、session membership の集合は workspace revision が変わったときだけ再構築する。
 branch catalog の Git subprocess も Home の初回描画後に one-shot worker で読み、完了時だけ material を更新する。
+worker は workspace-resident catalog port を共有せず、接続を持たない専用 adapter を factory から受け取るため、
+Git が停止しても workspace の teardown と次 workspace の composition を妨げない。
 mouse wheel の同方向・同一 cell の burst は terminal adapter が steps 付きの 1 input へ畳み、移動量を保ったまま
 1 回の再描画で反映する。pointer が別 surface へ移った event は畳まず FIFO 順を保つ。
 
@@ -1017,7 +1021,7 @@ Overview palette の Tab は選択中のトップレベル command を補完す�
 Config の `Modal mode` は Overview と Closeup の command surface に共通して適用される。`Action` は
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
 command の subcommand picker を開き、`←` は閉じる。`Prompt` は入力した command line を Enter で解釈・実行する。
-`config` は引数を取らず、現在開いている workspace の Config を Agent / Base branch / Workflow / Team / Issue / Memory の overlay modal で開く。
+`config` は引数を取らず、現在開いている workspace の Config を Agent / Environment / Base branch / Session setup / Workflow / Team / Issue / Memory の overlay modal で開く。
 `garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
@@ -1130,6 +1134,18 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 - 入力行が `NAME=value` の形でない、または名前が移植可能な識別子でない場合は、入力を保持したまま
   安全な error を表示する。読み込みや保存の失敗も editor に留まり、入力を失わずに再試行できる。
 - Overview から開いた editor で `Tab` を押すと相手スコープを読み直す。切り替え前の未保存の編集は破棄される。
+
+### session setup editor
+
+Workspace Config の `Session setup  [ N commands ]` を選んで Enter を押すと、session worktree 作成後に
+実行する command 列を複数行 textarea で編集できる。1 行を `/bin/sh -lc` に渡す 1 command として扱い、
+空行は保存時に取り除く。`Tab` で textarea と Save action の focus を切り替え、Save で Enter を押すと
+`.usagi/config.toml` の `[session].setup_commands` だけを全置換する。Esc は未保存の draft を破棄する。
+保存は workspace config の cross-process lock と atomic write を使い、同じファイルのコメント、順序、
+`[agents]` など session setup 以外の設定を保持する。既存 command の 1 要素に改行が含まれ、1 行 1 command の
+UI で損失なく表現できない場合は editor を開かず、`.usagi/config.toml` での直接編集を案内する。
+読み込み・検証・保存に失敗した場合は source を上書きせず、安全な error と入力 draft を保持して再試行できる。
+実行時の順序、lifecycle、失敗時の扱いは [daemon の setup command](05-daemon.md#session-作成後の-setup-command) を正本とする。
 
 ## session garden
 

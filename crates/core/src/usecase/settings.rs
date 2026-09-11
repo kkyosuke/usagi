@@ -68,6 +68,29 @@ pub trait SettingsPort: Send {
         settings.env.clone_from(environment);
         self.save(scope, &settings)
     }
+
+    /// Load commands run after creating a session worktree in the selected
+    /// workspace. Stateless adapters default to an empty workspace config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected workspace config cannot be read.
+    fn read_workspace_setup_commands(&mut self) -> io::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Replace the commands run after creating a session worktree in the
+    /// selected workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this adapter cannot persist workspace config.
+    fn save_workspace_setup_commands(&mut self, _commands: &[String]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "workspace session setup is unavailable",
+        ))
+    }
 }
 
 /// Resolve settings for a Home entry without allowing a damaged preference
@@ -136,6 +159,14 @@ mod tests {
         readable
             .save(SettingsScope::Workspace, &Settings::default())
             .unwrap();
+        assert!(readable.read_workspace_setup_commands().unwrap().is_empty());
+        assert_eq!(
+            readable
+                .save_workspace_setup_commands(&["cargo test".to_owned()])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
         assert_eq!(readable.workspace.as_ref().unwrap(), &Settings::default());
         readable
             .save(SettingsScope::Global, &Settings::default())

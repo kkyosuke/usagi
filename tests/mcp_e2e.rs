@@ -183,6 +183,18 @@ fn production_disabled_family_leaves_both_the_registry_and_the_agent_prompt() {
 #[test]
 fn production_session_create_reaches_daemon_and_durable_lifecycle() {
     let mut mcp = McpHarness::start();
+    fs::write(
+        mcp.workspace().join(".usagi/config.toml"),
+        concat!(
+            "[session]\n",
+            "setup_commands = [\"printf ready > setup-marker\"]\n",
+            "[agents.codex]\n",
+            "models = [\"fixture-codex\"]\n",
+            "[agents.claude]\n",
+            "models = [\"fixture-claude\"]\n",
+        ),
+    )
+    .unwrap();
     let response = mcp.tool("session_create", &json!({"name":"mcp-e2e-session"}));
     assert!(response.get("error").is_none(), "{response}");
     assert!(
@@ -195,6 +207,14 @@ fn production_session_create_reaches_daemon_and_durable_lifecycle() {
         mcp.workspace()
             .join(".usagi/sessions/mcp-e2e-session/.git")
             .exists()
+    );
+    assert_eq!(
+        fs::read_to_string(
+            mcp.workspace()
+                .join(".usagi/sessions/mcp-e2e-session/setup-marker")
+        )
+        .unwrap(),
+        "ready"
     );
     let lifecycle =
         fs::read_to_string(support::daemon::lifecycle_state_path(&mcp.data_dir())).unwrap();

@@ -14,7 +14,6 @@
 //! shell.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentInventory, AgentResumeRelation};
 use usagi_core::domain::id::AgentContinuationRef;
@@ -2064,28 +2063,25 @@ impl WorkspaceRuntime {
         height: usize,
         width: usize,
         workspace_name: &str,
-        root_cwd: impl Into<PathBuf>,
         sessions: &[ProjectedSession],
         metrics: Option<DaemonMetrics>,
         git_diffs: &BTreeMap<SessionId, GitDiff>,
         terminal_view: Option<TerminalViewProjection>,
     ) -> Vec<String> {
-        let root_cwd = root_cwd.into();
         let root_terminal_projection = self.root_terminal_projection(terminal_view.as_ref());
         let home_terminal_view = if self.state.root_terminal_drawer_open() {
             None
         } else {
             terminal_view
         };
-        let projection =
-            HomeProjection::from_state(&self.state, workspace_name, &root_cwd, sessions)
-                .with_pane(self.preview_pane())
-                .with_metrics(metrics)
-                .with_git_diffs(git_diffs)
-                .with_terminal_view(home_terminal_view)
-                .with_director_drawer(self.director_projection.clone())
-                .with_root_terminal_drawer(root_terminal_projection)
-                .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
+        let projection = HomeProjection::from_state(&self.state, workspace_name, sessions)
+            .with_pane(self.preview_pane())
+            .with_metrics(metrics)
+            .with_git_diffs(git_diffs)
+            .with_terminal_view(home_terminal_view)
+            .with_director_drawer(self.director_projection.clone())
+            .with_root_terminal_drawer(root_terminal_projection)
+            .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
         render_home(height, width, &projection)
     }
 
@@ -2717,16 +2713,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let mut runtime = overview_on(workspace);
         type_str(&mut runtime, "session");
-        let frame = runtime.render(
-            24,
-            80,
-            "atlas",
-            "/work/root",
-            &[],
-            None,
-            &BTreeMap::new(),
-            None,
-        );
+        let frame = runtime.render(24, 80, "atlas", &[], None, &BTreeMap::new(), None);
         assert!(frame.join("\n").contains("Overview"));
     }
 
@@ -3945,7 +3932,6 @@ mod tests {
             24,
             100,
             "demo",
-            ".",
             &[],
             None,
             &BTreeMap::new(),
@@ -4117,7 +4103,6 @@ mod tests {
             20,
             80,
             "workspace",
-            "/workspace",
             &[],
             None,
             &BTreeMap::new(),
@@ -4287,7 +4272,6 @@ mod tests {
             24,
             200,
             "workspace",
-            "/workspace",
             &[],
             None,
             &BTreeMap::new(),
@@ -4572,7 +4556,6 @@ mod tests {
             20,
             80,
             "atlas",
-            "/work/root",
             std::slice::from_ref(&projected),
             None,
             &BTreeMap::new(),
@@ -4735,7 +4718,7 @@ mod tests {
     /// Render one Home frame through the runtime and flatten it to plain text.
     fn joined_frame(runtime: &WorkspaceRuntime) -> String {
         runtime
-            .render(24, 100, "work", "/work", &[], None, &BTreeMap::new(), None)
+            .render(24, 100, "work", &[], None, &BTreeMap::new(), None)
             .iter()
             .map(|line| strip(line))
             .collect::<Vec<_>>()
