@@ -1920,6 +1920,64 @@ exit 0
 }
 
 #[test]
+fn production_peer_review_request_receives_a_correlated_cross_runtime_verdict() {
+    let mut mcp = McpHarness::start();
+    let credential = mcp.launch_caller();
+    mcp.restart_with_credential(&credential);
+    let caller = tool_text(&mcp.tool("agent_peers", &json!({})))["self_agent_id"].clone();
+    let request_id = OperationId::new();
+    let verdict_id = OperationId::new();
+    let review = json!({"base_sha":"a".repeat(40),"head_sha":"b".repeat(40)});
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"peer-reviewer","version":"1"}}});
+    let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    let read = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_messages","arguments":{"unread_only":true}}});
+    let ack = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_message_ack","arguments":{"message_id":request_id}}});
+    let reply = json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agent_message","arguments":{"message_id":verdict_id,"to_agent_id":caller,"kind":"approved","body":"fixture review passed","in_reply_to":request_id,"review":review}}});
+    // Wait for the actual peer wake before reading; the daemon must commit
+    // the request before notifying this exact runtime. The fixture has no API key.
+    mcp.replace_fixture_agent("claude", &format!(
+        "#!/bin/sh\nIFS= read -r notice || exit 1\nprintf '%s\\n' '{initialize}' '{initialized}' '{read}' '{ack}' '{reply}' | \"$USAGI_E2E_USAGI\" mcp >> \"$USAGI_MCP_FIXTURE_LOG\"\n"
+    ));
+    let handoff = mcp.tool("agent_handoff", &json!({"agent":{"runtime":"claude","model":"fixture-claude"},"prompt":"await a peer review request"}));
+    assert!(handoff.get("error").is_none(), "{handoff}");
+    let reviewer = tool_text(&handoff)["agent_id"].clone();
+    let request = mcp.tool("agent_message", &json!({"message_id":request_id,"to_agent_id":reviewer,"kind":"review_request","body":"review this diff","review":review}));
+    assert!(request.get("error").is_none(), "{request}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let verdict = loop {
+        let response = mcp.tool("agent_messages", &json!({"unread_only":true}));
+        assert!(response.get("error").is_none(), "{response}");
+        if let Some(verdict) = tool_text(&response)["messages"].as_array().unwrap().first() {
+            break verdict.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "peer reply missing: {}",
+            fs::read_to_string(mcp.fixture_log()).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(verdict["message_id"], json!(verdict_id));
+    assert_eq!(verdict["from_agent_id"], reviewer);
+    assert_eq!(verdict["kind"], "approved");
+    assert_eq!(verdict["in_reply_to"], json!(request_id));
+    assert_eq!(verdict["review"], review);
+    assert!(
+        mcp.tool("agent_message_ack", &json!({"message_id":verdict_id}))
+            .get("error")
+            .is_none()
+    );
+    let history = tool_text(&mcp.tool("agent_messages", &json!({})));
+    assert!(
+        history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["acknowledged"] == true)
+    );
+}
+
+#[test]
 fn production_same_session_handoff_and_messages_preserve_creator_authority() {
     let mut mcp = McpHarness::start();
     let credential = mcp.launch_caller();

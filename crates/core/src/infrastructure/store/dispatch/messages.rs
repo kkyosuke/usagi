@@ -406,4 +406,332 @@ mod tests {
         });
         assert!(store.send_message(workspace, &b, run, reply).is_err());
     }
+
+    #[test]
+    fn acknowledged_retry_from_a_new_run_preserves_original_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let a = participant(&store, workspace, session, "codex");
+        let b = participant(&store, workspace, session, "claude");
+        let run = OperationId::new();
+        let request = message(&b);
+        let mut saved = store
+            .send_message(workspace, &a, run, request.clone())
+            .unwrap();
+        store
+            .acknowledge_message(workspace, &b, request.message_id)
+            .unwrap();
+        saved.acknowledged = true;
+        let reopened = DispatchStore::new(dir.path());
+        assert_eq!(
+            reopened
+                .send_message(workspace, &a, OperationId::new(), request)
+                .unwrap(),
+            saved
+        );
+        assert_eq!(
+            reopened.messages(workspace, &a, None, 100, false).unwrap(),
+            vec![saved]
+        );
+    }
+
+    #[test]
+    fn concurrent_retries_append_only_one_durable_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let a = participant(&store, workspace, session, "codex");
+        let b = participant(&store, workspace, session, "claude");
+        let request = message(&b);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let store = DispatchStore::new(dir.path());
+                let caller = a.clone();
+                let message = request.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .send_message(workspace, &caller, OperationId::new(), message)
+                        .unwrap()
+                })
+            })
+            .collect();
+        let saved: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert!(saved.iter().all(|entry| entry == &saved[0]));
+        assert_eq!(
+            store.messages(workspace, &b, None, 100, true).unwrap(),
+            vec![saved[0].clone()]
+        );
+    }
+
+    #[test]
+    fn pages_and_replies_do_not_expose_other_peers_conversations() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let a = participant(&store, workspace, session, "codex");
+        let b = participant(&store, workspace, session, "claude");
+        let c = participant(&store, workspace, session, "claude");
+        let run = OperationId::new();
+        let private = store.send_message(workspace, &b, run, message(&c)).unwrap();
+        assert!(
+            store
+                .messages(workspace, &a, None, 100, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .messages(workspace, &a, Some(private.message.message_id), 100, false)
+                .is_err()
+        );
+        assert!(
+            store
+                .acknowledge_message(workspace, &a, private.message.message_id)
+                .is_err()
+        );
+        let mut forged_reply = message(&b);
+        forged_reply.in_reply_to = Some(private.message.message_id);
+        assert!(
+            store
+                .send_message(workspace, &a, run, forged_reply)
+                .is_err()
+        );
+        let first = store.send_message(workspace, &b, run, message(&a)).unwrap();
+        let second = store.send_message(workspace, &c, run, message(&a)).unwrap();
+        store
+            .acknowledge_message(workspace, &a, first.message.message_id)
+            .unwrap();
+        assert_eq!(
+            store.messages(workspace, &a, None, 1, true).unwrap(),
+            vec![second.clone()]
+        );
+        assert_eq!(
+            store
+                .messages(workspace, &a, Some(first.message.message_id), 1, true)
+                .unwrap(),
+            vec![second.clone()]
+        );
+        assert!(
+            store
+                .messages(workspace, &a, Some(second.message.message_id), 1, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.messages(workspace, &a, None, 101, false).is_err());
+    }
+
+    #[test]
+    fn review_verdict_requires_exact_base_and_head_and_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let a = participant(&store, workspace, session, "codex");
+        let b = participant(&store, workspace, session, "claude");
+        let run = OperationId::new();
+        let mut request = message(&b);
+        request.kind = MessageKind::ReviewRequest;
+        request.review = Some(ReviewTarget {
+            base_sha: "a".repeat(40),
+            head_sha: "b".repeat(40),
+        });
+        store
+            .send_message(workspace, &a, run, request.clone())
+            .unwrap();
+        let mut verdict = message(&a);
+        verdict.kind = MessageKind::Approved;
+        verdict.in_reply_to = Some(request.message_id);
+        for target in [
+            ReviewTarget {
+                base_sha: "c".repeat(40),
+                head_sha: "b".repeat(40),
+            },
+            ReviewTarget {
+                base_sha: "a".repeat(40),
+                head_sha: "c".repeat(40),
+            },
+        ] {
+            verdict.review = Some(target);
+            assert!(
+                store
+                    .send_message(workspace, &b, run, verdict.clone())
+                    .is_err()
+            );
+        }
+        verdict.review = request.review;
+        let saved = store
+            .send_message(workspace, &b, run, verdict.clone())
+            .unwrap();
+        assert_eq!(
+            store
+                .send_message(workspace, &b, OperationId::new(), verdict)
+                .unwrap(),
+            saved
+        );
+    }
+
+    #[test]
+    fn invalid_payloads_and_unmanaged_callers_cannot_modify_the_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let a = participant(&store, workspace, session, "codex");
+        let b = participant(&store, workspace, session, "claude");
+        let root = CallerRef {
+            session_id: None,
+            agent_id: a.agent_id,
+        };
+        let run = OperationId::new();
+        assert!(
+            store
+                .send_message(workspace, &root, run, message(&b))
+                .is_err()
+        );
+        assert!(store.messages(workspace, &root, None, 1, false).is_err());
+        assert!(
+            store
+                .acknowledge_message(workspace, &root, OperationId::new())
+                .is_err()
+        );
+        let mut invalid = message(&b);
+        invalid.body.clear();
+        assert!(store.send_message(workspace, &a, run, invalid).is_err());
+        assert!(!store.message_path(workspace, session).exists());
+    }
+
+    #[test]
+    fn failed_writes_and_acknowledgements_preserve_committed_messages() {
+        use json_file::{AtomicWriteStage, fail_next_atomic_write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let a = participant(&store, workspace, session, "codex");
+        let b = participant(&store, workspace, session, "claude");
+        let run = OperationId::new();
+        let saved = store.send_message(workspace, &a, run, message(&b)).unwrap();
+        let path = store.message_path(workspace, session);
+        let original = std::fs::read(&path).unwrap();
+        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
+            fail_next_atomic_write(&path, stage);
+            assert!(store.send_message(workspace, &a, run, message(&b)).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            fail_next_atomic_write(&path, stage);
+            assert!(
+                store
+                    .acknowledge_message(workspace, &b, saved.message.message_id)
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        assert_eq!(
+            store.messages(workspace, &b, None, 100, true).unwrap(),
+            vec![saved]
+        );
+    }
+
+    #[test]
+    fn future_corrupt_and_oversized_journals_fail_closed_without_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let a = participant(&store, workspace, session, "codex");
+        let b = participant(&store, workspace, session, "claude");
+        let run = OperationId::new();
+        let path = store.message_path(workspace, session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for raw in [
+            r#"{"version":2,"entries":[]}"#.to_owned(),
+            "not json".to_owned(),
+            " ".repeat(MAX_BYTES + 1),
+        ] {
+            std::fs::write(&path, &raw).unwrap();
+            assert!(store.messages(workspace, &a, None, 100, false).is_err());
+            assert!(store.send_message(workspace, &a, run, message(&b)).is_err());
+            assert!(
+                store
+                    .acknowledge_message(workspace, &b, OperationId::new())
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn count_and_byte_capacity_reject_only_new_messages_and_preserve_acks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let a = participant(&store, workspace, session, "codex");
+        let b = participant(&store, workspace, session, "claude");
+        let run = OperationId::new();
+        let saved = store.send_message(workspace, &a, run, message(&b)).unwrap();
+        let path = store.message_path(workspace, session);
+        let mut data = Messages::default();
+        for _ in 0..MAX_MESSAGES {
+            let mut entry = saved.clone();
+            entry.message.message_id = OperationId::new();
+            data.entries.push(entry);
+        }
+        json_file::write_atomic(path.parent().unwrap(), &path, &data).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert!(
+            store
+                .send_message(workspace, &a, run, message(&b))
+                .unwrap_err()
+                .to_string()
+                .contains("capacity exhausted")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let retained = &data.entries[0];
+        assert_eq!(
+            store
+                .send_message(workspace, &a, OperationId::new(), retained.message.clone())
+                .unwrap(),
+            *retained
+        );
+        store
+            .acknowledge_message(workspace, &b, retained.message.message_id)
+            .unwrap();
+
+        data.entries.clear();
+        let mut entry = saved;
+        entry.message.body = "a".repeat(16384);
+        data.entries.push(entry.clone());
+        let one_entry_bytes = serde_json::to_vec_pretty(&data).unwrap().len();
+        data.entries.push(entry.clone());
+        let additional_entry_bytes =
+            serde_json::to_vec_pretty(&data).unwrap().len() - one_entry_bytes;
+        let fitting_count = 1 + (MAX_BYTES - 1 - one_entry_bytes) / additional_entry_bytes;
+        data.entries.clear();
+        for _ in 0..fitting_count {
+            entry.message.message_id = OperationId::new();
+            data.entries.push(entry.clone());
+        }
+        json_file::write_atomic(path.parent().unwrap(), &path, &data).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        entry.message.message_id = OperationId::new();
+        assert!(
+            store
+                .send_message(workspace, &a, run, entry.message)
+                .unwrap_err()
+                .to_string()
+                .contains("byte capacity exhausted")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
 }

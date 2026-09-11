@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use usagi_core::{
     domain::session_lifecycle::AgentPhase,
     domain::{
@@ -2735,6 +2736,17 @@ impl AgentRuntime {
             worker.agent_id,
             &intent.prompt,
         );
+        if self
+            .dispatch
+            .agent_in_workspace(intent.workspace, worker.agent_id)
+            .map_err(map_dispatch_storage_error)?
+            .is_some_and(|stored| stored.runtime != worker.runtime || stored.model != worker.model)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::IdempotencyConflict,
+                "planned Agent runtime or model changed",
+            ));
+        }
         if let Some(existing) = self.operations.get(operation_id) {
             if existing.conflicts_with(&semantic) {
                 return Err(ProtocolError::new(
@@ -2746,15 +2758,13 @@ impl AgentRuntime {
         }
         // Recheck under the runtime owner lock after readiness to prevent a
         // competing handoff from starting this same Agent twice.
-        if intent.caller.session_id == Some(session) {
-            if worker.agent_id == intent.caller.agent_id {
-                return Err(ProtocolError::new(
-                    ErrorCode::InvalidArgument,
-                    "cannot hand off to yourself",
-                ));
-            }
-            self.require_peer_stopped(worker.agent_id)?;
+        if intent.caller.session_id == Some(session) && worker.agent_id == intent.caller.agent_id {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "cannot hand off to yourself",
+            ));
         }
+        self.require_peer_stopped(worker.agent_id)?;
         if matches!(intent.agent, DispatchAgentIntent::New { .. }) {
             let config = WorkspaceAgentConfig::read(
                 &scope
@@ -2829,7 +2839,7 @@ impl AgentRuntime {
         }
         if let DispatchAgentIntent::New { runtime, model } = selected {
             return Ok(usagi_core::domain::agent::Agent {
-                agent_id: AgentId::new(),
+                agent_id: peer_worker_id(operation, workspace, session),
                 session_id: Some(session),
                 runtime: runtime.clone(),
                 model: model.clone(),
@@ -2849,15 +2859,37 @@ impl AgentRuntime {
     }
 
     fn require_peer_stopped(&self, agent_id: AgentId) -> Result<(), ProtocolError> {
+        self.require_peer_stopped_except(agent_id, None)
+    }
+
+    fn require_peer_stopped_except(
+        &self,
+        agent_id: AgentId,
+        source: Option<OperationId>,
+    ) -> Result<(), ProtocolError> {
+        if !self.peer_is_stopped_except(agent_id, source)? {
+            return Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                "peer runtime already exists; use agent_message for a live peer",
+            ));
+        }
+        Ok(())
+    }
+
+    fn peer_is_stopped_except(
+        &self,
+        agent_id: AgentId,
+        source: Option<OperationId>,
+    ) -> Result<bool, ProtocolError> {
         let runs: BTreeSet<_> = self
             .dispatch
             .runs()
             .map_err(map_dispatch_storage_error)?
             .into_iter()
-            .filter(|run| run.agent_id == agent_id)
+            .filter(|run| run.agent_id == agent_id && Some(run.run_id) != source)
             .map(|run| run.run_id)
             .collect();
-        if self.coordinator.snapshot().records.iter().any(|record| {
+        Ok(!self.coordinator.snapshot().records.iter().any(|record| {
             runs.contains(&record.operation.operation_id)
                 && !matches!(
                     record.state,
@@ -2865,13 +2897,7 @@ impl AgentRuntime {
                         | super::runtime::RuntimeState::Reclaimed
                         | super::runtime::RuntimeState::SpawnFailed
                 )
-        }) {
-            return Err(ProtocolError::new(
-                ErrorCode::Unavailable,
-                "peer runtime already exists; use agent_message for a live peer",
-            ));
-        }
-        Ok(())
+        }))
     }
 
     /// Resolves the exact session Agent selected by a dispatch without
@@ -3222,17 +3248,20 @@ impl AgentRuntime {
             mcp_allowed: true,
         };
         let credential = OperationId::new().to_string();
+        // A tuple no longer identifies an Agent: same-session peers may use
+        // the same provider/model. Preserve the exact source's mailbox identity.
+        let source_binding = self
+            .dispatch
+            .binding(source.operation.operation_id)
+            .map_err(map_dispatch_storage_error)?
+            .ok_or_else(dispatch_binding_unavailable)?;
         let mut worker = self
             .dispatch
-            .upsert_agent_by_runtime_model(
-                target.workspace_id,
-                target.session_id,
-                profile_id,
-                source.launch.request.model.clone().unwrap_or_else(|| {
-                    ModelSelector::new("default").expect("literal model selector is canonical")
-                }),
-            )
-            .map_err(map_dispatch_storage_error)?;
+            .agent_in_workspace(target.workspace_id, source_binding.worker.agent_id)
+            .map_err(map_dispatch_storage_error)?
+            .filter(|worker| worker.session_id == target.session_id && worker.runtime == profile_id)
+            .ok_or_else(dispatch_agent_not_found)?;
+        self.require_peer_stopped_except(worker.agent_id, Some(source.operation.operation_id))?;
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
         let caller = CallerRef {
@@ -3425,6 +3454,10 @@ impl AgentRuntime {
                 ModelSelector::new("default").expect("literal model selector is canonical"),
             )
             .map_err(map_dispatch_storage_error)?;
+        if !self.peer_is_stopped_except(worker.agent_id, None)? {
+            // Ordinary launches must not steal a live peer's identity either.
+            worker.agent_id = AgentId::new();
+        }
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
         // A delayed delegation carries the authenticated parent in its durable
@@ -3439,7 +3472,8 @@ impl AgentRuntime {
             });
         self.sleep_one_for_capacity()?;
         self.dispatch
-            .reserve_admission(
+            .reserve_admission_for_workspace(
+                intent.workspace,
                 worker.clone(),
                 DispatchRun {
                     run_id: operation,
@@ -4219,6 +4253,31 @@ fn terminal_of(request: &TerminalRequest) -> Option<&TerminalRef> {
 /// The canonical launch intent. The formatting authority is
 /// [`usagi_core::infrastructure::client::agent_launch_semantic_key`] so a client can
 /// derive the same digest for the final it receives.
+/// Stable across readiness retries and daemon restarts before admission has
+/// published a binding. These IDs identify a resource, never confer authority.
+fn peer_worker_id(operation: OperationId, workspace: WorkspaceId, session: SessionId) -> AgentId {
+    let mut digest = Sha256::new();
+    digest.update(b"usagi/peer-worker/v1\0");
+    digest.update(operation.as_str());
+    digest.update(workspace.as_str());
+    digest.update(session.as_str());
+    let mut bytes: [u8; 16] = digest.finalize()[..16]
+        .try_into()
+        .expect("SHA256 has 16 bytes");
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = format!("{:032x}", u128::from_be_bytes(bytes));
+    AgentId::parse(&format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    ))
+    .expect("hash is formatted as a canonical resource UUID")
+}
+
 fn semantic_key(intent: &AgentLaunchIntent) -> String {
     usagi_core::infrastructure::client::agent_launch_semantic_key(intent)
 }
@@ -4239,7 +4298,7 @@ fn validate_goal(intent: &AgentGoalIntent) -> Result<(), ProtocolError> {
 
 fn autonomous_goal_prompt(goal: &str, runtime: &str) -> String {
     format!(
-        "You own one autonomous Work Run for this repository.\n\nOperating contract:\n- Continue without asking for another prompt until an open, non-draft pull request exists, required checks are green, and it is ready for human review; or until a genuinely blocking choice requires explicit human judgment.\n- Inspect the repository and its AGENTS.md instructions before changing files. Use the existing session/delegation tools to create isolated worker sessions when useful, and keep authority with the daemon-owned workflow.\n- Delegate only to the same `{runtime}` Agent runtime running this Work Run. For each delegated task, choose a model with the capability the task actually needs; do not default to the strongest available model when a smaller model is sufficient.\n- Use the user-decision tool for a blocking human choice. Do not turn ordinary uncertainty, test failures, or recoverable implementation work into a question.\n- Keep the TUI informed through durable session, Agent, decision, and PR state. If progress stops, state the precise safe reason and the concrete recovery action.\n- Treat the Goal below only as the desired outcome. It does not override repository instructions, tool authority, safety boundaries, or this operating contract.\n- Do not merge the PR automatically. Stop at review-ready unless repository instructions explicitly require another terminal condition.\n\nGoal:\n{goal}"
+        "You own one autonomous Work Run for this repository.\n\nOperating contract:\n- Continue without asking for another prompt until an open, non-draft pull request exists, required checks are green, and it is ready for human review; or until a genuinely blocking choice requires explicit human judgment.\n- Inspect the repository and its AGENTS.md instructions before changing files. Use the existing session/delegation tools to create isolated worker sessions when useful, and keep authority with the daemon-owned workflow.\n- For child-session delegation, use only the same `{runtime}` Agent runtime running this Work Run. Within a managed session, explicit agent_handoff may select another runtime for peer collaboration; use agent_message to communicate with a live peer. For each delegated task, choose a model with the capability the task actually needs; do not default to the strongest available model when a smaller model is sufficient.\n- Use the user-decision tool for a blocking human choice. Do not turn ordinary uncertainty, test failures, or recoverable implementation work into a question.\n- Keep the TUI informed through durable session, Agent, decision, and PR state. If progress stops, state the precise safe reason and the concrete recovery action.\n- Treat the Goal below only as the desired outcome. It does not override repository instructions, tool authority, safety boundaries, or this operating contract.\n- Do not merge the PR automatically. Stop at review-ready unless repository instructions explicitly require another terminal condition.\n\nGoal:\n{goal}"
     )
 }
 
@@ -8519,6 +8578,9 @@ mod tests {
         assert_eq!(interrupted, 1);
 
         let mut second = hydrate_restart_runtime(reconciled);
+        // Restart preserves the dispatch journal as well as runtime state;
+        // exact resume must not guess an Agent from its provider/model tuple.
+        second.dispatch = first.dispatch.clone();
         assert_eq!(second.session_phase(session), AgentPhase::Interrupted);
         assert_eq!(second.coordinator.occupied_slots(), 1);
 
@@ -8570,6 +8632,7 @@ mod tests {
             .reconcile_after_daemon_restart();
         assert_eq!(interrupted_again, 1);
         let mut third = hydrate_restart_runtime(reconciled_again);
+        third.dispatch = second.dispatch.clone();
         let replay = third
             .resume_exact(&resume_operation, &target, &FakeScope(Ok(resolved.clone())))
             .unwrap();
@@ -10016,6 +10079,138 @@ mod tests {
     }
 
     #[test]
+    fn same_model_launches_and_exact_resume_preserve_each_peer_identity() {
+        let mut runtime = runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = FakeScope(Ok(scope()));
+        let launch = AgentLaunchIntent {
+            workspace,
+            session: Some(session),
+            profile: Some(AgentProfileId::new("claude").unwrap()),
+        };
+        let first_operation = OperationId::new();
+        let first = runtime
+            .launch(&first_operation.to_string(), &launch, &resolved)
+            .unwrap();
+        let first_agent = runtime
+            .dispatch
+            .binding(first_operation)
+            .unwrap()
+            .unwrap()
+            .worker
+            .agent_id;
+        let second_operation = OperationId::new();
+        let second = runtime
+            .launch(&second_operation.to_string(), &launch, &resolved)
+            .unwrap();
+        let second_agent = runtime
+            .dispatch
+            .binding(second_operation)
+            .unwrap()
+            .unwrap()
+            .worker
+            .agent_id;
+        assert_ne!(first_agent, second_agent);
+        assert_eq!(
+            runtime
+                .dispatch
+                .agent(first_agent)
+                .unwrap()
+                .unwrap()
+                .current_run,
+            Some(first_operation)
+        );
+        runtime.exit(&second.terminal, 0).unwrap();
+        let target = runtime
+            .inventory(workspace)
+            .resumable
+            .into_iter()
+            .find_map(|item| {
+                item.target
+                    .filter(|target| target.runtime_id == second.runtime.agent_runtime_id)
+            })
+            .unwrap();
+        let resumed_operation = OperationId::new();
+        let resumed = runtime
+            .resume_exact(&resumed_operation.to_string(), &target, &resolved)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .dispatch
+                .binding(resumed_operation)
+                .unwrap()
+                .unwrap()
+                .worker
+                .agent_id,
+            second_agent
+        );
+        assert_eq!(
+            runtime
+                .dispatch
+                .agent(first_agent)
+                .unwrap()
+                .unwrap()
+                .current_run,
+            Some(first_operation)
+        );
+        runtime
+            .notify_peer(workspace, session, first_agent)
+            .unwrap();
+        assert_eq!(pty(&runtime).selected.as_ref(), Some(&first.terminal));
+        runtime
+            .notify_peer(workspace, session, second_agent)
+            .unwrap();
+        assert_eq!(pty(&runtime).selected.as_ref(), Some(&resumed.terminal));
+    }
+
+    #[test]
+    fn peer_plan_is_stable_before_admission_and_across_runtime_restart() {
+        let runtime = runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let caller = CallerRef {
+            session_id: Some(session),
+            agent_id: AgentId::new(),
+        };
+        let operation = OperationId::new();
+        let selected = DispatchAgentIntent::New {
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: ModelSelector::new("default").unwrap(),
+        };
+        let worker = runtime
+            .plan_peer_worker(&operation.to_string(), workspace, &caller, &selected)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .plan_peer_worker(&operation.to_string(), workspace, &caller, &selected)
+                .unwrap()
+                .agent_id,
+            worker.agent_id
+        );
+        let restarted = self::runtime();
+        assert_eq!(
+            restarted
+                .plan_peer_worker(&operation.to_string(), workspace, &caller, &selected)
+                .unwrap()
+                .agent_id,
+            worker.agent_id
+        );
+        assert_ne!(
+            peer_worker_id(OperationId::new(), workspace, session),
+            worker.agent_id
+        );
+        assert_ne!(
+            peer_worker_id(operation, WorkspaceId::new(), session),
+            worker.agent_id
+        );
+        assert_ne!(
+            peer_worker_id(operation, workspace, SessionId::new()),
+            worker.agent_id
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One peer lifetime covers planning, admission, notification, report and stopped reuse.
     fn peer_handoff_preserves_identity_and_targets_only_the_named_runtime() {
         let fixture = tempfile::tempdir().unwrap();
@@ -10088,6 +10283,29 @@ mod tests {
         let admission = runtime
             .dispatch_with_planned_worker(&operation, &dispatch, session, &scope, Some(&worker))
             .unwrap();
+        // A second selector can have been planned while the first request was
+        // still doing readiness IO. Stable identity does not authorize changing
+        // the model on a replay that reaches admission after the first request.
+        let mut conflicting_worker = worker.clone();
+        conflicting_worker.model = ModelSelector::new("changed").unwrap();
+        let mut conflicting_dispatch = dispatch.clone();
+        conflicting_dispatch.agent = DispatchAgentIntent::New {
+            runtime: conflicting_worker.runtime.clone(),
+            model: conflicting_worker.model.clone(),
+        };
+        assert_eq!(
+            runtime
+                .dispatch_with_planned_worker(
+                    &operation,
+                    &conflicting_dispatch,
+                    session,
+                    &scope,
+                    Some(&conflicting_worker)
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
         assert_eq!(
             runtime
                 .plan_peer_worker(&operation, workspace, &caller, &selected)
@@ -10698,14 +10916,50 @@ mod tests {
         );
 
         let successor_operation = OperationId::new();
+        assert_eq!(
+            runtime
+                .dispatch(
+                    &successor_operation.to_string(),
+                    &dispatch,
+                    session,
+                    &FakeScope(Ok(configured_scope(worktree.path()))),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable,
+            "public dispatch cannot replace a still-live Agent"
+        );
+        // Retain the late-completion regression for overlaps persisted by old
+        // daemons, which allowed a successor before the predecessor PTY exited.
+        let worker = runtime
+            .dispatch
+            .agent(completed_binding.worker.agent_id)
+            .unwrap()
+            .unwrap();
         let successor = runtime
-            .dispatch(
-                &successor_operation.to_string(),
-                &dispatch,
-                session,
+            .admit_dispatch(
+                successor_operation,
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(worker.runtime.clone()),
+                },
+                &dispatch.prompt,
+                &worker,
+                &caller,
+                &usagi_core::infrastructure::client::agent_dispatch_semantic_key(
+                    &dispatch.session_name,
+                    worker.agent_id,
+                    &dispatch.prompt,
+                ),
                 &FakeScope(Ok(configured_scope(worktree.path()))),
             )
             .unwrap();
+        runtime.remember_operation(
+            &successor_operation.to_string(),
+            None,
+            Ok(successor.clone()),
+        );
         let successor_binding = runtime
             .dispatch_store()
             .binding(successor_operation)

@@ -109,6 +109,27 @@ mod tests {
             review: None,
         };
         assert!(message.is_valid());
+        assert!(
+            SendMessage {
+                body: "a".repeat(16384),
+                ..message.clone()
+            }
+            .is_valid()
+        );
+        assert!(
+            !SendMessage {
+                body: "あ".repeat(5462),
+                ..message.clone()
+            }
+            .is_valid()
+        );
+        assert!(
+            !SendMessage {
+                kind: MessageKind::ReviewRequest,
+                ..message.clone()
+            }
+            .is_valid()
+        );
         for body in [" ".to_owned(), "a\0b".to_owned(), "a".repeat(16385)] {
             assert!(
                 !SendMessage {

@@ -280,6 +280,8 @@ provenance 束縛前の root / child が再帰委譲した直後に Work Run が
 promotion reservation に保存した immutable parent operation から各 operation の停止 fence を復元し、parent が retry generation へ進んだ後も child の束縛と起動済み worker の exact identity 回収に同じ履歴 fence を使う。live 周期回収は Agent 不在だけで予約を閉じず、socket 受付前の startup recovery だけが hydrated inventory の不在を確定とする。Goal root は Agent が一度未観測でも停止予約を保持し、reserve 後に遅れて出現した worker を後続回収で停止する。child operation は parent operation、既存 Agent dispatch、Supervisor start、別 task と共有できず、`supervisor_start` 自身も start operation と caller dispatch の join を root 作成前に永続化するため、同じ authenticated dispatch を retained Supervisor root/task から別 root へ移すこともできない。
 Supervisor provenance も promotion reservation もない classic caller はこの Work Run 固有の制約を受けず、
 従来どおり workspace allowlist 内の runtime を選べる。
+同じ session 内の明示的な `agent_handoff` はこの child-session delegation と別の入口であり、
+[Agent 間通信](#同じ-session-の-agent-間通信) の認可と exact worker fence に従う。
 
 MCP credential の transport authority は PID 単体ではなく、kernel から得た PID・process start identity・現在の
 `ConnectionId` の lease である。transport 切断は一致する connection lease だけを外し、exact process claim と credential は
@@ -423,6 +425,11 @@ handoff は session・worktree・role assignment を新設または変更しな�
 稼働中 peer とのやり取りには message を使う。handoff は異なる runtime を明示的に許可するが、runtime/model allowlist、
 実行数上限、既存 session role の delegation policy、Supervisor の budget / ownership fence は維持する。
 child session 向け `session_dispatch` / `session_delegate_brief` の同一 runtime 制約は変更しない。
+role の `max_depth` は [session 階層](10-session-roles.md) の制約であり、同じ session 内の handoff の再帰回数ではない。
+`max_concurrency` は同じ親 session の Agent 間で共有し、Supervisor の `ExecutionPolicy` は別途 task の深さと総数を制限する。
+`session_dispatch` も同じ Agent ID の live runtime を重ねて起動しない。通常の新規 selector は既存 tuple を再利用するため、
+選ばれた Agent が稼働中なら拒否する。別 identity を明示的に起動する入口は `agent_handoff` とする。
+exact resume は保存済み source binding の Agent ID を保持し、同じ runtime/model の別 peer に mailbox を付け替えない。
 
 kind は `message` / `review_request` / `approved` / `changes_requested`。
 review request は `review: {base_sha, head_sha}`（同じ長さの完全な 40 または 64 桁 hex SHA）を必須とする。

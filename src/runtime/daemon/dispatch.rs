@@ -470,29 +470,25 @@ pub(super) fn dispatch_agent_tool(
                     snapshot.clone()
                 } else {
                     perform_create(
-                            bound.sessions(),
-                            &SystemGit,
-                            &operation_id,
-                            &serde_json::json!({
-                            "name": session_name,
-                            "role": requested_role,
-                            "parent_session_id": caller.session_id,
-                            "creator_agent_id": caller.agent_id,
-                            }),
-                        )
-                        .map_err(|error| {
-                            let code = match &error {
-                                SessionRuntimeError::PermissionDenied => {
-                                    ErrorCode::PermissionDenied
-                                }
-                                SessionRuntimeError::RoleConflict(..) => {
-                                    ErrorCode::RevisionConflict
-                                }
-                                _ => ErrorCode::InvalidArgument,
-                            };
-                            ProtocolError::new(code, error.safe_message())
-                        })?
-                        .body
+                        bound.sessions(),
+                        &SystemGit,
+                        &operation_id,
+                        &serde_json::json!({
+                        "name": session_name,
+                        "role": requested_role,
+                        "parent_session_id": caller.session_id,
+                        "creator_agent_id": caller.agent_id,
+                        }),
+                    )
+                    .map_err(|error| {
+                        let code = match &error {
+                            SessionRuntimeError::PermissionDenied => ErrorCode::PermissionDenied,
+                            SessionRuntimeError::RoleConflict(..) => ErrorCode::RevisionConflict,
+                            _ => ErrorCode::InvalidArgument,
+                        };
+                        ProtocolError::new(code, error.safe_message())
+                    })?
+                    .body
                 };
                 let (session_id, parent_session_id) =
                     session_lineage_by_name(&created_body, &session_name).ok_or_else(|| {
@@ -563,8 +559,17 @@ pub(super) fn dispatch_agent_tool(
                         .as_ref()
                         .filter(|_| supervision_at_preflight.is_some())
                     {
-                        runtime
-                            .reserve_delegated_dispatch_for_session(
+                        if handoff {
+                            runtime.reserve_peer_handoff(
+                                parent_dispatch_run,
+                                &operation_id,
+                                task_instruction,
+                                reserved_worker,
+                                &session_name,
+                                chrono::Utc::now(),
+                            )
+                        } else {
+                            runtime.reserve_delegated_dispatch_for_session(
                                 parent_dispatch_run,
                                 &operation_id,
                                 task_instruction,
@@ -573,7 +578,8 @@ pub(super) fn dispatch_agent_tool(
                                 &session_name,
                                 chrono::Utc::now(),
                             )
-                            .map_err(supervisor_error)?
+                        }
+                        .map_err(supervisor_error)?
                     } else {
                         None
                     };

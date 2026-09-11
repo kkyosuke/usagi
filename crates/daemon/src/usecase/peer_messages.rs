@@ -133,6 +133,9 @@ pub fn handle(
         }
         DispatchToolAction::AgentMessages => {
             let query: Query = serde_json::from_value(payload).map_err(|_| invalid())?;
+            if !(1..=100).contains(&query.limit) {
+                return Err(invalid());
+            }
             let messages = store
                 .messages(
                     workspace,
@@ -237,6 +240,8 @@ mod tests {
                 json!({"message_id":OperationId::new(),"to_agent_id":receiver.agent_id,"kind":"message","body":" "}),
             ),
             (DispatchToolAction::AgentMessages, json!({"limit":"bad"})),
+            (DispatchToolAction::AgentMessages, json!({"limit":0})),
+            (DispatchToolAction::AgentMessages, json!({"limit":101})),
             (DispatchToolAction::AgentMessageAck, json!({})),
             (DispatchToolAction::AgentGet, json!({})),
         ] {
