@@ -23,6 +23,9 @@ pub struct WorkflowRecord {
     pub suspended_phase: Option<crate::domain::workflow::Phase>,
     #[serde(default)]
     pub implementation_operation: Option<OperationId>,
+    /// Daemon-proven exact resume chains rooted in the workflow launch or handoff.
+    #[serde(default)]
+    pub authorized_operations: Vec<(crate::domain::id::AgentId, OperationId)>,
 }
 
 impl DispatchStore {
@@ -109,6 +112,7 @@ mod tests {
                 start_error: None,
                 suspended_phase: None,
                 implementation_operation: None,
+                authorized_operations: Vec::new(),
             });
             std::fs::rename(parent, directory.path().join("saved-parent"))?;
             std::fs::write(parent, "not a directory")?;
@@ -140,6 +144,7 @@ mod tests {
                         start_error: None,
                         suspended_phase: None,
                         implementation_operation: None,
+                        authorized_operations: Vec::new(),
                     });
                     Ok(())
                 })
@@ -175,6 +180,7 @@ mod tests {
                     start_error: None,
                     suspended_phase: None,
                     implementation_operation: None,
+                    authorized_operations: Vec::new(),
                 });
                 Ok(())
             })
@@ -229,6 +235,7 @@ mod tests {
                     start_error: None,
                     suspended_phase: None,
                     implementation_operation: None,
+                    authorized_operations: Vec::new(),
                 });
                 Ok(())
             })

@@ -1091,23 +1091,51 @@ impl AgentRuntime {
     /// and its explicit resume chain, never a new launch that reused an Agent ID.
     #[must_use]
     pub fn workflow_live_operation(&self, operation: OperationId) -> Option<OperationId> {
-        let snapshot = self.coordinator.snapshot();
-        let mut record = snapshot
+        let operation = *self.workflow_operation_lineage(operation).last()?;
+        self.coordinator
+            .snapshot()
             .records
             .iter()
-            .find(|record| record.operation.operation_id == operation)?;
+            .find(|record| {
+                record.operation.operation_id == operation
+                    && record.superseded_by.is_none()
+                    && record.state == super::runtime::RuntimeState::Running
+            })
+            .map(|record| record.operation.operation_id)
+    }
+
+    /// Exact admitted operations, including exited ancestors and descendants.
+    /// A new launch sharing an Agent ID is never part of this provenance.
+    #[must_use]
+    pub fn workflow_operation_lineage(&self, operation: OperationId) -> Vec<OperationId> {
+        let snapshot = self.coordinator.snapshot();
+        let Some(mut record) = snapshot
+            .records
+            .iter()
+            .find(|record| record.operation.operation_id == operation)
+        else {
+            return Vec::new();
+        };
+        let mut lineage = Vec::new();
         for _ in 0..=snapshot.records.len() {
+            if lineage.contains(&record.operation.operation_id) {
+                break;
+            }
+            lineage.push(record.operation.operation_id);
             if let Some(replacement) = record.superseded_by {
-                record = snapshot
+                let Some(next) = snapshot
                     .records
                     .iter()
-                    .find(|candidate| candidate.runtime.agent_runtime_id == replacement)?;
+                    .find(|candidate| candidate.runtime.agent_runtime_id == replacement)
+                else {
+                    break;
+                };
+                record = next;
             } else {
-                return (record.state == super::runtime::RuntimeState::Running)
-                    .then_some(record.operation.operation_id);
+                break;
             }
         }
-        None
+        lineage
     }
 
     #[must_use]
@@ -10336,6 +10364,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Preserve the full launch/resume/exit identity scenario.
     fn same_model_launches_and_exact_resume_preserve_each_peer_identity() {
         let mut runtime = runtime();
         let workspace = WorkspaceId::new();
@@ -10419,6 +10448,29 @@ mod tests {
             .notify_peer(workspace, session, second_agent)
             .unwrap();
         assert_eq!(pty(&runtime).selected.as_ref(), Some(&resumed.terminal));
+        assert_eq!(
+            runtime.workflow_operation_lineage(second_operation),
+            vec![second_operation, resumed_operation]
+        );
+        assert_eq!(
+            runtime.workflow_live_operation(second_operation),
+            Some(resumed_operation)
+        );
+        assert_eq!(
+            runtime.workflow_operation_lineage(first_operation),
+            vec![first_operation]
+        );
+        assert!(
+            runtime
+                .workflow_operation_lineage(OperationId::new())
+                .is_empty()
+        );
+        runtime.exit(&resumed.terminal, 0).unwrap();
+        assert_eq!(
+            runtime.workflow_operation_lineage(second_operation),
+            vec![second_operation, resumed_operation]
+        );
+        assert_eq!(runtime.workflow_live_operation(second_operation), None);
     }
 
     #[test]

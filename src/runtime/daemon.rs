@@ -22021,10 +22021,14 @@ instructions = "{instructions}"
         };
         use usagi_daemon::usecase::codex::{CodexProvision, CodexProvisionFailure};
 
-        struct Ready;
+        struct Ready(bool);
         impl AgentReadinessProbe for Ready {
             fn observe(&self, _: &str) -> AgentReadiness {
-                AgentReadiness::Ready
+                if self.0 {
+                    AgentReadiness::Ready
+                } else {
+                    AgentReadiness::Unavailable
+                }
             }
         }
         struct Available;
@@ -22034,6 +22038,18 @@ instructions = "{instructions}"
             }
         }
         struct Provision(PathBuf);
+        impl ClaudeProvisioner for Provision {
+            fn provision(
+                &mut self,
+                _: &ProvisionContext,
+            ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
+                Ok(ClaudeProvision {
+                    working_directory: self.0.clone(),
+                    environment_allowlist: BTreeSet::new(),
+                    spawn: SpawnProvision::new(Vec::new(), Vec::new()),
+                })
+            }
+        }
         impl CodexProvisioner for Provision {
             fn provision(
                 &mut self,
@@ -22091,6 +22107,9 @@ instructions = "{instructions}"
         }
         impl Fixture {
             fn new() -> Self {
+                Self::with_readiness(true)
+            }
+            fn with_readiness(ready: bool) -> Self {
                 let directory = tempfile::tempdir().unwrap();
                 let root = directory.path().join("repository");
                 let sessions = Arc::new(Mutex::new(
@@ -22119,6 +22138,10 @@ instructions = "{instructions}"
                     workspace,
                 );
                 let mut registry = AdapterRegistry::new();
+                let adapter = ClaudeAdapter::new(Provision(root.clone()));
+                registry
+                    .register(adapter.profile().clone(), Box::new(adapter))
+                    .unwrap();
                 let adapter = CodexAdapter::new(Provision(root));
                 registry
                     .register(adapter.profile().clone(), Box::new(adapter))
@@ -22137,7 +22160,7 @@ instructions = "{instructions}"
                 );
                 let agent = Arc::new(SharedAgentState {
                     owner: Mutex::new(owner),
-                    readiness: Arc::new(Ready),
+                    readiness: Arc::new(Ready(ready)),
                 });
                 let inventory =
                     Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
@@ -22203,6 +22226,315 @@ instructions = "{instructions}"
                     command,
                 })
             }
+        }
+
+        fn resume_workflow_participant(
+            fixture: &Fixture,
+            operation: usagi_core::domain::id::OperationId,
+            provider: usagi_core::domain::agent::ProviderKind,
+        ) -> usagi_core::domain::id::OperationId {
+            use usagi_core::domain::agent::ProviderSessionId;
+            let mut owner = fixture.agent.lock().unwrap();
+            let runtime = owner.runtime_for_operation(operation).unwrap();
+            owner
+                .capture_structured_provider_session(
+                    &runtime,
+                    provider,
+                    ProviderSessionId::new(operation.to_string()).unwrap(),
+                )
+                .unwrap();
+            owner.exit(&runtime.terminal, 0).unwrap();
+            let target = owner
+                .inventory(fixture.workspace)
+                .resumable
+                .into_iter()
+                .find_map(|item| {
+                    item.target
+                        .filter(|target| target.runtime_id == runtime.agent_runtime_id)
+                })
+                .unwrap();
+            let resumed = usagi_core::domain::id::OperationId::new();
+            owner
+                .resume_exact(
+                    &resumed.to_string(),
+                    &target,
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+            resumed
+        }
+
+        #[test]
+        #[allow(clippy::too_many_lines)] // One exact-resume sequence exercises both participants before the first observation.
+        fn workflow_unobserved_exact_resumes_keep_requests_and_self_bound_reviewer_verdicts() {
+            use usagi_core::domain::agent::{CallerRef, ModelSelector, ProviderKind};
+            use usagi_core::domain::agent_message::{MessageKind, ReviewTarget, SendMessage};
+            use usagi_core::domain::id::OperationId;
+            use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
+            let fixture = Fixture::new();
+            let operation = OperationId::new();
+            let run = fixture
+                .control(
+                    operation,
+                    WorkflowCommand::Start {
+                        goal: "resume safely".into(),
+                    },
+                )
+                .unwrap()
+                .run
+                .unwrap();
+            let caller = CallerRef {
+                agent_id: run.implementer,
+                session_id: Some(fixture.session),
+            };
+            let review_operation = OperationId::new();
+            let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+            fixture
+                .agent
+                .lock()
+                .unwrap()
+                .dispatch(
+                    &review_operation.to_string(),
+                    &DispatchIntent {
+                        workspace: fixture.workspace,
+                        session_name: "workflow".into(),
+                        caller: caller.clone(),
+                        agent: DispatchAgentIntent::New {
+                            runtime: AgentProfileId::new("claude").unwrap(),
+                            model: ModelSelector::new("default").unwrap(),
+                        },
+                        prompt: "review only".into(),
+                    },
+                    fixture.session,
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+            let reviewer = store
+                .binding(review_operation)
+                .unwrap()
+                .unwrap()
+                .worker
+                .agent_id;
+            // Neither stop nor resume is observed by the Workflow projection.
+            let implementation =
+                resume_workflow_participant(&fixture, operation, ProviderKind::Codex);
+            let review_run =
+                resume_workflow_participant(&fixture, review_operation, ProviderKind::Claude);
+            assert_eq!(
+                store.binding(review_run).unwrap().unwrap().caller.agent_id,
+                reviewer
+            );
+            let request = OperationId::new();
+            let target = ReviewTarget {
+                base_sha: "a".repeat(40),
+                head_sha: "b".repeat(40),
+            };
+            store
+                .send_message(
+                    fixture.workspace,
+                    &caller,
+                    implementation,
+                    SendMessage {
+                        message_id: request,
+                        to_agent_id: reviewer,
+                        kind: MessageKind::ReviewRequest,
+                        body: "Review resumed implementation".into(),
+                        in_reply_to: None,
+                        review: Some(target.clone()),
+                    },
+                )
+                .unwrap();
+            store
+                .send_message(
+                    fixture.workspace,
+                    &CallerRef {
+                        agent_id: reviewer,
+                        session_id: Some(fixture.session),
+                    },
+                    review_run,
+                    SendMessage {
+                        message_id: OperationId::new(),
+                        to_agent_id: run.implementer,
+                        kind: MessageKind::ChangesRequested,
+                        body: "Fix resumed review finding".into(),
+                        in_reply_to: Some(request),
+                        review: Some(target),
+                    },
+                )
+                .unwrap();
+            // A fast exit after publishing must not remove authenticated evidence.
+            for finished in [implementation, review_run] {
+                let mut owner = fixture.agent.lock().unwrap();
+                let terminal = owner.runtime_for_operation(finished).unwrap().terminal;
+                owner.exit(&terminal, 0).unwrap();
+            }
+            let snapshot = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap()
+                .run
+                .unwrap();
+            assert_eq!(snapshot.review.unwrap().request, request);
+            assert_eq!(snapshot.revisions, 1);
+            assert_eq!(snapshot.history.len(), 2);
+            assert_eq!(snapshot.phase, usagi_core::domain::workflow::Phase::Waiting);
+        }
+
+        #[test]
+        fn workflow_pending_readiness_failure_restores_the_original_start_operation() {
+            let mut fixture = Fixture::with_readiness(false);
+            let operation = usagi_core::domain::id::OperationId::new();
+            assert!(
+                fixture
+                    .control(
+                        operation,
+                        WorkflowCommand::Start {
+                            goal: "recover me".into()
+                        }
+                    )
+                    .is_err()
+            );
+            let pending = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap()
+                .pending_start
+                .unwrap();
+            assert_eq!(pending.operation_id, operation);
+            assert_eq!(pending.goal, "recover me");
+            assert!(pending.error.is_some());
+            Arc::get_mut(&mut fixture.agent).unwrap().readiness = Arc::new(Ready(true));
+            let recovered = fixture
+                .control(
+                    pending.operation_id,
+                    WorkflowCommand::Start { goal: pending.goal },
+                )
+                .unwrap();
+            assert!(recovered.pending_start.is_none());
+            assert_eq!(recovered.run.unwrap().id, operation);
+        }
+
+        struct VerificationGit(String);
+        impl usagi_core::infrastructure::git::GitRunner for VerificationGit {
+            fn run(
+                &self,
+                _: &Path,
+                args: &[&str],
+            ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
+                Ok(usagi_core::infrastructure::git::GitOutput {
+                    success: true,
+                    stdout: if args[0] == "status" {
+                        String::new()
+                    } else {
+                        self.0.clone()
+                    },
+                    stderr: String::new(),
+                })
+            }
+        }
+        struct VerificationGh(String);
+        impl GhProcessPort for VerificationGh {
+            type Error = ();
+            fn run(&mut self, _: &str, _: &[String], _: u64) -> Result<String, ()> {
+                Ok(self.0.clone())
+            }
+        }
+
+        #[test]
+        fn workflow_pr_publication_uses_injected_independent_git_and_github_evidence() {
+            use usagi_core::domain::workflow::{Phase, Review};
+            let fixture = Fixture::new();
+            let operation = usagi_core::domain::id::OperationId::new();
+            let mut run = fixture
+                .control(
+                    operation,
+                    WorkflowCommand::Start {
+                        goal: "verify me".into(),
+                    },
+                )
+                .unwrap()
+                .run
+                .unwrap();
+            run.phase = Phase::Verifying;
+            run.review = Some(Review {
+                request: usagi_core::domain::id::OperationId::new(),
+                target: usagi_core::domain::agent_message::ReviewTarget {
+                    base_sha: "b".repeat(40),
+                    head_sha: "a".repeat(40),
+                },
+                approved: true,
+            });
+            let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    record.as_mut().unwrap().run = Some(run.clone());
+                    Ok(())
+                })
+                .unwrap();
+            let url = "https://github.com/owner/repo/pull/1";
+            let mut output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"});
+            let identity = usagi_core::domain::pr_inventory::extract(url.as_bytes()).remove(0);
+            let view =
+                usagi_daemon::usecase::pr_inventory::parse_gh_pr_view(&output.to_string()).unwrap();
+            fixture
+                .inventory
+                .lock()
+                .unwrap()
+                .observe_reported(fixture.session, url)
+                .unwrap();
+            fixture
+                .inventory
+                .lock()
+                .unwrap()
+                .publish_success(&identity, &view)
+                .unwrap();
+            workflow::verify_progress(
+                &store,
+                &fixture.inventory,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                &run,
+                &VerificationGit("a".repeat(40)),
+                &mut VerificationGh(output.to_string()),
+            )
+            .unwrap();
+            assert_eq!(
+                store
+                    .workflow(fixture.workspace, fixture.session)
+                    .unwrap()
+                    .unwrap()
+                    .run
+                    .unwrap()
+                    .phase,
+                Phase::Ready
+            );
+            output["isDraft"] = serde_json::json!(true);
+            workflow::verify_progress(
+                &store,
+                &fixture.inventory,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                &run,
+                &VerificationGit("a".repeat(40)),
+                &mut VerificationGh(output.to_string()),
+            )
+            .unwrap();
+            assert_eq!(
+                store
+                    .workflow(fixture.workspace, fixture.session)
+                    .unwrap()
+                    .unwrap()
+                    .run
+                    .unwrap()
+                    .phase,
+                Phase::Verifying
+            );
         }
 
         #[test]

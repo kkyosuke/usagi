@@ -95,11 +95,11 @@ fn handle(
         .resolve_available_scope(workspace, Some(session))
         .map_err(unavailable_scope)?;
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
-    workflow::snapshot(&store, workspace, session).map_err(unavailable)?;
+    synchronized_snapshot(agent, workspace, session)?;
     reconcile_runtime(agent, workspace, session)?;
     if let Some((operation, command)) = control {
         if matches!(command, WorkflowCommand::Instruct { .. }) {
-            workflow::snapshot(&store, workspace, session).map_err(unavailable)?;
+            synchronized_snapshot(agent, workspace, session)?;
         }
         workflow::admit(&store, workspace, session, operation, &command)
             .map_err(|error| admission_error(&error))?;
@@ -120,7 +120,7 @@ fn handle(
             WorkflowCommand::Instruct { .. } => deliver(agent, workspace, session, operation)?,
         }
     }
-    let snapshot = workflow::snapshot(&store, workspace, session).map_err(unavailable)?;
+    let snapshot = synchronized_snapshot(agent, workspace, session)?;
     if let Some(run) = &snapshot.run {
         for instruction in &run.instructions {
             if instruction.delivery == Delivery::Queued {
@@ -138,8 +138,77 @@ fn handle(
             &mut super::GhProcess,
         )?;
     }
-    serde_json::to_value(workflow::snapshot(&store, workspace, session).map_err(unavailable)?)
-        .map_err(unavailable)
+    serde_json::to_value(synchronized_snapshot(agent, workspace, session)?).map_err(unavailable)
+}
+
+fn synchronized_snapshot(
+    agent: &SharedAgentRuntime,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> Result<usagi_core::domain::workflow::WorkflowSnapshot, ProtocolError> {
+    let owner = agent.lock().map_err(unavailable)?;
+    let store = owner.dispatch_store();
+    let Some(record) = store.workflow(workspace, session).map_err(unavailable)? else {
+        return workflow::snapshot(store, workspace, session).map_err(unavailable);
+    };
+    let Some(run) = record.run else {
+        return workflow::snapshot(store, workspace, session).map_err(unavailable);
+    };
+    let mut authorized = owner
+        .workflow_operation_lineage(run.id)
+        .into_iter()
+        .map(|operation| (run.implementer, operation))
+        .collect::<Vec<_>>();
+    let mut reviewer_live = false;
+    for binding in store.bindings().map_err(unavailable)? {
+        if binding.caller.agent_id == run.implementer
+            && binding.caller.session_id == Some(session)
+            && binding.worker.session_id == Some(session)
+            && binding.worker.agent_id != run.implementer
+        {
+            if Some(binding.worker.agent_id) == run.reviewer {
+                reviewer_live |= owner.workflow_live_operation(binding.run_id).is_some();
+            }
+            authorized.extend(
+                owner
+                    .workflow_operation_lineage(binding.run_id)
+                    .into_iter()
+                    .map(|operation| (binding.worker.agent_id, operation)),
+            );
+        }
+    }
+    let selected_live =
+        if record.suspended_phase == Some(usagi_core::domain::workflow::Phase::Reviewing) {
+            reviewer_live
+        } else {
+            owner.workflow_live_operation(run.id).is_some()
+        };
+    store
+        .update_workflow(workspace, session, |value| {
+            let record = value
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("workflow disappeared"))?;
+            let mut changed = false;
+            for proof in authorized {
+                if !record.authorized_operations.contains(&proof) {
+                    record.authorized_operations.push(proof);
+                    changed = true;
+                }
+            }
+            // Restore before consuming evidence, including a resumed participant
+            // that sent a valid verdict and already exited between observations.
+            if (changed || selected_live)
+                && let Some(previous) = record.suspended_phase.take()
+                && let Some(current) = record.run.as_mut()
+            {
+                current.phase = previous;
+                current.waiting_reason = None;
+            }
+            Ok(())
+        })
+        .map_err(unavailable)?;
+    // Resume admission and message dispatch use this same runtime owner lock.
+    workflow::snapshot(store, workspace, session).map_err(unavailable)
 }
 
 fn reconcile_runtime(

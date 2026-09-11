@@ -38,6 +38,7 @@ pub fn admit(
                         start_error: None,
                         suspended_phase: None,
                         implementation_operation: None,
+                        authorized_operations: Vec::new(),
                     });
                 }
             }
@@ -136,20 +137,16 @@ pub fn snapshot(
                 pending_start: None,
             });
         }
-        let offset = record
-            .cursor
-            .and_then(|cursor| {
-                messages
-                    .iter()
-                    .position(|entry| entry.message.message_id == cursor)
-            })
-            .map_or(0, |index| index + 1);
+        let offset = journal_offset(record.cursor, &messages);
         for entry in messages.iter().skip(offset) {
             let message = &entry.message;
             let previous = (run.phase, run.review.clone());
             if entry.from_agent_id == run.implementer
                 && (entry.from_run_id == run.id
-                    || Some(entry.from_run_id) == record.implementation_operation)
+                    || Some(entry.from_run_id) == record.implementation_operation
+                    || record
+                        .authorized_operations
+                        .contains(&(entry.from_agent_id, entry.from_run_id)))
                 && message.kind == MessageKind::ReviewRequest
             {
                 let assigned = agents.iter().any(|agent| {
@@ -174,13 +171,12 @@ pub fn snapshot(
                     run.reviewer = Some(message.to_agent_id);
                 }
             } else if message.to_agent_id == run.implementer
-                && bindings.iter().any(|binding| {
-                    binding.run_id == entry.from_run_id
-                        && binding.worker.agent_id == entry.from_agent_id
-                        && binding.worker.session_id == Some(session)
-                        && binding.caller.agent_id == run.implementer
-                        && binding.caller.session_id == Some(session)
-                })
+                && (record
+                    .authorized_operations
+                    .contains(&(entry.from_agent_id, entry.from_run_id))
+                    || bindings
+                        .iter()
+                        .any(|binding| original_reviewer_binding(binding, entry, run)))
                 && matches!(
                     message.kind,
                     MessageKind::Approved | MessageKind::ChangesRequested
@@ -205,6 +201,31 @@ pub fn snapshot(
             pending_start: None,
         })
     })
+}
+
+fn journal_offset(
+    cursor: Option<OperationId>,
+    messages: &[usagi_core::domain::agent_message::AgentMessage],
+) -> usize {
+    cursor
+        .and_then(|cursor| {
+            messages
+                .iter()
+                .position(|entry| entry.message.message_id == cursor)
+        })
+        .map_or(0, |index| index + 1)
+}
+
+fn original_reviewer_binding(
+    binding: &usagi_core::domain::agent::DispatchBinding,
+    entry: &usagi_core::domain::agent_message::AgentMessage,
+    run: &WorkflowRun,
+) -> bool {
+    binding.run_id == entry.from_run_id
+        && binding.worker.agent_id == entry.from_agent_id
+        && binding.worker.session_id == Some(run.session)
+        && binding.caller.agent_id == run.implementer
+        && binding.caller.session_id == Some(run.session)
 }
 
 fn append_history(run: &mut WorkflowRun, entry: &usagi_core::domain::agent_message::AgentMessage) {
@@ -310,6 +331,43 @@ pub fn verify_pr<
 mod tests {
     use super::*;
     use usagi_core::domain::workflow::Recipient;
+
+    #[test]
+    fn history_retains_only_a_bounded_tail_and_bounded_bodies() {
+        let mut run = WorkflowRun {
+            id: OperationId::new(),
+            session: SessionId::new(),
+            goal: "task".into(),
+            implementer: AgentId::new(),
+            reviewer: None,
+            phase: Phase::Implementing,
+            revision_limit: 3,
+            revisions: 0,
+            review: None,
+            waiting_reason: None,
+            instructions: Vec::new(),
+            history: Vec::new(),
+        };
+        let entry = usagi_core::domain::agent_message::AgentMessage {
+            from_agent_id: run.implementer,
+            from_run_id: run.id,
+            message: usagi_core::domain::agent_message::SendMessage {
+                message_id: OperationId::new(),
+                to_agent_id: AgentId::new(),
+                kind: MessageKind::Message,
+                body: "あ".repeat(600),
+                in_reply_to: None,
+                review: None,
+            },
+            created_at: chrono::Utc::now(),
+            acknowledged: false,
+        };
+        for _ in 0..101 {
+            append_history(&mut run, &entry);
+        }
+        assert_eq!(run.history.len(), 100);
+        assert_eq!(run.history[0].body.chars().count(), 512);
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)] // One end-to-end journal fixture preserves request/verdict identity.
@@ -501,6 +559,56 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|message| !message.acknowledged)
+        );
+        let resumed = OperationId::new();
+        let reviewer_caller = CallerRef {
+            agent_id: reviewer,
+            session_id: Some(session),
+        };
+        let verdict = |id| SendMessage {
+            message_id: id,
+            to_agent_id: implementer,
+            kind: MessageKind::Approved,
+            body: "Resumed reviewer verdict".into(),
+            in_reply_to: Some(latest),
+            review: Some(ReviewTarget {
+                base_sha: "a".repeat(40),
+                head_sha: "d".repeat(40),
+            }),
+        };
+        store
+            .send_message(
+                workspace,
+                &reviewer_caller,
+                resumed,
+                verdict(OperationId::new()),
+            )
+            .unwrap();
+        assert_eq!(
+            snapshot(&store, workspace, session)
+                .unwrap()
+                .run
+                .unwrap()
+                .phase,
+            Phase::Reviewing
+        );
+        store
+            .update_workflow(workspace, session, |value| {
+                let record = value.as_mut().unwrap();
+                record.authorized_operations.push((reviewer, resumed));
+                // Replay the identical authenticated journal against the trusted
+                // lineage, without appending a second verdict for one request.
+                record.cursor = Some(latest);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            snapshot(&store, workspace, session)
+                .unwrap()
+                .run
+                .unwrap()
+                .phase,
+            Phase::Verifying
         );
     }
 
