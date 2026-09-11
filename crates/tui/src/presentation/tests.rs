@@ -13388,6 +13388,99 @@ fn closing_selected_agent_keeps_it_visible_without_focus_drift() {
 }
 
 #[test]
+fn workflow_focus_survives_agent_restore_and_explicit_agent_selection_still_works() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let allowed = BTreeSet::from([session]);
+    let terminals = [
+        scoped_terminal_ref(workspace, Some(session)),
+        scoped_terminal_ref(workspace, Some(session)),
+    ];
+    let agents = terminals
+        .iter()
+        .map(|terminal| AgentRuntimeInventoryItem {
+            runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
+                .unwrap(),
+            continuation: AgentContinuationRef::new(),
+            state: AgentRuntimeInventoryState::Live,
+            resumed_from: None,
+        })
+        .collect::<Vec<_>>();
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+        .with_agent_tab_intent(
+            workspace,
+            allowed.clone(),
+            Box::new(MemoryIntentPort {
+                state: Arc::new(Mutex::new(AgentTabIntent::empty(workspace))),
+                mutations: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+    let _ = runtime.handle_key(Key::Enter);
+    runtime.on_effect(&Effect::OpenWorkflow { session });
+    let workflow_selection = runtime.active_pane().selected().clone();
+    // First Codex and then Claude appear through the real coherent restore path.
+    for count in [1, 2] {
+        let fence = runtime.restore_fence();
+        let restored = super::apply_restore_completion(
+            super::RestoreCompletion {
+                port: Box::new(UnavailableAgentCommandPort),
+                dispatched_interaction: fence.0,
+                dispatched_registry_revision: fence.1,
+                dispatched_allowed_sessions: allowed.clone(),
+                terminals: Ok(terminals[..count]
+                    .iter()
+                    .map(|terminal| TerminalInventoryEntry {
+                        terminal: terminal.clone(),
+                        kind: TerminalKind::Agent,
+                        live: true,
+                    })
+                    .collect()),
+                agents: Ok(AgentInventory {
+                    workspace_id: workspace,
+                    runtimes: agents[..count].to_vec(),
+                    resumable: Vec::new(),
+                }),
+                observation_coherent: true,
+            },
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &allowed,
+        );
+        assert_eq!(restored.outcome, super::RestoreJobOutcome::Applied);
+        assert_eq!(runtime.active_pane().selected(), &workflow_selection);
+        assert_eq!(runtime.active_pane().tabs().len(), count + 1);
+        assert_eq!(runtime.focused_terminal(), None);
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    // Explicit tab navigation remains the existing exact-terminal selection path.
+    for terminal in &terminals {
+        sender
+            .send(ControllerHostAction::SelectTab(TabDirection::Next))
+            .unwrap();
+        drain_host_actions(
+            &receiver,
+            &mut ui,
+            &mut runtime,
+            &mut std::collections::HashMap::new(),
+        );
+        assert_eq!(runtime.focused_terminal().as_ref(), Some(terminal));
+    }
+    sender
+        .send(ControllerHostAction::SelectTab(TabDirection::Next))
+        .unwrap();
+    drain_host_actions(
+        &receiver,
+        &mut ui,
+        &mut runtime,
+        &mut std::collections::HashMap::new(),
+    );
+    assert_eq!(runtime.active_pane().selected(), &workflow_selection);
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One user flow covers close, inventory replay, explicit open, and exit cleanup.
 fn generic_close_survives_inventory_replay_until_explicit_open() {
     let workspace = WorkspaceId::new();

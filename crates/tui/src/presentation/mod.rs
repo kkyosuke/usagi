@@ -5050,7 +5050,7 @@ fn apply_restore_completion(
             }
         }
     }
-    let targets = pane_restore_targets(
+    let mut targets = pane_restore_targets(
         workspace,
         allowed_sessions,
         observation.projection,
@@ -5059,6 +5059,7 @@ fn apply_restore_completion(
         interrupted,
         &saved_selections,
     );
+    runtime.preserve_workflow_selection(&mut targets);
     let fence_accepted = runtime.restore_snapshot(
         dispatched_interaction,
         dispatched_registry_revision,

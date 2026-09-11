@@ -3,6 +3,406 @@ use super::*;
 use crate::usecase::application::environment_source::parse_environment_source;
 use std::collections::VecDeque;
 
+#[test]
+fn workflow_panels_follow_authoritative_session_removal() {
+    let workspace = WorkspaceId::new();
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let mut state = AppState::home(workspace, vec![first, second]);
+    state.workflows.entry(first).or_default();
+    state.workflows.entry(second).or_default();
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![second])),
+    );
+    assert!(state.workflow_panel(first).is_none());
+    assert!(state.workflow_panel(second).is_some());
+}
+
+#[test]
+fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
+    use crate::usecase::application::workflow::{WorkflowJob, fixture_run};
+    use usagi_core::domain::workflow::{
+        Recipient, WorkflowCommand, WorkflowPendingStart, WorkflowSnapshot,
+    };
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let operation = OperationId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    let _ = submit_closeup_workflow(&mut state, session, "");
+    let job = WorkflowJob {
+        workspace,
+        session,
+        control: None,
+    };
+    let snapshot = WorkflowSnapshot {
+        session,
+        run: None,
+        pending_start: Some(WorkflowPendingStart {
+            operation_id: operation,
+            goal: "Build login".into(),
+            error: Some("Sign in to retry".into()),
+        }),
+    };
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: job.clone(),
+            result: Ok(Box::new(snapshot.clone())),
+        }),
+    );
+    let panel = state.workflow_panel(session).unwrap();
+    assert_eq!(panel.draft.value(), "Build login");
+    assert_eq!(panel.error.as_deref(), Some("Sign in to retry"));
+    assert_eq!(
+        panel.pending,
+        Some((
+            operation,
+            WorkflowCommand::Start {
+                goal: "Build login".into()
+            }
+        ))
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: job.clone(),
+            result: Ok(Box::new(snapshot)),
+        }),
+    );
+    let effects = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::SaveRoles,
+        },
+    );
+    assert!(
+        matches!(&effects[0], Effect::Workflow(job) if job.control.as_ref().unwrap().0 == operation)
+    );
+    let instruction = (
+        OperationId::new(),
+        WorkflowCommand::Instruct {
+            recipient: Recipient::Implementer,
+            body: "Add tests".into(),
+        },
+    );
+    let panel = state.workflows.get_mut(&session).unwrap();
+    panel.pending = Some(instruction.clone());
+    panel.draft.replace("Add tests");
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: WorkflowJob {
+                control: Some(instruction),
+                ..job
+            },
+            result: Ok(Box::new(WorkflowSnapshot {
+                session,
+                run: Some(fixture_run(session)),
+                pending_start: None,
+            })),
+        }),
+    );
+    let panel = state.workflow_panel(session).unwrap();
+    assert!(panel.pending.is_none());
+    assert!(panel.draft.value().is_empty());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One correlated retry scenario keeps operation/draft assertions together.
+fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
+    use crate::usecase::application::workflow::{
+        WorkflowEdit, WorkflowError, WorkflowJob, fixture_run,
+    };
+    use usagi_core::domain::workflow::{WorkflowCommand, WorkflowSnapshot};
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    let effects = submit_closeup_workflow(&mut state, session, "");
+    assert_eq!(effects.len(), 2);
+    let job = WorkflowJob {
+        workspace,
+        session,
+        control: None,
+    };
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: job.clone(),
+            result: Ok(Box::new(WorkflowSnapshot {
+                session,
+                run: None,
+                pending_start: None,
+            })),
+        }),
+    );
+    assert!(
+        update(
+            &mut state,
+            AppEvent::WorkflowInput {
+                session,
+                key: AppKey::SaveRoles
+            }
+        )
+        .is_empty()
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::Paste("Build login".into()),
+        },
+    );
+    let first = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::SaveRoles,
+        },
+    );
+    let Effect::Workflow(submit) = first[0].clone() else {
+        panic!("expected workflow effect")
+    };
+    assert!(
+        matches!(&submit.control, Some((_, WorkflowCommand::Start { goal })) if goal == "Build login")
+    );
+    assert!(
+        update(
+            &mut state,
+            AppEvent::WorkflowInput {
+                session,
+                key: AppKey::SaveRoles
+            }
+        )
+        .is_empty()
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: submit.clone(),
+            result: Err(WorkflowError {
+                message: "lost response".into(),
+                unconfirmed: true,
+            }),
+        }),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::Paste(" plus tests".into()),
+        },
+    );
+    assert_eq!(
+        update(
+            &mut state,
+            AppEvent::WorkflowInput {
+                session,
+                key: AppKey::SaveRoles
+            }
+        ),
+        first
+    );
+    let run = fixture_run(session);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: submit,
+            result: Ok(Box::new(WorkflowSnapshot {
+                session,
+                run: Some(run.clone()),
+                pending_start: None,
+            })),
+        }),
+    );
+    assert_eq!(
+        state.workflow_panel(session).unwrap().draft.value(),
+        "Build login plus tests"
+    );
+    assert!(state.workflow_panel(session).unwrap().pending.is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowEdit {
+            session,
+            edit: WorkflowEdit::Start,
+        },
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowEdit {
+            session,
+            edit: WorkflowEdit::Delete,
+        },
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowEdit {
+            session,
+            edit: WorkflowEdit::End,
+        },
+    );
+    for key in [
+        AppKey::Left,
+        AppKey::Right,
+        AppKey::Up,
+        AppKey::Down,
+        AppKey::Tab,
+        AppKey::PageUp,
+        AppKey::PageDown,
+        AppKey::Backspace,
+        AppKey::Enter,
+        AppKey::Escape,
+    ] {
+        let _ = update(&mut state, AppEvent::WorkflowInput { session, key });
+    }
+    let next = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::SaveRoles,
+        },
+    );
+    let Effect::Workflow(submit) = next[0].clone() else {
+        panic!("expected instruction")
+    };
+    assert!(matches!(
+        &submit.control,
+        Some((_, WorkflowCommand::Instruct { .. }))
+    ));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: submit.clone(),
+            result: Err(WorkflowError {
+                message: "invalid".into(),
+                unconfirmed: false,
+            }),
+        }),
+    );
+    assert!(state.workflow_panel(session).unwrap().pending.is_none());
+    // A late reply for the rejected operation cannot clear a new draft.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: submit,
+            result: Ok(Box::new(WorkflowSnapshot {
+                session,
+                run: Some(run),
+                pending_start: None,
+            })),
+        }),
+    );
+    assert!(
+        !state
+            .workflow_panel(session)
+            .unwrap()
+            .draft
+            .value()
+            .is_empty()
+    );
+    // Periodic observation is non-blocking and does not start work.
+    state.mascot_tick = 9;
+    assert_eq!(
+        update(&mut state, AppEvent::Tick),
+        vec![Effect::Workflow(job)]
+    );
+}
+
+#[test]
+fn workflow_rejects_foreign_stale_and_overlay_input() {
+    use crate::usecase::application::workflow::{WorkflowEdit, WorkflowJob};
+    use usagi_core::domain::workflow::WorkflowSnapshot;
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    let job = WorkflowJob {
+        workspace,
+        session,
+        control: None,
+    };
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: job.clone(),
+            result: Ok(Box::new(WorkflowSnapshot {
+                session,
+                run: None,
+                pending_start: None,
+            })),
+        }),
+    );
+    assert!(state.workflow_panel(session).is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowEdit {
+            session,
+            edit: WorkflowEdit::Delete,
+        },
+    );
+    assert!(submit_closeup_workflow(&mut state, session, "invalid").is_empty());
+    let _ = submit_closeup_workflow(&mut state, session, "");
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: job.clone(),
+            result: Ok(Box::new(WorkflowSnapshot {
+                session: SessionId::new(),
+                run: None,
+                pending_start: None,
+            })),
+        }),
+    );
+    assert!(state.workflow_panel(session).unwrap().error.is_some());
+    let foreign = WorkflowJob {
+        workspace: WorkspaceId::new(),
+        ..job
+    };
+    assert!(
+        update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Workflow {
+                job: foreign,
+                result: Ok(Box::new(WorkflowSnapshot {
+                    session,
+                    run: None,
+                    pending_start: None
+                }))
+            })
+        )
+        .is_empty()
+    );
+    state.overlay = Some(Overlay::Overview);
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::Char('x'),
+        },
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowEdit {
+            session,
+            edit: WorkflowEdit::Delete,
+        },
+    );
+    assert!(
+        state
+            .workflow_panel(session)
+            .unwrap()
+            .draft
+            .value()
+            .is_empty()
+    );
+}
+
 /// Fake entry backend for Welcome / Open attach scenarios. It has no IO: tests
 /// inspect dispatched effects and enqueue typed completions in deterministic order.
 #[derive(Debug, Default)]

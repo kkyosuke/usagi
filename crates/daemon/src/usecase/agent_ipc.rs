@@ -402,6 +402,82 @@ impl DaemonRestartInterruptionError {
 }
 
 impl AgentRuntime {
+    /// Session Workflow admission keeps its initial prompt inside the provider
+    /// launch request, avoiding a race with a not-yet-ready interactive PTY.
+    pub fn prepare_workflow_readiness(
+        &self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        prompt: &str,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        if intent.session.is_none()
+            || prompt.trim().is_empty()
+            || prompt.len() > 24 * 1024
+            || prompt.contains('\0')
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid session workflow launch",
+            ));
+        }
+        let semantic = format!("workflow:{}:{prompt}", semantic_key(intent));
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing.conflicts_with(&semantic) {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "workflow launch identity conflicts",
+                ));
+            }
+            return Ok(None);
+        }
+        OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
+        self.readiness_ticket(
+            intent
+                .profile
+                .clone()
+                .unwrap_or_else(|| self.default_profile.clone()),
+        )
+        .map(Some)
+    }
+
+    /// Admit after an owner-external readiness probe and repeat its fences.
+    pub fn launch_workflow_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        prompt: &str,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_workflow_readiness(operation_id, intent, prompt)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        if let Some(existing) = self.operations.get(operation_id) {
+            return existing.outcome.clone();
+        }
+        if self
+            .dispatch
+            .agents_in_workspace(intent.workspace)
+            .map_err(map_dispatch_storage_error)?
+            .iter()
+            .any(|worker| {
+                worker.session_id == intent.session
+                    && worker
+                        .current_run
+                        .is_some_and(|run| run.to_string() != operation_id)
+                    && matches!(worker.status, AgentStatus::Starting | AgentStatus::Running)
+            })
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                "stop the session's existing Agent before starting a Workflow",
+            ));
+        }
+        let semantic = format!("workflow:{}:{prompt}", semantic_key(intent));
+        let outcome = self.admit(operation_id, intent, scope, Some(prompt), &semantic);
+        self.remember_operation(operation_id, Some(&semantic), outcome.clone());
+        outcome
+    }
+
     fn forget_closed_runtimes(
         &mut self,
         closed: &[AgentRuntimeRef],
@@ -1009,6 +1085,63 @@ impl AgentRuntime {
     #[must_use]
     pub fn runtime_for_operation(&self, operation_id: OperationId) -> Option<AgentRuntimeRef> {
         self.coordinator.runtime_for_operation(operation_id)
+    }
+
+    /// Observe one workflow participant through only the exact admitted runtime
+    /// and its explicit resume chain, never a new launch that reused an Agent ID.
+    #[must_use]
+    pub fn workflow_live_operation(&self, operation: OperationId) -> Option<OperationId> {
+        let operation = *self.workflow_operation_lineage(operation).last()?;
+        self.coordinator
+            .snapshot()
+            .records
+            .iter()
+            .find(|record| {
+                record.operation.operation_id == operation
+                    && record.superseded_by.is_none()
+                    && record.state == super::runtime::RuntimeState::Running
+            })
+            .map(|record| record.operation.operation_id)
+    }
+
+    /// Exact admitted operations, including exited ancestors and descendants.
+    /// A new launch sharing an Agent ID is never part of this provenance.
+    #[must_use]
+    pub fn workflow_operation_lineage(&self, operation: OperationId) -> Vec<OperationId> {
+        Self::workflow_lineage(&self.coordinator.snapshot(), operation)
+    }
+
+    fn workflow_lineage(
+        snapshot: &super::runtime::RuntimeStoreSnapshot,
+        operation: OperationId,
+    ) -> Vec<OperationId> {
+        let Some(mut record) = snapshot
+            .records
+            .iter()
+            .find(|record| record.operation.operation_id == operation)
+        else {
+            return Vec::new();
+        };
+        let mut lineage = Vec::new();
+        for _ in 0..=snapshot.records.len() {
+            if lineage.contains(&record.operation.operation_id) {
+                break;
+            }
+            lineage.push(record.operation.operation_id);
+            if let Some(replacement) = record.superseded_by {
+                let Some(next) = snapshot
+                    .records
+                    .iter()
+                    .find(|candidate| candidate.runtime.agent_runtime_id == replacement)
+                else {
+                    break;
+                };
+                record = next;
+            } else {
+                break;
+            }
+        }
+        lineage
     }
 
     #[must_use]
@@ -9326,6 +9459,150 @@ mod tests {
     }
 
     #[test]
+    fn session_workflow_launch_rechecks_readiness_and_embeds_exact_prompt() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let intent = intent(None);
+        let operation = OperationId::new().to_string();
+        let prompt = "workflow task";
+        let scope = FakeScope(Ok(scope()));
+        for invalid in ["", "\0", " "] {
+            assert!(
+                runtime
+                    .prepare_workflow_readiness(&operation, &intent, invalid)
+                    .is_err()
+            );
+        }
+        assert!(
+            runtime
+                .prepare_workflow_readiness("invalid", &intent, prompt)
+                .is_err()
+        );
+        let preflight = runtime
+            .prepare_workflow_readiness(&operation, &intent, prompt)
+            .unwrap();
+        assert!(
+            runtime
+                .launch_workflow_after_readiness(&operation, &intent, prompt, &scope, None)
+                .is_err()
+        );
+        let first = runtime
+            .launch_workflow_after_readiness(
+                &operation,
+                &intent,
+                prompt,
+                &scope,
+                preflight.as_ref(),
+            )
+            .unwrap();
+        let replay = runtime
+            .launch_workflow_after_readiness(&operation, &intent, prompt, &scope, None)
+            .unwrap();
+        assert_eq!(first, replay);
+        assert!(
+            runtime
+                .prepare_workflow_readiness(&operation, &intent, "changed")
+                .is_err()
+        );
+        assert_eq!(
+            runtime.coordinator.snapshot().records[0]
+                .launch
+                .request
+                .initial_prompt
+                .as_deref(),
+            Some(prompt)
+        );
+        let other = OperationId::new().to_string();
+        let preflight = runtime
+            .prepare_workflow_readiness(&other, &intent, prompt)
+            .unwrap();
+        assert!(
+            runtime
+                .launch_workflow_after_readiness(
+                    &other,
+                    &intent,
+                    prompt,
+                    &scope,
+                    preflight.as_ref()
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn workflow_restart_replays_interrupted_admission_without_spawning_a_replacement() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let mut first = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let intent = intent(None);
+        let operation = OperationId::new().to_string();
+        let prompt = "workflow immutable goal";
+        let ticket = first
+            .prepare_workflow_readiness(&operation, &intent, prompt)
+            .unwrap();
+        first
+            .launch_workflow_after_readiness(
+                &operation,
+                &intent,
+                prompt,
+                &FakeScope(Ok(scope())),
+                ticket.as_ref(),
+            )
+            .unwrap();
+        let dispatch = first.dispatch.clone();
+        let (snapshot, count) = first
+            .coordinator
+            .snapshot()
+            .reconcile_after_daemon_restart();
+        assert_eq!(count, 1);
+        let spawns = Arc::new(AtomicU32::new(0));
+        let mut restored = AgentRuntime::hydrate_with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty {
+                spawn_counter: Some(Arc::clone(&spawns)),
+                ..Pty::default()
+            },
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            dispatch,
+            FixtureLocator(fixture.path().to_path_buf()),
+            snapshot,
+        )
+        .unwrap();
+        assert!(
+            restored
+                .prepare_workflow_readiness(&operation, &intent, prompt)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            restored
+                .launch_workflow_after_readiness(
+                    &operation,
+                    &intent,
+                    prompt,
+                    &FakeScope(Ok(scope())),
+                    None
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(
+            restored
+                .prepare_workflow_readiness(&operation, &intent, "different goal")
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn goal_launch_is_root_scoped_idempotent_and_carries_the_work_contract() {
         let fixture = tempfile::tempdir().unwrap();
         std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
@@ -10188,6 +10465,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Preserve the full launch/resume/exit identity scenario.
     fn same_model_launches_and_exact_resume_preserve_each_peer_identity() {
         let mut runtime = runtime();
         let workspace = WorkspaceId::new();
@@ -10271,6 +10549,46 @@ mod tests {
             .notify_peer(workspace, session, second_agent)
             .unwrap();
         assert_eq!(pty(&runtime).selected.as_ref(), Some(&resumed.terminal));
+        assert_eq!(
+            runtime.workflow_operation_lineage(second_operation),
+            vec![second_operation, resumed_operation]
+        );
+        assert_eq!(
+            runtime.workflow_live_operation(second_operation),
+            Some(resumed_operation)
+        );
+        assert_eq!(
+            runtime.workflow_operation_lineage(first_operation),
+            vec![first_operation]
+        );
+        assert!(
+            runtime
+                .workflow_operation_lineage(OperationId::new())
+                .is_empty()
+        );
+        runtime.exit(&resumed.terminal, 0).unwrap();
+        assert_eq!(
+            runtime.workflow_operation_lineage(second_operation),
+            vec![second_operation, resumed_operation]
+        );
+        assert_eq!(runtime.workflow_live_operation(second_operation), None);
+        assert_eq!(runtime.workflow_live_operation(OperationId::new()), None);
+        let snapshot = runtime.coordinator.snapshot();
+        for replacement in [AgentRuntimeId::new(), resumed.runtime.agent_runtime_id] {
+            let mut broken = snapshot.clone();
+            broken
+                .records
+                .iter_mut()
+                .find(|record| record.operation.operation_id == resumed_operation)
+                .unwrap()
+                .superseded_by = Some(replacement);
+            // Missing/cyclic replacement data cannot invent another admitted
+            // operation or loop forever, even before hydration rejects it.
+            assert_eq!(
+                AgentRuntime::workflow_lineage(&broken, second_operation),
+                vec![second_operation, resumed_operation]
+            );
+        }
     }
 
     #[test]

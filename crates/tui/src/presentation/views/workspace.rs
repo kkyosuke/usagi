@@ -348,6 +348,8 @@ pub struct HomeProjection {
     /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
     /// replaces the phase line while a read-only history tab is selected.
     pane_detail: Option<String>,
+    workflow_panel: Option<crate::usecase::application::workflow::WorkflowPanel>,
+    workflow_selected: bool,
     /// Workspace transition progress replaces only the right-pane content.
     /// The project bar and cached session sidebar remain stable around it.
     content_loading: Option<ContentLoading>,
@@ -688,6 +690,8 @@ impl HomeProjection {
             pane_tabs: Vec::new(),
             pane_error: None,
             pane_detail: None,
+            workflow_panel: preview.and_then(|session| state.workflow_panel(session).cloned()),
+            workflow_selected: false,
             content_loading: None,
             // Only an explicit/forced `Overlay::Closeup` shows the action modal.
             closeup_action_visible: matches!(
@@ -852,6 +856,10 @@ impl HomeProjection {
     /// 置換して操作しない。同名 tab も選択状態は `TabSelection` で区別される。
     #[must_use]
     pub fn with_pane(mut self, pane: &PaneState) -> Self {
+        self.workflow_selected = pane.tabs().iter().any(|tab| {
+            matches!(tab, PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow)
+                && pane_tab_selected(tab, pane.selected())
+        });
         self.pane_tabs = pane
             .tabs()
             .iter()
@@ -1237,14 +1245,17 @@ fn pane_tab_label(tab: &PaneTab) -> String {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
             PaneKind::Diff => "Diff".to_owned(),
+            PaneKind::Workflow => "Workflow".to_owned(),
         },
         PaneTab::Live(live) => match live.kind {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
             PaneKind::Diff => "Diff".to_owned(),
+            PaneKind::Workflow => "Workflow".to_owned(),
         },
         PaneTab::Ready(ready) => match ready.kind {
             PaneKind::Diff => "Diff".to_owned(),
+            PaneKind::Workflow => "Workflow".to_owned(),
             PaneKind::Terminal | PaneKind::Agent => "Pane".to_owned(),
         },
     }
@@ -3321,6 +3332,15 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         })
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
+    if home.workflow_selected {
+        let mut rows = vec![chrome[0].clone(), chrome[1].clone()];
+        rows.extend(super::workflow::render(
+            height.saturating_sub(4),
+            width,
+            &home.workflow_panel.clone().unwrap_or_default(),
+        ));
+        return with_footer_gap(rows, height, footer);
+    }
     if let Some(view) = &home.terminal_view {
         // A focused live terminal renders daemon PTY output below the tab strip,
         // sharing the legacy viewport window and surfacing terminal feedback in
@@ -8121,6 +8141,56 @@ mod tests {
     }
 
     #[test]
+    fn home_workflow_tab_projects_native_progress_and_composer() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let operation = OperationId::new();
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Workflow,
+            },
+        );
+        let _ = reduce(&mut pane, PaneEvent::Resolved { operation });
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Ready(operation))),
+        );
+        let state = AppState::home(workspace, vec![session]);
+        let mut home = HomeProjection::from_state(
+            &state,
+            "repo",
+            &[projected_session(session, "login", "/work/login")],
+        )
+        .with_pane(&pane);
+        assert!(home.workflow_selected);
+        let empty = super::home_right_pane(20, 80, &home);
+        assert_eq!(empty.len(), 20);
+        assert!(empty.iter().any(|row| strip(row).contains("Not started")));
+        let mut panel = crate::usecase::application::workflow::WorkflowPanel {
+            run: Some(crate::usecase::application::workflow::fixture_run(session)),
+            ..Default::default()
+        };
+        panel.draft.replace("Add regression tests");
+        home.workflow_panel = Some(panel);
+        let running = super::home_right_pane(20, 80, &home);
+        assert!(
+            running
+                .iter()
+                .any(|row| strip(row).contains("Current owner: Codex"))
+        );
+        assert!(
+            running
+                .iter()
+                .any(|row| strip(row).contains("Add regression tests"))
+        );
+    }
+
+    #[test]
     fn home_right_pane_renders_live_terminal_viewport_and_feedback() {
         let workspace_id = WorkspaceId::new();
         let session = SessionId::new();
@@ -8383,7 +8453,12 @@ mod tests {
             target,
             kind: PaneKind::Terminal,
         };
-        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
+        for kind in [
+            PaneKind::Terminal,
+            PaneKind::Agent,
+            PaneKind::Diff,
+            PaneKind::Workflow,
+        ] {
             let mut item = pending;
             item.kind = kind;
             let tab = PaneTab::Pending(item);
@@ -8402,7 +8477,12 @@ mod tests {
             terminal_id: TerminalId::new(),
             daemon_generation: DaemonGeneration::new(),
         };
-        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
+        for kind in [
+            PaneKind::Terminal,
+            PaneKind::Agent,
+            PaneKind::Diff,
+            PaneKind::Workflow,
+        ] {
             assert!(
                 !pane_tab_label(&PaneTab::Live(
                     crate::usecase::application::pane::LivePane {

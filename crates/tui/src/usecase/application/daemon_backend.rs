@@ -404,6 +404,7 @@ pub enum Flow {
 ///
 /// [`drain_events`]: Self::drain_events
 pub struct DaemonBackend {
+    workflow: Option<Box<dyn super::workflow::WorkflowPort>>,
     sessions: Box<dyn SessionCommandPort>,
     agent: Box<dyn AgentPort>,
     store: Box<dyn TargetStorePort>,
@@ -426,6 +427,7 @@ impl DaemonBackend {
     ) -> Self {
         let (completions_tx, completions_rx) = mpsc::channel();
         Self {
+            workflow: None,
             sessions,
             agent,
             store,
@@ -459,6 +461,12 @@ impl DaemonBackend {
         self
     }
 
+    #[must_use]
+    pub fn with_workflow(mut self, port: Box<dyn super::workflow::WorkflowPort>) -> Self {
+        self.workflow = Some(port);
+        self
+    }
+
     /// Run one reducer-issued effect against its owning port.
     ///
     /// Returns [`Flow::Exit`] for [`Effect::Detach`] and [`Flow::Leave`] for
@@ -470,6 +478,23 @@ impl DaemonBackend {
     #[allow(clippy::too_many_lines)] // This exhaustive adapter keeps every controller effect visibly mapped to exactly one port.
     pub fn dispatch(&mut self, effect: Effect) -> Flow {
         match effect {
+            Effect::Workflow(job) => {
+                let completions = self.completions();
+                if let Some(port) = self.workflow.as_mut() {
+                    port.dispatch(job, completions);
+                } else {
+                    completions.emit(AppEvent::Backend(
+                        super::controller::BackendEvent::Workflow {
+                            job,
+                            result: Err(super::workflow::WorkflowError {
+                                message: "Workflow backend is unavailable".into(),
+                                unconfirmed: false,
+                            }),
+                        },
+                    ));
+                }
+            }
+            Effect::OpenWorkflow { .. } => {}
             Effect::CreateSession {
                 workspace,
                 token,
@@ -667,6 +692,54 @@ impl DaemonBackend {
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
+
+    #[test]
+    fn workflow_backend_routes_snapshots_and_explicit_unavailability() {
+        use crate::usecase::application::workflow::{WorkflowJob, WorkflowPort};
+        struct FakeWorkflow;
+        impl WorkflowPort for FakeWorkflow {
+            fn dispatch(&mut self, job: WorkflowJob, completions: Completions) {
+                let snapshot = usagi_core::domain::workflow::WorkflowSnapshot {
+                    session: job.session,
+                    run: None,
+                    pending_start: None,
+                };
+                completions.emit(AppEvent::Backend(
+                    super::super::controller::BackendEvent::Workflow {
+                        job,
+                        result: Ok(Box::new(snapshot)),
+                    },
+                ));
+            }
+        }
+        let mut backend = backend();
+        let job = WorkflowJob {
+            workspace: WorkspaceId::new(),
+            session: SessionId::new(),
+            control: None,
+        };
+        assert_eq!(
+            backend.dispatch(Effect::OpenWorkflow {
+                session: job.session
+            }),
+            Flow::Continue
+        );
+        backend.dispatch(Effect::Workflow(job.clone()));
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(
+                super::super::controller::BackendEvent::Workflow { result: Err(_), .. }
+            )]
+        ));
+        let mut backend = backend.with_workflow(Box::new(FakeWorkflow));
+        backend.dispatch(Effect::Workflow(job));
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(
+                super::super::controller::BackendEvent::Workflow { result: Ok(_), .. }
+            )]
+        ));
+    }
     use crate::usecase::application::controller::{
         BackendEvent, Notice, OperationResult, SafeError, SafeMessage,
     };

@@ -35,6 +35,17 @@ fn read_messages(path: &std::path::Path) -> Result<Messages> {
 }
 
 impl DispatchStore {
+    /// Read one bounded session journal for the daemon's human workflow projection.
+    /// The caller must already have verified workspace and session authority.
+    /// # Errors
+    /// Rejects unreadable or incompatible journals.
+    pub fn workflow_messages(
+        &self,
+        workspace: WorkspaceId,
+        session: SessionId,
+    ) -> Result<Vec<AgentMessage>> {
+        Ok(read_messages(&self.message_path(workspace, session))?.entries)
+    }
     fn message_path(&self, workspace: WorkspaceId, session: SessionId) -> std::path::PathBuf {
         self.dir
             .join("peer-messages")

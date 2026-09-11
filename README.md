@@ -45,7 +45,8 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex、Sakana AI です。通常の shell も同じ画面で利用できます。
 同じ session 内で Codex に実装、Claude にレビューを分担させる場合は、
-[Agent 間の handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) を使えます。
+Closeup の [Workflow タブ](document/03-tui.md#session-workflow-タブ)で進捗を確認し、追加指示を送れます。
+Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。
 
 ## インストール

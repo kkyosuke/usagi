@@ -4,6 +4,7 @@ mod agent_provisioning;
 mod dispatch;
 mod secure_path;
 mod tenant_control;
+mod workflow;
 
 use dispatch::{
     DispatchToolContext, SessionDispatchContext, authenticated_supervisor_caller,
@@ -4482,6 +4483,7 @@ fn start_ipc_accept_loop(
                                             },
                                             DaemonRequest::SupervisorSnapshot { .. } => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
                                             DaemonRequest::SupervisorControl { .. } => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
+                                            DaemonRequest::WorkflowSnapshot { .. } | DaemonRequest::WorkflowControl { .. } => workflow::dispatch(&agent_launch, &pr_inventory, &bound, request_id, request, &body, hello),
                                             DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
                                             DaemonRequest::Terminal { .. } => usagi_daemon::presentation::ipc::reject_unhandled_request(request_id, body, hello),
                                         }
@@ -22333,6 +22335,1105 @@ instructions = "{instructions}"
             ),
         );
         assert_eq!(cancelled, ResponseOutcome::Ok);
+    }
+
+    mod workflow_composition {
+        use super::*;
+        use usagi_core::domain::workflow::{
+            Delivery, Recipient, WorkflowCommand, WorkflowSnapshot,
+        };
+        use usagi_daemon::usecase::codex::{CodexProvision, CodexProvisionFailure};
+
+        struct Ready(bool);
+        impl AgentReadinessProbe for Ready {
+            fn observe(&self, _: &str) -> AgentReadiness {
+                if self.0 {
+                    AgentReadiness::Ready
+                } else {
+                    AgentReadiness::Unavailable
+                }
+            }
+        }
+        struct Available;
+        impl usagi_core::infrastructure::runtime_model::ExecutableLocator for Available {
+            fn is_available(&self, _: &str) -> bool {
+                true
+            }
+        }
+        struct Provision(PathBuf);
+        impl ClaudeProvisioner for Provision {
+            fn provision(
+                &mut self,
+                _: &ProvisionContext,
+            ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
+                Ok(ClaudeProvision {
+                    working_directory: self.0.clone(),
+                    environment_allowlist: BTreeSet::new(),
+                    spawn: SpawnProvision::new(Vec::new(), Vec::new()),
+                })
+            }
+        }
+        impl CodexProvisioner for Provision {
+            fn provision(
+                &mut self,
+                _: &ProvisionContext,
+            ) -> Result<CodexProvision, CodexProvisionFailure> {
+                Ok(CodexProvision {
+                    working_directory: self.0.clone(),
+                    environment_allowlist: BTreeSet::new(),
+                    spawn: SpawnProvision::new(Vec::new(), Vec::new()),
+                })
+            }
+        }
+        #[derive(Default)]
+        struct Writes {
+            selected: Option<TerminalRef>,
+            entries: Vec<(TerminalRef, Vec<u8>)>,
+        }
+        struct Pty(Arc<Mutex<Writes>>);
+        impl PtySpawner for Pty {
+            fn spawn(
+                &mut self,
+                _: &DurableLaunchSnapshot,
+                _: &SpawnProvision,
+                _: &TerminalRef,
+            ) -> Result<ProcessIdentity, SpawnFailure> {
+                Ok(ProcessIdentity {
+                    pid: 4321,
+                    start_identity: "workflow-test".into(),
+                    process_group: 4321,
+                })
+            }
+            fn terminate_reap(&mut self, _: &TerminalRef) -> Result<(), TerminateReapError> {
+                Ok(())
+            }
+        }
+        impl PtyWriter for Pty {
+            fn select_terminal(&mut self, terminal: &TerminalRef) {
+                self.0.lock().unwrap().selected = Some(terminal.clone());
+            }
+            fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
+                let mut writes = self.0.lock().unwrap();
+                let terminal = writes.selected.clone().unwrap();
+                writes.entries.push((terminal, bytes.to_vec()));
+                Ok(())
+            }
+        }
+        struct Fixture {
+            _directory: tempfile::TempDir,
+            bound: ConnectionWorkspace,
+            agent: SharedAgentRuntime,
+            inventory: SharedPrInventory,
+            workspace: WorkspaceId,
+            session: SessionId,
+            writes: Arc<Mutex<Writes>>,
+        }
+        impl Fixture {
+            fn new() -> Self {
+                Self::with_readiness(true)
+            }
+            fn with_readiness(ready: bool) -> Self {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path().join("repository");
+                let sessions = Arc::new(Mutex::new(
+                    SessionRuntime::open(
+                        root.clone(),
+                        &directory.path().join("sessions"),
+                        DaemonGeneration::new(),
+                        AlwaysSuccessfulGit,
+                        PermissiveSessionWorktreeIo,
+                    )
+                    .unwrap(),
+                ));
+                perform_create(
+                    &sessions,
+                    &AlwaysSuccessfulGit,
+                    &usagi_core::domain::id::OperationId::new().to_string(),
+                    &serde_json::json!({"name":"workflow"}),
+                )
+                .unwrap();
+                let workspace = sessions.lock().unwrap().workspace_id().unwrap();
+                let session = sessions.lock().unwrap().session_id("workflow").unwrap();
+                let bound = bound_to(
+                    &directory.path().join("tenants"),
+                    &root,
+                    sessions,
+                    workspace,
+                );
+                let mut registry = AdapterRegistry::new();
+                let adapter = ClaudeAdapter::new(Provision(root.clone()));
+                registry
+                    .register(adapter.profile().clone(), Box::new(adapter))
+                    .unwrap();
+                let adapter = CodexAdapter::new(Provision(root));
+                registry
+                    .register(adapter.profile().clone(), Box::new(adapter))
+                    .unwrap();
+                let writes = Arc::new(Mutex::new(Writes::default()));
+                let owner = AgentRuntime::with_dispatch_and_locator(
+                    DaemonGeneration::new(),
+                    registry,
+                    SupervisorAgentStore,
+                    SupervisorAgentJournal,
+                    Pty(Arc::clone(&writes)),
+                    AgentProfileId::new("codex").unwrap(),
+                    Geometry { cols: 80, rows: 24 },
+                    DispatchStore::new(directory.path().join("dispatch")),
+                    Available,
+                );
+                let agent = Arc::new(SharedAgentState {
+                    owner: Mutex::new(owner),
+                    readiness: Arc::new(Ready(ready)),
+                });
+                let inventory =
+                    Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+                        PrInventoryStore::new(directory.path().join("prs")),
+                        GenerationRole::Active,
+                    ))));
+                Self {
+                    _directory: directory,
+                    bound,
+                    agent,
+                    inventory,
+                    workspace,
+                    session,
+                    writes,
+                }
+            }
+            fn call(
+                &self,
+                request: DaemonRequest,
+            ) -> Result<WorkflowSnapshot, usagi_core::infrastructure::ipc::ProtocolError>
+            {
+                let raw = serde_json::to_value(&request).unwrap();
+                self.call_raw(request, &raw)
+            }
+            fn call_raw(
+                &self,
+                request: DaemonRequest,
+                raw: &serde_json::Value,
+            ) -> Result<WorkflowSnapshot, usagi_core::infrastructure::ipc::ProtocolError>
+            {
+                let response = workflow::dispatch(
+                    &self.agent,
+                    &self.inventory,
+                    &self.bound,
+                    usagi_core::infrastructure::ipc::RequestId("workflow-test".into()),
+                    request,
+                    raw,
+                    &session_test_hello(),
+                );
+                match response.kind {
+                    EnvelopeKind::Response {
+                        outcome: ResponseOutcome::Error(error),
+                        ..
+                    } => Err(error),
+                    EnvelopeKind::Response {
+                        outcome: ResponseOutcome::Ok,
+                        body,
+                        ..
+                    } => Ok(serde_json::from_value(body).unwrap()),
+                    _ => panic!("unexpected workflow envelope"),
+                }
+            }
+            fn control(
+                &self,
+                operation: usagi_core::domain::id::OperationId,
+                command: WorkflowCommand,
+            ) -> Result<WorkflowSnapshot, usagi_core::infrastructure::ipc::ProtocolError>
+            {
+                self.call(DaemonRequest::WorkflowControl {
+                    workspace: self.workspace,
+                    session: self.session,
+                    operation_id: operation,
+                    command,
+                })
+            }
+        }
+
+        fn resume_workflow_participant(
+            fixture: &Fixture,
+            operation: usagi_core::domain::id::OperationId,
+            provider: usagi_core::domain::agent::ProviderKind,
+        ) -> usagi_core::domain::id::OperationId {
+            use usagi_core::domain::agent::ProviderSessionId;
+            let mut owner = fixture.agent.lock().unwrap();
+            let runtime = owner.runtime_for_operation(operation).unwrap();
+            owner
+                .capture_structured_provider_session(
+                    &runtime,
+                    provider,
+                    ProviderSessionId::new(operation.to_string()).unwrap(),
+                )
+                .unwrap();
+            owner.exit(&runtime.terminal, 0).unwrap();
+            drop(owner);
+            resume_stopped_workflow_participant(fixture, operation)
+        }
+
+        fn resume_stopped_workflow_participant(
+            fixture: &Fixture,
+            operation: usagi_core::domain::id::OperationId,
+        ) -> usagi_core::domain::id::OperationId {
+            let mut owner = fixture.agent.lock().unwrap();
+            let runtime = owner.runtime_for_operation(operation).unwrap();
+            let target = owner
+                .inventory(fixture.workspace)
+                .resumable
+                .into_iter()
+                .find_map(|item| {
+                    item.target
+                        .filter(|target| target.runtime_id == runtime.agent_runtime_id)
+                })
+                .unwrap();
+            let resumed = usagi_core::domain::id::OperationId::new();
+            owner
+                .resume_exact(
+                    &resumed.to_string(),
+                    &target,
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+            resumed
+        }
+
+        #[test]
+        #[allow(clippy::too_many_lines)] // One exact-resume sequence exercises both participants before the first observation.
+        fn workflow_unobserved_exact_resumes_keep_requests_and_self_bound_reviewer_verdicts() {
+            use usagi_core::domain::agent::{CallerRef, ModelSelector, ProviderKind};
+            use usagi_core::domain::agent_message::{MessageKind, ReviewTarget, SendMessage};
+            use usagi_core::domain::id::OperationId;
+            use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
+            let fixture = Fixture::new();
+            let operation = OperationId::new();
+            let run = fixture
+                .control(
+                    operation,
+                    WorkflowCommand::Start {
+                        goal: "resume safely".into(),
+                    },
+                )
+                .unwrap()
+                .run
+                .unwrap();
+            let caller = CallerRef {
+                agent_id: run.implementer,
+                session_id: Some(fixture.session),
+            };
+            let review_operation = OperationId::new();
+            let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+            fixture
+                .agent
+                .lock()
+                .unwrap()
+                .dispatch(
+                    &review_operation.to_string(),
+                    &DispatchIntent {
+                        workspace: fixture.workspace,
+                        session_name: "workflow".into(),
+                        caller: caller.clone(),
+                        agent: DispatchAgentIntent::New {
+                            runtime: AgentProfileId::new("claude").unwrap(),
+                            model: ModelSelector::new("default").unwrap(),
+                        },
+                        prompt: "review only".into(),
+                    },
+                    fixture.session,
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+            let reviewer = store
+                .binding(review_operation)
+                .unwrap()
+                .unwrap()
+                .worker
+                .agent_id;
+            // Neither stop nor resume is observed by the Workflow projection.
+            let implementation =
+                resume_workflow_participant(&fixture, operation, ProviderKind::Codex);
+            let review_run =
+                resume_workflow_participant(&fixture, review_operation, ProviderKind::Claude);
+            assert_eq!(
+                store.binding(review_run).unwrap().unwrap().caller.agent_id,
+                reviewer
+            );
+            let request = OperationId::new();
+            let target = ReviewTarget {
+                base_sha: "a".repeat(40),
+                head_sha: "b".repeat(40),
+            };
+            store
+                .send_message(
+                    fixture.workspace,
+                    &caller,
+                    implementation,
+                    SendMessage {
+                        message_id: request,
+                        to_agent_id: reviewer,
+                        kind: MessageKind::ReviewRequest,
+                        body: "Review resumed implementation".into(),
+                        in_reply_to: None,
+                        review: Some(target.clone()),
+                    },
+                )
+                .unwrap();
+            store
+                .send_message(
+                    fixture.workspace,
+                    &CallerRef {
+                        agent_id: reviewer,
+                        session_id: Some(fixture.session),
+                    },
+                    review_run,
+                    SendMessage {
+                        message_id: OperationId::new(),
+                        to_agent_id: run.implementer,
+                        kind: MessageKind::ChangesRequested,
+                        body: "Fix resumed review finding".into(),
+                        in_reply_to: Some(request),
+                        review: Some(target),
+                    },
+                )
+                .unwrap();
+            // A fast exit after publishing must not remove authenticated evidence.
+            for finished in [implementation, review_run] {
+                let mut owner = fixture.agent.lock().unwrap();
+                let terminal = owner.runtime_for_operation(finished).unwrap().terminal;
+                owner.exit(&terminal, 0).unwrap();
+            }
+            let snapshot = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap()
+                .run
+                .unwrap();
+            assert_eq!(snapshot.review.unwrap().request, request);
+            assert_eq!(snapshot.revisions, 1);
+            assert_eq!(snapshot.history.len(), 2);
+            assert_eq!(snapshot.phase, usagi_core::domain::workflow::Phase::Waiting);
+            // Recovery re-reads the durable cursor without replaying the already
+            // accepted request and finding into another revision or history row.
+            resume_stopped_workflow_participant(&fixture, implementation);
+            let replay = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap()
+                .run
+                .unwrap();
+            assert_eq!(replay.revisions, 1);
+            assert_eq!(replay.history.len(), 2);
+            assert_eq!(replay.review.unwrap().request, request);
+            assert_eq!(replay.phase, usagi_core::domain::workflow::Phase::Revising);
+        }
+
+        #[test]
+        #[allow(clippy::too_many_lines)] // One observed reviewer interruption verifies exact recovery and queued delivery.
+        fn workflow_observed_reviewer_stop_resumes_and_retries_queued_instructions() {
+            use usagi_core::domain::agent::{
+                CallerRef, ModelSelector, ProviderKind, ProviderSessionId,
+            };
+            use usagi_core::domain::id::OperationId;
+            use usagi_core::domain::workflow::Phase;
+            use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
+            let fixture = Fixture::new();
+            let operation = OperationId::new();
+            let run = fixture
+                .control(
+                    operation,
+                    WorkflowCommand::Start {
+                        goal: "review recovery".into(),
+                    },
+                )
+                .unwrap()
+                .run
+                .unwrap();
+            let review_operation = OperationId::new();
+            let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+            fixture
+                .agent
+                .lock()
+                .unwrap()
+                .dispatch(
+                    &review_operation.to_string(),
+                    &DispatchIntent {
+                        workspace: fixture.workspace,
+                        session_name: "workflow".into(),
+                        caller: CallerRef {
+                            agent_id: run.implementer,
+                            session_id: Some(fixture.session),
+                        },
+                        agent: DispatchAgentIntent::New {
+                            runtime: AgentProfileId::new("claude").unwrap(),
+                            model: ModelSelector::new("default").unwrap(),
+                        },
+                        prompt: "review only".into(),
+                    },
+                    fixture.session,
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+            let reviewer = store
+                .binding(review_operation)
+                .unwrap()
+                .unwrap()
+                .worker
+                .agent_id;
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    let run = record.as_mut().unwrap().run.as_mut().unwrap();
+                    run.reviewer = Some(reviewer);
+                    run.phase = Phase::Reviewing;
+                    Ok(())
+                })
+                .unwrap();
+            let request = DaemonRequest::WorkflowSnapshot {
+                workspace: fixture.workspace,
+                session: fixture.session,
+            };
+            assert_eq!(
+                fixture.call(request.clone()).unwrap().run.unwrap().phase,
+                Phase::Reviewing
+            );
+            {
+                let mut owner = fixture.agent.lock().unwrap();
+                let runtime = owner.runtime_for_operation(review_operation).unwrap();
+                owner
+                    .capture_structured_provider_session(
+                        &runtime,
+                        ProviderKind::Claude,
+                        ProviderSessionId::new("observed-reviewer").unwrap(),
+                    )
+                    .unwrap();
+                owner.exit(&runtime.terminal, 0).unwrap();
+            }
+            assert_eq!(
+                fixture.call(request.clone()).unwrap().run.unwrap().phase,
+                Phase::Waiting
+            );
+            let queued = fixture
+                .control(
+                    OperationId::new(),
+                    WorkflowCommand::Instruct {
+                        recipient: Recipient::Reviewer,
+                        body: "Check recovery edge cases".into(),
+                    },
+                )
+                .unwrap()
+                .run
+                .unwrap();
+            assert_eq!(queued.instructions[0].delivery, Delivery::Queued);
+            assert!(fixture.writes.lock().unwrap().entries.is_empty());
+            // A plain launch may reuse the mailbox identity, but is not a resume
+            // of this Workflow's assigned conversation and must receive nothing.
+            let unrelated_operation = OperationId::new();
+            let unrelated = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .launch(
+                    &unrelated_operation.to_string(),
+                    &usagi_core::infrastructure::client::AgentLaunchIntent {
+                        workspace: fixture.workspace,
+                        session: Some(fixture.session),
+                        profile: Some(AgentProfileId::new("claude").unwrap()),
+                    },
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .binding(unrelated_operation)
+                    .unwrap()
+                    .unwrap()
+                    .worker
+                    .agent_id,
+                reviewer
+            );
+            assert_eq!(
+                fixture
+                    .call(request.clone())
+                    .unwrap()
+                    .run
+                    .unwrap()
+                    .instructions[0]
+                    .delivery,
+                Delivery::Queued
+            );
+            assert!(fixture.writes.lock().unwrap().entries.is_empty());
+            fixture
+                .agent
+                .lock()
+                .unwrap()
+                .exit(&unrelated.terminal, 0)
+                .unwrap();
+            let resumed = resume_stopped_workflow_participant(&fixture, review_operation);
+            let restored = fixture.call(request.clone()).unwrap().run.unwrap();
+            assert_eq!(restored.phase, Phase::Reviewing);
+            assert_eq!(restored.waiting_reason, None);
+            assert_eq!(restored.instructions[0].delivery, Delivery::Notified);
+            let terminal = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .runtime_for_operation(resumed)
+                .unwrap()
+                .terminal;
+            assert_eq!(fixture.writes.lock().unwrap().entries[0].0, terminal);
+            // Simulate exact resume completing between the synchronized journal
+            // observation and the later runtime-state reconciliation.
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    let record = record.as_mut().unwrap();
+                    record.suspended_phase = Some(Phase::Reviewing);
+                    let run = record.run.as_mut().unwrap();
+                    run.phase = Phase::Waiting;
+                    run.waiting_reason = Some("interrupted".into());
+                    Ok(())
+                })
+                .unwrap();
+            workflow::reconcile_runtime(&fixture.agent, fixture.workspace, fixture.session)
+                .unwrap();
+            let reconciled = store
+                .workflow(fixture.workspace, fixture.session)
+                .unwrap()
+                .unwrap();
+            assert_eq!(reconciled.suspended_phase, None);
+            assert_eq!(reconciled.run.unwrap().waiting_reason, None);
+            // An explicit revision-limit wait is not an interrupted-runtime wait.
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    record.as_mut().unwrap().run.as_mut().unwrap().phase = Phase::Waiting;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                fixture.call(request).unwrap().run.unwrap().phase,
+                Phase::Waiting
+            );
+        }
+
+        #[test]
+        #[allow(clippy::too_many_lines)] // One replay verifies original binding fallback, reviewer reuse, and non-verdict messages.
+        fn workflow_legacy_journal_replay_accepts_original_handoff_bindings_without_cached_lineage()
+        {
+            use usagi_core::domain::agent::{CallerRef, ModelSelector};
+            use usagi_core::domain::agent_message::{MessageKind, ReviewTarget, SendMessage};
+            use usagi_core::domain::id::OperationId;
+            use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
+            let fixture = Fixture::new();
+            let operation = OperationId::new();
+            let run = fixture
+                .control(
+                    operation,
+                    WorkflowCommand::Start {
+                        goal: "legacy journal replay".into(),
+                    },
+                )
+                .unwrap()
+                .run
+                .unwrap();
+            let caller = CallerRef {
+                agent_id: run.implementer,
+                session_id: Some(fixture.session),
+            };
+            let review_operation = OperationId::new();
+            fixture
+                .agent
+                .lock()
+                .unwrap()
+                .dispatch(
+                    &review_operation.to_string(),
+                    &DispatchIntent {
+                        workspace: fixture.workspace,
+                        session_name: "workflow".into(),
+                        caller: caller.clone(),
+                        agent: DispatchAgentIntent::New {
+                            runtime: AgentProfileId::new("claude").unwrap(),
+                            model: ModelSelector::new("default").unwrap(),
+                        },
+                        prompt: "review only".into(),
+                    },
+                    fixture.session,
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+            let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+            let reviewer = store
+                .binding(review_operation)
+                .unwrap()
+                .unwrap()
+                .worker
+                .agent_id;
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    record.as_mut().unwrap().authorized_operations.clear();
+                    Ok(())
+                })
+                .unwrap();
+            let first = OperationId::new();
+            let next = OperationId::new();
+            let target = ReviewTarget {
+                base_sha: "a".repeat(40),
+                head_sha: "b".repeat(40),
+            };
+            for (from, from_run, message) in [
+                (
+                    caller.clone(),
+                    operation,
+                    SendMessage {
+                        message_id: first,
+                        to_agent_id: reviewer,
+                        kind: MessageKind::ReviewRequest,
+                        body: "Review initial implementation".into(),
+                        in_reply_to: None,
+                        review: Some(target.clone()),
+                    },
+                ),
+                (
+                    CallerRef {
+                        agent_id: reviewer,
+                        session_id: Some(fixture.session),
+                    },
+                    review_operation,
+                    SendMessage {
+                        message_id: OperationId::new(),
+                        to_agent_id: run.implementer,
+                        kind: MessageKind::ChangesRequested,
+                        body: "Fix the finding".into(),
+                        in_reply_to: Some(first),
+                        review: Some(target.clone()),
+                    },
+                ),
+                (
+                    caller,
+                    operation,
+                    SendMessage {
+                        message_id: next,
+                        to_agent_id: reviewer,
+                        kind: MessageKind::ReviewRequest,
+                        body: "Review the correction".into(),
+                        in_reply_to: None,
+                        review: Some(target),
+                    },
+                ),
+                (
+                    CallerRef {
+                        agent_id: reviewer,
+                        session_id: Some(fixture.session),
+                    },
+                    review_operation,
+                    SendMessage {
+                        message_id: OperationId::new(),
+                        to_agent_id: run.implementer,
+                        kind: MessageKind::Message,
+                        body: "Review is still in progress, not a verdict".into(),
+                        in_reply_to: None,
+                        review: None,
+                    },
+                ),
+            ] {
+                store
+                    .send_message(fixture.workspace, &from, from_run, message)
+                    .unwrap();
+            }
+            // Replay an older persisted record before runtime lineage caching:
+            // exact original handoff bindings remain sufficient evidence.
+            let replay = usagi_daemon::usecase::workflow::snapshot(
+                &store,
+                fixture.workspace,
+                fixture.session,
+            )
+            .unwrap()
+            .run
+            .unwrap();
+            assert_eq!(replay.review.unwrap().request, next);
+            assert_eq!(replay.reviewer, Some(reviewer));
+            assert_eq!(replay.revisions, 1);
+            assert_eq!(replay.history.len(), 3);
+            assert_eq!(replay.phase, usagi_core::domain::workflow::Phase::Reviewing);
+        }
+
+        #[test]
+        fn workflow_verification_inventory_failure_is_reported_without_external_io() {
+            use usagi_core::domain::id::OperationId;
+            use usagi_core::domain::workflow::{Phase, Review};
+            let fixture = Fixture::new();
+            fixture
+                .control(
+                    OperationId::new(),
+                    WorkflowCommand::Start {
+                        goal: "verification error".into(),
+                    },
+                )
+                .unwrap();
+            let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    let run = record.as_mut().unwrap().run.as_mut().unwrap();
+                    run.phase = Phase::Verifying;
+                    run.review = Some(Review {
+                        request: OperationId::new(),
+                        target: usagi_core::domain::agent_message::ReviewTarget {
+                            base_sha: "a".repeat(40),
+                            head_sha: "b".repeat(40),
+                        },
+                        approved: true,
+                    });
+                    Ok(())
+                })
+                .unwrap();
+            let inventory = Arc::clone(&fixture.inventory);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = inventory.lock().unwrap();
+                panic!("fixture inventory failure");
+            }));
+            let error = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Unavailable);
+        }
+
+        #[test]
+        fn workflow_pending_readiness_failure_restores_the_original_start_operation() {
+            let mut fixture = Fixture::with_readiness(false);
+            let operation = usagi_core::domain::id::OperationId::new();
+            assert!(
+                fixture
+                    .control(
+                        operation,
+                        WorkflowCommand::Start {
+                            goal: "recover me".into()
+                        }
+                    )
+                    .is_err()
+            );
+            let pending = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap()
+                .pending_start
+                .unwrap();
+            assert_eq!(pending.operation_id, operation);
+            assert_eq!(pending.goal, "recover me");
+            assert!(pending.error.is_some());
+            Arc::get_mut(&mut fixture.agent).unwrap().readiness = Arc::new(Ready(true));
+            let recovered = fixture
+                .control(
+                    pending.operation_id,
+                    WorkflowCommand::Start { goal: pending.goal },
+                )
+                .unwrap();
+            assert!(recovered.pending_start.is_none());
+            assert_eq!(recovered.run.unwrap().id, operation);
+        }
+
+        struct VerificationGit(String);
+        impl usagi_core::infrastructure::git::GitRunner for VerificationGit {
+            fn run(
+                &self,
+                _: &Path,
+                args: &[&str],
+            ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
+                Ok(usagi_core::infrastructure::git::GitOutput {
+                    success: true,
+                    stdout: if args[0] == "status" {
+                        String::new()
+                    } else {
+                        self.0.clone()
+                    },
+                    stderr: String::new(),
+                })
+            }
+        }
+        struct VerificationGh(String);
+        impl GhProcessPort for VerificationGh {
+            type Error = std::io::Error;
+            fn run(&mut self, _: &str, _: &[String], _: u64) -> Result<String, Self::Error> {
+                Ok(self.0.clone())
+            }
+        }
+
+        #[test]
+        fn workflow_pr_publication_uses_injected_independent_git_and_github_evidence() {
+            use usagi_core::domain::workflow::{Phase, Review};
+            let fixture = Fixture::new();
+            let operation = usagi_core::domain::id::OperationId::new();
+            let mut run = fixture
+                .control(
+                    operation,
+                    WorkflowCommand::Start {
+                        goal: "verify me".into(),
+                    },
+                )
+                .unwrap()
+                .run
+                .unwrap();
+            run.phase = Phase::Verifying;
+            run.review = Some(Review {
+                request: usagi_core::domain::id::OperationId::new(),
+                target: usagi_core::domain::agent_message::ReviewTarget {
+                    base_sha: "b".repeat(40),
+                    head_sha: "a".repeat(40),
+                },
+                approved: true,
+            });
+            let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    record.as_mut().unwrap().run = Some(run.clone());
+                    Ok(())
+                })
+                .unwrap();
+            let url = "https://github.com/owner/repo/pull/1";
+            let mut output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"});
+            let identity = usagi_core::domain::pr_inventory::extract(url.as_bytes()).remove(0);
+            let view =
+                usagi_daemon::usecase::pr_inventory::parse_gh_pr_view(&output.to_string()).unwrap();
+            fixture
+                .inventory
+                .lock()
+                .unwrap()
+                .observe_reported(fixture.session, url)
+                .unwrap();
+            fixture
+                .inventory
+                .lock()
+                .unwrap()
+                .publish_success(&identity, &view)
+                .unwrap();
+            workflow::verify_progress(
+                &store,
+                &fixture.inventory,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                &run,
+                &VerificationGit("a".repeat(40)),
+                &mut VerificationGh(output.to_string()),
+            )
+            .unwrap();
+            assert_eq!(
+                store
+                    .workflow(fixture.workspace, fixture.session)
+                    .unwrap()
+                    .unwrap()
+                    .run
+                    .unwrap()
+                    .phase,
+                Phase::Ready
+            );
+            output["isDraft"] = serde_json::json!(true);
+            workflow::verify_progress(
+                &store,
+                &fixture.inventory,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                &run,
+                &VerificationGit("a".repeat(40)),
+                &mut VerificationGh(output.to_string()),
+            )
+            .unwrap();
+            assert_eq!(
+                store
+                    .workflow(fixture.workspace, fixture.session)
+                    .unwrap()
+                    .unwrap()
+                    .run
+                    .unwrap()
+                    .phase,
+                Phase::Verifying
+            );
+        }
+
+        #[test]
+        #[allow(clippy::too_many_lines)] // One dispatch fixture tests replay and exact targeting with a concurrent sibling.
+        fn workflow_dispatch_is_scoped_idempotent_and_delivers_only_to_its_exact_agent() {
+            let fixture = Fixture::new();
+            assert!(
+                fixture
+                    .call(DaemonRequest::WorkflowSnapshot {
+                        workspace: fixture.workspace,
+                        session: fixture.session
+                    })
+                    .unwrap()
+                    .run
+                    .is_none()
+            );
+            assert_eq!(
+                fixture
+                    .call(DaemonRequest::WorkflowSnapshot {
+                        workspace: WorkspaceId::new(),
+                        session: fixture.session
+                    })
+                    .unwrap_err()
+                    .code,
+                ErrorCode::OwnershipUnknown
+            );
+            assert!(
+                fixture
+                    .call(DaemonRequest::WorkflowSnapshot {
+                        workspace: fixture.workspace,
+                        session: SessionId::new()
+                    })
+                    .is_err()
+            );
+            assert_eq!(
+                fixture
+                    .call(DaemonRequest::SupervisorSnapshot {
+                        workspace: fixture.workspace
+                    })
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            let operation = usagi_core::domain::id::OperationId::new();
+            assert_eq!(
+                fixture
+                    .control(operation, WorkflowCommand::Start { goal: " ".into() })
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            let command = WorkflowCommand::Start {
+                goal: "Implement feature".into(),
+            };
+            let first = fixture.control(operation, command.clone()).unwrap();
+            assert_eq!(fixture.control(operation, command).unwrap(), first);
+            assert_eq!(
+                fixture
+                    .control(
+                        operation,
+                        WorkflowCommand::Start {
+                            goal: "Changed".into()
+                        }
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::IdempotencyConflict
+            );
+            let run = first.run.unwrap();
+            let credential = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .hook_credential(5000, 4321, 4321)
+                .unwrap()
+                .to_owned();
+            assert!(
+                fixture
+                    .agent
+                    .lock()
+                    .unwrap()
+                    .mcp_dispatch_context(&credential)
+                    .is_some()
+            );
+            for credential in [credential, "invalid-credential".into()] {
+                let request = DaemonRequest::WorkflowControl {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                    operation_id: usagi_core::domain::id::OperationId::new(),
+                    command: WorkflowCommand::Instruct {
+                        recipient: Recipient::Implementer,
+                        body: "must not deliver".into(),
+                    },
+                };
+                let mut raw = serde_json::to_value(&request).unwrap();
+                raw["caller_context"] = serde_json::json!({"credential":credential});
+                assert_eq!(
+                    fixture.call_raw(request, &raw).unwrap_err().code,
+                    ErrorCode::PermissionDenied
+                );
+            }
+            let sibling_operation = usagi_core::domain::id::OperationId::new().to_string();
+            let sibling_intent = usagi_core::infrastructure::client::AgentLaunchIntent {
+                workspace: fixture.workspace,
+                session: Some(fixture.session),
+                profile: Some(AgentProfileId::new("codex").unwrap()),
+            };
+            let ticket = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .prepare_launch_readiness(&sibling_operation, &sibling_intent)
+                .unwrap();
+            run_agent_readiness(&fixture.agent, ticket.as_ref()).unwrap();
+            let sibling = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .launch_after_readiness(
+                    &sibling_operation,
+                    &sibling_intent,
+                    &fixture.bound.scope_resolver(),
+                    ticket.as_ref(),
+                )
+                .unwrap();
+            let instruction = usagi_core::domain::id::OperationId::new();
+            assert_eq!(
+                fixture
+                    .control(
+                        instruction,
+                        WorkflowCommand::Instruct {
+                            recipient: Recipient::Reviewer,
+                            body: "No reviewer".into()
+                        }
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            let command = WorkflowCommand::Instruct {
+                recipient: Recipient::Implementer,
+                body: "Verify the edge cases".into(),
+            };
+            let delivered = fixture.control(instruction, command.clone()).unwrap();
+            assert_eq!(
+                delivered.run.unwrap().instructions[0].delivery,
+                Delivery::Notified
+            );
+            fixture.control(instruction, command).unwrap();
+            let writes = fixture.writes.lock().unwrap();
+            assert_eq!(writes.entries.len(), 1);
+            let expected = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .runtime_for_operation(run.id)
+                .unwrap()
+                .terminal;
+            assert_eq!(writes.entries[0].0, expected);
+            assert_ne!(writes.entries[0].0, sibling.terminal);
+            assert!(
+                String::from_utf8_lossy(&writes.entries[0].1).contains("Verify the edge cases")
+            );
+            drop(writes);
+            fixture.agent.lock().unwrap().exit(&expected, 0).unwrap();
+            let stopped = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap()
+                .run
+                .unwrap();
+            assert_eq!(stopped.phase, usagi_core::domain::workflow::Phase::Waiting);
+            assert!(
+                stopped
+                    .waiting_reason
+                    .unwrap()
+                    .contains("stopped or interrupted")
+            );
+        }
     }
 
     #[test]

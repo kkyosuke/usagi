@@ -25,6 +25,7 @@ pub mod terminal_retention;
 pub mod terminal_visibility;
 pub mod trace;
 pub mod user_decision;
+pub mod workflow;
 pub mod workspace;
 pub mod workspace_layout;
 pub mod workspace_state;

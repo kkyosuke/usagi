@@ -66,6 +66,7 @@ pub mod terminal_selection;
 pub mod terminal_session;
 /// Goal-driven Work Run の選択・確認・同一 operation retry を所有する純粋 state machine。
 pub mod work_run_control;
+pub mod workflow;
 
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]

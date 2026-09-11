@@ -50,3 +50,4 @@ pub mod terminal_owner;
 pub mod terminal_profile;
 pub mod terminal_retention_ipc;
 pub mod terminal_visibility_ipc;
+pub mod workflow;
