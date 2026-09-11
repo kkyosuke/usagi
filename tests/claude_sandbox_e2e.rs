@@ -395,11 +395,9 @@ fn session_scope_can_commit_without_granting_the_main_ref() {
     let _ = fs::remove_dir_all(&protected);
 }
 
-/// A root coordinator must be able to write the state its own CLI needs — Codex
-/// keeps `state_5.sqlite` under `~/.codex`, and a launcher that granted only
-/// `~/.claude` made `usagi` unable to start Codex at the workspace root at all
-/// ("attempt to write a readonly database"). The grant follows the launched
-/// program, so it never widens to another provider's state.
+/// A root coordinator must be able to write the state its own CLI needs. The
+/// grant follows the launched program, so it never widens to another provider's
+/// state directory.
 #[test]
 fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -409,39 +407,53 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
     let repo = fixture.join("repo");
     let home = fixture.join("home");
     let bin = fixture.join("bin");
-    for path in [&repo, &bin, &home.join(".codex"), &home.join(".claude")] {
+    let state_directories = [".codex", ".claude", ".gemini"];
+    for path in [
+        &repo,
+        &bin,
+        &home.join(".codex"),
+        &home.join(".claude"),
+        &home.join(".gemini"),
+    ] {
         fs::create_dir_all(path).unwrap();
     }
-    // The fixture programs differ only in name: each writes both state probes.
-    for program in ["codex", "claude"] {
+    // The fixture programs differ only in name: each writes every state probe.
+    for program in ["codex", "claude", "agy"] {
         let path = bin.join(program);
         fs::write(
             &path,
-            "#!/bin/sh\ntouch \"$1/.codex/probe\"\ntouch \"$1/.claude/probe\"\nexit 0\n",
+            "#!/bin/sh\ntouch \"$1/.codex/probe\"\ntouch \"$1/.claude/probe\"\ntouch \"$1/.gemini/probe\"\nexit 0\n",
         )
         .unwrap();
         fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     }
 
-    for (program, granted, denied) in [
-        ("codex", ".codex", ".claude"),
-        ("claude", ".claude", ".codex"),
+    for (program, granted) in [
+        ("codex", ".codex"),
+        ("claude", ".claude"),
+        ("agy", ".gemini"),
     ] {
         let output = run_agent_in_root(&repo, &home, &bin.join(program));
         if !output.status.success() && sandbox_backend_unavailable(&output) {
             continue;
         }
-        let granted = home.join(granted).join("probe");
-        let denied = home.join(denied).join("probe");
+        let granted_directory = granted;
+        let granted = home.join(granted_directory).join("probe");
         assert!(
             granted.exists(),
             "{program} must write its own state: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(
-            !denied.exists(),
-            "{program} must not write another provider's state"
-        );
+        for denied in state_directories
+            .iter()
+            .copied()
+            .filter(|directory| *directory != granted_directory)
+        {
+            assert!(
+                !home.join(denied).join("probe").exists(),
+                "{program} must not write another provider's state"
+            );
+        }
         fs::remove_file(granted).unwrap();
     }
 

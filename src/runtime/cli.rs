@@ -276,11 +276,14 @@ mod action_io {
                     }
                 }
             }
-            (Action::ReportAgentPhase, RunOutcome::ReportAgentPhase { phase }) => {
+            (Action::ReportAgentPhase, RunOutcome::ReportAgentPhase { phase, hook_event }) => {
                 let stdin = std::io::stdin();
                 let mut input = stdin.lock();
                 let request = match usagi_cli::cli::hooks::agent_phase::request_from_hook(
-                    &mut input, &phase, None,
+                    &mut input,
+                    &phase,
+                    hook_event.as_deref(),
+                    None,
                 ) {
                     Ok(request) => request,
                     Err(error) => {
@@ -297,7 +300,16 @@ mod action_io {
                 // hook must not start a daemon, and must not pay bootstrap latency.
                 match daemon::attached_client(ClientPolicy::cli()) {
                     Ok(mut client) => match client.request(request) {
-                        Ok(_) => Ok(ExitCode::SUCCESS),
+                        Ok(_) => {
+                            if let Some(response) =
+                                usagi_cli::cli::hooks::agent_phase::response_for_declared_event(
+                                    hook_event.as_deref(),
+                                )
+                            {
+                                writeln!(out, "{response}")?;
+                            }
+                            Ok(ExitCode::SUCCESS)
+                        }
                         Err(error) => {
                             write_client_error(err, "agent phase report failed", &error)?;
                             Ok(ExitCode::FAILURE)
@@ -1014,6 +1026,7 @@ mod tests {
         assert_route(
             RunOutcome::ReportAgentPhase {
                 phase: "working".into(),
+                hook_event: None,
             },
             Action::ReportAgentPhase,
         );

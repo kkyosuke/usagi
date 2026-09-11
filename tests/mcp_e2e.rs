@@ -1200,7 +1200,11 @@ fn wait_for_fixture_argv(
                     .iter()
                     .any(|argument| argument.contains(instruction_marker))
                 && user_prompt.is_none_or(|prompt| {
-                    capture.arguments.iter().any(|argument| argument == prompt)
+                    capture.arguments.iter().any(|argument| {
+                        argument == prompt
+                            || (capture.runtime == "agy"
+                                && argument.ends_with(&format!("\n\nTask:\n{prompt}")))
+                    })
                 })
         }) {
             return capture;
@@ -1233,6 +1237,21 @@ fn shipping_system_prompt(capture: &FixtureArgv) -> String {
             .get(positions[0] + 1)
             .expect("Claude system prompt value is missing")
             .clone()
+    } else if capture.runtime == "agy" {
+        let position = capture
+            .arguments
+            .iter()
+            .position(|argument| argument == "--prompt-interactive")
+            .expect("Antigravity interactive prompt flag is missing");
+        capture
+            .arguments
+            .get(position + 1)
+            .expect("Antigravity launch contract is missing")
+            .split_once("\n\nTask:\n")
+            .map_or_else(
+                || panic!("Antigravity task separator is missing"),
+                |(contract, _)| contract.to_owned(),
+            )
     } else {
         assert!(
             matches!(capture.runtime.as_str(), "codex" | "codex-fugu"),
@@ -1291,6 +1310,15 @@ fn assert_shipping_role_argv(
         "role instruction escaped its single ephemeral system argument"
     );
     if let Some(user_prompt) = user_prompt {
+        if capture.runtime == "agy" {
+            assert!(
+                capture
+                    .arguments
+                    .iter()
+                    .any(|argument| { argument.ends_with(&format!("\n\nTask:\n{user_prompt}")) })
+            );
+            return;
+        }
         assert_eq!(
             capture
                 .arguments
@@ -1398,6 +1426,7 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
     );
 
     let cases = [
+        ("agy", "fixture-agy", "agy", "check Antigravity argv"),
         (
             "sakana-ai",
             "fixture-sakana",

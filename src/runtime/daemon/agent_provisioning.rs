@@ -1,6 +1,6 @@
 //! Product-specific Agent launch provisioning for the daemon composition.
 //!
-//! This module owns Codex/Claude argv, sandbox, environment, role, and MCP
+//! This module owns Antigravity/Codex/Claude argv, sandbox, environment, role, and MCP
 //! materialization. Socket admission, runtime ownership, and background-worker
 //! orchestration remain in the parent composition module.
 
@@ -14,6 +14,11 @@ use super::{
     claude_product_mcp_arguments, claude_sandbox, codex_product_mcp_arguments,
     launch_system_prompt, paths, scoped_settings_json, user_env,
 };
+
+mod agy;
+pub(super) use agy::RootAgyProvisioner;
+#[cfg(test)]
+pub(super) use agy::agy_plugin_documents;
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(
@@ -188,7 +193,7 @@ impl CodexProvisioner for RootCodexProvisioner {
         } else {
             None
         };
-        let sandbox_roots = codex_writable_roots(
+        let sandbox_roots = agent_writable_roots(
             mode,
             &working_directory,
             session_git.as_ref(),
@@ -245,7 +250,7 @@ impl CodexProvisioner for RootCodexProvisioner {
     }
 }
 
-pub(super) fn codex_writable_roots(
+pub(super) fn agent_writable_roots(
     mode: SandboxMode,
     working_directory: &Path,
     session_git: Option<&SessionGitPolicy>,
@@ -808,7 +813,7 @@ impl From<InvalidOwnedDirectory> for ClaudeSandboxPolicyError {
 /// daemon が確定した、1 回の launch 分の sandbox policy 入力。
 pub(super) struct SandboxPolicyInputs<'a> {
     pub(super) mode: SandboxMode,
-    /// sandbox の中で exec する agent CLI（`claude` / `codex` / `codex-fugu`）。root mode で
+    /// sandbox の中で exec する agent CLI（`claude` / `codex` / `codex-fugu` / `agy`）。root mode で
     /// launcher が足す `$HOME` 配下の state root（`~/.claude` / `~/.codex` / …）を決めるため、
     /// daemon 側の検証もこの program に追従する。
     pub(super) program: &'a str,

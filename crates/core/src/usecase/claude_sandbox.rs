@@ -706,6 +706,7 @@ mod tests {
             ("claude", ".claude"),
             ("codex", ".codex"),
             ("codex-fugu", ".codex-fugu"),
+            ("agy", ".gemini"),
             // PATH 解決済みの絶対 path でも basename で判定する。
             ("/opt/homebrew/bin/codex", ".codex"),
         ] {
@@ -742,6 +743,7 @@ mod tests {
         );
         // 判定は closed vocabulary（`DefaultModel`）で、未知 token は None を返す。
         assert_eq!(agent_state_directory("sakana.ai"), Some(".codex-fugu"));
+        assert_eq!(agent_state_directory("agy"), Some(".gemini"));
         assert_eq!(agent_state_directory("gemini"), None);
         assert_eq!(agent_state_directory(""), None);
         assert_eq!(agent_state_directory("/"), None);

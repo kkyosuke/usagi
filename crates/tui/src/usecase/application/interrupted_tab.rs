@@ -91,6 +91,7 @@ pub const fn provider_label(provider: Option<ProviderKind>) -> &'static str {
     match provider {
         Some(ProviderKind::Claude) => "Claude",
         Some(ProviderKind::Codex) => "Codex",
+        Some(ProviderKind::Agy) => "Antigravity",
         None => "Agent",
     }
 }

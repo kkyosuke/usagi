@@ -112,6 +112,8 @@ pub enum RunOutcome {
     ReportAgentPhase {
         /// フックが引数で渡した phase token（closed vocabulary は core が持つ）。
         phase: String,
+        /// provider payload が event 名を含まない場合に、配線側が固定する event。
+        hook_event: Option<String>,
     },
     /// Claude `PreToolUse` hook の payload を stdin から読み、worktree を出る
     /// ツール呼び出しなら deny 判定を stdout へ書く。判定は純粋（daemon 不要）。
@@ -245,6 +247,9 @@ pub enum Command {
     AgentPhase {
         /// フックが報告する phase（例: `ended`）
         phase: String,
+        /// payload が event 名を含まない provider 用の配線時 event。
+        #[arg(long)]
+        hook_event: Option<String>,
     },
     /// （ヘルプ非表示・内部）Codex `SessionStart` の session ID を daemon へ渡す。
     #[command(hide = true)]
@@ -436,7 +441,9 @@ impl Command {
             Command::Mcp => Box::new(McpEntry),
             Command::Session { command } => Box::new(Session { command }),
             // エージェント統合フックは commands/ ではなく hooks/ に置く。
-            Command::AgentPhase { phase } => Box::new(hooks::AgentPhase { phase }),
+            Command::AgentPhase { phase, hook_event } => {
+                Box::new(hooks::AgentPhase { phase, hook_event })
+            }
             Command::CodexSessionCapture => Box::new(hooks::CodexSessionCapture),
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
             Command::ClaudeSandbox {
@@ -735,7 +742,22 @@ mod tests {
         let cli = Cli::try_parse_from(["usagi", "agent-phase", "ended"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::AgentPhase { phase }) if phase == "ended"
+            Some(Command::AgentPhase { phase, hook_event: None }) if phase == "ended"
+        ));
+        let cli = Cli::try_parse_from([
+            "usagi",
+            "agent-phase",
+            "running",
+            "--hook-event",
+            "PreInvocation",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::AgentPhase {
+                phase,
+                hook_event: Some(event),
+            }) if phase == "running" && event == "PreInvocation"
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "codex-session-capture"])

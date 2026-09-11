@@ -20,6 +20,7 @@ use usagi_core::{
 };
 
 use super::{
+    agy::{AgyAdapter, AgyProvisioner},
     claude::{ClaudeAdapter, ClaudeProvisioner},
     codex::{CodexAdapter, CodexProvisioner},
     control::AgentPhase,
@@ -61,15 +62,18 @@ impl AdapterRegistry {
         C: CodexProvisioner + Send + 'static,
         S: CodexProvisioner + Send + 'static,
         L: ClaudeProvisioner + Send + 'static,
+        A: AgyProvisioner + Send + 'static,
     >(
         &mut self,
         codex: CodexAdapter<C>,
         sakana: CodexAdapter<S>,
         claude: ClaudeAdapter<L>,
+        agy: AgyAdapter<A>,
     ) -> Result<(), RegistryError> {
         self.register(claude.profile().clone(), Box::new(claude))?;
         self.register(codex.profile().clone(), Box::new(codex))?;
         self.register(sakana.profile().clone(), Box::new(sakana))?;
+        self.register(agy.profile().clone(), Box::new(agy))?;
         let matches_catalog = self
             .profile_ids()
             .eq(supported_agent_runtimes().map(|runtime| runtime.id));
@@ -570,6 +574,17 @@ mod tests {
         }
     }
 
+    struct AgyNever;
+    impl AgyProvisioner for AgyNever {
+        fn provision(
+            &mut self,
+            _: &crate::usecase::runtime::ProvisionContext,
+        ) -> Result<crate::usecase::agy::AgyProvision, crate::usecase::agy::AgyProvisionFailure>
+        {
+            Err(crate::usecase::agy::AgyProvisionFailure::ExecutableUnavailable)
+        }
+    }
+
     struct Adapter {
         profile: AgentProfile,
     }
@@ -645,6 +660,7 @@ mod tests {
                 CodexAdapter::new(CodexNever),
                 CodexAdapter::sakana(CodexNever),
                 ClaudeAdapter::new(ClaudeNever),
+                AgyAdapter::new(AgyNever),
             )
             .unwrap();
         assert_eq!(
@@ -660,6 +676,7 @@ mod tests {
                 CodexAdapter::new(CodexNever),
                 CodexAdapter::sakana(CodexNever),
                 ClaudeAdapter::new(ClaudeNever),
+                AgyAdapter::new(AgyNever),
             ),
             Err(RegistryError::ProfileCatalogMismatch)
         );
@@ -672,6 +689,10 @@ mod tests {
         assert!(matches!(
             ClaudeNever.provision(&context),
             Err(crate::usecase::claude::ClaudeProvisionFailure::ExecutableUnavailable)
+        ));
+        assert!(matches!(
+            AgyNever.provision(&context),
+            Err(crate::usecase::agy::AgyProvisionFailure::ExecutableUnavailable)
         ));
     }
 

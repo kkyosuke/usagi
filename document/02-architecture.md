@@ -656,7 +656,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/`。terminal の JSON decode、action/payload 照合、negotiated snapshot の応答整形を担い、`usecase::terminal_owner` の typed application port を呼ぶ |
-| Codex / Claude の Agent 起動 materialization | 合成ルートの `src/runtime/daemon/agent_provisioning.rs`。provider argv、sandbox policy、role/system prompt、workspace 別 environment と MCP tool family の注入だけを束ねる。socket admission、runtime ownership、background worker lifecycle は `src/runtime/daemon.rs` に残す |
+| Antigravity / Codex / Claude の Agent 起動 materialization | 合成ルートの `src/runtime/daemon/agent_provisioning.rs`。Antigravity 固有の plugin materialization は子モジュール `agent_provisioning/agy.rs` に閉じ、provider argv、sandbox policy、role/launch contract、workspace 別 environment と MCP tool family の注入だけを束ねる。socket admission、runtime ownership、background worker lifecycle は `src/runtime/daemon.rs` に残す |
 | admitted daemon request と concrete owner / store の接続 | 合成ルートの `src/runtime/daemon/dispatch.rs`。request family ごとの decode・authorization・response shaping を、注入済みの daemon runtime / store へ接続する composition adapter とする。Unix socket accept、signal、process lifecycle、background worker ownership は `src/runtime/daemon.rs` に残し、daemon の business rule は `crates/daemon/src/usecase/`、transport-independent な server loop は `crates/daemon/src/presentation/ipc.rs` に残す |
 | live tenant の inventory / explicit retire を registry・session・Agent・generic terminal owner へ結合する unbound control | 合成ルートの `src/runtime/daemon/tenant_control.rs`。socket accept / lifecycle 全体は `src/runtime/daemon.rs` に残し、tenant policy を同じ巨大 module へ戻さない |
 | 各画面の描画（view） | `crates/tui/` の `presentation/views/` |
@@ -702,7 +702,7 @@ request capability 不足、plan provenance 不一致は typed error で fail-cl
 黙って別の意味へ再解決しない。実 executable 検査、設定 materialization、secret 注入、PTY spawn は
 adapter / daemon infrastructure の責務である。
 
-Codex / Claude adapter は daemon の terminal launch 子層である `usecase::codex` / `usecase::claude` に閉じる。各 product の CLI flag、
+Antigravity / Codex / Claude adapter は daemon の terminal launch 子層である `usecase::agy` / `usecase::codex` / `usecase::claude` に閉じる。各 product の CLI flag、
 model の解釈、config / MCP / hook の payload はそれぞれの provisioner 内部だけが扱う。adapter は共通の
 `AgentAdapter` として reservation 前に durable snapshot と `SpawnProvision` を組み立て、runtime は snapshot を
 保存してから provision を PTY spawner へ一度だけ渡す。`SpawnProvision` は durable record、IPC、terminal
@@ -717,6 +717,11 @@ provision 引数 -> --resume <captured-id>? -> mode 引数 -> --model <model>? -
 dispatch / delegate 由来の initial prompt は untrusted な opaque data であり、存在する場合は必ず option
 terminator `--` の直後に単一の positional value として置く。これにより `--version`、`--settings`、permission
 flag、subcommand に似た prompt も provider option として再解釈されない。
+
+Antigravity は `--prompt-interactive <prompt>`（対話）または `--print <prompt>`（headless）を使う。provider に
+独立した system-prompt flag がないため、ephemeral な scope/role contract と task を `\n\nTask:\n` で結んだ単一の
+opaque prompt value として渡す。exact resume は `--conversation <captured-id>` だけを private provision に足し、新しい
+prompt turn を送らない。
 
 durable snapshot が持てるのは `program`、`argv`、working directory、環境変数**名**の allowlist だけである。
 secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ存在し、保存・event・error detail に
@@ -788,7 +793,7 @@ slot を解放する。generic Terminal Launch は producer `OperationId` を wi
 
 ### Agent orchestration の fence
 
-`usecase::orchestration::AdapterRegistry` は Claude、Codex、Codex grammar を使う Sakana AI を同じ typed
+`usecase::orchestration::AdapterRegistry` は Antigravity、Claude、Codex、Codex grammar を使う Sakana AI を同じ typed
 orchestration port に登録する。
 daemon は profile ID によって registry を引くだけで、product 名による lifecycle・authorization 分岐を持たない。
 MCP wiring は profile の `McpWiring` capability と、別個の workspace/session authorization の両方が通った launch
@@ -924,7 +929,7 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   legacy の弱い replacement を実行せず非 0 で終える。内部 command は Agent integration 履歴の修復を行わず、daemon build の同期だけを担う。
   atomic rename 後の拒否では binary は選択版、daemon は旧 build のままであり、安全な現行版へ更新するか Agent 終了後に `usagi daemon restart` を実行する。
 - **内部フックコマンド**: Claude の `PreToolUse` フックが呼ぶ `usagi guard-workspace`（worktree の外へ
-  出るツール呼び出しを拒否）と、Codex / Claude の各ライフサイクルフックが呼ぶ `usagi agent-phase <phase>`
+  出るツール呼び出しを拒否）と、Antigravity / Codex / Claude の各ライフサイクルフックが呼ぶ `usagi agent-phase <phase>`
   （phase 報告）。この 2 つは人間向けではないため `--help` に出さない（`hide = true`）。呼び手（人手でも
   エージェントの推論でもなくエージェントのハーネスが自動実行）も目的も人間向けコマンドと違うので、
   ハンドラは `cli/commands/` ではなく **`cli/hooks/`** に分離する（clap の `Command` ツリーと `Run`
@@ -949,7 +954,10 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   core の closed vocabulary（`ready` / `running` / `waiting` / `ended` / `exited`）で、hook の stdin JSON が名乗る
   `hook_event_name` が usagi の配線どおりその phase を意味することも検証する（event と phase の対応表は
   `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。command hook は
-  Claude には `command` と `args` を分けた exec form、Codex には起動時のinline TOML command hookとして注入する。報告は
+  Claude には `command` と `args` を分けた exec form、Codex には起動時の inline TOML command hook、Antigravity には
+  専用 plugin の `hooks.json` command として注入する。Antigravity の stdin は event 名を含まないため、配線が
+  `--hook-event` で固定し、camelCase の `conversationId` を `PreInvocation` で capture する。成功時の stdout は provider の
+  event 契約（`PreToolUse` は `{"decision":"allow"}`、他 event は所定の JSON object）を返す。報告は
   kernel から得た hook PID・parent PID・process group を exact live runtime と照合して束縛し、caller は runtime /
   session / path を名指しできない。provider の direct child は inherited / self-led process group の双方を受理し、
   shell form との互換用に provider と同じ process group も受理する。未知 phase・malformed payload・配線外 event は
@@ -1048,6 +1056,11 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   自身の通常の trust review を通し、daemon は hook trust を一括 bypass しない。
   Claude と同様、すべての `SessionStart` は同じ phase hook で current provider session ID と phase を一緒に報告する。
   これにより startup / resume / clear / compact、および Claude の fork 後の現在の会話へ durable resume metadata が追従する。
+- **Antigravity plugin**: daemon は provider の global plugin directory のうち
+  `~/.gemini/config/plugins/usagi-runtime/` だけを作成・更新する。`plugin.json`、`mcp_config.json`、`hooks.json` を
+  atomic write し、利用者の既存 plugin や top-level MCP/hook 設定を置換しない。`PreInvocation` で `running` と
+  `conversationId`、`PreToolUse` / `PostToolUse` で `running` / `waiting`、`Stop` で `ended` を報告する。
+  hook は stdin を `usagi agent-phase` が一度だけ消費し、daemon が受理した後に Antigravity 所定の JSON を stdout へ返す。
 - **`TMPDIR` 伝播**: agent child は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable
   root に足す。この policy path は daemon bootstrap が trusted environment から独立に確定・検証し、両 mode へ
   同じように渡す（agent child の環境変数は policy 解決に使わない）。
@@ -1069,6 +1082,7 @@ launcher は、**exec する program 自身の state directory** を `$HOME` 配
 | `claude` | `~/.claude` |
 | `codex` | `~/.codex` |
 | `codex-fugu`（sakana.ai） | `~/.codex-fugu` |
+| `agy`（Antigravity CLI） | `~/.gemini` |
 
 - 判定は launcher が exec する program（`--` の先頭）の basename だけを根拠にし、値の正本は
   `usagi-core` の `domain::settings::DefaultModel::state_directory` である（executable と state の置き場所を
@@ -1165,8 +1179,8 @@ store と caller inbox を一つの durable 経路として compose する。cre
 一致しない完了報告は fail-closed で拒否し、payload の caller identity は信用しない。
 
 `session_dispatch` の新規 agent は workspace の `.usagi/config.toml` にある
-`[agents.claude].models` / `[agents.codex].models` / `[agents.sakana-ai].models` allowlist だけから選ぶ。MCP server は起動時に
-allowlist と PATH 上の `claude` / `codex` / `codex-fugu` の存在を snapshot し、非空 allowlist と executable の
+`[agents.claude].models` / `[agents.codex].models` / `[agents.sakana-ai].models` / `[agents.agy].models` allowlist だけから選ぶ。MCP server は起動時に
+allowlist と PATH 上の `claude` / `codex` / `codex-fugu` / `agy` の存在を snapshot し、非空 allowlist と executable の
 両方を持つ runtime だけを `tools/list` の `agent.runtime` / `agent.model` enum に載せる。既存 agent は
 `agent.id` branch を使い、runtime/model branch とは JSON Schema `oneOf` で排他的である。snapshot は
 server lifetime 中は変わらないため、設定、PATH、CLI install/uninstall の変更を反映するには MCP server の

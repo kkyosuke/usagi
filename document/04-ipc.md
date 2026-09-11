@@ -615,7 +615,7 @@ session request、response、event、status projection、error detail には現�
 
 `agent_phase_report` kind は、daemon が起動した agent のライフサイクルフックだけが送る private request である。
 field は closed vocabulary の `phase`（`ready` / `running` / `waiting` / `ended` / `exited`）、
-`SessionStart` でだけ current producer が付ける opaque `native_session_id`、同じ process provision にだけ存在する
+provider の structured starting hook（Claude / Codex の `SessionStart`、Antigravity の `PreInvocation`）でだけ current producer が付ける opaque `native_session_id`、同じ process provision にだけ存在する
 daemon-minted credential である。client は runtime / session / worktree / path / provider を指定できず、daemon は
 credential から exact live runtime を、runtime profile から provider を決める。成功 response は body を持たない。
 
@@ -623,10 +623,13 @@ phase は wire に載る前に hook 側で検証する。共通 validator の li
 `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd` である。
 Claude はこのうち `PreToolUse` を含む対応 event を、Codex は `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
 `PostToolUse` / `Stop` / `SessionEnd` だけを配線する。Codex は `approval_policy = "never"` で起動するため
-`PermissionRequest` は発火せず、`Notification` も Codex event ではない。event と phase の対応が hook input の
-`hook_event_name` と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
-`SessionStart` では current `session_id` を同じ request に載せ、conversation ID の capture / 置換と `ready`
-phase を一度の durable mutation として処理する。`ready` 以外に native ID を付けた報告は拒否する。旧 hook
+`PermissionRequest` は発火せず、`Notification` も Codex event ではない。Antigravity は `PreInvocation` /
+`PreToolUse` / `PostToolUse` / `Stop` を専用 plugin から配線する。Antigravity の payload は event 名を含まないため、
+plugin command の hidden `--hook-event` で宣言し、camelCase の `conversationId` を受け取る。event と phase の対応が
+hook input または配線宣言と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
+`SessionStart` では current `session_id` と `ready`、`PreInvocation` では current `conversationId` と `running` を同じ
+request に載せ、conversation ID の capture / 置換と対応 phase を一度の durable mutation として処理する。この 2 つ
+以外の組み合わせで native ID を付けた報告は拒否する。旧 hook
 producer の ID 無し `ready` は phase だけを反映して wire compatibility を保つが、新しい resume metadata は作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
 
@@ -643,7 +646,7 @@ durable な写像は [Agent phase の投影](05-daemon.md#agent-phase-の投影)
 `AgentContinuationRef`、runtime state、optional source relation を持つ。resumable item は runtime ごとに
 `available` と provider ID を含まない closed enum の safe reason を持ち、現 schema の record には
 `AgentResumeTarget` を載せる。加えて client が interrupted history を provider 単位で表示するための
-closed vocabulary だけを additive に載せる（`provider` = `claude` / `codex`、`last_known_phase` = safe phase enum）。
+closed vocabulary だけを additive に載せる（`provider` = `claude` / `codex` / `agy`、`last_known_phase` = safe phase enum）。
 metadata を保存していない record では両 field を省略し、client は欠落を推測で埋めない。旧 record は
 `target: null` / unavailable のまま読み、identity を推測しない。
 item は durable operation timestamp と stable runtime ID で決定的に並ぶため、同じ scope の複数 history

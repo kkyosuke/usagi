@@ -89,7 +89,7 @@ impl McpHarness {
         Self::start_at(Channel::Production, None, false, None, false)
     }
 
-    /// Every shipping Agent grammar, including Sakana AI's `codex-fugu`.
+    /// Every shipping Agent grammar, including Antigravity and Sakana AI.
     #[must_use]
     pub fn start_with_all_agents() -> Self {
         Self::start_at(Channel::Local, None, false, None, true)
@@ -171,12 +171,20 @@ impl McpHarness {
                 &fixture_mcp_input,
                 &fixture_mcp_output,
             );
+            install_fixture_agent(
+                &fixture_bin,
+                "agy",
+                &fixture_log,
+                &fixture_argv,
+                &fixture_mcp_input,
+                &fixture_mcp_output,
+            );
         }
         fs::create_dir(workspace.path().join(".usagi")).unwrap();
         fs::write(
             workspace.path().join(".usagi/config.toml"),
             if all_agents {
-                "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n[agents.sakana-ai]\nmodels = [\"fixture-sakana\"]\n"
+                "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n[agents.sakana-ai]\nmodels = [\"fixture-sakana\"]\n[agents.agy]\nmodels = [\"fixture-agy\"]\n"
             } else {
                 "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n"
             },
@@ -232,6 +240,7 @@ impl McpHarness {
                 &["daemon".as_ref(), "start".as_ref()],
             )
             .env("PATH", &path)
+            .env("HOME", home.path())
             .env(SANDBOX_PASSTHROUGH, "1")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -265,6 +274,7 @@ impl McpHarness {
         }
         let mut child = usagi_command(home.path(), channel, &cwd, &["mcp".as_ref()])
             .env("PATH", &path)
+            .env("HOME", home.path())
             .env(SANDBOX_PASSTHROUGH, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -721,7 +731,7 @@ fn materialize_fixture_script(script: &str, log: &Path, argv: &Path) -> String {
             &shell_double_quote_content(env!("CARGO_BIN_EXE_usagi")),
         );
     let capture = format!(
-        "if ! [ \"$1\" = login ] || ! [ \"$2\" = status ]; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; fi\n",
+        "if ! {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} && ! {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} && ! [ \"$1\" = models ]; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; fi\n",
         argv.display()
     );
     script.strip_prefix("#!/bin/sh\n").map_or_else(
@@ -754,7 +764,7 @@ fn install_fixture_agent(
 ) {
     let relay_lock = input.with_extension("lock");
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
+        "#!/bin/sh\nif {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} || {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} || [ \"$1\" = models ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
         relay_lock.display(),
         input.display(),
         output.display()

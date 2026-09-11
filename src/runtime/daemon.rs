@@ -37,7 +37,7 @@ use dispatch::{
 #[cfg(test)]
 use agent_provisioning::{
     CLAUDE_PROGRAM, ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs,
-    claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
+    agy_plugin_documents, claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
     claude_settings_arguments, claude_system_prompt_arguments, claude_writable_roots,
     codex_developer_instructions_arguments, codex_integration_arguments,
     codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
@@ -45,7 +45,7 @@ use agent_provisioning::{
     lexical_prefix_overlaps_path, mcp_environment, mcp_environment_allowlist, prompt_scope,
     repair_codex_arg0_permissions, repair_codex_arg0_permissions_with_limit,
     root_agent_writable_roots, root_memory_store_root, sandbox_mode, session_git_common_dir,
-    session_git_policy, toml_basic_string, validate_claude_sandbox_policy,
+    session_git_policy, shell_quote, toml_basic_string, validate_claude_sandbox_policy,
     validate_root_git_common_dir_policy,
 };
 use agent_provisioning::{
@@ -131,6 +131,7 @@ use usagi_daemon::usecase::agent_ipc::{
     PromptMode, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
     TerminalOutcome,
 };
+use usagi_daemon::usecase::agy::AgyAdapter;
 use usagi_daemon::usecase::authority::activation::{
     AuthorityClaim, claim_authority, release_authority,
 };
@@ -3738,16 +3739,27 @@ fn open_agent_runtime(
             sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
+            workspaces: Arc::clone(&workspaces),
+            mcp_command: mcp_command.clone(),
+            data_home: data_home.clone(),
+            sandbox_backend: sandbox_backend.clone(),
+            sandbox_tmpdir: sandbox_tmpdir.clone(),
+            sandbox_home: sandbox_home.clone(),
+            sandbox_cache_dir: sandbox_cache_dir.clone(),
+            environment: Some(Arc::clone(&environment)),
+            // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
+            // 配布バイナリは常に拘束された Claude だけを起動する。
+            sandbox_passthrough,
+        }),
+        AgyAdapter::new(agent_provisioning::RootAgyProvisioner {
             workspaces,
             mcp_command,
             data_home,
+            environment: Some(environment),
             sandbox_backend,
             sandbox_tmpdir,
             sandbox_home,
             sandbox_cache_dir,
-            environment: Some(environment),
-            // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
-            // 配布バイナリは常に拘束された Claude だけを起動する。
             sandbox_passthrough,
         }),
     );
@@ -10760,6 +10772,10 @@ fn current_agent_integrations() -> Vec<AgentIntegrationRevision> {
         (
             DefaultModel::SakanaAi,
             usagi_daemon::usecase::codex::PROFILE_REVISION,
+        ),
+        (
+            DefaultModel::Agy,
+            usagi_daemon::usecase::agy::PROFILE_REVISION,
         ),
     ]
     .into_iter()
@@ -18432,8 +18448,48 @@ instructions = "{instructions}"
         assert_eq!(roots, [home.join(".codex").canonicalize().unwrap()]);
         assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
 
+        let roots = root_agent_writable_roots(Some(&home), "agy").unwrap();
+        assert_eq!(roots, [home.join(".gemini").canonicalize().unwrap()]);
+        assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
+
         let roots = root_agent_writable_roots(None, "/bin/sh").unwrap();
         assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn agy_plugin_documents_are_scoped_and_shell_safe() {
+        let command = "/Applications/Usagi's Tools/usagi";
+        let (manifest, mcp, hooks) = agy_plugin_documents(command);
+
+        assert_eq!(manifest, serde_json::json!({"name": "usagi-runtime"}));
+        assert_eq!(mcp["mcpServers"]["usagi"]["command"], command);
+        assert_eq!(
+            mcp["mcpServers"]["usagi"]["args"],
+            serde_json::json!(["mcp"])
+        );
+        assert_eq!(hooks.as_object().unwrap().len(), 1);
+        let integration = &hooks["usagi-runtime"];
+        let command = integration["PreInvocation"][0]["command"].as_str().unwrap();
+        assert!(command.starts_with("'/Applications/Usagi'\"'\"'s Tools/usagi'"));
+        assert!(command.ends_with("agent-phase running --hook-event PreInvocation"));
+        assert_eq!(
+            integration["PreToolUse"][0]["matcher"],
+            serde_json::json!("*")
+        );
+        assert_eq!(
+            integration["PostToolUse"][0]["hooks"][0]["command"],
+            serde_json::json!(format!(
+                "{} agent-phase waiting --hook-event PostToolUse",
+                shell_quote("/Applications/Usagi's Tools/usagi")
+            ))
+        );
+        assert_eq!(
+            integration["Stop"][0]["command"],
+            serde_json::json!(format!(
+                "{} agent-phase ended --hook-event Stop",
+                shell_quote("/Applications/Usagi's Tools/usagi")
+            ))
+        );
     }
 
     #[test]
@@ -19010,7 +19066,12 @@ instructions = "{instructions}"
         )
         .unwrap();
         std::fs::write(state.join("worktrees/linked/commondir"), "../..\n").unwrap();
-        for (program, allowed) in [("codex", false), ("claude", true), ("/bin/sh", true)] {
+        for (program, allowed) in [
+            ("codex", false),
+            ("claude", true),
+            ("agy", true),
+            ("/bin/sh", true),
+        ] {
             assert_eq!(
                 validate_root_git_common_dir_policy(
                     under_state.path(),
@@ -19429,6 +19490,7 @@ instructions = "{instructions}"
             ),
             ("codex-fugu", Ok(())),
             ("claude", Ok(())),
+            ("agy", Ok(())),
             ("/bin/sh", Ok(())),
         ] {
             assert_eq!(

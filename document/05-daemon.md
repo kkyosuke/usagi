@@ -873,7 +873,7 @@ daemon が起動する Agent child には、mode を適用する**前**の base�
 
 この 2 つは常に 1 つの組として扱い、片方から path 操作でもう片方を導かない。production は base と selected directory が同じ directory なので、「selected directory から 1 階層上が base」と仮定すると data home の**親**（既定では利用者のホームディレクトリ）を選んでしまい、それが child の data home・sandbox の writable root として渡ることになる。
 
-- child の `$USAGI_HOME` には **base** を渡すが、Claude / Codex sandbox の writable root には含めない。root coordinator
+- child の `$USAGI_HOME` には **base** を渡すが、Antigravity / Claude / Codex sandbox の writable root には含めない。root coordinator
   からの cold start は、稼働中 daemon があらかじめ sandbox 外へ起動した固定 workspace の bootstrap broker に委譲する。
   broker は ping と daemon start だけを受理し、session sandbox と同様に data home の mutation は daemon IPC に閉じる。
   child は mode の子 directory を自分で作る必要があるため、root coordinator に selected directory だけを渡すことは
@@ -1380,7 +1380,7 @@ launch ごとに passwd database を引き直さず、`id` のような subproce
 
 ## agent ownership
 
-Agent runtime は daemon 所有の Agent owner が持つ。owner は production composition が生成した generation coordinator、durable runtime coordinator、Codex / Claude
+Agent runtime は daemon 所有の Agent owner が持つ。owner は production composition が生成した generation coordinator、durable runtime coordinator、Antigravity / Codex / Claude
 adapter を解決する code-defined adapter registry、durable runtime store、実 PTY adapter、producer-issued
 `OperationId` の idempotency ledger を一つに束ねる。[`agent` launch request](04-ipc.md#agent-launch-request)
 は [managed session scope](#authority-と-lifecycle) を解決してから registry で profile を選び、adapter が
@@ -1468,23 +1468,25 @@ resume では active owner が foreign shard を書き換えないため、repla
 既に counterpart を回収した片側 relation は historical tombstone として受理する。replacement の `resumed_from` は
 回収済み source shard を retain せず、source の `superseded_by` は replacement 回収後も同じ source の再 resume を拒否する。
 
-各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。Claude / Codex とも [agent phase report request](04-ipc.md#agent-phase-report-request) の `SessionStart` 入力だけが native ID を一度 IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は resume 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
+各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。Claude / Codex は `SessionStart`、Antigravity は `PreInvocation` の [agent phase report request](04-ipc.md#agent-phase-report-request) だけが native ID を一度 IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は resume 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
 
-新規 interactive launch は Claude / Codex のどちらにも daemon 発行の provider ID を渡さない。両 adapter は
-`SessionStart` を共通の hidden `usagi agent-phase ready` command へ配線し、provider が documented hook JSON の
-stdin に渡す current `session_id` と phase を一緒に報告する。daemon は kernel 由来の hook PID・parent PID・
+新規 interactive launch は Antigravity / Claude / Codex のいずれにも daemon 発行の provider ID を渡さない。Claude / Codex adapter は
+`SessionStart` を hidden `usagi agent-phase ready`、Antigravity adapter は `PreInvocation` を
+`usagi agent-phase running --hook-event PreInvocation` へ配線し、provider が documented hook JSON の stdin に渡す
+current `session_id` または `conversationId` と phase を一緒に報告する。daemon は kernel 由来の hook PID・parent PID・
 process group と exact live runtime を照合し、runtime profile から provider を決める。provider と同じ process
 group の hook に加えて、provider の direct child で inherited / self-led process group の hook を受理する。hook は
-MCP caller credential を継承せず、dispatch scope も取得しない。interactive runtime のすべての `SessionStart`
-（startup / resume / clear / compact、および Claude の fork）で `ProviderResumeRef` を `ProviderStructured` provenance の current ID へ
+MCP caller credential を継承せず、dispatch scope も取得しない。interactive runtime の structured starting hook
+（Claude / Codex の startup / resume / clear / compact と Claude の fork、Antigravity の model invocation）で
+`ProviderResumeRef` を `ProviderStructured` provenance の current ID へ
 置換するため、同じ process 内で会話が切り替わっても古い ID を再開対象に残さない。headless runtime は phase だけを
 反映し、resume metadata を作らない。再開時は検証済みの同一 ID を Claude では `claude --resume <id>`、Codex では
-`codex resume <id>` の一時 provision に追加する。旧 Claude record の `DaemonIssued` provenance と、profile
+`codex resume <id>`、Antigravity では `agy --conversation <id>` の一時 provision に追加する。旧 Claude record の `DaemonIssued` provenance と、profile
 revision 4 以前の [Codex structured capture request](04-ipc.md#codex-structured-capture-request) は既存履歴・live
 process の移行互換にだけ使う。
 
-この経路の互換条件は、lifecycle hooks、`SessionStart` command event、その共通 input field `session_id` を
-provider CLI が提供することである。Codex では通常の hook trust review も必要であり、daemon は
+この経路の互換条件は provider が documented lifecycle hook と native conversation ID field を提供することである。
+Antigravity は global `usagi-runtime` plugin の `hooks.json` と camelCase の `conversationId` を使う。Codex では通常の hook trust review も必要であり、daemon は
 `--dangerously-bypass-hook-trust` を渡さない。managed policy による hooks 無効化、Codex hook の未 trust、
 非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、
 daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。
@@ -1527,7 +1529,7 @@ producer `OperationId` と target 全体を semantic key にして dedupe する
 `superseded_by` の replacement outcome を replay し、failed / in-flight / live / completed のいずれも最初の final から
 分岐させない。resume request は daemon が発行した exact target を必須とし、「最新」や provider 種別で選ばない。
 
-daemon restart reconciliation は unfinished record の provider status を `interrupted` にするが、自動 resume は行わない。TUI 起動、pane inventory 復元、daemon / macOS 再起動も同様である。schema v1/v2/v3 record は provider metadata または public lineage が欠けたまま schema v4 として読めるが、ID を推測して補完せず resume 不可のままにする。fixture は continuation の restart stability / non-reuse、root と複数 session、同一 scope の複数 history、Claude / Codex の structured `SessionStart` capture、scope/revision/incarnation mismatch、ID の public plan argv / snapshot / IPC 非露出、source relation、operation restart replay と exact source の一度だけの spawn を確認する。
+daemon restart reconciliation は unfinished record の provider status を `interrupted` にするが、自動 resume は行わない。TUI 起動、pane inventory 復元、daemon / macOS 再起動も同様である。schema v1/v2/v3 record は provider metadata または public lineage が欠けたまま schema v4 として読めるが、ID を推測して補完せず resume 不可のままにする。fixture は continuation の restart stability / non-reuse、root と複数 session、同一 scope の複数 history、Claude / Codex の structured `SessionStart` と Antigravity の structured `PreInvocation` capture、scope/revision/incarnation mismatch、ID の public plan argv / snapshot / IPC 非露出、source relation、operation restart replay と exact source の一度だけの spawn を確認する。
 
 ### daemon restart による Agent integration 更新
 
@@ -1584,7 +1586,7 @@ terminal と Agent terminal の両方が含まれ、各エントリは `Terminal
 attach 可能か）だけを持つ。これは client が workspace open 時に live runtime を pane へ復元するための source of
 truth である（[3. TUI](03-tui.md#workspace-open-時の-pane-復元) を正本とする）。
 
-Codex / Claude の Agent launch は `McpWiring` capability を要求し、daemon 自身の絶対パスで `usagi mcp` を
+Antigravity / Codex / Claude の Agent launch は `McpWiring` capability を要求し、daemon 自身の絶対パスで `usagi mcp` を
 子 MCP server として起動する。製品ごとの MCP 設定は adapter provision が spawn 時だけに渡すため、設定 payload は
 public launch plan、durable snapshot、IPC response に残らない。注入した usagi MCP tool は agent が確認なしで
 呼べる。Codex は spawn 時に `mcp_servers.usagi.required = true` を渡し、usagi tool を欠いた起動を拒否する。
@@ -1594,6 +1596,10 @@ daemon 接続に必要な環境だけを forward する。
 `--allowedTools mcp__usagi` で同じ server のツールを事前許可する。Agent launch に配線するのはこの `usagi`
 server だけである。それ以外の MCP server・shell・ファイル編集・network の permission model は通常どおり維持され、
 無効化・緩和しない。
+
+Antigravity は `~/.gemini/config/plugins/usagi-runtime/mcp_config.json` から同じ server を起動する。daemon が所有する
+専用 plugin directory だけを atomic update し、利用者の既存 `~/.gemini/config/mcp_config.json`、workspace `.agents/`、
+他 plugin は変更しない。
 
 daemon が provision した live Agent provider の直系 MCP child だけが、起動後の one-shot IPC claim で runtime に結び付く opaque な
 caller credential を受け取る。claim は kernel 由来の peer PID / 親 PID / process group、live runtime、generation と
@@ -1620,7 +1626,7 @@ root は Codex を既定 profile とし、launch する executable 自身の sta
 Agent owner lock の外で実行する。どの product にどの status command を対応させるかは、profile・executable と同じ
 [agent CLI の closed vocabulary](03-tui.md#settings-scope-と-workspace-entry)（core domain settings）が持つ単一の決定関数が答える。
 Codex 互換の `sakana-ai` は launch する `codex-fugu` の `login status` で判定され、Codex は `codex login status`、
-Claude は `claude auth status` を使う。vocabulary に無い product は probe を得られず fail closed で `unavailable` になる。
+Claude は `claude auth status`、Antigravity は `agy models` を使う。vocabulary に無い product は probe を得られず fail closed で `unavailable` になる。
 probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
 credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
 差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。status command は 2 秒で
@@ -1653,7 +1659,7 @@ projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / 
 
 報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、kernel 由来の hook
 process identity で報告元 runtime に束縛される。Claude の command hook は exec form なので provider の direct child として
-照合でき、Codex の command hook を含む inherited process group も受理する。両 provider は同じphase写像を使う。
+照合でき、Codex / Antigravity の command hook を含む inherited process group も受理する。各 provider は同じ phase 語彙を使う。
 Claude の `PermissionRequest` / `Notification` と Codex の `PostToolUse` は `waiting` を報告する。Codex は
 `approval_policy = "never"` で起動するため `PermissionRequest` を配線しない。反映は次の規則に従う。
 
@@ -1672,12 +1678,12 @@ Claude の `PermissionRequest` / `Notification` と Codex の `PostToolUse` は 
   対応を要する runtime が session 全体の phase になる。
 - 報告 phase は in-memory であり、runtime の process binding と同じく daemon restart で失効する（restart 後は観測 state
   由来の phase に戻る）。
-- `SessionStart` の `ready` 報告は current provider ID の capture / 置換と `starting` phase の保存を一度の
+- Claude / Codex の `SessionStart` (`ready`) と Antigravity の `PreInvocation` (`running`) は current provider ID の capture / 置換と対応する durable phase の保存を一度の
   mutation で行う。それ以外の durable な写像は `ProviderResumeRef.last_known_phase` だけを更新し、
   `last_known_status`（liveness）は書かない。
   値が変わらない報告は snapshot を書き直さない。`exited` を durable に書かないのは、hook の言う `exited` が
   agent 自身の lifecycle 終了であって daemon 所有 process の死ではなく、process 死の authority は PTY exit の
-  観測だけだからである。provider metadata を持たない runtime（structured capture 前の Claude / Codex など）への報告は
+観測だけだからである。provider metadata を持たない runtime（structured capture 前の Antigravity / Claude / Codex など）への報告は
   projection だけを refine し、metadata を合成しない。
 - 未知 credential、失効 credential、非 live runtime、malformed request は何も記録せず safe error になる。
 

@@ -516,7 +516,7 @@ fn empty_provider_body(width: usize, height: usize, mut rows: Vec<String>) -> Ve
         rows.push(
             Style::new()
                 .dim()
-                .paint("Install claude, codex, or sakana.ai and check Config."),
+                .paint("Install claude, codex, sakana.ai, or agy."),
         );
     }
     rows.truncate(height.saturating_sub(1));
@@ -1924,7 +1924,7 @@ mod tests {
         );
         assert!(
             body.iter()
-                .any(|row| row.contains("Install claude, codex, or sakana.ai"))
+                .any(|row| row.contains("Install claude, codex, sakana.ai, or agy"))
         );
         assert!(body.iter().any(|row| row.contains("Esc: back")));
         assert!(!body.iter().any(|row| row.contains("Loading Work Runs")));
@@ -2234,7 +2234,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("No Agent CLI installed"));
-        assert!(text.contains("Install claude, codex, or sakana.ai"));
+        assert!(text.contains("Install claude, codex, sakana.ai, or agy"));
 
         let launching = DirectorDrawerProjection {
             new: DirectorNewProjection::Launching,
