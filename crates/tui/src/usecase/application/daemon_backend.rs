@@ -700,6 +700,7 @@ mod tests {
         impl WorkflowPort for FakeWorkflow {
             fn dispatch(&mut self, job: WorkflowJob, completions: Completions) {
                 let snapshot = usagi_core::domain::workflow::WorkflowSnapshot {
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                     session: job.session,
                     run: None,
                     pending_start: None,

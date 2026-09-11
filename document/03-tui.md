@@ -2091,8 +2091,9 @@ Closeup action の `workflow` は、その session の非端末 Workflow タブ�
 Team
 ├─ Session A
 │  └─ Workflow: 実装＋レビュー
-│     ├─ Codex: 実装
-│     └─ Claude: レビュー
+│     ├─ Planner: 計画
+│     ├─ Implementer: 実装
+│     └─ Reviewer: レビュー
 └─ Session B
    └─ 単独 Agent
 ```
@@ -2102,15 +2103,21 @@ Team
 | 上段 | 工程、修正回数、レビュー対象 SHA、判断待ち・エラーの理由 |
 | 中央 | Workflow の履歴。PageUp / PageDown でスクロールする |
 | 下段 | 開始前は依頼、開始後は追加指示の複数行入力 |
-| 宛先 | 自動（現在の担当）・Codex・Claude。Tab で切り替える |
+| 開始前の担当 | Planner・Implementer・Reviewer を個別に選択。Tab で依頼入力と各担当欄を移動し、左右キーで選ぶ |
+| 宛先 | 自動（現在の担当）・選択した実行者・レビュー担当。Tab で切り替える |
 
 Enter は改行、Ctrl-S は開始／送信、矢印・Home / End・Delete / Backspace は入力編集である。
 入力下書きは session ごとに保持し、配送中に追記した内容は先行する送信の完了で消さない。
 Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Agent 出力は各 Agent タブで確認する。
 
-開始は daemon に依頼し、Codex の実行環境・認証の確認を経て起動する。既に別の Agent が
+担当候補は Claude、Codex、Sakana AI、Gemini（`agy`）である。初回は計画・実行が Codex、レビューが Claude。
+開始できた担当の組合せをワークスペース単位で保存し、次の session や再起動後の初期候補に使う。
+開始後と結果未確定の再試行中は担当を変更しない。
+
+開始は daemon に依頼し、選択した実行者の実行環境・認証の確認を経て起動する。既に別の Agent が
 動いている session では開始を拒否し、既存 Agent を勝手に使い回さない。
-レビュー担当の起動は同じ session の認証済み handoff を使うため、runtime/model allowlist と
+実行者は先に計画担当を起動し、編集を伴わない計画の返答を待ってから実装する。計画担当とレビュー担当は別 Agent とする。
+計画・レビュー担当の起動は同じ session の認証済み handoff を使うため、runtime/model allowlist と
 既存の role・実行数上限が適用される。
 
 進捗は daemon の保存済み状態から取得する。レビュー判定は対象の依頼 ID と commit SHA に結び付く。

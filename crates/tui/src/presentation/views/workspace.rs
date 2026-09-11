@@ -8181,7 +8181,7 @@ mod tests {
         assert!(
             running
                 .iter()
-                .any(|row| strip(row).contains("Current owner: Codex"))
+                .any(|row| strip(row).contains("Current owner: codex"))
         );
         assert!(
             running

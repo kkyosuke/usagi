@@ -38,9 +38,11 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
         control: None,
     };
     let snapshot = WorkflowSnapshot {
+        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
         session,
         run: None,
         pending_start: Some(WorkflowPendingStart {
+            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
             operation_id: operation,
             goal: "Build login".into(),
             error: Some("Sign in to retry".into()),
@@ -61,7 +63,8 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
         Some((
             operation,
             WorkflowCommand::Start {
-                goal: "Build login".into()
+                goal: "Build login".into(),
+                agents: usagi_core::domain::workflow::WorkflowAgents::default()
             }
         ))
     );
@@ -100,6 +103,7 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
                 ..job
             },
             result: Ok(Box::new(WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                 session,
                 run: Some(fixture_run(session)),
                 pending_start: None,
@@ -135,6 +139,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
         AppEvent::Backend(BackendEvent::Workflow {
             job: job.clone(),
             result: Ok(Box::new(WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                 session,
                 run: None,
                 pending_start: None,
@@ -169,7 +174,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
         panic!("expected workflow effect")
     };
     assert!(
-        matches!(&submit.control, Some((_, WorkflowCommand::Start { goal })) if goal == "Build login")
+        matches!(&submit.control, Some((_, WorkflowCommand::Start { goal, .. })) if goal == "Build login")
     );
     assert!(
         update(
@@ -214,6 +219,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
         AppEvent::Backend(BackendEvent::Workflow {
             job: submit,
             result: Ok(Box::new(WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                 session,
                 run: Some(run.clone()),
                 pending_start: None,
@@ -291,6 +297,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
         AppEvent::Backend(BackendEvent::Workflow {
             job: submit,
             result: Ok(Box::new(WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                 session,
                 run: Some(run),
                 pending_start: None,
@@ -332,6 +339,7 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
         AppEvent::Backend(BackendEvent::Workflow {
             job: job.clone(),
             result: Ok(Box::new(WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                 session,
                 run: None,
                 pending_start: None,
@@ -353,6 +361,7 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
         AppEvent::Backend(BackendEvent::Workflow {
             job: job.clone(),
             result: Ok(Box::new(WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                 session: SessionId::new(),
                 run: None,
                 pending_start: None,
@@ -370,6 +379,7 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
             AppEvent::Backend(BackendEvent::Workflow {
                 job: foreign,
                 result: Ok(Box::new(WorkflowSnapshot {
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                     session,
                     run: None,
                     pending_start: None
@@ -8290,4 +8300,76 @@ fn managed_navigation_defensive_boundaries_never_create_a_root_target() {
         assert!(activate_selected(&mut state).is_empty());
         assert_eq!(state.active(), None);
     }
+}
+
+#[test]
+fn workflow_uses_saved_agents_without_overwriting_edits_and_submits_exact_choices() {
+    use super::super::workflow::WorkflowJob;
+    use usagi_core::domain::{
+        settings::DefaultModel,
+        workflow::{WorkflowAgents, WorkflowCommand, WorkflowSnapshot},
+    };
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    submit_closeup_workflow(&mut state, session, "");
+    let saved = WorkflowAgents {
+        planner: DefaultModel::Agy,
+        implementer: DefaultModel::Claude,
+        reviewer: DefaultModel::OpenAi,
+    };
+    let snapshot = AppEvent::Backend(BackendEvent::Workflow {
+        job: WorkflowJob {
+            workspace,
+            session,
+            control: None,
+        },
+        result: Ok(Box::new(WorkflowSnapshot {
+            agents: saved,
+            session,
+            run: None,
+            pending_start: None,
+        })),
+    });
+    let _ = update(&mut state, snapshot.clone());
+    assert_eq!(state.workflow_panel(session).unwrap().agents, saved);
+    for key in [
+        AppKey::Paste("Task".into()),
+        AppKey::Tab,
+        AppKey::Right,
+        AppKey::Left,
+        AppKey::Right,
+        AppKey::Char('x'),
+    ] {
+        let _ = update(&mut state, AppEvent::WorkflowInput { session, key });
+    }
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowEdit {
+            session,
+            edit: super::super::workflow::WorkflowEdit::Start,
+        },
+    );
+    assert_eq!(state.workflow_panel(session).unwrap().draft.cursor(), 4);
+    let chosen = state.workflow_panel(session).unwrap().agents;
+    assert_ne!(chosen.planner, saved.planner);
+    assert_eq!(chosen.implementer, saved.implementer);
+    let _ = update(&mut state, snapshot);
+    assert_eq!(state.workflow_panel(session).unwrap().agents, chosen);
+    assert_eq!(state.workflow_panel(session).unwrap().draft.value(), "Task");
+    let effects = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::SaveRoles,
+        },
+    );
+    let Effect::Workflow(job) = &effects[0] else {
+        panic!("workflow submission");
+    };
+    assert!(
+        matches!(&job.control, Some((_, WorkflowCommand::Start { goal, agents })) if goal == "Task" && *agents == chosen)
+    );
 }
