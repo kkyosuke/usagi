@@ -32,6 +32,11 @@ pub fn tools() -> Vec<ToolDescriptor> {
         ToolDescriptor::session(SessionDelegateIssue, SessionAction::DelegateIssue),
         ToolDescriptor::session(SessionDelegateBrief, SessionAction::DelegateBrief),
         ToolDescriptor::dispatch(SessionDispatch, DispatchToolAction::Dispatch),
+        ToolDescriptor::dispatch(AgentHandoff, DispatchToolAction::AgentHandoff),
+        ToolDescriptor::dispatch(AgentPeers, DispatchToolAction::AgentPeers),
+        ToolDescriptor::dispatch(AgentMessage, DispatchToolAction::AgentMessage),
+        ToolDescriptor::dispatch(AgentMessages, DispatchToolAction::AgentMessages),
+        ToolDescriptor::dispatch(AgentMessageAck, DispatchToolAction::AgentMessageAck),
         ToolDescriptor::dispatch(SessionGet, DispatchToolAction::SessionGet),
         ToolDescriptor::dispatch(AgentList, DispatchToolAction::AgentList),
         ToolDescriptor::dispatch(AgentGet, DispatchToolAction::AgentGet),
@@ -47,6 +52,70 @@ pub fn tools() -> Vec<ToolDescriptor> {
         ToolDescriptor::dispatch(UserDecisionExpire, DispatchToolAction::UserDecisionExpire),
     ]
 }
+pub struct AgentPeers;
+pub struct AgentHandoff;
+impl Tool for AgentHandoff {
+    fn name(&self) -> &'static str {
+        "agent_handoff"
+    }
+    fn description(&self) -> &'static str {
+        "現在の managed session 内で Agent にタスクを委譲する。session の所属・作成者を変更しない。既存の live Agent への会話は agent_message を使う"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]},"prompt":{"type":"string","minLength":1,"maxLength":16384}},"required":["agent","prompt"],"additionalProperties":false}"#
+    }
+}
+impl Tool for AgentPeers {
+    fn name(&self) -> &'static str {
+        "agent_peers"
+    }
+    fn description(&self) -> &'static str {
+        "現在の managed session の Agent を列挙する。session の管理権限は共有しない"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{},"additionalProperties":false}"#
+    }
+}
+
+pub struct AgentMessage;
+impl Tool for AgentMessage {
+    fn name(&self) -> &'static str {
+        "agent_message"
+    }
+    fn description(&self) -> &'static str {
+        "同じ session の Agent へ会話・レビュー依頼・判定を durable に保存する。message_id は UUIDv7 で retry 時に再利用する。実行完了を意味しない"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"message_id":{"type":"string"},"to_agent_id":{"type":"string"},"kind":{"enum":["message","review_request","approved","changes_requested"]},"body":{"type":"string","minLength":1,"maxLength":16384},"in_reply_to":{"type":"string"},"review":{"type":"object","properties":{"base_sha":{"type":"string"},"head_sha":{"type":"string"}},"required":["base_sha","head_sha"],"additionalProperties":false}},"required":["message_id","to_agent_id","kind","body"],"additionalProperties":false}"#
+    }
+}
+
+pub struct AgentMessages;
+impl Tool for AgentMessages {
+    fn name(&self) -> &'static str {
+        "agent_messages"
+    }
+    fn description(&self) -> &'static str {
+        "自分が送受信した peer message を保存順に読む。after には前ページ末尾の message_id を渡す。未読は受信分だけ。read では ACK しない"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"after":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100},"unread_only":{"type":"boolean"}},"additionalProperties":false}"#
+    }
+}
+
+pub struct AgentMessageAck;
+impl Tool for AgentMessageAck {
+    fn name(&self) -> &'static str {
+        "agent_message_ack"
+    }
+    fn description(&self) -> &'static str {
+        "処理した受信 peer message を明示的に ACK する"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"message_id":{"type":"string"}},"required":["message_id"],"additionalProperties":false}"#
+    }
+}
+
 pub struct UserDecisionRequest;
 impl Tool for UserDecisionRequest {
     fn name(&self) -> &'static str {

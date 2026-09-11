@@ -325,6 +325,11 @@ pub fn decode_pr_snapshot(value: Value) -> Result<PrSnapshot, ClientError> {
 #[serde(rename_all = "snake_case")]
 pub enum DispatchToolAction {
     Dispatch,
+    AgentHandoff,
+    AgentPeers,
+    AgentMessage,
+    AgentMessages,
+    AgentMessageAck,
     SessionGet,
     AgentList,
     AgentGet,
@@ -350,6 +355,8 @@ impl DispatchToolAction {
         matches!(
             self,
             Self::SessionGet
+                | Self::AgentPeers
+                | Self::AgentMessages
                 | Self::AgentList
                 | Self::AgentGet
                 | Self::TerminalList
@@ -365,7 +372,7 @@ impl DispatchToolAction {
     /// the same final on a fresh connection.
     #[must_use]
     pub const fn is_durable_operation(self) -> bool {
-        matches!(self, Self::Dispatch)
+        matches!(self, Self::Dispatch | Self::AgentHandoff)
     }
 }
 

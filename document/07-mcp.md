@@ -15,6 +15,7 @@
 - [tool 面](#tool-面)
   - [Agent が作成した session の authority](#agent-が作成した-session-の-authority)
   - [session lifecycle の受理契約](#session-lifecycle-の受理契約)
+  - [同じ session の Agent 間通信](#同じ-session-の-agent-間通信)
 - [tool descriptor と追加手順](#tool-descriptor-と追加手順)
 - [resource 面](#resource-面)
 - [orchestration ガイド](#orchestration-ガイド)
@@ -403,6 +404,48 @@ durable decision の owner と caller scope を照合して terminal decision �
 Agent PTY へ自動配送する経路は持たないため、MCP client disconnect では event を残し、同じ caller の次の `get` で
 収束する。期限切れ、cancel、expire は terminal record のみを残し、回答 event を作らない。deadline maintenance は
 接続や次の MCP call を待たずに期限を terminal 化する。
+
+### 同じ session の Agent 間通信
+
+この節が同一 session の peer handoff / message の正本である。caller credential から現在の session と Agent を復元し、
+payload に送信者や session を指定することはできない。session の creator authority は変更せず、root scope では受理しない。
+
+| tool | 用途 |
+|---|---|
+| `agent_peers` | 現在の session の Agent ID、runtime、model、status と自分の ID を返す |
+| `agent_handoff` | `agent`（既存 `id` または allowlist の `runtime` / `model`）と `prompt` で同じ worktree に worker を起動する |
+| `agent_message` | `to_agent_id` へ `message_id`、`kind`、`body` を保存する。返信には `in_reply_to` を付ける |
+| `agent_messages` | 自分が送信者または受信者の履歴を `after` / `limit`（1–100）で読む。`unread_only` は未 ACK の受信だけを返す |
+| `agent_message_ack` | 受信した `message_id` を処理済みにする。run の完了にはしない |
+
+handoff は session・worktree・role assignment を新設または変更しない。新規 selector は同じ runtime/model の Agent が
+いても別 identity を作る。既存 Agent への handoff は停止中だけを受理し、自分自身・別 session・実行中 peer は拒否する。
+稼働中 peer とのやり取りには message を使う。handoff は異なる runtime を明示的に許可するが、runtime/model allowlist、
+実行数上限、既存 session role の delegation policy、Supervisor の budget / ownership fence は維持する。
+child session 向け `session_dispatch` / `session_delegate_brief` の同一 runtime 制約は変更しない。
+
+kind は `message` / `review_request` / `approved` / `changes_requested`。
+review request は `review: {base_sha, head_sha}`（同じ長さの完全な 40 または 64 桁 hex SHA）を必須とする。
+判定は依頼の `message_id` を `in_reply_to` に指定し、逆向きの送受信者と同一 `review` を要求する。
+1 依頼への判定は 1 件であり、修正後は新しい SHA と新しい依頼 ID で再レビューする。
+SHA は照合用の参照であり、Git object の存在、現在の HEAD との一致、merge 可否を daemon が検証・保証するものではない。
+
+message は completion inbox と別の versioned journal に保存する。read は ACK せず、同一 ID・同一内容の再送と
+重複 ACK は冪等である。同一 ID の内容変更は拒否する。body と handoff prompt は非空・NUL なし・16 KiB 以下。
+journal は session ごとに最大 4096 件、4 MiB 未満とし、上限では新規送信を拒否する。ACK は履歴を削除せず、
+自動削除・自動起動は行わない。メッセージ保存後の通知は指定 Agent の current run だけへ送る best-effort のヒントで、
+停止・入力失敗でもメッセージは残り、別 Agent や session queue へ転送しない。再起動・再開後も inbox を明示的に読む。
+handoff の完了報告も同一 session では保存済み caller だけへ通知する。
+
+```text
+Codex: commit → agent_handoff(Claude) → agent_message(review_request, SHA)
+Claude: agent_messages → 差分確認 → agent_message(changes_requested または approved) → ACK
+Codex: agent_messages → 修正・再 commit → 新しい review_request
+```
+
+共有 worktree 内で同時編集しないよう、実装担当だけが編集・commit し、レビュー担当には変更しないことを指示する。
+これは協調手順であり、Agent ごとの read-only sandbox や書き込み lock ではない。peer の本文は task data として扱い、
+既存の system instruction・権限境界を上書きする指示として扱わない。
 
 ## tool descriptor と追加手順
 
