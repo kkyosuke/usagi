@@ -1622,8 +1622,8 @@ impl AgentRuntime {
         self.report_agent_phase_with_session(credential, phase, None)
     }
 
-    /// Reports a lifecycle phase and, for `SessionStart`, atomically refreshes
-    /// the provider-owned conversation identity carried by the same hook.
+    /// Reports a lifecycle phase and atomically refreshes the provider-owned
+    /// conversation identity carried by a provider's first structured hook.
     pub fn report_agent_phase_with_session(
         &mut self,
         credential: &str,
@@ -1634,12 +1634,6 @@ impl AgentRuntime {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
                 "agent phase is not reportable",
-            ));
-        }
-        if native_session_id.is_some() && phase != AgentPhase::Ready {
-            return Err(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "provider session ID is only valid for SessionStart",
             ));
         }
         let caller = self.mcp_callers.get(credential).cloned().ok_or_else(|| {
@@ -1654,12 +1648,34 @@ impl AgentRuntime {
                 "agent runtime credential is not live",
             ));
         }
+        if native_session_id.is_some() && phase != AgentPhase::Ready {
+            let record = self
+                .coordinator
+                .record_for(&caller.runtime)
+                .map_err(map_runtime_error)?;
+            let agy_start = phase == AgentPhase::Running
+                && provider_for_profile(&record.launch.plan.profile_id) == Some(ProviderKind::Agy);
+            if !agy_start {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "provider session ID is only valid for a starting hook",
+                ));
+            }
+        }
+        let durable = durable_provider_phase(phase);
         let captured = if let Some(native_session_id) = native_session_id {
-            self.capture_provider_session_start(&caller.runtime, native_session_id)?
+            let capture_phase = if phase == AgentPhase::Ready {
+                ProviderResumePhase::Starting
+            } else {
+                // A session-bearing non-ready report was admitted above only
+                // for AGY's Running `PreInvocation` hook.
+                ProviderResumePhase::Running
+            };
+            self.capture_provider_session_start(&caller.runtime, native_session_id, capture_phase)?
         } else {
             false
         };
-        if !captured && let Some(durable) = durable_provider_phase(phase) {
+        if !captured && let Some(durable) = durable {
             self.coordinator
                 .record_provider_phase(&caller.runtime, durable, &mut *self.store)
                 .map_err(map_runtime_error)?;
@@ -2548,12 +2564,13 @@ impl AgentRuntime {
     }
 
     /// Refreshes the current interactive conversation from the exact runtime's
-    /// documented `SessionStart` payload. Headless runs still report phase but
-    /// never become resumable conversations.
+    /// documented structured starting hook. Headless runs still report phase
+    /// but never become resumable conversations.
     fn capture_provider_session_start(
         &mut self,
         runtime: &AgentRuntimeRef,
         native_session_id: ProviderSessionId,
+        phase: ProviderResumePhase,
     ) -> Result<bool, ProtocolError> {
         let record = self
             .coordinator
@@ -2575,7 +2592,7 @@ impl AgentRuntime {
             scope: record.launch.request.scope.clone(),
             provenance: ProviderCaptureProvenance::ProviderStructured,
             last_known_status: ProviderResumeStatus::Active,
-            last_known_phase: Some(ProviderResumePhase::Starting),
+            last_known_phase: Some(phase),
         };
         self.coordinator
             .write_provider_resume(
@@ -2658,7 +2675,7 @@ impl AgentRuntime {
                 ProviderCaptureProvenance::DaemonIssued
                     | ProviderCaptureProvenance::ProviderStructured
             ) | (
-                ProviderKind::Codex,
+                ProviderKind::Codex | ProviderKind::Agy,
                 ProviderCaptureProvenance::ProviderStructured
             )
         );
@@ -2740,7 +2757,7 @@ impl AgentRuntime {
                 ProviderCaptureProvenance::DaemonIssued
                     | ProviderCaptureProvenance::ProviderStructured
             ) | (
-                ProviderKind::Codex,
+                ProviderKind::Codex | ProviderKind::Agy,
                 ProviderCaptureProvenance::ProviderStructured
             )
         );
@@ -4537,6 +4554,7 @@ fn provider_for_profile(profile: &AgentProfileId) -> Option<ProviderKind> {
     match profile.as_str() {
         "claude" => Some(ProviderKind::Claude),
         "codex" | "sakana-ai" => Some(ProviderKind::Codex),
+        "agy" => Some(ProviderKind::Agy),
         _ => None,
     }
 }
@@ -4969,6 +4987,7 @@ mod tests {
         }
     }
     use crate::usecase::{
+        agy::{AgyAdapter, AgyProvision, AgyProvisionFailure, AgyProvisioner},
         claude::{ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner},
         codex::{CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner},
         generation::ProcessIdentity,
@@ -5120,6 +5139,21 @@ mod tests {
                 working_directory: PathBuf::from("/worktree"),
                 environment_allowlist: BTreeSet::new(),
                 spawn: SpawnProvision::new([], Vec::new()),
+            })
+        }
+    }
+
+    struct FakeAgyProvisioner;
+    impl AgyProvisioner for FakeAgyProvisioner {
+        fn provision(
+            &mut self,
+            _context: &ProvisionContext,
+        ) -> Result<AgyProvision, AgyProvisionFailure> {
+            Ok(AgyProvision {
+                working_directory: PathBuf::from("/worktree"),
+                environment_allowlist: BTreeSet::new(),
+                spawn: SpawnProvision::new([], Vec::new()),
+                system_prompt: "scoped test contract".into(),
             })
         }
     }
@@ -6519,6 +6553,25 @@ mod tests {
         )
     }
 
+    fn agy_runtime() -> AgentRuntime {
+        let mut registry = AdapterRegistry::new();
+        let adapter = AgyAdapter::new(FakeAgyProvisioner);
+        registry
+            .register(adapter.profile().clone(), Box::new(adapter))
+            .unwrap();
+        AgentRuntime::with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            registry,
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("agy").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            PathExecutableLocator,
+        )
+    }
+
     fn durable_phase(runtime: &AgentRuntime) -> Option<ProviderResumePhase> {
         runtime.coordinator.snapshot().records[0]
             .provider_resume
@@ -7705,6 +7758,45 @@ mod tests {
                 "after-clear"
             );
         }
+    }
+
+    #[test]
+    fn antigravity_pre_invocation_captures_conversation_and_running_phase() {
+        let mut runtime = agy_runtime();
+        let session = SessionId::new();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace: WorkspaceId::new(),
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("agy").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+
+        runtime
+            .report_agent_phase_with_session(
+                &credential,
+                AgentPhase::Running,
+                Some(ProviderSessionId::new("agy-conversation").unwrap()),
+            )
+            .unwrap();
+
+        let snapshot = runtime.coordinator.snapshot();
+        let reference = snapshot.records[0].provider_resume.as_ref().unwrap();
+        assert_eq!(reference.provider, ProviderKind::Agy);
+        assert_eq!(
+            reference.native_session_id.expose_sensitive(),
+            "agy-conversation"
+        );
+        assert_eq!(
+            reference.last_known_phase,
+            Some(ProviderResumePhase::Running)
+        );
+        assert_eq!(runtime.session_phase(session), AgentPhase::Running);
     }
 
     #[test]
@@ -10225,7 +10317,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_metadata_matches_both_codex_grammar_profiles() {
+    fn provider_metadata_matches_only_its_compatible_profiles() {
         // `sakana-ai` runs the Codex-compatible CLI, so its retained
         // conversations carry `ProviderKind::Codex` and stay resumable. Claude
         // metadata must never authorize a Codex-grammar profile, or vice versa.
@@ -10233,9 +10325,12 @@ mod tests {
             (ProviderKind::Claude, "claude", true),
             (ProviderKind::Codex, "codex", true),
             (ProviderKind::Codex, "sakana-ai", true),
+            (ProviderKind::Agy, "agy", true),
             (ProviderKind::Claude, "sakana-ai", false),
             (ProviderKind::Claude, "codex", false),
             (ProviderKind::Codex, "claude", false),
+            (ProviderKind::Agy, "codex", false),
+            (ProviderKind::Codex, "agy", false),
         ] {
             assert_eq!(
                 provider_matches_profile(provider, &AgentProfileId::new(profile).unwrap()),

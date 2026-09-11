@@ -6,7 +6,7 @@ mod support;
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1200,7 +1200,11 @@ fn wait_for_fixture_argv(
                     .iter()
                     .any(|argument| argument.contains(instruction_marker))
                 && user_prompt.is_none_or(|prompt| {
-                    capture.arguments.iter().any(|argument| argument == prompt)
+                    capture.arguments.iter().any(|argument| {
+                        argument == prompt
+                            || (capture.runtime == "agy"
+                                && argument.ends_with(&format!("\n\nTask:\n{prompt}")))
+                    })
                 })
         }) {
             return capture;
@@ -1233,6 +1237,21 @@ fn shipping_system_prompt(capture: &FixtureArgv) -> String {
             .get(positions[0] + 1)
             .expect("Claude system prompt value is missing")
             .clone()
+    } else if capture.runtime == "agy" {
+        let position = capture
+            .arguments
+            .iter()
+            .position(|argument| argument == "--prompt-interactive")
+            .expect("Antigravity interactive prompt flag is missing");
+        capture
+            .arguments
+            .get(position + 1)
+            .expect("Antigravity launch contract is missing")
+            .split_once("\n\nTask:\n")
+            .map_or_else(
+                || panic!("Antigravity task separator is missing"),
+                |(contract, _)| contract.to_owned(),
+            )
     } else {
         assert!(
             matches!(capture.runtime.as_str(), "codex" | "codex-fugu"),
@@ -1291,6 +1310,15 @@ fn assert_shipping_role_argv(
         "role instruction escaped its single ephemeral system argument"
     );
     if let Some(user_prompt) = user_prompt {
+        if capture.runtime == "agy" {
+            assert!(
+                capture
+                    .arguments
+                    .iter()
+                    .any(|argument| { argument.ends_with(&format!("\n\nTask:\n{user_prompt}")) })
+            );
+            return;
+        }
         assert_eq!(
             capture
                 .arguments
@@ -1304,6 +1332,73 @@ fn assert_shipping_role_argv(
             !user_prompt.contains(instructions),
             "role instruction entered the initial user prompt"
         );
+    }
+}
+
+fn assert_shipping_agy_plugin(mcp: &McpHarness, capture: &FixtureArgv) {
+    assert_eq!(capture.runtime, "agy");
+    let positions = capture
+        .arguments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, argument)| (argument == "--add-dir").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(positions.len(), 1, "managed AGY workspace flag changed");
+    let integration = Path::new(
+        capture
+            .arguments
+            .get(positions[0] + 1)
+            .expect("managed AGY workspace path is missing"),
+    );
+    let relative = integration
+        .strip_prefix(
+            mcp.data_dir()
+                .canonicalize()
+                .unwrap()
+                .join("agent-integrations"),
+        )
+        .expect("AGY plugin workspace must remain in daemon-private data");
+    assert_eq!(relative.components().count(), 2);
+    assert_eq!(
+        relative.file_name().and_then(|name| name.to_str()),
+        Some("agy")
+    );
+    assert!(!integration.starts_with(mcp.workspace()));
+
+    let plugin = integration.join(".agents/plugins/usagi-runtime");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(plugin.join("plugin.json")).unwrap()).unwrap();
+    let mcp_config: serde_json::Value =
+        serde_json::from_slice(&fs::read(plugin.join("mcp_config.json")).unwrap()).unwrap();
+    let hooks: serde_json::Value =
+        serde_json::from_slice(&fs::read(plugin.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(manifest["name"], "usagi-runtime");
+    assert_eq!(mcp_config["mcpServers"]["usagi"]["args"], json!(["mcp"]));
+    assert!(hooks["usagi-runtime"]["PreInvocation"].is_array());
+    assert!(
+        !mcp.workspace()
+            .join(".agents/plugins/usagi-runtime")
+            .exists()
+    );
+    assert!(
+        !mcp.home()
+            .join(".gemini/config/plugins/usagi-runtime")
+            .exists(),
+        "managed integration must not persist as a global AGY plugin"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if fs::read_to_string(mcp.fixture_log())
+            .is_ok_and(|log| log.lines().any(|line| line == "agy-plugin-ready"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture AGY did not load the plugin and report PreInvocation"
+        );
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -1398,6 +1493,7 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
     );
 
     let cases = [
+        ("agy", "fixture-agy", "agy", "check Antigravity argv"),
         (
             "sakana-ai",
             "fixture-sakana",
@@ -1428,6 +1524,9 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         responses.push(response);
         let capture = wait_for_fixture_argv(&mcp, executable, Some(prompt), ROLE_SECRET);
         assert_shipping_role_argv(&capture, "shipping-reviewer", ROLE_SECRET, Some(prompt));
+        if runtime == "agy" {
+            assert_shipping_agy_plugin(&mcp, &capture);
+        }
         captures.push(capture);
     }
 

@@ -276,11 +276,14 @@ mod action_io {
                     }
                 }
             }
-            (Action::ReportAgentPhase, RunOutcome::ReportAgentPhase { phase }) => {
+            (Action::ReportAgentPhase, RunOutcome::ReportAgentPhase { phase, hook_event }) => {
                 let stdin = std::io::stdin();
                 let mut input = stdin.lock();
                 let request = match usagi_cli::cli::hooks::agent_phase::request_from_hook(
-                    &mut input, &phase, None,
+                    &mut input,
+                    &phase,
+                    hook_event.as_deref(),
+                    None,
                 ) {
                     Ok(request) => request,
                     Err(error) => {
@@ -297,7 +300,16 @@ mod action_io {
                 // hook must not start a daemon, and must not pay bootstrap latency.
                 match daemon::attached_client(ClientPolicy::cli()) {
                     Ok(mut client) => match client.request(request) {
-                        Ok(_) => Ok(ExitCode::SUCCESS),
+                        Ok(_) => {
+                            if let Some(response) =
+                                usagi_cli::cli::hooks::agent_phase::response_for_declared_event(
+                                    hook_event.as_deref(),
+                                )
+                            {
+                                writeln!(out, "{response}")?;
+                            }
+                            Ok(ExitCode::SUCCESS)
+                        }
                         Err(error) => {
                             write_client_error(err, "agent phase report failed", &error)?;
                             Ok(ExitCode::FAILURE)
@@ -320,6 +332,7 @@ mod action_io {
                     home,
                     cache_dir,
                     writable_roots,
+                    read_only_roots,
                     command,
                 },
             ) => claude_sandbox(
@@ -331,6 +344,7 @@ mod action_io {
                     home,
                     cache_dir,
                     writable_roots,
+                    read_only_roots,
                 },
                 command,
                 err,
@@ -432,7 +446,7 @@ fn guard_workspace(out: &mut dyn Write) -> std::io::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-// Claude を OS sandbox の中で fail-closed 起動する合成の縁。実 platform / daemon-issued policy の再検証と
+// Agent CLI を OS sandbox の中で fail-closed 起動する合成の縁。実 platform / daemon-issued policy の再検証と
 // exec を束ね、純粋な起動計画は `usagi_core::usecase::claude_sandbox` に委ねる。backend 不在・未対応
 // platform では無保護フォールバックせず、拒否理由を stderr へ書いて失敗終了する。
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=macos_wraps_claude_with_a_write_confining_profile
@@ -484,6 +498,7 @@ fn claude_sandbox(
         protected_root: policy.protected_root,
         backend: policy.backend,
         launch_roots: policy.writable_roots,
+        read_only_roots: policy.read_only_roots,
         tmpdir: policy.tmpdir,
         home: policy.home,
         linux_home_entries,
@@ -525,6 +540,7 @@ struct LauncherPolicyInputs {
     home: Option<PathBuf>,
     cache_dir: Option<PathBuf>,
     writable_roots: Vec<PathBuf>,
+    read_only_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,6 +548,7 @@ enum LauncherPolicyError {
     Backend,
     ProtectedRoot,
     WritableRoot,
+    ReadOnlyRoot,
 }
 
 fn validate_launcher_policy_inputs(
@@ -544,6 +561,7 @@ fn validate_launcher_policy_inputs(
         home,
         cache_dir,
         writable_roots,
+        read_only_roots,
     } = policy;
     let (protected_root, backend, tmpdir, home, cache_dir) = (
         protected_root.as_deref(),
@@ -573,26 +591,30 @@ fn validate_launcher_policy_inputs(
         }
     }
     for &protected_root in protected_root.as_slice() {
-        validate_launcher_directory(protected_root, LauncherPolicyError::ProtectedRoot)?;
+        validate_launcher_path(protected_root, LauncherPolicyError::ProtectedRoot, false)?;
     }
     for root in writable_roots {
-        validate_launcher_directory(root, LauncherPolicyError::WritableRoot)?;
+        validate_launcher_path(root, LauncherPolicyError::WritableRoot, true)?;
+    }
+    for root in read_only_roots {
+        validate_launcher_path(root, LauncherPolicyError::ReadOnlyRoot, true)?;
     }
     for root in [tmpdir, home, cache_dir].into_iter().flatten() {
-        validate_launcher_directory(root, LauncherPolicyError::WritableRoot)?;
+        validate_launcher_path(root, LauncherPolicyError::WritableRoot, false)?;
     }
     Ok(())
 }
 
-fn validate_launcher_directory(
+fn validate_launcher_path(
     path: &Path,
     error: LauncherPolicyError,
+    allow_file: bool,
 ) -> Result<(), LauncherPolicyError> {
     if !path.is_absolute() || path == Path::new("/") {
         return Err(error);
     }
     let metadata = std::fs::symlink_metadata(path).map_err(|_| error)?;
-    if !metadata.file_type().is_dir() {
+    if !(metadata.file_type().is_dir() || allow_file && metadata.file_type().is_file()) {
         return Err(error);
     }
     if path.canonicalize().ok().as_deref() != Some(path) {
@@ -848,8 +870,25 @@ mod tests {
             std::fs::set_permissions(&backend_path, std::fs::Permissions::from_mode(0o700))
                 .unwrap();
         }
-        // backend・tmpdir・home・cache root・起動固有 root がすべて所有された canonical
-        // directory なら受け入れる。
+        // read-only carve-out も他の policy path と同様、未作成なら拒否する。
+        assert_eq!(
+            validate_launcher_policy_inputs(&LauncherPolicyInputs {
+                protected_root: Some(protected.clone()),
+                backend: Some(backend_path.clone()),
+                tmpdir: Some(protected.clone()),
+                home: Some(protected.clone()),
+                cache_dir: Some(protected.clone()),
+                writable_roots: vec![protected.clone()],
+                read_only_roots: vec![protected.join("missing-read-only-root")],
+            }),
+            Err(LauncherPolicyError::ReadOnlyRoot)
+        );
+
+        std::fs::create_dir(protected.join("read-only")).unwrap();
+        std::fs::write(protected.join("read-only-file"), "existing").unwrap();
+        std::fs::write(protected.join("writable-file"), "existing").unwrap();
+        // backend・tmpdir・home・cache・writable / read-only path がすべて
+        // 所有された canonical path なら受け入れる。
         assert_eq!(
             validate_launcher_policy_inputs(&LauncherPolicyInputs {
                 protected_root: Some(protected.clone()),
@@ -857,7 +896,14 @@ mod tests {
                 tmpdir: Some(protected.clone()),
                 home: Some(protected.clone()),
                 cache_dir: Some(protected.clone()),
-                writable_roots: vec![protected.clone()],
+                writable_roots: vec![
+                    protected.clone(),
+                    protected.join("writable-file").canonicalize().unwrap(),
+                ],
+                read_only_roots: vec![
+                    protected.join("read-only").canonicalize().unwrap(),
+                    protected.join("read-only-file").canonicalize().unwrap(),
+                ],
             }),
             Ok(())
         );
@@ -1014,6 +1060,7 @@ mod tests {
         assert_route(
             RunOutcome::ReportAgentPhase {
                 phase: "working".into(),
+                hook_event: None,
             },
             Action::ReportAgentPhase,
         );
@@ -1027,6 +1074,7 @@ mod tests {
                 home: None,
                 cache_dir: None,
                 writable_roots: vec![PathBuf::from("worktree")],
+                read_only_roots: vec![],
                 command: vec!["claude".into()],
             },
             Action::ClaudeSandbox,

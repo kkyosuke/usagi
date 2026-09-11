@@ -277,7 +277,7 @@ mod tests {
     fn legacy_runtime_schema_uses_the_shared_catalog() {
         assert_eq!(
             RuntimeModelSnapshot::runtime_schema()["enum"],
-            json!(["claude", "codex", "sakana-ai"])
+            json!(["claude", "codex", "sakana-ai", "agy"])
         );
     }
 

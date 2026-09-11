@@ -74,7 +74,7 @@ struct ToolSpec {
     required: bool,
 }
 
-const TOOLS: [ToolSpec; 4] = [
+const TOOLS: [ToolSpec; 5] = [
     ToolSpec {
         name: "Git",
         executable: "git",
@@ -93,6 +93,11 @@ const TOOLS: [ToolSpec; 4] = [
     ToolSpec {
         name: "Sakana AI CLI",
         executable: DefaultModel::SakanaAi.command(),
+        required: false,
+    },
+    ToolSpec {
+        name: "Antigravity CLI",
+        executable: DefaultModel::Agy.command(),
         required: false,
     },
 ];
@@ -169,6 +174,7 @@ mod tests {
         claude: Result<&str, &str>,
         openai: Result<&str, &str>,
         sakana_ai: Result<&str, &str>,
+        agy: Result<&str, &str>,
         settings: Result<&str, &str>,
         daemon: Result<&str, &str>,
     ) -> FakePort {
@@ -190,6 +196,10 @@ mod tests {
                     "codex-fugu".to_owned(),
                     sakana_ai.map(str::to_owned).map_err(str::to_owned),
                 ),
+                (
+                    "agy".to_owned(),
+                    agy.map(str::to_owned).map_err(str::to_owned),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -206,6 +216,7 @@ mod tests {
             Ok("claude 2.0"),
             Ok("codex-cli 1.0"),
             Ok("codex-fugu 1.0"),
+            Ok("agy 1.2.0"),
             Ok("settings.json is readable"),
             Ok("daemon is reachable"),
         );
@@ -214,9 +225,17 @@ mod tests {
         assert!(report.is_healthy());
         assert_eq!(
             port.calls,
-            ["git", "claude", "codex", "codex-fugu", "settings", "daemon"]
+            [
+                "git",
+                "claude",
+                "codex",
+                "codex-fugu",
+                "agy",
+                "settings",
+                "daemon"
+            ]
         );
-        assert_eq!(report.checks.len(), 6);
+        assert_eq!(report.checks.len(), 7);
         assert!(
             report
                 .checks
@@ -235,6 +254,7 @@ mod tests {
             Ok("claude 2.0"),
             Err("not found"),
             Err("not found"),
+            Err("not found"),
             Err("invalid JSON"),
             Err("connection refused"),
         );
@@ -245,8 +265,9 @@ mod tests {
         assert_eq!(report.checks[1].status, CheckStatus::Pass);
         assert_eq!(report.checks[2].status, CheckStatus::Warning);
         assert_eq!(report.checks[3].status, CheckStatus::Warning);
-        assert_eq!(report.checks[4].status, CheckStatus::Fail);
+        assert_eq!(report.checks[4].status, CheckStatus::Warning);
         assert_eq!(report.checks[5].status, CheckStatus::Fail);
+        assert_eq!(report.checks[6].status, CheckStatus::Fail);
         assert!(format!("{:?}", CheckStatus::Warning).contains("Warning"));
     }
 }

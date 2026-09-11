@@ -2410,7 +2410,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             create["inputSchema"]["properties"]["runtime"]["enum"],
-            serde_json::json!(["claude", "codex", "sakana-ai"])
+            serde_json::json!(["claude", "codex", "sakana-ai", "agy"])
         );
     }
 

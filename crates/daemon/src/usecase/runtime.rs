@@ -1735,7 +1735,7 @@ impl RuntimeCoordinator {
     /// Process death stays observation-owned: this path never writes
     /// `last_known_status`, and a runtime which is not `Running` is refused so a
     /// late report cannot make a reconciled or exited record look alive.  A
-    /// record without provider metadata (for example Claude or Codex before its
+    /// record without provider metadata (for example Antigravity, Claude, or Codex before its
     /// structured capture) is a no-op rather than a synthesized reference, and
     /// an unchanged phase does not persist a snapshot.
     pub fn record_provider_phase(

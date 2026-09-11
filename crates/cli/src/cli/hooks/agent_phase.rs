@@ -2,7 +2,8 @@
 //!
 //! usagi がエージェント起動時に各 provider のライフサイクルフックへ配線し、フックが phase
 //! （例: `ended`）を引数に渡して呼ぶ。人手で叩くものではない（`--help` 非表示）。フックは
-//! 終了コードだけを見るため、標準出力には何も書かない。
+//! Claude / Codex では終了コードだけを使い、Antigravity では provider 所定の判定 JSON も
+//! 標準出力へ返す。
 //!
 //! 報告元の runtime は daemon が hook process の OS peer lineage から exact live runtime を
 //! 解決して束縛する（caller は runtime / session / path を名指しできない）。phase 引数は
@@ -24,22 +25,26 @@ use crate::cli::{Run, RunOutcome};
 /// `usagi agent-phase <phase>` のハンドラ。
 pub struct AgentPhase {
     pub phase: String,
+    pub hook_event: Option<String>,
 }
 
 impl Run for AgentPhase {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         Ok(RunOutcome::ReportAgentPhase {
             phase: self.phase.clone(),
+            hook_event: self.hook_event.clone(),
         })
     }
 }
 
-/// hook JSON のうち、この報告が読む field。`session_id` は `SessionStart` でだけ
-/// daemon へ渡し、`transcript_path` などの他 field は deserialize 対象にせず file も開かない。
+/// hook JSON のうち、この報告が読む field。`session_id` / `conversationId` は provider の
+/// structured starting event でだけ daemon へ渡し、transcript などの他 field は deserialize
+/// 対象にせず file も開かない。
 #[derive(Debug, Deserialize)]
 struct PhaseHookInput {
-    hook_event_name: String,
     #[serde(default)]
+    hook_event_name: Option<String>,
+    #[serde(default, alias = "conversationId")]
     session_id: Option<ProviderSessionId>,
 }
 
@@ -78,6 +83,7 @@ impl std::error::Error for PhaseInputError {}
 pub fn request_from_hook(
     reader: &mut dyn Read,
     phase: &str,
+    declared_event: Option<&str>,
     credential: Option<String>,
 ) -> Result<DaemonRequest, PhaseInputError> {
     let phase = ReportedPhase::parse_token(phase)
@@ -85,17 +91,25 @@ pub fn request_from_hook(
         .ok_or(PhaseInputError::UnknownPhase)?;
     let input = serde_json::from_reader::<_, PhaseHookInput>(reader)
         .map_err(|_| PhaseInputError::InvalidPayload)?;
-    let canonical = ReportedPhase::for_hook_event(&input.hook_event_name);
+    let event = declared_event
+        .or(input.hook_event_name.as_deref())
+        .ok_or(PhaseInputError::InvalidPayload)?;
+    let canonical = ReportedPhase::for_hook_event(event).or(match event {
+        // Antigravity's documented hooks do not repeat the configured event
+        // name in stdin. `PreInvocation` begins a model turn and also carries
+        // the provider conversation ID.
+        "PreInvocation" => Some(ReportedPhase::Running),
+        _ => None,
+    });
     // v2.9-era launch material wired `PostToolUse` to `running`. Accept that
     // one historical pairing so an already-running Agent does not fail its
     // hook after the `usagi` executable is updated in place. New launch
     // material reports `waiting`, which is the canonical mapping above.
-    let legacy_post_tool =
-        input.hook_event_name == "PostToolUse" && phase == ReportedPhase::Running;
+    let legacy_post_tool = event == "PostToolUse" && phase == ReportedPhase::Running;
     if canonical != Some(phase) && !legacy_post_tool {
         return Err(PhaseInputError::WrongEvent);
     }
-    let native_session_id = if input.hook_event_name == "SessionStart" {
+    let native_session_id = if matches!(event, "SessionStart" | "PreInvocation") {
         Some(input.session_id.ok_or(PhaseInputError::InvalidPayload)?)
     } else {
         None
@@ -109,22 +123,37 @@ pub fn request_from_hook(
     })
 }
 
+/// Provider-native stdout payload for a successfully reported Antigravity
+/// hook. Claude and Codex omit `declared_event` and therefore keep their
+/// existing empty stdout contract.
+#[must_use]
+pub fn response_for_declared_event(declared_event: Option<&str>) -> Option<&'static str> {
+    match declared_event {
+        Some("PreToolUse") => Some(r#"{"decision":"allow"}"#),
+        Some("PreInvocation" | "PostToolUse") => Some("{}"),
+        Some("Stop") => Some(r#"{"decision":"stop"}"#),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
-    use super::{PhaseInputError, request_from_hook};
+    use super::{PhaseInputError, request_from_hook, response_for_declared_event};
     use crate::cli::{Command, RunOutcome, execute};
 
     #[test]
     fn hidden_handler_requests_composition_report_without_output() {
         let (outcome, output) = execute(Command::AgentPhase {
             phase: "ended".into(),
+            hook_event: None,
         });
         assert_eq!(
             outcome,
             RunOutcome::ReportAgentPhase {
-                phase: "ended".into()
+                phase: "ended".into(),
+                hook_event: None,
             }
         );
         assert!(output.is_empty());
@@ -153,6 +182,7 @@ mod tests {
             let request = request_from_hook(
                 &mut Cursor::new(payload),
                 phase,
+                None,
                 Some("runtime-secret".into()),
             )
             .unwrap();
@@ -175,6 +205,7 @@ mod tests {
                 br#"{"session_id":"provider-session","hook_event_name":"PostToolUse"}"#,
             ),
             "running",
+            None,
             Some("runtime-secret".to_owned()),
         )
         .unwrap();
@@ -223,7 +254,7 @@ mod tests {
             ),
         ] {
             let error =
-                request_from_hook(&mut Cursor::new(payload), phase, credential).unwrap_err();
+                request_from_hook(&mut Cursor::new(payload), phase, None, credential).unwrap_err();
             assert_eq!(error, expected);
             assert!(!error.to_string().contains("runtime-secret"));
         }
@@ -231,11 +262,52 @@ mod tests {
             &mut Cursor::new(br#"{"session_id":"provider-session","hook_event_name":"Stop"}"#),
             "ended",
             None,
+            None,
         )
         .unwrap();
         assert!(
             serde_json::to_value(request).unwrap()["caller_context"].is_null(),
             "hook credentials must not be inherited through the Agent environment"
         );
+    }
+
+    #[test]
+    fn antigravity_declared_event_accepts_camel_case_conversation_id() {
+        let request = request_from_hook(
+            &mut Cursor::new(
+                br#"{"conversationId":"agy-conversation","workspacePaths":["/worktree"]}"#,
+            ),
+            "running",
+            Some("PreInvocation"),
+            Some("runtime-secret".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "kind": "agent_phase_report",
+                "phase": "running",
+                "native_session_id": "agy-conversation",
+                "caller_context": {"credential": "runtime-secret"}
+            })
+        );
+    }
+
+    #[test]
+    fn antigravity_hook_responses_follow_each_event_output_contract() {
+        assert_eq!(
+            response_for_declared_event(Some("PreToolUse")),
+            Some(r#"{"decision":"allow"}"#)
+        );
+        assert_eq!(response_for_declared_event(Some("PostToolUse")), Some("{}"));
+        assert_eq!(
+            response_for_declared_event(Some("PreInvocation")),
+            Some("{}")
+        );
+        assert_eq!(
+            response_for_declared_event(Some("Stop")),
+            Some(r#"{"decision":"stop"}"#)
+        );
+        assert_eq!(response_for_declared_event(None), None);
     }
 }

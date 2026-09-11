@@ -172,6 +172,7 @@ fn terminal_concurrency_limit_rejects_out_of_range_persisted_values() {
 #[test]
 fn default_model_tokens_select_the_expected_agent_profile() {
     assert_eq!(DefaultModel::Claude.profile_id(), "claude");
+    assert_eq!(DefaultModel::Agy.profile_id(), "agy");
     assert_eq!(DefaultModel::OpenAi.profile_id(), "codex");
     assert_eq!(DefaultModel::SakanaAi.profile_id(), "sakana-ai");
     assert_eq!(
@@ -188,21 +189,27 @@ fn default_model_tokens_select_the_expected_agent_profile() {
 fn every_model_provider_maps_a_selector_profile_and_executable() {
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::selector),
-        ["claude", "codex", "sakana.ai"]
+        ["claude", "codex", "sakana.ai", "agy"]
     );
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::command),
-        ["claude", "codex", "codex-fugu"]
+        ["claude", "codex", "codex-fugu", "agy"]
     );
     // `sakana.ai` is presented under its product name but launches `codex-fugu`
     // through the `sakana-ai` profile.
     assert_eq!(DefaultModel::SakanaAi.command(), "codex-fugu");
     assert_eq!(DefaultModel::SakanaAi.selector(), "sakana.ai");
-    // Each provider's CLI writes its own state directory, so a write-confining
-    // launcher can grant exactly the one it spawns.
+    // Each provider declares the narrow state directory a write-confining
+    // launcher grants. AGY persists conversation DBs without making its
+    // executable global customizations writable.
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::state_directory),
-        [".claude", ".codex", ".codex-fugu"]
+        [
+            ".claude",
+            ".codex",
+            ".codex-fugu",
+            ".gemini/antigravity-cli/conversations"
+        ]
     );
     // Claude keeps its global config (onboarding, folder trust, MCP approvals)
     // beside that directory in `~/.claude.json`, and saves it through sibling
@@ -210,7 +217,7 @@ fn every_model_provider_maps_a_selector_profile_and_executable() {
     // Codex and `codex-fugu` keep their config inside the state directory.
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::global_config_prefix),
-        [Some(".claude.json"), None, None]
+        [Some(".claude.json"), None, None, None]
     );
 }
 
@@ -231,6 +238,9 @@ fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
         // The probe cannot drift away from the executable a launch spawns.
         assert_eq!(probe.program(), model.command(), "{model:?}");
     }
+    let agy = DefaultModel::Agy.readiness_command();
+    assert_eq!(agy.program(), "agy");
+    assert_eq!(agy.arguments(), ["models"]);
     // Exercise the derived traits the launcher relies on to copy and log a probe.
     let probe: AgentReadinessCommand = DefaultModel::SakanaAi.readiness_command();
     assert_eq!(probe, DefaultModel::SakanaAi.readiness_command());
@@ -257,9 +267,13 @@ fn readiness_resolution_accepts_product_tokens_and_otherwise_fails_closed() {
         DefaultModel::readiness_command_for("claude"),
         Some(DefaultModel::Claude.readiness_command())
     );
+    assert_eq!(
+        DefaultModel::readiness_command_for("agy"),
+        Some(DefaultModel::Agy.readiness_command())
+    );
     // An unmodelled product yields no probe, so a launcher refuses it rather
     // than spawning an unknown executable.
-    for token in ["gemini", "agy", "openai", ""] {
+    for token in ["gemini", "openai", ""] {
         assert_eq!(DefaultModel::readiness_command_for(token), None, "{token}");
     }
 }
@@ -270,6 +284,8 @@ fn selector_resolution_accepts_every_spelling_of_a_provider() {
         ("claude", DefaultModel::Claude),
         ("Claude", DefaultModel::Claude),
         ("codex", DefaultModel::OpenAi),
+        ("agy", DefaultModel::Agy),
+        ("AGY", DefaultModel::Agy),
         ("sakana.ai", DefaultModel::SakanaAi),
         ("sakana_ai", DefaultModel::SakanaAi),
         ("sakana-ai", DefaultModel::SakanaAi),
@@ -308,6 +324,15 @@ fn sakana_ai_persists_as_snake_case_and_reads_legacy_tokens() {
 }
 
 #[test]
+fn agy_persists_as_its_stable_profile_token() {
+    assert_eq!(serde_json::to_value(DefaultModel::Agy).unwrap(), "agy");
+    assert_eq!(
+        serde_json::from_str::<DefaultModel>("\"agy\"").unwrap(),
+        DefaultModel::Agy
+    );
+}
+
+#[test]
 fn availability_offers_only_installed_providers() {
     let all = AvailableModels::all();
     assert!(!all.is_empty());
@@ -340,7 +365,8 @@ fn availability_offers_only_installed_providers() {
     // choice that is no longer installed.
     assert_eq!(all.next(DefaultModel::Claude), Some(DefaultModel::OpenAi));
     assert_eq!(all.next(DefaultModel::OpenAi), Some(DefaultModel::SakanaAi));
-    assert_eq!(all.next(DefaultModel::SakanaAi), Some(DefaultModel::Claude));
+    assert_eq!(all.next(DefaultModel::SakanaAi), Some(DefaultModel::Agy));
+    assert_eq!(all.next(DefaultModel::Agy), Some(DefaultModel::Claude));
     let only_sakana = AvailableModels::new([DefaultModel::SakanaAi]);
     assert_eq!(
         only_sakana.next(DefaultModel::Claude),

@@ -340,6 +340,7 @@ impl ProviderSessionId {
 pub enum ProviderKind {
     Claude,
     Codex,
+    Agy,
 }
 
 /// Evidence by which a provider-native identity entered durable state.

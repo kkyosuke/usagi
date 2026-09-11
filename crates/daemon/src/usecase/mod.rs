@@ -14,6 +14,7 @@
 //! 判定を 1 か所に集約し、`stop` → fresh `start` の bypass を残さないためである。
 
 pub mod agent_ipc;
+pub mod agy;
 pub mod authority;
 pub mod claude;
 pub mod codex;
