@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 526,
+  "total": 527,
   "owners": {
     "core": 10,
-    "daemon": 369,
+    "daemon": 370,
     "root-cli": 40,
     "tui": 107
   },
