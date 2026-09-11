@@ -6,7 +6,8 @@
 //! 持つ。`--help` には出さない（`hide = true`）が、CLI コマンドツリーの一部として同じ
 //! `Run` dispatch に載る。
 //!
-//! lifecycle phase と `SessionStart` の current provider ID は documented stdin JSON から
+//! lifecycle phase と structured starting event（Claude / Codex の `SessionStart`、
+//! Antigravity の `PreInvocation`）の current provider ID は documented stdin JSON から
 //! private daemon request へ変換する。Claude の `guard-workspace` は `PreToolUse` payload を
 //! 検査し、worktree を出るツール呼び出しを deny する（判定は
 //! [`usagi_core::usecase::workspace_guard`]）。

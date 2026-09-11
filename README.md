@@ -43,7 +43,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 
-対応する Agent は Claude、OpenAI Codex、Sakana AI です。通常の shell も同じ画面で利用できます。
+対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex、Sakana AI です。通常の shell も同じ画面で利用できます。
 同じ session 内で Codex に実装、Claude にレビューを分担させる場合は、
 [Agent 間の handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) を使えます。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。

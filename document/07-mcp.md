@@ -318,14 +318,22 @@ session 作成系は optional role selector を受け取る。`session_create` /
 worker の `id` branch は schema に現れず daemon も受理しない。`agent` は allowlist にある `runtime` と `model` の
 組だけであり、部分指定・混在は受理しない。`session_dispatch` は既存 session を対象とするため `id` branch を持つ。
 
-runtime の closed vocabulary は daemon の profile catalog と共通で、`claude` / `codex` / `sakana-ai` を扱う。
+runtime の closed vocabulary は daemon の profile catalog と共通で、`claude` / `codex` / `sakana-ai` / `agy` を扱う。
 workspace の `.usagi/config.toml` に対応する model allowlist があり、profile の実行コマンドが PATH 上にある runtime
 だけが MCP schema に現れる。daemon が provision した MCP child は `USAGI_WORKSPACE_ROOT` の trusted root から
 allowlist を読み、session worktree の cwd に machine-local config がなくても workspace と同じ schema を公開する。
 daemon の spawn 直前の再検証も同じ workspace root を権威とし、session worktree は worker の cwd としてだけ使う。
 workspace config 自体が未作成なら `claude/default` を安全な provider-default として使う。config が存在するのに
 読めない、または runtime/model 設定が不正な場合は空へ fail closed し、暗黙の fallback は行わない。
-`sakana-ai` の実行コマンドは `codex-fugu` である。
+`sakana-ai` の実行コマンドは `codex-fugu`、`agy` の実行コマンドは `agy` である。Antigravity では daemon が
+daemon の selected data directory に
+`agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を materialize し、その synthetic workspace を
+managed launch の private `--add-dir` にだけ渡す。plugin の `mcp_config.json` から同じ `usagi mcp` child を起動し、
+plugin root は全実効 writable surface との overlap を拒否した上で sandbox から read-only のままにする。managed AGY では
+`~/.gemini` 全体を writable にせず、`~/.gemini/antigravity-cli/conversations/` と state 直下の
+`conversation_summaries.db{,-shm,-wal}` だけを書き込める。認証は OS keyring を使う。この allowlist により、
+`~/.gemini/GEMINI.md`、global config、state の plugin / skill / settings / import manifest / status・title script は
+未作成 path も含めて read-only のままとなり、既存 customization を読み取れる一方で新規作成・置換を防ぐ。
 
 ### delegation の atomicity
 

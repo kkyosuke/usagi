@@ -6,15 +6,16 @@
 //! IO を持たないためユニットテストで全分岐を被覆できる。
 //!
 //! **fail-closed**: sandbox backend が無い、または未対応 platform では [`SandboxPlan::Reject`] を
-//! 返し、Claude を無保護で起動しない。合成ルートは Reject を非 0 終了に写す。
+//! 返し、Agent CLI を無保護で起動しない。合成ルートは Reject を非 0 終了に写す。
 //!
 //! 起動固有の writable root は provisioner が渡す（session は own worktree と必要な Git administrative
 //! state、root coordinator は repository-local root を持たない）。**その起動固有 root に、両 mode とも同じ普遍領域**
 //! （`$TMPDIR`・`/tmp`・`/var/tmp`・起動する agent CLI 自身の state と global config・macOS の
 //! Keychain と system / per-user の MDS cache）を加える。daemon の再起動は sandbox 外の bootstrap broker に
 //! 委譲し、data home は writable root に含めない。sandbox は書き込みだけをこの root 集合に
-//! 閉じ込め、読み取りは許す（読み取り側の論理境界は
-//! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う）。
+//! 閉じ込め、provider state 内の global customization などは [`SandboxRequest::read_only_roots`]
+//! で後段の read-only carve-out に戻す。読み取り側の論理境界は
+//! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う。
 //!
 //! 普遍領域を session から落とすと、agent CLI は**その worktree の中でしか動けない**という以前に
 //! **起動できない**。Claude Code は tool を実行するたびに `$TMPDIR` を無視した固定 path
@@ -108,8 +109,11 @@ pub struct SandboxRequest {
     pub protected_root: Option<PathBuf>,
     /// 解決済み backend 実行ファイル（macOS: `sandbox-exec` / Linux: `bwrap`）。無ければ `None`。
     pub backend: Option<PathBuf>,
-    /// provisioner が起動 scope から渡す writable root。
+    /// provisioner が起動 scope から渡す writable file / directory。
     pub launch_roots: Vec<PathBuf>,
+    /// writable root の内側でも書き込みを再度閉じる read-only file / directory carve-out。
+    /// 対象は launcher 起動前に実在・検証済みでなければならない。
+    pub read_only_roots: Vec<PathBuf>,
     /// `$TMPDIR`（あれば）。
     pub tmpdir: Option<PathBuf>,
     /// `$HOME`（あれば）。Claude state・macOS の Keychain に使う。
@@ -170,14 +174,21 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
     let prefixes = writable_prefixes(request);
     match request.platform {
         Platform::Unsupported => SandboxPlan::Reject {
-            reason: "このプラットフォームには OS sandbox backend が無いため、Claude を無保護で起動しません"
+            reason: "このプラットフォームには OS sandbox backend が無いため、Agent CLI を無保護で起動しません"
                 .to_owned(),
         },
         Platform::MacOs => match &request.backend {
             None => reject_backend("sandbox-exec"),
             Some(backend) => SandboxPlan::Launch {
                 program: backend.clone(),
-                argv: macos_argv(request.mode, &roots, &prefixes, program, program_args),
+                argv: macos_argv(
+                    request.mode,
+                    &roots,
+                    &prefixes,
+                    &request.read_only_roots,
+                    program,
+                    program_args,
+                ),
             },
         },
         Platform::Linux => match &request.backend {
@@ -189,6 +200,7 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
                     &prefixes,
                     request.home.as_deref(),
                     request.linux_home_entries.as_deref(),
+                    &request.read_only_roots,
                     program,
                     program_args,
                 ),
@@ -230,6 +242,11 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
             return Some("writable prefix が保護対象 workspace と重なります".to_owned());
         }
     }
+    for root in &request.read_only_roots {
+        if !root.is_absolute() || root == Path::new("/") || root.to_str().is_none() {
+            return Some("read-only root が安全な absolute path ではありません".to_owned());
+        }
+    }
     if request.platform == Platform::Linux && !writable_prefixes(request).is_empty() {
         let (Some(home), Some(entries)) = (
             request.home.as_deref(),
@@ -255,17 +272,18 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
 fn reject_backend(backend: &str) -> SandboxPlan {
     SandboxPlan::Reject {
         reason: format!(
-            "sandbox backend（{backend}）が見つからないため、Claude を無保護で起動しません"
+            "sandbox backend（{backend}）が見つからないため、Agent CLI を無保護で起動しません"
         ),
     }
 }
 
-/// exec する program が自身の state / 認証キャッシュを書く `$HOME` 配下の directory 名。
+/// exec する program が managed launch 中に書ける `$HOME` 配下の directory 名。
 ///
 /// 根拠は launcher が実際に exec する program（`command` の先頭）だけで、値の単一情報源は
 /// [`DefaultModel::state_directory`] である。したがって grant は起動する CLI と必ず一致し、
-/// provider を増やしても sandbox 側に写し漏れが起きない。usagi が launch しない未知 program
-/// には state root を与えない（fail-closed）。
+/// provider を増やしても sandbox 側に写し漏れが起きない。AGY は自動ロードされる global
+/// customization と runtime state が同じ `~/.gemini` に同居するため、conversation subtree
+/// だけを返す。usagi が launch しない未知 program には state root を与えない（fail-closed）。
 #[must_use]
 pub fn agent_state_directory(program: &str) -> Option<&'static str> {
     let name = Path::new(program).file_name()?;
@@ -307,7 +325,8 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
         roots.insert(tmpdir.clone());
     }
     if let Some(home) = &request.home {
-        // 起動する agent CLI 自身の state / 認証キャッシュ（`~/.claude` / `~/.codex` / `~/.codex-fugu`）。
+        // 起動する agent CLI 自身の writable state。AGY は global customization と
+        // state が同居するため、conversation subtree だけを返す。
         if let Some(state) = request
             .command
             .first()
@@ -350,17 +369,53 @@ fn writable_prefixes(request: &SandboxRequest) -> Vec<PathBuf> {
     prefixes.into_iter().collect()
 }
 
+/// `candidate` が launcher の実効 writable root / prefix と双方向に重なるかを返す。
+///
+/// daemon-private な provider integration を materialize する前の fail-closed gate が使う。
+/// macOS では `/tmp` などの firmlink 後の `/private` 側も同じ write surface として扱う。
+#[must_use]
+pub fn writable_surface_overlaps(request: &SandboxRequest, candidate: &Path) -> bool {
+    if !candidate.is_absolute() || candidate == Path::new("/") || candidate.to_str().is_none() {
+        return true;
+    }
+    let candidates = if request.platform == Platform::MacOs {
+        macos_write_roots(&[candidate.to_path_buf()])
+    } else {
+        BTreeSet::from([candidate.to_path_buf()])
+    };
+    let roots = if request.platform == Platform::MacOs {
+        macos_write_roots(&writable_roots(request))
+    } else {
+        writable_roots(request).into_iter().collect()
+    };
+    if candidates.iter().any(|candidate| {
+        roots
+            .iter()
+            .any(|root| candidate.starts_with(root) || root.starts_with(candidate))
+    }) {
+        return true;
+    }
+    writable_prefixes(request).iter().any(|prefix| {
+        candidates.iter().any(|candidate| {
+            prefix.starts_with(candidate)
+                || path_has_prefix(candidate, prefix)
+                || candidate.to_str().zip(prefix.to_str()).is_none()
+        })
+    })
+}
+
 /// macOS: `sandbox-exec -p <profile> <program> <args…>`。
 fn macos_argv(
     mode: SandboxMode,
     roots: &[PathBuf],
     prefixes: &[PathBuf],
+    read_only_roots: &[PathBuf],
     program: &str,
     program_args: &[String],
 ) -> Vec<String> {
     let mut argv = vec![
         "-p".to_owned(),
-        macos_profile(mode, roots, prefixes),
+        macos_profile(mode, roots, prefixes, read_only_roots),
         program.to_owned(),
     ];
     argv.extend(program_args.iter().cloned());
@@ -378,7 +433,12 @@ fn macos_argv(
 /// `> /dev/fd/1` を日常的に使い、literal 列挙ではそれらが `Operation not permitted` になるためである。
 /// 代わりに動詞を `file-write-data` に絞ってあるので、`/dev` への node 作成・削除・属性変更は
 /// deny のまま残る。
-fn macos_profile(mode: SandboxMode, roots: &[PathBuf], prefixes: &[PathBuf]) -> String {
+fn macos_profile(
+    mode: SandboxMode,
+    roots: &[PathBuf],
+    prefixes: &[PathBuf],
+    read_only_roots: &[PathBuf],
+) -> String {
     let subpaths = macos_write_roots(roots)
         .iter()
         .fold(String::new(), |mut acc, root| {
@@ -396,8 +456,19 @@ fn macos_profile(mode: SandboxMode, roots: &[PathBuf], prefixes: &[PathBuf]) -> 
             );
             acc
         });
+    let read_only_rules =
+        macos_write_roots(read_only_roots)
+            .iter()
+            .fold(String::new(), |mut acc, root| {
+                let _ = writeln!(
+                    acc,
+                    "(deny file-write* (subpath {}))",
+                    sandbox_string_literal(root)
+                );
+                acc
+            });
     format!(
-        "(version 1)\n;; usagi claude-sandbox mode={}\n(allow default)\n(deny file-write*)\n(allow file-write*\n{subpaths})\n{prefix_rules}(allow file-write-data (subpath \"/dev\"))\n",
+        "(version 1)\n;; usagi claude-sandbox mode={}\n(allow default)\n(deny file-write*)\n(allow file-write*\n{subpaths})\n{prefix_rules}{read_only_rules}(allow file-write-data (subpath \"/dev\"))\n",
         mode.as_str()
     )
 }
@@ -482,6 +553,7 @@ fn linux_argv(
     prefixes: &[PathBuf],
     home: Option<&Path>,
     home_entries: Option<&[PathBuf]>,
+    read_only_roots: &[PathBuf],
     program: &str,
     program_args: &[String],
 ) -> Vec<String> {
@@ -507,6 +579,9 @@ fn linux_argv(
     }
     for root in roots {
         push_linux_bind(&mut argv, "--bind-try", root);
+    }
+    for root in read_only_roots {
+        push_linux_bind(&mut argv, "--ro-bind", root);
     }
     argv.push(program.to_owned());
     argv.extend(program_args.iter().cloned());
@@ -537,6 +612,7 @@ mod tests {
             protected_root: Some(PathBuf::from("/repo")),
             backend: backend.map(PathBuf::from),
             launch_roots: vec![PathBuf::from("/repo/.usagi/sessions/work")],
+            read_only_roots: Vec::new(),
             tmpdir: Some(PathBuf::from("/tmp/user")),
             home: Some(PathBuf::from("/home/dev")),
             linux_home_entries: Some(vec![
@@ -706,6 +782,7 @@ mod tests {
             ("claude", ".claude"),
             ("codex", ".codex"),
             ("codex-fugu", ".codex-fugu"),
+            ("agy", ".gemini/antigravity-cli/conversations"),
             // PATH 解決済みの絶対 path でも basename で判定する。
             ("/opt/homebrew/bin/codex", ".codex"),
         ] {
@@ -742,6 +819,10 @@ mod tests {
         );
         // 判定は closed vocabulary（`DefaultModel`）で、未知 token は None を返す。
         assert_eq!(agent_state_directory("sakana.ai"), Some(".codex-fugu"));
+        assert_eq!(
+            agent_state_directory("agy"),
+            Some(".gemini/antigravity-cli/conversations")
+        );
         assert_eq!(agent_state_directory("gemini"), None);
         assert_eq!(agent_state_directory(""), None);
         assert_eq!(agent_state_directory("/"), None);
@@ -820,6 +901,28 @@ mod tests {
                 .into_reject()
                 .is_some_and(|reason| reason.contains("writable root"))
         );
+
+        for read_only in ["/", "relative"] {
+            let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
+            request.read_only_roots = vec![PathBuf::from(read_only)];
+            assert!(
+                plan(&request)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("read-only root"))
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+            let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
+            request.read_only_roots = vec![PathBuf::from(OsString::from_vec(vec![b'/', 0xff]))];
+            assert!(
+                plan(&request)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("read-only root"))
+            );
+        }
     }
 
     // A session launch that only owns its worktree cannot run the agent at all:
@@ -976,6 +1079,7 @@ mod tests {
             &[PathBuf::from("/home/dev/.claude.json")],
             None,
             None,
+            &[],
             "claude",
             &[],
         );
@@ -1008,6 +1112,107 @@ mod tests {
                     .into_reject()
                     .is_some_and(|reason| reason.contains("writable prefix"))
             );
+        }
+    }
+
+    #[test]
+    fn read_only_carve_out_is_applied_after_writable_grants() {
+        for platform in [Platform::MacOs, Platform::Linux] {
+            let mut request = request(platform, Some("/sandbox"));
+            request.command = vec!["agy".to_owned()];
+            let state = "/home/dev/.gemini/antigravity-cli/conversations";
+            let protected = format!("{state}/protected.db");
+            request.read_only_roots = vec![PathBuf::from(&protected)];
+            let (_, argv) = plan(&request).into_launch().unwrap();
+            if platform == Platform::MacOs {
+                let profile = &argv[1];
+                let allow = profile.find(&format!("(subpath \"{state}\")")).unwrap();
+                let deny = profile
+                    .find(&format!("(deny file-write* (subpath \"{protected}\"))"))
+                    .unwrap();
+                assert!(deny > allow);
+            } else {
+                assert_eq!(platform, Platform::Linux);
+                let writable = argv
+                    .windows(3)
+                    .position(|window| window[0] == "--bind-try" && window[1] == state)
+                    .unwrap();
+                let read_only = argv
+                    .windows(3)
+                    .position(|window| window[0] == "--ro-bind" && window[1] == protected)
+                    .unwrap();
+                assert!(read_only > writable);
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_root_overlap_covers_universal_state_launch_and_prefix_surfaces() {
+        let mut request = request(Platform::MacOs, Some("/sandbox"));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/private/tmp/usagi/agent-integrations")
+        ));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/private/var/tmp/usagi/agent-integrations")
+        ));
+        request.tmpdir = Some(PathBuf::from("/custom/tmpdir"));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/custom/tmpdir/agent-integrations")
+        ));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.claude/integration")
+        ));
+        for candidate in [
+            "/home/dev/Library/Keychains/integration",
+            "/Library/Keychains/integration",
+            "/private/var/db/mds/integration",
+            "/private/var/folders/ab/cd/C/mds/integration",
+        ] {
+            assert!(writable_surface_overlaps(&request, Path::new(candidate)));
+        }
+        assert!(writable_surface_overlaps(&request, Path::new("/repo")));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.claude.json-integration")
+        ));
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.claude.json")
+        ));
+        request.command = vec!["agy".to_owned()];
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.gemini/antigravity-cli/conversations/session.db")
+        ));
+        assert!(!writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.gemini/antigravity-cli/settings.json")
+        ));
+        assert!(!writable_surface_overlaps(
+            &request,
+            Path::new("/daemon/agent-integrations/workspace/agy")
+        ));
+        assert!(writable_surface_overlaps(&request, Path::new("relative")));
+        request.platform = Platform::Linux;
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/tmp/agent-integrations")
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+            request.command = vec!["claude".to_owned()];
+            request.home = Some(PathBuf::from(OsString::from_vec(vec![b'/', 0xff])));
+            assert!(writable_surface_overlaps(
+                &request,
+                Path::new("/daemon/agent-integrations")
+            ));
         }
     }
 

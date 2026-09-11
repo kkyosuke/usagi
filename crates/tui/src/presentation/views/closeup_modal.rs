@@ -730,7 +730,7 @@ mod tests {
             all.insert_char(character);
         }
         let mut seen = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..6 {
             all.complete_selected();
             seen.push(all.submission());
         }
@@ -742,6 +742,7 @@ mod tests {
                 "agent claude",
                 "agent codex",
                 "agent sakana.ai",
+                "agent agy",
             ]
         );
         // Wrapping returns to the first candidate.

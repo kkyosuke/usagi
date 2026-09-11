@@ -271,6 +271,8 @@ impl AgentReadinessCommand {
 pub enum DefaultModel {
     /// Anthropic Claude, launched through the `claude` profile.
     Claude,
+    /// Google Antigravity CLI, launched through the `agy` profile.
+    Agy,
     /// Sakana AI's Codex-compatible CLI. Presented as `sakana.ai` and launched
     /// through the `sakana-ai` profile, whose executable is `codex-fugu`.
     #[serde(alias = "codex_fugu", alias = "sakana.ai")]
@@ -284,13 +286,14 @@ pub enum DefaultModel {
 impl DefaultModel {
     /// Every selectable model provider, in the order menus and completion list
     /// them.
-    pub const ALL: [Self; 3] = [Self::Claude, Self::OpenAi, Self::SakanaAi];
+    pub const ALL: [Self; 4] = [Self::Claude, Self::OpenAi, Self::SakanaAi, Self::Agy];
 
     /// Stable daemon profile ID selected by this model provider.
     #[must_use]
     pub const fn profile_id(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::Agy => "agy",
             Self::OpenAi => "codex",
             Self::SakanaAi => "sakana-ai",
         }
@@ -303,24 +306,30 @@ impl DefaultModel {
     pub const fn command(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::Agy => "agy",
             Self::OpenAi => "codex",
             Self::SakanaAi => "codex-fugu",
         }
     }
 
-    /// The `$HOME`-relative directory this provider's CLI writes its own state
-    /// and auth cache into (`~/.claude`, `~/.codex`, `~/.codex-fugu`).
+    /// The `$HOME`-relative directory this provider's CLI must be allowed to
+    /// write while it is managed by usagi.
     ///
     /// It belongs next to [`command`](Self::command) because the executable and
-    /// the directory it writes are one fact: a launcher that confines writes has
-    /// to grant the state directory of the CLI it actually spawns, and a renamed
+    /// the writable state directory are one fact: a launcher that confines
+    /// writes has to grant the state of the CLI it actually spawns, and a renamed
     /// executable must not leave that grant pointing at another provider's
     /// state. `sakana-ai` runs `codex-fugu`, whose state is `~/.codex-fugu`, so
-    /// it never shares Codex's rollouts.
+    /// it never shares Codex's rollouts. AGY is deliberately narrower: auth is
+    /// held by the OS keyring and only conversation databases need persistent
+    /// writes. Keeping the rest of `~/.gemini` outside the grant prevents a
+    /// managed tool from replacing global rules, skills, plugins, or scripts
+    /// that AGY automatically executes on a later launch.
     #[must_use]
     pub const fn state_directory(self) -> &'static str {
         match self {
             Self::Claude => ".claude",
+            Self::Agy => ".gemini/antigravity-cli/conversations",
             Self::OpenAi => ".codex",
             Self::SakanaAi => ".codex-fugu",
         }
@@ -341,7 +350,7 @@ impl DefaultModel {
     pub const fn global_config_prefix(self) -> Option<&'static str> {
         match self {
             Self::Claude => Some(".claude.json"),
-            Self::OpenAi | Self::SakanaAi => None,
+            Self::Agy | Self::OpenAi | Self::SakanaAi => None,
         }
     }
 
@@ -350,6 +359,7 @@ impl DefaultModel {
     pub const fn selector(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::Agy => "agy",
             Self::OpenAi => "codex",
             Self::SakanaAi => "sakana.ai",
         }
@@ -359,7 +369,8 @@ impl DefaultModel {
     /// provider's CLI.
     ///
     /// Codex and the Codex-compatible `codex-fugu` share the same CLI grammar,
-    /// so both prove readiness with `login status`; Claude uses `auth status`.
+    /// so both prove readiness with `login status`; Claude uses `auth status`,
+    /// and Antigravity uses its authenticated model listing.
     /// The probe deliberately reuses [`command`](Self::command) rather than
     /// naming an executable again, so a renamed executable cannot leave the
     /// probe pointing at the old one.
@@ -369,6 +380,7 @@ impl DefaultModel {
             program: self.command(),
             arguments: match self {
                 Self::Claude => &["auth", "status"],
+                Self::Agy => &["models"],
                 Self::OpenAi | Self::SakanaAi => &["login", "status"],
             },
         }
@@ -411,8 +423,11 @@ impl DefaultModel {
 /// a provider — the Config screen and the Closeup `agent -m` picker and
 /// completion — offers exactly the providers that can actually run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+// Closed provider availability flags remain a small Copy value with stable Debug output.
+#[allow(clippy::struct_excessive_bools)]
 pub struct AvailableModels {
     claude: bool,
+    agy: bool,
     open_ai: bool,
     sakana_ai: bool,
 }
@@ -425,6 +440,7 @@ impl AvailableModels {
         for model in models {
             match model {
                 DefaultModel::Claude => available.claude = true,
+                DefaultModel::Agy => available.agy = true,
                 DefaultModel::OpenAi => available.open_ai = true,
                 DefaultModel::SakanaAi => available.sakana_ai = true,
             }
@@ -441,7 +457,7 @@ impl AvailableModels {
     /// Whether no provider is installed.
     #[must_use]
     pub const fn is_empty(self) -> bool {
-        !self.claude && !self.open_ai && !self.sakana_ai
+        !self.claude && !self.agy && !self.open_ai && !self.sakana_ai
     }
 
     /// Whether this exact provider can be selected.
@@ -449,6 +465,7 @@ impl AvailableModels {
     pub const fn contains(self, model: DefaultModel) -> bool {
         match model {
             DefaultModel::Claude => self.claude,
+            DefaultModel::Agy => self.agy,
             DefaultModel::OpenAi => self.open_ai,
             DefaultModel::SakanaAi => self.sakana_ai,
         }
@@ -471,6 +488,7 @@ impl AvailableModels {
             DefaultModel::OpenAi,
             DefaultModel::Claude,
             DefaultModel::SakanaAi,
+            DefaultModel::Agy,
         ]
         .into_iter()
         .find(|model| self.contains(*model))

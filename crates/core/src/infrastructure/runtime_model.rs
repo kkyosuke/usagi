@@ -432,6 +432,7 @@ mod tests {
                 ("claude", "claude"),
                 ("codex", "codex"),
                 ("sakana-ai", "codex-fugu"),
+                ("agy", "agy"),
             ]
         );
     }
@@ -456,7 +457,7 @@ mod tests {
         );
         assert_eq!(
             *locator.0.lock().unwrap(),
-            ["claude", "codex", "codex-fugu"]
+            ["claude", "codex", "codex-fugu", "agy"]
         );
     }
 

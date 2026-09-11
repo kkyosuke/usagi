@@ -148,6 +148,30 @@ fn write_restartable_codex(bin: &Path, count: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// Antigravity fixture which loads the daemon-private workspace plugin, runs
+/// its structured starting hook, and records exact argv for cold-restart resume.
+fn write_restartable_agy(bin: &Path, count: &Path, argv: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = models ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nplugin_workspace=\nconversation_id=\nprevious=\nfor argument in \"$@\"; do\n  if [ \"$previous\" = --add-dir ]; then plugin_workspace=\"$argument\"; fi\n  if [ \"$previous\" = --conversation ]; then conversation_id=\"$argument\"; fi\n  previous=\"$argument\"\ndone\n[ -n \"$plugin_workspace\" ] || exit 10\nplugin=\"$plugin_workspace/.agents/plugins/usagi-runtime\"\n[ -f \"$plugin/plugin.json\" ] || exit 11\n[ -f \"$plugin/mcp_config.json\" ] || exit 12\n[ -f \"$plugin/hooks.json\" ] || exit 13\ngrep -q '\"PreInvocation\"' \"$plugin/hooks.json\" || exit 14\nresuming=true\nif [ -z \"$conversation_id\" ]; then conversation_id=fixture-agy-conversation; resuming=false; fi\nresponse=$(printf '%s' '{{\"conversationId\":\"'\"$conversation_id\"'\",\"workspacePaths\":[\"/fixture\"]}}' | {usagi} agent-phase running --hook-event PreInvocation) || exit 15\n[ \"$response\" = '{{}}' ] || exit 16\nprintf '%s\\0' \"$@\" > \"{}\"\nprintf 'spawn\\n' >> \"{}\"\nprintf 'agy-ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        argv.display(),
+        count.display(),
+    );
+    let path = bin.join("agy");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn nul_arguments(path: &Path) -> Vec<String> {
+    fs::read(path)
+        .unwrap()
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .map(|argument| String::from_utf8(argument.to_vec()).unwrap())
+        .collect()
+}
+
 /// Restartable provider whose successor readiness can be held until the test
 /// has killed the lifecycle requester. The daemon recovery worker, rather than
 /// that requester, must still consume the durable restart transaction.
@@ -275,6 +299,13 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
     spawn_daemon(repo, home, path, shell)
 }
 
+fn start_daemon_with_sandbox_home(repo: &Path, home: &Path, path: &Path) -> Daemon {
+    let data_dir = channel_data_dir(home);
+    fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    spawn_daemon_command(repo, home, path, None, None, Some(home))
+}
+
 fn start_daemon_with_source_identity(
     repo: &Path,
     home: &Path,
@@ -285,13 +316,13 @@ fn start_daemon_with_source_identity(
     let data_dir = channel_data_dir(home);
     fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    spawn_daemon_command(repo, home, path, Some(shell), Some(source_identity))
+    spawn_daemon_command(repo, home, path, Some(shell), Some(source_identity), None)
 }
 
 /// Start a daemon against an existing home, as a cold restart does. The data
 /// directory is already published, so it is not re-created here.
 fn spawn_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> Daemon {
-    spawn_daemon_command(repo, home, path, shell, None)
+    spawn_daemon_command(repo, home, path, shell, None, None)
 }
 
 fn spawn_daemon_command(
@@ -300,6 +331,7 @@ fn spawn_daemon_command(
     path: &Path,
     shell: Option<&Path>,
     source_identity: Option<&str>,
+    sandbox_home: Option<&Path>,
 ) -> Daemon {
     let fixture_path = format!("{}:/usr/bin:/bin", path.display());
     let mut command = usagi_command(
@@ -317,6 +349,9 @@ fn spawn_daemon_command(
             usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
             "1",
         );
+    if let Some(sandbox_home) = sandbox_home {
+        command.env("HOME", sandbox_home);
+    }
     if let Some(shell) = shell {
         command.env("SHELL", shell);
     }
@@ -1799,6 +1834,132 @@ fn wait_for_spawns(count: &Path, expected: usize) {
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn assert_private_agy_plugin(
+    arguments: &[String],
+    data_dir: &Path,
+    repo: &Path,
+    home: &Path,
+) -> PathBuf {
+    let add_dir = arguments
+        .iter()
+        .position(|argument| argument == "--add-dir")
+        .and_then(|position| arguments.get(position + 1))
+        .map(PathBuf::from)
+        .expect("managed AGY launch carries its private plugin workspace");
+    assert!(
+        add_dir.starts_with(data_dir.canonicalize().unwrap().join("agent-integrations")),
+        "managed plugin workspace {} escaped daemon data {}",
+        add_dir.display(),
+        data_dir.display()
+    );
+    let plugin = add_dir.join(".agents/plugins/usagi-runtime");
+    for document in ["plugin.json", "mcp_config.json", "hooks.json"] {
+        assert!(plugin.join(document).is_file());
+    }
+    assert!(!repo.join(".agents/plugins/usagi-runtime").exists());
+    assert!(!home.join(".gemini/config").exists());
+    add_dir
+}
+
+fn assert_agy_conversation_state(state: &Path) {
+    assert!(state.join("conversations").is_dir());
+    for database in [
+        "conversation_summaries.db",
+        "conversation_summaries.db-shm",
+        "conversation_summaries.db-wal",
+    ] {
+        assert!(state.join(database).is_file());
+    }
+    assert_eq!(
+        fs::read_to_string(state.join("settings.json")).unwrap(),
+        "{\"existing\":true}\n"
+    );
+    assert!(!state.join("plugins").exists());
+    assert!(!state.join("import_manifest.json").exists());
+}
+
+/// Shipping composition E2E for the AGY-specific chain: private workspace
+/// plugin discovery, structured hook capture, cold interruption, and exact
+/// provider-native resume without a replacement prompt.
+#[test]
+fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    fs::create_dir(repo.path().join(".usagi")).unwrap();
+    fs::write(
+        repo.path().join(".usagi/config.toml"),
+        "[agents.agy]\nmodels = [\"fixture-agy\"]\n",
+    )
+    .unwrap();
+    git(repo.path(), &["add", ".usagi/config.toml"]);
+    git(repo.path(), &["commit", "-qm", "fixture agy config"]);
+
+    let home = short_dir("usagi-agy-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("agy-spawn-count");
+    let argv = home.path().join("agy-argv");
+    write_restartable_agy(&bin, &count, &argv);
+    let state = home.path().join(".gemini/antigravity-cli");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("settings.json"), "{\"existing\":true}\n").unwrap();
+    let daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
+    let data_dir = channel_data_dir(home.path());
+    let mut first = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut first);
+    let (_, terminal) = launch(&mut first, workspace, session, Some("agy"));
+    wait_for_terminal_text(&mut first, &terminal, "agy-ready");
+    wait_for_spawns(&count, 1);
+
+    let initial = nul_arguments(&argv);
+    let add_dir = assert_private_agy_plugin(&initial, &data_dir, repo.path(), home.path());
+    assert_agy_conversation_state(&state);
+    drop(first);
+    drop(daemon);
+    let _restarted = spawn_daemon_command(
+        repo.path(),
+        home.path(),
+        &bin,
+        None,
+        None,
+        Some(home.path()),
+    );
+    let mut second = client(&data_dir);
+    let (_, replacement, target) = resume(&mut second, workspace, session);
+    assert_eq!(
+        target.adapter_revision,
+        usagi_daemon::usecase::agy::PROFILE_REVISION
+    );
+    assert!(
+        !serde_json::to_string(&target)
+            .unwrap()
+            .contains("fixture-agy-conversation")
+    );
+    wait_for_spawns(&count, 2);
+    wait_for_terminal_text(&mut second, &replacement, "agy-ready");
+
+    let resumed = nul_arguments(&argv);
+    assert_eq!(
+        resumed
+            .iter()
+            .filter(|argument| argument.as_str() == "fixture-agy-conversation")
+            .count(),
+        1
+    );
+    assert!(
+        resumed
+            .windows(2)
+            .any(|arguments| { arguments == ["--conversation", "fixture-agy-conversation"] })
+    );
+    assert!(resumed.windows(2).any(|arguments| {
+        arguments[0] == "--add-dir" && arguments[1] == add_dir.to_string_lossy()
+    }));
+    assert!(
+        resumed
+            .iter()
+            .all(|argument| !matches!(argument.as_str(), "--prompt-interactive" | "--print"))
+    );
 }
 
 /// #510 product E2E: after a cold restart every interrupted conversation becomes

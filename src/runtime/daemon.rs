@@ -37,15 +37,17 @@ use dispatch::{
 #[cfg(test)]
 use agent_provisioning::{
     CLAUDE_PROGRAM, ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs,
-    claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
+    agent_writable_roots, agy_arguments_for_integration, agy_plugin_arguments,
+    agy_plugin_documents, claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
     claude_settings_arguments, claude_system_prompt_arguments, claude_writable_roots,
     codex_developer_instructions_arguments, codex_integration_arguments,
     codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
     effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
-    lexical_prefix_overlaps_path, mcp_environment, mcp_environment_allowlist, prompt_scope,
-    repair_codex_arg0_permissions, repair_codex_arg0_permissions_with_limit,
-    root_agent_writable_roots, root_memory_store_root, sandbox_mode, session_git_common_dir,
-    session_git_policy, toml_basic_string, validate_claude_sandbox_policy,
+    lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
+    mcp_environment_allowlist, prompt_scope, repair_codex_arg0_permissions,
+    repair_codex_arg0_permissions_with_limit, root_agent_writable_roots, root_memory_store_root,
+    sandbox_mode, session_git_common_dir, session_git_policy, shell_quote, toml_basic_string,
+    validate_claude_sandbox_policy, validate_isolated_sandbox_root,
     validate_root_git_common_dir_policy,
 };
 use agent_provisioning::{
@@ -131,6 +133,7 @@ use usagi_daemon::usecase::agent_ipc::{
     PromptMode, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
     TerminalOutcome,
 };
+use usagi_daemon::usecase::agy::AgyAdapter;
 use usagi_daemon::usecase::authority::activation::{
     AuthorityClaim, claim_authority, release_authority,
 };
@@ -3738,16 +3741,27 @@ fn open_agent_runtime(
             sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
+            workspaces: Arc::clone(&workspaces),
+            mcp_command: mcp_command.clone(),
+            data_home: data_home.clone(),
+            sandbox_backend: sandbox_backend.clone(),
+            sandbox_tmpdir: sandbox_tmpdir.clone(),
+            sandbox_home: sandbox_home.clone(),
+            sandbox_cache_dir: sandbox_cache_dir.clone(),
+            environment: Some(Arc::clone(&environment)),
+            // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
+            // 配布バイナリは常に拘束された Claude だけを起動する。
+            sandbox_passthrough,
+        }),
+        AgyAdapter::new(agent_provisioning::RootAgyProvisioner {
             workspaces,
             mcp_command,
             data_home,
+            environment: Some(environment),
             sandbox_backend,
             sandbox_tmpdir,
             sandbox_home,
             sandbox_cache_dir,
-            environment: Some(environment),
-            // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
-            // 配布バイナリは常に拘束された Claude だけを起動する。
             sandbox_passthrough,
         }),
     );
@@ -10760,6 +10774,10 @@ fn current_agent_integrations() -> Vec<AgentIntegrationRevision> {
         (
             DefaultModel::SakanaAi,
             usagi_daemon::usecase::codex::PROFILE_REVISION,
+        ),
+        (
+            DefaultModel::Agy,
+            usagi_daemon::usecase::agy::PROFILE_REVISION,
         ),
     ]
     .into_iter()
@@ -18432,8 +18450,298 @@ instructions = "{instructions}"
         assert_eq!(roots, [home.join(".codex").canonicalize().unwrap()]);
         assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
 
+        let roots = root_agent_writable_roots(Some(&home), "agy").unwrap();
+        assert_eq!(
+            roots,
+            [home
+                .join(".gemini/antigravity-cli/conversations")
+                .canonicalize()
+                .unwrap()]
+        );
+        assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let hostile_home = fixture.path().join("hostile-home");
+            let outside = fixture.path().join("outside");
+            std::fs::create_dir_all(&hostile_home).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            symlink(&outside, hostile_home.join(".gemini")).unwrap();
+            assert_eq!(
+                root_agent_writable_roots(Some(&hostile_home), "agy"),
+                Err(ClaudeSandboxPolicyError::InvalidWritableRoot)
+            );
+            assert!(!outside.join("antigravity-cli").exists());
+        }
+
         let roots = root_agent_writable_roots(None, "/bin/sh").unwrap();
         assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn agy_plugin_documents_are_scoped_and_shell_safe() {
+        let command = "/Applications/Usagi's Tools/usagi";
+        let (manifest, mcp, hooks) = agy_plugin_documents(command);
+
+        assert_eq!(manifest, serde_json::json!({"name": "usagi-runtime"}));
+        assert_eq!(mcp["mcpServers"]["usagi"]["command"], command);
+        assert_eq!(
+            mcp["mcpServers"]["usagi"]["args"],
+            serde_json::json!(["mcp"])
+        );
+        assert_eq!(hooks.as_object().unwrap().len(), 1);
+        let integration = &hooks["usagi-runtime"];
+        let command = integration["PreInvocation"][0]["command"].as_str().unwrap();
+        assert!(command.starts_with("'/Applications/Usagi'\"'\"'s Tools/usagi'"));
+        assert!(command.ends_with("agent-phase running --hook-event PreInvocation"));
+        assert_eq!(
+            integration["PreToolUse"][0]["matcher"],
+            serde_json::json!("*")
+        );
+        assert_eq!(
+            integration["PostToolUse"][0]["hooks"][0]["command"],
+            serde_json::json!(format!(
+                "{} agent-phase waiting --hook-event PostToolUse",
+                shell_quote("/Applications/Usagi's Tools/usagi")
+            ))
+        );
+        assert_eq!(
+            integration["Stop"][0]["command"],
+            serde_json::json!(format!(
+                "{} agent-phase ended --hook-event Stop",
+                shell_quote("/Applications/Usagi's Tools/usagi")
+            ))
+        );
+
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
+        let workspace = WorkspaceId::new();
+        let plugin_workspace =
+            materialize_agy_plugin(&data_home, workspace, Path::new(command)).unwrap();
+        let expected = fixture
+            .path()
+            .join("agent-integrations")
+            .join(workspace.to_string())
+            .join("agy")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(plugin_workspace, expected);
+        let plugin = plugin_workspace.join(".agents/plugins/usagi-runtime");
+        for document in ["plugin.json", "mcp_config.json", "hooks.json"] {
+            assert!(plugin.join(document).is_file());
+        }
+        assert!(
+            !fixture
+                .path()
+                .join(".gemini/config/plugins/usagi-runtime")
+                .exists(),
+            "managed launch material must not become a global AGY plugin"
+        );
+
+        let sandbox_home = fixture.path().join("home");
+        std::fs::create_dir(&sandbox_home).unwrap();
+        let writable = agent_writable_roots(
+            SandboxMode::Root,
+            Path::new("/workspace"),
+            None,
+            Some(&sandbox_home),
+            DefaultModel::Agy.command(),
+            &data_home,
+            workspace,
+        )
+        .unwrap();
+        assert!(writable.iter().all(|root| {
+            !plugin_workspace.starts_with(root) && !root.starts_with(&plugin_workspace)
+        }));
+    }
+
+    #[test]
+    fn agy_plugin_arguments_materialize_only_outside_the_write_surface() {
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
+        let workspace = WorkspaceId::new();
+        let policy = SandboxPolicyInputs {
+            mode: SandboxMode::Root,
+            program: DefaultModel::Agy.command(),
+            workspace_root: Path::new("/workspace"),
+            launch_roots: &[],
+            tmpdir: None,
+            home: None,
+            cache_dir: None,
+            backend: None,
+            passthrough: false,
+            read_only_roots: &[],
+        };
+        assert_eq!(
+            agy_plugin_arguments(
+                &data_home,
+                workspace,
+                Path::new("usagi"),
+                false,
+                false,
+                &policy
+            )
+            .unwrap(),
+            (Vec::new(), None)
+        );
+        let (arguments, isolated) = agy_plugin_arguments(
+            &data_home,
+            workspace,
+            Path::new("usagi"),
+            true,
+            false,
+            &policy,
+        )
+        .unwrap();
+        let isolated = isolated.unwrap();
+        assert_eq!(
+            arguments,
+            [
+                "--add-dir".to_owned(),
+                isolated.to_str().unwrap().to_owned()
+            ]
+        );
+
+        let temporary = tempfile::tempdir().unwrap();
+        let temporary_data = paths::DataHome::new(temporary.path(), paths::RuntimeMode::Production);
+        let temporary_policy = SandboxPolicyInputs {
+            tmpdir: Some(temporary.path()),
+            ..policy
+        };
+        assert!(
+            agy_plugin_arguments(
+                &temporary_data,
+                workspace,
+                Path::new("usagi"),
+                true,
+                false,
+                &temporary_policy,
+            )
+            .is_err()
+        );
+        assert!(!temporary.path().join("agent-integrations").exists());
+    }
+
+    #[test]
+    fn agy_plugin_arguments_reject_invalid_materialization_inputs() {
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
+        let workspace = WorkspaceId::new();
+        let policy = SandboxPolicyInputs {
+            mode: SandboxMode::Root,
+            program: DefaultModel::Agy.command(),
+            workspace_root: Path::new("/workspace"),
+            launch_roots: &[],
+            tmpdir: None,
+            home: None,
+            cache_dir: None,
+            backend: None,
+            passthrough: false,
+            read_only_roots: &[],
+        };
+        let missing_data = paths::DataHome::new(
+            fixture.path().join("missing-data"),
+            paths::RuntimeMode::Production,
+        );
+        assert!(
+            agy_plugin_arguments(
+                &missing_data,
+                workspace,
+                Path::new("usagi"),
+                true,
+                true,
+                &policy,
+            )
+            .is_err()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+            let invalid_command = PathBuf::from(OsString::from_vec(vec![0xff]));
+            assert!(agy_arguments_for_integration(&invalid_command).is_err());
+            assert!(
+                agy_plugin_arguments(
+                    &data_home,
+                    WorkspaceId::new(),
+                    &invalid_command,
+                    true,
+                    true,
+                    &policy,
+                )
+                .is_err()
+            );
+
+            #[cfg(target_os = "linux")]
+            {
+                let non_utf8_root = fixture
+                    .path()
+                    .join(OsString::from_vec(vec![b'n', b'o', b'n', b'-', 0xff]));
+                std::fs::create_dir(&non_utf8_root).unwrap();
+                let non_utf8_data =
+                    paths::DataHome::new(&non_utf8_root, paths::RuntimeMode::Production);
+                assert!(
+                    agy_plugin_arguments(
+                        &non_utf8_data,
+                        WorkspaceId::new(),
+                        Path::new("usagi"),
+                        true,
+                        true,
+                        &policy,
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agy_integration_rejects_every_effective_sandbox_write_surface() {
+        let roots = [PathBuf::from("/repo/.usagi/sessions/agy")];
+        let policy = SandboxPolicyInputs {
+            mode: SandboxMode::Session,
+            program: DefaultModel::Agy.command(),
+            workspace_root: Path::new("/repo"),
+            launch_roots: &roots,
+            tmpdir: Some(Path::new("/custom/tmpdir")),
+            home: Some(Path::new("/home/dev")),
+            cache_dir: Some(Path::new("/private/var/folders/ab/cd/C")),
+            backend: None,
+            passthrough: false,
+            read_only_roots: &[],
+        };
+        for target in [
+            "/tmp/usagi/agent-integrations",
+            "/var/tmp/usagi/agent-integrations",
+            "/custom/tmpdir/agent-integrations",
+            "/repo/.usagi/sessions/agy/private-plugin",
+            "/repo/daemon-data/agent-integrations",
+            "/home/dev/.gemini/antigravity-cli/conversations/private-plugin",
+        ] {
+            assert_eq!(
+                validate_isolated_sandbox_root(&policy, Path::new(target)),
+                Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
+                "{target} must fail closed"
+            );
+        }
+        assert_eq!(
+            validate_isolated_sandbox_root(
+                &policy,
+                Path::new("/daemon/agent-integrations/workspace/agy")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_isolated_sandbox_root(&policy, Path::new("/home/dev/.gemini/private-plugin")),
+            Ok(()),
+            "AGY global customization is no longer part of the write surface"
+        );
     }
 
     #[test]
@@ -19010,7 +19318,12 @@ instructions = "{instructions}"
         )
         .unwrap();
         std::fs::write(state.join("worktrees/linked/commondir"), "../..\n").unwrap();
-        for (program, allowed) in [("codex", false), ("claude", true), ("/bin/sh", true)] {
+        for (program, allowed) in [
+            ("codex", false),
+            ("claude", true),
+            ("agy", true),
+            ("/bin/sh", true),
+        ] {
             assert_eq!(
                 validate_root_git_common_dir_policy(
                     under_state.path(),
@@ -19180,6 +19493,7 @@ instructions = "{instructions}"
             Path::new("/repo"),
             &SandboxLauncherPaths::default(),
             &roots,
+            &[],
         )
         .unwrap();
         assert_eq!(launcher.program, "/opt/usagi/bin/usagi");
@@ -19214,6 +19528,7 @@ instructions = "{instructions}"
                 cache_dir: Some(Path::new("/cache")),
             },
             &roots,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -19270,6 +19585,7 @@ instructions = "{instructions}"
                 ..SandboxLauncherPaths::default()
             },
             &[],
+            &[],
         )
         .unwrap();
         assert!(
@@ -19308,6 +19624,7 @@ instructions = "{instructions}"
                 cache_dir,
                 backend: Some(&backend),
                 passthrough: false,
+                read_only_roots: &[],
             })
         };
         assert_eq!(validate(Some(&cache_root)), Ok(()));
@@ -19328,6 +19645,7 @@ instructions = "{instructions}"
                 cache_dir: Some(&overlapping_root),
                 backend: Some(&backend),
                 passthrough: false,
+                read_only_roots: &[],
             }),
             Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)
         );
@@ -19374,6 +19692,7 @@ instructions = "{instructions}"
                 cache_dir: None,
                 backend: Some(&backend),
                 passthrough: false,
+                read_only_roots: &[],
             })
         };
 
@@ -19429,6 +19748,7 @@ instructions = "{instructions}"
             ),
             ("codex-fugu", Ok(())),
             ("claude", Ok(())),
+            ("agy", Ok(())),
             ("/bin/sh", Ok(())),
         ] {
             assert_eq!(
@@ -19442,6 +19762,7 @@ instructions = "{instructions}"
                     cache_dir: None,
                     backend: Some(&backend),
                     passthrough: false,
+                    read_only_roots: &[],
                 }),
                 expected,
                 "{program} state root against a workspace inside ~/.codex"
@@ -19462,6 +19783,7 @@ instructions = "{instructions}"
                     cache_dir: None,
                     backend: Some(&backend),
                     passthrough: false,
+                    read_only_roots: &[],
                 }),
                 Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
                 "the lexical ~/.claude.json* grant must not cover a repository"
@@ -19493,6 +19815,7 @@ instructions = "{instructions}"
             Path::new("/repo"),
             &SandboxLauncherPaths::default(),
             &roots,
+            &[],
         )
         .unwrap();
         assert_eq!(&launcher.prefix[..3], ["claude-sandbox", "--mode", "root"]);
