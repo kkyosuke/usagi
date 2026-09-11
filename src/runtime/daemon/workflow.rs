@@ -12,6 +12,10 @@ use usagi_core::infrastructure::ipc::{
 use usagi_daemon::usecase::agent_ipc::SessionScopeResolver;
 use usagi_daemon::usecase::workflow;
 
+fn unavailable_scope<T>(_: T) -> ProtocolError {
+    unavailable("session/workspace identity is unavailable")
+}
+
 fn unavailable(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::new(ErrorCode::Unavailable, format!("Workflow: {error}"))
 }
@@ -79,7 +83,7 @@ fn handle(
         .lock()
         .map_err(unavailable)?
         .workspace_id()
-        .map_err(|_| unavailable("workspace identity is unavailable"))?;
+        .map_err(unavailable_scope)?;
     if actual != workspace {
         return Err(ProtocolError::new(
             ErrorCode::OwnershipUnknown,
@@ -89,7 +93,7 @@ fn handle(
     let scope = bound.scope_resolver();
     scope
         .resolve_available_scope(workspace, Some(session))
-        .map_err(|_| unavailable("session is unavailable"))?;
+        .map_err(unavailable_scope)?;
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
     workflow::snapshot(&store, workspace, session).map_err(unavailable)?;
     reconcile_runtime(agent, workspace, session)?;
@@ -123,7 +127,16 @@ fn handle(
                 let _ = deliver(agent, workspace, session, instruction.id);
             }
         }
-        verify_progress(&store, inventory, bound, workspace, session, run)?;
+        verify_progress(
+            &store,
+            inventory,
+            bound,
+            workspace,
+            session,
+            run,
+            &super::SystemGit,
+            &mut super::GhProcess,
+        )?;
     }
     serde_json::to_value(workflow::snapshot(&store, workspace, session).map_err(unavailable)?)
         .map_err(unavailable)
@@ -183,13 +196,19 @@ fn reconcile_runtime(
     }).map_err(unavailable)
 }
 
-fn verify_progress(
+#[allow(clippy::too_many_arguments)] // Keep both external verification ports explicit and injectable.
+pub(super) fn verify_progress<
+    G: usagi_core::infrastructure::git::GitRunner,
+    P: usagi_daemon::usecase::pr_inventory::GhProcessPort,
+>(
     store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
     inventory: &SharedPrInventory,
     bound: &ConnectionWorkspace,
     workspace: WorkspaceId,
     session: SessionId,
     run: &usagi_core::domain::workflow::WorkflowRun,
+    git: &G,
+    gh: &mut P,
 ) -> Result<(), ProtocolError> {
     let scope = bound.scope_resolver();
     if matches!(
@@ -205,15 +224,9 @@ fn verify_progress(
             .entries;
         let directory = scope
             .resolve_available_scope(workspace, Some(session))
-            .map_err(|_| unavailable("session is unavailable"))?
+            .map_err(unavailable_scope)?
             .working_directory;
-        let verified = workflow::verify_pr(
-            &super::SystemGit,
-            &mut super::GhProcess,
-            &directory,
-            &review.target,
-            &entries,
-        );
+        let verified = workflow::verify_pr(git, gh, &directory, &review.target, &entries);
         publish_verification(store, workspace, session, run, verified)?;
     }
     Ok(())

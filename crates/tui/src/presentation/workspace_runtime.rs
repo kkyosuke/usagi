@@ -2367,6 +2367,8 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = closeup_on(workspace, session);
+        let _ = runtime.handle_key(Key::Up);
+        let _ = runtime.handle_key(Key::Down);
         type_str(&mut runtime, "workflow");
         let effects = runtime.handle_key(Key::Enter);
         assert!(
