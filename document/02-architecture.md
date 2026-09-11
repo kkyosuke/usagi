@@ -1056,9 +1056,11 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   自身の通常の trust review を通し、daemon は hook trust を一括 bypass しない。
   Claude と同様、すべての `SessionStart` は同じ phase hook で current provider session ID と phase を一緒に報告する。
   これにより startup / resume / clear / compact、および Claude の fork 後の現在の会話へ durable resume metadata が追従する。
-- **Antigravity plugin**: daemon は provider の global plugin directory のうち
-  `~/.gemini/config/plugins/usagi-runtime/` だけを作成・更新する。`plugin.json`、`mcp_config.json`、`hooks.json` を
-  atomic write し、利用者の既存 plugin や top-level MCP/hook 設定を置換しない。`PreInvocation` で `running` と
+- **Antigravity plugin**: daemon は selected data directory の
+  `agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を作成・更新し、synthetic workspace を private
+  `--add-dir` で managed launch にだけ追加する。`plugin.json`、`mcp_config.json`、`hooks.json` を atomic write し、
+  sandbox writable roots には plugin root を含めない。したがって Agent 自身による永続的な hook 差し替えと、管理外の
+  `agy` への統合残留を防ぎ、利用者の global/workspace plugin や top-level MCP/hook 設定も置換しない。`PreInvocation` で `running` と
   `conversationId`、`PreToolUse` / `PostToolUse` で `running` / `waiting`、`Stop` で `ended` を報告する。
   hook は stdin を `usagi agent-phase` が一度だけ消費し、daemon が受理した後に Antigravity 所定の JSON を stdout へ返す。
 - **`TMPDIR` 伝播**: agent child は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable

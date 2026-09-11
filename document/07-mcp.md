@@ -326,8 +326,10 @@ daemon の spawn 直前の再検証も同じ workspace root を権威とし、se
 workspace config 自体が未作成なら `claude/default` を安全な provider-default として使う。config が存在するのに
 読めない、または runtime/model 設定が不正な場合は空へ fail closed し、暗黙の fallback は行わない。
 `sakana-ai` の実行コマンドは `codex-fugu`、`agy` の実行コマンドは `agy` である。Antigravity では daemon が
-`~/.gemini/config/plugins/usagi-runtime/` に専用 plugin を materialize し、その `mcp_config.json` から同じ
-`usagi mcp` child を起動する。既存の global/workspace MCP 設定は置換しない。
+daemon の selected data directory に
+`agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を materialize し、その synthetic workspace を
+managed launch の private `--add-dir` にだけ渡す。plugin の `mcp_config.json` から同じ `usagi mcp` child を起動し、
+plugin root は sandbox から read-only のままにする。既存の global/workspace MCP 設定は置換しない。
 
 ### delegation の atomicity
 

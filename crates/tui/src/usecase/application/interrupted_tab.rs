@@ -1166,6 +1166,7 @@ mod tests {
         );
         assert_eq!(provider_label(Some(ProviderKind::Claude)), "Claude");
         assert_eq!(provider_label(Some(ProviderKind::Codex)), "Codex");
+        assert_eq!(provider_label(Some(ProviderKind::Agy)), "Antigravity");
         assert_eq!(provider_label(None), "Agent");
 
         let workspace = WorkspaceId::new();

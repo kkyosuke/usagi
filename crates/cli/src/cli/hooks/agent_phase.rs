@@ -2,7 +2,8 @@
 //!
 //! usagi がエージェント起動時に各 provider のライフサイクルフックへ配線し、フックが phase
 //! （例: `ended`）を引数に渡して呼ぶ。人手で叩くものではない（`--help` 非表示）。フックは
-//! 終了コードだけを見るため、標準出力には何も書かない。
+//! Claude / Codex では終了コードだけを使い、Antigravity では provider 所定の判定 JSON も
+//! 標準出力へ返す。
 //!
 //! 報告元の runtime は daemon が hook process の OS peer lineage から exact live runtime を
 //! 解決して束縛する（caller は runtime / session / path を名指しできない）。phase 引数は
@@ -36,8 +37,9 @@ impl Run for AgentPhase {
     }
 }
 
-/// hook JSON のうち、この報告が読む field。`session_id` は `SessionStart` でだけ
-/// daemon へ渡し、`transcript_path` などの他 field は deserialize 対象にせず file も開かない。
+/// hook JSON のうち、この報告が読む field。`session_id` / `conversationId` は provider の
+/// structured starting event でだけ daemon へ渡し、transcript などの他 field は deserialize
+/// 対象にせず file も開かない。
 #[derive(Debug, Deserialize)]
 struct PhaseHookInput {
     #[serde(default)]

@@ -1486,7 +1486,7 @@ revision 4 以前の [Codex structured capture request](04-ipc.md#codex-structur
 process の移行互換にだけ使う。
 
 この経路の互換条件は provider が documented lifecycle hook と native conversation ID field を提供することである。
-Antigravity は global `usagi-runtime` plugin の `hooks.json` と camelCase の `conversationId` を使う。Codex では通常の hook trust review も必要であり、daemon は
+Antigravity は managed launch 専用 `usagi-runtime` plugin の `hooks.json` と camelCase の `conversationId` を使う。Codex では通常の hook trust review も必要であり、daemon は
 `--dangerously-bypass-hook-trust` を渡さない。managed policy による hooks 無効化、Codex hook の未 trust、
 非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、
 daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。
@@ -1597,9 +1597,11 @@ daemon 接続に必要な環境だけを forward する。
 server だけである。それ以外の MCP server・shell・ファイル編集・network の permission model は通常どおり維持され、
 無効化・緩和しない。
 
-Antigravity は `~/.gemini/config/plugins/usagi-runtime/mcp_config.json` から同じ server を起動する。daemon が所有する
-専用 plugin directory だけを atomic update し、利用者の既存 `~/.gemini/config/mcp_config.json`、workspace `.agents/`、
-他 plugin は変更しない。
+Antigravity は daemon data の
+`agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/mcp_config.json` から同じ server を起動する。
+daemon は専用 plugin directory だけを atomic update し、その synthetic workspace を private `--add-dir` で managed launch
+へだけ追加する。plugin root は sandbox writable roots に含めないため Agent は設定を永続的に差し替えられず、利用者の
+`~/.gemini/config/`、実 workspace の `.agents/`、他 plugin は変更しない。
 
 daemon が provision した live Agent provider の直系 MCP child だけが、起動後の one-shot IPC claim で runtime に結び付く opaque な
 caller credential を受け取る。claim は kernel 由来の peer PID / 親 PID / process group、live runtime、generation と

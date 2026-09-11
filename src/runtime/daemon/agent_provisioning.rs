@@ -18,7 +18,7 @@ use super::{
 mod agy;
 pub(super) use agy::RootAgyProvisioner;
 #[cfg(test)]
-pub(super) use agy::agy_plugin_documents;
+pub(super) use agy::{agy_plugin_documents, materialize_agy_plugin};
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(

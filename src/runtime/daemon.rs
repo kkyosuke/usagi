@@ -37,16 +37,16 @@ use dispatch::{
 #[cfg(test)]
 use agent_provisioning::{
     CLAUDE_PROGRAM, ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs,
-    agy_plugin_documents, claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
-    claude_settings_arguments, claude_system_prompt_arguments, claude_writable_roots,
-    codex_developer_instructions_arguments, codex_integration_arguments,
+    agent_writable_roots, agy_plugin_documents, claude_mcp_arguments, claude_prompt_arguments,
+    claude_sandbox_launcher, claude_settings_arguments, claude_system_prompt_arguments,
+    claude_writable_roots, codex_developer_instructions_arguments, codex_integration_arguments,
     codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
     effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
-    lexical_prefix_overlaps_path, mcp_environment, mcp_environment_allowlist, prompt_scope,
-    repair_codex_arg0_permissions, repair_codex_arg0_permissions_with_limit,
-    root_agent_writable_roots, root_memory_store_root, sandbox_mode, session_git_common_dir,
-    session_git_policy, shell_quote, toml_basic_string, validate_claude_sandbox_policy,
-    validate_root_git_common_dir_policy,
+    lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
+    mcp_environment_allowlist, prompt_scope, repair_codex_arg0_permissions,
+    repair_codex_arg0_permissions_with_limit, root_agent_writable_roots, root_memory_store_root,
+    sandbox_mode, session_git_common_dir, session_git_policy, shell_quote, toml_basic_string,
+    validate_claude_sandbox_policy, validate_root_git_common_dir_policy,
 };
 use agent_provisioning::{
     DiscardJournal, RootClaudeProvisioner, RootCodexProvisioner,
@@ -18490,6 +18490,48 @@ instructions = "{instructions}"
                 shell_quote("/Applications/Usagi's Tools/usagi")
             ))
         );
+
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
+        let workspace = WorkspaceId::new();
+        let plugin_workspace =
+            materialize_agy_plugin(&data_home, workspace, Path::new(command)).unwrap();
+        let expected = fixture
+            .path()
+            .join("agent-integrations")
+            .join(workspace.to_string())
+            .join("agy")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(plugin_workspace, expected);
+        let plugin = plugin_workspace.join(".agents/plugins/usagi-runtime");
+        for document in ["plugin.json", "mcp_config.json", "hooks.json"] {
+            assert!(plugin.join(document).is_file());
+        }
+        assert!(
+            !fixture
+                .path()
+                .join(".gemini/config/plugins/usagi-runtime")
+                .exists(),
+            "managed launch material must not become a global AGY plugin"
+        );
+
+        let sandbox_home = fixture.path().join("home");
+        std::fs::create_dir(&sandbox_home).unwrap();
+        let writable = agent_writable_roots(
+            SandboxMode::Root,
+            Path::new("/workspace"),
+            None,
+            Some(&sandbox_home),
+            DefaultModel::Agy.command(),
+            &data_home,
+            workspace,
+        )
+        .unwrap();
+        assert!(writable.iter().all(|root| {
+            !plugin_workspace.starts_with(root) && !root.starts_with(&plugin_workspace)
+        }));
     }
 
     #[test]

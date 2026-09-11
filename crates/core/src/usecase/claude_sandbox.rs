@@ -6,7 +6,7 @@
 //! IO を持たないためユニットテストで全分岐を被覆できる。
 //!
 //! **fail-closed**: sandbox backend が無い、または未対応 platform では [`SandboxPlan::Reject`] を
-//! 返し、Claude を無保護で起動しない。合成ルートは Reject を非 0 終了に写す。
+//! 返し、Agent CLI を無保護で起動しない。合成ルートは Reject を非 0 終了に写す。
 //!
 //! 起動固有の writable root は provisioner が渡す（session は own worktree と必要な Git administrative
 //! state、root coordinator は repository-local root を持たない）。**その起動固有 root に、両 mode とも同じ普遍領域**
@@ -170,7 +170,7 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
     let prefixes = writable_prefixes(request);
     match request.platform {
         Platform::Unsupported => SandboxPlan::Reject {
-            reason: "このプラットフォームには OS sandbox backend が無いため、Claude を無保護で起動しません"
+            reason: "このプラットフォームには OS sandbox backend が無いため、Agent CLI を無保護で起動しません"
                 .to_owned(),
         },
         Platform::MacOs => match &request.backend {
@@ -255,7 +255,7 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
 fn reject_backend(backend: &str) -> SandboxPlan {
     SandboxPlan::Reject {
         reason: format!(
-            "sandbox backend（{backend}）が見つからないため、Claude を無保護で起動しません"
+            "sandbox backend（{backend}）が見つからないため、Agent CLI を無保護で起動しません"
         ),
     }
 }

@@ -148,6 +148,30 @@ fn write_restartable_codex(bin: &Path, count: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// Antigravity fixture which loads the daemon-private workspace plugin, runs
+/// its structured starting hook, and records exact argv for cold-restart resume.
+fn write_restartable_agy(bin: &Path, count: &Path, argv: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = models ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nplugin_workspace=\nconversation_id=\nprevious=\nfor argument in \"$@\"; do\n  if [ \"$previous\" = --add-dir ]; then plugin_workspace=\"$argument\"; fi\n  if [ \"$previous\" = --conversation ]; then conversation_id=\"$argument\"; fi\n  previous=\"$argument\"\ndone\n[ -n \"$plugin_workspace\" ] || exit 10\nplugin=\"$plugin_workspace/.agents/plugins/usagi-runtime\"\n[ -f \"$plugin/plugin.json\" ] || exit 11\n[ -f \"$plugin/mcp_config.json\" ] || exit 12\n[ -f \"$plugin/hooks.json\" ] || exit 13\ngrep -q '\"PreInvocation\"' \"$plugin/hooks.json\" || exit 14\nresuming=true\nif [ -z \"$conversation_id\" ]; then conversation_id=fixture-agy-conversation; resuming=false; fi\nresponse=$(printf '%s' '{{\"conversationId\":\"'\"$conversation_id\"'\",\"workspacePaths\":[\"/fixture\"]}}' | {usagi} agent-phase running --hook-event PreInvocation) || exit 15\n[ \"$response\" = '{{}}' ] || exit 16\nprintf '%s\\0' \"$@\" > \"{}\"\nprintf 'spawn\\n' >> \"{}\"\nprintf 'agy-ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        argv.display(),
+        count.display(),
+    );
+    let path = bin.join("agy");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn nul_arguments(path: &Path) -> Vec<String> {
+    fs::read(path)
+        .unwrap()
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .map(|argument| String::from_utf8(argument.to_vec()).unwrap())
+        .collect()
+}
+
 /// Restartable provider whose successor readiness can be held until the test
 /// has killed the lifecycle requester. The daemon recovery worker, rather than
 /// that requester, must still consume the durable restart transaction.
@@ -1799,6 +1823,98 @@ fn wait_for_spawns(count: &Path, expected: usize) {
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Shipping composition E2E for the AGY-specific chain: private workspace
+/// plugin discovery, structured hook capture, cold interruption, and exact
+/// provider-native resume without a replacement prompt.
+#[test]
+fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    fs::create_dir(repo.path().join(".usagi")).unwrap();
+    fs::write(
+        repo.path().join(".usagi/config.toml"),
+        "[agents.agy]\nmodels = [\"fixture-agy\"]\n",
+    )
+    .unwrap();
+    git(repo.path(), &["add", ".usagi/config.toml"]);
+    git(repo.path(), &["commit", "-qm", "fixture agy config"]);
+
+    let home = short_dir("usagi-agy-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("agy-spawn-count");
+    let argv = home.path().join("agy-argv");
+    write_restartable_agy(&bin, &count, &argv);
+    let daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    let mut first = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut first);
+    let (_, terminal) = launch(&mut first, workspace, session, Some("agy"));
+    wait_for_terminal_text(&mut first, &terminal, "agy-ready");
+    wait_for_spawns(&count, 1);
+
+    let initial = nul_arguments(&argv);
+    let add_dir = initial
+        .iter()
+        .position(|argument| argument == "--add-dir")
+        .and_then(|position| initial.get(position + 1))
+        .map(PathBuf::from)
+        .expect("managed AGY launch carries its private plugin workspace");
+    assert!(
+        add_dir.starts_with(data_dir.canonicalize().unwrap().join("agent-integrations")),
+        "managed plugin workspace {add_dir:?} escaped daemon data {data_dir:?}"
+    );
+    let plugin = add_dir.join(".agents/plugins/usagi-runtime");
+    assert!(plugin.join("plugin.json").is_file());
+    assert!(plugin.join("mcp_config.json").is_file());
+    assert!(plugin.join("hooks.json").is_file());
+    assert!(!repo.path().join(".agents/plugins/usagi-runtime").exists());
+    assert!(
+        !home
+            .path()
+            .join(".gemini/config/plugins/usagi-runtime")
+            .exists()
+    );
+
+    drop(first);
+    drop(daemon);
+    let _restarted = spawn_daemon(repo.path(), home.path(), &bin, None);
+    let mut second = client(&data_dir);
+    let (_, replacement, target) = resume(&mut second, workspace, session);
+    assert_eq!(
+        target.adapter_revision,
+        usagi_daemon::usecase::agy::PROFILE_REVISION
+    );
+    assert!(
+        !serde_json::to_string(&target)
+            .unwrap()
+            .contains("fixture-agy-conversation")
+    );
+    wait_for_spawns(&count, 2);
+    wait_for_terminal_text(&mut second, &replacement, "agy-ready");
+
+    let resumed = nul_arguments(&argv);
+    assert_eq!(
+        resumed
+            .iter()
+            .filter(|argument| argument.as_str() == "fixture-agy-conversation")
+            .count(),
+        1
+    );
+    assert!(
+        resumed
+            .windows(2)
+            .any(|arguments| { arguments == ["--conversation", "fixture-agy-conversation"] })
+    );
+    assert!(resumed.windows(2).any(|arguments| {
+        arguments[0] == "--add-dir" && arguments[1] == add_dir.to_string_lossy()
+    }));
+    assert!(
+        resumed
+            .iter()
+            .all(|argument| !matches!(argument.as_str(), "--prompt-interactive" | "--print"))
+    );
 }
 
 /// #510 product E2E: after a cold restart every interrupted conversation becomes

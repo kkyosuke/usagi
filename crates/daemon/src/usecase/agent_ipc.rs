@@ -1531,12 +1531,12 @@ impl AgentRuntime {
         }
         let durable = durable_provider_phase(phase);
         let captured = if let Some(native_session_id) = native_session_id {
-            let capture_phase = durable.ok_or_else(|| {
-                ProtocolError::new(
+            let Some(capture_phase) = durable else {
+                return Err(ProtocolError::new(
                     ErrorCode::InvalidArgument,
                     "provider session ID requires a durable starting phase",
-                )
-            })?;
+                ));
+            };
             self.capture_provider_session_start(&caller.runtime, native_session_id, capture_phase)?
         } else {
             false

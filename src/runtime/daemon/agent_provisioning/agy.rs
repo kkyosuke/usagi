@@ -7,6 +7,7 @@ use usagi_core::{
     infrastructure::persistence::json_file,
     usecase::claude_sandbox::SandboxMode,
 };
+use usagi_daemon::infrastructure::unix_transport::ensure_private_dir_all;
 use usagi_daemon::usecase::{
     agy::{AgyProvision, AgyProvisionFailure, AgyProvisioner},
     runtime::{ProvisionContext, SpawnProvision},
@@ -17,8 +18,8 @@ use super::{
     agent_writable_roots, claude_sandbox, claude_sandbox_launcher, configured_environment,
     configured_mcp_tools, effective_role_instruction, insert_root_git_environment,
     launch_allowlist, launch_environment, launch_system_prompt, mcp_environment, paths,
-    prompt_scope, root_agent_writable_roots, sandbox_mode, session_git_policy, shell_quote,
-    validate_claude_sandbox_policy, validate_owned_directory,
+    prompt_scope, sandbox_mode, session_git_policy, shell_quote, validate_claude_sandbox_policy,
+    validate_owned_directory,
 };
 
 /// Resolves the checkout, Antigravity plugin, prompt, environment, and outer
@@ -53,10 +54,13 @@ impl AgyProvisioner for RootAgyProvisioner {
             .then(|| configured_mcp_tools(&self.data_home, &workspace_root))
             .transpose()
             .map_err(|()| AgyProvisionFailure::MaterializationFailed)?;
-        if context.inject_mcp {
-            materialize_agy_plugin(self.sandbox_home.as_deref(), &self.mcp_command)
-                .map_err(|()| AgyProvisionFailure::MaterializationFailed)?;
-        }
+        let arguments = agy_plugin_arguments(
+            &self.data_home,
+            context.scope.workspace_id,
+            &self.mcp_command,
+            context.inject_mcp,
+        )
+        .map_err(|()| AgyProvisionFailure::MaterializationFailed)?;
         let user = configured_environment(self.environment.as_ref(), &workspace_root)
             .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
         let mut spawn = SpawnProvision::new(
@@ -65,7 +69,7 @@ impl AgyProvisioner for RootAgyProvisioner {
                 mcp_environment(context, &self.data_home, &workspace_root)
                     .map_err(|()| AgyProvisionFailure::MaterializationFailed)?,
             ),
-            Vec::new(),
+            arguments,
         );
         let session_git = if mode == SandboxMode::Session {
             session_git_policy(&workspace_root, &working_directory)
@@ -136,7 +140,21 @@ impl AgyProvisioner for RootAgyProvisioner {
     }
 }
 
-/// Provider-native global plugin documents loaded by Antigravity CLI.
+fn agy_plugin_arguments(
+    data_home: &paths::DataHome,
+    workspace: usagi_core::domain::id::WorkspaceId,
+    command: &std::path::Path,
+    enabled: bool,
+) -> Result<Vec<String>, ()> {
+    if !enabled {
+        return Ok(Vec::new());
+    }
+    let integration = materialize_agy_plugin(data_home, workspace, command)?;
+    let integration = integration.to_str().ok_or(())?;
+    Ok(vec!["--add-dir".to_owned(), integration.to_owned()])
+}
+
+/// Provider-native workspace plugin documents loaded by Antigravity CLI.
 #[must_use]
 pub(in crate::runtime::daemon) fn agy_plugin_documents(
     command: &str,
@@ -189,27 +207,24 @@ pub(in crate::runtime::daemon) fn agy_plugin_documents(
     (plugin, mcp, hooks)
 }
 
-/// Writes only usagi's dedicated Antigravity plugin directory. Existing user
-/// MCP, hook, and settings documents remain untouched.
+/// Writes usagi's dedicated Antigravity plugin beneath daemon-private data and
+/// returns the synthetic workspace root passed only to this managed launch.
+/// The root is deliberately not a sandbox writable root, so the provider may
+/// read but cannot persistently replace its hook or MCP command documents.
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agy_plugin_documents_are_scoped_and_shell_safe
-fn materialize_agy_plugin(
-    home: Option<&std::path::Path>,
+pub(in crate::runtime::daemon) fn materialize_agy_plugin(
+    data_home: &paths::DataHome,
+    workspace: usagi_core::domain::id::WorkspaceId,
     command: &std::path::Path,
-) -> Result<(), ()> {
-    let home = home.ok_or(())?;
-    validate_owned_directory(home).map_err(|_| ())?;
-    let mut state_roots =
-        root_agent_writable_roots(Some(home), DefaultModel::Agy.command()).map_err(|_| ())?;
-    let mut plugin = state_roots.pop().ok_or(())?;
-    for component in ["config", "plugins", "usagi-runtime"] {
-        plugin.push(component);
-        match std::fs::create_dir(&plugin) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(()),
-        }
-        validate_owned_directory(&plugin).map_err(|_| ())?;
-    }
+) -> Result<PathBuf, ()> {
+    let integration = data_home
+        .selected()
+        .join("agent-integrations")
+        .join(workspace.to_string())
+        .join("agy");
+    let plugin = integration.join(".agents/plugins/usagi-runtime");
+    ensure_private_dir_all(&plugin).map_err(|_| ())?;
+    validate_owned_directory(&plugin).map_err(|_| ())?;
     let command = command.to_str().ok_or(())?;
     let (manifest, mcp, hooks) = agy_plugin_documents(command);
     for (name, value) in [
@@ -219,5 +234,7 @@ fn materialize_agy_plugin(
     ] {
         json_file::write_atomic(&plugin, &plugin.join(name), &value).map_err(|_| ())?;
     }
-    Ok(())
+    let integration = integration.canonicalize().map_err(|_| ())?;
+    validate_owned_directory(&integration).map_err(|_| ())?;
+    Ok(integration)
 }

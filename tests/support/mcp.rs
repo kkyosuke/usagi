@@ -763,8 +763,31 @@ fn install_fixture_agent(
     output: &Path,
 ) {
     let relay_lock = input.with_extension("lock");
+    let agy_plugin_probe = if name == "agy" {
+        r#"plugin_workspace=
+conversation_id="fixture-agy-$$"
+previous=
+for argument in "$@"; do
+  if [ "$previous" = --add-dir ]; then plugin_workspace="$argument"; fi
+  if [ "$previous" = --conversation ]; then conversation_id="$argument"; fi
+  previous="$argument"
+done
+plugin="$plugin_workspace/.agents/plugins/usagi-runtime"
+[ -f "$plugin/plugin.json" ] || exit 10
+[ -f "$plugin/mcp_config.json" ] || exit 11
+[ -f "$plugin/hooks.json" ] || exit 12
+grep -q '"name"[[:space:]]*:[[:space:]]*"usagi-runtime"' "$plugin/plugin.json" || exit 13
+grep -q '"mcpServers"' "$plugin/mcp_config.json" || exit 14
+grep -q '"PreInvocation"' "$plugin/hooks.json" || exit 15
+response=$(printf '{"conversationId":"%s","workspacePaths":["/fixture"]}' "$conversation_id" | "$USAGI_E2E_USAGI" agent-phase running --hook-event PreInvocation) || exit 16
+[ "$response" = '{}' ] || exit 17
+printf 'agy-plugin-ready\n' >> "$USAGI_MCP_FIXTURE_LOG"
+"#
+    } else {
+        ""
+    };
     let script = format!(
-        "#!/bin/sh\nif {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} || {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} || [ \"$1\" = models ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
+        "#!/bin/sh\nif {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} || {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} || [ \"$1\" = models ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n{agy_plugin_probe}\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
         relay_lock.display(),
         input.display(),
         output.display()

@@ -22,8 +22,8 @@ use super::runtime::{
     AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, SpawnProvision,
 };
 
-/// Revision 1 uses Antigravity's plugin, prompt, and conversation flag contracts.
-pub const PROFILE_REVISION: u32 = 1;
+/// Revision 2 scopes the plugin to managed launches through a private workspace.
+pub const PROFILE_REVISION: u32 = 2;
 
 /// Product-private provisioning result for one Antigravity launch.
 pub struct AgyProvision {
