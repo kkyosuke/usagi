@@ -109,7 +109,7 @@ pub struct SandboxRequest {
     pub protected_root: Option<PathBuf>,
     /// 解決済み backend 実行ファイル（macOS: `sandbox-exec` / Linux: `bwrap`）。無ければ `None`。
     pub backend: Option<PathBuf>,
-    /// provisioner が起動 scope から渡す writable root。
+    /// provisioner が起動 scope から渡す writable file / directory。
     pub launch_roots: Vec<PathBuf>,
     /// writable root の内側でも書き込みを再度閉じる read-only file / directory carve-out。
     /// 対象は launcher 起動前に実在・検証済みでなければならない。
@@ -277,12 +277,13 @@ fn reject_backend(backend: &str) -> SandboxPlan {
     }
 }
 
-/// exec する program が自身の state / 認証キャッシュを書く `$HOME` 配下の directory 名。
+/// exec する program が managed launch 中に書ける `$HOME` 配下の directory 名。
 ///
 /// 根拠は launcher が実際に exec する program（`command` の先頭）だけで、値の単一情報源は
 /// [`DefaultModel::state_directory`] である。したがって grant は起動する CLI と必ず一致し、
-/// provider を増やしても sandbox 側に写し漏れが起きない。usagi が launch しない未知 program
-/// には state root を与えない（fail-closed）。
+/// provider を増やしても sandbox 側に写し漏れが起きない。AGY は自動ロードされる global
+/// customization と runtime state が同じ `~/.gemini` に同居するため、conversation subtree
+/// だけを返す。usagi が launch しない未知 program には state root を与えない（fail-closed）。
 #[must_use]
 pub fn agent_state_directory(program: &str) -> Option<&'static str> {
     let name = Path::new(program).file_name()?;
@@ -324,7 +325,8 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
         roots.insert(tmpdir.clone());
     }
     if let Some(home) = &request.home {
-        // 起動する agent CLI 自身の state / 認証キャッシュ（`~/.claude` / `~/.codex` / `~/.codex-fugu`）。
+        // 起動する agent CLI 自身の writable state。AGY は global customization と
+        // state が同居するため、conversation subtree だけを返す。
         if let Some(state) = request
             .command
             .first()
@@ -780,7 +782,7 @@ mod tests {
             ("claude", ".claude"),
             ("codex", ".codex"),
             ("codex-fugu", ".codex-fugu"),
-            ("agy", ".gemini"),
+            ("agy", ".gemini/antigravity-cli/conversations"),
             // PATH 解決済みの絶対 path でも basename で判定する。
             ("/opt/homebrew/bin/codex", ".codex"),
         ] {
@@ -817,7 +819,10 @@ mod tests {
         );
         // 判定は closed vocabulary（`DefaultModel`）で、未知 token は None を返す。
         assert_eq!(agent_state_directory("sakana.ai"), Some(".codex-fugu"));
-        assert_eq!(agent_state_directory("agy"), Some(".gemini"));
+        assert_eq!(
+            agent_state_directory("agy"),
+            Some(".gemini/antigravity-cli/conversations")
+        );
         assert_eq!(agent_state_directory("gemini"), None);
         assert_eq!(agent_state_directory(""), None);
         assert_eq!(agent_state_directory("/"), None);
@@ -1115,28 +1120,26 @@ mod tests {
         for platform in [Platform::MacOs, Platform::Linux] {
             let mut request = request(platform, Some("/sandbox"));
             request.command = vec!["agy".to_owned()];
-            request.read_only_roots = vec![PathBuf::from("/home/dev/.gemini/config")];
+            let state = "/home/dev/.gemini/antigravity-cli/conversations";
+            let protected = format!("{state}/protected.db");
+            request.read_only_roots = vec![PathBuf::from(&protected)];
             let (_, argv) = plan(&request).into_launch().unwrap();
             if platform == Platform::MacOs {
                 let profile = &argv[1];
-                let allow = profile.find("(subpath \"/home/dev/.gemini\")").unwrap();
+                let allow = profile.find(&format!("(subpath \"{state}\")")).unwrap();
                 let deny = profile
-                    .find("(deny file-write* (subpath \"/home/dev/.gemini/config\"))")
+                    .find(&format!("(deny file-write* (subpath \"{protected}\"))"))
                     .unwrap();
                 assert!(deny > allow);
             } else {
                 assert_eq!(platform, Platform::Linux);
                 let writable = argv
                     .windows(3)
-                    .position(|window| {
-                        window[0] == "--bind-try" && window[1] == "/home/dev/.gemini"
-                    })
+                    .position(|window| window[0] == "--bind-try" && window[1] == state)
                     .unwrap();
                 let read_only = argv
                     .windows(3)
-                    .position(|window| {
-                        window[0] == "--ro-bind" && window[1] == "/home/dev/.gemini/config"
-                    })
+                    .position(|window| window[0] == "--ro-bind" && window[1] == protected)
                     .unwrap();
                 assert!(read_only > writable);
             }
@@ -1181,6 +1184,14 @@ mod tests {
             Path::new("/home/dev/.claude.json")
         ));
         request.command = vec!["agy".to_owned()];
+        assert!(writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.gemini/antigravity-cli/conversations/session.db")
+        ));
+        assert!(!writable_surface_overlaps(
+            &request,
+            Path::new("/home/dev/.gemini/antigravity-cli/settings.json")
+        ));
         assert!(!writable_surface_overlaps(
             &request,
             Path::new("/daemon/agent-integrations/workspace/agy")

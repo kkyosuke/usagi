@@ -312,21 +312,24 @@ impl DefaultModel {
         }
     }
 
-    /// The `$HOME`-relative directory this provider's CLI writes its own state
-    /// and auth cache into (`~/.claude`, `~/.gemini`, `~/.codex`,
-    /// `~/.codex-fugu`).
+    /// The `$HOME`-relative directory this provider's CLI must be allowed to
+    /// write while it is managed by usagi.
     ///
     /// It belongs next to [`command`](Self::command) because the executable and
-    /// the directory it writes are one fact: a launcher that confines writes has
-    /// to grant the state directory of the CLI it actually spawns, and a renamed
+    /// the writable state directory are one fact: a launcher that confines
+    /// writes has to grant the state of the CLI it actually spawns, and a renamed
     /// executable must not leave that grant pointing at another provider's
     /// state. `sakana-ai` runs `codex-fugu`, whose state is `~/.codex-fugu`, so
-    /// it never shares Codex's rollouts.
+    /// it never shares Codex's rollouts. AGY is deliberately narrower: auth is
+    /// held by the OS keyring and only conversation databases need persistent
+    /// writes. Keeping the rest of `~/.gemini` outside the grant prevents a
+    /// managed tool from replacing global rules, skills, plugins, or scripts
+    /// that AGY automatically executes on a later launch.
     #[must_use]
     pub const fn state_directory(self) -> &'static str {
         match self {
             Self::Claude => ".claude",
-            Self::Agy => ".gemini",
+            Self::Agy => ".gemini/antigravity-cli/conversations",
             Self::OpenAi => ".codex",
             Self::SakanaAi => ".codex-fugu",
         }

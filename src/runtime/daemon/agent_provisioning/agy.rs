@@ -23,7 +23,7 @@ use super::{
 };
 
 mod security;
-use security::prepare_agy_read_only_paths;
+use security::prepare_agy_writable_paths;
 
 /// Resolves the checkout, Antigravity plugin, prompt, environment, and outer
 /// sandbox for the `agy` adapter.
@@ -66,7 +66,7 @@ impl AgyProvisioner for RootAgyProvisioner {
         } else {
             None
         };
-        let sandbox_roots = agent_writable_roots(
+        let mut sandbox_roots = agent_writable_roots(
             mode,
             &working_directory,
             session_git.as_ref(),
@@ -76,7 +76,10 @@ impl AgyProvisioner for RootAgyProvisioner {
             context.scope.workspace_id,
         )
         .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
-        let mut read_only_roots = prepare_agy_read_only_paths(self.sandbox_home.as_deref())?;
+        sandbox_roots.extend(prepare_agy_writable_paths(self.sandbox_home.as_deref())?);
+        sandbox_roots.sort();
+        sandbox_roots.dedup();
+        let mut read_only_roots = Vec::new();
         let policy = SandboxPolicyInputs {
             mode,
             program: DefaultModel::Agy.command(),

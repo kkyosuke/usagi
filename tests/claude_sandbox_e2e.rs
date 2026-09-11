@@ -133,13 +133,14 @@ fn run_usagi_in_root(root: &Path, data: &Path, arguments: &[&str]) -> Output {
 /// Runs `program` (a fixture executable whose *name* selects the provider) as a
 /// root coordinator, with `home` as the launcher's `$HOME` policy input.
 fn run_agent_in_root(root: &Path, home: &Path, program: &Path) -> Output {
-    run_agent_in_root_with_read_only(root, home, program, &[])
+    run_agent_in_root_with_policy(root, home, program, &[], &[])
 }
 
-fn run_agent_in_root_with_read_only(
+fn run_agent_in_root_with_policy(
     root: &Path,
     home: &Path,
     program: &Path,
+    writable_roots: &[&Path],
     read_only_roots: &[&Path],
 ) -> Output {
     let protected = root.canonicalize().expect("canonical protected root");
@@ -150,6 +151,9 @@ fn run_agent_in_root_with_read_only(
         .arg(&protected)
         .arg("--home")
         .arg(&home);
+    for writable_root in writable_roots {
+        command.arg("--writable-root").arg(writable_root);
+    }
     for read_only_root in read_only_roots {
         command.arg("--read-only-root").arg(read_only_root);
     }
@@ -409,7 +413,8 @@ fn session_scope_can_commit_without_granting_the_main_ref() {
 
 /// A root coordinator must be able to write the state its own CLI needs. The
 /// grant follows the launched program, so it never widens to another provider's
-/// state directory.
+/// state directory. AGY receives only its conversation subtree, not all of
+/// `.gemini`.
 #[test]
 fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -419,13 +424,13 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
     let repo = fixture.join("repo");
     let home = fixture.join("home");
     let bin = fixture.join("bin");
-    let state_directories = [".codex", ".claude", ".gemini"];
+    let state_directories = [".codex", ".claude", ".gemini/antigravity-cli/conversations"];
     for path in [
         &repo,
         &bin,
         &home.join(".codex"),
         &home.join(".claude"),
-        &home.join(".gemini"),
+        &home.join(".gemini/antigravity-cli/conversations"),
     ] {
         fs::create_dir_all(path).unwrap();
     }
@@ -434,7 +439,7 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
         let path = bin.join(program);
         fs::write(
             &path,
-            "#!/bin/sh\ntouch \"$1/.codex/probe\"\ntouch \"$1/.claude/probe\"\ntouch \"$1/.gemini/probe\"\nexit 0\n",
+            "#!/bin/sh\ntouch \"$1/.codex/probe\"\ntouch \"$1/.claude/probe\"\ntouch \"$1/.gemini/antigravity-cli/conversations/probe\"\nexit 0\n",
         )
         .unwrap();
         fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
@@ -443,7 +448,7 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
     for (program, granted) in [
         ("codex", ".codex"),
         ("claude", ".claude"),
-        ("agy", ".gemini"),
+        ("agy", ".gemini/antigravity-cli/conversations"),
     ] {
         let output = run_agent_in_root(&repo, &home, &bin.join(program));
         if !output.status.success() && sandbox_backend_unavailable(&output) {
@@ -473,7 +478,7 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
 }
 
 #[test]
-fn agy_global_customizations_are_read_only_in_the_shipping_sandbox() {
+fn agy_grants_only_conversation_state_in_the_shipping_sandbox() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("agy-global-config-read-only");
@@ -488,13 +493,22 @@ fn agy_global_customizations_are_read_only_in_the_shipping_sandbox() {
     let state = home.join(".gemini/antigravity-cli");
     let state_plugins = state.join("plugins");
     let state_plugin = state_plugins.join("existing/plugin.json");
+    let state_skills = state.join("skills");
+    let state_skill = state_skills.join("existing/SKILL.md");
     let settings = state.join("settings.json");
     let import_manifest = state.join("import_manifest.json");
+    let statusline = state.join("statusline.sh");
+    let title = state.join("title.sh");
+    let global_context = home.join(".gemini/GEMINI.md");
+    let conversations = state.join("conversations");
+    let summaries = state.join("conversation_summaries.db");
     for path in [
         &repo,
         &bin,
         plugin.parent().unwrap(),
         state_plugin.parent().unwrap(),
+        state_skill.parent().unwrap(),
+        &conversations,
     ] {
         fs::create_dir_all(path).unwrap();
     }
@@ -503,15 +517,20 @@ fn agy_global_customizations_are_read_only_in_the_shipping_sandbox() {
         &hooks,
         &mcp,
         &state_plugin,
+        &state_skill,
         &settings,
         &import_manifest,
+        &statusline,
+        &title,
+        &global_context,
+        &summaries,
     ] {
         fs::write(path, ORIGINAL).unwrap();
     }
     let program = bin.join("agy");
     fs::write(
         &program,
-        "#!/bin/sh\ntouch \"$1/.gemini/antigravity-cli/state-probe\" || exit 10\nprintf attack > \"$1/.gemini/config/hooks.json\" && exit 20\nprintf attack > \"$1/.gemini/config/mcp_config.json\" && exit 21\nmkdir -p \"$1/.gemini/config/plugins/injected\" && exit 22\nmv \"$1/.gemini/config\" \"$1/.gemini/config-moved\" && exit 23\nprintf attack > \"$1/.gemini/antigravity-cli/settings.json\" && exit 24\nprintf attack > \"$1/.gemini/antigravity-cli/import_manifest.json\" && exit 25\nmkdir -p \"$1/.gemini/antigravity-cli/plugins/injected\" && exit 26\nmv \"$1/.gemini/antigravity-cli/settings.json\" \"$1/.gemini/antigravity-cli/settings-moved.json\" && exit 27\nmv \"$1/.gemini/antigravity-cli\" \"$1/.gemini/antigravity-cli-moved\" && exit 28\nexit 0\n",
+        "#!/bin/sh\ntouch \"$1/.gemini/antigravity-cli/conversations/state-probe\" || exit 10\nprintf summary > \"$1/.gemini/antigravity-cli/conversation_summaries.db\" || exit 11\nprintf attack > \"$1/.gemini/config/hooks.json\" && exit 20\nprintf attack > \"$1/.gemini/config/mcp_config.json\" && exit 21\nmkdir -p \"$1/.gemini/config/plugins/injected\" && exit 22\nmv \"$1/.gemini/config\" \"$1/.gemini/config-moved\" && exit 23\nprintf attack > \"$1/.gemini/antigravity-cli/settings.json\" && exit 24\nprintf attack > \"$1/.gemini/antigravity-cli/import_manifest.json\" && exit 25\nmkdir -p \"$1/.gemini/antigravity-cli/plugins/injected\" && exit 26\nprintf attack > \"$1/.gemini/antigravity-cli/skills/existing/SKILL.md\" && exit 27\nprintf attack > \"$1/.gemini/GEMINI.md\" && exit 28\nprintf attack > \"$1/.gemini/antigravity-cli/statusline.sh\" && exit 29\nprintf attack > \"$1/.gemini/antigravity-cli/title.sh\" && exit 30\nprintf attack > \"$1/.gemini/antigravity-cli/new-status-command.sh\" && exit 31\nmv \"$1/.gemini/antigravity-cli\" \"$1/.gemini/antigravity-cli-moved\" && exit 32\nmv \"$1/.gemini\" \"$1/.gemini-moved\" && exit 33\nexit 0\n",
     )
     .unwrap();
     fs::set_permissions(
@@ -520,39 +539,41 @@ fn agy_global_customizations_are_read_only_in_the_shipping_sandbox() {
     )
     .unwrap();
 
-    let output = run_agent_in_root_with_read_only(
-        &repo,
-        &home,
-        &program,
-        &[&config, &state_plugins, &settings, &import_manifest],
-    );
+    let output = run_agent_in_root_with_policy(&repo, &home, &program, &[&summaries], &[]);
     if !output.status.success() && sandbox_backend_unavailable(&output) {
         let _ = fs::remove_dir_all(&fixture);
         return;
     }
     assert!(
         output.status.success(),
-        "AGY state must remain writable while executable customization is read-only: {}",
+        "AGY conversations must remain writable while global customization is denied: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(state.join("state-probe").is_file());
+    assert!(conversations.join("state-probe").is_file());
+    assert_eq!(fs::read(&summaries).unwrap(), b"summary");
     for path in [
         &plugin,
         &hooks,
         &mcp,
         &state_plugin,
+        &state_skill,
         &settings,
         &import_manifest,
+        &statusline,
+        &title,
+        &global_context,
     ] {
         assert_unchanged(path);
     }
     assert!(!config.join("plugins/injected").exists());
     assert!(!state.join("plugins/injected").exists());
+    assert!(!state.join("new-status-command.sh").exists());
     assert!(config.is_dir());
     assert!(state.is_dir());
     assert!(!home.join(".gemini/config-moved").exists());
     assert!(!state.join("settings-moved.json").exists());
     assert!(!home.join(".gemini/antigravity-cli-moved").exists());
+    assert!(!home.join(".gemini-moved").exists());
 
     let _ = fs::remove_dir_all(&fixture);
 }

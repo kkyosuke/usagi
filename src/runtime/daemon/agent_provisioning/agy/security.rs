@@ -1,8 +1,7 @@
-//! Host-side preparation of AGY customization paths protected by the outer sandbox.
+//! Host-side preparation of AGY's minimal persistent conversation state.
 
 use std::{
     fs::OpenOptions,
-    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -10,11 +9,12 @@ use usagi_daemon::usecase::agy::AgyProvisionFailure;
 
 use super::super::validate_owned_directory;
 
-/// Creates missing customization anchors without replacing user content, then
-/// returns canonical paths that the launcher must make read-only. AGY keeps the
-/// rest of `antigravity-cli` writable for conversations and authentication.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agy_global_customizations_are_read_only_in_the_shipping_sandbox
-pub(super) fn prepare_agy_read_only_paths(
+/// Creates the conversation database anchors AGY needs, without replacing user
+/// content, and returns only those canonical paths as writable. The parent
+/// `~/.gemini` tree stays outside the grant, so absent and future customization
+/// paths are protected without relying on a blacklist.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agy_grants_only_conversation_state_in_the_shipping_sandbox
+pub(super) fn prepare_agy_writable_paths(
     home: Option<&Path>,
 ) -> Result<Vec<PathBuf>, AgyProvisionFailure> {
     let Some(home) = home else {
@@ -26,10 +26,11 @@ pub(super) fn prepare_agy_read_only_paths(
         .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
 
     let gemini = home.join(".gemini");
-    let config = gemini.join("config");
     let state = gemini.join("antigravity-cli");
-    let plugins = state.join("plugins");
-    for directory in [&gemini, &config, &state, &plugins] {
+    let conversations = state.join("conversations");
+    // Create and validate each ancestor before descending so an existing
+    // symlink cannot redirect the first write outside the trusted home.
+    for directory in [&gemini, &state, &conversations] {
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -45,9 +46,10 @@ pub(super) fn prepare_agy_read_only_paths(
             .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
     }
 
-    let settings = state.join("settings.json");
-    let import_manifest = state.join("import_manifest.json");
-    for path in [&settings, &import_manifest] {
+    let summaries = state.join("conversation_summaries.db");
+    let summaries_shm = state.join("conversation_summaries.db-shm");
+    let summaries_wal = state.join("conversation_summaries.db-wal");
+    for path in [&summaries, &summaries_shm, &summaries_wal] {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -58,9 +60,7 @@ pub(super) fn prepare_agy_read_only_paths(
                 .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
         }
         match options.open(path) {
-            Ok(mut file) => file
-                .write_all(b"{}\n")
-                .map_err(|_| AgyProvisionFailure::MaterializationFailed)?,
+            Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(_) => return Err(AgyProvisionFailure::MaterializationFailed),
         }
@@ -78,7 +78,7 @@ pub(super) fn prepare_agy_read_only_paths(
         }
     }
 
-    [&config, &plugins, &settings, &import_manifest]
+    [&conversations, &summaries, &summaries_shm, &summaries_wal]
         .into_iter()
         .map(|path| {
             path.canonicalize()

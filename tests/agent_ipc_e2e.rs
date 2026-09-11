@@ -1836,6 +1836,50 @@ fn wait_for_spawns(count: &Path, expected: usize) {
     }
 }
 
+fn assert_private_agy_plugin(
+    arguments: &[String],
+    data_dir: &Path,
+    repo: &Path,
+    home: &Path,
+) -> PathBuf {
+    let add_dir = arguments
+        .iter()
+        .position(|argument| argument == "--add-dir")
+        .and_then(|position| arguments.get(position + 1))
+        .map(PathBuf::from)
+        .expect("managed AGY launch carries its private plugin workspace");
+    assert!(
+        add_dir.starts_with(data_dir.canonicalize().unwrap().join("agent-integrations")),
+        "managed plugin workspace {} escaped daemon data {}",
+        add_dir.display(),
+        data_dir.display()
+    );
+    let plugin = add_dir.join(".agents/plugins/usagi-runtime");
+    for document in ["plugin.json", "mcp_config.json", "hooks.json"] {
+        assert!(plugin.join(document).is_file());
+    }
+    assert!(!repo.join(".agents/plugins/usagi-runtime").exists());
+    assert!(!home.join(".gemini/config").exists());
+    add_dir
+}
+
+fn assert_agy_conversation_state(state: &Path) {
+    assert!(state.join("conversations").is_dir());
+    for database in [
+        "conversation_summaries.db",
+        "conversation_summaries.db-shm",
+        "conversation_summaries.db-wal",
+    ] {
+        assert!(state.join(database).is_file());
+    }
+    assert_eq!(
+        fs::read_to_string(state.join("settings.json")).unwrap(),
+        "{\"existing\":true}\n"
+    );
+    assert!(!state.join("plugins").exists());
+    assert!(!state.join("import_manifest.json").exists());
+}
+
 /// Shipping composition E2E for the AGY-specific chain: private workspace
 /// plugin discovery, structured hook capture, cold interruption, and exact
 /// provider-native resume without a replacement prompt.
@@ -1869,37 +1913,8 @@ fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
     wait_for_spawns(&count, 1);
 
     let initial = nul_arguments(&argv);
-    let add_dir = initial
-        .iter()
-        .position(|argument| argument == "--add-dir")
-        .and_then(|position| initial.get(position + 1))
-        .map(PathBuf::from)
-        .expect("managed AGY launch carries its private plugin workspace");
-    assert!(
-        add_dir.starts_with(data_dir.canonicalize().unwrap().join("agent-integrations")),
-        "managed plugin workspace {add_dir:?} escaped daemon data {data_dir:?}"
-    );
-    let plugin = add_dir.join(".agents/plugins/usagi-runtime");
-    assert!(plugin.join("plugin.json").is_file());
-    assert!(plugin.join("mcp_config.json").is_file());
-    assert!(plugin.join("hooks.json").is_file());
-    assert!(!repo.path().join(".agents/plugins/usagi-runtime").exists());
-    assert!(
-        !home
-            .path()
-            .join(".gemini/config/plugins/usagi-runtime")
-            .exists()
-    );
-    assert!(home.path().join(".gemini/config").is_dir());
-    assert!(state.join("plugins").is_dir());
-    assert_eq!(
-        fs::read_to_string(state.join("settings.json")).unwrap(),
-        "{\"existing\":true}\n"
-    );
-    assert_eq!(
-        fs::read_to_string(state.join("import_manifest.json")).unwrap(),
-        "{}\n"
-    );
+    let add_dir = assert_private_agy_plugin(&initial, &data_dir, repo.path(), home.path());
+    assert_agy_conversation_state(&state);
     drop(first);
     drop(daemon);
     let _restarted = spawn_daemon_command(

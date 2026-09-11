@@ -594,7 +594,7 @@ fn validate_launcher_policy_inputs(
         validate_launcher_path(protected_root, LauncherPolicyError::ProtectedRoot, false)?;
     }
     for root in writable_roots {
-        validate_launcher_path(root, LauncherPolicyError::WritableRoot, false)?;
+        validate_launcher_path(root, LauncherPolicyError::WritableRoot, true)?;
     }
     for root in read_only_roots {
         validate_launcher_path(root, LauncherPolicyError::ReadOnlyRoot, true)?;
@@ -886,6 +886,7 @@ mod tests {
 
         std::fs::create_dir(protected.join("read-only")).unwrap();
         std::fs::write(protected.join("read-only-file"), "existing").unwrap();
+        std::fs::write(protected.join("writable-file"), "existing").unwrap();
         // backend・tmpdir・home・cache・writable / read-only path がすべて
         // 所有された canonical path なら受け入れる。
         assert_eq!(
@@ -895,7 +896,10 @@ mod tests {
                 tmpdir: Some(protected.clone()),
                 home: Some(protected.clone()),
                 cache_dir: Some(protected.clone()),
-                writable_roots: vec![protected.clone()],
+                writable_roots: vec![
+                    protected.clone(),
+                    protected.join("writable-file").canonicalize().unwrap(),
+                ],
                 read_only_roots: vec![
                     protected.join("read-only").canonicalize().unwrap(),
                     protected.join("read-only-file").canonicalize().unwrap(),

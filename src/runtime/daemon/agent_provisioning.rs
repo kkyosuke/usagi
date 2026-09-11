@@ -4,7 +4,7 @@
 //! materialization. Socket admission, runtime ownership, and background-worker
 //! orchestration remain in the parent composition module.
 
-use super::secure_path::{InvalidOwnedDirectory, validate_owned_directory};
+use super::secure_path::{InvalidOwnedDirectory, validate_owned_directory, validate_owned_path};
 use super::{
     AGENT_PHASE_HOOK_EVENTS, Arc, BTreeMap, BTreeSet, ClaudeProvision, ClaudeProvisionFailure,
     ClaudeProvisioner, CodexProvision, CodexProvisionFailure, CodexProvisioner, DefaultModel,
@@ -300,19 +300,24 @@ pub(super) fn root_agent_writable_roots(
         return Ok(Vec::new());
     };
     validate_owned_directory(home)?;
-    let state = home.join(state_directory);
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
+    let mut state = home.to_path_buf();
+    // Some providers intentionally expose a nested state subtree. Validate
+    // every ancestor before descending so a symlink cannot redirect creation.
+    for segment in state_directory.split('/') {
+        state.push(segment);
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        match builder.create(&state) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
+        }
+        validate_owned_directory(&state)?;
     }
-    match builder.create(&state) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
-    }
-    validate_owned_directory(&state)?;
     state
         .canonicalize()
         .map(|state| vec![state])
@@ -927,10 +932,13 @@ pub(super) fn validate_claude_sandbox_policy(
         }
     }
     for root in roots {
-        validate_owned_directory(&root)?;
+        validate_owned_path(&root, true)?;
         let canonical = root
             .canonicalize()
             .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+        if canonical != root {
+            return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
+        }
         if protected_workspace.starts_with(&canonical)
             || (mode == SandboxMode::Root && canonical.starts_with(&protected_workspace))
         {
@@ -938,20 +946,7 @@ pub(super) fn validate_claude_sandbox_policy(
         }
     }
     for root in read_only_roots {
-        let metadata = std::fs::symlink_metadata(root)
-            .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
-        if metadata.file_type().is_dir() {
-            validate_owned_directory(root)?;
-        } else if !metadata.file_type().is_file() {
-            return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            if metadata.uid() != unsafe { libc::geteuid() } {
-                return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
-            }
-        }
+        validate_owned_path(root, true)?;
         if root
             .canonicalize()
             .ok()

@@ -22,7 +22,7 @@ use super::runtime::{
     AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, SpawnProvision,
 };
 
-/// Revision 2 scopes the plugin to managed launches through a private workspace.
+/// Revision 3 scopes the plugin to managed launches through a private workspace.
 pub const PROFILE_REVISION: u32 = 3;
 
 /// Product-private provisioning result for one Antigravity launch.
@@ -173,6 +173,11 @@ fn render_plan(
         "--dangerously-skip-permissions".to_owned(),
         "--mode".to_owned(),
         "accept-edits".to_owned(),
+        // Default AGY logs use dynamically named files below global state.
+        // Routing this managed launch to a device keeps that directory outside
+        // the sandbox write allowlist without losing terminal diagnostics.
+        "--log-file".to_owned(),
+        "/dev/null".to_owned(),
     ];
     if let Some(model) = &request.model {
         argv.extend(["--model".to_owned(), model.as_str().to_owned()]);
@@ -288,6 +293,8 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--mode",
                 "accept-edits",
+                "--log-file",
+                "/dev/null",
                 "--model",
                 "gemini-3.8-flash-high",
             ]
@@ -349,6 +356,8 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--mode",
                 "accept-edits",
+                "--log-file",
+                "/dev/null",
                 "--model",
                 "gemini-3.8-flash-high",
             ]

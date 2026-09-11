@@ -199,11 +199,17 @@ fn every_model_provider_maps_a_selector_profile_and_executable() {
     // through the `sakana-ai` profile.
     assert_eq!(DefaultModel::SakanaAi.command(), "codex-fugu");
     assert_eq!(DefaultModel::SakanaAi.selector(), "sakana.ai");
-    // Each provider's CLI writes its own state directory, so a write-confining
-    // launcher can grant exactly the one it spawns.
+    // Each provider declares the narrow state directory a write-confining
+    // launcher grants. AGY persists conversation DBs without making its
+    // executable global customizations writable.
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::state_directory),
-        [".claude", ".codex", ".codex-fugu", ".gemini"]
+        [
+            ".claude",
+            ".codex",
+            ".codex-fugu",
+            ".gemini/antigravity-cli/conversations"
+        ]
     );
     // Claude keeps its global config (onboarding, folder trust, MCP approvals)
     // beside that directory in `~/.claude.json`, and saves it through sibling

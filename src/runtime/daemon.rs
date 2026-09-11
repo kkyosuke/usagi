@@ -18451,8 +18451,30 @@ instructions = "{instructions}"
         assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
 
         let roots = root_agent_writable_roots(Some(&home), "agy").unwrap();
-        assert_eq!(roots, [home.join(".gemini").canonicalize().unwrap()]);
+        assert_eq!(
+            roots,
+            [home
+                .join(".gemini/antigravity-cli/conversations")
+                .canonicalize()
+                .unwrap()]
+        );
         assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let hostile_home = fixture.path().join("hostile-home");
+            let outside = fixture.path().join("outside");
+            std::fs::create_dir_all(&hostile_home).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            symlink(&outside, hostile_home.join(".gemini")).unwrap();
+            assert_eq!(
+                root_agent_writable_roots(Some(&hostile_home), "agy"),
+                Err(ClaudeSandboxPolicyError::InvalidWritableRoot)
+            );
+            assert!(!outside.join("antigravity-cli").exists());
+        }
 
         let roots = root_agent_writable_roots(None, "/bin/sh").unwrap();
         assert!(roots.is_empty());
@@ -18700,7 +18722,7 @@ instructions = "{instructions}"
             "/custom/tmpdir/agent-integrations",
             "/repo/.usagi/sessions/agy/private-plugin",
             "/repo/daemon-data/agent-integrations",
-            "/home/dev/.gemini/private-plugin",
+            "/home/dev/.gemini/antigravity-cli/conversations/private-plugin",
         ] {
             assert_eq!(
                 validate_isolated_sandbox_root(&policy, Path::new(target)),
@@ -18714,6 +18736,11 @@ instructions = "{instructions}"
                 Path::new("/daemon/agent-integrations/workspace/agy")
             ),
             Ok(())
+        );
+        assert_eq!(
+            validate_isolated_sandbox_root(&policy, Path::new("/home/dev/.gemini/private-plugin")),
+            Ok(()),
+            "AGY global customization is no longer part of the write surface"
         );
     }
 
