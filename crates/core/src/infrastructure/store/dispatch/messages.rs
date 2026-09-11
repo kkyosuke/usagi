@@ -548,6 +548,9 @@ mod tests {
         store
             .send_message(workspace, &a, run, request.clone())
             .unwrap();
+        let mut discussion = message(&a);
+        discussion.in_reply_to = Some(request.message_id);
+        store.send_message(workspace, &b, run, discussion).unwrap();
         let mut verdict = message(&a);
         verdict.kind = MessageKind::Approved;
         verdict.in_reply_to = Some(request.message_id);

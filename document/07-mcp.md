@@ -426,6 +426,7 @@ handoff は session・worktree・role assignment を新設または変更しな�
 実行数上限、既存 session role の delegation policy、Supervisor の budget / ownership fence は維持する。
 child session 向け `session_dispatch` / `session_delegate_brief` の同一 runtime 制約は変更しない。
 role の `max_depth` は [session 階層](10-session-roles.md) の制約であり、同じ session 内の handoff の再帰回数ではない。
+handoff でも既存の admission と同じ `caller の session depth + 1` を上限と比較するため、上限に達した session では拒否する。
 `max_concurrency` は同じ親 session の Agent 間で共有し、Supervisor の `ExecutionPolicy` は別途 task の深さと総数を制限する。
 `session_dispatch` も同じ Agent ID の live runtime を重ねて起動しない。通常の新規 selector は既存 tuple を再利用するため、
 選ばれた Agent が稼働中なら拒否する。別 identity を明示的に起動する入口は `agent_handoff` とする。

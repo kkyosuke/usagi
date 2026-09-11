@@ -2736,6 +2736,20 @@ impl AgentRuntime {
             worker.agent_id,
             &intent.prompt,
         );
+        // Planning precedes readiness IO. Another request may have admitted
+        // this operation meanwhile, so replay must recheck its exact caller.
+        if self
+            .dispatch
+            .binding(operation)
+            .map_err(map_dispatch_storage_error)?
+            .is_some_and(|binding| {
+                binding.caller != intent.caller
+                    || binding.worker.agent_id != worker.agent_id
+                    || binding.worker.session_id != Some(session)
+            })
+        {
+            return Err(unknown_caller_provenance());
+        }
         if self
             .dispatch
             .agent_in_workspace(intent.workspace, worker.agent_id)
@@ -10283,6 +10297,36 @@ mod tests {
         let admission = runtime
             .dispatch_with_planned_worker(&operation, &dispatch, session, &scope, Some(&worker))
             .unwrap();
+        let mut self_handoff = dispatch.clone();
+        self_handoff.caller.agent_id = worker.agent_id;
+        assert_eq!(
+            runtime
+                .dispatch_with_planned_worker(
+                    &OperationId::new().to_string(),
+                    &self_handoff,
+                    session,
+                    &scope,
+                    Some(&worker)
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        let mut other_caller = dispatch.clone();
+        other_caller.caller.agent_id = AgentId::new();
+        assert_eq!(
+            runtime
+                .dispatch_with_planned_worker(
+                    &operation,
+                    &other_caller,
+                    session,
+                    &scope,
+                    Some(&worker)
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
         // A second selector can have been planned while the first request was
         // still doing readiness IO. Stable identity does not authorize changing
         // the model on a replay that reaches admission after the first request.
