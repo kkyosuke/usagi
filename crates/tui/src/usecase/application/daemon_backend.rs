@@ -171,6 +171,8 @@ pub trait AgentPort {
     /// Open the target's worktree in the platform terminal without creating a
     /// daemon-owned pane.
     fn open_external_terminal(&mut self, target: Target);
+    /// Open or select the session's native Workflow tab.
+    fn open_workflow(&mut self, session: SessionId);
     /// Move the active pane's stable tab selection.
     fn select_tab(&mut self, direction: TabDirection);
 }
@@ -494,7 +496,7 @@ impl DaemonBackend {
                     ));
                 }
             }
-            Effect::OpenWorkflow { .. } => {}
+            Effect::OpenWorkflow { session } => self.agent.open_workflow(session),
             Effect::CreateSession {
                 workspace,
                 token,
@@ -835,6 +837,8 @@ mod tests {
             self.external.push(target);
         }
 
+        fn open_workflow(&mut self, _: SessionId) {}
+
         fn select_tab(&mut self, direction: TabDirection) {
             self.tabs.push(direction);
         }
@@ -851,6 +855,8 @@ mod tests {
 
         fn open_external_terminal(&mut self, _: Target) {}
 
+        fn open_workflow(&mut self, _: SessionId) {}
+
         fn select_tab(&mut self, _: TabDirection) {}
     }
 
@@ -862,6 +868,8 @@ mod tests {
         fn open_terminal(&mut self, _: OpenTerminalRequest) {}
 
         fn open_external_terminal(&mut self, _: Target) {}
+
+        fn open_workflow(&mut self, _: SessionId) {}
 
         fn select_tab(&mut self, _: TabDirection) {}
     }

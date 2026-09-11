@@ -931,6 +931,7 @@ pub enum ControllerHostAction {
     ReopenAgent(ReopenAgentRequest),
     OpenTerminal(OpenTerminalRequest),
     OpenExternalTerminal(Target),
+    OpenWorkflow(SessionId),
     SelectTab(crate::usecase::application::controller::TabDirection),
 }
 
@@ -1018,6 +1019,10 @@ impl BackendAgentPort for ControllerHost {
         let _ = self
             .0
             .send(ControllerHostAction::OpenExternalTerminal(target));
+    }
+
+    fn open_workflow(&mut self, session: SessionId) {
+        let _ = self.0.send(ControllerHostAction::OpenWorkflow(session));
     }
 
     fn select_tab(&mut self, direction: crate::usecase::application::controller::TabDirection) {
@@ -6460,6 +6465,9 @@ fn drain_controller_host_actions(
                         )));
                     }
                 }
+            }
+            ControllerHostAction::OpenWorkflow(session) => {
+                runtime.on_effect(&Effect::OpenWorkflow { session });
             }
             ControllerHostAction::SelectTab(direction) => {
                 let Some(active) = runtime.panes().active() else {

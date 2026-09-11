@@ -2085,7 +2085,8 @@ tab-less Closeup の action modal に戻る。TUI の Agent / terminal daemon �
 session creator、worktree は変更しない。単独実行には既存の `agent` を使う。
 
 Closeup action の `workflow` は、その session の非端末 Workflow タブを開く。既に開いている場合は
-同じタブを選択し、重複して作らない。タブを開くだけでは Agent を起動しない。
+同じタブを選択し、重複して作らない。進捗の取得を待たずにタブを表示し、取得中や取得失敗もタブ内に表示する。
+タブを開くだけでは Agent を起動しない。
 
 ```text
 Team
