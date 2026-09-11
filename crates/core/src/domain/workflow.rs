@@ -105,6 +105,7 @@ impl WorkflowRun {
     #[must_use]
     pub fn recipient(&self, recipient: Recipient) -> Option<AgentId> {
         match recipient {
+            Recipient::Automatic if self.phase == Phase::Waiting => None,
             Recipient::Reviewer => self.reviewer,
             Recipient::Automatic if self.phase == Phase::Reviewing => self.reviewer,
             Recipient::Automatic | Recipient::Implementer => Some(self.implementer),
@@ -152,7 +153,11 @@ impl WorkflowRun {
         request: OperationId,
         target: ReviewTarget,
     ) -> Result<(), &'static str> {
-        if !matches!(self.phase, Phase::Implementing | Phase::Revising) || !target.is_valid() {
+        if !matches!(
+            self.phase,
+            Phase::Implementing | Phase::Revising | Phase::Verifying | Phase::Ready
+        ) || !target.is_valid()
+        {
             return Err("review requires an implementation and full commit SHAs");
         }
         if self
@@ -235,6 +240,15 @@ fn valid_text(text: &str) -> bool {
 pub struct WorkflowSnapshot {
     pub session: SessionId,
     pub run: Option<WorkflowRun>,
+    #[serde(default)]
+    pub pending_start: Option<WorkflowPendingStart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowPendingStart {
+    pub operation_id: OperationId,
+    pub goal: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,6 +323,18 @@ mod tests {
             run.enqueue(OperationId::new(), Recipient::Automatic, "Check".into())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn new_review_invalidates_approval_before_pr_verification_catches_up() {
+        let mut run = run();
+        for phase in [Phase::Verifying, Phase::Ready] {
+            run.phase = phase;
+            let request = OperationId::new();
+            run.request_review(request, target()).unwrap();
+            assert_eq!(run.phase, Phase::Reviewing);
+            assert!(!run.review.as_ref().unwrap().approved);
+        }
     }
 
     #[test]
@@ -403,6 +429,7 @@ mod tests {
         run.phase = Phase::Verifying;
         assert!(run.mark_ready(&target().head_sha, true, true).is_err());
         for phase in [
+            Phase::Starting,
             Phase::Implementing,
             Phase::Reviewing,
             Phase::Revising,

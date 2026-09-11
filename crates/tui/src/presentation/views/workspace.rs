@@ -8141,6 +8141,56 @@ mod tests {
     }
 
     #[test]
+    fn home_workflow_tab_projects_native_progress_and_composer() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let operation = OperationId::new();
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Workflow,
+            },
+        );
+        let _ = reduce(&mut pane, PaneEvent::Resolved { operation });
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Ready(operation))),
+        );
+        let state = AppState::home(workspace, vec![session]);
+        let mut home = HomeProjection::from_state(
+            &state,
+            "repo",
+            &[projected_session(session, "login", "/work/login")],
+        )
+        .with_pane(&pane);
+        assert!(home.workflow_selected);
+        let empty = super::home_right_pane(20, 80, &home);
+        assert_eq!(empty.len(), 20);
+        assert!(empty.iter().any(|row| strip(row).contains("Not started")));
+        let mut panel = crate::usecase::application::workflow::WorkflowPanel {
+            run: Some(crate::usecase::application::workflow::fixture_run(session)),
+            ..Default::default()
+        };
+        panel.draft.replace("Add regression tests");
+        home.workflow_panel = Some(panel);
+        let running = super::home_right_pane(20, 80, &home);
+        assert!(
+            running
+                .iter()
+                .any(|row| strip(row).contains("Current owner: Codex"))
+        );
+        assert!(
+            running
+                .iter()
+                .any(|row| strip(row).contains("Add regression tests"))
+        );
+    }
+
+    #[test]
     fn home_right_pane_renders_live_terminal_viewport_and_feedback() {
         let workspace_id = WorkspaceId::new();
         let session = SessionId::new();
@@ -8403,7 +8453,12 @@ mod tests {
             target,
             kind: PaneKind::Terminal,
         };
-        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
+        for kind in [
+            PaneKind::Terminal,
+            PaneKind::Agent,
+            PaneKind::Diff,
+            PaneKind::Workflow,
+        ] {
             let mut item = pending;
             item.kind = kind;
             let tab = PaneTab::Pending(item);
@@ -8422,7 +8477,12 @@ mod tests {
             terminal_id: TerminalId::new(),
             daemon_generation: DaemonGeneration::new(),
         };
-        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
+        for kind in [
+            PaneKind::Terminal,
+            PaneKind::Agent,
+            PaneKind::Diff,
+            PaneKind::Workflow,
+        ] {
             assert!(
                 !pane_tab_label(&PaneTab::Live(
                     crate::usecase::application::pane::LivePane {

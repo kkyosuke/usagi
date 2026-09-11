@@ -854,22 +854,28 @@ impl WorkspaceRuntime {
     #[must_use]
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
         let event = match event {
-            AppEvent::Key(key) if self.state.overlay().is_none()
-                && self.state.workspace_drawer_focus().is_none()
-                && matches!(self.state.route(), Route::Home(HomeMode::Closeup))
-                    && matches!(key, AppKey::Char(_) | AppKey::Paste(_) | AppKey::Enter
-                        | AppKey::Backspace | AppKey::Left | AppKey::Right | AppKey::Up
-                        | AppKey::Down | AppKey::Tab | AppKey::PageUp | AppKey::PageDown
-                        | AppKey::SaveRoles)
-                && self.panes.active_pane().tabs().iter().any(|tab| {
-                    matches!(tab, PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow
-                        && self.panes.active_pane().selected() == &PaneSelection::Tab(TabSelection::Ready(ready.operation)))
-                }) => {
-                    match self.panes.active() {
-                        Some(Target::Session(session)) => AppEvent::WorkflowInput { session, key },
-                        _ => AppEvent::Key(key),
-                    }
+            AppEvent::Key(key)
+                if matches!(
+                    key,
+                    AppKey::Char(_)
+                        | AppKey::Paste(_)
+                        | AppKey::Enter
+                        | AppKey::Backspace
+                        | AppKey::Left
+                        | AppKey::Right
+                        | AppKey::Up
+                        | AppKey::Down
+                        | AppKey::Tab
+                        | AppKey::PageUp
+                        | AppKey::PageDown
+                        | AppKey::SaveRoles
+                ) =>
+            {
+                match self.selected_workflow_session() {
+                    Some(session) => AppEvent::WorkflowInput { session, key },
+                    _ => AppEvent::Key(key),
                 }
+            }
             event => event,
         };
         let previous_drawer_focus = self.state.workspace_drawer_focus();
@@ -2414,6 +2420,23 @@ mod tests {
     }
 
     #[test]
+    fn workflow_can_open_beside_an_agent_and_has_no_root_input_owner() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let _ = runtime.request_pane(
+            Target::Session(session),
+            OperationId::new(),
+            PaneKind::Agent,
+        );
+        runtime.on_effect(&Effect::OpenWorkflow { session });
+        assert_eq!(runtime.panes.active_pane().tabs().len(), 2);
+        assert_eq!(runtime.selected_workflow_session(), Some(session));
+        runtime.panes = PaneRegistry::new(Target::Root(workspace));
+        assert_eq!(runtime.selected_workflow_session(), None);
+    }
+
+    #[test]
     fn workflow_tab_rejects_stale_and_unavailable_session_targets() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -2446,12 +2469,7 @@ mod tests {
             OperationId::new(),
             PaneKind::Workflow,
         );
-        assert!(
-            runtime
-                .panes
-                .pane(Target::Root(workspace))
-                .is_none_or(|pane| pane.tabs().is_empty())
-        );
+        assert!(runtime.panes.pane(Target::Root(workspace)).is_none());
     }
 
     #[test]

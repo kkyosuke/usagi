@@ -35,6 +35,9 @@ pub fn admit(
                         run: None,
                         initial_notified: false,
                         cursor: None,
+                        start_error: None,
+                        suspended_phase: None,
+                        implementation_operation: None,
                     });
                 }
             }
@@ -104,7 +107,11 @@ pub fn snapshot(
     session: SessionId,
 ) -> Result<WorkflowSnapshot> {
     if store.workflow(workspace, session)?.is_none() {
-        return Ok(WorkflowSnapshot { session, run: None });
+        return Ok(WorkflowSnapshot {
+            session,
+            run: None,
+            pending_start: None,
+        });
     }
     let messages = store.workflow_messages(workspace, session)?;
     let agents = store.agents_in_workspace(workspace)?;
@@ -112,8 +119,23 @@ pub fn snapshot(
     store.update_workflow(workspace, session, |value| {
         let record = value.as_mut().context("workflow disappeared")?;
         let Some(run) = record.run.as_mut() else {
-            return Ok(WorkflowSnapshot { session, run: None });
+            return Ok(WorkflowSnapshot {
+                session,
+                run: None,
+                pending_start: Some(usagi_core::domain::workflow::WorkflowPendingStart {
+                    operation_id: record.operation,
+                    goal: record.goal.clone(),
+                    error: record.start_error.clone(),
+                }),
+            });
         };
+        if record.suspended_phase.is_some() {
+            return Ok(WorkflowSnapshot {
+                session,
+                run: Some(run.clone()),
+                pending_start: None,
+            });
+        }
         let offset = record
             .cursor
             .and_then(|cursor| {
@@ -126,7 +148,8 @@ pub fn snapshot(
             let message = &entry.message;
             let previous = (run.phase, run.review.clone());
             if entry.from_agent_id == run.implementer
-                && entry.from_run_id == run.id
+                && (entry.from_run_id == run.id
+                    || Some(entry.from_run_id) == record.implementation_operation)
                 && message.kind == MessageKind::ReviewRequest
             {
                 let assigned = agents.iter().any(|agent| {
@@ -172,28 +195,34 @@ pub fn snapshot(
                 );
             }
             if previous != (run.phase, run.review.clone()) {
-                let actor = if entry.from_agent_id == run.implementer {
-                    "Codex"
-                } else {
-                    "Claude"
-                };
-                run.history
-                    .push(usagi_core::domain::workflow::WorkflowHistoryEntry {
-                        id: message.message_id,
-                        actor: actor.into(),
-                        body: message.body.chars().take(512).collect(),
-                    });
-                if run.history.len() > 100 {
-                    run.history.remove(0);
-                }
+                append_history(run, entry);
             }
             record.cursor = Some(message.message_id);
         }
         Ok(WorkflowSnapshot {
             session,
             run: Some(run.clone()),
+            pending_start: None,
         })
     })
+}
+
+fn append_history(run: &mut WorkflowRun, entry: &usagi_core::domain::agent_message::AgentMessage) {
+    let message = &entry.message;
+    let actor = if entry.from_agent_id == run.implementer {
+        "Codex"
+    } else {
+        "Claude"
+    };
+    run.history
+        .push(usagi_core::domain::workflow::WorkflowHistoryEntry {
+            id: message.message_id,
+            actor: actor.into(),
+            body: message.body.chars().take(512).collect(),
+        });
+    if run.history.len() > 100 {
+        run.history.remove(0);
+    }
 }
 
 #[must_use]
@@ -246,10 +275,10 @@ pub fn verify_pr<
             5000,
         )
         .map_err(|_| "Could not refresh PR checks")?;
-    let view = super::pr_inventory::parse_gh_pr_view(&output)
-        .ok_or("PR verification response is incomplete")?;
     let value: serde_json::Value =
         serde_json::from_str(&output).map_err(|_| "PR verification response is invalid")?;
+    let view = super::pr_inventory::parse_gh_pr_view(&output)
+        .ok_or("PR verification response is incomplete")?;
     if view.head_oid != target.head_sha {
         return Err("PR HEAD changed; a new review is required");
     }
@@ -405,6 +434,67 @@ mod tests {
         let approved = snapshot(&store, workspace, session).unwrap().run.unwrap();
         assert_eq!(approved.phase, Phase::Verifying);
         assert_eq!(approved.history.len(), 2);
+        let next_request = OperationId::new();
+        let next_target = ReviewTarget {
+            base_sha: "a".repeat(40),
+            head_sha: "c".repeat(40),
+        };
+        store
+            .send_message(
+                workspace,
+                &caller,
+                operation,
+                SendMessage {
+                    message_id: next_request,
+                    to_agent_id: reviewer,
+                    kind: MessageKind::ReviewRequest,
+                    body: "Review follow-up implementation".into(),
+                    in_reply_to: None,
+                    review: Some(next_target.clone()),
+                },
+            )
+            .unwrap();
+        store
+            .send_message(
+                workspace,
+                &CallerRef {
+                    agent_id: reviewer,
+                    session_id: Some(session),
+                },
+                reviewer_run,
+                SendMessage {
+                    message_id: OperationId::new(),
+                    to_agent_id: implementer,
+                    kind: MessageKind::Approved,
+                    body: "Approved follow-up".into(),
+                    in_reply_to: Some(next_request),
+                    review: Some(next_target),
+                },
+            )
+            .unwrap();
+        let latest = OperationId::new();
+        store
+            .send_message(
+                workspace,
+                &caller,
+                operation,
+                SendMessage {
+                    message_id: latest,
+                    to_agent_id: reviewer,
+                    kind: MessageKind::ReviewRequest,
+                    body: "One more change while tab closed".into(),
+                    in_reply_to: None,
+                    review: Some(ReviewTarget {
+                        base_sha: "a".repeat(40),
+                        head_sha: "d".repeat(40),
+                    }),
+                },
+            )
+            .unwrap();
+        let current = snapshot(&store, workspace, session).unwrap().run.unwrap();
+        assert_eq!(current.phase, Phase::Reviewing);
+        assert_eq!(current.review.unwrap().request, latest);
+        assert_eq!(current.history.len(), 5);
         assert!(
             store
                 .workflow_messages(workspace, session)
@@ -433,13 +523,74 @@ mod tests {
         }
     }
     struct Gh(String);
+    struct FailingGit {
+        calls: std::cell::Cell<usize>,
+        at: usize,
+        mode: u8,
+    }
+    impl usagi_core::infrastructure::git::GitRunner for FailingGit {
+        fn run(
+            &self,
+            path: &std::path::Path,
+            args: &[&str],
+        ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            if call == self.at {
+                if self.mode == 0 {
+                    anyhow::bail!("Git unavailable");
+                }
+                return Ok(usagi_core::infrastructure::git::GitOutput {
+                    success: self.mode != 1,
+                    stdout: "changed".into(),
+                    stderr: String::new(),
+                });
+            }
+            Git.run(path, args)
+        }
+    }
     impl super::super::pr_inventory::GhProcessPort for Gh {
         type Error = ();
         fn run(&mut self, program: &str, argv: &[String], timeout: u64) -> Result<String, ()> {
             assert_eq!(program, "gh");
             assert_eq!(argv[0], "pr");
             assert_eq!(timeout, 5000);
+            if self.0 == "unavailable" {
+                return Err(());
+            }
             Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn workflow_verification_rejects_every_git_probe_failure_or_race() {
+        let target = usagi_core::domain::agent_message::ReviewTarget {
+            base_sha: "b".repeat(40),
+            head_sha: "a".repeat(40),
+        };
+        let mut entry = usagi_core::domain::pr_inventory::PrEntry::new(
+            usagi_core::domain::pr_inventory::extract(b"https://github.com/owner/repo/pull/1")
+                .remove(0),
+        );
+        entry.head_oid = Some(target.head_sha.clone());
+        let output=serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"}).to_string();
+        for at in 0..3 {
+            for mode in 0..3 {
+                assert!(
+                    verify_pr(
+                        &FailingGit {
+                            calls: std::cell::Cell::new(0),
+                            at,
+                            mode
+                        },
+                        &mut Gh(output.clone()),
+                        std::path::Path::new("/fixture"),
+                        &target,
+                        std::slice::from_ref(&entry)
+                    )
+                    .is_err()
+                );
+            }
         }
     }
 
@@ -467,6 +618,40 @@ mod tests {
             .is_ok()
         );
         assert!(verify_pr(&Git, &mut Gh(value.to_string()), directory, &target, &[]).is_err());
+        assert!(
+            verify_pr(
+                &Git,
+                &mut Gh("{}".into()),
+                directory,
+                &target,
+                std::slice::from_ref(&entry)
+            )
+            .is_err()
+        );
+        assert!(
+            verify_pr(
+                &Git,
+                &mut Gh("unavailable".into()),
+                directory,
+                &target,
+                std::slice::from_ref(&entry)
+            )
+            .is_err()
+        );
+        value["state"] = serde_json::json!("MERGED");
+        value["mergeable"] = serde_json::json!("UNKNOWN");
+        assert!(
+            verify_pr(
+                &Git,
+                &mut Gh(value.to_string()),
+                directory,
+                &target,
+                std::slice::from_ref(&entry)
+            )
+            .is_ok()
+        );
+        value["state"] = serde_json::json!("OPEN");
+        value["mergeable"] = serde_json::json!("MERGEABLE");
         for (field, bad) in [
             ("headRefOid", serde_json::json!("c".repeat(40))),
             ("isDraft", serde_json::json!(true)),
@@ -531,6 +716,27 @@ mod tests {
         assert!(admit(&store, workspace, session, operation, &instruct).is_err());
         admit(&store, workspace, session, operation, &start).unwrap();
         admit(&store, workspace, session, operation, &start).unwrap();
+        store
+            .update_workflow(workspace, session, |record| {
+                record.as_mut().unwrap().start_error = Some("authentication needed".into());
+                Ok(())
+            })
+            .unwrap();
+        let pending = snapshot(&DispatchStore::new(dir.path()), workspace, session)
+            .unwrap()
+            .pending_start
+            .unwrap();
+        assert_eq!(pending.operation_id, operation);
+        assert_eq!(pending.goal, "implement authentication");
+        assert_eq!(pending.error.as_deref(), Some("authentication needed"));
+        admit(
+            &store,
+            workspace,
+            session,
+            pending.operation_id,
+            &WorkflowCommand::Start { goal: pending.goal },
+        )
+        .unwrap();
         assert!(admit(&store, workspace, session, OperationId::new(), &start).is_err());
         assert!(snapshot(&store, workspace, session).unwrap().run.is_none());
         assert!(admit(&store, workspace, session, OperationId::new(), &instruct).is_err());

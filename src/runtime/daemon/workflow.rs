@@ -22,9 +22,10 @@ pub(super) fn dispatch(
     bound: &ConnectionWorkspace,
     request_id: RequestId,
     request: DaemonRequest,
+    raw: &serde_json::Value,
     hello: &ServerHello,
 ) -> Envelope {
-    let result = handle(agent, inventory, bound, request);
+    let result = reject_agent_context(raw).and_then(|()| handle(agent, inventory, bound, request));
     match result {
         Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
         Err(error) => envelope(
@@ -34,6 +35,22 @@ pub(super) fn dispatch(
             serde_json::Value::Null,
         ),
     }
+}
+
+fn reject_agent_context(raw: &serde_json::Value) -> Result<(), ProtocolError> {
+    if raw.get("caller_context").is_some()
+        || raw.get("_caller_credential").is_some()
+        || raw
+            .get("payload")
+            .and_then(|value| value.get("_caller_credential"))
+            .is_some()
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::PermissionDenied,
+            "Workflow controls are human-only",
+        ));
+    }
+    Ok(())
 }
 
 fn handle(
@@ -74,6 +91,8 @@ fn handle(
         .resolve_available_scope(workspace, Some(session))
         .map_err(|_| unavailable("session is unavailable"))?;
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
+    workflow::snapshot(&store, workspace, session).map_err(unavailable)?;
+    reconcile_runtime(agent, workspace, session)?;
     if let Some((operation, command)) = control {
         if matches!(command, WorkflowCommand::Instruct { .. }) {
             workflow::snapshot(&store, workspace, session).map_err(unavailable)?;
@@ -82,7 +101,17 @@ fn handle(
             .map_err(|error| admission_error(&error))?;
         match command {
             WorkflowCommand::Start { goal } => {
-                start(agent, bound, workspace, session, operation, &goal)?;
+                if let Err(error) = start(agent, bound, workspace, session, operation, &goal) {
+                    store
+                        .update_workflow(workspace, session, |record| {
+                            if let Some(record) = record {
+                                record.start_error = Some(error.message.clone());
+                            }
+                            Ok(())
+                        })
+                        .map_err(unavailable)?;
+                    return Err(error);
+                }
             }
             WorkflowCommand::Instruct { .. } => deliver(agent, workspace, session, operation)?,
         }
@@ -98,6 +127,60 @@ fn handle(
     }
     serde_json::to_value(workflow::snapshot(&store, workspace, session).map_err(unavailable)?)
         .map_err(unavailable)
+}
+
+fn reconcile_runtime(
+    agent: &SharedAgentRuntime,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> Result<(), ProtocolError> {
+    use usagi_core::domain::workflow::Phase;
+    let owner = agent.lock().map_err(unavailable)?;
+    let store = owner.dispatch_store();
+    let Some(record) = store.workflow(workspace, session).map_err(unavailable)? else {
+        return Ok(());
+    };
+    let Some(run) = record.run else {
+        return Ok(());
+    };
+    let phase = record.suspended_phase.unwrap_or(run.phase);
+    if !matches!(
+        phase,
+        Phase::Implementing | Phase::Revising | Phase::Reviewing
+    ) {
+        return Ok(());
+    }
+    let implementation = owner.workflow_live_operation(run.id);
+    let selected = if phase == Phase::Reviewing {
+        store
+            .bindings()
+            .map_err(unavailable)?
+            .iter()
+            .find(|binding| {
+                Some(binding.worker.agent_id) == run.reviewer
+                    && binding.worker.session_id == Some(session)
+                    && binding.caller.agent_id == run.implementer
+                    && binding.caller.session_id == Some(session)
+            })
+            .and_then(|binding| owner.workflow_live_operation(binding.run_id))
+    } else {
+        implementation
+    };
+    store.update_workflow(workspace,session,|record| {
+        let record=record.as_mut().ok_or_else(||anyhow::anyhow!("workflow disappeared"))?;
+        let current=record.run.as_mut().ok_or_else(||anyhow::anyhow!("workflow run disappeared"))?;
+        if current.id!=run.id || current.phase!=run.phase || current.review!=run.review {return Ok(());}
+        record.implementation_operation=implementation;
+        if selected.is_none() {
+            record.suspended_phase=Some(phase);
+            current.phase=Phase::Waiting;
+            current.waiting_reason=Some("Assigned Agent is stopped or interrupted. Recover that exact Agent from the agent menu; workflow state is retained.".into());
+        } else if let Some(previous)=record.suspended_phase.take() {
+            current.phase=previous;
+            current.waiting_reason=None;
+        }
+        Ok(())
+    }).map_err(unavailable)
 }
 
 fn verify_progress(
@@ -146,7 +229,7 @@ fn publish_verification(
     let review = run
         .review
         .as_ref()
-        .ok_or_else(|| unavailable("review is missing"))?;
+        .ok_or(unavailable("review is missing"))?;
     store
         .update_workflow(workspace, session, |record| {
             if let Some(current) = record.as_mut().and_then(|record| record.run.as_mut())
@@ -222,7 +305,7 @@ fn start(
     let binding = store
         .binding(operation)
         .map_err(unavailable)?
-        .ok_or_else(|| unavailable("admitted Agent identity is unavailable"))?;
+        .ok_or(unavailable("admitted Agent identity is unavailable"))?;
     workflow::bind(
         store,
         workspace,
@@ -244,12 +327,12 @@ fn deliver(
     let record = store
         .workflow(workspace, session)
         .map_err(unavailable)?
-        .ok_or_else(|| unavailable("workflow disappeared"))?;
+        .ok_or(unavailable("workflow disappeared"))?;
     let instruction = record
         .run
         .as_ref()
         .and_then(|run| run.instructions.iter().find(|item| item.id == operation))
-        .ok_or_else(|| unavailable("instruction disappeared"))?;
+        .ok_or(unavailable("instruction disappeared"))?;
     if instruction.delivery != Delivery::Queued {
         return Ok(());
     }
@@ -257,7 +340,7 @@ fn deliver(
         .agent_in_workspace(workspace, instruction.recipient)
         .map_err(unavailable)?
         .filter(|worker| worker.session_id == Some(session))
-        .ok_or_else(|| unavailable("instruction recipient is unavailable"))?;
+        .ok_or(unavailable("instruction recipient is unavailable"))?;
     let Some(run) = recipient.current_run else {
         return Ok(());
     };
@@ -275,7 +358,7 @@ fn deliver(
                         .iter_mut()
                         .find(|item| item.id == operation)
                 })
-                .ok_or_else(|| anyhow::anyhow!("instruction disappeared"))?;
+                .ok_or(anyhow::anyhow!("instruction disappeared"))?;
             item.delivery = Delivery::Unconfirmed;
             Ok(())
         })
@@ -291,7 +374,7 @@ fn deliver(
                         .iter_mut()
                         .find(|item| item.id == operation)
                 })
-                .ok_or_else(|| anyhow::anyhow!("instruction disappeared"))?;
+                .ok_or(anyhow::anyhow!("instruction disappeared"))?;
             item.delivery = Delivery::Notified;
             Ok(())
         })
@@ -308,6 +391,19 @@ mod tests {
 
     #[test]
     fn workflow_error_mapping_distinguishes_refusal_from_unknown_effect() {
+        assert!(reject_agent_context(&serde_json::json!({})).is_ok());
+        for raw in [
+            serde_json::json!({"caller_context":{"credential":"valid"}}),
+            serde_json::json!({"caller_context":{"credential":"invalid"}}),
+            serde_json::json!({"caller_context":null}),
+            serde_json::json!({"_caller_credential":"valid"}),
+            serde_json::json!({"payload":{"_caller_credential":"valid"}}),
+        ] {
+            assert_eq!(
+                reject_agent_context(&raw).unwrap_err().code,
+                ErrorCode::PermissionDenied
+            );
+        }
         for message in [
             "invalid workflow goal",
             "workflow has not started",

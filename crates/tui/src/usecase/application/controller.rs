@@ -2890,6 +2890,8 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::WorkflowEdit { session, edit } => {
             if state.active != Some(session)
                 || state.overlay.is_some()
+                || state.workspace_drawer_focus.is_some()
+                || state.route != Route::Home(HomeMode::Closeup)
                 || !state.session_can_use(session)
             {
                 return Vec::new();
@@ -2920,6 +2922,20 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             match result {
                 Ok(snapshot) if snapshot.session == job.session => {
+                    if let Some(start) = snapshot.pending_start {
+                        if panel.pending.is_none() {
+                            if panel.draft.value().is_empty() {
+                                panel.draft.paste(&start.goal);
+                            }
+                            panel.pending = Some((
+                                start.operation_id,
+                                usagi_core::domain::workflow::WorkflowCommand::Start {
+                                    goal: start.goal,
+                                },
+                            ));
+                        }
+                        panel.error = start.error;
+                    }
                     panel.run = snapshot.run;
                     if panel.pending.is_none() {
                         panel.error = None;

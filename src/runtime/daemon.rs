@@ -4469,7 +4469,7 @@ fn start_ipc_accept_loop(
                                             },
                                             DaemonRequest::SupervisorSnapshot { .. } => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
                                             DaemonRequest::SupervisorControl { .. } => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
-                                            DaemonRequest::WorkflowSnapshot { .. } | DaemonRequest::WorkflowControl { .. } => workflow::dispatch(&agent_launch, &pr_inventory, &bound, request_id, request, hello),
+                                            DaemonRequest::WorkflowSnapshot { .. } | DaemonRequest::WorkflowControl { .. } => workflow::dispatch(&agent_launch, &pr_inventory, &bound, request_id, request, &body, hello),
                                             DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
                                             DaemonRequest::Terminal { .. } => usagi_daemon::presentation::ipc::reject_unhandled_request(request_id, body, hello),
                                         }
@@ -22159,12 +22159,22 @@ instructions = "{instructions}"
                 request: DaemonRequest,
             ) -> Result<WorkflowSnapshot, usagi_core::infrastructure::ipc::ProtocolError>
             {
+                let raw = serde_json::to_value(&request).unwrap();
+                self.call_raw(request, &raw)
+            }
+            fn call_raw(
+                &self,
+                request: DaemonRequest,
+                raw: &serde_json::Value,
+            ) -> Result<WorkflowSnapshot, usagi_core::infrastructure::ipc::ProtocolError>
+            {
                 let response = workflow::dispatch(
                     &self.agent,
                     &self.inventory,
                     &self.bound,
                     usagi_core::infrastructure::ipc::RequestId("workflow-test".into()),
                     request,
+                    raw,
                     &session_test_hello(),
                 );
                 match response.kind {
@@ -22262,6 +22272,38 @@ instructions = "{instructions}"
                 ErrorCode::IdempotencyConflict
             );
             let run = first.run.unwrap();
+            let credential = fixture
+                .agent
+                .lock()
+                .unwrap()
+                .hook_credential(5000, 4321, 4321)
+                .unwrap()
+                .to_owned();
+            assert!(
+                fixture
+                    .agent
+                    .lock()
+                    .unwrap()
+                    .mcp_dispatch_context(&credential)
+                    .is_some()
+            );
+            for credential in [credential, "invalid-credential".into()] {
+                let request = DaemonRequest::WorkflowControl {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                    operation_id: usagi_core::domain::id::OperationId::new(),
+                    command: WorkflowCommand::Instruct {
+                        recipient: Recipient::Implementer,
+                        body: "must not deliver".into(),
+                    },
+                };
+                let mut raw = serde_json::to_value(&request).unwrap();
+                raw["caller_context"] = serde_json::json!({"credential":credential});
+                assert_eq!(
+                    fixture.call_raw(request, &raw).unwrap_err().code,
+                    ErrorCode::PermissionDenied
+                );
+            }
             let sibling_operation = usagi_core::domain::id::OperationId::new().to_string();
             let sibling_intent = usagi_core::infrastructure::client::AgentLaunchIntent {
                 workspace: fixture.workspace,
@@ -22323,6 +22365,23 @@ instructions = "{instructions}"
             assert_ne!(writes.entries[0].0, sibling.terminal);
             assert!(
                 String::from_utf8_lossy(&writes.entries[0].1).contains("Verify the edge cases")
+            );
+            drop(writes);
+            fixture.agent.lock().unwrap().exit(&expected, 0).unwrap();
+            let stopped = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap()
+                .run
+                .unwrap();
+            assert_eq!(stopped.phase, usagi_core::domain::workflow::Phase::Waiting);
+            assert!(
+                stopped
+                    .waiting_reason
+                    .unwrap()
+                    .contains("stopped or interrupted")
             );
         }
     }

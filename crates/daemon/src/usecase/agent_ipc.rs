@@ -1087,6 +1087,29 @@ impl AgentRuntime {
         self.coordinator.runtime_for_operation(operation_id)
     }
 
+    /// Observe one workflow participant through only the exact admitted runtime
+    /// and its explicit resume chain, never a new launch that reused an Agent ID.
+    #[must_use]
+    pub fn workflow_live_operation(&self, operation: OperationId) -> Option<OperationId> {
+        let snapshot = self.coordinator.snapshot();
+        let mut record = snapshot
+            .records
+            .iter()
+            .find(|record| record.operation.operation_id == operation)?;
+        for _ in 0..=snapshot.records.len() {
+            if let Some(replacement) = record.superseded_by {
+                record = snapshot
+                    .records
+                    .iter()
+                    .find(|candidate| candidate.runtime.agent_runtime_id == replacement)?;
+            } else {
+                return (record.state == super::runtime::RuntimeState::Running)
+                    .then_some(record.operation.operation_id);
+            }
+        }
+        None
+    }
+
     #[must_use]
     pub fn dispatch_store(&self) -> &DispatchStore {
         &self.dispatch

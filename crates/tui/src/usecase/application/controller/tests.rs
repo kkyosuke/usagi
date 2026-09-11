@@ -20,6 +20,98 @@ fn workflow_panels_follow_authoritative_session_removal() {
 }
 
 #[test]
+fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
+    use crate::usecase::application::workflow::{WorkflowJob, fixture_run};
+    use usagi_core::domain::workflow::{
+        Recipient, WorkflowCommand, WorkflowPendingStart, WorkflowSnapshot,
+    };
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let operation = OperationId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    let _ = submit_closeup_workflow(&mut state, session, "");
+    let job = WorkflowJob {
+        workspace,
+        session,
+        control: None,
+    };
+    let snapshot = WorkflowSnapshot {
+        session,
+        run: None,
+        pending_start: Some(WorkflowPendingStart {
+            operation_id: operation,
+            goal: "Build login".into(),
+            error: Some("Sign in to retry".into()),
+        }),
+    };
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: job.clone(),
+            result: Ok(Box::new(snapshot.clone())),
+        }),
+    );
+    let panel = state.workflow_panel(session).unwrap();
+    assert_eq!(panel.draft.value(), "Build login");
+    assert_eq!(panel.error.as_deref(), Some("Sign in to retry"));
+    assert_eq!(
+        panel.pending,
+        Some((
+            operation,
+            WorkflowCommand::Start {
+                goal: "Build login".into()
+            }
+        ))
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: job.clone(),
+            result: Ok(Box::new(snapshot)),
+        }),
+    );
+    let effects = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::SaveRoles,
+        },
+    );
+    assert!(
+        matches!(&effects[0], Effect::Workflow(job) if job.control.as_ref().unwrap().0 == operation)
+    );
+    let instruction = (
+        OperationId::new(),
+        WorkflowCommand::Instruct {
+            recipient: Recipient::Implementer,
+            body: "Add tests".into(),
+        },
+    );
+    let panel = state.workflows.get_mut(&session).unwrap();
+    panel.pending = Some(instruction.clone());
+    panel.draft.replace("Add tests");
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: WorkflowJob {
+                control: Some(instruction),
+                ..job
+            },
+            result: Ok(Box::new(WorkflowSnapshot {
+                session,
+                run: Some(fixture_run(session)),
+                pending_start: None,
+            })),
+        }),
+    );
+    let panel = state.workflow_panel(session).unwrap();
+    assert!(panel.pending.is_none());
+    assert!(panel.draft.value().is_empty());
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One correlated retry scenario keeps operation/draft assertions together.
 fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
     use crate::usecase::application::workflow::{
@@ -42,7 +134,11 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
         &mut state,
         AppEvent::Backend(BackendEvent::Workflow {
             job: job.clone(),
-            result: Ok(Box::new(WorkflowSnapshot { session, run: None })),
+            result: Ok(Box::new(WorkflowSnapshot {
+                session,
+                run: None,
+                pending_start: None,
+            })),
         }),
     );
     assert!(
@@ -120,6 +216,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
             result: Ok(Box::new(WorkflowSnapshot {
                 session,
                 run: Some(run.clone()),
+                pending_start: None,
             })),
         }),
     );
@@ -159,6 +256,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
         AppKey::PageDown,
         AppKey::Backspace,
         AppKey::Enter,
+        AppKey::Escape,
     ] {
         let _ = update(&mut state, AppEvent::WorkflowInput { session, key });
     }
@@ -195,6 +293,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
             result: Ok(Box::new(WorkflowSnapshot {
                 session,
                 run: Some(run),
+                pending_start: None,
             })),
         }),
     );
@@ -232,10 +331,21 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
         &mut state,
         AppEvent::Backend(BackendEvent::Workflow {
             job: job.clone(),
-            result: Ok(Box::new(WorkflowSnapshot { session, run: None })),
+            result: Ok(Box::new(WorkflowSnapshot {
+                session,
+                run: None,
+                pending_start: None,
+            })),
         }),
     );
     assert!(state.workflow_panel(session).is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowEdit {
+            session,
+            edit: WorkflowEdit::Delete,
+        },
+    );
     assert!(submit_closeup_workflow(&mut state, session, "invalid").is_empty());
     let _ = submit_closeup_workflow(&mut state, session, "");
     let _ = update(
@@ -245,6 +355,7 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
             result: Ok(Box::new(WorkflowSnapshot {
                 session: SessionId::new(),
                 run: None,
+                pending_start: None,
             })),
         }),
     );
@@ -258,7 +369,11 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
             &mut state,
             AppEvent::Backend(BackendEvent::Workflow {
                 job: foreign,
-                result: Ok(Box::new(WorkflowSnapshot { session, run: None }))
+                result: Ok(Box::new(WorkflowSnapshot {
+                    session,
+                    run: None,
+                    pending_start: None
+                }))
             })
         )
         .is_empty()

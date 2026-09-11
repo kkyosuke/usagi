@@ -702,6 +702,7 @@ mod tests {
                 let snapshot = usagi_core::domain::workflow::WorkflowSnapshot {
                     session: job.session,
                     run: None,
+                    pending_start: None,
                 };
                 completions.emit(AppEvent::Backend(
                     super::super::controller::BackendEvent::Workflow {

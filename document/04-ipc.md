@@ -8,7 +8,6 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 ## 目次
 
 - [この文書の読み方](#この文書の読み方)
-- [session Workflow request](#session-workflow-request)
 - [identity と fence](#identity-と-fence)
 - [frame と handshake](#frame-と-handshake)
 - [daemon rollover request](#daemon-rollover-request)
@@ -23,6 +22,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [managed session request](#managed-session-request)
 - [agent launch request](#agent-launch-request)
   - [agent operation identity と final の相関](#agent-operation-identity-と-final-の相関)
+- [session Workflow request](#session-workflow-request)
 - [Codex structured capture request](#codex-structured-capture-request)
 - [agent phase report request](#agent-phase-report-request)
 - [provider conversation resume request](#provider-conversation-resume-request)
@@ -43,25 +43,6 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 session・Agent・terminal など request ごとの payload と状態遷移、後半は generation をまたぐ routing、Unix transport、
 client の復旧契約を扱う。特定の request を実装するときも、まず前半の共通 fence を確認し、次に対象 request、最後に
 後半の transport と失敗処理を確認する。
-
-## session Workflow request
-
-Session 内 Workflow の human control は次の typed request を使う。操作画面は
-[Session Workflow タブ](03-tui.md#session-workflow-タブ)を正本とする。
-
-| request | payload | 結果 |
-|---|---|---|
-| `WorkflowSnapshot` | workspace、session | session と optional run を含む snapshot |
-| `WorkflowControl` | workspace、session、operation_id、command | 制御後の同形式 snapshot |
-
-command は `Start { goal }` または `Instruct { recipient, body }` である。接続先 workspace と
-利用可能な session を照合し、Agent credential による human control は拒否する。
-制御の再送は同じ operation ID と payload を使う。受理後の通信失敗は未受理と断定せず、
-保存済みの結果を再取得する。異なる payload で operation ID を再利用すると conflict になる。
-
-daemon は開始 intent と指示を永続化し、認証済み handoff と peer journal の相関から進捗を投影する。
-snapshot の取得時に進捗を再照合し、未通知の queued 指示を再試行する。独立した常駐 Workflow
-scheduler は持たない。PTY 通知の成功と Agent による処理完了は別であり、処理済み ACK は推定しない。
 
 ## identity と fence
 
@@ -614,6 +595,27 @@ canonical semantic key は classic launch では `(WorkspaceId, SessionId?, prof
 cached replay は direct final と同じ body（同じ identity・digest・`TerminalRef`）を返し、client は経路によって検証を
 省略しない。semantic key を持たない旧 durable record は digest を持たないため replay しても intent の一致を証明できず、
 client は final として受けずに安全に失敗する。
+
+## session Workflow request
+
+Session 内 Workflow の human control は次の typed request を使う。操作画面は
+[Session Workflow タブ](03-tui.md#session-workflow-タブ)を正本とする。
+
+| request | payload | 結果 |
+|---|---|---|
+| `WorkflowSnapshot` | workspace、session | session、optional run、optional pending_start を含む snapshot |
+| `WorkflowControl` | workspace、session、operation_id、command | 制御後の同形式 snapshot |
+
+command は `Start { goal }` または `Instruct { recipient, body }` である。接続先 workspace と
+利用可能な session を照合し、Agent credential による human control は拒否する。
+制御の再送は同じ operation ID と payload を使う。受理後の通信失敗は未受理と断定せず、
+保存済みの結果を再取得する。異なる payload で operation ID を再利用すると conflict になる。
+開始前の intent は `pending_start` に元の operation ID・goal・開始エラーを返すため、
+TUI を再起動しても同じ開始操作を再試行できる。
+
+daemon は開始 intent と指示を永続化し、認証済み handoff と peer journal の相関から進捗を投影する。
+snapshot の取得時に進捗を再照合し、未通知の queued 指示を再試行する。独立した常駐 Workflow
+scheduler は持たない。PTY 通知の成功と Agent による処理完了は別であり、処理済み ACK は推定しない。
 
 ## Codex structured capture request
 

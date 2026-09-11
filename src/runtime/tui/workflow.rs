@@ -175,6 +175,7 @@ mod tests {
             let snapshot = WorkflowSnapshot {
                 session: job.session,
                 run: None,
+                pending_start: None,
             };
             let mut fake = Fake {
                 requests: vec![],
@@ -184,25 +185,20 @@ mod tests {
             };
             assert_eq!(execute(&job, &mut fake).unwrap(), snapshot);
             assert_eq!(fake.requests.len(), 1);
-            match &fake.requests[0] {
-                DaemonRequest::WorkflowSnapshot { workspace, session } => {
-                    assert_eq!((*workspace, *session), (job.workspace, job.session));
-                    assert!(job.control.is_none());
-                }
+            let expected = if let Some((operation_id, command)) = &job.control {
                 DaemonRequest::WorkflowControl {
-                    workspace,
-                    session,
-                    operation_id,
-                    command,
-                } => {
-                    assert_eq!((*workspace, *session), (job.workspace, job.session));
-                    assert_eq!(
-                        job.control.as_ref(),
-                        Some(&(*operation_id, command.clone()))
-                    );
+                    workspace: job.workspace,
+                    session: job.session,
+                    operation_id: *operation_id,
+                    command: command.clone(),
                 }
-                _ => panic!("unexpected request"),
-            }
+            } else {
+                DaemonRequest::WorkflowSnapshot {
+                    workspace: job.workspace,
+                    session: job.session,
+                }
+            };
+            assert_eq!(fake.requests[0], expected);
         }
         let mut fake = Fake {
             requests: vec![],
@@ -212,6 +208,7 @@ mod tests {
         let snapshot = WorkflowSnapshot {
             session: SessionId::new(),
             run: None,
+            pending_start: None,
         };
         fake.reply = Some(Ok(DaemonReply::Ok(serde_json::to_value(snapshot).unwrap())));
         assert!(execute(&job, &mut fake).unwrap_err().unconfirmed);
@@ -246,10 +243,15 @@ mod tests {
         Ok(WorkflowSnapshot {
             session: job.session,
             run: None,
+            pending_start: None,
         })
     }
     #[test]
     fn workflow_worker_owns_and_reaps_its_lane() {
+        let default_port = DaemonWorkflowPort::default();
+        assert!(default_port.sender.is_none());
+        assert!(default_port.worker.is_none());
+        drop(default_port);
         let mut port = DaemonWorkflowPort {
             sender: None,
             worker: None,
