@@ -18,7 +18,10 @@ use super::{
 mod agy;
 pub(super) use agy::RootAgyProvisioner;
 #[cfg(test)]
-pub(super) use agy::{agy_plugin_arguments, agy_plugin_documents, materialize_agy_plugin};
+pub(super) use agy::{
+    agy_arguments_for_integration, agy_plugin_arguments, agy_plugin_documents,
+    materialize_agy_plugin,
+};
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(
@@ -830,13 +833,14 @@ pub(super) struct SandboxPolicyInputs<'a> {
     pub(super) cache_dir: Option<&'a Path>,
     pub(super) backend: Option<&'a Path>,
     pub(super) passthrough: bool,
-    /// writable provider state の内側を再び read-only にする、実在・検証済み directory。
+    /// writable provider state の内側を再び read-only にする、実在・検証済み file / directory。
     pub(super) read_only_roots: &'a [PathBuf],
 }
 
 /// launcher へ host path を渡す前に通す policy gate。writable root 集合・`$HOME` 配下の
 /// state root・（root mode では）Git common dir を、保護対象 workspace と突き合わせる。
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
+#[allow(clippy::too_many_lines)] // One gate keeps every host path validation and overlap rule atomic.
 pub(super) fn validate_claude_sandbox_policy(
     policy: &SandboxPolicyInputs<'_>,
 ) -> Result<(), ClaudeSandboxPolicyError> {
@@ -934,7 +938,20 @@ pub(super) fn validate_claude_sandbox_policy(
         }
     }
     for root in read_only_roots {
-        validate_owned_directory(root)?;
+        let metadata = std::fs::symlink_metadata(root)
+            .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+        if metadata.file_type().is_dir() {
+            validate_owned_directory(root)?;
+        } else if !metadata.file_type().is_file() {
+            return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.uid() != unsafe { libc::geteuid() } {
+                return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
+            }
+        }
         if root
             .canonicalize()
             .ok()

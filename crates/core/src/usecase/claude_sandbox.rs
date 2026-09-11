@@ -111,7 +111,7 @@ pub struct SandboxRequest {
     pub backend: Option<PathBuf>,
     /// provisioner が起動 scope から渡す writable root。
     pub launch_roots: Vec<PathBuf>,
-    /// writable root の内側でも書き込みを再度閉じる read-only carve-out。
+    /// writable root の内側でも書き込みを再度閉じる read-only file / directory carve-out。
     /// 対象は launcher 起動前に実在・検証済みでなければならない。
     pub read_only_roots: Vec<PathBuf>,
     /// `$TMPDIR`（あれば）。
@@ -1117,31 +1117,28 @@ mod tests {
             request.command = vec!["agy".to_owned()];
             request.read_only_roots = vec![PathBuf::from("/home/dev/.gemini/config")];
             let (_, argv) = plan(&request).into_launch().unwrap();
-            match platform {
-                Platform::MacOs => {
-                    let profile = &argv[1];
-                    let allow = profile.find("(subpath \"/home/dev/.gemini\")").unwrap();
-                    let deny = profile
-                        .find("(deny file-write* (subpath \"/home/dev/.gemini/config\"))")
-                        .unwrap();
-                    assert!(deny > allow);
-                }
-                Platform::Linux => {
-                    let writable = argv
-                        .windows(3)
-                        .position(|window| {
-                            window[0] == "--bind-try" && window[1] == "/home/dev/.gemini"
-                        })
-                        .unwrap();
-                    let read_only = argv
-                        .windows(3)
-                        .position(|window| {
-                            window[0] == "--ro-bind" && window[1] == "/home/dev/.gemini/config"
-                        })
-                        .unwrap();
-                    assert!(read_only > writable);
-                }
-                Platform::Unsupported => unreachable!(),
+            if platform == Platform::MacOs {
+                let profile = &argv[1];
+                let allow = profile.find("(subpath \"/home/dev/.gemini\")").unwrap();
+                let deny = profile
+                    .find("(deny file-write* (subpath \"/home/dev/.gemini/config\"))")
+                    .unwrap();
+                assert!(deny > allow);
+            } else {
+                assert_eq!(platform, Platform::Linux);
+                let writable = argv
+                    .windows(3)
+                    .position(|window| {
+                        window[0] == "--bind-try" && window[1] == "/home/dev/.gemini"
+                    })
+                    .unwrap();
+                let read_only = argv
+                    .windows(3)
+                    .position(|window| {
+                        window[0] == "--ro-bind" && window[1] == "/home/dev/.gemini/config"
+                    })
+                    .unwrap();
+                assert!(read_only > writable);
             }
         }
     }

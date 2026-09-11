@@ -591,29 +591,30 @@ fn validate_launcher_policy_inputs(
         }
     }
     for &protected_root in protected_root.as_slice() {
-        validate_launcher_directory(protected_root, LauncherPolicyError::ProtectedRoot)?;
+        validate_launcher_path(protected_root, LauncherPolicyError::ProtectedRoot, false)?;
     }
     for root in writable_roots {
-        validate_launcher_directory(root, LauncherPolicyError::WritableRoot)?;
+        validate_launcher_path(root, LauncherPolicyError::WritableRoot, false)?;
     }
     for root in read_only_roots {
-        validate_launcher_directory(root, LauncherPolicyError::ReadOnlyRoot)?;
+        validate_launcher_path(root, LauncherPolicyError::ReadOnlyRoot, true)?;
     }
     for root in [tmpdir, home, cache_dir].into_iter().flatten() {
-        validate_launcher_directory(root, LauncherPolicyError::WritableRoot)?;
+        validate_launcher_path(root, LauncherPolicyError::WritableRoot, false)?;
     }
     Ok(())
 }
 
-fn validate_launcher_directory(
+fn validate_launcher_path(
     path: &Path,
     error: LauncherPolicyError,
+    allow_file: bool,
 ) -> Result<(), LauncherPolicyError> {
     if !path.is_absolute() || path == Path::new("/") {
         return Err(error);
     }
     let metadata = std::fs::symlink_metadata(path).map_err(|_| error)?;
-    if !metadata.file_type().is_dir() {
+    if !(metadata.file_type().is_dir() || allow_file && metadata.file_type().is_file()) {
         return Err(error);
     }
     if path.canonicalize().ok().as_deref() != Some(path) {
@@ -884,7 +885,8 @@ mod tests {
         );
 
         std::fs::create_dir(protected.join("read-only")).unwrap();
-        // backend・tmpdir・home・cache・writable / read-only root がすべて
+        std::fs::write(protected.join("read-only-file"), "existing").unwrap();
+        // backend・tmpdir・home・cache・writable / read-only path がすべて
         // 所有された canonical path なら受け入れる。
         assert_eq!(
             validate_launcher_policy_inputs(&LauncherPolicyInputs {
@@ -894,7 +896,10 @@ mod tests {
                 home: Some(protected.clone()),
                 cache_dir: Some(protected.clone()),
                 writable_roots: vec![protected.clone()],
-                read_only_roots: vec![protected.join("read-only").canonicalize().unwrap()],
+                read_only_roots: vec![
+                    protected.join("read-only").canonicalize().unwrap(),
+                    protected.join("read-only-file").canonicalize().unwrap(),
+                ],
             }),
             Ok(())
         );

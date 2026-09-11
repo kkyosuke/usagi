@@ -133,14 +133,14 @@ fn run_usagi_in_root(root: &Path, data: &Path, arguments: &[&str]) -> Output {
 /// Runs `program` (a fixture executable whose *name* selects the provider) as a
 /// root coordinator, with `home` as the launcher's `$HOME` policy input.
 fn run_agent_in_root(root: &Path, home: &Path, program: &Path) -> Output {
-    run_agent_in_root_with_read_only(root, home, program, None)
+    run_agent_in_root_with_read_only(root, home, program, &[])
 }
 
 fn run_agent_in_root_with_read_only(
     root: &Path,
     home: &Path,
     program: &Path,
-    read_only_root: Option<&Path>,
+    read_only_roots: &[&Path],
 ) -> Output {
     let protected = root.canonicalize().expect("canonical protected root");
     let home = home.canonicalize().expect("canonical home");
@@ -150,7 +150,7 @@ fn run_agent_in_root_with_read_only(
         .arg(&protected)
         .arg("--home")
         .arg(&home);
-    if let Some(read_only_root) = read_only_root {
+    for read_only_root in read_only_roots {
         command.arg("--read-only-root").arg(read_only_root);
     }
     #[cfg(target_os = "macos")]
@@ -473,7 +473,7 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
 }
 
 #[test]
-fn agy_global_config_is_read_only_in_the_shipping_sandbox() {
+fn agy_global_customizations_are_read_only_in_the_shipping_sandbox() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("agy-global-config-read-only");
@@ -486,16 +486,32 @@ fn agy_global_config_is_read_only_in_the_shipping_sandbox() {
     let hooks = config.join("hooks.json");
     let mcp = config.join("mcp_config.json");
     let state = home.join(".gemini/antigravity-cli");
-    for path in [&repo, &bin, plugin.parent().unwrap(), &state] {
+    let state_plugins = state.join("plugins");
+    let state_plugin = state_plugins.join("existing/plugin.json");
+    let settings = state.join("settings.json");
+    let import_manifest = state.join("import_manifest.json");
+    for path in [
+        &repo,
+        &bin,
+        plugin.parent().unwrap(),
+        state_plugin.parent().unwrap(),
+    ] {
         fs::create_dir_all(path).unwrap();
     }
-    for path in [&plugin, &hooks, &mcp] {
+    for path in [
+        &plugin,
+        &hooks,
+        &mcp,
+        &state_plugin,
+        &settings,
+        &import_manifest,
+    ] {
         fs::write(path, ORIGINAL).unwrap();
     }
     let program = bin.join("agy");
     fs::write(
         &program,
-        "#!/bin/sh\ntouch \"$1/.gemini/antigravity-cli/state-probe\" || exit 10\nprintf attack > \"$1/.gemini/config/hooks.json\" && exit 20\nprintf attack > \"$1/.gemini/config/mcp_config.json\" && exit 21\nmkdir -p \"$1/.gemini/config/plugins/injected\" && exit 22\nmv \"$1/.gemini/config\" \"$1/.gemini/config-moved\" && exit 23\nexit 0\n",
+        "#!/bin/sh\ntouch \"$1/.gemini/antigravity-cli/state-probe\" || exit 10\nprintf attack > \"$1/.gemini/config/hooks.json\" && exit 20\nprintf attack > \"$1/.gemini/config/mcp_config.json\" && exit 21\nmkdir -p \"$1/.gemini/config/plugins/injected\" && exit 22\nmv \"$1/.gemini/config\" \"$1/.gemini/config-moved\" && exit 23\nprintf attack > \"$1/.gemini/antigravity-cli/settings.json\" && exit 24\nprintf attack > \"$1/.gemini/antigravity-cli/import_manifest.json\" && exit 25\nmkdir -p \"$1/.gemini/antigravity-cli/plugins/injected\" && exit 26\nmv \"$1/.gemini/antigravity-cli/settings.json\" \"$1/.gemini/antigravity-cli/settings-moved.json\" && exit 27\nmv \"$1/.gemini/antigravity-cli\" \"$1/.gemini/antigravity-cli-moved\" && exit 28\nexit 0\n",
     )
     .unwrap();
     fs::set_permissions(
@@ -504,23 +520,39 @@ fn agy_global_config_is_read_only_in_the_shipping_sandbox() {
     )
     .unwrap();
 
-    let output = run_agent_in_root_with_read_only(&repo, &home, &program, Some(&config));
+    let output = run_agent_in_root_with_read_only(
+        &repo,
+        &home,
+        &program,
+        &[&config, &state_plugins, &settings, &import_manifest],
+    );
     if !output.status.success() && sandbox_backend_unavailable(&output) {
         let _ = fs::remove_dir_all(&fixture);
         return;
     }
     assert!(
         output.status.success(),
-        "AGY state must remain writable while global customization is read-only: {}",
+        "AGY state must remain writable while executable customization is read-only: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(state.join("state-probe").is_file());
-    for path in [&plugin, &hooks, &mcp] {
+    for path in [
+        &plugin,
+        &hooks,
+        &mcp,
+        &state_plugin,
+        &settings,
+        &import_manifest,
+    ] {
         assert_unchanged(path);
     }
     assert!(!config.join("plugins/injected").exists());
+    assert!(!state.join("plugins/injected").exists());
     assert!(config.is_dir());
+    assert!(state.is_dir());
     assert!(!home.join(".gemini/config-moved").exists());
+    assert!(!state.join("settings-moved.json").exists());
+    assert!(!home.join(".gemini/antigravity-cli-moved").exists());
 
     let _ = fs::remove_dir_all(&fixture);
 }

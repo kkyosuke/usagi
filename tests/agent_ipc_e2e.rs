@@ -1857,6 +1857,9 @@ fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
     let count = home.path().join("agy-spawn-count");
     let argv = home.path().join("agy-argv");
     write_restartable_agy(&bin, &count, &argv);
+    let state = home.path().join(".gemini/antigravity-cli");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("settings.json"), "{\"existing\":true}\n").unwrap();
     let daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
     let data_dir = channel_data_dir(home.path());
     let mut first = client(&data_dir);
@@ -1888,6 +1891,15 @@ fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
             .exists()
     );
     assert!(home.path().join(".gemini/config").is_dir());
+    assert!(state.join("plugins").is_dir());
+    assert_eq!(
+        fs::read_to_string(state.join("settings.json")).unwrap(),
+        "{\"existing\":true}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("import_manifest.json")).unwrap(),
+        "{}\n"
+    );
     drop(first);
     drop(daemon);
     let _restarted = spawn_daemon_command(

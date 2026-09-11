@@ -22,6 +22,9 @@ use super::{
     validate_isolated_sandbox_root, validate_owned_directory,
 };
 
+mod security;
+use security::prepare_agy_read_only_paths;
+
 /// Resolves the checkout, Antigravity plugin, prompt, environment, and outer
 /// sandbox for the `agy` adapter.
 pub(in crate::runtime::daemon) struct RootAgyProvisioner {
@@ -73,9 +76,7 @@ impl AgyProvisioner for RootAgyProvisioner {
             context.scope.workspace_id,
         )
         .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
-        let mut read_only_roots = prepare_agy_global_config_root(self.sandbox_home.as_deref())?
-            .into_iter()
-            .collect::<Vec<_>>();
+        let mut read_only_roots = prepare_agy_read_only_paths(self.sandbox_home.as_deref())?;
         let policy = SandboxPolicyInputs {
             mode,
             program: DefaultModel::Agy.command(),
@@ -166,6 +167,12 @@ pub(in crate::runtime::daemon) fn agy_plugin_arguments(
         validate_isolated_sandbox_root(policy, &target).map_err(|_| ())?;
     }
     let integration = materialize_agy_plugin(data_home, workspace, command)?;
+    agy_arguments_for_integration(&integration)
+}
+
+pub(in crate::runtime::daemon) fn agy_arguments_for_integration(
+    integration: &std::path::Path,
+) -> Result<(Vec<String>, Option<PathBuf>), ()> {
     let integration = integration.to_str().ok_or(())?;
     Ok((
         vec!["--add-dir".to_owned(), integration.to_owned()],
@@ -182,39 +189,6 @@ fn agy_integration_root(
         .join("agent-integrations")
         .join(workspace.to_string())
         .join("agy"))
-}
-
-/// Ensures AGY's global customization directory exists before it is bound
-/// read-only. Existing hooks, MCP settings, and user plugins are preserved.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agy_global_config_is_read_only_in_the_shipping_sandbox
-fn prepare_agy_global_config_root(
-    home: Option<&std::path::Path>,
-) -> Result<Option<PathBuf>, AgyProvisionFailure> {
-    let Some(home) = home else {
-        return Ok(None);
-    };
-    validate_owned_directory(home).map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
-    let mut current = home.to_path_buf();
-    for component in [".gemini", "config"] {
-        current.push(component);
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt as _;
-            builder.mode(0o700);
-        }
-        match builder.create(&current) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(AgyProvisionFailure::MaterializationFailed),
-        }
-        validate_owned_directory(&current)
-            .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
-    }
-    current
-        .canonicalize()
-        .map(Some)
-        .map_err(|_| AgyProvisionFailure::MaterializationFailed)
 }
 
 /// Provider-native workspace plugin documents loaded by Antigravity CLI.

@@ -1061,7 +1061,8 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   `--add-dir` で managed launch にだけ追加する。`plugin.json`、`mcp_config.json`、`hooks.json` を atomic write し、
   plugin root は実効 writable root / prefix（worktree、provider state、`TMPDIR`、`/tmp`、`/var/tmp` を含む）との
   双方向 overlap を作成前に拒否し、sandbox でも明示 read-only に戻す。managed AGY の
-  `~/.gemini/config` も read-only carve-out にするため、Agent 自身による global hook / MCP / plugin の永続注入と、管理外の
+  `~/.gemini/config` と、state 内で自動ロードされる `antigravity-cli/plugins/`・`settings.json`・
+  `import_manifest.json` も read-only carve-out にするため、Agent 自身による hook / MCP / command の永続注入と、管理外の
   `agy` への統合残留を防ぐ。利用者の既存 global/workspace customization は読み取れるが置換しない。`PreInvocation` で `running` と
   `conversationId`、`PreToolUse` / `PostToolUse` で `running` / `waiting`、`Stop` で `ended` を報告する。
   hook は stdin を `usagi agent-phase` が一度だけ消費し、daemon が受理した後に Antigravity 所定の JSON を stdout へ返す。
@@ -1096,7 +1097,9 @@ launcher は、**exec する program 自身の state directory** を `$HOME` 配
 - grant は両 mode に効く。session の agent CLI も利用者本人の state directory をそのまま使うため、
   onboarding・theme・permission mode・MCP 承認・認証は session をまたいで持続する。
 - `agy` の state root では認証・会話 state を writable に保つ一方、global customization root
-  `~/.gemini/config` を managed launch 中だけ read-only に戻す。既存の hooks / MCP / plugins は保持して読み取れる。
+  `~/.gemini/config` と、`~/.gemini/antigravity-cli/` 直下で command / plugin を自動ロードできる
+  `plugins/`・`settings.json`・`import_manifest.json` を managed launch 中だけ read-only に戻す。既存内容は保持して読み取れ、
+  未作成の anchor は空の private directory / JSON object として起動前に用意するため Linux の exact read-only bind でも保護される。
 
 #### agent global config の writable prefix
 

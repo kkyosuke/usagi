@@ -37,12 +37,13 @@ use dispatch::{
 #[cfg(test)]
 use agent_provisioning::{
     CLAUDE_PROGRAM, ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs,
-    agent_writable_roots, agy_plugin_arguments, agy_plugin_documents, claude_mcp_arguments,
-    claude_prompt_arguments, claude_sandbox_launcher, claude_settings_arguments,
-    claude_system_prompt_arguments, claude_writable_roots, codex_developer_instructions_arguments,
-    codex_integration_arguments, codex_system_prompt_arguments, configured_environment,
-    configured_mcp_tools, effective_role_instruction, git_common_dir, insert_root_git_environment,
-    launch_environment, lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
+    agent_writable_roots, agy_arguments_for_integration, agy_plugin_arguments,
+    agy_plugin_documents, claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
+    claude_settings_arguments, claude_system_prompt_arguments, claude_writable_roots,
+    codex_developer_instructions_arguments, codex_integration_arguments,
+    codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
+    effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
+    lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
     mcp_environment_allowlist, prompt_scope, repair_codex_arg0_permissions,
     repair_codex_arg0_permissions_with_limit, root_agent_writable_roots, root_memory_store_root,
     sandbox_mode, session_git_common_dir, session_git_policy, shell_quote, toml_basic_string,
@@ -18601,6 +18602,81 @@ instructions = "{instructions}"
             .is_err()
         );
         assert!(!temporary.path().join("agent-integrations").exists());
+    }
+
+    #[test]
+    fn agy_plugin_arguments_reject_invalid_materialization_inputs() {
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
+        let workspace = WorkspaceId::new();
+        let policy = SandboxPolicyInputs {
+            mode: SandboxMode::Root,
+            program: DefaultModel::Agy.command(),
+            workspace_root: Path::new("/workspace"),
+            launch_roots: &[],
+            tmpdir: None,
+            home: None,
+            cache_dir: None,
+            backend: None,
+            passthrough: false,
+            read_only_roots: &[],
+        };
+        let missing_data = paths::DataHome::new(
+            fixture.path().join("missing-data"),
+            paths::RuntimeMode::Production,
+        );
+        assert!(
+            agy_plugin_arguments(
+                &missing_data,
+                workspace,
+                Path::new("usagi"),
+                true,
+                true,
+                &policy,
+            )
+            .is_err()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+            let invalid_command = PathBuf::from(OsString::from_vec(vec![0xff]));
+            assert!(agy_arguments_for_integration(&invalid_command).is_err());
+            assert!(
+                agy_plugin_arguments(
+                    &data_home,
+                    WorkspaceId::new(),
+                    &invalid_command,
+                    true,
+                    true,
+                    &policy,
+                )
+                .is_err()
+            );
+
+            #[cfg(target_os = "linux")]
+            {
+                let non_utf8_root = fixture
+                    .path()
+                    .join(OsString::from_vec(vec![b'n', b'o', b'n', b'-', 0xff]));
+                std::fs::create_dir(&non_utf8_root).unwrap();
+                let non_utf8_data =
+                    paths::DataHome::new(&non_utf8_root, paths::RuntimeMode::Production);
+                assert!(
+                    agy_plugin_arguments(
+                        &non_utf8_data,
+                        WorkspaceId::new(),
+                        Path::new("usagi"),
+                        true,
+                        true,
+                        &policy,
+                    )
+                    .is_err()
+                );
+            }
+        }
     }
 
     #[test]
