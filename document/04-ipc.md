@@ -606,11 +606,14 @@ Session 内 Workflow の human control は次の typed request を使う。操�
 | `WorkflowSnapshot` | workspace、session | session、optional run、optional pending_start を含む snapshot |
 | `WorkflowControl` | workspace、session、operation_id、command | 制御後の同形式 snapshot |
 
-command は `Start { goal }` または `Instruct { recipient, body }` である。接続先 workspace と
+command は `Start { goal, agents }` または `Instruct { recipient, body }` である。接続先 workspace と
 利用可能な session を照合し、Agent credential による human control は拒否する。
 制御の再送は同じ operation ID と payload を使う。受理後の通信失敗は未受理と断定せず、
 保存済みの結果を再取得する。異なる payload で operation ID を再利用すると conflict になる。
-開始前の intent は `pending_start` に元の operation ID・goal・開始エラーを返すため、
+`agents` は planner / implementer / reviewer の provider 選択で、省略時は従来の実行・レビュー担当と Codex の計画担当を使う。
+run・pending_start は受理時の担当を固定し、snapshot の agents は開始済みならその担当、未開始ならワークスペースで前回開始した担当を返す。
+同じ operation ID の担当変更は競合として拒否する。
+開始前の intent は `pending_start` に元の operation ID・goal・agents・開始エラーを返すため、
 TUI を再起動しても同じ開始操作を再試行できる。
 
 daemon は開始 intent と指示を永続化し、認証済み handoff と peer journal の相関から進捗を投影する。

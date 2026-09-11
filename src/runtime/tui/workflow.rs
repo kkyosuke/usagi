@@ -168,11 +168,13 @@ mod tests {
                 OperationId::new(),
                 WorkflowCommand::Start {
                     goal: "Review login".into(),
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                 },
             )),
         ] {
             job.control = control;
             let snapshot = WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                 session: job.session,
                 run: None,
                 pending_start: None,
@@ -206,6 +208,7 @@ mod tests {
         };
         assert!(execute(&job, &mut fake).unwrap_err().unconfirmed);
         let snapshot = WorkflowSnapshot {
+            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
             session: SessionId::new(),
             run: None,
             pending_start: None,
@@ -241,6 +244,7 @@ mod tests {
             });
         }
         Ok(WorkflowSnapshot {
+            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
             session: job.session,
             run: None,
             pending_start: None,
@@ -269,6 +273,7 @@ mod tests {
                 OperationId::new(),
                 WorkflowCommand::Start {
                     goal: "task".into(),
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                 },
             )),
             ..job

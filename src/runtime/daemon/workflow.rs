@@ -104,8 +104,10 @@ fn handle(
         workflow::admit(&store, workspace, session, operation, &command)
             .map_err(|error| admission_error(&error))?;
         match command {
-            WorkflowCommand::Start { goal } => {
-                if let Err(error) = start(agent, bound, workspace, session, operation, &goal) {
+            WorkflowCommand::Start { goal, agents } => {
+                if let Err(error) =
+                    start(agent, bound, workspace, session, operation, &goal, agents)
+                {
                     store
                         .update_workflow(workspace, session, |record| {
                             if let Some(record) = record {
@@ -360,13 +362,14 @@ fn start(
     session: SessionId,
     operation: OperationId,
     goal: &str,
+    agents: usagi_core::domain::workflow::WorkflowAgents,
 ) -> Result<(), ProtocolError> {
     let intent = AgentLaunchIntent {
         workspace,
         session: Some(session),
-        profile: Some(AgentProfileId::new("codex").map_err(unavailable)?),
+        profile: Some(AgentProfileId::new(agents.implementer.profile_id()).map_err(unavailable)?),
     };
-    let prompt = workflow::initial_prompt(goal);
+    let prompt = workflow::initial_prompt(goal, agents);
     let preflight = agent
         .lock()
         .map_err(unavailable)?
@@ -392,7 +395,10 @@ fn start(
         operation,
         binding.worker.agent_id,
     )
-    .map_err(unavailable)
+    .map_err(unavailable)?;
+    store
+        .remember_workflow_start(workspace, session)
+        .map_err(unavailable)
 }
 
 fn deliver(
@@ -534,6 +540,7 @@ mod tests {
             operation,
             &WorkflowCommand::Start {
                 goal: "task".into(),
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
             },
         )
         .unwrap();
