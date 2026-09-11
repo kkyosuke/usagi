@@ -1255,6 +1255,7 @@ pub struct AppState {
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
     role_editor: Option<RoleEditor>,
+    workflows: std::collections::BTreeMap<SessionId, super::workflow::WorkflowPanel>,
     daemon_control: DaemonControlState,
     decisions: Vec<UserDecision>,
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
@@ -1479,6 +1480,7 @@ impl AppState {
             note_editor: None,
             environment_editor: None,
             role_editor: None,
+            workflows: std::collections::BTreeMap::new(),
             daemon_control: DaemonControlState::default(),
             decisions: Vec::new(),
             unread_decisions: std::collections::BTreeSet::new(),
@@ -1624,6 +1626,11 @@ impl AppState {
     #[must_use]
     pub fn role_editor(&self) -> Option<&RoleEditor> {
         self.role_editor.as_ref()
+    }
+
+    #[must_use]
+    pub fn workflow_panel(&self, session: SessionId) -> Option<&super::workflow::WorkflowPanel> {
+        self.workflows.get(&session)
     }
     /// Current selection, pending action, and safe result in the daemon modal.
     #[must_use]
@@ -2375,6 +2382,8 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
 /// reducer の入力。実 terminal adapter はこの語彙へ変換するだけでよい。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// Input captured by the selected native workflow pane, never by a PTY.
+    WorkflowInput { session: SessionId, key: AppKey },
     /// live terminal input。現行 Home reducer は接続 seam を提供し、pane routing は runtime 合成側が担う。
     Input(LiveInput),
     /// The runtime's current live-pane availability, sampled on every event.
@@ -2666,6 +2675,10 @@ pub enum TabDirection {
 /// reducer が要求する外部操作。daemon wire 型への変換は adapter 側の責務。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    /// Select the session's non-terminal workflow tab without launching an Agent.
+    OpenWorkflow {
+        session: SessionId,
+    },
     /// Ask the pane owner to move its stable tab selection without exposing tab
     /// identities to this controller.
     SelectTab {
@@ -2913,6 +2926,33 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Key(key) => {
             state.pending_session_click = None;
             update_key(state, key)
+        }
+        AppEvent::WorkflowInput { session, key } => {
+            if state.active != Some(session)
+                || !state.sessions.contains(&session)
+                || !state.session_can_use(session)
+            {
+                return Vec::new();
+            }
+            let panel = state.workflows.entry(session).or_default();
+            match key {
+                AppKey::Char(character) => panel.draft.insert(&character.to_string()),
+                AppKey::Paste(text) => panel.draft.paste(&text),
+                AppKey::Enter => panel.draft.newline(),
+                AppKey::Backspace => panel.draft.backspace(),
+                AppKey::Left => panel.draft.move_cursor(false),
+                AppKey::Right => panel.draft.move_cursor(true),
+                AppKey::Up => panel.draft.move_vertical(false),
+                AppKey::Down => panel.draft.move_vertical(true),
+                AppKey::Tab => panel.cycle_recipient(),
+                AppKey::PageUp => panel.history_offset = panel.history_offset.saturating_add(5),
+                AppKey::PageDown => panel.history_offset = panel.history_offset.saturating_sub(5),
+                AppKey::SaveRoles => {
+                    panel.error = Some("Workflow execution is not connected".into());
+                }
+                _ => {}
+            }
+            Vec::new()
         }
         AppEvent::RetainedPaneActivated(target) => {
             let Target::Session(session) = target else {
@@ -5780,6 +5820,17 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         // `env` owns the workspace-scoped editor rather than a per-session effect,
         // so it opens the editor and returns before the shared dismiss/notice tail.
         closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
+        closeup::Command::Workflow { arguments } => {
+            if arguments.is_empty() {
+                state.workflows.entry(active_session).or_default();
+                Some(Effect::OpenWorkflow {
+                    session: active_session,
+                })
+            } else {
+                state.notice = Some(Notice::new("workflow takes no arguments"));
+                None
+            }
+        }
     };
     if effect.is_some() {
         dismiss_closeup_action_modal(state);

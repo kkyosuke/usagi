@@ -20,6 +20,8 @@ pub enum PaneKind {
     Agent,
     /// A read-only diff document for the selected target.
     Diff,
+    /// Session-scoped workflow controls; never a PTY.
+    Workflow,
 }
 
 /// backend の completion を待つ tab placeholder。

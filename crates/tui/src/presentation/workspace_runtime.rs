@@ -841,6 +841,24 @@ impl WorkspaceRuntime {
     /// live-pane flag in sync with the resulting controller state.
     #[must_use]
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
+        let event = match event {
+            AppEvent::Key(key) if self.state.overlay().is_none()
+                && matches!(self.state.route(), Route::Home(HomeMode::Closeup))
+                    && matches!(key, AppKey::Char(_) | AppKey::Paste(_) | AppKey::Enter
+                        | AppKey::Backspace | AppKey::Left | AppKey::Right | AppKey::Up
+                        | AppKey::Down | AppKey::Tab | AppKey::PageUp | AppKey::PageDown
+                        | AppKey::SaveRoles)
+                && self.panes.active_pane().tabs().iter().any(|tab| {
+                    matches!(tab, PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow
+                        && self.panes.active_pane().selected() == &PaneSelection::Tab(TabSelection::Ready(ready.operation)))
+                }) => {
+                    match self.panes.active() {
+                        Some(Target::Session(session)) => AppEvent::WorkflowInput { session, key },
+                        _ => AppEvent::Key(key),
+                    }
+                }
+            event => event,
+        };
         let previous_drawer_focus = self.state.workspace_drawer_focus();
         let advances_material = match &event {
             AppEvent::Tick => false,
@@ -1899,6 +1917,39 @@ impl WorkspaceRuntime {
     /// matching tab. Effects with no pane surface are ignored here.
     pub fn on_effect(&mut self, effect: &Effect) {
         match effect {
+            Effect::OpenWorkflow { session } => {
+                let target = Target::Session(*session);
+                let existing = self.panes.pane(target).and_then(|pane| {
+                    pane.tabs().iter().find_map(|tab| match tab {
+                        PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow => {
+                            Some(ready.operation)
+                        }
+                        _ => None,
+                    })
+                });
+                let operation = existing.unwrap_or_else(OperationId::new);
+                if existing.is_none() {
+                    let _ = self.request_pane(target, operation, PaneKind::Workflow);
+                    let _ = reduce_registry(
+                        &mut self.panes,
+                        PaneRegistryEvent::Pane {
+                            target,
+                            event: PaneEvent::Resolved { operation },
+                        },
+                    );
+                    self.pane_focus_at_request.remove(&operation);
+                }
+                let _ = reduce_registry(
+                    &mut self.panes,
+                    PaneRegistryEvent::Pane {
+                        target,
+                        event: PaneEvent::Select(PaneSelection::Tab(TabSelection::Ready(
+                            operation,
+                        ))),
+                    },
+                );
+                self.sync_live_pane();
+            }
             Effect::SelectTab { direction } => {
                 let _ = self.select_tab(*direction);
             }
@@ -2267,6 +2318,48 @@ mod tests {
     }
 
     #[test]
+    fn workflow_command_opens_one_nonterminal_tab_and_keeps_its_draft() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        type_str(&mut runtime, "workflow");
+        let effects = runtime.handle_key(Key::Enter);
+        assert_eq!(effects, vec![Effect::OpenWorkflow { session }]);
+        for effect in &effects {
+            runtime.on_effect(effect);
+        }
+        assert!(runtime.focused_terminal().is_none());
+        assert!(
+            matches!(runtime.panes.active_pane().tabs(), [PaneTab::Ready(ready)] if ready.kind == PaneKind::Workflow)
+        );
+        type_str(&mut runtime, "Check login");
+        let _ = runtime.handle_key(Key::Enter);
+        type_str(&mut runtime, "and errors");
+        assert_eq!(
+            runtime
+                .state()
+                .workflow_panel(session)
+                .unwrap()
+                .draft
+                .value(),
+            "Check login\nand errors"
+        );
+        runtime.on_effect(&Effect::OpenWorkflow { session });
+        assert_eq!(runtime.panes.active_pane().tabs().len(), 1);
+        assert_eq!(
+            runtime
+                .state()
+                .workflow_panel(session)
+                .unwrap()
+                .draft
+                .value(),
+            "Check login\nand errors"
+        );
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::CtrlO));
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Switch));
+    }
+
+    #[test]
     fn overview_palette_runs_a_typed_command_through_the_reducer() {
         let workspace = WorkspaceId::new();
         let mut runtime = overview_on(workspace);
@@ -2507,9 +2600,9 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
 
-        // `terminal` is the last action; Up wraps to it.
+        // Select by name so adding a later command cannot change this target.
         let mut runtime = closeup_on(workspace, session);
-        let _ = runtime.handle_key(Key::Up);
+        type_str(&mut runtime, "terminal");
         let effects = runtime.handle_key(Key::Enter);
         assert!(
             effects
