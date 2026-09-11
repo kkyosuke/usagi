@@ -51,6 +51,11 @@ pub(super) fn dispatch_dispatch_tool(
         matches!(
             action,
             DispatchToolAction::Dispatch
+                | DispatchToolAction::AgentHandoff
+                | DispatchToolAction::AgentPeers
+                | DispatchToolAction::AgentMessage
+                | DispatchToolAction::AgentMessages
+                | DispatchToolAction::AgentMessageAck
                 | DispatchToolAction::SessionGet
                 | DispatchToolAction::AgentList
                 | DispatchToolAction::AgentGet
@@ -304,6 +309,34 @@ pub(super) fn dispatch_agent_tool(
         let caller = authenticated.caller;
         let store = runtime.dispatch_store().clone();
         drop(runtime);
+        if matches!(
+            action,
+            DispatchToolAction::AgentPeers
+                | DispatchToolAction::AgentMessage
+                | DispatchToolAction::AgentMessages
+                | DispatchToolAction::AgentMessageAck
+        ) {
+            let response = usagi_daemon::usecase::peer_messages::handle(
+                &store,
+                workspace,
+                &caller,
+                parent_dispatch_run,
+                action,
+                payload,
+            )?;
+            if action == DispatchToolAction::AgentMessage
+                && let Some(recipient) = response
+                    .get("message")
+                    .and_then(|message| message.get("to_agent_id"))
+                    .cloned()
+                    .and_then(|id| serde_json::from_value::<AgentId>(id).ok())
+                && let Some(session) = caller.session_id
+                && let Ok(mut runtime) = agent.lock()
+            {
+                let _ = runtime.notify_peer(workspace, session, recipient);
+            }
+            return Ok((ResponseOutcome::Ok, response));
+        }
         let owned_sessions = bound
             .sessions()
             .lock()
@@ -329,7 +362,15 @@ pub(super) fn dispatch_agent_tool(
                 .map_or(serde_json::Value::Null, |run| serde_json::json!(run)))
         };
         match action {
-            DispatchToolAction::Dispatch => {
+            DispatchToolAction::Dispatch | DispatchToolAction::AgentHandoff => {
+                let handoff = action == DispatchToolAction::AgentHandoff;
+                let payload = if handoff {
+                    usagi_daemon::usecase::peer_messages::handoff_payload(
+                        &caller, &snapshot, payload,
+                    )?
+                } else {
+                    payload
+                };
                 let input = serde_json::from_value::<DispatchPayload>(payload).map_err(|_| {
                     ProtocolError::new(
                         ErrorCode::InvalidArgument,
@@ -387,7 +428,7 @@ pub(super) fn dispatch_agent_tool(
                     })?
                     .supervision_fence(parent_dispatch_run)
                     .map_err(supervisor_error)?;
-                if supervision_at_preflight.is_some() {
+                if supervision_at_preflight.is_some() && !handoff {
                     agent
                         .lock()
                         .map_err(|_| {
@@ -395,21 +436,26 @@ pub(super) fn dispatch_agent_tool(
                         })?
                         .require_same_dispatch_runtime(workspace, &caller, &selected)?;
                 }
-                bound
-                    .sessions()
-                    .lock()
-                    .map_err(|_| {
-                        ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
-                    })?
-                    .authorize_create_or_reuse(&session_name, &caller)
-                    .map_err(|error| {
-                        let code = if matches!(error, SessionRuntimeError::PermissionDenied) {
-                            ErrorCode::PermissionDenied
-                        } else {
-                            ErrorCode::Unavailable
-                        };
-                        ProtocolError::new(code, error.safe_message())
-                    })?;
+                if !handoff {
+                    bound
+                        .sessions()
+                        .lock()
+                        .map_err(|_| {
+                            ProtocolError::new(
+                                ErrorCode::Unavailable,
+                                "session runtime is unavailable",
+                            )
+                        })?
+                        .authorize_create_or_reuse(&session_name, &caller)
+                        .map_err(|error| {
+                            let code = if matches!(error, SessionRuntimeError::PermissionDenied) {
+                                ErrorCode::PermissionDenied
+                            } else {
+                                ErrorCode::Unavailable
+                            };
+                            ProtocolError::new(code, error.safe_message())
+                        })?;
+                }
                 let _delegation_permit = authorize_delegation(
                     bound,
                     agent,
@@ -420,46 +466,65 @@ pub(super) fn dispatch_agent_tool(
                 .map_err(|error| {
                     ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
                 })?;
-                let created = perform_create(
-                    bound.sessions(),
-                    &SystemGit,
-                    &operation_id,
-                    &serde_json::json!({
+                let created_body = if handoff {
+                    snapshot.clone()
+                } else {
+                    perform_create(
+                        bound.sessions(),
+                        &SystemGit,
+                        &operation_id,
+                        &serde_json::json!({
                         "name": session_name,
                         "role": requested_role,
                         "parent_session_id": caller.session_id,
                         "creator_agent_id": caller.agent_id,
-                    }),
-                )
-                .map_err(|error| {
-                    let code = match &error {
-                        SessionRuntimeError::PermissionDenied => ErrorCode::PermissionDenied,
-                        SessionRuntimeError::RoleConflict(..) => ErrorCode::RevisionConflict,
-                        _ => ErrorCode::InvalidArgument,
-                    };
-                    ProtocolError::new(code, error.safe_message())
-                })?;
+                        }),
+                    )
+                    .map_err(|error| {
+                        let code = match &error {
+                            SessionRuntimeError::PermissionDenied => ErrorCode::PermissionDenied,
+                            SessionRuntimeError::RoleConflict(..) => ErrorCode::RevisionConflict,
+                            _ => ErrorCode::InvalidArgument,
+                        };
+                        ProtocolError::new(code, error.safe_message())
+                    })?
+                    .body
+                };
                 let (session_id, parent_session_id) =
-                    session_lineage_by_name(&created.body, &session_name).ok_or_else(|| {
+                    session_lineage_by_name(&created_body, &session_name).ok_or_else(|| {
                         ProtocolError::new(
                             ErrorCode::Unavailable,
                             "created session is not available",
                         )
                     })?;
-                agent
-                    .lock()
-                    .map_err(|_| {
-                        ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
-                    })?
-                    .dispatch_store()
-                    .record_session_parent(workspace, session_id, parent_session_id)
-                    .map_err(|_| {
-                        ProtocolError::new(
-                            ErrorCode::Unavailable,
-                            "session parentage is unavailable",
-                        )
-                    })?;
-                let reserved_worker = if supervision_at_preflight.is_some() {
+                if !handoff {
+                    agent
+                        .lock()
+                        .map_err(|_| {
+                            ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                        })?
+                        .dispatch_store()
+                        .record_session_parent(workspace, session_id, parent_session_id)
+                        .map_err(|_| {
+                            ProtocolError::new(
+                                ErrorCode::Unavailable,
+                                "session parentage is unavailable",
+                            )
+                        })?;
+                }
+                let reserved_worker = if handoff {
+                    Some(
+                        agent
+                            .lock()
+                            .map_err(|_| {
+                                ProtocolError::new(
+                                    ErrorCode::Unavailable,
+                                    "agent owner is unavailable",
+                                )
+                            })?
+                            .plan_peer_worker(&operation_id, workspace, &caller, &selected)?,
+                    )
+                } else if supervision_at_preflight.is_some() {
                     Some(
                         agent
                             .lock()
@@ -490,9 +555,21 @@ pub(super) fn dispatch_agent_tool(
                         supervision_at_preflight.as_ref(),
                         supervision_before_reservation.as_ref(),
                     )?;
-                    let reservation = if let Some(reserved_worker) = reserved_worker.as_ref() {
-                        runtime
-                            .reserve_delegated_dispatch_for_session(
+                    let reservation = if let Some(reserved_worker) = reserved_worker
+                        .as_ref()
+                        .filter(|_| supervision_at_preflight.is_some())
+                    {
+                        if handoff {
+                            runtime.reserve_peer_handoff(
+                                parent_dispatch_run,
+                                &operation_id,
+                                task_instruction,
+                                reserved_worker,
+                                &session_name,
+                                chrono::Utc::now(),
+                            )
+                        } else {
+                            runtime.reserve_delegated_dispatch_for_session(
                                 parent_dispatch_run,
                                 &operation_id,
                                 task_instruction,
@@ -501,7 +578,8 @@ pub(super) fn dispatch_agent_tool(
                                 &session_name,
                                 chrono::Utc::now(),
                             )
-                            .map_err(supervisor_error)?
+                        }
+                        .map_err(supervisor_error)?
                     } else {
                         None
                     };

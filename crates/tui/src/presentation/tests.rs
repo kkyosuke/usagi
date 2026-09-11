@@ -2249,6 +2249,83 @@ fn a_failed_lifecycle_flows_to_the_sidebar_rows_and_the_reducer() {
 }
 
 #[test]
+fn sidebar_groups_children_and_navigation_survives_snapshot_refresh() {
+    use crate::usecase::application::controller::{
+        AppEvent, AppKey, Selection, SessionRoleProjection, Target,
+    };
+
+    let ids = (0..6).map(|_| SessionId::new()).collect::<Vec<_>>();
+    let mut snapshot = state("demo");
+    let template = snapshot.sessions[0].clone();
+    snapshot.sessions = [
+        "session",
+        "agy",
+        "review",
+        "inject-user-environment",
+        "display",
+        "grandchild",
+    ]
+    .into_iter()
+    .map(|name| SessionRecord {
+        name: name.into(),
+        ..template.clone()
+    })
+    .collect();
+    let records = snapshot.sessions.clone();
+    let mut view = WorkspaceView::with_runtime_ids(ws("demo"), snapshot, ids.clone());
+    let roles = BTreeMap::from([(ids[3], ids[0]), (ids[5], ids[3])].map(|(id, parent)| {
+        (
+            id,
+            SessionRoleProjection {
+                role_id: None,
+                role_summary: None,
+                parent_session_id: Some(parent),
+                agent_status: None,
+            },
+        )
+    }));
+    view.set_session_roles(roles.clone());
+    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![ids[0]]);
+    super::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let expected = [ids[0], ids[3], ids[5], ids[1], ids[2], ids[4]];
+    assert_eq!(runtime.state().sessions(), &expected);
+    let rows = super::project_controller_sessions(&ui, runtime.state());
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.label.as_str(), row.organization_depth))
+            .collect::<Vec<_>>(),
+        vec![
+            ("session", 0),
+            ("inject-user-environment", 1),
+            ("grandchild", 2),
+            ("agy", 0),
+            ("review", 0),
+            ("display", 0),
+        ]
+    );
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
+    assert_eq!(
+        runtime.state().selected(),
+        Selection::Target(Target::Session(ids[3]))
+    );
+    let active = runtime.state().active();
+    ui.workspace.replace_sessions_with_runtime_ids(records, ids);
+    ui.workspace.set_session_roles(roles);
+    super::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert_eq!(runtime.state().sessions(), &expected);
+    assert_eq!(
+        runtime.state().selected(),
+        Selection::Target(Target::Session(expected[1]))
+    );
+    assert_eq!(runtime.state().active(), active);
+    let revision = ui.workspace.material_revision();
+    ui.workspace
+        .set_session_roles(ui.workspace.session_roles().clone());
+    assert_eq!(ui.workspace.material_revision(), revision);
+}
+
+#[test]
 fn director_organization_projects_statuses_hierarchy_and_orphans() {
     use usagi_core::domain::agent::AgentStatus;
 

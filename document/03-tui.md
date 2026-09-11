@@ -937,7 +937,7 @@ material にかかわらず必ず描き直す。
 Home sidebar は `session* → + new session` の順序と stable session identity を保つ。作成 action は
 1 行、各 session は固定 3 行（1 行目 まとめ / 2 行目 変更履歴 / 3 行目 Agent）で描画する。`main` 行・root divider・`Sessions` 見出しは表示しない。session が
 0 件なら `+ new session` が唯一の selectable row となる。作成中の skeleton は `+ new session` の直前に置く。session の 1 行目は cursor / active marker、表示名、常に幅を
-予約する note icon に加え、daemon projection に assignment がある場合だけ `◆ Manager` / `● Worker`（独自roleは `• role-id`）を描く。Director の直下は `└─`、その子孫は深さに応じた字下げを表示名の前へ置く。role icon と階層は表示専用で、attach / remove の可否は従来どおり lifecycle capability だけから決める。
+予約する note icon に加え、daemon projection に assignment がある場合だけ `◆ Manager` / `● Worker`（独自roleは `• role-id`）を描く。Director の直下には字下げを付けず、session の子には `└─` と深さに応じた字下げを表示名の前へ置く。子孫は親の直後にまとめ、同じ親を持つ session と最上位の session 同士は snapshot の順序を保つ。キー操作の移動順もこの表示順と一致し、更新時は選択中・操作中の session identity を維持する。親が一覧に存在しない session は最上位に表示する。role icon と階層は表示専用で、attach / remove の可否は従来どおり lifecycle capability だけから決める。
 予約する note icon を表示する。note icon は既存の text overlay を開く入力を増やさず、内容の有無だけを示す。
 
 2 行目は daemon snapshot の `last_active`、または旧 record の `created_at` を基準に、`now`、`12m ago`、`3h ago`

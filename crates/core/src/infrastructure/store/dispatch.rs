@@ -26,6 +26,8 @@ use crate::domain::id::{AgentId, OperationId, SessionId, WorkspaceId};
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 use crate::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
+mod messages;
+
 const REGISTRY_FILE: &str = "dispatch.json";
 const WORKSPACE_REGISTRY_FILE: &str = "dispatch-workspaces.json";
 const INBOX_DIR: &str = "inbox";

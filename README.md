@@ -44,6 +44,8 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 
 対応する Agent は Claude、OpenAI Codex、Sakana AI です。通常の shell も同じ画面で利用できます。
+同じ session 内で Codex に実装、Claude にレビューを分担させる場合は、
+[Agent 間の handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) を使えます。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。
 
 ## インストール
@@ -80,6 +82,7 @@ session 作成直後の環境構築は、開いた workspace の Overview から
 [`[session].setup_commands`](document/05-daemon.md#session-作成後の-setup-command) に直接設定できます。
 
 次回からは `usagi` を起動し、Open / Recent から workspace を選べます。
+サイドバーでは、委譲して作成した子 session を親の直下にまとめて表示します。
 Session Garden では庭と右側の session 一覧から作業状況を確認し、各 Agent を開けます。
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は
 [キーバインド](document/11-keybindings.md) を参照してください。
