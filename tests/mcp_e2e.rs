@@ -1936,7 +1936,7 @@ fn production_peer_review_request_receives_a_correlated_cross_runtime_verdict() 
     // Wait for the actual peer wake before reading; the daemon must commit
     // the request before notifying this exact runtime. The fixture has no API key.
     mcp.replace_fixture_agent("claude", &format!(
-        "#!/bin/sh\nIFS= read -r notice || exit 1\nprintf '%s\\n' '{initialize}' '{initialized}' '{read}' '{ack}' '{reply}' | \"$USAGI_E2E_USAGI\" mcp >> \"$USAGI_MCP_FIXTURE_LOG\"\n"
+        "#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nIFS= read -r notice || exit 1\nprintf '%s\\n' '{initialize}' '{initialized}' '{read}' '{ack}' '{reply}' | \"$USAGI_E2E_USAGI\" mcp >> \"$USAGI_MCP_FIXTURE_LOG\"\n"
     ));
     let handoff = mcp.tool("agent_handoff", &json!({"agent":{"runtime":"claude","model":"fixture-claude"},"prompt":"await a peer review request"}));
     assert!(handoff.get("error").is_none(), "{handoff}");
