@@ -11,11 +11,15 @@ const MAX_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRecord {
+    #[serde(default)]
+    pub agents: crate::domain::workflow::WorkflowAgents,
     pub version: u32,
     pub operation: OperationId,
     pub goal: String,
     pub run: Option<WorkflowRun>,
     pub initial_notified: bool,
+    #[serde(default)]
+    pub preferences_saved: bool,
     pub cursor: Option<OperationId>,
     #[serde(default)]
     pub start_error: Option<String>,
@@ -29,11 +33,65 @@ pub struct WorkflowRecord {
 }
 
 impl DispatchStore {
+    /// Read the last successfully launched choices in this workspace.
+    /// # Errors
+    /// Returns malformed or unreadable preferences instead of silently replacing them.
+    pub fn workflow_agents(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<crate::domain::workflow::WorkflowAgents> {
+        Ok(json_file::read_bounded(
+            &self
+                .dir
+                .join("workflows")
+                .join(workspace.as_str())
+                .join("defaults.json"),
+            MAX_BYTES,
+        )?
+        .unwrap_or_default())
+    }
+
+    /// Remember a successful start for subsequent sessions and daemon restarts.
+    /// # Errors
+    /// Returns persistence failures.
+    pub fn remember_workflow_agents(
+        &self,
+        workspace: WorkspaceId,
+        agents: crate::domain::workflow::WorkflowAgents,
+    ) -> Result<()> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let directory = self.dir.join("workflows").join(workspace.as_str());
+        json_file::write_atomic(&directory, &directory.join("defaults.json"), &agents)
+    }
+
     fn workflow_path(&self, workspace: WorkspaceId, session: SessionId) -> std::path::PathBuf {
         self.dir
             .join("workflows")
             .join(workspace.as_str())
             .join(format!("{}.json", session.as_str()))
+    }
+
+    /// Save defaults once per successful launch, so retrying an old run cannot
+    /// overwrite the choices of a newer workflow.
+    /// # Errors
+    /// Returns missing intent and persistence failures, retaining retryability.
+    pub fn remember_workflow_start(
+        &self,
+        workspace: WorkspaceId,
+        session: SessionId,
+    ) -> Result<()> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut record = self
+            .workflow(workspace, session)?
+            .context("workflow intent is missing")?;
+        if record.preferences_saved {
+            return Ok(());
+        }
+        ensure!(record.run.is_some(), "workflow has not launched");
+        let directory = self.dir.join("workflows").join(workspace.as_str());
+        json_file::write_atomic(&directory, &directory.join("defaults.json"), &record.agents)?;
+        record.preferences_saved = true;
+        self.save_workflow(workspace, session, record)
     }
 
     /// Read the bounded record for one authority-checked session.
@@ -106,6 +164,44 @@ impl DispatchStore {
 mod tests {
     use super::*;
     #[test]
+    fn workflow_choices_survive_restart_and_are_workspace_scoped() {
+        use crate::domain::{settings::DefaultModel, workflow::WorkflowAgents};
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let agents = WorkflowAgents {
+            planner: DefaultModel::Agy,
+            implementer: DefaultModel::Claude,
+            reviewer: DefaultModel::OpenAi,
+        };
+        assert_eq!(
+            store.workflow_agents(workspace).unwrap(),
+            WorkflowAgents::default()
+        );
+        store.remember_workflow_agents(workspace, agents).unwrap();
+        let reopened = DispatchStore::new(dir.path());
+        assert_eq!(reopened.workflow_agents(workspace).unwrap(), agents);
+        assert_eq!(
+            reopened.workflow_agents(WorkspaceId::new()).unwrap(),
+            WorkflowAgents::default()
+        );
+        let path = dir
+            .path()
+            .join("workflows")
+            .join(workspace.as_str())
+            .join("defaults.json");
+        std::fs::write(&path, "invalid").unwrap();
+        assert!(reopened.workflow_agents(workspace).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            reopened
+                .remember_workflow_agents(workspace, agents)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn workflow_write_failure_is_not_reported_as_a_successful_update() {
         for fail in [true, false] {
             let directory = tempfile::tempdir().unwrap();
@@ -117,11 +213,13 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
             let result = store.update_workflow(workspace, session, |record| {
                 *record = Some(WorkflowRecord {
+                    agents: crate::domain::workflow::WorkflowAgents::default(),
                     version: 1,
                     operation: OperationId::new(),
                     goal: "task".into(),
                     run: None,
                     initial_notified: false,
+                    preferences_saved: false,
                     cursor: None,
                     start_error: None,
                     suspended_phase: None,
@@ -138,6 +236,7 @@ mod tests {
         }
     }
     #[test]
+    #[allow(clippy::too_many_lines)] // One capacity fixture checks retention and all overflow paths.
     fn workflow_capacity_keeps_instructions_and_bounds_the_wire_snapshot() {
         use crate::domain::{
             id::AgentId,
@@ -151,6 +250,7 @@ mod tests {
         for oversized in [true, false] {
             let result = store.update_workflow(workspace, session, |value| {
                 *value = Some(WorkflowRecord {
+                    agents: crate::domain::workflow::WorkflowAgents::default(),
                     version: 1,
                     operation,
                     goal: if oversized {
@@ -160,6 +260,7 @@ mod tests {
                     },
                     run: None,
                     initial_notified: false,
+                    preferences_saved: false,
                     cursor: None,
                     start_error: None,
                     suspended_phase: None,
@@ -171,6 +272,7 @@ mod tests {
             assert_eq!(result.is_err(), oversized);
         }
         let run = WorkflowRun {
+            agents: crate::domain::workflow::WorkflowAgents::default(),
             id: operation,
             session,
             goal: "Task".into(),
@@ -191,11 +293,13 @@ mod tests {
         store
             .update_workflow(workspace, session, |value| {
                 *value = Some(WorkflowRecord {
+                    agents: crate::domain::workflow::WorkflowAgents::default(),
                     version: 1,
                     operation,
                     goal: "Task".into(),
                     run: Some(run),
                     initial_notified: false,
+                    preferences_saved: false,
                     cursor: None,
                     start_error: None,
                     suspended_phase: None,
@@ -249,11 +353,13 @@ mod tests {
         store
             .update_workflow(workspace, session, |record| {
                 *record = Some(WorkflowRecord {
+                    agents: crate::domain::workflow::WorkflowAgents::default(),
                     version: 1,
                     operation,
                     goal: "test".into(),
                     run: None,
                     initial_notified: false,
+                    preferences_saved: false,
                     cursor: None,
                     start_error: None,
                     suspended_phase: None,

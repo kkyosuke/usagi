@@ -22598,6 +22598,41 @@ instructions = "{instructions}"
         }
 
         #[test]
+        fn workflow_launch_uses_selected_implementer_and_remembers_the_three_agents() {
+            use usagi_core::domain::{
+                settings::DefaultModel,
+                workflow::{WorkflowAgents, WorkflowCommand},
+            };
+            let fixture = Fixture::new();
+            let agents = WorkflowAgents {
+                planner: DefaultModel::Agy,
+                implementer: DefaultModel::Claude,
+                reviewer: DefaultModel::OpenAi,
+            };
+            let result = fixture
+                .control(
+                    usagi_core::domain::id::OperationId::new(),
+                    WorkflowCommand::Start {
+                        goal: "Selected providers".into(),
+                        agents,
+                    },
+                )
+                .unwrap();
+            let run = result.run.unwrap();
+            assert_eq!(run.agents, agents);
+            let owner = fixture.agent.lock().unwrap();
+            let store = owner.dispatch_store();
+            let implementer = store
+                .agents_in_workspace(fixture.workspace)
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.agent_id == run.implementer)
+                .unwrap();
+            assert_eq!(implementer.runtime.as_str(), "claude");
+            assert_eq!(store.workflow_agents(fixture.workspace).unwrap(), agents);
+        }
+
+        #[test]
         #[allow(clippy::too_many_lines)] // One exact-resume sequence exercises both participants before the first observation.
         fn workflow_unobserved_exact_resumes_keep_requests_and_self_bound_reviewer_verdicts() {
             use usagi_core::domain::agent::{CallerRef, ModelSelector, ProviderKind};
@@ -22611,6 +22646,7 @@ instructions = "{instructions}"
                     operation,
                     WorkflowCommand::Start {
                         goal: "resume safely".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                     },
                 )
                 .unwrap()
@@ -22746,6 +22782,7 @@ instructions = "{instructions}"
                     operation,
                     WorkflowCommand::Start {
                         goal: "review recovery".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                     },
                 )
                 .unwrap()
@@ -22931,6 +22968,7 @@ instructions = "{instructions}"
                     operation,
                     WorkflowCommand::Start {
                         goal: "legacy journal replay".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                     },
                 )
                 .unwrap()
@@ -23067,6 +23105,7 @@ instructions = "{instructions}"
                     OperationId::new(),
                     WorkflowCommand::Start {
                         goal: "verification error".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                     },
                 )
                 .unwrap();
@@ -23109,7 +23148,8 @@ instructions = "{instructions}"
                     .control(
                         operation,
                         WorkflowCommand::Start {
-                            goal: "recover me".into()
+                            goal: "recover me".into(),
+                            agents: usagi_core::domain::workflow::WorkflowAgents::default()
                         }
                     )
                     .is_err()
@@ -23129,7 +23169,10 @@ instructions = "{instructions}"
             let recovered = fixture
                 .control(
                     pending.operation_id,
-                    WorkflowCommand::Start { goal: pending.goal },
+                    WorkflowCommand::Start {
+                        goal: pending.goal,
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    },
                 )
                 .unwrap();
             assert!(recovered.pending_start.is_none());
@@ -23172,6 +23215,7 @@ instructions = "{instructions}"
                     operation,
                     WorkflowCommand::Start {
                         goal: "verify me".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                     },
                 )
                 .unwrap()
@@ -23299,13 +23343,20 @@ instructions = "{instructions}"
             let operation = usagi_core::domain::id::OperationId::new();
             assert_eq!(
                 fixture
-                    .control(operation, WorkflowCommand::Start { goal: " ".into() })
+                    .control(
+                        operation,
+                        WorkflowCommand::Start {
+                            goal: " ".into(),
+                            agents: usagi_core::domain::workflow::WorkflowAgents::default()
+                        }
+                    )
                     .unwrap_err()
                     .code,
                 ErrorCode::InvalidArgument
             );
             let command = WorkflowCommand::Start {
                 goal: "Implement feature".into(),
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
             };
             let first = fixture.control(operation, command.clone()).unwrap();
             assert_eq!(fixture.control(operation, command).unwrap(), first);
@@ -23314,7 +23365,8 @@ instructions = "{instructions}"
                     .control(
                         operation,
                         WorkflowCommand::Start {
-                            goal: "Changed".into()
+                            goal: "Changed".into(),
+                            agents: usagi_core::domain::workflow::WorkflowAgents::default()
                         }
                     )
                     .unwrap_err()

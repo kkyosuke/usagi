@@ -2897,6 +2897,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 return Vec::new();
             }
             if let Some(panel) = state.workflows.get_mut(&session) {
+                if panel.run.is_none() && panel.agent_field.is_some() {
+                    return Vec::new();
+                }
                 match edit {
                     super::workflow::WorkflowEdit::Start => panel.draft.move_edge(false),
                     super::workflow::WorkflowEdit::End => panel.draft.move_edge(true),
@@ -2922,7 +2925,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             match result {
                 Ok(snapshot) if snapshot.session == job.session => {
+                    if !panel.agents_edited && panel.pending.is_none() {
+                        panel.agents = snapshot.agents;
+                    }
                     if let Some(start) = snapshot.pending_start {
+                        panel.agents = start.agents;
                         if panel.pending.is_none() {
                             if panel.draft.value().is_empty() {
                                 panel.draft.paste(&start.goal);
@@ -2931,6 +2938,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                                 start.operation_id,
                                 usagi_core::domain::workflow::WorkflowCommand::Start {
                                     goal: start.goal,
+                                    agents: start.agents,
                                 },
                             ));
                         }
@@ -2942,7 +2950,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                     }
                     if let Some((_, command)) = job.control {
                         let body = match command {
-                            usagi_core::domain::workflow::WorkflowCommand::Start { goal } => goal,
+                            usagi_core::domain::workflow::WorkflowCommand::Start {
+                                goal, ..
+                            } => goal,
                             usagi_core::domain::workflow::WorkflowCommand::Instruct {
                                 body,
                                 ..
@@ -3025,6 +3035,20 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 return Vec::new();
             }
             let panel = state.workflows.entry(session).or_default();
+            if panel.run.is_none() && panel.agent_field.is_some() {
+                match key {
+                    AppKey::Left => {
+                        panel.cycle_agent(false);
+                        return Vec::new();
+                    }
+                    AppKey::Right => {
+                        panel.cycle_agent(true);
+                        return Vec::new();
+                    }
+                    AppKey::Tab | AppKey::SaveRoles => {}
+                    _ => return Vec::new(),
+                }
+            }
             match key {
                 AppKey::Char(character) => panel.draft.insert(&character.to_string()),
                 AppKey::Paste(text) => panel.draft.paste(&text),
@@ -3056,7 +3080,10 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                                 body,
                             }
                         } else {
-                            usagi_core::domain::workflow::WorkflowCommand::Start { goal: body }
+                            usagi_core::domain::workflow::WorkflowCommand::Start {
+                                goal: body,
+                                agents: panel.agents,
+                            }
                         };
                         panel.pending = Some((OperationId::new(), command));
                     }

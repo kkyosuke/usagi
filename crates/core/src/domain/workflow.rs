@@ -5,6 +5,25 @@ use serde::{Deserialize, Serialize};
 use super::agent_message::ReviewTarget;
 use super::id::{AgentId, OperationId, SessionId};
 
+/// Provider choices retained with each run and used as the next workspace defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgents {
+    pub planner: super::settings::DefaultModel,
+    pub implementer: super::settings::DefaultModel,
+    pub reviewer: super::settings::DefaultModel,
+}
+
+impl Default for WorkflowAgents {
+    fn default() -> Self {
+        Self {
+            planner: super::settings::DefaultModel::OpenAi,
+            implementer: super::settings::DefaultModel::OpenAi,
+            reviewer: super::settings::DefaultModel::Claude,
+        }
+    }
+}
+
 /// The participant chosen for an instruction. Automatic is resolved on admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +89,8 @@ pub struct Review {
 /// Stored by the daemon; opening or closing its UI does not create/stop a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowRun {
+    #[serde(default)]
+    pub agents: WorkflowAgents,
     pub id: OperationId,
     pub session: SessionId,
     pub goal: String,
@@ -238,6 +259,8 @@ fn valid_text(text: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowSnapshot {
+    #[serde(default)]
+    pub agents: WorkflowAgents,
     pub session: SessionId,
     pub run: Option<WorkflowRun>,
     #[serde(default)]
@@ -246,6 +269,8 @@ pub struct WorkflowSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowPendingStart {
+    #[serde(default)]
+    pub agents: WorkflowAgents,
     pub operation_id: OperationId,
     pub goal: String,
     pub error: Option<String>,
@@ -254,8 +279,15 @@ pub struct WorkflowPendingStart {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowCommand {
-    Start { goal: String },
-    Instruct { recipient: Recipient, body: String },
+    Start {
+        goal: String,
+        #[serde(default)]
+        agents: WorkflowAgents,
+    },
+    Instruct {
+        recipient: Recipient,
+        body: String,
+    },
 }
 
 #[cfg(test)]
@@ -264,6 +296,7 @@ mod tests {
 
     fn run() -> WorkflowRun {
         WorkflowRun {
+            agents: crate::domain::workflow::WorkflowAgents::default(),
             id: OperationId::new(),
             session: SessionId::new(),
             goal: "Implement authentication".into(),

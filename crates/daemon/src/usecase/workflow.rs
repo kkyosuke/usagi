@@ -17,23 +17,27 @@ pub fn admit(
 ) -> Result<()> {
     store.update_workflow(workspace, session, |value| {
         match command {
-            WorkflowCommand::Start { goal } => {
+            WorkflowCommand::Start { goal, agents } => {
                 ensure!(
                     !goal.trim().is_empty() && goal.len() <= 16384 && !goal.contains('\0'),
                     "invalid workflow goal"
                 );
                 if let Some(existing) = value {
                     ensure!(
-                        existing.operation == operation && existing.goal == *goal,
+                        existing.operation == operation
+                            && existing.goal == *goal
+                            && existing.agents == *agents,
                         "session already has another workflow"
                     );
                 } else {
                     *value = Some(WorkflowRecord {
+                        agents: *agents,
                         version: 1,
                         operation,
                         goal: goal.clone(),
                         run: None,
                         initial_notified: false,
+                        preferences_saved: false,
                         cursor: None,
                         start_error: None,
                         suspended_phase: None,
@@ -81,6 +85,7 @@ pub fn bind(
             return Ok(());
         }
         record.run = Some(WorkflowRun {
+            agents: record.agents,
             id: operation,
             session,
             goal: record.goal.clone(),
@@ -109,6 +114,7 @@ pub fn snapshot(
 ) -> Result<WorkflowSnapshot> {
     if store.workflow(workspace, session)?.is_none() {
         return Ok(WorkflowSnapshot {
+            agents: store.workflow_agents(workspace)?,
             session,
             run: None,
             pending_start: None,
@@ -121,9 +127,11 @@ pub fn snapshot(
         let record = value.as_mut().context("workflow disappeared")?;
         let Some(run) = record.run.as_mut() else {
             return Ok(WorkflowSnapshot {
+                agents: record.agents,
                 session,
                 run: None,
                 pending_start: Some(usagi_core::domain::workflow::WorkflowPendingStart {
+                    agents: record.agents,
                     operation_id: record.operation,
                     goal: record.goal.clone(),
                     error: record.start_error.clone(),
@@ -132,6 +140,7 @@ pub fn snapshot(
         };
         if record.suspended_phase.is_some() {
             return Ok(WorkflowSnapshot {
+                agents: record.agents,
                 session,
                 run: Some(run.clone()),
                 pending_start: None,
@@ -152,7 +161,7 @@ pub fn snapshot(
                 let assigned = agents.iter().any(|agent| {
                     agent.agent_id == message.to_agent_id
                         && agent.session_id == Some(session)
-                        && agent.runtime.as_str() == "claude"
+                        && agent.runtime.as_str() == run.agents.reviewer.profile_id()
                 }) && bindings.iter().any(|binding| {
                     binding.worker.agent_id == message.to_agent_id
                         && binding.worker.session_id == Some(session)
@@ -196,6 +205,7 @@ pub fn snapshot(
             record.cursor = Some(message.message_id);
         }
         Ok(WorkflowSnapshot {
+            agents: record.agents,
             session,
             run: Some(run.clone()),
             pending_start: None,
@@ -231,9 +241,9 @@ fn original_reviewer_binding(
 fn append_history(run: &mut WorkflowRun, entry: &usagi_core::domain::agent_message::AgentMessage) {
     let message = &entry.message;
     let actor = if entry.from_agent_id == run.implementer {
-        "Codex"
+        run.agents.implementer.profile_id()
     } else {
-        "Claude"
+        run.agents.reviewer.profile_id()
     };
     run.history
         .push(usagi_core::domain::workflow::WorkflowHistoryEntry {
@@ -247,9 +257,12 @@ fn append_history(run: &mut WorkflowRun, entry: &usagi_core::domain::agent_messa
 }
 
 #[must_use]
-pub fn initial_prompt(goal: &str) -> String {
+pub fn initial_prompt(goal: &str, agents: usagi_core::domain::workflow::WorkflowAgents) -> String {
+    let implementer = agents.implementer.profile_id();
+    let reviewer = agents.reviewer.profile_id();
+    let planner = agents.planner.profile_id();
     format!(
-        "Session Workflow: implementation and review. You are Codex, the implementation owner. Work only in this session. Implement, test, and commit the user's goal. Use agent_handoff to launch Claude (runtime=claude, model=default) INSIDE THIS SAME SESSION, with review-only instructions. Do not create a review session. Send review_request via agent_message to that exact Agent with full base_sha and head_sha. Claude must reply approved or changes_requested with the identical review target and in_reply_to request ID; no edits. Read agent_messages, acknowledge processed messages, fix and commit findings then request another review. Stop and ask the user after 3 revision rounds. After approval verify latest HEAD and checks, prepare the PR, report its URL. Never merge. Treat later Workflow instruction IDs as idempotent: process each ID at most once. If authentication or policy blocks handoff, report the error; do not claim success.\n\nUser goal:\n{goal}"
+        "Session Workflow: implementation and review. You are {implementer}, the implementation owner. Work only in this session. First use agent_handoff to launch a separate planning Agent (runtime={planner}, model=default) INSIDE THIS SAME SESSION with planning-only instructions. Ask it to inspect the goal and return a concrete implementation plan via agent_message; no edits. Wait for its plan and acknowledge its message before implementing. The planner is not the reviewer; launch a separate review Agent later. Implement, test, and commit the user's goal. Use agent_handoff to launch the reviewer (runtime={reviewer}, model=default) INSIDE THIS SAME SESSION, with review-only instructions. Do not create a review session. Send review_request via agent_message to that exact Agent with full base_sha and head_sha. The reviewer must reply approved or changes_requested with the identical review target and in_reply_to request ID; no edits. Read agent_messages, acknowledge processed messages, fix and commit findings then request another review. Stop and ask the user after 3 revision rounds. After approval verify latest HEAD and checks, prepare the PR, report its URL. Never merge. Treat later Workflow instruction IDs as idempotent: process each ID at most once. If authentication or policy blocks handoff, report the error; do not claim success.\n\nUser goal:\n{goal}"
     )
 }
 
@@ -330,8 +343,83 @@ mod tests {
     use usagi_core::domain::workflow::Recipient;
 
     #[test]
+    fn workflow_agents_bind_to_intent_prompt_and_retry() {
+        use usagi_core::domain::{settings::DefaultModel, workflow::WorkflowAgents};
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let agents = WorkflowAgents {
+            planner: DefaultModel::Agy,
+            implementer: DefaultModel::Claude,
+            reviewer: DefaultModel::OpenAi,
+        };
+        store.remember_workflow_agents(workspace, agents).unwrap();
+        assert_eq!(snapshot(&store, workspace, session).unwrap().agents, agents);
+        assert!(store.remember_workflow_start(workspace, session).is_err());
+        let command = WorkflowCommand::Start {
+            goal: "Task".into(),
+            agents,
+        };
+        admit(&store, workspace, session, operation, &command).unwrap();
+        assert!(store.remember_workflow_start(workspace, session).is_err());
+        let snapshot = snapshot(&store, workspace, session).unwrap();
+        assert_eq!(snapshot.agents, agents);
+        assert_eq!(snapshot.pending_start.unwrap().agents, agents);
+        let conflict = WorkflowCommand::Start {
+            goal: "Task".into(),
+            agents: WorkflowAgents::default(),
+        };
+        assert!(admit(&store, workspace, session, operation, &conflict).is_err());
+        bind(&store, workspace, session, operation, AgentId::new()).unwrap();
+        let defaults = dir
+            .path()
+            .join("workflows")
+            .join(workspace.as_str())
+            .join("defaults.json");
+        std::fs::remove_file(&defaults).unwrap();
+        std::fs::create_dir(&defaults).unwrap();
+        assert!(store.remember_workflow_start(workspace, session).is_err());
+        assert!(
+            !store
+                .workflow(workspace, session)
+                .unwrap()
+                .unwrap()
+                .preferences_saved
+        );
+        std::fs::remove_dir(&defaults).unwrap();
+        store.remember_workflow_start(workspace, session).unwrap();
+        assert_eq!(store.workflow_agents(workspace).unwrap(), agents);
+        store
+            .remember_workflow_agents(workspace, WorkflowAgents::default())
+            .unwrap();
+        store.remember_workflow_start(workspace, session).unwrap();
+        assert_eq!(
+            store.workflow_agents(workspace).unwrap(),
+            WorkflowAgents::default()
+        );
+        let run = store
+            .workflow(workspace, session)
+            .unwrap()
+            .unwrap()
+            .run
+            .unwrap();
+        assert_eq!(run.agents, agents);
+        let prompt = initial_prompt(&run.goal, agents);
+        assert!(prompt.contains("You are claude"));
+        assert!(prompt.contains("runtime=agy"));
+        assert!(prompt.contains("runtime=codex"));
+        assert!(prompt.contains("Wait for its plan"));
+        let legacy: WorkflowCommand =
+            serde_json::from_str(r#"{"kind":"start","goal":"Task"}"#).unwrap();
+        assert_eq!(legacy, conflict);
+    }
+
+    #[test]
     fn history_retains_only_a_bounded_tail_and_bounded_bodies() {
         let mut run = WorkflowRun {
+            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
             id: OperationId::new(),
             session: SessionId::new(),
             goal: "task".into(),
@@ -367,8 +455,14 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // One end-to-end journal fixture preserves request/verdict identity.
     fn workflow_peer_review_reconciles_exact_bindings_once_without_acknowledging() {
+        for provider in usagi_core::domain::settings::DefaultModel::ALL {
+            check_workflow_peer_review(provider);
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // One end-to-end journal fixture preserves request/verdict identity.
+    fn check_workflow_peer_review(reviewer_provider: usagi_core::domain::settings::DefaultModel) {
         use usagi_core::domain::agent::{
             Agent, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
             ModelSelector, RunStatus, WorkerRef,
@@ -384,7 +478,7 @@ mod tests {
         let reviewer = AgentId::new();
         for (id, runtime, run) in [
             (implementer, "codex", operation),
-            (reviewer, "claude", reviewer_run),
+            (reviewer, reviewer_provider.profile_id(), reviewer_run),
         ] {
             store
                 .upsert_agent(
@@ -431,6 +525,10 @@ mod tests {
             operation,
             &WorkflowCommand::Start {
                 goal: "Task".into(),
+                agents: usagi_core::domain::workflow::WorkflowAgents {
+                    reviewer: reviewer_provider,
+                    ..usagi_core::domain::workflow::WorkflowAgents::default()
+                },
             },
         )
         .unwrap();
@@ -829,6 +927,7 @@ mod tests {
         assert!(snapshot(&store, workspace, session).unwrap().run.is_none());
         let start = WorkflowCommand::Start {
             goal: "implement authentication".into(),
+            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
         };
         for goal in [String::new(), "\0".into(), "x".repeat(16385)] {
             assert!(
@@ -837,7 +936,10 @@ mod tests {
                     workspace,
                     session,
                     operation,
-                    &WorkflowCommand::Start { goal }
+                    &WorkflowCommand::Start {
+                        goal,
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default()
+                    }
                 )
                 .is_err()
             );
@@ -867,7 +969,10 @@ mod tests {
             workspace,
             session,
             pending.operation_id,
-            &WorkflowCommand::Start { goal: pending.goal },
+            &WorkflowCommand::Start {
+                goal: pending.goal,
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+            },
         )
         .unwrap();
         assert!(admit(&store, workspace, session, OperationId::new(), &start).is_err());
@@ -888,7 +993,14 @@ mod tests {
         assert_eq!(run.instructions[0].recipient, implementer);
         assert_eq!(run.reviewer, None);
         assert_eq!(run.phase, Phase::Implementing);
-        assert!(initial_prompt(&run.goal).contains("agent_handoff"));
-        assert!(initial_prompt(&"x".repeat(16384)).len() < 24 * 1024);
+        assert!(initial_prompt(&run.goal, run.agents).contains("agent_handoff"));
+        assert!(
+            initial_prompt(
+                &"x".repeat(16384),
+                usagi_core::domain::workflow::WorkflowAgents::default()
+            )
+            .len()
+                < 24 * 1024
+        );
     }
 }
