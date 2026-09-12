@@ -5262,9 +5262,9 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
 /// unmerged branch for the exact selected identity. The safe variant it
 /// replaced refused nearly every real session — Git rejects `worktree remove`
 /// while the tree carries untracked build output, and rejects `branch -d`
-/// while the branch is not merged into the local base, which a squash-merged
-/// PR never is — so the only reachable outcome was a `failed/delete` row that
-/// then needed a second, forced attempt anyway.
+/// unless the branch is merged into the local base or the daemon can prove a
+/// squash merge from its PR inventory — so the usual outcome was a
+/// `failed/delete` row that then needed a second, forced attempt anyway.
 ///
 /// `purge_orphan` stays reserved for a daemon-diagnosed integrity orphan: the
 /// daemon rejects that acknowledgement for any other row.

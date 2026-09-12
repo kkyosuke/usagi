@@ -2711,7 +2711,7 @@ fn home_left_pane(
     }
     let footer = match home.mode {
         HomeMode::Switch => {
-            "[switch] ←→ project / ↑↓ select / Enter closeup / Ctrl-X remove / Ctrl-? help"
+            "[switch] ←→ project / ↑↓ select / Enter closeup / Ctrl-X force remove / Ctrl-? help"
         }
         HomeMode::Closeup => {
             "[closeup] a agent / t terminal / Enter actions / Ctrl-O controls / Ctrl-? help"
