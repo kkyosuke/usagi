@@ -607,7 +607,9 @@ Session 内 Workflow の human control は次の typed request を使う。操�
 | `WorkflowControl` | workspace、session、operation_id、command | 制御後の同形式 snapshot |
 
 command は `Start { goal, agents }` または `Instruct { recipient, body }` である。接続先 workspace と
-利用可能な session を照合し、Agent credential による human control は拒否する。
+利用可能な session を照合し、**この 2 つの request** は Agent credential を伴う呼び出しを拒否する。
+同じ制御を MCP から行う経路は別にあり、session tool と同じ所有権規則（caller が作成した session に限り、
+caller 自身が動いている session は拒否）で守る（[7. MCP サーバ](07-mcp.md)が正本）。
 制御の再送は同じ operation ID と payload を使う。受理後の通信失敗は未受理と断定せず、
 保存済みの結果を再取得する。異なる payload で operation ID を再利用すると conflict になる。
 `agents` は planner / implementer / reviewer の provider 選択で、省略時は従来の実行・レビュー担当と Codex の計画担当を使う。

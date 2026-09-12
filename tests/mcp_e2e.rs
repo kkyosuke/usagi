@@ -455,6 +455,76 @@ fn production_workflow_tools_observe_a_session_and_refuse_a_self_directed_start(
 }
 
 #[test]
+fn production_workflow_start_launches_the_remembered_participants() {
+    let mut mcp = McpHarness::start();
+    // Claude proves readiness with `auth status`; the implementer then stays
+    // alive so the run has a live participant to bind to.
+    mcp.replace_fixture_agent(
+        "claude",
+        r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then exit 0; fi
+sleep 30
+"#,
+    );
+    assert!(mcp.tool("session_create", &json!({"name":"workflow-run"}))["error"].is_null());
+
+    // Nobody is named, so the start uses what this workspace remembers. The
+    // default implementer is Codex; remembering Claude is what proves the
+    // workspace answer reached the launch rather than the product default.
+    let defaults = mcp.data_dir().join("daemon/workflows").join(
+        tool_text(&mcp.tool("session_list", &json!({})))["workspace_id"]
+            .as_str()
+            .unwrap(),
+    );
+    fs::create_dir_all(&defaults).unwrap();
+    fs::write(
+        defaults.join("defaults.json"),
+        r#"{"planner":"claude","implementer":"claude","reviewer":"codex"}"#,
+    )
+    .unwrap();
+
+    let started = mcp.tool(
+        "workflow_start",
+        &json!({"name":"workflow-run","goal":"add a login form"}),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let started = tool_text(&started);
+    assert_eq!(started["run"]["goal"], "add a login form");
+    assert_eq!(started["run"]["agents"]["implementer"], "claude");
+    assert_eq!(started["run"]["phase"], "implementing");
+
+    // The same call is one operation: repeating it answers with the same run
+    // instead of starting a second one.
+    let again = mcp.tool(
+        "workflow_start",
+        &json!({"name":"workflow-run","goal":"add a login form"}),
+    );
+    assert!(again.get("error").is_some(), "{again}");
+
+    // An instruction reaches the run and is remembered durably.
+    let instructed = mcp.tool(
+        "workflow_instruct",
+        &json!({"name":"workflow-run","body":"cover the error path","recipient":"implementer"}),
+    );
+    assert!(instructed.get("error").is_none(), "{instructed}");
+    let instructed = tool_text(&instructed);
+    assert_eq!(
+        instructed["run"]["instructions"][0]["body"],
+        "cover the error path"
+    );
+
+    // An unknown participant spelling is refused rather than silently defaulted.
+    assert!(
+        mcp.tool(
+            "workflow_start",
+            &json!({"name":"workflow-run","goal":"x","reviewer":"nobody"}),
+        )
+        .get("error")
+        .is_some()
+    );
+}
+
+#[test]
 fn production_delegate_brief_immediately_dispatches_an_isolated_triage_worker() {
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();

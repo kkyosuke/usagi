@@ -242,6 +242,22 @@ impl Tool for UserDecisionResolve {
     }
 }
 
+/// Goal and instruction text share the daemon's bound for durable workflow text.
+const WORKFLOW_TEXT_MAX_BYTES: usize = 16 * 1024;
+
+/// The participants a workflow can be started with, spelled the way the rest of
+/// the product spells them. Publishing the closed set lets a caller discover the
+/// vocabulary from `tools/list` instead of guessing and being refused.
+fn participant_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": usagi_core::domain::settings::DefaultModel::ALL
+            .iter()
+            .map(|model| model.selector())
+            .collect::<Vec<_>>(),
+    })
+}
+
 fn bounded_string_schema(maximum: usize, nonempty: bool) -> serde_json::Value {
     let mut schema = serde_json::json!({
         "type": "string",
@@ -489,10 +505,27 @@ impl Tool for WorkflowStart {
         "workflow_start"
     }
     fn description(&self) -> &'static str {
-        "認証済み caller が作成したセッションで、実装＋レビューの workflow を開始するときに使う。name と goal は必須。実装担当が計画担当とレビュー担当を同じセッション内で起動し、レビュー承認と PR の独立検証まで daemon が進行を所有する。進行状況は workflow_status で観測する。自分自身が動いているセッションに対しては呼べない。planner / implementer / reviewer は省略時に workspace の既定を使う。"
+        "認証済み caller が作成したセッションで、実装＋レビューの workflow を開始するときに使う。name と goal は必須。実装担当が計画担当とレビュー担当を同じセッション内で起動し、レビュー承認と PR の独立検証まで daemon が進行を所有する。進行状況は workflow_status で観測する。自分自身が動いているセッションに対しては呼べない。planner / implementer / reviewer は省略時に workspace が最後に開始できた組合せを使い、未知の綴りは拒否する。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"goal":{"type":"string","minLength":1,"maxLength":16384},"planner":{"type":"string"},"implementer":{"type":"string"},"reviewer":{"type":"string"}},"required":["name","goal"],"additionalProperties":false}"#
+        static SCHEMA: OnceLock<String> = OnceLock::new();
+        SCHEMA
+            .get_or_init(|| {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "goal": bounded_string_schema(WORKFLOW_TEXT_MAX_BYTES, true),
+                        "planner": participant_schema(),
+                        "implementer": participant_schema(),
+                        "reviewer": participant_schema(),
+                    },
+                    "required": ["name", "goal"],
+                    "additionalProperties": false,
+                })
+                .to_string()
+            })
+            .as_str()
     }
 }
 
@@ -504,7 +537,7 @@ impl Tool for WorkflowStatus {
         "workflow_status"
     }
     fn description(&self) -> &'static str {
-        "認証済み caller が作成したセッションの workflow の進捗（工程・担当・修正回数・待ち理由・PR）を観測するときに使う。name 必須。工程が Needs attention（判断待ち）か PR ready（完了）なら人の判断が要る。"
+        "認証済み caller が作成したセッションの workflow の進捗（工程・担当・修正回数・待ち理由・PR）を観測するときに使う。name 必須。工程が Needs attention（判断待ち）か PR ready（完了）なら人の判断が要る。1 回ごとに PR の実検証（git と gh）を伴うため、密なポーリングはしない。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
@@ -522,7 +555,25 @@ impl Tool for WorkflowInstruct {
         "進行中の workflow へ追加指示を送るときに使う。name と body は必須。recipient は automatic（既定、現在の担当）/ implementer / reviewer。指示は受理時点の担当に固定され、工程が変わっても付け替えない。応答を得られなかった場合に呼び直すと別の指示として積まれるため、同じ内容を繰り返さない。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"body":{"type":"string","minLength":1,"maxLength":16384},"recipient":{"type":"string","enum":["automatic","implementer","reviewer"]}},"required":["name","body"],"additionalProperties":false}"#
+        static SCHEMA: OnceLock<String> = OnceLock::new();
+        SCHEMA
+            .get_or_init(|| {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "body": bounded_string_schema(WORKFLOW_TEXT_MAX_BYTES, true),
+                        "recipient": {
+                            "type": "string",
+                            "enum": ["automatic", "implementer", "reviewer"],
+                        },
+                    },
+                    "required": ["name", "body"],
+                    "additionalProperties": false,
+                })
+                .to_string()
+            })
+            .as_str()
     }
 }
 
