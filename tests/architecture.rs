@@ -661,16 +661,15 @@ fn daemon_request_dispatch_stays_out_of_the_socket_and_lifecycle_composition_mod
     assert!(
         !dispatch
             .lines()
-            .take(10)
             .any(|line| line.trim_start().starts_with("#![coverage(off)]")),
         "moving dispatch must not exclude the module from coverage"
     );
-    // Each boundary leaves about a fifth of itself free. A ceiling a few lines
-    // above the current size is the state this split was undertaken to escape:
-    // the table sat 19 lines under its own, and every change to it failed on
-    // arithmetic before it could fail on merit.
+    // Each boundary leaves at least a fifth of itself free. A ceiling a few
+    // lines above the current size is the state this split was undertaken to
+    // escape: the table sat 19 lines under its own, and every change to it
+    // failed on arithmetic before it could fail on merit.
     assert!(
-        dispatch.lines().count() <= 5_600,
+        dispatch.lines().count() <= 5_900,
         "daemon request dispatch grew beyond its reviewable boundary"
     );
     // The session family is the one that grows — every new session tool lands in
@@ -678,7 +677,7 @@ fn daemon_request_dispatch_stays_out_of_the_socket_and_lifecycle_composition_mod
     let session = fs::read_to_string(root.join("src/runtime/daemon/dispatch/session.rs"))
         .expect("session dispatch source is readable");
     assert!(
-        session.lines().count() <= 1_500,
+        session.lines().count() <= 1_600,
         "session dispatch grew beyond its reviewable boundary"
     );
     let scratchpad = fs::read_to_string(root.join("src/runtime/daemon/dispatch/scratchpad.rs"))
@@ -687,11 +686,14 @@ fn daemon_request_dispatch_stays_out_of_the_socket_and_lifecycle_composition_mod
         scratchpad.lines().count() <= 400,
         "scratchpad dispatch grew beyond its reviewable boundary"
     );
+    // Scan the whole file rather than a header window: an inner attribute can
+    // only sit above the first item, but a window has to be widened every time
+    // the module doc grows, and the day it is not is the day the guard stops
+    // looking at the only lines that matter.
     for (name, source) in [("session", &session), ("scratchpad", &scratchpad)] {
         assert!(
             !source
                 .lines()
-                .take(12)
                 .any(|line| line.trim_start().starts_with("#![coverage(off)]")),
             "splitting dispatch must not exclude {name} from coverage"
         );

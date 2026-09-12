@@ -3401,7 +3401,7 @@ pub(super) fn clean_orphan_session_resources(
 #[coverage(off)]
 // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 #[allow(clippy::too_many_lines)] // Preflight, reservation, and Supervisor escalation are one fail-closed admission boundary.
-pub(super) fn admit_agent_dispatch_request(
+fn admit_agent_dispatch_request(
     agent: &SharedAgentRuntime,
     supervisor: &SharedSupervisorRuntime,
     scope: &dyn SessionScopeResolver,
@@ -4044,7 +4044,7 @@ pub(super) fn reconcile_supervisor_promotion_outcome(
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
-pub(super) fn dispatch_agent_maintenance(
+fn dispatch_agent_maintenance(
     agent: &SharedAgentRuntime,
     request: &AgentDispatchRequest,
     visible_sessions: Option<&BTreeSet<SessionId>>,

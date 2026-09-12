@@ -118,15 +118,17 @@ pub(super) fn read_or_write(
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionAction, SessionRuntimeError, read_or_write};
+    use super::{SessionAction, SessionRuntimeError, read_or_write as call};
     use serde_json::json;
 
-    fn call(
-        action: SessionAction,
-        payload: &serde_json::Value,
-        path: &std::path::Path,
-    ) -> Result<serde_json::Value, SessionRuntimeError> {
-        read_or_write(action, payload, path)
+    /// Every refusal in this module is the same one. Asserting `is_err()` alone
+    /// would keep passing if one of them turned into a `Storage` failure.
+    #[track_caller]
+    fn refused(result: &Result<serde_json::Value, SessionRuntimeError>) {
+        assert!(
+            matches!(result, Err(SessionRuntimeError::InvalidRequest)),
+            "expected an invalid request, got {result:?}"
+        );
     }
 
     #[test]
@@ -155,9 +157,9 @@ mod tests {
         );
         // A note may be cleared; every other field is required.
         assert!(call(SessionAction::NoteUpdate, &json!({"note": ""}), path).is_ok());
-        assert!(call(SessionAction::NoteUpdate, &json!({}), path).is_err());
+        refused(&call(SessionAction::NoteUpdate, &json!({}), path));
 
-        // Todos: add, then mark done, then remove.
+        // Todos: add, then mark done, then rename, then remove.
         assert_eq!(
             call(SessionAction::TodoList, &json!({}), path).unwrap()["todos"],
             json!([])
@@ -172,7 +174,7 @@ mod tests {
         // An unchecked todo omits `done` on the wire (the domain skips the
         // default), so its absence is what "not done" looks like here.
         assert_eq!(added["todos"][0]["done"], json!(null));
-        assert!(call(SessionAction::TodoAdd, &json!({"text": "  "}), path).is_err());
+        refused(&call(SessionAction::TodoAdd, &json!({"text": "  "}), path));
 
         let updated = call(
             SessionAction::TodoUpdate,
@@ -181,41 +183,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(updated["todos"][0]["done"], json!(true));
+        // Text is the other field an update may change, and changing it leaves
+        // `done` where it was.
+        let renamed = call(
+            SessionAction::TodoUpdate,
+            &json!({"index": 0, "text": " run the test "}),
+            path,
+        )
+        .unwrap();
+        assert_eq!(renamed["todos"][0]["text"], json!("run the test"));
+        assert_eq!(renamed["todos"][0]["done"], json!(true));
         // An update has to change something, name a real entry, and use the
         // declared types.
-        assert!(call(SessionAction::TodoUpdate, &json!({"index": 0}), path).is_err());
-        assert!(call(SessionAction::TodoUpdate, &json!({"done": true}), path).is_err());
-        assert!(
-            call(
-                SessionAction::TodoUpdate,
-                &json!({"index": 0, "done": "yes"}),
-                path
-            )
-            .is_err()
-        );
-        assert!(
-            call(
-                SessionAction::TodoUpdate,
-                &json!({"index": 0, "text": ""}),
-                path
-            )
-            .is_err()
-        );
-        assert!(
-            call(
-                SessionAction::TodoUpdate,
-                &json!({"index": 7, "done": true}),
-                path
-            )
-            .is_err()
-        );
+        refused(&call(SessionAction::TodoUpdate, &json!({"index": 0}), path));
+        refused(&call(
+            SessionAction::TodoUpdate,
+            &json!({"done": true}),
+            path,
+        ));
+        refused(&call(
+            SessionAction::TodoUpdate,
+            &json!({"index": 0, "done": "yes"}),
+            path,
+        ));
+        refused(&call(
+            SessionAction::TodoUpdate,
+            &json!({"index": 0, "text": ""}),
+            path,
+        ));
+        refused(&call(
+            SessionAction::TodoUpdate,
+            &json!({"index": 7, "done": true}),
+            path,
+        ));
 
         assert_eq!(
             call(SessionAction::TodoRemove, &json!({"index": 0}), path).unwrap()["todos"],
             json!([])
         );
-        assert!(call(SessionAction::TodoRemove, &json!({"index": 0}), path).is_err());
-        assert!(call(SessionAction::TodoRemove, &json!({}), path).is_err());
+        refused(&call(SessionAction::TodoRemove, &json!({"index": 0}), path));
+        refused(&call(SessionAction::TodoRemove, &json!({}), path));
 
         // Decisions append and are read back.
         assert_eq!(
@@ -229,13 +236,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(logged["decisions"][0]["text"], json!("split the table"));
-        assert!(call(SessionAction::DecisionLog, &json!({}), path).is_err());
+        refused(&call(SessionAction::DecisionLog, &json!({}), path));
 
-        // An action this module does not own is refused rather than panicking:
-        // as its own item the function is reachable from anywhere in the crate.
-        assert!(matches!(
-            call(SessionAction::Create, &json!({}), path),
-            Err(SessionRuntimeError::InvalidRequest)
-        ));
+        // An action this module does not own is refused rather than panicking.
+        // Inside the dispatch table's match the compiler proved this could not
+        // happen; as its own item nothing but the table's arm proves it, so the
+        // function answers the way every other caller error does.
+        refused(&call(SessionAction::Create, &json!({}), path));
     }
 }

@@ -6,9 +6,9 @@
 //! daemon has to fit inside, and because the session family is the one that
 //! grows: every new session tool lands here.
 //!
-//! Visibility says who each item is for: `pub(in crate::runtime::daemon)` for
-//! what the daemon module itself calls, `pub(super)` for what stays inside the
-//! dispatch table.
+//! Visibility says how far each item reaches: `pub(in crate::runtime::daemon)`
+//! for the four the daemon module's own recovery and tests call, `pub(super)`
+//! for what only the dispatch table calls, and private for the rest.
 
 use super::super::workflow;
 use super::{
@@ -55,7 +55,7 @@ pub(super) fn session_organization(
 
 #[allow(clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
-pub(in crate::runtime::daemon) fn dispatch_session_action(
+pub(super) fn dispatch_session_action(
     context: &SessionDispatchContext<'_>,
     action: usagi_core::infrastructure::client::SessionAction,
     operation_id: &str,
@@ -647,7 +647,7 @@ pub(in crate::runtime::daemon) fn dispatch_session_action(
 /// tool schema no longer advertises that branch and this is the daemon-side half
 /// of the same rule.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_publishes_and_accepts_only_a_new_agent_selector
-pub(super) fn new_agent_selector(
+fn new_agent_selector(
     selector: Option<&serde_json::Value>,
 ) -> Result<
     (
@@ -829,7 +829,7 @@ pub(in crate::runtime::daemon) fn required_payload_string<'a>(
 #[coverage(off)]
 // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 #[allow(clippy::too_many_lines)] // Atomic create, reservation, spawn, compensation, and recovery stay visible as one transaction.
-pub(in crate::runtime::daemon) fn delegate_brief(
+fn delegate_brief(
     context: &SessionDispatchContext<'_>,
     operation_id: &str,
     payload: &serde_json::Value,
@@ -1232,7 +1232,7 @@ pub(in crate::runtime::daemon) fn reconcile_orphan_delegations(
         .count()
 }
 
-pub(in crate::runtime::daemon) enum AgentDispatchRequest {
+pub(super) enum AgentDispatchRequest {
     Launch(
         String,
         usagi_core::infrastructure::client::AgentLaunchIntent,
