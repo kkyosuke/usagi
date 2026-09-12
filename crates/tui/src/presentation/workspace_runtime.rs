@@ -1971,7 +1971,9 @@ impl WorkspaceRuntime {
     }
 
     /// Mirror a controller [`Effect`]'s pane-visible intent into the registry
-    /// before the shell executes the effect against daemon IO. `SelectTab`
+    /// before the shell executes the effect against daemon IO. `OpenWorkflow`
+    /// has no daemon IO to execute, so [`Self::apply_event`] mirrors it itself
+    /// as soon as the reducer produces it. `SelectTab`
     /// cycles the active tab; `OpenTerminal`/`LaunchAgent` record a pending
     /// placeholder keyed by the effect's operation, so the daemon completion the
     /// shell later routes to [`WorkspaceRuntime::complete_pane`] promotes the

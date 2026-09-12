@@ -184,7 +184,8 @@ Home を開く入口は direct workspace、Welcome の Recent、Open の選択�
 `DaemonBackend` と同一の port set を使う。Home controller が発行した Effect は
 `DaemonBackend::dispatch` だけが解釈し、session / Agent / terminal、notes / environment、workspace command、
 decision、PR snapshot / preview、browser、desktop notification へ振り分ける。別の screen-graph executor や
-production fallback stub は持たない。
+production fallback stub は持たない。例外は daemon operation を持たない pane-local な intent で、
+[Session Workflow タブ](#session-workflow-タブ)だけがこれに当たる。
 
 composition が一つの接続として保持する Agent runtime adapter は aggregate だが、利用側へは用途別の境界を渡す。pane launch worker は
 `PaneLaunchCommandPort`、live terminal session は `TerminalStreamPort`、session refresh は `SessionRefreshPort` だけを見る。
@@ -2086,6 +2087,11 @@ session creator、worktree は変更しない。単独実行には既存の `age
 
 Closeup action の `workflow` は、その session の非端末 Workflow タブを開く。既に開いている場合は
 同じタブを選択し、重複して作らない。タブを開くだけでは Agent を起動しない。
+
+このタブは daemon operation を持たない shell-local な pane である。terminal や Agent のように
+起動完了がタブを確定させる経路が無いため、pane registry への反映は Home runtime が reducer の
+出力を受け取った時点で行う。`DaemonBackend::dispatch` はこの effect を実行対象に持たず、
+[project tab と workspace deck](#project-tab-と-workspace-deck)が示す port 振り分けの対象外である。
 
 ```text
 Team
