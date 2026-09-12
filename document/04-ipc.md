@@ -606,7 +606,7 @@ Session 内 Workflow の human control は次の typed request を使う。操�
 | `WorkflowSnapshot` | workspace、session | session、optional run、optional pending_start を含む snapshot |
 | `WorkflowControl` | workspace、session、operation_id、command | 制御後の同形式 snapshot |
 
-command は `Start { goal, agents }` または `Instruct { recipient, body }` である。接続先 workspace と
+command は `Start { goal, agents }`、`Instruct { recipient, body }`、`Finish` である。接続先 workspace と
 利用可能な session を照合し、**この 2 つの request** は Agent credential を伴う呼び出しを拒否する。
 同じ制御を MCP から行う経路は別にあり、session tool と同じ所有権規則（caller が作成した session に限り、
 caller 自身が動いている session は拒否）で守る（[7. MCP サーバ](07-mcp.md)が正本）。
@@ -617,6 +617,14 @@ run・pending_start は受理時の担当を固定し、snapshot の agents は�
 同じ operation ID の担当変更は競合として拒否する。
 開始前の intent は `pending_start` に元の operation ID・goal・agents・開始エラーを返すため、
 TUI を再起動しても同じ開始操作を再試行できる。
+
+`Finish` は active な run、または起動前の開始 intent を終了する。終了は保存済み状態の変更だけで、
+Agent の停止も worktree の削除も伴わない。終了した run は `PR ready` なら完了、それ以外の工程なら
+中止として記録し、snapshot の `finished` が古い順に最大 5 件返す。終了済みの record は `pending_start` を
+返さない（開始待ちではなく、次の開始を受け付けられる状態である）。同じ operation ID の再送は二度終了せず、
+別の operation ID による 2 度目の終了と、終了済み record への `Instruct` は拒否する。終了後の `Start` は
+新しい intent として受理し、終了済み run の履歴だけを引き継ぐ。すでに終了した run の operation ID を
+使った `Start` は拒否する。
 
 daemon は開始 intent と指示を永続化し、認証済み handoff と peer journal の相関から進捗を投影する。
 進捗の再照合と未通知の queued 指示の再試行を所有するのは daemon の常駐 lane であり、client の

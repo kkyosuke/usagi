@@ -34,6 +34,7 @@ pub fn tools() -> Vec<ToolDescriptor> {
         ToolDescriptor::session(WorkflowStart, SessionAction::WorkflowStart),
         ToolDescriptor::session(WorkflowStatus, SessionAction::WorkflowStatus),
         ToolDescriptor::session(WorkflowInstruct, SessionAction::WorkflowInstruct),
+        ToolDescriptor::session(WorkflowFinish, SessionAction::WorkflowFinish),
         ToolDescriptor::dispatch(SessionDispatch, DispatchToolAction::Dispatch),
         ToolDescriptor::dispatch(AgentHandoff, DispatchToolAction::AgentHandoff),
         ToolDescriptor::dispatch(AgentPeers, DispatchToolAction::AgentPeers),
@@ -575,6 +576,21 @@ impl Tool for WorkflowInstruct {
                 .to_string()
             })
             .as_str()
+    }
+}
+
+/// `workflow_finish` — run を終了し、そのセッションで次の開始を受け付ける。
+pub struct WorkflowFinish;
+
+impl Tool for WorkflowFinish {
+    fn name(&self) -> &'static str {
+        "workflow_finish"
+    }
+    fn description(&self) -> &'static str {
+        "認証済み caller が作成したセッションの workflow を終了するときに使う。name 必須。PR ready で終了すれば完了、それ以外の工程で終了すれば中止として履歴に残す。起動できないまま開始待ちの intent も同じ操作で畳める。Agent は終了させず、worktree も削除しない（不要になった Agent は人が閉じる）。終了後は同じセッションで workflow_start を受け付ける。同じ operation で呼び直しても二度終了しない。"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
     }
 }
 

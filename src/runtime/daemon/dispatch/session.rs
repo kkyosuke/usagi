@@ -332,7 +332,8 @@ pub(super) fn dispatch_session_action(
         // workflow's own Agents from driving their own workflow.
         SessionAction::WorkflowStatus
         | SessionAction::WorkflowStart
-        | SessionAction::WorkflowInstruct => {
+        | SessionAction::WorkflowInstruct
+        | SessionAction::WorkflowFinish => {
             let name = string("name")?;
             let session = target_session(name)?;
             let workspace = bound_workspace()?;
@@ -360,6 +361,9 @@ pub(super) fn dispatch_session_action(
                         )
                         .ok_or(SessionRuntimeError::InvalidRequest)?,
                     })
+                }
+                SessionAction::WorkflowFinish => {
+                    Some(usagi_core::domain::workflow::WorkflowCommand::Finish)
                 }
                 _ => Some(usagi_core::domain::workflow::WorkflowCommand::Instruct {
                     recipient: workflow::requested_recipient(payload)

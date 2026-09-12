@@ -1,7 +1,7 @@
 //! Session-local editor state; daemon snapshots remain the progress authority.
 
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
-use usagi_core::domain::workflow::{Recipient, WorkflowCommand, WorkflowRun};
+use usagi_core::domain::workflow::{FinishedRun, Recipient, WorkflowCommand, WorkflowRun};
 
 use super::environment_source::EnvironmentSourceEditor;
 
@@ -12,6 +12,8 @@ pub struct WorkflowPanel {
     pub agent_field: Option<usize>,
     pub agents_edited: bool,
     pub run: Option<WorkflowRun>,
+    /// Runs this session already finished, oldest first.
+    pub finished: Vec<FinishedRun>,
     pub draft: EnvironmentSourceEditor,
     pub recipient: Option<Recipient>,
     pub error: Option<String>,
@@ -97,10 +99,13 @@ impl WorkflowPanel {
     }
 
     /// Accept a successful submission without losing a later edit.
-    pub fn submitted(&mut self, submitted_text: &str) {
+    ///
+    /// `submitted_text` is `None` for a command that carried no draft, such as
+    /// finishing a run: there is nothing the submission could have consumed.
+    pub fn submitted(&mut self, submitted_text: Option<&str>) {
         self.submitting = false;
         self.error = None;
-        if self.draft.value() == submitted_text {
+        if submitted_text == Some(self.draft.value()) {
             self.draft.replace("");
         }
     }
@@ -184,9 +189,9 @@ mod tests {
         panel.cycle_recipient();
         assert!(panel.recipient_label().contains("Automatic"));
         panel.draft.replace("first\nsecond");
-        panel.submitted("first");
+        panel.submitted(Some("first"));
         assert_eq!(panel.draft.value(), "first\nsecond");
-        panel.submitted("first\nsecond");
+        panel.submitted(Some("first\nsecond"));
         assert!(panel.draft.value().is_empty());
     }
 }

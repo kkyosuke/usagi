@@ -39,6 +39,15 @@ pub struct WorkflowRecord {
     /// agree on which issue the run implements.
     #[serde(default)]
     pub issue: Option<u32>,
+    /// The operation that ended the current intent, once it has ended. It is
+    /// what separates the two records that both have no run: a start that has
+    /// not launched yet, and a session that is free to start another.
+    #[serde(default)]
+    pub finish: Option<OperationId>,
+    /// Ended runs, oldest first, capped at
+    /// [`FINISHED_LIMIT`](crate::domain::workflow::FINISHED_LIMIT).
+    #[serde(default)]
+    pub finished: Vec<crate::domain::workflow::FinishedRun>,
 }
 
 impl DispatchStore {
@@ -184,18 +193,17 @@ impl DispatchStore {
         mut value: WorkflowRecord,
     ) -> Result<()> {
         while serde_json::to_vec_pretty(&value)?.len() >= MAX_BYTES {
-            let history = &mut value
-                .run
-                .as_mut()
-                .context("workflow capacity exhausted")?
-                .history;
-            ensure!(!history.is_empty(), "workflow capacity exhausted");
-            history.remove(0);
+            // Drop the oldest evidence first: the active run's history, and only
+            // once that is gone the ended runs archived beside it.
+            if let Some(history) = value.run.as_mut().map(|run| &mut run.history)
+                && !history.is_empty()
+            {
+                history.remove(0);
+                continue;
+            }
+            ensure!(!value.finished.is_empty(), "workflow capacity exhausted");
+            value.finished.remove(0);
         }
-        ensure!(
-            serde_json::to_vec_pretty(&value)?.len() < MAX_BYTES,
-            "workflow capacity exhausted"
-        );
         let path = self.workflow_path(workspace, session);
         json_file::write_atomic(
             path.parent().context("missing workflow parent")?,
@@ -233,6 +241,8 @@ mod tests {
                     authorized_operations: Vec::new(),
                     announced: None,
                     issue: None,
+                    finish: None,
+                    finished: Vec::new(),
                 });
                 Ok(())
             })
@@ -326,6 +336,8 @@ mod tests {
                     authorized_operations: Vec::new(),
                     announced: None,
                     issue: None,
+                    finish: None,
+                    finished: Vec::new(),
                 });
                 if fail {
                     std::fs::rename(parent, directory.path().join("saved-parent"))?;
@@ -369,6 +381,8 @@ mod tests {
                     authorized_operations: Vec::new(),
                     announced: None,
                     issue: None,
+                    finish: None,
+                    finished: Vec::new(),
                 });
                 Ok(())
             });
@@ -412,6 +426,8 @@ mod tests {
                     authorized_operations: Vec::new(),
                     announced: None,
                     issue: None,
+                    finish: None,
+                    finished: Vec::new(),
                 });
                 Ok(())
             })
@@ -474,6 +490,8 @@ mod tests {
                     authorized_operations: Vec::new(),
                     announced: None,
                     issue: None,
+                    finish: None,
+                    finished: Vec::new(),
                 });
                 Ok(())
             })

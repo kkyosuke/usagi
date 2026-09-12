@@ -60,6 +60,44 @@ impl Phase {
     }
 }
 
+/// How a run ended. Derived from the phase it was in, never asked of the
+/// person: the daemon already knows whether the PR reached `Ready`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Completed,
+    Stopped,
+}
+
+impl Outcome {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+/// How many ended runs one session keeps, so a long-lived session cannot grow
+/// its record without bound.
+pub const FINISHED_LIMIT: usize = 5;
+
+/// A run that is no longer active. Kept so restarting a session still shows what
+/// came before, and small enough that `FINISHED_LIMIT` of them stay cheap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinishedRun {
+    /// The operation that started the run, so a stale retry of it is refused
+    /// instead of resurrecting finished work.
+    pub id: OperationId,
+    pub outcome: Outcome,
+    pub goal: String,
+    /// The phase the run was in when it ended.
+    pub phase: Phase,
+    pub issue: Option<u32>,
+    pub pr_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Delivery {
@@ -234,6 +272,27 @@ impl WorkflowRun {
         Ok(())
     }
 
+    /// Archive this run as it stands.
+    ///
+    /// `Ready` means the person is closing work that arrived; any other phase
+    /// means they are abandoning it. Nobody is asked which it was, because the
+    /// phase already records it.
+    #[must_use]
+    pub fn finished(&self) -> FinishedRun {
+        FinishedRun {
+            id: self.id,
+            outcome: if self.phase == Phase::Ready {
+                Outcome::Completed
+            } else {
+                Outcome::Stopped
+            },
+            goal: self.goal.clone(),
+            phase: self.phase,
+            issue: self.issue,
+            pr_url: self.pr_url.clone(),
+        }
+    }
+
     /// What a human is being waited on for, if anything.
     ///
     /// Only the two phases nobody else can move produce a notice: a run that
@@ -295,6 +354,9 @@ pub struct WorkflowSnapshot {
     pub run: Option<WorkflowRun>,
     #[serde(default)]
     pub pending_start: Option<WorkflowPendingStart>,
+    /// Ended runs of this session, oldest first.
+    #[serde(default)]
+    pub finished: Vec<FinishedRun>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +384,9 @@ pub enum WorkflowCommand {
         recipient: Recipient,
         body: String,
     },
+    /// End the active run, or abandon a start that never launched, so the
+    /// session can begin another. Stops no Agent and touches no worktree.
+    Finish,
 }
 
 #[cfg(test)]
@@ -383,6 +448,35 @@ mod tests {
             instructions: Vec::new(),
             history: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_ended_run_records_whether_the_pr_arrived() {
+        let mut run = run();
+        run.issue = Some(745);
+        run.pr_url = Some("https://example.test/pr/1".into());
+        // Every phase but `Ready` means the person walked away from the work.
+        for phase in [
+            Phase::Starting,
+            Phase::Implementing,
+            Phase::Reviewing,
+            Phase::Revising,
+            Phase::Verifying,
+            Phase::Waiting,
+        ] {
+            run.phase = phase;
+            let ended = run.finished();
+            assert_eq!(ended.outcome, Outcome::Stopped);
+            assert_eq!(ended.outcome.label(), "stopped");
+            assert_eq!(ended.phase, phase);
+            assert_eq!(ended.id, run.id);
+            assert_eq!(ended.goal, run.goal);
+            assert_eq!(ended.issue, Some(745));
+            assert_eq!(ended.pr_url.as_deref(), Some("https://example.test/pr/1"));
+        }
+        run.phase = Phase::Ready;
+        assert_eq!(run.finished().outcome, Outcome::Completed);
+        assert_eq!(Outcome::Completed.label(), "completed");
     }
 
     fn target() -> ReviewTarget {

@@ -23,7 +23,24 @@ pub fn admit(
                     !goal.trim().is_empty() && goal.len() <= 16384 && !goal.contains('\0'),
                     "invalid workflow goal"
                 );
-                if let Some(existing) = value {
+                if let Some(existing) = value.as_mut().filter(|record| record.finish.is_some()) {
+                    // The previous run ended, so this is a new intent in the
+                    // same session: everything the old run owned is reset, and
+                    // only the archive of ended runs carries over.
+                    ensure!(
+                        !existing.finished.iter().any(|ended| ended.id == operation),
+                        "workflow operation has already finished"
+                    );
+                    existing.agents = *agents;
+                    existing.operation = operation;
+                    existing.goal.clone_from(goal);
+                    existing.issue = issue;
+                    existing.finish = None;
+                    existing.initial_notified = false;
+                    existing.preferences_saved = false;
+                    existing.start_error = None;
+                    existing.authorized_operations.clear();
+                } else if let Some(existing) = value {
                     // An issue-backed start is identified by the issue, not by
                     // the rendered text: the issue moves to `in-progress` as
                     // soon as the run starts, so re-rendering it would make a
@@ -53,11 +70,14 @@ pub fn admit(
                         authorized_operations: Vec::new(),
                         announced: None,
                         issue,
+                        finish: None,
+                        finished: Vec::new(),
                     });
                 }
             }
             WorkflowCommand::Instruct { recipient, body } => {
                 let record = value.as_mut().context("workflow has not started")?;
+                ensure!(record.finish.is_none(), "workflow has already finished");
                 ensure!(
                     record.operation != operation,
                     "instruction ID conflicts with workflow start"
@@ -68,6 +88,42 @@ pub fn admit(
                     .context("workflow launch is not yet admitted")?
                     .enqueue(operation, *recipient, body.clone())
                     .map_err(anyhow::Error::msg)?;
+            }
+            WorkflowCommand::Finish => {
+                let record = value.as_mut().context("workflow has not started")?;
+                if record.finish == Some(operation) {
+                    // The same request arriving twice ends the run once.
+                    return Ok(());
+                }
+                ensure!(record.finish.is_none(), "workflow has already finished");
+                record.finished.push(record.run.as_ref().map_or_else(
+                    || {
+                        // A start that never launched has no run to archive, so
+                        // the intent itself is what the person abandoned.
+                        usagi_core::domain::workflow::FinishedRun {
+                            id: record.operation,
+                            outcome: usagi_core::domain::workflow::Outcome::Stopped,
+                            goal: record.goal.clone(),
+                            phase: Phase::Starting,
+                            issue: record.issue,
+                            pr_url: None,
+                        }
+                    },
+                    WorkflowRun::finished,
+                ));
+                let excess = record
+                    .finished
+                    .len()
+                    .saturating_sub(usagi_core::domain::workflow::FINISHED_LIMIT);
+                record.finished.drain(..excess);
+                record.run = None;
+                record.finish = Some(operation);
+                // Progress state belongs to the run that just ended. The journal
+                // cursor is the exception: keeping it is what stops the next run
+                // from replaying this one's peer messages as its own evidence.
+                record.suspended_phase = None;
+                record.implementation_operation = None;
+                record.announced = None;
             }
         }
         Ok(())
@@ -135,24 +191,26 @@ pub fn projection(
             session,
             run: None,
             pending_start: None,
+            finished: Vec::new(),
         });
     };
-    let pending_start =
-        record
-            .run
-            .is_none()
-            .then(|| usagi_core::domain::workflow::WorkflowPendingStart {
-                agents: record.agents,
-                operation_id: record.operation,
-                goal: record.goal.clone(),
-                error: record.start_error.clone(),
-                issue: record.issue,
-            });
+    // No run and no finish is the one record that is still trying to launch.
+    // Once it has finished, the session is free rather than mid-start.
+    let pending_start = (record.run.is_none() && record.finish.is_none()).then(|| {
+        usagi_core::domain::workflow::WorkflowPendingStart {
+            agents: record.agents,
+            operation_id: record.operation,
+            goal: record.goal.clone(),
+            error: record.start_error.clone(),
+            issue: record.issue,
+        }
+    });
     Ok(WorkflowSnapshot {
         agents: record.agents,
         session,
         run: record.run,
         pending_start,
+        finished: record.finished,
     })
 }
 
@@ -164,40 +222,28 @@ pub fn snapshot(
     workspace: WorkspaceId,
     session: SessionId,
 ) -> Result<WorkflowSnapshot> {
+    replay(store, workspace, session)?;
+    projection(store, workspace, session)
+}
+
+/// Apply the peer journal to the stored run. Reading what it produced is
+/// [`projection`]'s job, so there is one place that decides how a record
+/// projects.
+fn replay(store: &DispatchStore, workspace: WorkspaceId, session: SessionId) -> Result<()> {
     if store.workflow(workspace, session)?.is_none() {
-        return Ok(WorkflowSnapshot {
-            agents: store.workflow_agents(workspace)?,
-            session,
-            run: None,
-            pending_start: None,
-        });
+        return Ok(());
     }
     let messages = store.workflow_messages(workspace, session)?;
     let agents = store.agents_in_workspace(workspace)?;
     let bindings = store.bindings()?;
     store.update_workflow(workspace, session, |value| {
         let record = value.as_mut().context("workflow disappeared")?;
+        // Nothing to replay onto: the start has not launched, or the run ended.
         let Some(run) = record.run.as_mut() else {
-            return Ok(WorkflowSnapshot {
-                agents: record.agents,
-                session,
-                run: None,
-                pending_start: Some(usagi_core::domain::workflow::WorkflowPendingStart {
-                    agents: record.agents,
-                    operation_id: record.operation,
-                    goal: record.goal.clone(),
-                    error: record.start_error.clone(),
-                    issue: record.issue,
-                }),
-            });
+            return Ok(());
         };
         if record.suspended_phase.is_some() {
-            return Ok(WorkflowSnapshot {
-                agents: record.agents,
-                session,
-                run: Some(run.clone()),
-                pending_start: None,
-            });
+            return Ok(());
         }
         let offset = journal_offset(record.cursor, &messages);
         for entry in messages.iter().skip(offset) {
@@ -257,12 +303,7 @@ pub fn snapshot(
             }
             record.cursor = Some(message.message_id);
         }
-        Ok(WorkflowSnapshot {
-            agents: record.agents,
-            session,
-            run: Some(run.clone()),
-            pending_start: None,
-        })
+        Ok(())
     })
 }
 
@@ -525,6 +566,175 @@ mod tests {
         let legacy: WorkflowCommand =
             serde_json::from_str(r#"{"kind":"start","goal":"Task"}"#).unwrap();
         assert_eq!(legacy, conflict);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One session's whole finish/restart life stays in one place.
+    fn finishing_frees_the_session_and_keeps_a_bounded_history() {
+        use usagi_core::domain::workflow::{FINISHED_LIMIT, Outcome, WorkflowAgents};
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let start = |goal: &str| WorkflowCommand::Start {
+            goal: goal.to_owned(),
+            agents: WorkflowAgents::default(),
+        };
+        let record = || store.workflow(workspace, session).unwrap().unwrap();
+
+        // Nothing to finish before anything started.
+        assert!(
+            admit(
+                &store,
+                workspace,
+                session,
+                OperationId::new(),
+                &WorkflowCommand::Finish,
+                None,
+            )
+            .is_err()
+        );
+
+        // A start that never launched is abandoned as the intent it was.
+        let first = OperationId::new();
+        admit(&store, workspace, session, first, &start("never ran"), None).unwrap();
+        let finish = OperationId::new();
+        admit(
+            &store,
+            workspace,
+            session,
+            finish,
+            &WorkflowCommand::Finish,
+            None,
+        )
+        .unwrap();
+        let ended = record();
+        assert_eq!(ended.finish, Some(finish));
+        assert!(ended.run.is_none());
+        assert_eq!(ended.finished.len(), 1);
+        assert_eq!(ended.finished[0].id, first);
+        assert_eq!(ended.finished[0].outcome, Outcome::Stopped);
+        assert_eq!(ended.finished[0].phase, Phase::Starting);
+        // A finished record is not mid-start, so nothing offers to retry it.
+        assert!(
+            projection(&store, workspace, session)
+                .unwrap()
+                .pending_start
+                .is_none()
+        );
+
+        // The same request arriving twice ends it once; a different one is told
+        // there is nothing left to end.
+        admit(
+            &store,
+            workspace,
+            session,
+            finish,
+            &WorkflowCommand::Finish,
+            None,
+        )
+        .unwrap();
+        assert_eq!(record().finished.len(), 1);
+        assert!(
+            admit(
+                &store,
+                workspace,
+                session,
+                OperationId::new(),
+                &WorkflowCommand::Finish,
+                None,
+            )
+            .is_err()
+        );
+        // So is an instruction: the run it would have joined is over.
+        assert!(
+            admit(
+                &store,
+                workspace,
+                session,
+                OperationId::new(),
+                &WorkflowCommand::Instruct {
+                    recipient: Recipient::Automatic,
+                    body: "keep going".into(),
+                },
+                None,
+            )
+            .is_err()
+        );
+
+        // A finished session takes a new start, and the stale retry of the run
+        // it already buried does not resurrect it.
+        assert!(admit(&store, workspace, session, first, &start("again"), None).is_err());
+        let second = OperationId::new();
+        admit(&store, workspace, session, second, &start("again"), None).unwrap();
+        let started = record();
+        assert!(started.finish.is_none());
+        assert_eq!(started.operation, second);
+        assert_eq!(started.goal, "again");
+        assert_eq!(started.finished.len(), 1, "the archive carries over");
+        bind(&store, workspace, session, second, AgentId::new()).unwrap();
+        assert!(record().run.is_some());
+
+        // Ending a run that reached `Ready` is a completion, and the archive
+        // never grows past its cap.
+        store
+            .update_workflow(workspace, session, |value| {
+                let record = value.as_mut().unwrap();
+                let run = record.run.as_mut().unwrap();
+                run.phase = Phase::Ready;
+                run.pr_url = Some("https://example.test/pr/2".into());
+                Ok(())
+            })
+            .unwrap();
+        admit(
+            &store,
+            workspace,
+            session,
+            OperationId::new(),
+            &WorkflowCommand::Finish,
+            None,
+        )
+        .unwrap();
+        let completed = record();
+        assert_eq!(completed.finished.len(), 2);
+        assert_eq!(completed.finished[1].outcome, Outcome::Completed);
+        assert_eq!(
+            completed.finished[1].pr_url.as_deref(),
+            Some("https://example.test/pr/2")
+        );
+        assert_eq!(
+            projection(&store, workspace, session).unwrap().finished,
+            completed.finished
+        );
+
+        for round in 0..FINISHED_LIMIT {
+            let operation = OperationId::new();
+            admit(
+                &store,
+                workspace,
+                session,
+                operation,
+                &start(&format!("round {round}")),
+                None,
+            )
+            .unwrap();
+            admit(
+                &store,
+                workspace,
+                session,
+                OperationId::new(),
+                &WorkflowCommand::Finish,
+                None,
+            )
+            .unwrap();
+        }
+        let capped = record();
+        assert_eq!(capped.finished.len(), FINISHED_LIMIT);
+        assert_eq!(capped.finished[0].goal, "round 0", "the oldest fall off");
+        assert_eq!(
+            capped.finished[FINISHED_LIMIT - 1].goal,
+            format!("round {}", FINISHED_LIMIT - 1)
+        );
     }
 
     #[test]

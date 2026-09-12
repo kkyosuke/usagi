@@ -36,7 +36,21 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
         .take(header_height)
         .map(|line| safe_line(&line))
         .collect::<Vec<_>>();
-    let history = panel.run.as_ref().map_or_else(Vec::new, |run| {
+    // Ended runs come first: they are the oldest thing that happened here, and
+    // a restarted session should still show what it already tried.
+    let mut history = panel
+        .finished
+        .iter()
+        .map(|ended| {
+            format!(
+                "[{}] {} ({})",
+                ended.outcome.label(),
+                ended.goal.replace('\n', " / "),
+                ended.phase.label()
+            )
+        })
+        .collect::<Vec<_>>();
+    history.extend(panel.run.as_ref().map_or_else(Vec::new, |run| {
         let mut rows = run
             .history
             .iter()
@@ -57,7 +71,7 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
                 .collect::<Vec<_>>(),
         );
         rows
-    });
+    }));
     let end = history.len().saturating_sub(panel.history_offset);
     let start = end.saturating_sub(history_height);
     rows.extend(history[start..end].iter().map(|line| safe_line(line)));
@@ -100,6 +114,13 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
         ));
         if let Some(issue) = run.issue {
             header.push(format!("Issue: #{issue} (PR must mark it done)"));
+        }
+        if matches!(
+            run.phase,
+            usagi_core::domain::workflow::Phase::Ready
+                | usagi_core::domain::workflow::Phase::Waiting
+        ) {
+            header.push("Closeup `workflow finish` ends this run".into());
         }
         if let Some(reason) = &run.waiting_reason {
             header.push(reason.clone());
@@ -196,6 +217,60 @@ mod tests {
             ..WorkflowPanel::default()
         };
         assert!(render(20, 100, &panel).join("\n").contains("Issue: #742"));
+    }
+
+    #[test]
+    fn ended_runs_stay_visible_and_the_way_to_end_one_is_offered_where_it_helps() {
+        use usagi_core::domain::workflow::{FinishedRun, Outcome, Phase};
+        let mut run = crate::usecase::application::workflow::fixture_run(
+            usagi_core::domain::id::SessionId::new(),
+        );
+        let ended = |outcome, phase, goal: &str| FinishedRun {
+            id: usagi_core::domain::id::OperationId::new(),
+            outcome,
+            goal: goal.to_owned(),
+            phase,
+            issue: None,
+            pr_url: None,
+        };
+        let mut panel = WorkflowPanel {
+            finished: vec![
+                ended(Outcome::Completed, Phase::Ready, "Ship login"),
+                ended(Outcome::Stopped, Phase::Revising, "Rewrite\nthe parser"),
+            ],
+            ..WorkflowPanel::default()
+        };
+
+        // Ended runs are readable before anything new starts, and a multi-line
+        // goal stays on one row.
+        let rendered = render(20, 100, &panel).join("\n");
+        assert!(rendered.contains("[completed] Ship login (PR ready)"));
+        assert!(rendered.contains("[stopped] Rewrite / the parser (Revising)"));
+
+        // Mid-run there is nothing to decide, so the tab does not advertise
+        // ending: every other phase belongs to an Agent.
+        run.phase = Phase::Implementing;
+        panel.run = Some(run);
+        assert!(
+            !render(20, 100, &panel)
+                .join("\n")
+                .contains("workflow finish")
+        );
+        for phase in [Phase::Ready, Phase::Waiting] {
+            panel.run.as_mut().unwrap().phase = phase;
+            assert!(
+                render(20, 100, &panel)
+                    .join("\n")
+                    .contains("Closeup `workflow finish` ends this run"),
+                "{phase:?} is the person's turn"
+            );
+        }
+        // The archive survives alongside a new run.
+        assert!(
+            render(20, 100, &panel)
+                .join("\n")
+                .contains("[completed] Ship login")
+        );
     }
 
     #[test]

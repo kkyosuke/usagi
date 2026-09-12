@@ -48,6 +48,7 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
             error: Some("Sign in to retry".into()),
             issue: None,
         }),
+        finished: Vec::new(),
     };
     let _ = update(
         &mut state,
@@ -108,12 +109,116 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
                 session,
                 run: Some(fixture_run(session)),
                 pending_start: None,
+                finished: Vec::new(),
             })),
         }),
     );
     let panel = state.workflow_panel(session).unwrap();
     assert!(panel.pending.is_none());
     assert!(panel.draft.value().is_empty());
+}
+
+#[test]
+fn finishing_a_workflow_opens_the_tab_and_resends_one_operation() {
+    use crate::usecase::application::workflow::{WorkflowJob, fixture_run};
+    use usagi_core::domain::workflow::{
+        FinishedRun, Outcome, Phase, WorkflowCommand, WorkflowSnapshot,
+    };
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+
+    // Anything but `finish` is refused without touching the panel.
+    assert!(submit_closeup_workflow(&mut state, session, "stop").is_empty());
+    assert!(state.notice.is_some());
+    assert!(
+        state
+            .workflows
+            .get(&session)
+            .is_none_or(|panel| { panel.pending.is_none() && !panel.submitting && !panel.loading })
+    );
+
+    // Finishing opens the tab so the daemon's answer has somewhere to land, and
+    // carries a control payload rather than a read.
+    let effects = submit_closeup_workflow(&mut state, session, "finish");
+    let [Effect::OpenWorkflow { .. }, Effect::Workflow(job)] = effects.as_slice() else {
+        panic!("finishing opens the tab and dispatches one control, got {effects:?}");
+    };
+    let control = job.control.clone().expect("finishing is a control request");
+    assert_eq!(control.1, WorkflowCommand::Finish);
+    let panel = state.workflow_panel(session).unwrap();
+    assert!(panel.submitting);
+    assert_eq!(panel.pending.as_ref(), Some(&control));
+
+    // A request in flight owns the panel; asking again only re-opens the tab.
+    let again = submit_closeup_workflow(&mut state, session, "finish");
+    assert!(matches!(again.as_slice(), [Effect::OpenWorkflow { .. }]));
+
+    // A lost answer keeps the same operation, so retrying ends the run once.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: job.clone(),
+            result: Err(crate::usecase::application::workflow::WorkflowError {
+                message: "connection lost".into(),
+                unconfirmed: true,
+            }),
+        }),
+    );
+    let effects = submit_closeup_workflow(&mut state, session, "finish");
+    let [_, Effect::Workflow(resent)] = effects.as_slice() else {
+        panic!("an unconfirmed finish is resent, got {effects:?}");
+    };
+    assert_eq!(resent.control, Some(control.clone()));
+
+    // The answer clears the request, keeps the draft, and shows the archive.
+    let panel = state.workflows.get_mut(&session).unwrap();
+    panel.draft.replace("a goal I am still typing");
+    let ended = FinishedRun {
+        id: OperationId::new(),
+        outcome: Outcome::Completed,
+        goal: "Implement login".into(),
+        phase: Phase::Ready,
+        issue: Some(745),
+        pr_url: Some("https://example.test/pr/1".into()),
+    };
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: WorkflowJob {
+                control: Some(control),
+                ..job.clone()
+            },
+            result: Ok(Box::new(WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                session,
+                run: None,
+                pending_start: None,
+                finished: vec![ended.clone()],
+            })),
+        }),
+    );
+    let panel = state.workflow_panel(session).unwrap();
+    assert!(panel.pending.is_none());
+    assert!(!panel.submitting);
+    assert!(panel.run.is_none());
+    assert_eq!(panel.finished, vec![ended]);
+    assert_eq!(
+        panel.draft.value(),
+        "a goal I am still typing",
+        "finishing carries no draft, so it consumes none"
+    );
+
+    // With the run gone the tab is back to starting one, and `workflow` alone
+    // is a read again.
+    let effects = submit_closeup_workflow(&mut state, session, "");
+    let [_, Effect::Workflow(read)] = effects.as_slice() else {
+        panic!("reopening reads the workflow, got {effects:?}");
+    };
+    assert!(read.control.is_none());
+    let _ = fixture_run(session);
 }
 
 #[test]
@@ -144,6 +249,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
                 session,
                 run: None,
                 pending_start: None,
+                finished: Vec::new(),
             })),
         }),
     );
@@ -224,6 +330,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
                 session,
                 run: Some(run.clone()),
                 pending_start: None,
+                finished: Vec::new(),
             })),
         }),
     );
@@ -302,6 +409,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
                 session,
                 run: Some(run),
                 pending_start: None,
+                finished: Vec::new(),
             })),
         }),
     );
@@ -344,6 +452,7 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
                 session,
                 run: None,
                 pending_start: None,
+                finished: Vec::new(),
             })),
         }),
     );
@@ -366,6 +475,7 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
                 session: SessionId::new(),
                 run: None,
                 pending_start: None,
+                finished: Vec::new(),
             })),
         }),
     );
@@ -383,7 +493,8 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
                     session,
                     run: None,
-                    pending_start: None
+                    pending_start: None,
+                    finished: Vec::new()
                 }))
             })
         )
@@ -8483,6 +8594,7 @@ fn workflow_uses_saved_agents_without_overwriting_edits_and_submits_exact_choice
             session,
             run: None,
             pending_start: None,
+            finished: Vec::new(),
         })),
     });
     let _ = update(&mut state, snapshot.clone());

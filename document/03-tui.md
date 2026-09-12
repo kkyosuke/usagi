@@ -2148,6 +2148,15 @@ Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Ag
 担当 Agent が終了・中断した場合は判断待ちと理由を表示する。別 Agent の起動を担当の復帰とは
 みなさず、既存の Agent 回復操作で同じ実行系統が再開したことを照合する。
 
+Closeup action の `workflow finish` は、その session の run を終了する。終了は保存済みの状態だけを変え、
+**担当 Agent を終了させず、worktree も削除しない**（不要になった Agent は従来の Agent 操作で閉じる）。
+`PR ready` で終了した run は完了、それ以外の工程で終了した run は中止として記録する。起動できないまま
+開始待ちになっている intent も同じ操作で畳める。終了後は同じ session で新しい開始を受け付ける。
+終了した run は goal・終了時の工程・結果・issue・PR を最大 5 件まで保持し、古いものから捨てる。
+履歴欄の先頭に `[completed] <goal> (PR ready)` の形で表示し、`PR ready` と判断待ちの間は上段にこの操作を案内する。
+応答を失った終了は同じ操作 ID で再送し、二重に終了しない。終了済みの run への追加指示と、
+別の操作 ID による 2 度目の終了は拒否する。
+
 タブを閉じても daemon の作業は中止しない。再度 `workflow` を開くと保存済みの進捗を取得する。
 進行そのものは daemon の常駐 lane が所有するため、タブを閉じていても、別の session を見ていても、
 TUI を終了していても進む（[workflow lane](05-daemon.md#workflow-lane)が正本）。開いている画面の

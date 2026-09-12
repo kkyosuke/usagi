@@ -522,6 +522,62 @@ sleep 30
         .get("error")
         .is_some()
     );
+
+    // Finishing ends the run. It is not `Ready`, so it is recorded as stopped
+    // with the phase it was abandoned in, and the session keeps its worktree.
+    let implementer = started["run"]["implementer"].clone();
+    let worktree = mcp.workspace().join(".usagi/sessions/workflow-run");
+    assert!(worktree.join(".git").exists());
+    let finished = mcp.tool("workflow_finish", &json!({"name":"workflow-run"}));
+    assert!(finished.get("error").is_none(), "{finished}");
+    let finished = tool_text(&finished);
+    assert!(finished["run"].is_null(), "{finished}");
+    assert!(finished["pending_start"].is_null(), "{finished}");
+    assert_eq!(finished["finished"][0]["outcome"], "stopped");
+    assert_eq!(finished["finished"][0]["goal"], "add a login form");
+    assert_eq!(finished["finished"][0]["phase"], "implementing");
+
+    // The run's Agent is untouched and so is the worktree: finishing is a
+    // change to the workflow record and nothing else.
+    let agents = tool_text(&mcp.tool("agent_list", &json!({})));
+    assert!(
+        agents["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| agent["agent_id"] == implementer),
+        "the implementer outlives the run it carried: {agents}"
+    );
+    assert!(
+        worktree.join(".git").exists(),
+        "finishing a run never removes the session worktree"
+    );
+
+    // Finishing again is refused, and so is instructing a run that is over.
+    assert!(
+        mcp.tool("workflow_finish", &json!({"name":"workflow-run"}))
+            .get("error")
+            .is_some()
+    );
+    assert!(
+        mcp.tool(
+            "workflow_instruct",
+            &json!({"name":"workflow-run","body":"one more thing"}),
+        )
+        .get("error")
+        .is_some()
+    );
+
+    // The session is free again, and the run it already finished stays visible.
+    let restarted = mcp.tool(
+        "workflow_start",
+        &json!({"name":"workflow-run","goal":"add a logout form"}),
+    );
+    assert!(restarted.get("error").is_none(), "{restarted}");
+    let restarted = tool_text(&restarted);
+    assert_eq!(restarted["run"]["goal"], "add a logout form");
+    assert_eq!(restarted["finished"][0]["goal"], "add a login form");
+    assert_eq!(restarted["finished"].as_array().unwrap().len(), 1);
 }
 
 #[test]

@@ -178,6 +178,7 @@ mod tests {
                 session: job.session,
                 run: None,
                 pending_start: None,
+                finished: Vec::new(),
             };
             let mut fake = Fake {
                 requests: vec![],
@@ -212,6 +213,7 @@ mod tests {
             session: SessionId::new(),
             run: None,
             pending_start: None,
+            finished: Vec::new(),
         };
         fake.reply = Some(Ok(DaemonReply::Ok(serde_json::to_value(snapshot).unwrap())));
         assert!(execute(&job, &mut fake).unwrap_err().unconfirmed);
@@ -248,6 +250,7 @@ mod tests {
             session: job.session,
             run: None,
             pending_start: None,
+            finished: Vec::new(),
         })
     }
     #[test]

@@ -707,6 +707,7 @@ mod tests {
                     session: job.session,
                     run: None,
                     pending_start: None,
+                    finished: Vec::new(),
                 };
                 completions.emit(AppEvent::Backend(
                     super::super::controller::BackendEvent::Workflow {
