@@ -795,7 +795,6 @@ trait AgentReadinessProbe: Send + Sync {
     fn observe(&self, product: &str) -> AgentReadiness;
 }
 
-const AGENT_READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const AGENT_READINESS_TERMINATE_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -803,6 +802,16 @@ enum AgentReadiness {
     Ready,
     #[default]
     Unavailable,
+}
+
+/// The per-product half of one readiness probe's policy, resolved from the
+/// shared agent CLI vocabulary. The terminate grace and the coalescing rule
+/// stay owned by this root because they are properties of how it runs a child,
+/// not of the product being probed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadinessBounds {
+    timeout: Duration,
+    output_limit: usize,
 }
 
 #[derive(Default)]
@@ -822,7 +831,6 @@ struct ReadinessState {
 struct SystemAgentReadiness {
     state: Mutex<ReadinessState>,
     completed: Condvar,
-    timeout: Duration,
     terminate_grace: Duration,
 }
 
@@ -831,7 +839,6 @@ impl Default for SystemAgentReadiness {
         Self {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
-            timeout: AGENT_READINESS_TIMEOUT,
             terminate_grace: AGENT_READINESS_TERMINATE_GRACE,
         }
     }
@@ -845,16 +852,34 @@ impl AgentReadinessProbe for SystemAgentReadiness {
         // root only runs the resolved probe, so the Codex-compatible
         // `codex-fugu` behind the `sakana-ai` profile is recognised without a
         // second table here (#609). An unmodelled product still fails closed.
+        // The budget travels with the probe for the same reason: how long
+        // `agy models` may take is a fact about Antigravity, not about this
+        // root, and a single shared deadline reported an installed and
+        // authenticated CLI as unavailable.
         let Some(probe) = DefaultModel::readiness_command_for(product) else {
             return AgentReadiness::Unavailable;
         };
-        self.ready_command(product, probe.program(), probe.arguments())
+        self.ready_command(
+            product,
+            probe.program(),
+            probe.arguments(),
+            ReadinessBounds {
+                timeout: probe.timeout(),
+                output_limit: probe.output_limit(),
+            },
+        )
     }
 }
 
 impl SystemAgentReadiness {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
-    fn ready_command(&self, product: &str, program: &str, arguments: &[&str]) -> AgentReadiness {
+    fn ready_command(
+        &self,
+        product: &str,
+        program: &str,
+        arguments: &[&str],
+        bounds: ReadinessBounds,
+    ) -> AgentReadiness {
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
         };
@@ -862,7 +887,7 @@ impl SystemAgentReadiness {
         if slot.running {
             let Ok((state_after_wait, timeout)) = self.completed.wait_timeout_while(
                 state,
-                self.timeout + self.terminate_grace,
+                bounds.timeout + self.terminate_grace,
                 |state| {
                     state
                         .providers
@@ -885,8 +910,7 @@ impl SystemAgentReadiness {
         slot.result = None;
         drop(state);
 
-        let result =
-            bounded_readiness_command(program, arguments, self.timeout, self.terminate_grace);
+        let result = bounded_readiness_command(program, arguments, bounds, self.terminate_grace);
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
         };
@@ -904,16 +928,16 @@ impl SystemAgentReadiness {
 fn bounded_readiness_command(
     program: &str,
     arguments: &[&str],
-    timeout: Duration,
+    bounds: ReadinessBounds,
     terminate_grace: Duration,
 ) -> AgentReadiness {
     readiness_from_observation(&observe(
         program,
         arguments,
         ChildPolicy {
-            timeout,
+            timeout: bounds.timeout,
             terminate_grace,
-            output_limit: 16 * 1024,
+            output_limit: bounds.output_limit,
         },
     ))
 }
@@ -12826,13 +12850,18 @@ mod tests {
         let readiness = Arc::new(SystemAgentReadiness {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
-            timeout: Duration::from_millis(150),
             terminate_grace: Duration::from_millis(50),
         });
+        let bounds = ReadinessBounds {
+            timeout: Duration::from_millis(150),
+            output_limit: 16 * 1024,
+        };
         let first = {
             let readiness = Arc::clone(&readiness);
             let script = script.clone();
-            std::thread::spawn(move || readiness.ready_command("codex", "/bin/sh", &[&script]))
+            std::thread::spawn(move || {
+                readiness.ready_command("codex", "/bin/sh", &[&script], bounds)
+            })
         };
         let started = Instant::now();
         while !pid_file.is_file() && started.elapsed() < Duration::from_secs(1) {
@@ -12841,7 +12870,9 @@ mod tests {
         assert!(pid_file.is_file(), "fixture readiness child started");
         let second = {
             let readiness = Arc::clone(&readiness);
-            std::thread::spawn(move || readiness.ready_command("codex", "/bin/sh", &[&script]))
+            std::thread::spawn(move || {
+                readiness.ready_command("codex", "/bin/sh", &[&script], bounds)
+            })
         };
         assert_eq!(first.join().unwrap(), AgentReadiness::Unavailable);
         assert_eq!(second.join().unwrap(), AgentReadiness::Unavailable);
@@ -12856,6 +12887,67 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH),
             "timed-out readiness child was reaped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let program = fixture.path().join("slow-status");
+        // A status command that answers after a delay and prints while it works
+        // stands in for `agy models`, which starts a language server and logs
+        // for the whole probe.
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nawk 'BEGIN { while (i++ < 400) print \"log line\" }' >&2\nsleep 0.3\necho ready\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let program = program.to_string_lossy().into_owned();
+        let grace = Duration::from_millis(50);
+
+        // The product's own budget admits it.
+        assert_eq!(
+            bounded_readiness_command(
+                &program,
+                &[],
+                ReadinessBounds {
+                    timeout: Duration::from_secs(10),
+                    output_limit: 256 * 1024,
+                },
+                grace,
+            ),
+            AgentReadiness::Ready
+        );
+        // A budget sized for a credential read terminates the same healthy CLI
+        // and reports it unavailable.
+        assert_eq!(
+            bounded_readiness_command(
+                &program,
+                &[],
+                ReadinessBounds {
+                    timeout: Duration::from_millis(50),
+                    output_limit: 256 * 1024,
+                },
+                grace,
+            ),
+            AgentReadiness::Unavailable
+        );
+        // So does a capture bound smaller than what a chatty probe prints.
+        assert_eq!(
+            bounded_readiness_command(
+                &program,
+                &[],
+                ReadinessBounds {
+                    timeout: Duration::from_secs(10),
+                    output_limit: 64,
+                },
+                grace,
+            ),
+            AgentReadiness::Unavailable
         );
     }
 

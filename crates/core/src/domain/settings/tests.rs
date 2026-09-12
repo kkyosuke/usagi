@@ -3,6 +3,7 @@ use super::{
     ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, TerminalConcurrencyLimit, Theme,
     WorkMode,
 };
+use std::time::Duration;
 
 fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
     pairs
@@ -246,6 +247,37 @@ fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
     assert_eq!(probe, DefaultModel::SakanaAi.readiness_command());
     assert_ne!(probe, DefaultModel::OpenAi.readiness_command());
     assert!(format!("{probe:?}").contains("codex-fugu"));
+}
+
+#[test]
+fn each_probe_carries_the_bounds_its_own_product_needs() {
+    // A credential read answers immediately and prints almost nothing, so the
+    // providers that only read a token share one small budget.
+    for model in [
+        DefaultModel::Claude,
+        DefaultModel::OpenAi,
+        DefaultModel::SakanaAi,
+    ] {
+        let probe = model.readiness_command();
+        assert_eq!(probe.timeout(), Duration::from_secs(2), "{model:?}");
+        assert_eq!(probe.output_limit(), 16 * 1024, "{model:?}");
+    }
+    // `agy models` starts Antigravity's language server and lists the models of
+    // the signed-in account, which takes seconds and logs to stderr throughout.
+    // Under the shared budget above, an installed and authenticated CLI was
+    // terminated mid-probe and reported unavailable.
+    let agy = DefaultModel::Agy.readiness_command();
+    assert!(
+        agy.timeout() >= Duration::from_secs(10),
+        "{:?}",
+        agy.timeout()
+    );
+    assert!(agy.timeout() > DefaultModel::Claude.readiness_command().timeout());
+    assert!(agy.output_limit() > DefaultModel::Claude.readiness_command().output_limit());
+    // The bounds are part of the probe's identity, so a launcher that copies a
+    // probe cannot drop them.
+    assert_ne!(agy, DefaultModel::Claude.readiness_command());
+    assert_eq!(agy, DefaultModel::readiness_command_for("agy").unwrap());
 }
 
 #[test]
