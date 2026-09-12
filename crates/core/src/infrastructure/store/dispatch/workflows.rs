@@ -193,8 +193,9 @@ impl DispatchStore {
         mut value: WorkflowRecord,
     ) -> Result<()> {
         while serde_json::to_vec_pretty(&value)?.len() >= MAX_BYTES {
-            // Drop the oldest evidence first: the active run's history, and only
-            // once that is gone the ended runs archived beside it.
+            // Spend the live run's history first. The archive of ended runs is
+            // small and bounded already, and it is the one thing this record
+            // promises to keep, so it is what goes last rather than first.
             if let Some(history) = value.run.as_mut().map(|run| &mut run.history)
                 && !history.is_empty()
             {
@@ -442,6 +443,38 @@ mod tests {
                 .history
                 .is_empty()
         );
+        // With no live history left to give up, the archive of ended runs is
+        // what the record spends next, oldest first and only as far as it must.
+        let ended = |goal: String| crate::domain::workflow::FinishedRun {
+            id: OperationId::new(),
+            outcome: crate::domain::workflow::Outcome::Stopped,
+            goal,
+            phase: Phase::Implementing,
+            issue: None,
+            pr_url: None,
+        };
+        store
+            .update_workflow(workspace, session, |value| {
+                let record = value.as_mut().unwrap();
+                record.run = None;
+                record.finished = vec![
+                    ended("a".repeat(MAX_BYTES * 3 / 5)),
+                    ended("b".repeat(MAX_BYTES * 3 / 5)),
+                ];
+                Ok(())
+            })
+            .unwrap();
+        let kept = store
+            .workflow(workspace, session)
+            .unwrap()
+            .unwrap()
+            .finished;
+        assert_eq!(kept.len(), 1);
+        assert!(
+            kept[0].goal.starts_with('b'),
+            "the oldest ended run is the one that goes"
+        );
+
         for oversized in [true, false] {
             let result = store.update_workflow(workspace, session, |value| {
                 value.as_mut().unwrap().goal = if oversized {

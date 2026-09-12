@@ -36,6 +36,7 @@ pub fn admit(
                     existing.goal.clone_from(goal);
                     existing.issue = issue;
                     existing.finish = None;
+                    existing.run = None;
                     existing.initial_notified = false;
                     existing.preferences_saved = false;
                     existing.start_error = None;
@@ -143,6 +144,13 @@ pub fn bind(
     store.update_workflow(workspace, session, |value| {
         let record = value.as_mut().context("workflow intent is missing")?;
         let issue = record.issue;
+        // A launch that was still resolving when the person gave up on it must
+        // not come back. `start` releases the runtime lock while it proves the
+        // participant is ready, so a finish can be admitted in between, and
+        // binding then would leave a record that is finished *and* running:
+        // instructions and a second finish are both refused, and nothing can
+        // move it again.
+        ensure!(record.finish.is_none(), "workflow has already finished");
         ensure!(record.operation == operation, "workflow launch conflict");
         if let Some(run) = &record.run {
             ensure!(
@@ -661,6 +669,12 @@ mod tests {
             )
             .is_err()
         );
+
+        // A launch still resolving when the person abandoned it cannot come
+        // back: binding it would leave a record that is finished and running at
+        // once, which nothing could move again.
+        assert!(bind(&store, workspace, session, first, AgentId::new()).is_err());
+        assert!(record().run.is_none());
 
         // A finished session takes a new start, and the stale retry of the run
         // it already buried does not resurrect it.

@@ -115,13 +115,10 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
         if let Some(issue) = run.issue {
             header.push(format!("Issue: #{issue} (PR must mark it done)"));
         }
-        if matches!(
-            run.phase,
-            usagi_core::domain::workflow::Phase::Ready
-                | usagi_core::domain::workflow::Phase::Waiting
-        ) {
-            header.push("Closeup `workflow finish` ends this run".into());
-        }
+        // Offered in every phase, not only the two that are already the person's
+        // turn: the run that most needs ending is the one still insisting it is
+        // working.
+        header.push("Closeup `workflow finish` ends this run".into());
         if let Some(reason) = &run.waiting_reason {
             header.push(reason.clone());
         }
@@ -222,7 +219,7 @@ mod tests {
     #[test]
     fn ended_runs_stay_visible_and_the_way_to_end_one_is_offered_where_it_helps() {
         use usagi_core::domain::workflow::{FinishedRun, Outcome, Phase};
-        let mut run = crate::usecase::application::workflow::fixture_run(
+        let run = crate::usecase::application::workflow::fixture_run(
             usagi_core::domain::id::SessionId::new(),
         );
         let ended = |outcome, phase, goal: &str| FinishedRun {
@@ -247,22 +244,21 @@ mod tests {
         assert!(rendered.contains("[completed] Ship login (PR ready)"));
         assert!(rendered.contains("[stopped] Rewrite / the parser (Revising)"));
 
-        // Mid-run there is nothing to decide, so the tab does not advertise
-        // ending: every other phase belongs to an Agent.
-        run.phase = Phase::Implementing;
+        // A run the person wants to abandon is usually one that still claims to
+        // be working, so the way out is offered in every phase.
         panel.run = Some(run);
-        assert!(
-            !render(20, 100, &panel)
-                .join("\n")
-                .contains("workflow finish")
-        );
-        for phase in [Phase::Ready, Phase::Waiting] {
+        for phase in [
+            Phase::Implementing,
+            Phase::Reviewing,
+            Phase::Ready,
+            Phase::Waiting,
+        ] {
             panel.run.as_mut().unwrap().phase = phase;
             assert!(
                 render(20, 100, &panel)
                     .join("\n")
                     .contains("Closeup `workflow finish` ends this run"),
-                "{phase:?} is the person's turn"
+                "{phase:?} still offers the way out"
             );
         }
         // The archive survives alongside a new run.

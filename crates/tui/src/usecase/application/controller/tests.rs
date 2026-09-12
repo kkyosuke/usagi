@@ -120,7 +120,7 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
 
 #[test]
 fn finishing_a_workflow_opens_the_tab_and_resends_one_operation() {
-    use crate::usecase::application::workflow::{WorkflowJob, fixture_run};
+    use crate::usecase::application::workflow::WorkflowJob;
     use usagi_core::domain::workflow::{
         FinishedRun, Outcome, Phase, WorkflowCommand, WorkflowSnapshot,
     };
@@ -218,7 +218,6 @@ fn finishing_a_workflow_opens_the_tab_and_resends_one_operation() {
         panic!("reopening reads the workflow, got {effects:?}");
     };
     assert!(read.control.is_none());
-    let _ = fixture_run(session);
 }
 
 #[test]

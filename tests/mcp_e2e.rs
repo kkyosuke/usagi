@@ -108,7 +108,7 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 59);
+    assert_eq!(tools.len(), 60);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -131,7 +131,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 48);
+    assert_eq!(names.len(), 49);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -539,13 +539,18 @@ sleep 30
 
     // The run's Agent is untouched and so is the worktree: finishing is a
     // change to the workflow record and nothing else.
+    // Its *status* is the assertion, not its presence: an Agent that is killed
+    // stays in the registry as `exited`, so checking only that the id is still
+    // listed would pass even if finishing started stopping Agents.
     let agents = tool_text(&mcp.tool("agent_list", &json!({})));
+    let carried = agents["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["agent_id"] == implementer)
+        .unwrap_or_else(|| panic!("the implementer is still listed: {agents}"));
     assert!(
-        agents["agents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|agent| agent["agent_id"] == implementer),
+        carried["status"] != "exited" && carried["status"] != "failed",
         "the implementer outlives the run it carried: {agents}"
     );
     assert!(
