@@ -11691,9 +11691,11 @@ mod tests {
     }
 
     #[test]
-    fn sakana_dispatch_preflight_checks_the_codex_fugu_executable() {
+    fn sakana_dispatch_preflight_checks_the_executable_it_launches() {
         let fixture = tempfile::tempdir().unwrap();
-        let executable = fixture.path().join("codex-fugu");
+        // Fugu runs the Claude CLI, so that is the executable whose absence
+        // makes this runtime unavailable.
+        let executable = fixture.path().join("claude");
         std::fs::write(&executable, "fixture").unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::fs::create_dir(workspace.path().join(".usagi")).unwrap();

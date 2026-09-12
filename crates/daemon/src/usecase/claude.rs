@@ -340,6 +340,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_fugu_profile_is_a_separate_identity_over_the_same_claude_grammar() {
+        let sakana = ClaudeAdapter::sakana(FakeProvisioner(None));
+        let claude = ClaudeAdapter::new(FakeProvisioner(None));
+        assert_eq!(sakana.profile().id.as_str(), "sakana-ai");
+        assert_eq!(sakana.profile().display_name, "sakana.ai");
+        // Same grammar, same capabilities: only the environment a provisioner
+        // gives it makes one Fugu and the other Anthropic Claude.
+        assert_eq!(sakana.profile().capabilities, claude.profile().capabilities);
+        assert_eq!(
+            sakana.profile().allowed_modes,
+            claude.profile().allowed_modes
+        );
+        // The revision must differ from Claude's. Until this change the same
+        // `sakana-ai` ID was launched by the Codex adapter, which also carried
+        // revision 5: a durable snapshot from that era describes Codex argv, and
+        // a shared revision would let it validate against this profile.
+        assert_ne!(sakana.profile().revision, claude.profile().revision);
+        assert_eq!(sakana.profile().revision, SAKANA_PROFILE_REVISION);
+
+        // A launch for the other profile is refused rather than answered with
+        // the wrong identity.
+        let mut sakana = ClaudeAdapter::sakana(FakeProvisioner(Some(Ok(provision()))));
+        assert!(matches!(
+            sakana.resolve(&request()),
+            Err(AdapterError::Validation(LaunchValidationError::UnknownProfile {
+                profile_id,
+            })) if profile_id.as_str() == "claude"
+        ));
+    }
+
     fn provision() -> ClaudeProvision {
         ClaudeProvision {
             working_directory: PathBuf::from("/workspace"),

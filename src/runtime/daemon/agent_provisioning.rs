@@ -1205,7 +1205,7 @@ pub(super) fn launch_allowlist(
 /// provider's state. A missing API key is *not* fatal here: the readiness probe
 /// runs the same environment and refuses the launch with a recovery reason,
 /// which is a better answer than a provisioning failure.
-fn provider_gateway_environment(
+pub(super) fn provider_gateway_environment(
     agent: DefaultModel,
     home: Option<&Path>,
     user: &BTreeMap<String, String>,

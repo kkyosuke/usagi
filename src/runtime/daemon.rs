@@ -45,11 +45,11 @@ use agent_provisioning::{
     codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
     effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
     lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
-    mcp_environment_allowlist, prompt_scope, repair_codex_arg0_permissions,
-    repair_codex_arg0_permissions_with_limit, root_agent_writable_roots, root_memory_store_root,
-    sandbox_mode, session_git_common_dir, session_git_policy, shell_quote, toml_basic_string,
-    validate_claude_sandbox_policy, validate_isolated_sandbox_root,
-    validate_root_git_common_dir_policy,
+    mcp_environment_allowlist, prompt_scope, provider_gateway_environment,
+    repair_codex_arg0_permissions, repair_codex_arg0_permissions_with_limit,
+    root_agent_writable_roots, root_memory_store_root, sandbox_mode, session_git_common_dir,
+    session_git_policy, shell_quote, toml_basic_string, validate_claude_sandbox_policy,
+    validate_isolated_sandbox_root, validate_root_git_common_dir_policy,
 };
 use agent_provisioning::{
     DiscardJournal, RootClaudeProvisioner, RootCodexProvisioner,
@@ -13089,6 +13089,78 @@ mod tests {
             Some(libc::ESRCH),
             "timed-out readiness child was reaped"
         );
+    }
+
+    #[test]
+    fn a_gateway_provider_is_made_of_environment_and_fails_closed_without_it() {
+        let home = PathBuf::from("/home/dev");
+        let user = BTreeMap::from([
+            ("SAKANA_API_KEY".to_owned(), "fish-secret".to_owned()),
+            ("UNRELATED".to_owned(), "value".to_owned()),
+        ]);
+        let environment = provider_gateway_environment(DefaultModel::SakanaAi, Some(&home), &user)
+            .expect("a configured key and a home are all this provider needs");
+        let pairs = environment
+            .iter()
+            .map(|(name, value)| (name.as_str().to_owned(), value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        // The endpoint and every model slot come from the vocabulary, so a
+        // launch cannot lose one and quietly run as Anthropic Claude.
+        assert_eq!(
+            pairs.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://api.sakana.ai")
+        );
+        assert_eq!(
+            pairs
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .map(String::as_str),
+            Some("fugu-max[1m]")
+        );
+        // The CLI is pointed at this provider's own state, not the home the
+        // Claude profile uses.
+        assert_eq!(
+            pairs.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/home/dev/.claude-sakana")
+        );
+        // The key is stored under the product's name and delivered under
+        // Claude's, so the Claude profile never receives it.
+        assert_eq!(
+            pairs.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
+            Some("fish-secret")
+        );
+        assert!(!pairs.contains_key("SAKANA_API_KEY"));
+        assert!(!pairs.contains_key("UNRELATED"));
+
+        // Without a home there is no isolated config directory to name, and the
+        // CLI would fall back to the Claude profile's `~/.claude`.
+        assert_eq!(
+            provider_gateway_environment(DefaultModel::SakanaAi, None, &user),
+            Err(())
+        );
+        // A missing key is not a provisioning failure: readiness refuses the
+        // launch first, with a reason the user can act on. The rest of the
+        // gateway is still assembled.
+        let without_key =
+            provider_gateway_environment(DefaultModel::SakanaAi, Some(&home), &BTreeMap::new())
+                .expect("a missing credential does not fail provisioning");
+        assert!(
+            !without_key
+                .iter()
+                .any(|(name, _)| name.as_str() == "ANTHROPIC_AUTH_TOKEN")
+        );
+        assert_eq!(without_key.len(), environment.len() - 1);
+        // A product that is its own CLI carries no gateway at all.
+        for agent in [
+            DefaultModel::Claude,
+            DefaultModel::OpenAi,
+            DefaultModel::Agy,
+        ] {
+            assert_eq!(
+                provider_gateway_environment(agent, Some(&home), &user),
+                Ok(Vec::new()),
+                "{agent:?}"
+            );
+        }
     }
 
     #[test]
