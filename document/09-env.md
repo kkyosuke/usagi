@@ -43,9 +43,19 @@ editor は 1 行 1 binding の `NAME=value` を受け取り、保存時に次の
 | secret 参照 | `op://` で始まり、続くパスが空でない値。それ以外は平文として扱う |
 | 重複 | 同名は後の行が勝ち、map は名前順に正規化される |
 
-workspace binding の `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` /
-`USAGI_CLAUDE_SANDBOX_PASSTHROUGH` は Agent launcher の境界を変更できるため、launch admission で secret 解決前に拒否する。
-global binding は利用者が管理する trusted baseline として扱い、この workspace 固有の拒否対象には含めない。
+### workspace が bind できない変数
+
+次の名前は workspace binding から拒否する。判定は launch admission で secret 解決より前に行う。
+global binding は利用者が管理する trusted baseline として扱い、この拒否対象には含めない。
+
+| 変数 | 拒否する理由 |
+|---|---|
+| `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `USAGI_CLAUDE_SANDBOX_PASSTHROUGH` | Agent launcher が使う filesystem の境界そのものを差し替えられる |
+| `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_DEFAULT_*_MODEL` | managed launch の宛先とアカウントを差し替えられる。`.usagi/settings.json` は repository に入るため、checkout 側が session の prompt・file 内容・credential を別の server へ送れてしまう |
+| `SAKANA_API_KEY` | provider の readiness は「この key が設定されているか」であり、probe は workspace を持たない。workspace scope の key は「admission が見た credential」と「launch が使う credential」を食い違わせる |
+
+usagi 自身が provider を定義するために所有する変数（endpoint、model 束縛、state directory、API key の
+注入先）は [5. daemon#Agent CLI の readiness preflight](05-daemon.md#agent-cli-の-readiness-preflight) を正本とする。
 
 binding と secret reference の resource 上限は domain の env policy が正本であり、global / workspace の各保存文書と
 合成後の launch admission が同じ検証を使う。
