@@ -6,10 +6,11 @@
 //! daemon has to fit inside, and because the session family is the one that
 //! grows: every new session tool lands here.
 //!
-//! Visibility is `pub(in crate::runtime::daemon)` rather than `pub(super)`: the
-//! daemon module is the consumer, and the dispatch table is only the road it
-//! travels on.
+//! Visibility says who each item is for: `pub(in crate::runtime::daemon)` for
+//! what the daemon module itself calls, `pub(super)` for what stays inside the
+//! dispatch table.
 
+use super::super::workflow;
 use super::{
     AmbiguousIssueNumber, BTreeMap, BTreeSet, ConnectionWorkspace, DispatchStore, ErrorLog,
     SessionDispatchContext, SessionId, SessionRuntimeError, SharedAgentRuntime,
@@ -341,40 +342,41 @@ pub(in crate::runtime::daemon) fn dispatch_session_action(
             // A start may name a backlog issue instead of spelling the goal.
             // The issue body becomes the goal, and the run keeps the reference
             // the PR will have to name.
-            let issue = super::super::workflow::requested_issue(payload)?;
+            let issue = workflow::requested_issue(payload)?;
             let command = match action {
                 SessionAction::WorkflowStatus => None,
                 SessionAction::WorkflowStart => {
                     let goal = match issue {
-                        Some(number) => super::super::workflow::issue_goal(bound, number)
-                            .map_err(super::super::workflow::refusal)?,
+                        Some(number) => {
+                            workflow::issue_goal(bound, number).map_err(workflow::refusal)?
+                        }
                         None => string("goal")?.to_owned(),
                     };
                     Some(usagi_core::domain::workflow::WorkflowCommand::Start {
                         goal,
-                        agents: super::super::workflow::requested_agents(
+                        agents: workflow::requested_agents(
                             payload,
-                            super::super::workflow::remembered_agents(agent, workspace),
+                            workflow::remembered_agents(agent, workspace),
                         )
                         .ok_or(SessionRuntimeError::InvalidRequest)?,
                     })
                 }
                 _ => Some(usagi_core::domain::workflow::WorkflowCommand::Instruct {
-                    recipient: super::super::workflow::requested_recipient(payload)
+                    recipient: workflow::requested_recipient(payload)
                         .ok_or(SessionRuntimeError::InvalidRequest)?,
                     body: string("body")?.to_owned(),
                 }),
             };
             let snapshot = match command {
-                None => super::super::workflow::advance(
+                None => workflow::advance(
                     agent,
                     pr_inventory,
                     &bound.scope_resolver(),
                     workspace,
                     session,
-                    super::super::workflow::Attention::Requested,
+                    workflow::Attention::Requested,
                 ),
-                Some(command) => super::super::workflow::control_workflow(
+                Some(command) => workflow::control_workflow(
                     agent,
                     bound,
                     workspace,
@@ -385,7 +387,7 @@ pub(in crate::runtime::daemon) fn dispatch_session_action(
                     issue,
                 ),
             }
-            .map_err(super::super::workflow::refusal)?;
+            .map_err(workflow::refusal)?;
             reply(serde_json::to_value(snapshot).map_err(|_| SessionRuntimeError::Storage)?)
         }
         SessionAction::Pr => {

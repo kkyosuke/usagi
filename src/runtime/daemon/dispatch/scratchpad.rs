@@ -17,8 +17,8 @@ use usagi_daemon::usecase::session_runtime::SessionRuntimeError;
 /// function never chooses a session.
 ///
 /// # Errors
-/// Returns `InvalidRequest` for a missing or empty field and `Storage` for a
-/// store failure.
+/// Returns `InvalidRequest` for an action this module does not own and for a
+/// missing or empty field, and `Storage` for a store failure.
 pub(super) fn read_or_write(
     action: SessionAction,
     payload: &serde_json::Value,
@@ -109,6 +109,133 @@ pub(super) fn read_or_write(
                 .map_err(|_| SessionRuntimeError::Storage)?;
             serde_json::json!({"decisions": note::decisions(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
         }
-        _ => unreachable!(),
+        // Reaching here means the caller passed an action this module does not
+        // own. It was impossible while this lived inside the dispatch table's
+        // match; as its own item it is an ordinary caller error.
+        _ => return Err(SessionRuntimeError::InvalidRequest),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionAction, SessionRuntimeError, read_or_write};
+    use serde_json::json;
+
+    fn call(
+        action: SessionAction,
+        payload: &serde_json::Value,
+        path: &std::path::Path,
+    ) -> Result<serde_json::Value, SessionRuntimeError> {
+        read_or_write(action, payload, path)
+    }
+
+    #[test]
+    fn the_scratchpad_reads_and_writes_one_session_worktree() {
+        let worktree = tempfile::tempdir().unwrap();
+        let path = worktree.path();
+
+        // An unwritten note reads as absent, and an update answers with what it
+        // wrote.
+        assert_eq!(
+            call(SessionAction::NoteGet, &json!({}), path).unwrap()["note"],
+            json!(null)
+        );
+        assert_eq!(
+            call(
+                SessionAction::NoteUpdate,
+                &json!({"note": "why this branch"}),
+                path
+            )
+            .unwrap()["note"],
+            json!("why this branch")
+        );
+        assert_eq!(
+            call(SessionAction::NoteGet, &json!({}), path).unwrap()["note"],
+            json!("why this branch")
+        );
+        // A note may be cleared; every other field is required.
+        assert!(call(SessionAction::NoteUpdate, &json!({"note": ""}), path).is_ok());
+        assert!(call(SessionAction::NoteUpdate, &json!({}), path).is_err());
+
+        // Todos: add, then mark done, then remove.
+        assert_eq!(
+            call(SessionAction::TodoList, &json!({}), path).unwrap()["todos"],
+            json!([])
+        );
+        let added = call(
+            SessionAction::TodoAdd,
+            &json!({"text": " write the test "}),
+            path,
+        )
+        .unwrap();
+        assert_eq!(added["todos"][0]["text"], json!("write the test"));
+        // An unchecked todo omits `done` on the wire (the domain skips the
+        // default), so its absence is what "not done" looks like here.
+        assert_eq!(added["todos"][0]["done"], json!(null));
+        assert!(call(SessionAction::TodoAdd, &json!({"text": "  "}), path).is_err());
+
+        let updated = call(
+            SessionAction::TodoUpdate,
+            &json!({"index": 0, "done": true}),
+            path,
+        )
+        .unwrap();
+        assert_eq!(updated["todos"][0]["done"], json!(true));
+        // An update has to change something, name a real entry, and use the
+        // declared types.
+        assert!(call(SessionAction::TodoUpdate, &json!({"index": 0}), path).is_err());
+        assert!(call(SessionAction::TodoUpdate, &json!({"done": true}), path).is_err());
+        assert!(
+            call(
+                SessionAction::TodoUpdate,
+                &json!({"index": 0, "done": "yes"}),
+                path
+            )
+            .is_err()
+        );
+        assert!(
+            call(
+                SessionAction::TodoUpdate,
+                &json!({"index": 0, "text": ""}),
+                path
+            )
+            .is_err()
+        );
+        assert!(
+            call(
+                SessionAction::TodoUpdate,
+                &json!({"index": 7, "done": true}),
+                path
+            )
+            .is_err()
+        );
+
+        assert_eq!(
+            call(SessionAction::TodoRemove, &json!({"index": 0}), path).unwrap()["todos"],
+            json!([])
+        );
+        assert!(call(SessionAction::TodoRemove, &json!({"index": 0}), path).is_err());
+        assert!(call(SessionAction::TodoRemove, &json!({}), path).is_err());
+
+        // Decisions append and are read back.
+        assert_eq!(
+            call(SessionAction::DecisionList, &json!({}), path).unwrap()["decisions"],
+            json!([])
+        );
+        let logged = call(
+            SessionAction::DecisionLog,
+            &json!({"text": "split the table"}),
+            path,
+        )
+        .unwrap();
+        assert_eq!(logged["decisions"][0]["text"], json!("split the table"));
+        assert!(call(SessionAction::DecisionLog, &json!({}), path).is_err());
+
+        // An action this module does not own is refused rather than panicking:
+        // as its own item the function is reachable from anywhere in the crate.
+        assert!(matches!(
+            call(SessionAction::Create, &json!({}), path),
+            Err(SessionRuntimeError::InvalidRequest)
+        ));
+    }
 }
