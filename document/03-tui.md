@@ -1375,10 +1375,12 @@ request を描くと、キー入力を受け取らない空の枠が残るため
 届いた snapshot で中身を更新する。request が届く前に別の surface が前面を取っていた場合、遅れて届いた
 snapshot はその操作を奪わずに request を捨てる。modal の枠タイトルは `Pull Request` の 1 か所だけに置く。repository は連続する PR 群の見出しとして 1 回表示し、その下の各行へ状態・番号・title・CI / review を
 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。modal の枠外をクリックすると閉じ、枠内と枠外のクリックはいずれも背後の project bar・header・pane・sidebar へ伝播しない。sidebar projection は新しい revision だけで進み、
-開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
-保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、
-その session の PR modal を検知した行を選択して自動で開く。ただし行全体が PR URL の出力だけを自動表示候補とし、文章中の参考リンクは一覧に追加しても自動表示しない。title / state だけの更新、重複・古い revision、
-dismissed PR は自動表示せず、前面の操作を奪わない。別 session の値は対象 session の cache にだけ反映する。
+開き直した modal は同じ cache を即時利用する。表示用 cache は target（workspace root と各 session）ごとに
+1 つで、sidebar badge・modal・status tab はすべてこの同じ行を読む。target ごとの初回 snapshot は baseline として
+cache にだけ保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面に
+ない場合に、その target の PR modal を検知した行を選択して自動で開く。ただし行全体が PR URL の出力だけを自動表示候補とし、文章中の参考リンクは一覧に追加しても自動表示しない。title / state だけの更新、重複・古い revision、
+dismissed PR は自動表示せず、前面の操作を奪わない。古い revision の snapshot は modal の行も error 表示も
+書き換えない。別 target の値は対象 target の cache にだけ反映する。
 
 Global Config の `PR auto-open` は `always` / `switch only` / `notify only` / `never` を選ぶ。既定の
 `switch only` は live terminal の入力を奪わず Switch だけで自動表示する。`notify only` は modal の代わりに notice、

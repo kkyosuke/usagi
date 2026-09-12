@@ -781,6 +781,14 @@ impl PrFilter {
     }
 }
 
+/// What one daemon snapshot did to the cached inventory.
+enum PrSnapshot {
+    /// Stale or untracked: the inventory keeps what the last real answer left.
+    Ignored,
+    /// Cached, carrying the PR whose first appearance the user is waiting for.
+    Absorbed(Option<PrIdentity>),
+}
+
 /// Cache one daemon snapshot and report the PR whose first appearance the user
 /// is waiting for.
 ///
@@ -793,12 +801,12 @@ fn absorb_pr_snapshot(
     target: Target,
     revision: u64,
     prs: &[PrEntry],
-) -> Option<PrIdentity> {
+) -> PrSnapshot {
     let known = state.prs.get(&target);
     if !is_tracked(&state.sessions, target)
         || known.is_some_and(|(current, _)| revision <= *current)
     {
-        return None;
+        return PrSnapshot::Ignored;
     }
     let detected = known
         .and_then(|(_, known)| {
@@ -824,7 +832,7 @@ fn absorb_pr_snapshot(
     }
     state.prs.insert(target, (revision, prs.to_vec()));
     state.session_pr_revision = state.session_pr_revision.saturating_add(1);
-    detected
+    PrSnapshot::Absorbed(detected)
 }
 
 /// Rebuild the open modal from the refreshed inventory of its own target.
@@ -3079,9 +3087,36 @@ pub enum Effect {
     },
 }
 
+/// Reduce one event, then restore the invariants the PR surfaces share with the
+/// foreground overlay.
+#[must_use]
+pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
+    let effects = update_event(state, event);
+    reconcile_pr_surfaces(state);
+    effects
+}
+
+/// Keep the PR modal and the pending request consistent with the foreground.
+///
+/// Arms all over the reducer release the foreground overlay when their own
+/// surface takes over, and they cannot each remember what a PR modal owns. So
+/// the rule is applied once, after every event: a modal that is not the
+/// foreground does not exist, and a surface the user opened after asking for
+/// PRs supersedes that request.
+fn reconcile_pr_surfaces(state: &mut AppState) {
+    match state.overlay {
+        Some(Overlay::Prs) => state.pr_request = None,
+        Some(_) => {
+            state.pr_overlay = None;
+            state.pr_request = None;
+        }
+        None => state.pr_overlay = None,
+    }
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
+fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     match event {
         AppEvent::WorkflowEdit { session, edit } => {
             if state.active != Some(session)
@@ -3827,8 +3862,16 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             revision,
             prs,
         } => {
-            let detected = absorb_pr_snapshot(state, *target, *revision, prs);
-            refresh_pr_modal(state, *target, detected.as_ref());
+            let detected = match absorb_pr_snapshot(state, *target, *revision, prs) {
+                // A stale snapshot proves nothing, so it must not rebuild the
+                // modal's rows or clear the error the last real answer left
+                // there. It still answers the request that provoked it.
+                PrSnapshot::Ignored => None,
+                PrSnapshot::Absorbed(detected) => {
+                    refresh_pr_modal(state, *target, detected.as_ref());
+                    detected
+                }
+            };
             settle_pr_request(state, *target, detected.as_ref());
             announce_detected_pr(state, *target, detected.as_ref());
             reconcile_cleanup_queue(state);

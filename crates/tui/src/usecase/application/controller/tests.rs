@@ -6976,6 +6976,82 @@ fn pr_overlay_opens_reflows_material_navigates_opens_and_closes() {
 }
 
 #[test]
+fn a_pending_pr_request_is_forgotten_when_its_session_leaves_the_workspace() {
+    let (workspace, session, _) = ids();
+    let mut state = AppState::home(workspace, vec![session]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+    assert_eq!(state.pr_request(), Some(Target::Session(session)));
+
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(Vec::new())),
+    );
+    assert_eq!(state.pr_request(), None);
+}
+
+#[test]
+fn an_error_on_an_open_pr_modal_stays_in_it_and_a_stale_snapshot_keeps_it() {
+    let (workspace, session, _) = ids();
+    let target = Target::Session(session);
+    let mut state = AppState::home(workspace, vec![session]);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![pr_link(1)],
+        }),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+    assert_eq!(state.overlay(), Some(Overlay::Prs));
+
+    // A failed refresh keeps the rows the last real answer left and says why
+    // they may be stale, instead of replacing the modal.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsError {
+            target,
+            error: safe_error("gh unavailable"),
+        }),
+    );
+    assert_eq!(state.overlay(), Some(Overlay::Prs));
+    assert_eq!(state.pr_overlay().unwrap().prs().len(), 1);
+    assert_eq!(
+        state
+            .pr_overlay()
+            .unwrap()
+            .error()
+            .map(|error| error.message.as_str()),
+        Some("gh unavailable")
+    );
+
+    // A snapshot the reducer rejects proves nothing, so it must not present the
+    // unchanged rows as freshly confirmed.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![pr_link(1), pr_link(2)],
+        }),
+    );
+    assert_eq!(state.pr_overlay().unwrap().prs().len(), 1);
+    assert!(state.pr_overlay().unwrap().error().is_some());
+
+    // The next authoritative snapshot clears it.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 2,
+            prs: vec![pr_link(1), pr_link(2)],
+        }),
+    );
+    assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
+    assert!(state.pr_overlay().unwrap().error().is_none());
+}
+
+#[test]
 fn pr_overlay_stays_hidden_without_prs_and_reports_loading_errors() {
     let (workspace, session, _) = ids();
     let target = Target::Session(session);
@@ -7800,6 +7876,9 @@ fn opening_one_overlay_discards_the_other_state() {
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
     assert_eq!(state.overlay(), Some(Overlay::Preview));
     assert!(state.pr_overlay().is_none());
+    // The preview supersedes the request, so its late snapshot cannot open a
+    // modal the user is no longer asking for.
+    assert_eq!(state.pr_request(), None);
     assert!(state.preview_overlay().is_some());
     // And the reverse: opening PRs discards the preview state.
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
