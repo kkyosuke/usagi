@@ -669,6 +669,13 @@ pub enum SessionAction {
     DecisionLog,
     DelegateIssue,
     DelegateBrief,
+    /// Start the session's implementation/review workflow on behalf of the
+    /// human who is running this MCP client.
+    WorkflowStart,
+    /// Read one session's workflow progress.
+    WorkflowStatus,
+    /// Send one durable instruction to a running workflow.
+    WorkflowInstruct,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1939,6 +1946,7 @@ const fn session_action_is_read_only(action: SessionAction) -> bool {
             | SessionAction::NoteGet
             | SessionAction::TodoList
             | SessionAction::DecisionList
+            | SessionAction::WorkflowStatus
     )
 }
 
@@ -1947,7 +1955,16 @@ const fn session_action_is_durable_operation(action: SessionAction) -> bool {
     // lifecycle mutations (create/remove across daemon restarts). Other
     // mutating actions stay fail-closed until their server-backed durable
     // contract is proven.
-    matches!(action, SessionAction::Create | SessionAction::Remove)
+    matches!(
+        action,
+        SessionAction::Create
+            | SessionAction::Remove
+            // A workflow command is admitted by the producer's operation ID, so
+            // retrying a lost response resumes the same run instead of starting
+            // a second one.
+            | SessionAction::WorkflowStart
+            | SessionAction::WorkflowInstruct
+    )
 }
 
 const fn supervisor_action_is_read_only(action: SupervisorToolAction) -> bool {
@@ -3272,6 +3289,13 @@ mod deadline_and_retry_tests {
                 root: None,
                 force: false,
             },
+            // Reading a workflow reconciles evidence the resident lane would
+            // reconcile anyway, so re-reading it changes nothing a caller owns.
+            DaemonRequest::Session {
+                action: SessionAction::WorkflowStatus,
+                operation_id: "op".into(),
+                payload: session_payload(),
+            },
             DaemonRequest::Pr {
                 action: PrAction::Snapshot,
                 payload: PrRequest {
@@ -3342,6 +3366,18 @@ mod deadline_and_retry_tests {
         let durable = [
             DaemonRequest::Session {
                 action: SessionAction::Create,
+                operation_id: "op".into(),
+                payload: session_payload(),
+            },
+            // A workflow command is admitted by the producer's operation ID, so
+            // a lost response resumes the same run instead of starting another.
+            DaemonRequest::Session {
+                action: SessionAction::WorkflowStart,
+                operation_id: "op".into(),
+                payload: session_payload(),
+            },
+            DaemonRequest::Session {
+                action: SessionAction::WorkflowInstruct,
                 operation_id: "op".into(),
                 payload: session_payload(),
             },

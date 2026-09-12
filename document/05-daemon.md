@@ -20,6 +20,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [failure logging](#failure-logging)
 - [durable operation](#durable-operation)
 - [background worker の待ち方](#background-worker-の待ち方)
+- [workflow lane](#workflow-lane)
 - [session teardown worker](#session-teardown-worker)
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
@@ -1132,12 +1133,62 @@ tick の長さに依存しない。
 | session teardown | 1 s | finalization に失敗している間だけ teardown を再試行する間隔。受理は即座に worker を起こす（[session teardown worker](#session-teardown-worker)） |
 | decision maintenance | 250 ms | 期限切れの decision が `Pending` として読める残り時間 |
 | retention GC | 30 s | idle 時に age budget と最小可視 TTL を反映するまでの遅れ（[final retention と aggregate GC](#final-retention-と-aggregate-gc)） |
+| workflow lane | 10 s | workflow の進行（peer 証拠の反映・queued 指示の再配送・PR 検証）が次に進むまでの遅れ（[workflow lane](#workflow-lane)） |
 
 IPC accept は tick を持たない。listener の readiness descriptor と、shutdown 要求を写した descriptor を
 `poll(2)` で同時に待つため、接続が来るまで wakeup は発生しない。lifecycle owner も同じく park し、
 **signal 由来の shutdown と accept worker の異常終了由来の shutdown の両方**で起きる。signal handler は
 flag を直接書くだけ（async-signal-safe だが condvar を notify できない）なので、delivery を要求へ変換する
 専用の待ち手が signal を blocking で受ける。
+
+## workflow lane
+
+session workflow の進行を所有するのはこの常駐 lane である。client の要求は進行の条件ではない。
+
+lane は tick ごとに保存済み workflow record を列挙し、各 run について次を 1 回行う。
+
+| 段階 | 内容 |
+|---|---|
+| reconcile | peer message journal を cursor から読み、証拠に一致する phase / review だけを進める |
+| 担当の生存確認 | 担当 Agent が停止していれば判断待ちへ落とし、復帰を確認できれば元の phase へ戻す |
+| 配送 | `queued` の指示を、受理時点の exact な担当とその認可済み実行系統にだけ再配送する |
+| 検証 | 承認済み HEAD に対する PR の独立検証（レビュー承認後の phase のみ。worktree HEAD 一致・未コミット変更なし・承認 HEAD に対する PR の checks 成功を要求する） |
+
+次の record は読み飛ばす。読み飛ばした record は書き換えないため、1 件あたりのコストは record を
+1 回読むことだけになる。
+
+| 読み飛ばす record | 理由 |
+|---|---|
+| worktree を解決できない session（削除済み、この daemon が保持していない workspace） | 進める対象が無い |
+| Agent を束ねられないまま開始に失敗した intent（`run` が無い） | 人間の再試行を待つ |
+
+`PR ready` に到達した run も他と同じく sweep する。そこから改めてレビューを依頼でき、そこで出した指示も
+配送先へ届ける必要があるためである。ただし**無人の sweep は `PR ready` の PR を再検証しない**。完了した
+PR を tick ごとに GitHub へ照会し続け、ブランチが動いた瞬間に工程を降格させてしまうからである。画面を
+開いている人の request は従来どおり再検証し、古くなった承認を無効化する。
+
+1 件の失敗は他の run の進行を止めない。daemon の停止要求は sweep の途中でも観測し、残りは次の起動へ残す。
+
+進めた run が**人を待つ状態**になったとき、lane は desktop 通知を 1 回出す。対象は次の 2 つだけで、
+Agent の手番は通知しない。
+
+| 状態 | 通知 |
+|---|---|
+| 判断待ち | `usagi: workflow needs you` と、goal の 1 行目・待ち理由 |
+| PR 準備完了 | `usagi: PR ready` と、goal の 1 行目・検証した PR の URL |
+
+record は「どの状態を通知済みか」を保持するため、同じ状態に留まっている間は再通知しない。復帰して
+再び同じ状態になった場合は改めて通知する。通知すべき状態が変わらない tick では record を書き換えない。
+通知は best-effort で、通知にも記録にも失敗した場合はその tick を諦め、run の進行と他の run の sweep は
+止めない。
+TUI の起動有無に依存しないのは、daemon が利用者と同じ権限で動いているためである。
+
+Workflow request のうち snapshot はこの pass をそのまま通り、control（開始・指示）は reconcile の直後に
+受理して PR 検証を挟まない。GitHub が一時的に読めないことが指示の拒否理由にならないようにするためで、
+検証は次の sweep か次の snapshot が行う。
+
+どの request も reconcile は 1 回だけ通る。control は自分が適用した記録変更を保存済み projection として
+返し、journal を二重に replay しない。
 
 decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
 atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。

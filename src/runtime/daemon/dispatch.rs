@@ -3113,7 +3113,10 @@ pub(super) fn session_response_envelope(
                 | SessionAction::DecisionList
                 | SessionAction::DecisionLog
                 | SessionAction::DelegateIssue
-                | SessionAction::DelegateBrief => None,
+                | SessionAction::DelegateBrief
+                | SessionAction::WorkflowStart
+                | SessionAction::WorkflowStatus
+                | SessionAction::WorkflowInstruct => None,
             } && let Some(object) = body.as_object_mut()
             {
                 object.insert(
@@ -3692,6 +3695,65 @@ pub(super) fn dispatch_session_action(
                 "reported_to": delivery.delivered_to,
                 "delivered_to": "inbox"
             }))
+        }
+        // The workflow control plane is the human's, so these tools carry the
+        // same ownership rule as the rest: a caller reaches a session it
+        // created, never the one it is running inside. That is what keeps a
+        // workflow's own Agents from driving their own workflow.
+        SessionAction::WorkflowStatus
+        | SessionAction::WorkflowStart
+        | SessionAction::WorkflowInstruct => {
+            let name = string("name")?;
+            let session = target_session(name)?;
+            let workspace = bound_workspace()?;
+            if caller.is_some_and(|caller| caller.session_id == Some(session)) {
+                return Err(SessionRuntimeError::PermissionDenied);
+            }
+            let command = match action {
+                SessionAction::WorkflowStatus => None,
+                SessionAction::WorkflowStart => {
+                    Some(usagi_core::domain::workflow::WorkflowCommand::Start {
+                        goal: string("goal")?.to_owned(),
+                        agents: super::workflow::requested_agents(
+                            payload,
+                            super::workflow::remembered_agents(agent, workspace),
+                        )
+                        .ok_or(SessionRuntimeError::InvalidRequest)?,
+                    })
+                }
+                _ => Some(usagi_core::domain::workflow::WorkflowCommand::Instruct {
+                    recipient: super::workflow::requested_recipient(payload)
+                        .ok_or(SessionRuntimeError::InvalidRequest)?,
+                    body: string("body")?.to_owned(),
+                }),
+            };
+            let snapshot = match command {
+                None => super::workflow::advance(
+                    agent,
+                    pr_inventory,
+                    &bound.scope_resolver(),
+                    workspace,
+                    session,
+                    super::workflow::Attention::Requested,
+                ),
+                Some(command) => super::workflow::control_workflow(
+                    agent,
+                    bound,
+                    workspace,
+                    session,
+                    usagi_core::domain::id::OperationId::parse(operation_id)
+                        .map_err(|_| SessionRuntimeError::InvalidRequest)?,
+                    command,
+                ),
+            }
+            // Keep the daemon's own refusal visible: an admission conflict and a
+            // momentarily unavailable dependency are different answers, and the
+            // IPC control path already tells them apart.
+            .map_err(|error| SessionRuntimeError::AgentFailure {
+                code: error.code,
+                message: error.message,
+            })?;
+            reply(serde_json::to_value(snapshot).map_err(|_| SessionRuntimeError::Storage)?)
         }
         SessionAction::Pr => {
             let (name, id) = if payload.get("name").is_some() {

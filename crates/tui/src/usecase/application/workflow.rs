@@ -120,6 +120,7 @@ pub(crate) fn fixture_run(session: SessionId) -> WorkflowRun {
         revisions: 0,
         review: None,
         waiting_reason: None,
+        pr_url: None,
         instructions: vec![],
         history: vec![],
     }

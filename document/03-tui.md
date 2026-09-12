@@ -2143,14 +2143,18 @@ Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Ag
 `delivery unconfirmed` と表示する。端末への書き込み成功だけで処理済みとはみなさない。
 応答を失った送信は同じ操作 ID で再試行し、二重の開始や指示を作らない。
 認証失敗などで開始待ちの操作も保存し、画面を開き直すと元の依頼と再試行操作を復元する。
+判断待ちと PR 準備完了は daemon が desktop 通知で知らせる（[workflow lane](05-daemon.md#workflow-lane)が正本）。
+同じ状態に留まっている間は再通知しない。
 担当 Agent が終了・中断した場合は判断待ちと理由を表示する。別 Agent の起動を担当の復帰とは
 みなさず、既存の Agent 回復操作で同じ実行系統が再開したことを照合する。
 
 タブを閉じても daemon の作業は中止しない。再度 `workflow` を開くと保存済みの進捗を取得する。
+進行そのものは daemon の常駐 lane が所有するため、タブを閉じていても、別の session を見ていても、
+TUI を終了していても進む（[workflow lane](05-daemon.md#workflow-lane)が正本）。開いている画面の
+polling は同じ進行の pass を通して最新の状態を受け取る。
 Workflow は PR の自動マージや session/worktree の削除を行わない。
 実装・レビューの進行は起動時の固定指示と同一 session の handoff に従う。修正は最大 3 回を
-指示するが、プロセスを強制停止する上限ではない。進捗の再照合と queued 指示の再通知は
-[snapshot の取得時](04-ipc.md#session-workflow-request)に行う。
+指示するが、プロセスを強制停止する上限ではない。
 
 ## Closeup の agent CLI 選択
 

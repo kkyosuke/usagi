@@ -1,13 +1,13 @@
 ---
 number: 736
 title: feat(daemon): workflow を daemon の常駐 lane で進める
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, workflow, agent]
 dependson: []
 related: [737, 738, 739]
 created_at: 2026-09-12T00:00:00+00:00
-updated_at: 2026-09-12T00:00:00+00:00
+updated_at: 2026-09-12T05:00:00+00:00
 ---
 
 ## 問題
@@ -38,9 +38,9 @@ watchdog（#738）も通知（#739）も、この pull 駆動のままでは作�
 
 ## 受入条件
 
-- [ ] TUI を閉じた状態でも active run の reconcile・queued 指示の配送・PR 検証が進む。
-- [ ] 非 active session の run も同じ間隔で進む。
-- [ ] lane は run が存在しない間は観測を行わず、daemon 停止時に worker を残さない。
-- [ ] 1 回の workflow request で reconcile が複数回走らない。
-- [ ] TUI の polling を止めても進行が続くことを示す test がある。
-- [ ] `document/05-daemon.md` と `document/03-tui.md` の「進行は snapshot 取得時に行う」記述を更新する。
+- [x] TUI を閉じた状態でも active run の reconcile・queued 指示の配送・PR 検証が進む。
+- [x] 非 active session の run も同じ間隔で進む。
+- [x] 進める対象が無い間の 1 tick のコストは record の列挙と 1 回の読み取りだけで、Agent 観測も durable write も行わない（開始待ちの record は読み飛ばす）。daemon 停止時に worker を残さない。
+- [x] 1 回の workflow request で reconcile が複数回走らない。
+- [x] TUI の polling を止めても進行が続くことを示す test がある。
+- [x] `document/05-daemon.md` と `document/03-tui.md` の「進行は snapshot 取得時に行う」記述を更新する。

@@ -950,7 +950,10 @@ impl SessionRuntime {
             | SessionAction::DecisionList
             | SessionAction::DecisionLog
             | SessionAction::DelegateIssue
-            | SessionAction::DelegateBrief => Err(SessionRuntimeError::InvalidRequest),
+            | SessionAction::DelegateBrief
+            | SessionAction::WorkflowStart
+            | SessionAction::WorkflowStatus
+            | SessionAction::WorkflowInstruct => Err(SessionRuntimeError::InvalidRequest),
         }
     }
 
