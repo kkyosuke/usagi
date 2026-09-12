@@ -22,6 +22,7 @@ pub use env::{
 };
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// Default number of daemon-owned generic Terminal PTYs admitted at once.
 pub const DEFAULT_TERMINAL_MAX_CONCURRENT: u16 = 64;
@@ -230,6 +231,26 @@ impl TeamTemplate {
     }
 }
 
+/// Budget of a status probe whose CLI answers from local credentials alone.
+/// Claude and the Codex-compatible CLIs read a token file and exit.
+const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Budget of Antigravity's probe. `agy models` is not a local credential read:
+/// it starts the product's language server and lists the models the signed-in
+/// account may use, which costs seconds of process start-up plus one network
+/// round trip. Measured warm runs land between two and three seconds, so the
+/// default budget classifies an installed, authenticated CLI as unavailable.
+const ANTIGRAVITY_READINESS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Bytes retained per captured stream for a quiet status probe.
+const DEFAULT_READINESS_OUTPUT_LIMIT: usize = 16 * 1024;
+
+/// Antigravity's language server logs to stderr for the whole probe whenever it
+/// cannot open its own log file, and readiness is decided by the first line of
+/// output rather than its volume. A budget of seconds therefore needs a capture
+/// bound that a chatty-but-successful probe cannot exhaust.
+const ANTIGRAVITY_READINESS_OUTPUT_LIMIT: usize = 256 * 1024;
+
 /// The public, non-secret status invocation that decides whether an agent CLI is
 /// ready to launch.
 ///
@@ -238,10 +259,19 @@ impl TeamTemplate {
 /// picker without also declaring how a launcher proves that CLI is usable. The
 /// arguments are literal, product-documented status subcommands: they carry no
 /// credential, configuration path, or user input.
+///
+/// The bounds travel with the invocation for the same reason: how long a status
+/// command may take, and how much it may print while taking it, is a property of
+/// the product being probed, not of the launcher running it. A launcher that
+/// applied one budget to every provider would report a healthy CLI as
+/// unavailable purely because that product's status command is slower or
+/// noisier than another's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentReadinessCommand {
     program: &'static str,
     arguments: &'static [&'static str],
+    timeout: Duration,
+    output_limit: usize,
 }
 
 impl AgentReadinessCommand {
@@ -255,6 +285,19 @@ impl AgentReadinessCommand {
     #[must_use]
     pub const fn arguments(self) -> &'static [&'static str] {
         self.arguments
+    }
+
+    /// How long this product's status command may run before a launcher
+    /// terminates it and reports the CLI unavailable.
+    #[must_use]
+    pub const fn timeout(self) -> Duration {
+        self.timeout
+    }
+
+    /// Bytes a launcher retains from each captured stream while the probe runs.
+    #[must_use]
+    pub const fn output_limit(self) -> usize {
+        self.output_limit
     }
 }
 
@@ -382,6 +425,14 @@ impl DefaultModel {
                 Self::Claude => &["auth", "status"],
                 Self::Agy => &["models"],
                 Self::OpenAi | Self::SakanaAi => &["login", "status"],
+            },
+            timeout: match self {
+                Self::Agy => ANTIGRAVITY_READINESS_TIMEOUT,
+                Self::Claude | Self::OpenAi | Self::SakanaAi => DEFAULT_READINESS_TIMEOUT,
+            },
+            output_limit: match self {
+                Self::Agy => ANTIGRAVITY_READINESS_OUTPUT_LIMIT,
+                Self::Claude | Self::OpenAi | Self::SakanaAi => DEFAULT_READINESS_OUTPUT_LIMIT,
             },
         }
     }
