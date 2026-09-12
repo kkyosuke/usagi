@@ -709,7 +709,10 @@ impl HomeProjection {
                 .pr_overlay()
                 .filter(|_| state.overlay() == Some(Overlay::Prs))
                 .cloned(),
-            preview_overlay: state.preview_overlay().cloned(),
+            preview_overlay: state
+                .preview_overlay()
+                .filter(|_| state.overlay() == Some(Overlay::Preview))
+                .cloned(),
             cleanup_queue,
             remove_queue,
             overview_modal: None,

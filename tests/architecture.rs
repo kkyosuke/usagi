@@ -552,13 +552,19 @@ fn tui_controller_keeps_entry_new_and_tests_in_their_bounded_contexts() {
     let tests =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/tests.rs"))
             .expect("TUI controller tests are readable");
+    let pull_requests = fs::read_to_string(
+        root.join("crates/tui/src/usecase/application/controller/pull_requests.rs"),
+    )
+    .expect("TUI pull request controller is readable");
 
-    for module in ["mod entry;", "mod new;", "mod tests;"] {
+    for module in ["mod entry;", "mod new;", "mod pull_requests;", "mod tests;"] {
         assert!(controller.contains(module));
     }
     assert!(!controller.contains("mod tests {"));
     assert!(!controller.contains("pub struct EntryState"));
     assert!(!controller.contains("pub struct NewState"));
+    assert!(!controller.contains("pub struct PrOverlay"));
+    assert!(pull_requests.contains("pub struct PrOverlay"));
     assert!(entry.contains("pub fn update_entry("));
     assert!(new.contains("pub fn update_new("));
     assert!(tests.contains("#![coverage(off)]"));

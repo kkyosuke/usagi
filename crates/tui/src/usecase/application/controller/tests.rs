@@ -6976,6 +6976,24 @@ fn pr_overlay_opens_reflows_material_navigates_opens_and_closes() {
 }
 
 #[test]
+fn a_live_pane_that_releases_the_foreground_takes_its_modal_state_with_it() {
+    let (workspace, session, _) = ids();
+    let mut state = AppState::home(workspace, vec![session]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+
+    // A pane going live releases the Closeup foreground. Whatever modal held it
+    // must go with it: input is routed by the foreground alone, so a surviving
+    // modal would be drawn while every key reached Home instead.
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+    assert_eq!(state.overlay(), Some(Overlay::Preview));
+    assert!(state.preview_overlay().is_some());
+    let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+    assert_eq!(state.overlay(), None);
+    assert!(state.preview_overlay().is_none());
+}
+
+#[test]
 fn a_pending_pr_request_is_forgotten_when_its_session_leaves_the_workspace() {
     let (workspace, session, _) = ids();
     let mut state = AppState::home(workspace, vec![session]);
@@ -8096,7 +8114,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
 
     state.overlay = Some(Overlay::Prs);
     state.pr_overlay = None;
-    assert!(update_prs_overlay(&mut state, &AppKey::Enter).is_empty());
+    assert!(pull_requests::update_key(&mut state, &AppKey::Enter).is_empty());
     state.overlay = Some(Overlay::Preview);
     state.preview_overlay = None;
     assert_eq!(
@@ -8199,7 +8217,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
         None,
     ));
     for key in [AppKey::Up, AppKey::Down, AppKey::Home] {
-        let _ = update_prs_overlay(&mut state, &key);
+        let _ = pull_requests::update_key(&mut state, &key);
     }
 
     state.decision_overlay = None;
