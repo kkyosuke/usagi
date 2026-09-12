@@ -1,4 +1,9 @@
-//! Human session workflow composition. No Agent credentials are accepted here.
+//! Session workflow composition.
+//!
+//! The dedicated IPC entry stays human-only — it refuses a request that carries
+//! an Agent credential — but the module is also reached by the MCP session tools
+//! (`workflow_*`), which apply the same admission through `control_workflow`
+//! after the session-ownership rules have answered.
 use super::{
     AgentProfileId, ConnectionWorkspace, DaemonRequest, SharedAgentRuntime, SharedPrInventory,
     envelope, run_agent_readiness,
@@ -111,6 +116,57 @@ fn handle(
         Attention::Requested,
     )?)
     .map_err(unavailable)
+}
+
+/// The participants this workspace last launched successfully.
+///
+/// A caller that does not name the three Agents gets what the workspace already
+/// works with, which is the same seed the TUI's start form shows. An unreadable
+/// store falls back to the product defaults rather than refusing to start.
+pub(super) fn remembered_agents(
+    agent: &SharedAgentRuntime,
+    workspace: WorkspaceId,
+) -> usagi_core::domain::workflow::WorkflowAgents {
+    agent
+        .lock()
+        .ok()
+        .and_then(|owner| owner.dispatch_store().workflow_agents(workspace).ok())
+        .unwrap_or_default()
+}
+
+/// The three participants a caller asked for, defaulted per field.
+///
+/// Returns `None` for a selector that is not an installed participant spelling,
+/// so an unknown name is refused before a durable run exists.
+pub(super) fn requested_agents(
+    payload: &serde_json::Value,
+    defaults: usagi_core::domain::workflow::WorkflowAgents,
+) -> Option<usagi_core::domain::workflow::WorkflowAgents> {
+    let selector = |key: &str, fallback: usagi_core::domain::settings::DefaultModel| {
+        payload.get(key).map_or(Some(fallback), |value| {
+            usagi_core::domain::settings::DefaultModel::from_selector(value.as_str()?)
+        })
+    };
+    Some(usagi_core::domain::workflow::WorkflowAgents {
+        planner: selector("planner", defaults.planner)?,
+        implementer: selector("implementer", defaults.implementer)?,
+        reviewer: selector("reviewer", defaults.reviewer)?,
+    })
+}
+
+/// Who an instruction is for. Omitting it means whoever's turn it is.
+pub(super) fn requested_recipient(
+    payload: &serde_json::Value,
+) -> Option<usagi_core::domain::workflow::Recipient> {
+    match payload.get("recipient") {
+        None => Some(usagi_core::domain::workflow::Recipient::Automatic),
+        Some(value) => match value.as_str()? {
+            "automatic" => Some(usagi_core::domain::workflow::Recipient::Automatic),
+            "implementer" => Some(usagi_core::domain::workflow::Recipient::Implementer),
+            "reviewer" => Some(usagi_core::domain::workflow::Recipient::Reviewer),
+            _ => None,
+        },
+    }
 }
 
 /// Apply one human workflow command and answer with the stored projection.
@@ -748,6 +804,63 @@ mod tests {
             ErrorCode::Unavailable
         );
         assert!(unavailable("storage failed").message.contains("Workflow:"));
+    }
+
+    #[test]
+    fn requested_participants_default_per_field_and_refuse_unknown_spellings() {
+        use usagi_core::domain::settings::DefaultModel;
+        use usagi_core::domain::workflow::{Recipient, WorkflowAgents};
+        let defaults = WorkflowAgents {
+            planner: DefaultModel::Agy,
+            implementer: DefaultModel::Claude,
+            reviewer: DefaultModel::OpenAi,
+        };
+        // Naming nobody keeps every remembered choice.
+        assert_eq!(
+            requested_agents(&serde_json::json!({}), defaults),
+            Some(defaults)
+        );
+        // Naming one replaces only that one.
+        assert_eq!(
+            requested_agents(&serde_json::json!({"reviewer": "claude"}), defaults),
+            Some(WorkflowAgents {
+                reviewer: DefaultModel::Claude,
+                ..defaults
+            })
+        );
+        // An unknown or non-string selector is refused, not silently defaulted:
+        // a run that launches the wrong participant is worse than no run.
+        assert_eq!(
+            requested_agents(&serde_json::json!({"planner": "nobody"}), defaults),
+            None
+        );
+        assert_eq!(
+            requested_agents(&serde_json::json!({"implementer": 1}), defaults),
+            None
+        );
+
+        assert_eq!(
+            requested_recipient(&serde_json::json!({})),
+            Some(Recipient::Automatic)
+        );
+        for (token, expected) in [
+            ("automatic", Recipient::Automatic),
+            ("implementer", Recipient::Implementer),
+            ("reviewer", Recipient::Reviewer),
+        ] {
+            assert_eq!(
+                requested_recipient(&serde_json::json!({"recipient": token})),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            requested_recipient(&serde_json::json!({"recipient": "nobody"})),
+            None
+        );
+        assert_eq!(
+            requested_recipient(&serde_json::json!({"recipient": 1})),
+            None
+        );
     }
 
     #[test]

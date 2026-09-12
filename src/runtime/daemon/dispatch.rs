@@ -3423,52 +3423,8 @@ fn session_organization(
     (parent_name, lineage.len(), path)
 }
 
-/// A workflow command is admitted by the producer's operation identity, so the
-/// request's own operation ID is what makes a retry idempotent.
-fn workflow_operation(
-    operation_id: &str,
-) -> Result<usagi_core::domain::id::OperationId, SessionRuntimeError> {
-    usagi_core::domain::id::OperationId::parse(operation_id)
-        .map_err(|_| SessionRuntimeError::InvalidRequest)
-}
-
-/// The three participants, defaulted to the workspace's remembered choices when
-/// the caller does not name them.
-fn workflow_agents(
-    payload: &serde_json::Value,
-) -> Result<usagi_core::domain::workflow::WorkflowAgents, SessionRuntimeError> {
-    let selector = |key: &str, fallback: usagi_core::domain::settings::DefaultModel| {
-        payload
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .map_or(Ok(fallback), |value| {
-                usagi_core::domain::settings::DefaultModel::from_selector(value)
-                    .ok_or(SessionRuntimeError::InvalidRequest)
-            })
-    };
-    let defaults = usagi_core::domain::workflow::WorkflowAgents::default();
-    Ok(usagi_core::domain::workflow::WorkflowAgents {
-        planner: selector("planner", defaults.planner)?,
-        implementer: selector("implementer", defaults.implementer)?,
-        reviewer: selector("reviewer", defaults.reviewer)?,
-    })
-}
-
-/// Who an instruction is for. Omitting it means the participant whose turn it is.
-fn workflow_recipient(
-    payload: &serde_json::Value,
-) -> Result<usagi_core::domain::workflow::Recipient, SessionRuntimeError> {
-    match payload.get("recipient").and_then(serde_json::Value::as_str) {
-        None | Some("automatic") => Ok(usagi_core::domain::workflow::Recipient::Automatic),
-        Some("implementer") => Ok(usagi_core::domain::workflow::Recipient::Implementer),
-        Some("reviewer") => Ok(usagi_core::domain::workflow::Recipient::Reviewer),
-        Some(_) => Err(SessionRuntimeError::InvalidRequest),
-    }
-}
-
 #[allow(clippy::too_many_lines)]
-#[coverage(off)]
-// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 pub(super) fn dispatch_session_action(
     context: &SessionDispatchContext<'_>,
     action: usagi_core::infrastructure::client::SessionAction,
@@ -3753,8 +3709,26 @@ pub(super) fn dispatch_session_action(
             if caller.is_some_and(|caller| caller.session_id == Some(session)) {
                 return Err(SessionRuntimeError::PermissionDenied);
             }
-            let snapshot = match action {
-                SessionAction::WorkflowStatus => super::workflow::advance(
+            let command = match action {
+                SessionAction::WorkflowStatus => None,
+                SessionAction::WorkflowStart => {
+                    Some(usagi_core::domain::workflow::WorkflowCommand::Start {
+                        goal: string("goal")?.to_owned(),
+                        agents: super::workflow::requested_agents(
+                            payload,
+                            super::workflow::remembered_agents(agent, workspace),
+                        )
+                        .ok_or(SessionRuntimeError::InvalidRequest)?,
+                    })
+                }
+                _ => Some(usagi_core::domain::workflow::WorkflowCommand::Instruct {
+                    recipient: super::workflow::requested_recipient(payload)
+                        .ok_or(SessionRuntimeError::InvalidRequest)?,
+                    body: string("body")?.to_owned(),
+                }),
+            };
+            let snapshot = match command {
+                None => super::workflow::advance(
                     agent,
                     pr_inventory,
                     &bound.scope_resolver(),
@@ -3762,36 +3736,23 @@ pub(super) fn dispatch_session_action(
                     session,
                     super::workflow::Attention::Requested,
                 ),
-                SessionAction::WorkflowStart => {
-                    let goal = string("goal")?;
-                    super::workflow::control_workflow(
-                        agent,
-                        bound,
-                        workspace,
-                        session,
-                        workflow_operation(operation_id)?,
-                        usagi_core::domain::workflow::WorkflowCommand::Start {
-                            goal: goal.to_owned(),
-                            agents: workflow_agents(payload)?,
-                        },
-                    )
-                }
-                _ => {
-                    let body = string("body")?;
-                    super::workflow::control_workflow(
-                        agent,
-                        bound,
-                        workspace,
-                        session,
-                        workflow_operation(operation_id)?,
-                        usagi_core::domain::workflow::WorkflowCommand::Instruct {
-                            recipient: workflow_recipient(payload)?,
-                            body: body.to_owned(),
-                        },
-                    )
-                }
+                Some(command) => super::workflow::control_workflow(
+                    agent,
+                    bound,
+                    workspace,
+                    session,
+                    usagi_core::domain::id::OperationId::parse(operation_id)
+                        .map_err(|_| SessionRuntimeError::InvalidRequest)?,
+                    command,
+                ),
             }
-            .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            // Keep the daemon's own refusal visible: an admission conflict and a
+            // momentarily unavailable dependency are different answers, and the
+            // IPC control path already tells them apart.
+            .map_err(|error| SessionRuntimeError::AgentFailure {
+                code: error.code,
+                message: error.message,
+            })?;
             reply(serde_json::to_value(snapshot).map_err(|_| SessionRuntimeError::Storage)?)
         }
         SessionAction::Pr => {

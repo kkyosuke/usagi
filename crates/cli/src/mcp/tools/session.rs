@@ -492,7 +492,7 @@ impl Tool for WorkflowStart {
         "認証済み caller が作成したセッションで、実装＋レビューの workflow を開始するときに使う。name と goal は必須。実装担当が計画担当とレビュー担当を同じセッション内で起動し、レビュー承認と PR の独立検証まで daemon が進行を所有する。進行状況は workflow_status で観測する。自分自身が動いているセッションに対しては呼べない。planner / implementer / reviewer は省略時に workspace の既定を使う。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"goal":{"type":"string"},"planner":{"type":"string"},"implementer":{"type":"string"},"reviewer":{"type":"string"}},"required":["name","goal"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"goal":{"type":"string","minLength":1,"maxLength":16384},"planner":{"type":"string"},"implementer":{"type":"string"},"reviewer":{"type":"string"}},"required":["name","goal"],"additionalProperties":false}"#
     }
 }
 
@@ -519,10 +519,10 @@ impl Tool for WorkflowInstruct {
         "workflow_instruct"
     }
     fn description(&self) -> &'static str {
-        "進行中の workflow へ追加指示を送るときに使う。name と body は必須。recipient は automatic（既定、現在の担当）/ implementer / reviewer。指示は受理時点の担当に固定され、工程が変わっても付け替えない。"
+        "進行中の workflow へ追加指示を送るときに使う。name と body は必須。recipient は automatic（既定、現在の担当）/ implementer / reviewer。指示は受理時点の担当に固定され、工程が変わっても付け替えない。応答を得られなかった場合に呼び直すと別の指示として積まれるため、同じ内容を繰り返さない。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"body":{"type":"string"},"recipient":{"type":"string","enum":["automatic","implementer","reviewer"]}},"required":["name","body"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"body":{"type":"string","minLength":1,"maxLength":16384},"recipient":{"type":"string","enum":["automatic","implementer","reviewer"]}},"required":["name","body"],"additionalProperties":false}"#
     }
 }
 

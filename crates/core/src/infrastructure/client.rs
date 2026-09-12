@@ -3289,6 +3289,13 @@ mod deadline_and_retry_tests {
                 root: None,
                 force: false,
             },
+            // Reading a workflow reconciles evidence the resident lane would
+            // reconcile anyway, so re-reading it changes nothing a caller owns.
+            DaemonRequest::Session {
+                action: SessionAction::WorkflowStatus,
+                operation_id: "op".into(),
+                payload: session_payload(),
+            },
             DaemonRequest::Pr {
                 action: PrAction::Snapshot,
                 payload: PrRequest {
@@ -3359,6 +3366,18 @@ mod deadline_and_retry_tests {
         let durable = [
             DaemonRequest::Session {
                 action: SessionAction::Create,
+                operation_id: "op".into(),
+                payload: session_payload(),
+            },
+            // A workflow command is admitted by the producer's operation ID, so
+            // a lost response resumes the same run instead of starting another.
+            DaemonRequest::Session {
+                action: SessionAction::WorkflowStart,
+                operation_id: "op".into(),
+                payload: session_payload(),
+            },
+            DaemonRequest::Session {
+                action: SessionAction::WorkflowInstruct,
                 operation_id: "op".into(),
                 payload: session_payload(),
             },
