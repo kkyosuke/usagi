@@ -86,7 +86,9 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::{AgentReadinessCommand, DefaultModel};
-use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
+use usagi_core::infrastructure::bounded_process::{
+    ChildObservation, ChildPolicy, observe, observe_with_environment,
+};
 use usagi_core::infrastructure::client::{
     ClientError, ClientPolicy, DaemonClient, DaemonRestartAgents, DeadlineConnection,
     DeadlineStream, IpcClient, MonotonicClock, PolicyClient, TerminalLaneBudget,
@@ -846,6 +848,21 @@ struct SystemAgentReadiness {
     state: Mutex<ReadinessState>,
     completed: Condvar,
     terminate_grace: Duration,
+    /// `$HOME`, for the provider state directory a gateway provider's CLI must
+    /// be pointed at. A provider that needs one and has no home is unavailable:
+    /// probing it in the shared CLI's default home would answer for the other
+    /// provider that lives there.
+    home: Option<PathBuf>,
+    /// Where a provider's configured API key comes from. The probe resolves it
+    /// the same way a launch does, because "is this provider usable" is mostly
+    /// "is its credential configured" — and a probe run without the key refuses
+    /// a provider that would have launched.
+    environment: Option<Arc<SharedUserEnvironment>>,
+    /// The workspace whose settings the credential is read from. Gateway and
+    /// credential names are reserved from workspace bindings, so this resolves
+    /// the same value for every workspace; the daemon's own root is simply the
+    /// one that always exists.
+    workspace: PathBuf,
 }
 
 impl Default for SystemAgentReadiness {
@@ -854,6 +871,9 @@ impl Default for SystemAgentReadiness {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
             terminate_grace: AGENT_READINESS_TERMINATE_GRACE,
+            home: None,
+            environment: None,
+            workspace: PathBuf::new(),
         }
     }
 }
@@ -863,14 +883,20 @@ impl AgentReadinessProbe for SystemAgentReadiness {
     fn observe(&self, product: &str) -> AgentReadiness {
         // Which products exist, and which status command proves each one usable,
         // is the shared agent CLI vocabulary owned by core domain settings. This
-        // root only runs the resolved probe, so the Codex-compatible
-        // `codex-fugu` behind the `sakana-ai` profile is recognised without a
-        // second table here (#609). An unmodelled product still fails closed.
+        // root only runs the resolved probe, so a provider is recognised without
+        // a second table here (#609). An unmodelled product still fails closed.
         // The budget travels with the probe for the same reason: how long
         // `agy models` may take is a fact about Antigravity, not about this
         // root, and a single shared deadline reported an installed and
         // authenticated CLI as unavailable.
-        let Some(probe) = DefaultModel::readiness_command_for(product) else {
+        let Some(agent) = DefaultModel::from_selector(product) else {
+            return AgentReadiness::Unavailable;
+        };
+        let probe = agent.readiness_command();
+        // A provider that is a shared CLI plus an environment is only probed
+        // honestly under that environment: `claude auth status` run bare answers
+        // for the user's own Anthropic account, not for this profile.
+        let Ok(environment) = self.provider_environment(agent) else {
             return AgentReadiness::Unavailable;
         };
         self.ready_command(
@@ -878,11 +904,43 @@ impl AgentReadinessProbe for SystemAgentReadiness {
             probe.program(),
             probe.arguments(),
             ReadinessBounds::for_probe(probe),
+            &environment,
         )
     }
 }
 
 impl SystemAgentReadiness {
+    /// The environment that makes this probe answer for `agent` rather than for
+    /// whichever provider shares its executable. `Err` means the provider cannot
+    /// be probed honestly — a missing home for a provider that needs its own
+    /// config directory, or a credential it declares but nothing supplies — and
+    /// the caller reports it unavailable rather than asking a question whose
+    /// answer would be about something else.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
+    fn provider_environment(&self, agent: DefaultModel) -> Result<Vec<(String, String)>, ()> {
+        let mut environment: Vec<(String, String)> = agent
+            .gateway_environment()
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        if let Some(name) = agent.state_directory_env() {
+            let home = self.home.as_deref().ok_or(())?;
+            let directory = home.join(agent.state_directory());
+            environment.push((name.to_owned(), directory.to_str().ok_or(())?.to_owned()));
+        }
+        if let Some((source, target)) = agent.credential_binding() {
+            let resolved = self
+                .environment
+                .as_ref()
+                .ok_or(())?
+                .resolved(&self.workspace)
+                .map_err(|_| ())?;
+            let value = resolved.get(source).ok_or(())?;
+            environment.push((target.to_owned(), value.clone()));
+        }
+        Ok(environment)
+    }
+
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
     fn ready_command(
         &self,
@@ -890,6 +948,7 @@ impl SystemAgentReadiness {
         program: &str,
         arguments: &[&str],
         bounds: ReadinessBounds,
+        environment: &[(String, String)],
     ) -> AgentReadiness {
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
@@ -921,7 +980,13 @@ impl SystemAgentReadiness {
         slot.result = None;
         drop(state);
 
-        let result = bounded_readiness_command(program, arguments, bounds, self.terminate_grace);
+        let result = bounded_readiness_command(
+            program,
+            arguments,
+            environment,
+            bounds,
+            self.terminate_grace,
+        );
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
         };
@@ -939,12 +1004,14 @@ impl SystemAgentReadiness {
 fn bounded_readiness_command(
     program: &str,
     arguments: &[&str],
+    environment: &[(String, String)],
     bounds: ReadinessBounds,
     terminate_grace: Duration,
 ) -> AgentReadiness {
-    readiness_from_observation(&observe(
+    readiness_from_observation(&observe_with_environment(
         program,
         arguments,
+        environment,
         ChildPolicy {
             timeout: bounds.timeout,
             terminate_grace,
@@ -3730,7 +3797,17 @@ fn open_agent_runtime(
     };
     let store = ShardedAgentStore::new(state);
     let mut registry = AdapterRegistry::new();
-    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness::default());
+    // The readiness probe needs the same home and configured credential the
+    // launch will use; a probe that lacks them answers about a different
+    // provider or a missing key it would in fact have had.
+    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness {
+        home: std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .and_then(|path| path.canonicalize().ok()),
+        environment: Some(Arc::clone(&environment)),
+        workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        ..SystemAgentReadiness::default()
+    });
     // Agent MCP children receive the mode-neutral base. They apply the same
     // selected runtime mode themselves, so every mode reaches the daemon's
     // already-selected directory without adding that child twice. Production
@@ -12974,6 +13051,7 @@ mod tests {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
             terminate_grace: Duration::from_millis(50),
+            ..SystemAgentReadiness::default()
         });
         let bounds = ReadinessBounds {
             timeout: Duration::from_millis(150),
@@ -12983,7 +13061,7 @@ mod tests {
             let readiness = Arc::clone(&readiness);
             let script = script.clone();
             std::thread::spawn(move || {
-                readiness.ready_command("codex", "/bin/sh", &[&script], bounds)
+                readiness.ready_command("codex", "/bin/sh", &[&script], bounds, &[])
             })
         };
         let started = Instant::now();
@@ -12994,7 +13072,7 @@ mod tests {
         let second = {
             let readiness = Arc::clone(&readiness);
             std::thread::spawn(move || {
-                readiness.ready_command("codex", "/bin/sh", &[&script], bounds)
+                readiness.ready_command("codex", "/bin/sh", &[&script], bounds, &[])
             })
         };
         assert_eq!(first.join().unwrap(), AgentReadiness::Unavailable);
@@ -13063,6 +13141,7 @@ mod tests {
             bounded_readiness_command(
                 &program,
                 &[],
+                &[],
                 ReadinessBounds {
                     timeout: Duration::from_secs(10),
                     output_limit: 256 * 1024,
@@ -13077,6 +13156,7 @@ mod tests {
             bounded_readiness_command(
                 &program,
                 &[],
+                &[],
                 ReadinessBounds {
                     timeout: Duration::from_millis(50),
                     output_limit: 256 * 1024,
@@ -13089,6 +13169,7 @@ mod tests {
         assert_eq!(
             bounded_readiness_command(
                 &program,
+                &[],
                 &[],
                 ReadinessBounds {
                     timeout: Duration::from_secs(10),
@@ -19800,6 +19881,10 @@ instructions = "{instructions}"
                 "claude-sandbox",
                 "--mode",
                 "session",
+                // Which provider's `$HOME` state the launcher grants cannot be
+                // read off the program: Claude and `sakana-ai` share `claude`.
+                "--agent",
+                "claude",
                 "--protected-root",
                 "/repo",
                 "--writable-root",
@@ -19835,6 +19920,8 @@ instructions = "{instructions}"
                 "claude-sandbox",
                 "--mode",
                 "session",
+                "--agent",
+                "claude",
                 "--protected-root",
                 "/repo",
                 "--backend",

@@ -57,11 +57,35 @@ impl From<EnvLimitError> for UserEnvironmentError {
     }
 }
 
-const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 5] = [
+/// Variables a **workspace** may not bind, because they decide what a managed
+/// launch *is* rather than what it can see.
+///
+/// `.usagi/settings.json` travels with a repository, so a binding here would let
+/// a checkout redirect an agent CLI: `PATH`/`HOME`/`TMPDIR`/`CODEX_HOME` at the
+/// filesystem it uses, and the gateway variables at the endpoint it talks to.
+/// The latter matter even for providers usagi does not point anywhere: binding
+/// `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` would send the user's Claude
+/// session — prompts, file contents, credentials in flight — to a server the
+/// repository chose. usagi owns them per provider
+/// ([`DefaultModel::gateway_environment`]), so a workspace binding could only
+/// ever be an override of that decision.
+const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 13] = [
     "PATH",
     "TMPDIR",
     "HOME",
     "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    // The provider API key usagi injects. Reserving it keeps one machine-level
+    // value behind the readiness probe and the launch: the probe has no
+    // workspace, so a workspace-scoped key would let a launch be admitted — or
+    // refused — on a credential that is not the one it would use.
+    "SAKANA_API_KEY",
     usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
 ];
 
@@ -469,6 +493,19 @@ mod tests {
             ("CODEX_HOME", "/workspace/.codex"),
             ("USAGI_CLAUDE_SANDBOX_PASSTHROUGH", "1"),
             ("TMPDIR", symlink_value.as_ref()),
+            // A checked-in binding must not be able to point a managed Claude
+            // launch at another endpoint, or hand it another account's token.
+            ("ANTHROPIC_BASE_URL", "https://attacker.example"),
+            ("ANTHROPIC_AUTH_TOKEN", "stolen"),
+            ("ANTHROPIC_API_KEY", "stolen"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "attacker-model"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "attacker-model"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "attacker-model"),
+            // Nor at another provider's state directory.
+            ("CLAUDE_CONFIG_DIR", "/workspace/.claude"),
+            // The provider key is machine-level so the probe and the launch
+            // cannot disagree about which credential is configured.
+            ("SAKANA_API_KEY", "workspace-key"),
         ];
         for (name, value) in cases {
             let data = tempfile::tempdir().unwrap();
