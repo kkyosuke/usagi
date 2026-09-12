@@ -30,6 +30,10 @@ pub struct WorkflowRecord {
     /// Daemon-proven exact resume chains rooted in the workflow launch or handoff.
     #[serde(default)]
     pub authorized_operations: Vec<(crate::domain::id::AgentId, OperationId)>,
+    /// The phase whose call for a human has already been announced, so entering
+    /// it notifies once instead of every sweep.
+    #[serde(default)]
+    pub announced: Option<crate::domain::workflow::Phase>,
 }
 
 impl DispatchStore {
@@ -222,6 +226,7 @@ mod tests {
                     suspended_phase: None,
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
+                    announced: None,
                 });
                 Ok(())
             })
@@ -313,6 +318,7 @@ mod tests {
                     suspended_phase: None,
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
+                    announced: None,
                 });
                 if fail {
                     std::fs::rename(parent, directory.path().join("saved-parent"))?;
@@ -354,6 +360,7 @@ mod tests {
                     suspended_phase: None,
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
+                    announced: None,
                 });
                 Ok(())
             });
@@ -371,6 +378,7 @@ mod tests {
             revisions: 0,
             review: None,
             waiting_reason: None,
+            pr_url: None,
             instructions: Vec::new(),
             history: vec![WorkflowHistoryEntry {
                 id: OperationId::new(),
@@ -393,6 +401,7 @@ mod tests {
                     suspended_phase: None,
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
+                    announced: None,
                 });
                 Ok(())
             })
@@ -453,6 +462,7 @@ mod tests {
                     suspended_phase: None,
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
+                    announced: None,
                 });
                 Ok(())
             })

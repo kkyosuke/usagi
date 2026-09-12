@@ -4,7 +4,7 @@ use super::{
     envelope, run_agent_readiness,
 };
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
-use usagi_core::domain::workflow::{Delivery, WorkflowCommand};
+use usagi_core::domain::workflow::{Delivery, WorkflowCommand, WorkflowRun};
 use usagi_core::infrastructure::client::AgentLaunchIntent;
 use usagi_core::infrastructure::ipc::{
     Envelope, ErrorCode, ProtocolError, RequestId, ResponseOutcome, ServerHello,
@@ -371,7 +371,7 @@ fn publish_verification(
     workspace: WorkspaceId,
     session: SessionId,
     run: &usagi_core::domain::workflow::WorkflowRun,
-    verified: Result<(), &'static str>,
+    verified: Result<String, &'static str>,
 ) -> Result<(), ProtocolError> {
     let review = run
         .review
@@ -388,11 +388,14 @@ fn publish_verification(
             {
                 current.phase = usagi_core::domain::workflow::Phase::Verifying;
                 match verified {
-                    Ok(()) => {
+                    Ok(url) => {
                         current
                             .mark_ready(&review.target.head_sha, true, true)
                             .map_err(anyhow::Error::msg)?;
                         current.waiting_reason = None;
+                        // The notice a human reads should name the PR, not just
+                        // say that one exists.
+                        current.pr_url = Some(url);
                     }
                     Err(reason) => {
                         current.waiting_reason = Some(reason.into());
@@ -405,6 +408,75 @@ fn publish_verification(
             Ok(())
         })
         .map_err(unavailable)
+}
+
+/// Best-effort desktop notice for the two moments a workflow needs a human.
+///
+/// Delivery is never required: a run's progress does not depend on whether a
+/// notice was shown, and a notifier that fails must not fail the sweep.
+pub(super) trait AttentionNotifier {
+    fn notify(&self, title: &str, body: &str);
+}
+
+/// Announce a run that started waiting for a human, once per entry.
+///
+/// Best-effort in both directions: a store failure leaves the announcement for
+/// the next tick, and the notice itself is never required for progress.
+///
+/// The record remembers which phase was announced, so a run that sits in
+/// `Waiting` for an hour produces one notice rather than one every tick, and a
+/// run that recovers and waits again is announced afresh.
+fn announce(
+    store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
+    workspace: WorkspaceId,
+    session: SessionId,
+    run: Option<&WorkflowRun>,
+    notifier: &dyn AttentionNotifier,
+) {
+    let announced = store
+        .workflow(workspace, session)
+        .ok()
+        .flatten()
+        .and_then(|record| record.announced);
+    let remember = |phase: Option<usagi_core::domain::workflow::Phase>| {
+        let _ = store.update_workflow(workspace, session, |value| {
+            if let Some(record) = value {
+                record.announced = phase;
+            }
+            Ok(())
+        });
+    };
+    let Some((phase, detail)) = run.and_then(WorkflowRun::attention) else {
+        // The run moved on; the next call for a human is a new event.
+        if announced.is_some() {
+            remember(None);
+        }
+        return;
+    };
+    if announced == Some(phase) {
+        return;
+    }
+    // Remember before announcing: a duplicate notice is worse than a missed one,
+    // and the run's progress does not depend on either.
+    remember(Some(phase));
+    let title = match phase {
+        usagi_core::domain::workflow::Phase::Ready => "usagi: PR ready",
+        _ => "usagi: workflow needs you",
+    };
+    notifier.notify(
+        title,
+        &format!("{}\n{detail}", first_line(run.map_or("", |run| &run.goal))),
+    );
+}
+
+/// Desktop notices are one line of context, not the whole goal.
+fn first_line(goal: &str) -> String {
+    goal.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(80)
+        .collect()
 }
 
 /// Advance every stored run once, independent of any client connection.
@@ -420,6 +492,7 @@ pub(super) fn sweep(
     agent: &SharedAgentRuntime,
     inventory: &SharedPrInventory,
     scope: &dyn SessionScopeResolver,
+    notifier: &dyn AttentionNotifier,
     stopping: &dyn Fn() -> bool,
 ) -> Result<usize, ProtocolError> {
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
@@ -441,17 +514,19 @@ pub(super) fn sweep(
         if !advanceable(&store, workspace, session) {
             continue;
         }
-        if advance(
+        if let Ok(snapshot) = advance(
             agent,
             inventory,
             scope,
             workspace,
             session,
             Attention::Unattended,
-        )
-        .is_ok()
-        {
+        ) {
             advanced += 1;
+            // Announce where the run ended up, not where it started. A notice is
+            // never worth stopping the sweep for: the next tick announces what
+            // this one could not.
+            announce(&store, workspace, session, snapshot.run.as_ref(), notifier);
         }
     }
     Ok(advanced)
@@ -663,7 +738,9 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One publication fixture covers ready, invalidation and both fences.
     fn workflow_verification_publication_fences_concurrent_reviews_and_invalidates_ready() {
+        const PR_URL: &str = "https://github.com/o/r/pull/7";
         let directory = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(directory.path());
         let workspace = WorkspaceId::new();
@@ -687,7 +764,9 @@ mod tests {
             .unwrap()
             .run
             .unwrap();
-        assert!(publish_verification(&store, workspace, session, &run, Ok(())).is_err());
+        assert!(
+            publish_verification(&store, workspace, session, &run, Ok(PR_URL.to_owned())).is_err()
+        );
         run.phase = Phase::Verifying;
         run.review = Some(Review {
             request: OperationId::new(),
@@ -703,7 +782,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        publish_verification(&store, workspace, session, &run, Ok(())).unwrap();
+        publish_verification(&store, workspace, session, &run, Ok(PR_URL.to_owned())).unwrap();
         assert_eq!(
             store
                 .workflow(workspace, session)
@@ -728,6 +807,9 @@ mod tests {
             run
         };
         let ready = stored(Phase::Ready);
+        // A finished run remembers which PR was verified, so the notice a human
+        // reads can name it.
+        assert_eq!(ready.pr_url.as_deref(), Some(PR_URL));
         publish_verification(&store, workspace, session, &ready, Err("checks pending")).unwrap();
         let pending = stored(Phase::Verifying);
         assert_eq!(pending.waiting_reason.as_deref(), Some("checks pending"));
@@ -741,7 +823,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        publish_verification(&store, workspace, session, &revising, Ok(())).unwrap();
+        publish_verification(&store, workspace, session, &revising, Ok(PR_URL.to_owned())).unwrap();
         let _ = stored(Phase::Waiting);
         store
             .update_workflow(workspace, session, |record| {
@@ -751,10 +833,10 @@ mod tests {
             .unwrap();
         let mut stale = revising.clone();
         stale.id = OperationId::new();
-        publish_verification(&store, workspace, session, &stale, Ok(())).unwrap();
+        publish_verification(&store, workspace, session, &stale, Ok(PR_URL.to_owned())).unwrap();
         stale = run.clone();
         stale.review.as_mut().unwrap().request = OperationId::new();
-        publish_verification(&store, workspace, session, &stale, Ok(())).unwrap();
+        publish_verification(&store, workspace, session, &stale, Ok(PR_URL.to_owned())).unwrap();
         assert_eq!(
             store
                 .workflow(workspace, session)
@@ -765,6 +847,15 @@ mod tests {
                 .phase,
             Phase::Revising
         );
-        assert!(publish_verification(&store, workspace, SessionId::new(), &run, Ok(())).is_err());
+        assert!(
+            publish_verification(
+                &store,
+                workspace,
+                SessionId::new(),
+                &run,
+                Ok(PR_URL.to_owned())
+            )
+            .is_err()
+        );
     }
 }

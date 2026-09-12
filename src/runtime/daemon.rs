@@ -8436,6 +8436,44 @@ fn start_daemon_agent_restart_recovery(
         })
 }
 
+/// The daemon's own desktop notice for a workflow that needs a human.
+///
+/// The TUI notifies about decisions it observes, but a workflow reaches
+/// `Needs attention` or `PR ready` whether or not anyone has usagi open — which
+/// is the whole point of the resident lane. The daemon runs as the same user, so
+/// it raises the notice itself and the moment survives a closed TUI.
+struct PlatformWorkflowNotifier {
+    reaper: crate::runtime::platform_child_reaper::PlatformChildReaper,
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=platform_child_reaper_reaps_short_helpers_around_a_long_lived_child
+impl workflow::AttentionNotifier for PlatformWorkflowNotifier {
+    fn notify(&self, title: &str, body: &str) {
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = std::process::Command::new("osascript");
+            command
+                .arg("-e")
+                .arg("on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run")
+                .arg("--")
+                .arg(title)
+                .arg(body);
+            command
+        } else if cfg!(target_os = "linux") {
+            let mut command = std::process::Command::new("notify-send");
+            // `--` first: a goal line that starts with `-` is text, not a flag.
+            command
+                .arg("--app-name=usagi")
+                .arg("--")
+                .arg(title)
+                .arg(body);
+            command
+        } else {
+            return;
+        };
+        let _ = self.reaper.spawn(&mut command);
+    }
+}
+
 /// Starts the resident lane that carries stored workflow runs forward without a
 /// client connection.
 ///
@@ -8453,13 +8491,17 @@ fn start_workflow_lane(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let sweeping = Arc::clone(&shutdown);
     let mut failures = FailureTransitionLog::default();
+    let notifier = PlatformWorkflowNotifier {
+        reaper: crate::runtime::platform_child_reaper::PlatformChildReaper::default(),
+    };
     spawn_workflow_lane(
         Box::new(move || {
             let scope = SharedScopeResolver(Arc::clone(&workspaces));
-            let failure =
-                workflow::sweep(&agent, &pr_inventory, &scope, &|| sweeping.is_requested())
-                    .err()
-                    .map(|error| format!("workflow lane sweep deferred: {}", error.message));
+            let failure = workflow::sweep(&agent, &pr_inventory, &scope, &notifier, &|| {
+                sweeping.is_requested()
+            })
+            .err()
+            .map(|error| format!("workflow lane sweep deferred: {}", error.message));
             if let Some(entry) = failures.changed(failure) {
                 ErrorLog::record(&entry);
             }
@@ -22650,6 +22692,17 @@ instructions = "{instructions}"
                 Ok(())
             }
         }
+        /// Records what the lane announced, so a test can assert both the notice
+        /// and that entering the same phase twice announces once.
+        #[derive(Default)]
+        struct RecordingNotifier(Mutex<Vec<(String, String)>>);
+
+        impl workflow::AttentionNotifier for RecordingNotifier {
+            fn notify(&self, title: &str, body: &str) {
+                self.0.lock().unwrap().push((title.into(), body.into()));
+            }
+        }
+
         struct Fixture {
             _directory: tempfile::TempDir,
             bound: ConnectionWorkspace,
@@ -23360,10 +23413,12 @@ instructions = "{instructions}"
                 .unwrap();
             assert!(fixture.writes.lock().unwrap().entries.is_empty());
 
+            let notices = RecordingNotifier::default();
             let advanced = workflow::sweep(
                 &fixture.agent,
                 &fixture.inventory,
                 &fixture.bound.scope_resolver(),
+                &notices,
                 &|| false,
             )
             .unwrap();
@@ -23409,6 +23464,7 @@ instructions = "{instructions}"
                     &fixture.agent,
                     &fixture.inventory,
                     &fixture.bound.scope_resolver(),
+                    &notices,
                     &|| false,
                 )
                 .unwrap(),
@@ -23424,6 +23480,7 @@ instructions = "{instructions}"
                     &fixture.agent,
                     &fixture.inventory,
                     &fixture.bound.scope_resolver(),
+                    &notices,
                     &|| {
                         calls.set(calls.get() + 1);
                         calls.get() > 1
@@ -23483,6 +23540,7 @@ instructions = "{instructions}"
                     &fixture.agent,
                     &fixture.inventory,
                     &fixture.bound.scope_resolver(),
+                    &notices,
                     &|| false,
                 )
                 .unwrap(),
@@ -23514,6 +23572,87 @@ instructions = "{instructions}"
                     .run
                     .is_none()
             );
+        }
+
+        #[test]
+        fn the_lane_announces_each_call_for_a_human_once() {
+            use usagi_core::domain::id::OperationId;
+            use usagi_core::domain::workflow::Phase;
+            let fixture = Fixture::new();
+            fixture
+                .control(
+                    OperationId::new(),
+                    WorkflowCommand::Start {
+                        goal: "Add login\nwith tests".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    },
+                )
+                .unwrap();
+            let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+            let notices = RecordingNotifier::default();
+            let sweep = || {
+                workflow::sweep(
+                    &fixture.agent,
+                    &fixture.inventory,
+                    &fixture.bound.scope_resolver(),
+                    &notices,
+                    &|| false,
+                )
+                .unwrap()
+            };
+            // An Agent's turn is nobody's business but the Agent's.
+            assert_eq!(sweep(), 1);
+            assert!(notices.0.lock().unwrap().is_empty());
+
+            let waiting = |reason: &str| {
+                let reason = reason.to_owned();
+                store
+                    .update_workflow(fixture.workspace, fixture.session, move |record| {
+                        let run = record.as_mut().unwrap().run.as_mut().unwrap();
+                        run.phase = Phase::Waiting;
+                        run.waiting_reason = Some(reason);
+                        Ok(())
+                    })
+                    .unwrap();
+            };
+            waiting("Revision limit reached");
+            assert_eq!(sweep(), 1);
+            // Sitting in the same phase is not a new event.
+            assert_eq!(sweep(), 1);
+            let announced = notices.0.lock().unwrap().clone();
+            assert_eq!(announced.len(), 1);
+            assert_eq!(announced[0].0, "usagi: workflow needs you");
+            assert_eq!(announced[0].1, "Add login\nRevision limit reached");
+
+            // Recovering and waiting again is a new event.
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    let run = record.as_mut().unwrap().run.as_mut().unwrap();
+                    run.phase = Phase::Implementing;
+                    run.waiting_reason = None;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(sweep(), 1);
+            waiting("Assigned Agent is stopped");
+            assert_eq!(sweep(), 1);
+            assert_eq!(notices.0.lock().unwrap().len(), 2);
+
+            // A finished run names its PR.
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    let run = record.as_mut().unwrap().run.as_mut().unwrap();
+                    run.phase = Phase::Ready;
+                    run.waiting_reason = None;
+                    run.pr_url = Some("https://github.com/o/r/pull/9".into());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(sweep(), 1);
+            let announced = notices.0.lock().unwrap().clone();
+            assert_eq!(announced.len(), 3);
+            assert_eq!(announced[2].0, "usagi: PR ready");
+            assert!(announced[2].1.contains("https://github.com/o/r/pull/9"));
         }
 
         #[test]

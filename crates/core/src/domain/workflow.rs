@@ -101,6 +101,9 @@ pub struct WorkflowRun {
     pub revisions: u8,
     pub review: Option<Review>,
     pub waiting_reason: Option<String>,
+    /// The PR the approved HEAD was verified against, once it is `Ready`.
+    #[serde(default)]
+    pub pr_url: Option<String>,
     pub instructions: Vec<Instruction>,
     #[serde(default)]
     pub history: Vec<WorkflowHistoryEntry>,
@@ -228,6 +231,30 @@ impl WorkflowRun {
         Ok(())
     }
 
+    /// What a human is being waited on for, if anything.
+    ///
+    /// Only the two phases nobody else can move produce a notice: a run that
+    /// needs a decision, and one whose PR is ready. Everything else is an Agent's
+    /// turn, and announcing it would train the reader to ignore the channel.
+    #[must_use]
+    pub fn attention(&self) -> Option<(Phase, String)> {
+        match self.phase {
+            Phase::Waiting => Some((
+                Phase::Waiting,
+                self.waiting_reason
+                    .clone()
+                    .unwrap_or_else(|| "Workflow needs a decision".to_owned()),
+            )),
+            Phase::Ready => Some((
+                Phase::Ready,
+                self.pr_url
+                    .clone()
+                    .unwrap_or_else(|| "PR is ready for review".to_owned()),
+            )),
+            _ => None,
+        }
+    }
+
     /// PR preparation needs independent evidence for the approved HEAD.
     ///
     /// # Errors
@@ -294,6 +321,43 @@ pub enum WorkflowCommand {
 mod tests {
     use super::*;
 
+    #[test]
+    fn attention_names_only_the_states_a_human_has_to_move() {
+        let mut run = run();
+        for phase in [
+            Phase::Starting,
+            Phase::Implementing,
+            Phase::Reviewing,
+            Phase::Revising,
+            Phase::Verifying,
+        ] {
+            run.phase = phase;
+            assert_eq!(run.attention(), None, "{phase:?} is an Agent's turn");
+        }
+        run.phase = Phase::Waiting;
+        run.waiting_reason = Some("Revision limit reached".into());
+        assert_eq!(
+            run.attention(),
+            Some((Phase::Waiting, "Revision limit reached".to_owned()))
+        );
+        // A phase that carries no explanation still has to be announceable.
+        run.waiting_reason = None;
+        assert_eq!(
+            run.attention(),
+            Some((Phase::Waiting, "Workflow needs a decision".to_owned()))
+        );
+        run.phase = Phase::Ready;
+        assert_eq!(
+            run.attention(),
+            Some((Phase::Ready, "PR is ready for review".to_owned()))
+        );
+        run.pr_url = Some("https://github.com/o/r/pull/3".into());
+        assert_eq!(
+            run.attention(),
+            Some((Phase::Ready, "https://github.com/o/r/pull/3".to_owned()))
+        );
+    }
+
     fn run() -> WorkflowRun {
         WorkflowRun {
             agents: crate::domain::workflow::WorkflowAgents::default(),
@@ -307,6 +371,7 @@ mod tests {
             revisions: 0,
             review: None,
             waiting_reason: None,
+            pr_url: None,
             instructions: Vec::new(),
             history: Vec::new(),
         }

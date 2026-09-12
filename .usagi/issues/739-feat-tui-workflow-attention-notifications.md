@@ -1,13 +1,13 @@
 ---
 number: 739
 title: feat(tui): workflow の判断待ちと PR 完了を通知する
-status: todo
+status: done
 priority: high
 labels: [v2, tui, daemon, workflow, notification]
 dependson: [736]
 related: [738]
 created_at: 2026-09-12T00:00:00+00:00
-updated_at: 2026-09-12T00:00:00+00:00
+updated_at: 2026-09-12T09:00:00+00:00
 ---
 
 ## 問題
@@ -18,17 +18,28 @@ updated_at: 2026-09-12T00:00:00+00:00
 
 ## 方針
 
-- `Waiting` への遷移で `user_decision` を起票する。本文に理由を入れ、選択肢として
-  「催促する」「修正回数の上限を増やす」「中止する」（#745 の Stop に依存する選択肢は実装後に追加）を出す。
-- `Ready` への遷移で desktop notification を出し、PR URL を添える。
-- 同じ遷移で通知を重複させない（phase ごとに 1 回、`(run, phase)` の identity で抑止する）。
-- 通知は daemon lane（#736）の観測から発火させ、TUI が開いていなくても届くようにする。
-- 通知の有効・無効は既存の設定と同じ粒度で切れるようにする。
+- 通知は daemon の常駐 lane（#736）から出す。TUI が開いていなくても届く必要があり、daemon は利用者と
+  同じ権限で動いているため desktop 通知を自分で起こせる。
+- 対象は「人以外に動かせない」2 状態だけとする。判断待ちは待ち理由、PR 準備完了は検証した PR の URL を添える。
+  Agent の手番を通知すると、利用者がこの通知を無視する習慣を作ってしまう。
+- record に「どの状態を通知済みか」を持たせ、同じ状態に留まる間は再通知しない。復帰して再び同じ状態に
+  なった場合は改めて通知する。
+- 通知は best-effort とし、失敗しても run の進行に影響させない。
+
+### user_decision を使わない理由
+
+当初案は `Waiting` で `user_decision` を起票することだったが採らなかった。
+
+- TUI は pending な decision をすべて desktop 通知するため、daemon 側の通知と**二重に通知される**。
+- decision は「回答が誰かに配送される」ことを前提にした仕組みで、workflow の待ちには回答の consumer が
+  いない。放置された decision が pending として積み上がる。
+- session 横断で「自分待ちの一覧」を見たいという要求は #741（Director の Workflows ビュー）が扱う。
 
 ## 受入条件
 
-- [ ] `Waiting` 遷移で理由付きの user decision が 1 件だけ作られる。
-- [ ] `Ready` 遷移で PR URL 付きの通知が 1 回だけ出る。
-- [ ] TUI を開いていない状態でも発火する。
-- [ ] 同じ phase に留まっている間は再通知しない。
-- [ ] `document/03-tui.md` に通知の条件と抑止規則を追記する。
+- [x] 判断待ちへの遷移で、理由を添えた通知が 1 回だけ出る。
+- [x] PR 準備完了への遷移で、PR URL を添えた通知が 1 回だけ出る。
+- [x] TUI を開いていない状態でも発火する（daemon lane から出す）。
+- [x] 同じ状態に留まっている間は再通知せず、復帰後に再び同じ状態になれば改めて通知する。
+- [x] Agent の手番（実装中・レビュー中など）では通知しない。
+- [x] `document/03-tui.md` と `document/05-daemon.md` に通知の条件と抑止規則を書く。
