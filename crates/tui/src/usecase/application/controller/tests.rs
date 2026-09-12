@@ -3956,7 +3956,7 @@ fn workspace_surfaces_require_reserved_actions_instead_of_plain_letters() {
 }
 
 #[test]
-fn switch_ctrl_x_removes_safely_and_plain_x_is_inert() {
+fn switch_ctrl_x_force_removes_and_plain_x_is_inert() {
     let (workspace, first, second) = ids();
     let mut state = AppState::home(workspace, vec![first, second]);
 
@@ -3965,8 +3965,8 @@ fn switch_ctrl_x_removes_safely_and_plain_x_is_inert() {
         vec![Effect::RemoveSession {
             workspace,
             session: first,
-            force: false,
-            force_delete_branch: false,
+            force: true,
+            force_delete_branch: true,
             purge_orphan: false,
         }]
     );
@@ -3981,8 +3981,8 @@ fn switch_ctrl_x_removes_safely_and_plain_x_is_inert() {
         vec![Effect::RemoveSession {
             workspace,
             session: second,
-            force: false,
-            force_delete_branch: false,
+            force: true,
+            force_delete_branch: true,
             purge_orphan: false,
         }]
     );
@@ -3990,7 +3990,7 @@ fn switch_ctrl_x_removes_safely_and_plain_x_is_inert() {
 }
 
 #[test]
-fn switch_ctrl_x_safely_removes_regular_sessions_and_purges_integrity_orphans() {
+fn switch_ctrl_x_force_removes_regular_sessions_and_purges_integrity_orphans() {
     let (workspace, session, _) = ids();
     let mut empty_state = AppState::home(workspace, Vec::new());
     assert!(
@@ -4005,11 +4005,11 @@ fn switch_ctrl_x_safely_removes_regular_sessions_and_purges_integrity_orphans() 
         vec![Effect::RemoveSession {
             workspace,
             session,
-            force: false,
-            force_delete_branch: false,
+            force: true,
+            force_delete_branch: true,
             purge_orphan: false,
         }],
-        "an available session stays on the safe removal path"
+        "an available session is force-removed without a purge acknowledgement"
     );
     let _ = update(
         &mut state,
@@ -4027,11 +4027,11 @@ fn switch_ctrl_x_safely_removes_regular_sessions_and_purges_integrity_orphans() 
         vec![Effect::RemoveSession {
             workspace,
             session,
-            force: false,
-            force_delete_branch: false,
+            force: true,
+            force_delete_branch: true,
             purge_orphan: false,
         }],
-        "an ordinary delete failure keeps the safe removal path"
+        "an ordinary delete failure retries the same force removal"
     );
 
     let _ = update(
@@ -4076,11 +4076,11 @@ fn switch_ctrl_x_safely_removes_regular_sessions_and_purges_integrity_orphans() 
         vec![Effect::RemoveSession {
             workspace,
             session,
-            force: false,
-            force_delete_branch: false,
+            force: true,
+            force_delete_branch: true,
             purge_orphan: false,
         }],
-        "an integrity stage without the failed lifecycle stays safe"
+        "an integrity stage without the failed lifecycle is not a purge target"
     );
 }
 
@@ -4167,17 +4167,17 @@ fn failed_session_is_not_normally_attachable_but_retained_panes_are_reachable() 
         vec![Effect::RemoveSession {
             workspace,
             session,
-            force: false,
-            force_delete_branch: false,
+            force: true,
+            force_delete_branch: true,
             purge_orphan: false,
         }]
     );
 }
 
-// Force removal is never a single unmodified letter. Ctrl-X retries on the
-// safe path; Enter on the failed row opens the explicit force confirmation.
+// Removal is never a single unmodified letter. Ctrl-X retries the force
+// removal in place; Enter on the failed row still opens the force confirmation.
 #[test]
-fn failed_delete_ctrl_x_stays_safe_and_plain_x_is_inert() {
+fn failed_delete_ctrl_x_retries_the_force_removal_and_plain_x_is_inert() {
     let (workspace, session, _) = ids();
     let mut state = AppState::home(workspace, vec![session]);
     let _ = update(
@@ -4200,8 +4200,8 @@ fn failed_delete_ctrl_x_stays_safe_and_plain_x_is_inert() {
         vec![Effect::RemoveSession {
             workspace,
             session,
-            force: false,
-            force_delete_branch: false,
+            force: true,
+            force_delete_branch: true,
             purge_orphan: false,
         }]
     );

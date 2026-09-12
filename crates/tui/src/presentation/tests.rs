@@ -20319,7 +20319,7 @@ fn workspace_help_describes_switch_and_swallows_background_commands() {
         .find(|frame| frame.contains("Keyboard help · Workspace switch"))
         .expect("workspace Help frame");
     assert!(help.contains("Ctrl-X"));
-    assert!(help.contains("remove session / purge orphan"));
+    assert!(help.contains("force remove session"));
     assert!(!help.contains("Available"));
     assert!(
         term.frames
