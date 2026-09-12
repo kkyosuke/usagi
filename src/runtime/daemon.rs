@@ -23433,11 +23433,23 @@ instructions = "{instructions}"
                 1
             );
             assert_eq!(calls.get(), 2);
-            // A launch that never bound its Agent waits for the human. The sweep
-            // skips it, so it never joins the advanced count.
-            let pending_session = std::iter::repeat_with(SessionId::new)
-                .find(|candidate| candidate.as_str() > fixture.session.as_str())
-                .expect("identities are unbounded");
+            // A launch that never bound its Agent waits for the human. Its
+            // session resolves like any other, so the sweep reaches it and skips
+            // it on the record itself.
+            perform_create(
+                fixture.bound.sessions(),
+                &AlwaysSuccessfulGit,
+                &OperationId::new().to_string(),
+                &serde_json::json!({"name":"pending"}),
+            )
+            .unwrap();
+            let pending_session = fixture
+                .bound
+                .sessions()
+                .lock()
+                .unwrap()
+                .session_id("pending")
+                .unwrap();
             store
                 .update_workflow(fixture.workspace, pending_session, |record| {
                     *record = Some(
