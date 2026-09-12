@@ -9,7 +9,7 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use usagi_core::domain::id::{SessionId, WorkspaceId};
+use usagi_core::domain::id::WorkspaceId;
 
 use crate::usecase::application::controller::{
     AppEvent, BackendEvent, Notice, OperationResult, Target,
@@ -32,7 +32,6 @@ pub enum ControllerHostAction {
     ReopenAgent(ReopenAgentRequest),
     OpenTerminal(OpenTerminalRequest),
     OpenExternalTerminal(Target),
-    OpenWorkflow(SessionId),
     SelectTab(crate::usecase::application::controller::TabDirection),
 }
 
@@ -120,10 +119,6 @@ impl BackendAgentPort for ControllerHost {
         let _ = self
             .0
             .send(ControllerHostAction::OpenExternalTerminal(target));
-    }
-
-    fn open_workflow(&mut self, session: SessionId) {
-        let _ = self.0.send(ControllerHostAction::OpenWorkflow(session));
     }
 
     fn select_tab(&mut self, direction: crate::usecase::application::controller::TabDirection) {

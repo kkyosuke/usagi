@@ -6354,9 +6354,6 @@ fn drain_controller_host_actions(
                     }
                 }
             }
-            ControllerHostAction::OpenWorkflow(session) => {
-                runtime.on_effect(&Effect::OpenWorkflow { session });
-            }
             ControllerHostAction::SelectTab(direction) => {
                 let Some(active) = runtime.panes().active() else {
                     continue;
