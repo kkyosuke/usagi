@@ -32,7 +32,10 @@ updated_at: 2026-09-12T00:00:00+00:00
 
 - [x] 中止・完了・再開始が durable な operation として受理され、retry で二重実行しない。
 - [x] 中止は Agent を殺さず、worktree も削除しない。
-- [x] 完了後に同じ session で新しい `Start` が通る。
+- [x] 完了後に同じ session で新しい `Start` が通る（workflow の記録は解放される。
+  なお終了は Agent を残すため、前の run の Agent が生きている間は既存の
+  「1 session に 1 Agent」規則が先に効く。これは #745 が挙げた
+  `session already has another workflow` の詰みとは別の、意図された規則である）。
 - [x] 終了した run の履歴が保持され、上限を超えない。
 - [x] `document/03-tui.md` と `document/04-ipc.md` を更新する。
 

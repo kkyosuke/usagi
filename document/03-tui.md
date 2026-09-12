@@ -2152,7 +2152,10 @@ Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Ag
 Closeup action の `workflow finish` は、その session の run を終了する。終了は保存済みの状態だけを変え、
 **担当 Agent を終了させず、worktree も削除しない**（不要になった Agent は従来の Agent 操作で閉じる）。
 `PR ready` で終了した run は完了、それ以外の工程で終了した run は中止として記録する。起動できないまま
-開始待ちになっている intent も同じ操作で畳める。終了後は同じ session で新しい開始を受け付ける。
+開始待ちになっている intent も同じ操作で畳める。終了後は workflow の記録が session を押さえなくなるため、新しい開始を受け付ける。
+ただし終了は Agent を残すので、前の run の Agent が動いている間は
+「既に別の Agent が動いている session では開始を拒否する」規則が先に効く。
+新しい run を始めるには、その Agent を閉じてからにする。
 終了した run は goal・終了時の工程・結果・issue・PR を最大 5 件まで保持し、古いものから捨てる。
 履歴欄の先頭に `[completed] <goal> (PR ready)` の形で表示し、run がある間は上段の末尾でこの操作を案内する。
 案内は上段で最も低い優先度を持ち、pane が狭いときは待ち理由・レビュー対象 SHA・エラーより先に落ちる。

@@ -271,14 +271,20 @@ mod tests {
                 .contains("[completed] Ship login")
         );
 
-        // A short pane keeps the header's first rows, so the standing hint is
-        // what gets dropped — never the reason the run is waiting.
+        // A short pane keeps the header's first rows, so the standing hint has to
+        // sit after everything it must not displace. Assert the order itself,
+        // which holds at any size, and then the one height where the two
+        // actually compete.
         let run = panel.run.as_mut().unwrap();
         run.phase = Phase::Waiting;
         run.waiting_reason = Some("Revision limit reached".into());
-        let short = render(7, 100, &panel).join("\n");
-        assert!(short.contains("Revision limit reached"));
-        assert!(!short.contains("workflow finish"));
+        let position =
+            |rows: &[String], needle: &str| rows.iter().position(|row| row.contains(needle));
+        let full = render(20, 100, &panel);
+        assert!(position(&full, "Revision limit reached") < position(&full, "workflow finish"));
+        let short = render(7, 100, &panel);
+        assert!(position(&short, "Revision limit reached").is_some());
+        assert!(position(&short, "workflow finish").is_none());
     }
 
     #[test]
