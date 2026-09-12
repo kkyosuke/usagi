@@ -100,8 +100,10 @@ fn handle(
         .resolve_available_scope(workspace, Some(session))
         .map_err(unavailable_scope)?;
     if let Some((operation, command)) = control {
+        // The TUI names its own goal, so an issue reference only arrives through
+        // the MCP tool that rendered one.
         return serde_json::to_value(control_workflow(
-            agent, bound, workspace, session, operation, command,
+            agent, bound, workspace, session, operation, command, None,
         )?)
         .map_err(unavailable);
     }
@@ -181,6 +183,7 @@ pub(super) fn control_workflow(
     session: SessionId,
     operation: OperationId,
     command: WorkflowCommand,
+    issue: Option<u32>,
 ) -> Result<usagi_core::domain::workflow::WorkflowSnapshot, ProtocolError> {
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
     // Reconcile immediately before admission so the command is judged against
@@ -191,7 +194,18 @@ pub(super) fn control_workflow(
         .map_err(|error| admission_error(&error))?;
     match command {
         WorkflowCommand::Start { goal, agents } => {
-            if let Err(error) = start(agent, bound, workspace, session, operation, &goal, agents) {
+            if let Err(error) = start(
+                agent,
+                bound,
+                workspace,
+                session,
+                &StartIntent {
+                    operation,
+                    goal: &goal,
+                    agents,
+                    issue,
+                },
+            ) {
                 store
                     .update_workflow(workspace, session, |record| {
                         if let Some(record) = record {
@@ -429,7 +443,8 @@ pub(super) fn verify_progress(
             .resolve_available_scope(workspace, Some(session))
             .map_err(unavailable_scope)?
             .working_directory;
-        let verified = workflow::verify_pr(git, gh, &directory, &review.target, &entries);
+        let verified =
+            workflow::verify_pr(git, gh, &directory, &review.target, &entries, run.issue);
         publish_verification(store, workspace, session, run, verified)?;
     }
     Ok(())
@@ -635,21 +650,37 @@ fn admission_error(error: &anyhow::Error) -> ProtocolError {
     ProtocolError::new(code, message)
 }
 
+/// Everything one launch is admitted with, so the launch reads as one intent
+/// rather than a list of positional arguments.
+struct StartIntent<'a> {
+    operation: OperationId,
+    goal: &'a str,
+    agents: usagi_core::domain::workflow::WorkflowAgents,
+    issue: Option<u32>,
+}
+
 fn start(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     workspace: WorkspaceId,
     session: SessionId,
-    operation: OperationId,
-    goal: &str,
-    agents: usagi_core::domain::workflow::WorkflowAgents,
+    intent: &StartIntent<'_>,
 ) -> Result<(), ProtocolError> {
+    let StartIntent {
+        operation,
+        goal,
+        agents,
+        issue,
+    } = *intent;
     let intent = AgentLaunchIntent {
         workspace,
         session: Some(session),
         profile: Some(AgentProfileId::new(agents.implementer.profile_id()).map_err(unavailable)?),
     };
-    let prompt = workflow::initial_prompt(goal, agents);
+    let mut prompt = workflow::initial_prompt(goal, agents);
+    if let Some(issue) = issue {
+        prompt.push_str(&workflow::issue_conventions(issue));
+    }
     let preflight = agent
         .lock()
         .map_err(unavailable)?
@@ -674,6 +705,7 @@ fn start(
         session,
         operation,
         binding.worker.agent_id,
+        issue,
     )
     .map_err(unavailable)?;
     store
@@ -883,7 +915,7 @@ mod tests {
             },
         )
         .unwrap();
-        workflow::bind(&store, workspace, session, operation, AgentId::new()).unwrap();
+        workflow::bind(&store, workspace, session, operation, AgentId::new(), None).unwrap();
         let mut run = store
             .workflow(workspace, session)
             .unwrap()

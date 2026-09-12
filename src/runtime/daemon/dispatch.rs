@@ -2582,7 +2582,35 @@ pub(super) fn session_lineage_by_name(
     Some((session_id, parent_session_id))
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_session_tools_only_reach_sessions_created_by_the_caller
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_session_tools_only_reach_sessions_created_by_the_caller
+/// Render a backlog issue as the goal of a workflow run.
+///
+/// The same rendering `session_delegate_issue` queues, so a workflow started
+/// from an issue reads exactly what a delegated Agent would have read.
+fn issue_goal(bound: &ConnectionWorkspace, number: u32) -> Result<String, SessionRuntimeError> {
+    use usagi_core::infrastructure::store::issue::IssueStore;
+    let root = bound
+        .sessions()
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .repository_root()
+        .to_path_buf();
+    let issue = usagi_core::usecase::issue::get(&IssueStore::new(root), number)
+        .map_err(|error| {
+            error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<AmbiguousIssueNumber>())
+                .cloned()
+                .map_or(
+                    SessionRuntimeError::Storage,
+                    SessionRuntimeError::AmbiguousIssue,
+                )
+        })?
+        .ok_or(SessionRuntimeError::InvalidRequest)?;
+    Ok(usagi_core::usecase::issue::to_prompt(&issue))
+}
+
 pub(super) fn record_session_lineage(
     agent: &SharedAgentRuntime,
     workspace_id: WorkspaceId,
@@ -3709,11 +3737,27 @@ pub(super) fn dispatch_session_action(
             if caller.is_some_and(|caller| caller.session_id == Some(session)) {
                 return Err(SessionRuntimeError::PermissionDenied);
             }
+            // A start may name a backlog issue instead of spelling the goal.
+            // The issue body becomes the goal, and the run keeps the reference
+            // the PR will have to name.
+            let issue = payload
+                .get("issue")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|number| u32::try_from(number).ok())
+                        .ok_or(SessionRuntimeError::InvalidRequest)
+                })
+                .transpose()?;
             let command = match action {
                 SessionAction::WorkflowStatus => None,
                 SessionAction::WorkflowStart => {
+                    let goal = match issue {
+                        Some(number) => issue_goal(bound, number)?,
+                        None => string("goal")?.to_owned(),
+                    };
                     Some(usagi_core::domain::workflow::WorkflowCommand::Start {
-                        goal: string("goal")?.to_owned(),
+                        goal,
                         agents: super::workflow::requested_agents(
                             payload,
                             super::workflow::remembered_agents(agent, workspace),
@@ -3744,6 +3788,7 @@ pub(super) fn dispatch_session_action(
                     usagi_core::domain::id::OperationId::parse(operation_id)
                         .map_err(|_| SessionRuntimeError::InvalidRequest)?,
                     command,
+                    issue,
                 ),
             }
             // Keep the daemon's own refusal visible: an admission conflict and a

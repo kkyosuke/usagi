@@ -525,6 +525,57 @@ sleep 30
 }
 
 #[test]
+fn production_workflow_start_from_an_issue_renders_the_goal_and_keeps_the_reference() {
+    let mut mcp = McpHarness::start();
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+sleep 30
+"#,
+    );
+    // Issue writes are refused at the workspace root by design, so the backlog
+    // entry is placed the way a merged PR leaves it.
+    let number = 742_u64;
+    let issues = mcp.workspace().join(".usagi/issues");
+    fs::create_dir_all(&issues).unwrap();
+    fs::write(
+        issues.join(format!("{number}-close-the-loop.md")),
+        format!(
+            "---\nnumber: {number}\ntitle: fix(daemon): close the loop\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-09-12T00:00:00+00:00\nupdated_at: 2026-09-12T00:00:00+00:00\n---\n\nreproduce and fix\n"
+        ),
+    )
+    .unwrap();
+    assert!(mcp.tool("session_create", &json!({"name":"issue-run"}))["error"].is_null());
+
+    let started = mcp.tool(
+        "workflow_start",
+        &json!({"name":"issue-run","issue":number}),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let started = tool_text(&started);
+    // The issue body becomes the goal, and the run keeps the reference the PR
+    // will have to name.
+    let goal = started["run"]["goal"].as_str().unwrap();
+    assert!(goal.contains("fix(daemon): close the loop"), "{goal}");
+    assert!(goal.contains("reproduce and fix"), "{goal}");
+    assert_eq!(started["run"]["issue"], json!(number));
+
+    // A goal is required when no issue is named.
+    let neither = mcp.tool("workflow_start", &json!({"name":"issue-run"}));
+    assert!(neither.get("error").is_some(), "{neither}");
+    // An issue that does not exist is refused before a run is created.
+    assert!(
+        mcp.tool(
+            "workflow_start",
+            &json!({"name":"issue-run","issue":number + 1000}),
+        )
+        .get("error")
+        .is_some()
+    );
+}
+
+#[test]
 fn production_delegate_brief_immediately_dispatches_an_isolated_triage_worker() {
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();

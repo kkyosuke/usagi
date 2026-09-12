@@ -98,6 +98,9 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
             "Implement -> Review -> PR ready | revisions {}/{}",
             run.revisions, run.revision_limit
         ));
+        if let Some(issue) = run.issue {
+            header.push(format!("Issue: #{issue} (PR must mark it done)"));
+        }
         if let Some(reason) = &run.waiting_reason {
             header.push(reason.clone());
         }
@@ -181,6 +184,19 @@ fn input_rows(panel: &WorkflowPanel, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_started_from_an_issue_names_it() {
+        let mut run = crate::usecase::application::workflow::fixture_run(
+            usagi_core::domain::id::SessionId::new(),
+        );
+        run.issue = Some(742);
+        let panel = WorkflowPanel {
+            run: Some(run),
+            ..WorkflowPanel::default()
+        };
+        assert!(render(20, 100, &panel).join("\n").contains("Issue: #742"));
+    }
 
     #[test]
     fn workflow_renders_selected_providers_and_focus() {

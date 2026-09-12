@@ -379,6 +379,7 @@ mod tests {
             review: None,
             waiting_reason: None,
             pr_url: None,
+            issue: None,
             instructions: Vec::new(),
             history: vec![WorkflowHistoryEntry {
                 id: OperationId::new(),

@@ -74,6 +74,7 @@ pub fn bind(
     session: SessionId,
     operation: OperationId,
     implementer: AgentId,
+    issue: Option<u32>,
 ) -> Result<()> {
     store.update_workflow(workspace, session, |value| {
         let record = value.as_mut().context("workflow intent is missing")?;
@@ -98,6 +99,7 @@ pub fn bind(
             review: None,
             waiting_reason: None,
             pr_url: None,
+            issue,
             instructions: Vec::new(),
             history: Vec::new(),
         });
@@ -296,6 +298,19 @@ fn append_history(run: &mut WorkflowRun, entry: &usagi_core::domain::agent_messa
     }
 }
 
+/// The repository conventions a run started from an issue has to satisfy before
+/// its PR counts as ready.
+///
+/// The daemon verifies both independently at `PR ready`, so stating them in the
+/// launch prompt is what lets the implementer satisfy them in the same PR rather
+/// than discovering the refusal afterwards.
+#[must_use]
+pub fn issue_conventions(issue: u32) -> String {
+    format!(
+        " This run implements issue #{issue}. Write `Internal-Issue: #{issue}` in the PR body, and put the same PR's diff in charge of marking that issue done: update `.usagi/issues/` in this worktree so the issue's status is `done` before you open the PR. Both are verified before the workflow reports the PR as ready."
+    )
+}
+
 #[must_use]
 pub fn initial_prompt(goal: &str, agents: usagi_core::domain::workflow::WorkflowAgents) -> String {
     let implementer = agents.implementer.profile_id();
@@ -316,6 +331,7 @@ pub fn verify_pr(
     directory: &std::path::Path,
     target: &usagi_core::domain::agent_message::ReviewTarget,
     entries: &[usagi_core::domain::pr_inventory::PrEntry],
+    issue: Option<u32>,
 ) -> Result<String, &'static str> {
     let head = git
         .run(directory, &["rev-parse", "--verify", "HEAD"])
@@ -341,7 +357,8 @@ pub fn verify_pr(
                 "view".into(),
                 entry.url().into(),
                 "--json".into(),
-                "title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup,mergeable".into(),
+                "title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup,mergeable,body"
+                    .into(),
             ],
             5000,
         )
@@ -368,6 +385,13 @@ pub fn verify_pr(
     if view.review == Some(usagi_core::domain::pr_inventory::PrReviewDecision::ChangesRequested) {
         return Err("PR has unresolved review requests");
     }
+    if let Some(issue) = issue {
+        verify_issue_conventions(
+            directory,
+            issue,
+            value.get("body").and_then(serde_json::Value::as_str),
+        )?;
+    }
     let current = git
         .run(directory, &["rev-parse", "--verify", "HEAD"])
         .map_err(|_| "Could not recheck worktree HEAD")?;
@@ -375,6 +399,35 @@ pub fn verify_pr(
         return Err("Worktree HEAD changed during verification");
     }
     Ok(entry.url().to_owned())
+}
+
+/// The two repository conventions an issue-backed PR has to satisfy.
+///
+/// Both are checked against what is actually there — the PR body GitHub returns
+/// and the issue as it stands in this worktree — rather than the implementer's
+/// report, for the same reason the rest of the verification is independent.
+fn verify_issue_conventions(
+    directory: &std::path::Path,
+    issue: u32,
+    body: Option<&str>,
+) -> Result<(), &'static str> {
+    let body = body.ok_or("Could not read the PR body")?;
+    if !body
+        .lines()
+        .any(|line| line.trim() == format!("Internal-Issue: #{issue}"))
+    {
+        return Err("PR body is missing its Internal-Issue line");
+    }
+    let issue = usagi_core::usecase::issue::get(
+        &usagi_core::infrastructure::store::issue::IssueStore::new(directory),
+        issue,
+    )
+    .map_err(|_| "Could not read the issue this run implements")?
+    .ok_or("The issue this run implements is missing from the worktree")?;
+    if issue.status != usagi_core::domain::issue::IssueStatus::Done {
+        return Err("The issue this run implements is not marked done in this PR");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -412,7 +465,7 @@ mod tests {
             agents: WorkflowAgents::default(),
         };
         assert!(admit(&store, workspace, session, operation, &conflict).is_err());
-        bind(&store, workspace, session, operation, AgentId::new()).unwrap();
+        bind(&store, workspace, session, operation, AgentId::new(), None).unwrap();
         let defaults = dir
             .path()
             .join("workflows")
@@ -457,6 +510,78 @@ mod tests {
     }
 
     #[test]
+    fn issue_backed_runs_prove_both_repository_conventions() {
+        use usagi_core::domain::issue::{IssuePriority, IssueStatus};
+        use usagi_core::infrastructure::store::issue::IssueStore;
+        use usagi_core::usecase::issue::{IssuePatch, NewIssue};
+        let worktree = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(worktree.path());
+        let issue = usagi_core::usecase::issue::create(
+            &store,
+            NewIssue {
+                title: "fix(daemon): close the loop".into(),
+                priority: IssuePriority::High,
+                body: "body".into(),
+                ..Default::default()
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let body = format!("Internal-Issue: #{}\n", issue.number);
+
+        // A PR body that never names the issue, and a PR body that does while
+        // the issue is still open, are both incomplete.
+        assert_eq!(
+            verify_issue_conventions(worktree.path(), issue.number, Some("no marker")),
+            Err("PR body is missing its Internal-Issue line")
+        );
+        assert_eq!(
+            verify_issue_conventions(worktree.path(), issue.number, None),
+            Err("Could not read the PR body")
+        );
+        assert_eq!(
+            verify_issue_conventions(worktree.path(), issue.number, Some(&body)),
+            Err("The issue this run implements is not marked done in this PR")
+        );
+        // An issue that is not in this worktree at all cannot be proven done.
+        assert_eq!(
+            verify_issue_conventions(
+                worktree.path(),
+                issue.number + 1,
+                Some(&format!("Internal-Issue: #{}\n", issue.number + 1))
+            ),
+            Err("The issue this run implements is missing from the worktree")
+        );
+
+        usagi_core::usecase::issue::update(
+            &store,
+            issue.number,
+            IssuePatch {
+                status: Some(IssueStatus::Done),
+                ..Default::default()
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_issue_conventions(worktree.path(), issue.number, Some(&body)),
+            Ok(())
+        );
+        // The marker is a line of its own: a mention inside prose is not one.
+        assert_eq!(
+            verify_issue_conventions(
+                worktree.path(),
+                issue.number,
+                Some(&format!(
+                    "see Internal-Issue: #{} for context",
+                    issue.number
+                ))
+            ),
+            Err("PR body is missing its Internal-Issue line")
+        );
+    }
+
+    #[test]
     fn history_retains_only_a_bounded_tail_and_bounded_bodies() {
         let mut run = WorkflowRun {
             agents: usagi_core::domain::workflow::WorkflowAgents::default(),
@@ -471,6 +596,7 @@ mod tests {
             review: None,
             waiting_reason: None,
             pr_url: None,
+            issue: None,
             instructions: Vec::new(),
             history: Vec::new(),
         };
@@ -573,7 +699,7 @@ mod tests {
             },
         )
         .unwrap();
-        bind(&store, workspace, session, operation, implementer).unwrap();
+        bind(&store, workspace, session, operation, implementer, None).unwrap();
         let target = ReviewTarget {
             base_sha: "a".repeat(40),
             head_sha: "b".repeat(40),
@@ -858,7 +984,8 @@ mod tests {
                         &mut Gh(output.clone()),
                         std::path::Path::new("/fixture"),
                         &target,
-                        std::slice::from_ref(&entry)
+                        std::slice::from_ref(&entry),
+                        None,
                     )
                     .is_err()
                 );
@@ -867,6 +994,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One verification fixture walks every refusal a PR can earn.
     fn workflow_verification_requires_fresh_matching_ready_pr_evidence() {
         let target = usagi_core::domain::agent_message::ReviewTarget {
             base_sha: "b".repeat(40),
@@ -887,18 +1015,30 @@ mod tests {
                 &mut Gh(value.to_string()),
                 directory,
                 &target,
-                std::slice::from_ref(&entry)
+                std::slice::from_ref(&entry),
+                None,
             ),
             Ok(entry.url().to_owned())
         );
-        assert!(verify_pr(&Git, &mut Gh(value.to_string()), directory, &target, &[]).is_err());
+        assert!(
+            verify_pr(
+                &Git,
+                &mut Gh(value.to_string()),
+                directory,
+                &target,
+                &[],
+                None
+            )
+            .is_err()
+        );
         assert!(
             verify_pr(
                 &Git,
                 &mut Gh("{}".into()),
                 directory,
                 &target,
-                std::slice::from_ref(&entry)
+                std::slice::from_ref(&entry),
+                None,
             )
             .is_err()
         );
@@ -908,7 +1048,8 @@ mod tests {
                 &mut Gh("unavailable".into()),
                 directory,
                 &target,
-                std::slice::from_ref(&entry)
+                std::slice::from_ref(&entry),
+                None,
             )
             .is_err()
         );
@@ -920,7 +1061,8 @@ mod tests {
                 &mut Gh(value.to_string()),
                 directory,
                 &target,
-                std::slice::from_ref(&entry)
+                std::slice::from_ref(&entry),
+                None,
             )
             .is_ok()
         );
@@ -942,7 +1084,8 @@ mod tests {
                     &mut Gh(value.to_string()),
                     directory,
                     &target,
-                    std::slice::from_ref(&entry)
+                    std::slice::from_ref(&entry),
+                    None,
                 )
                 .is_err()
             );
@@ -954,13 +1097,15 @@ mod tests {
                 &mut Gh("invalid".into()),
                 directory,
                 &target,
-                &[entry]
+                &[entry],
+                None,
             )
             .is_err()
         );
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One command fixture covers admission, replay and refusal together.
     fn workflow_commands_are_durable_and_idempotent_and_do_not_invent_review() {
         let dir = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(dir.path());
@@ -1022,11 +1167,31 @@ mod tests {
         assert!(snapshot(&store, workspace, session).unwrap().run.is_none());
         assert!(admit(&store, workspace, session, OperationId::new(), &instruct).is_err());
         let implementer = AgentId::new();
-        bind(&store, workspace, session, operation, implementer).unwrap();
-        bind(&store, workspace, session, operation, implementer).unwrap();
-        assert!(bind(&store, workspace, session, operation, AgentId::new()).is_err());
-        assert!(bind(&store, workspace, session, OperationId::new(), implementer).is_err());
-        assert!(bind(&store, workspace, SessionId::new(), operation, implementer).is_err());
+        bind(&store, workspace, session, operation, implementer, None).unwrap();
+        bind(&store, workspace, session, operation, implementer, None).unwrap();
+        assert!(bind(&store, workspace, session, operation, AgentId::new(), None).is_err());
+        assert!(
+            bind(
+                &store,
+                workspace,
+                session,
+                OperationId::new(),
+                implementer,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            bind(
+                &store,
+                workspace,
+                SessionId::new(),
+                operation,
+                implementer,
+                None
+            )
+            .is_err()
+        );
         assert!(admit(&store, workspace, session, operation, &instruct).is_err());
         let instruction = OperationId::new();
         admit(&store, workspace, session, instruction, &instruct).unwrap();

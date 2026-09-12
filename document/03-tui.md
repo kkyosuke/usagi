@@ -2156,6 +2156,17 @@ Workflow は PR の自動マージや session/worktree の削除を行わない�
 実装・レビューの進行は起動時の固定指示と同一 session の handoff に従う。修正は最大 3 回を
 指示するが、プロセスを強制停止する上限ではない。
 
+issue 番号から開始した run は、その issue を参照として保持し、工程表示に `Issue: #<番号>` を出す。
+この run は起動時の指示に次の 2 つを含め、`PR ready` の判定でも daemon が独立に検証する。
+
+| 規約 | 検証 |
+|---|---|
+| PR 本文に `Internal-Issue: #<番号>` の行がある | GitHub が返した PR 本文を行単位で照合する |
+| 同じ PR の差分で issue が `done` になっている | session worktree の issue を読んで status を確認する |
+
+どちらかが欠けていれば `PR ready` にはならず、不足を待ち理由として表示する。issue の書き込みは
+従来どおり session worktree の中だけで行う。
+
 ## Closeup の agent CLI 選択
 
 Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI を選ぶ。この節が v2 の agent CLI 選択の正本である。

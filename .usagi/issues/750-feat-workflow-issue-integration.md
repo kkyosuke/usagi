@@ -1,13 +1,13 @@
 ---
 number: 750
 title: feat(workflow): issue から workflow を起こし、PR と done まで繋ぐ
-status: todo
+status: done
 priority: high
 labels: [v2, workflow, issue, pr]
 dependson: [749]
 related: [745]
 created_at: 2026-09-12T00:00:00+00:00
-updated_at: 2026-09-12T00:00:00+00:00
+updated_at: 2026-09-13T00:00:00+00:00
 ---
 
 ## 問題
@@ -27,8 +27,8 @@ workflow はそのどちらとも繋がっていない。
 
 ## 受入条件
 
-- [ ] issue 番号を指定して workflow を起こせ、goal が issue 本文から生成される。
-- [ ] run が参照 issue を保持し、snapshot に含まれる。
-- [ ] `Ready` の検証に `Internal-Issue` と issue status の整合が含まれる。
-- [ ] issue の書き込みが session worktree 経由に限定される。
-- [ ] `document/03-tui.md` と issue 運用のドキュメントを更新する。
+- [x] issue 番号を指定して workflow を起こせ、goal が issue 本文から生成される。
+- [x] run が参照 issue を保持し、snapshot に含まれる。
+- [x] `Ready` の検証に `Internal-Issue` と issue status の整合が含まれる。
+- [x] issue の書き込みが session worktree 経由に限定される。
+- [x] `document/03-tui.md` と issue 運用のドキュメントを更新する。

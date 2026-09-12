@@ -104,6 +104,9 @@ pub struct WorkflowRun {
     /// The PR the approved HEAD was verified against, once it is `Ready`.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// The backlog issue this run implements, when it was started from one.
+    #[serde(default)]
+    pub issue: Option<u32>,
     pub instructions: Vec<Instruction>,
     #[serde(default)]
     pub history: Vec<WorkflowHistoryEntry>,
@@ -372,6 +375,7 @@ mod tests {
             review: None,
             waiting_reason: None,
             pr_url: None,
+            issue: None,
             instructions: Vec::new(),
             history: Vec::new(),
         }
