@@ -338,7 +338,7 @@ mod action_io {
                 },
             ) => claude_sandbox(
                 mode,
-                agent,
+                agent.as_deref(),
                 LauncherPolicyInputs {
                     protected_root,
                     backend,
@@ -454,14 +454,14 @@ fn guard_workspace(out: &mut dyn Write) -> std::io::Result<ExitCode> {
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=macos_wraps_claude_with_a_write_confining_profile
 fn claude_sandbox(
     mode: SandboxMode,
-    agent: Option<String>,
+    agent: Option<&str>,
     policy: LauncherPolicyInputs,
     command: Vec<String>,
     err: &mut dyn Write,
 ) -> std::io::Result<ExitCode> {
     // 未知の selector で起動を通さない。grant の根拠が失われた launch は、
     // program 名から別 provider の state を貰ってしまうため fail closed にする。
-    let agent = match agent.as_deref().map(resolve_launch_agent) {
+    let agent = match agent.map(resolve_launch_agent) {
         Some(Ok(agent)) => Some(agent),
         Some(Err(())) => {
             writeln!(err, "claude-sandbox: 未知の agent selector です")?;
