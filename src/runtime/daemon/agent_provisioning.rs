@@ -16,12 +16,14 @@ use super::{
 };
 
 mod agy;
+mod gateway;
 pub(super) use agy::RootAgyProvisioner;
 #[cfg(test)]
 pub(super) use agy::{
     agy_arguments_for_integration, agy_plugin_arguments, agy_plugin_documents,
     materialize_agy_plugin,
 };
+pub(in crate::runtime) use gateway::provider_gateway_environment;
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(
@@ -1190,40 +1192,6 @@ pub(super) fn launch_allowlist(
     let mut allowlist = mcp_environment_allowlist(context);
     allowlist.extend(user_env::allowlist(user));
     allowlist
-}
-
-/// The variables that make a shared CLI *be* this provider: its endpoint, its
-/// model bindings, the directory it keeps state in, and its API key.
-///
-/// They come after the user's own bindings in [`launch_environment`] for the
-/// same reason the MCP wiring does: a workspace must not be able to redirect a
-/// managed launch by binding the same name. A provider that needs its own state
-/// directory but has no resolved `$HOME` fails the launch instead of silently
-/// falling back to the shared CLI's default home — that default is another
-/// provider's state. A missing API key is *not* fatal here: the readiness probe
-/// runs the same environment and refuses the launch with a recovery reason,
-/// which is a better answer than a provisioning failure.
-pub(super) fn provider_gateway_environment(
-    agent: DefaultModel,
-    home: Option<&Path>,
-    user: &BTreeMap<String, String>,
-) -> Result<Vec<(EnvironmentVariableName, String)>, ()> {
-    let mut environment = Vec::new();
-    let typed = |name: &str| EnvironmentVariableName::new(name).map_err(|_| ());
-    for (name, value) in agent.gateway_environment() {
-        environment.push((typed(name)?, (*value).to_owned()));
-    }
-    if let Some(name) = agent.state_directory_env() {
-        let home = home.ok_or(())?;
-        let directory = home.join(agent.state_directory());
-        environment.push((typed(name)?, directory.to_str().ok_or(())?.to_owned()));
-    }
-    if let Some((source, target)) = agent.credential_binding()
-        && let Some(value) = user.get(source)
-    {
-        environment.push((typed(target)?, value.clone()));
-    }
-    Ok(environment)
 }
 
 /// The ephemeral spawn environment: the configured bindings first, then the

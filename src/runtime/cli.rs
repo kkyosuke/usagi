@@ -817,11 +817,30 @@ mod tests {
     use super::{
         Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
         execute_self_update_with, exit_code, linux_home_entry_inventory, mcp_daemon_route,
-        process_outcome, update_installer_command, validate_launcher_policy_inputs,
-        write_client_error, write_daemon_outcome,
+        process_outcome, resolve_launch_agent, update_installer_command,
+        validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
+
+    #[test]
+    fn the_launch_agent_selector_resolves_a_provider_or_fails_closed() {
+        use usagi_core::domain::settings::DefaultModel;
+
+        // The selector decides which provider's `$HOME` state this launch may
+        // write, so it is resolved through the closed vocabulary rather than
+        // trusted as text.
+        assert_eq!(
+            resolve_launch_agent("sakana-ai"),
+            Ok(DefaultModel::SakanaAi)
+        );
+        assert_eq!(resolve_launch_agent("claude"), Ok(DefaultModel::Claude));
+        // An unmodelled token yields no provider, and the caller refuses the
+        // launch rather than falling back to a grant decided by the program.
+        for token in ["", "codex-fugu", "gemini"] {
+            assert_eq!(resolve_launch_agent(token), Err(()), "{token}");
+        }
+    }
 
     #[test]
     fn daemon_provisioned_mcp_attaches_while_manual_mcp_keeps_bootstrap_authority() {
