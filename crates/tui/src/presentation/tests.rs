@@ -5,13 +5,13 @@ use super::{
     ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
     DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort, FixedBackendFactory,
     FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort, Geometry, GitDiff, IdleWatch,
-    LaunchAgentRequest, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory,
-    MissingWorkspacePrompt, NewStep, NoDesktopNotifications, NoMetrics, OpenStep, PROJECT_BAR_ROWS,
-    PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
-    SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
-    SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
-    SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
-    TerminalInputOutcome, TerminalInputResolution, TerminalSubscription, TerminalViewProjection,
+    MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, MissingWorkspacePrompt,
+    NewStep, NoDesktopNotifications, NoMetrics, OpenStep, PROJECT_BAR_ROWS, PaneLaunch,
+    PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession, SerializedPaneLaunchPort,
+    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
+    SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint, SessionWorktreeScanPort,
+    Start, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
+    TerminalInputResolution, TerminalSubscription, TerminalViewProjection,
     UnavailableAgentCommandPort, UnavailableBackendPort, UnavailableBrowserOpener,
     UnavailableDecisionCommandPort, UnavailableEnvironmentStore, UnavailableExternalTerminalPort,
     UnavailableGardenInventoryPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
@@ -70,7 +70,8 @@ use crate::usecase::application::controller::{
     Target,
 };
 use crate::usecase::application::daemon_backend::{
-    Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
+    Completions, DaemonBackend, DecisionPort as BackendDecisionPort, LaunchAgentRequest,
+    ReopenAgentRequest,
 };
 use crate::usecase::application::pane::{LivePane, PaneKind, PaneSelection, PaneTab, TabSelection};
 use crate::usecase::application::pr::PrSnapshotPort;
@@ -9783,7 +9784,7 @@ fn root_generic_host_request_is_admitted_and_untracked_resume_completion_is_iner
     let mut pending = std::collections::HashMap::new();
     let (mut host, actions) = ControllerHost::channel();
     let operation = OperationId::new();
-    super::BackendAgentPort::open_terminal(
+    crate::usecase::application::daemon_backend::AgentPort::open_terminal(
         &mut host,
         crate::usecase::application::daemon_backend::OpenTerminalRequest {
             target: Target::Root(workspace),

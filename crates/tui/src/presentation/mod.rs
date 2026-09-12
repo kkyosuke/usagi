@@ -9,6 +9,7 @@
 
 mod banner;
 mod config_setup;
+mod controller_host;
 pub mod frame;
 pub mod layouts;
 pub mod live_terminal;
@@ -20,6 +21,7 @@ pub mod workspace_deck;
 pub mod workspace_runtime;
 
 pub use banner::{BannerScreenRunner, write_banner};
+pub use controller_host::{ControllerHost, ControllerHostAction};
 pub use startup::{StartupSplash, play_startup_splash};
 
 #[cfg(test)]
@@ -94,11 +96,8 @@ use crate::usecase::application::controller::{
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
 use crate::usecase::application::daemon_backend::{
-    AgentPort as BackendAgentPort, Completions, CreateSessionRequest, DaemonBackend,
-    DecisionPort as BackendDecisionPort, Flow as BackendFlow, LaunchAgentRequest,
-    OpenTerminalRequest, OverlayPort as BackendOverlayPort, RemoveSessionRequest,
-    ReopenAgentRequest, ResumeAgentRequest, SessionCommandPort as BackendSessionCommandPort,
-    SleepSessionRequest, TargetStorePort as BackendTargetStorePort,
+    Completions, DaemonBackend, DecisionPort as BackendDecisionPort, Flow as BackendFlow,
+    OverlayPort as BackendOverlayPort, TargetStorePort as BackendTargetStorePort,
     WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
@@ -918,117 +917,6 @@ fn garden_shell_owned_wake(key: &Key) -> bool {
 
 struct NoMetrics;
 impl MetricsPort for NoMetrics {}
-
-/// Actions whose stateful host remains in the terminal loop while
-/// [`DaemonBackend`] is the sole controller-effect dispatcher.
-pub enum ControllerHostAction {
-    Create(CreateSessionRequest, Completions),
-    Refresh(WorkspaceId, Completions),
-    Remove(RemoveSessionRequest, Completions),
-    Sleep(SleepSessionRequest, Completions),
-    LaunchAgent(LaunchAgentRequest),
-    ResumeAgent(ResumeAgentRequest),
-    ReopenAgent(ReopenAgentRequest),
-    OpenTerminal(OpenTerminalRequest),
-    OpenExternalTerminal(Target),
-    OpenWorkflow(SessionId),
-    SelectTab(crate::usecase::application::controller::TabDirection),
-}
-
-/// Cloneable adapter handed to the production backend factory. It contains no
-/// policy: each port call enqueues exactly one action for the terminal host.
-#[derive(Clone)]
-pub struct ControllerHost(Sender<ControllerHostAction>);
-
-impl ControllerHost {
-    /// Create the host adapter and the terminal loop's action receiver.
-    #[must_use]
-    pub fn channel() -> (Self, Receiver<ControllerHostAction>) {
-        let (sender, receiver) = mpsc::channel();
-        (Self(sender), receiver)
-    }
-}
-
-impl BackendSessionCommandPort for ControllerHost {
-    fn create(&mut self, request: CreateSessionRequest, completions: Completions) {
-        if let Err(mpsc::SendError(ControllerHostAction::Create(request, completions))) = self
-            .0
-            .send(ControllerHostAction::Create(request, completions))
-        {
-            completions.emit(AppEvent::OperationResult(OperationResult {
-                token: request.token,
-                succeeded: false,
-                created: None,
-                notice: Some(Notice::new("session command host is unavailable")),
-            }));
-        }
-    }
-
-    fn refresh(&mut self, workspace: WorkspaceId, completions: Completions) {
-        if let Err(mpsc::SendError(ControllerHostAction::Refresh(_, completions))) = self
-            .0
-            .send(ControllerHostAction::Refresh(workspace, completions))
-        {
-            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                "session command host is unavailable",
-            ))));
-        }
-    }
-
-    fn remove(&mut self, request: RemoveSessionRequest, completions: Completions) {
-        if let Err(mpsc::SendError(ControllerHostAction::Remove(_, completions))) = self
-            .0
-            .send(ControllerHostAction::Remove(request, completions))
-        {
-            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                "session command host is unavailable",
-            ))));
-        }
-    }
-
-    fn sleep(&mut self, request: SleepSessionRequest, completions: Completions) {
-        if let Err(mpsc::SendError(ControllerHostAction::Sleep(_, completions))) = self
-            .0
-            .send(ControllerHostAction::Sleep(request, completions))
-        {
-            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                "session command host is unavailable",
-            ))));
-        }
-    }
-}
-
-impl BackendAgentPort for ControllerHost {
-    fn launch_agent(&mut self, request: LaunchAgentRequest) {
-        let _ = self.0.send(ControllerHostAction::LaunchAgent(request));
-    }
-
-    fn resume_agent(&mut self, request: ResumeAgentRequest) {
-        let _ = self.0.send(ControllerHostAction::ResumeAgent(request));
-    }
-
-    fn reopen_agent(&mut self, request: ReopenAgentRequest) {
-        let _ = self.0.send(ControllerHostAction::ReopenAgent(request));
-    }
-
-    fn open_terminal(&mut self, request: OpenTerminalRequest) {
-        let _ = self.0.send(ControllerHostAction::OpenTerminal(request));
-    }
-
-    fn open_external_terminal(&mut self, target: Target) {
-        let _ = self
-            .0
-            .send(ControllerHostAction::OpenExternalTerminal(target));
-    }
-
-    fn open_workflow(&mut self, session: SessionId) {
-        let _ = self.0.send(ControllerHostAction::OpenWorkflow(session));
-    }
-
-    fn select_tab(&mut self, direction: crate::usecase::application::controller::TabDirection) {
-        let _ = self.0.send(ControllerHostAction::SelectTab(direction));
-    }
-}
 
 /// Complete production port set for one opened workspace.
 pub struct ControllerBackendComposition {
