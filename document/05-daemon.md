@@ -1154,19 +1154,27 @@ lane は tick ごとに保存済み workflow record を列挙し、各 run に�
 | 配送 | `queued` の指示を、受理時点の exact な担当とその認可済み実行系統にだけ再配送する |
 | 検証 | 承認済み HEAD に対する PR の独立検証（レビュー承認後の phase のみ。worktree HEAD 一致・未コミット変更なし・承認 HEAD に対する PR の checks 成功を要求する） |
 
-次の record は読み飛ばす。読み飛ばした record は書き換えないため、idle のコストも生じない。
+次の record は読み飛ばす。読み飛ばした record は書き換えないため、1 件あたりのコストは record を
+1 回読むことだけになる。
 
 | 読み飛ばす record | 理由 |
 |---|---|
 | worktree を解決できない session（削除済み、この daemon が保持していない workspace） | 進める対象が無い |
 | Agent を束ねられないまま開始に失敗した intent（`run` が無い） | 人間の再試行を待つ |
-| `PR ready` に到達した run | 後続の遷移が無い。無人の再検証は完了した PR を無限に照会し、ブランチが動けば降格させてしまう |
+
+`PR ready` に到達した run も他と同じく sweep する。そこから改めてレビューを依頼でき、そこで出した指示も
+配送先へ届ける必要があるためである。ただし**無人の sweep は `PR ready` の PR を再検証しない**。完了した
+PR を tick ごとに GitHub へ照会し続け、ブランチが動いた瞬間に工程を降格させてしまうからである。画面を
+開いている人の request は従来どおり再検証し、古くなった承認を無効化する。
 
 1 件の失敗は他の run の進行を止めない。daemon の停止要求は sweep の途中でも観測し、残りは次の起動へ残す。
 
-Workflow request（snapshot / control）も同じ 1 回の pass を通るため、開いている画面は常に最新の
-進行を受け取る。control は自分が適用した記録変更を保存済み projection として返し、journal を二重に
-replay しない。
+Workflow request のうち snapshot はこの pass をそのまま通り、control（開始・指示）は reconcile の直後に
+受理して PR 検証を挟まない。GitHub が一時的に読めないことが指示の拒否理由にならないようにするためで、
+検証は次の sweep か次の snapshot が行う。
+
+どの request も reconcile は 1 回だけ通る。control は自分が適用した記録変更を保存済み projection として
+返し、journal を二重に replay しない。
 
 decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
 atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。

@@ -130,8 +130,15 @@ fn handle(
     }
     // One reconcile pass per request. The resident lane owns progress; an open
     // tab only has to observe it.
-    serde_json::to_value(advance(agent, inventory, &scope, workspace, session)?)
-        .map_err(unavailable)
+    serde_json::to_value(advance(
+        agent,
+        inventory,
+        &scope,
+        workspace,
+        session,
+        Attention::Requested,
+    )?)
+    .map_err(unavailable)
 }
 
 /// Reflect observed evidence in the stored run: replay the peer journal, then
@@ -145,6 +152,25 @@ fn reconcile(
     reconcile_runtime(agent, workspace, session)
 }
 
+/// Who is carrying the run forward.
+///
+/// Both reconcile the journal and re-deliver queued instructions. They differ
+/// only over a run that already reached `PR ready`: a person looking at the tab
+/// still wants a stale approval invalidated, but an unattended sweep must not
+/// re-verify a finished PR every tick — it would query GitHub forever and demote
+/// the run the moment the branch moves on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Attention {
+    Unattended,
+    Requested,
+}
+
+impl Attention {
+    fn verifies(self, phase: usagi_core::domain::workflow::Phase) -> bool {
+        self == Self::Requested || phase != usagi_core::domain::workflow::Phase::Ready
+    }
+}
+
 /// Carry one run as far as observed evidence allows: reconcile the peer journal,
 /// re-deliver queued instructions and verify an approved PR.
 ///
@@ -156,6 +182,7 @@ pub(super) fn advance(
     scope: &dyn SessionScopeResolver,
     workspace: WorkspaceId,
     session: SessionId,
+    attention: Attention,
 ) -> Result<usagi_core::domain::workflow::WorkflowSnapshot, ProtocolError> {
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
     reconcile(agent, workspace, session)?;
@@ -166,16 +193,18 @@ pub(super) fn advance(
                 let _ = deliver(agent, workspace, session, instruction.id);
             }
         }
-        verify_progress(
-            &store,
-            inventory,
-            scope,
-            workspace,
-            session,
-            run,
-            &super::SystemGit,
-            &mut super::GhProcess,
-        )?;
+        if attention.verifies(run.phase) {
+            verify_progress(
+                &store,
+                inventory,
+                scope,
+                workspace,
+                session,
+                run,
+                &super::SystemGit,
+                &mut super::GhProcess,
+            )?;
+        }
         return workflow::projection(&store, workspace, session).map_err(unavailable);
     }
     Ok(snapshot)
@@ -412,7 +441,16 @@ pub(super) fn sweep(
         if !advanceable(&store, workspace, session) {
             continue;
         }
-        if advance(agent, inventory, scope, workspace, session).is_ok() {
+        if advance(
+            agent,
+            inventory,
+            scope,
+            workspace,
+            session,
+            Attention::Unattended,
+        )
+        .is_ok()
+        {
             advanced += 1;
         }
     }
@@ -421,23 +459,19 @@ pub(super) fn sweep(
 
 /// Whether an unattended sweep has anything to do for this record.
 ///
-/// A launch that never bound its Agent waits for the human to retry it, and a
-/// run that reached `PR ready` has no further transition. Sweeping either would
-/// rewrite the record every tick — and re-verify a finished PR against GitHub
-/// forever, demoting it whenever the branch moves on — for no progress. An open
-/// tab still refreshes both on request.
+/// A launch that never bound its Agent waits for the human to retry it; there is
+/// no run to reconcile, and sweeping it would rewrite the record every tick for
+/// no progress. Every bound run is swept, including one at `PR ready`: a
+/// reviewer can still be asked for another review from there, and instructions
+/// enqueued there still have to reach their recipient.
 fn advanceable(
     store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
     workspace: WorkspaceId,
     session: SessionId,
 ) -> bool {
-    store.workflow(workspace, session).is_ok_and(|record| {
-        record.is_some_and(|record| {
-            record
-                .run
-                .is_some_and(|run| run.phase != usagi_core::domain::workflow::Phase::Ready)
-        })
-    })
+    store
+        .workflow(workspace, session)
+        .is_ok_and(|record| record.is_some_and(|record| record.run.is_some()))
 }
 
 fn admission_error(error: &anyhow::Error) -> ProtocolError {

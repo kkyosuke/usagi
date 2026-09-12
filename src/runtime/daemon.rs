@@ -8443,7 +8443,7 @@ fn start_daemon_agent_restart_recovery(
 /// inside a Workflow request, which made progress a property of what the user
 /// happened to be looking at. This lane owns that progress instead; the request
 /// path keeps the same pass so an open tab still answers with fresh state.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_workflow_lane_ticks_until_shutdown_and_stops_mid_sweep
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_resident_workflow_lane_advances_a_run_without_any_client_request
 fn start_workflow_lane(
     agent: SharedAgentRuntime,
     pr_inventory: SharedPrInventory,
@@ -8454,7 +8454,7 @@ fn start_workflow_lane(
     let sweeping = Arc::clone(&shutdown);
     let mut failures = FailureTransitionLog::default();
     spawn_workflow_lane(
-        move || {
+        Box::new(move || {
             let scope = SharedScopeResolver(Arc::clone(&workspaces));
             let failure =
                 workflow::sweep(&agent, &pr_inventory, &scope, &|| sweeping.is_requested())
@@ -8463,7 +8463,7 @@ fn start_workflow_lane(
             if let Some(entry) = failures.changed(failure) {
                 ErrorLog::record(&entry);
             }
-        },
+        }),
         shutdown,
         tick,
     )
@@ -8471,15 +8471,11 @@ fn start_workflow_lane(
 
 /// The lane loop, with the sweep injected so a test can drive it without a
 /// daemon, a PTY, or a store.
-#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=the_workflow_lane_ticks_until_shutdown_and_stops_mid_sweep
-fn spawn_workflow_lane<S>(
-    mut sweep: S,
+fn spawn_workflow_lane(
+    mut sweep: Box<dyn FnMut() + Send>,
     shutdown: Arc<ShutdownRequest>,
     tick: Duration,
-) -> std::io::Result<std::thread::JoinHandle<()>>
-where
-    S: FnMut() + Send + 'static,
-{
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("usagi-workflow-lane".to_owned())
         .spawn(move || {
@@ -17282,17 +17278,17 @@ mod tests {
     }
 
     #[test]
-    fn the_workflow_lane_ticks_until_shutdown_and_stops_mid_sweep() {
+    fn the_workflow_lane_ticks_until_shutdown_and_never_sweeps_once_down() {
         let shutdown = Arc::new(ShutdownRequest::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let ticking = Arc::clone(&calls);
         let stopper = Arc::clone(&shutdown);
         let handle = spawn_workflow_lane(
-            move || {
+            Box::new(move || {
                 if ticking.fetch_add(1, Ordering::AcqRel) >= 1 {
                     stopper.request();
                 }
-            },
+            }),
             Arc::clone(&shutdown),
             Duration::from_millis(1),
         )
@@ -17306,9 +17302,9 @@ mod tests {
         let skipped = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&skipped);
         spawn_workflow_lane(
-            move || {
+            Box::new(move || {
                 counter.fetch_add(1, Ordering::AcqRel);
-            },
+            }),
             cancelled,
             Duration::from_millis(1),
         )
@@ -23331,6 +23327,7 @@ instructions = "{instructions}"
         }
 
         #[test]
+        #[allow(clippy::too_many_lines)] // One lane fixture covers delivery, the mid-sweep stop and both skip rules.
         fn the_resident_workflow_lane_advances_a_run_without_any_client_request() {
             use usagi_core::domain::id::{OperationId, SessionId};
             use usagi_core::domain::workflow::Recipient;
@@ -23410,24 +23407,51 @@ instructions = "{instructions}"
                 .unwrap(),
                 1
             );
-            // A stopping daemon leaves the remaining records for the next start.
+            // A daemon that starts stopping mid-sweep leaves the rest for its
+            // next start: the first record is advanced, the second is not.
+            let calls = std::cell::Cell::new(0);
             assert_eq!(
                 workflow::sweep(
                     &fixture.agent,
                     &fixture.inventory,
                     &fixture.bound.scope_resolver(),
-                    &|| true,
+                    &|| {
+                        calls.set(calls.get() + 1);
+                        calls.get() > 1
+                    },
                 )
                 .unwrap(),
-                0
+                1
             );
-            // `PR ready` is terminal: an unattended sweep must not re-verify it
-            // against GitHub forever, or demote it when the branch moves on.
+            // A launch that never bound its Agent waits for the human. The sweep
+            // skips it and leaves its record byte-identical.
+            let pending_session = SessionId::new();
+            store
+                .update_workflow(fixture.workspace, pending_session, |record| {
+                    *record = Some(
+                        store
+                            .workflow(fixture.workspace, fixture.session)
+                            .unwrap()
+                            .unwrap(),
+                    );
+                    record.as_mut().unwrap().run = None;
+                    Ok(())
+                })
+                .unwrap();
+            // `PR ready` is still swept: another review can be requested from
+            // there, and instructions enqueued there still have to be delivered.
+            // Only the unattended PR re-verification is left out.
+            let ready_instruction = OperationId::new();
             store
                 .update_workflow(fixture.workspace, fixture.session, |record| {
-                    record.as_mut().unwrap().run.as_mut().unwrap().phase =
-                        usagi_core::domain::workflow::Phase::Ready;
-                    Ok(())
+                    let run = record.as_mut().unwrap().run.as_mut().unwrap();
+                    run.phase = usagi_core::domain::workflow::Phase::Ready;
+                    run.enqueue(
+                        ready_instruction,
+                        Recipient::Implementer,
+                        "One more thing".into(),
+                    )
+                    .map_err(anyhow::Error::msg)
                 })
                 .unwrap();
             assert_eq!(
@@ -23438,7 +23462,33 @@ instructions = "{instructions}"
                     &|| false,
                 )
                 .unwrap(),
-                0
+                1
+            );
+            let swept = store
+                .workflow(fixture.workspace, fixture.session)
+                .unwrap()
+                .unwrap()
+                .run
+                .unwrap();
+            assert_eq!(swept.phase, usagi_core::domain::workflow::Phase::Ready);
+            assert_eq!(
+                swept
+                    .instructions
+                    .iter()
+                    .find(|item| item.id == ready_instruction)
+                    .unwrap()
+                    .delivery,
+                Delivery::Notified
+            );
+            // The count is the proof: a swept record is counted, and the
+            // run-less one is not — so nothing rewrote it either.
+            assert!(
+                store
+                    .workflow(fixture.workspace, pending_session)
+                    .unwrap()
+                    .unwrap()
+                    .run
+                    .is_none()
             );
         }
 
@@ -23484,6 +23534,21 @@ instructions = "{instructions}"
                 })
                 .unwrap_err();
             assert_eq!(error.code, ErrorCode::Unavailable);
+            // An instruction is not a verification: a GitHub read that is
+            // momentarily unavailable must not refuse the command.
+            let instruction = OperationId::new();
+            let accepted = fixture
+                .control(
+                    instruction,
+                    WorkflowCommand::Instruct {
+                        recipient: Recipient::Implementer,
+                        body: "Keep going".into(),
+                    },
+                )
+                .unwrap()
+                .run
+                .unwrap();
+            assert_eq!(accepted.instructions[0].id, instruction);
         }
 
         #[test]
