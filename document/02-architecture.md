@@ -1089,12 +1089,17 @@ launcher は、**exec する program 自身の state directory** を `$HOME` 配
 |---|---|
 | `claude` | `~/.claude` |
 | `codex` | `~/.codex` |
-| `codex-fugu`（sakana.ai） | `~/.codex-fugu` |
+| `codex-fugu`（sakana.ai） | `~/.codex`（Codex と同じ home） |
 | `agy`（Antigravity CLI） | `~/.gemini/antigravity-cli/conversations`（加えて同じ state 直下の conversation summary DB 3 ファイルだけ） |
 
 - 判定は launcher が exec する program（`--` の先頭）の basename だけを根拠にし、値の正本は
   `usagi-core` の `domain::settings::DefaultModel::state_directory` である（executable と state の置き場所を
   1 つの事実として持つ）。usagi が launch しない未知 program には state root を与えない（fail-closed）。
+- `codex-fugu` は Codex の別 install ではなく、`CODEX_HOME`（既定 `~/.codex`）の中の `fugu` profile を
+  `codex --profile fugu` として起動する wrapper である。model provider 定義、model catalog、provider が読む
+  API key の `.env`、wrapper 自身の state（`$CODEX_HOME/.fugu`）はすべてその home にあるため、grant も
+  同じ home を指す。`~/.codex-fugu` を渡していた間、managed launch は自分が実際に使う home へ書けなかった。
+  この 1 件だけは 2 つの profile が同じ grant を共有する。
 - daemon 側の policy 検証も同じ program から state root を決め、保護対象 workspace（および linked worktree の
   Git common dir）と重なる構成を拒否する。
 - grant は両 mode に効く。session の agent CLI も利用者本人の state directory をそのまま使うため、

@@ -202,13 +202,16 @@ fn every_model_provider_maps_a_selector_profile_and_executable() {
     assert_eq!(DefaultModel::SakanaAi.selector(), "sakana.ai");
     // Each provider declares the narrow state directory a write-confining
     // launcher grants. AGY persists conversation DBs without making its
-    // executable global customizations writable.
+    // executable global customizations writable. `codex-fugu` is the `fugu`
+    // profile inside Codex's own `CODEX_HOME`, not a second installation, so
+    // it names that same home: granting `~/.codex-fugu` left a managed launch
+    // unable to write the home the CLI actually uses.
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::state_directory),
         [
             ".claude",
             ".codex",
-            ".codex-fugu",
+            ".codex",
             ".gemini/antigravity-cli/conversations"
         ]
     );
@@ -224,14 +227,12 @@ fn every_model_provider_maps_a_selector_profile_and_executable() {
 
 #[test]
 fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
-    // Codex and the Codex-compatible `codex-fugu` share the CLI grammar, so both
-    // prove readiness with `login status`; Claude uses `auth status`. Without
-    // `codex-fugu` here an installed sakana.ai stays permanently unavailable
-    // (#609).
+    // Claude uses `auth status`, Codex `login status`. The probe must name the
+    // executable a launch spawns, without which an installed sakana.ai stays
+    // permanently unavailable (#609).
     for (model, program, arguments) in [
         (DefaultModel::Claude, "claude", ["auth", "status"]),
         (DefaultModel::OpenAi, "codex", ["login", "status"]),
-        (DefaultModel::SakanaAi, "codex-fugu", ["login", "status"]),
     ] {
         let probe = model.readiness_command();
         assert_eq!(probe.program(), program, "{model:?}");
@@ -242,6 +243,18 @@ fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
     let agy = DefaultModel::Agy.readiness_command();
     assert_eq!(agy.program(), "agy");
     assert_eq!(agy.arguments(), ["models"]);
+    // `codex-fugu` execs `codex --profile fugu`, and Codex refuses `--profile`
+    // for `login`, so Codex's own probe exits nonzero on a healthy install.
+    // The profile authenticates with an API key from the environment, so there
+    // is no login state to ask about; what a launcher can prove is that the
+    // wrapper runs and resolves the Codex it delegates to.
+    let sakana = DefaultModel::SakanaAi.readiness_command();
+    assert_eq!(sakana.program(), "codex-fugu");
+    assert_eq!(sakana.arguments(), ["--version"]);
+    assert_ne!(
+        sakana.arguments(),
+        DefaultModel::OpenAi.readiness_command().arguments()
+    );
     // Exercise the derived traits the launcher relies on to copy and log a probe.
     let probe: AgentReadinessCommand = DefaultModel::SakanaAi.readiness_command();
     assert_eq!(probe, DefaultModel::SakanaAi.readiness_command());

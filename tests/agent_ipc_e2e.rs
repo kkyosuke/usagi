@@ -222,11 +222,16 @@ fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &P
 /// differ only in the executable name and are exercised with the same script:
 /// the same `login status` readiness contract, the same session capture, and the
 /// same one-line conversation.
+/// Fixture for a Codex-grammar CLI. It answers both status probes the agent CLI
+/// vocabulary declares for this family — Codex's `login status` and the
+/// `codex-fugu` wrapper's `--version`, which is all that wrapper can prove
+/// because Codex refuses `--profile` for `login` — with `ready_status`, so a
+/// caller sets one knob regardless of which product it is standing in for.
 fn write_codex_cli(bin: &Path, program: &str, count: &Path, ready_status: i32) {
     fs::create_dir_all(bin).unwrap();
     let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"$1\" = --version ]; then printf 'fixture 1.0\\n'; exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         count.display(),
     );
     let path = bin.join(program);
@@ -924,7 +929,7 @@ fn safe_readiness_error(error: ClientError) {
     for private in [
         "PATH",
         "codex login status",
-        "codex-fugu login status",
+        "codex-fugu --version",
         "credential",
         "token",
         "argv",
@@ -1425,10 +1430,14 @@ fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
 ///
 /// The root used to accept only `codex` / `claude` as readiness products, which
 /// made an installed and authenticated `codex-fugu` permanently unavailable —
-/// the profile the picker offers could never be launched. This drives the
+/// the profile the picker offers could never be launched. Naming Codex's own
+/// `login status` here reintroduced that outcome from the other side: the
+/// wrapper execs `codex --profile fugu`, Codex accepts `--profile` only for
+/// runtime subcommands, so the probe exited nonzero on a healthy install. The
+/// probe this profile can actually answer is `--version`. This drives the
 /// shipping binary over the real socket for all three states: not installed and
-/// installed-but-unauthenticated must refuse safely without spawning a PTY, and
-/// an authenticated fixture must reach a live conversation.
+/// installed-but-not-runnable must refuse safely without spawning a PTY, and a
+/// runnable fixture must reach a live conversation.
 #[test]
 fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
     let _serial = serial();

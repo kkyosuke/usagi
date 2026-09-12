@@ -362,8 +362,14 @@ impl DefaultModel {
     /// the writable state directory are one fact: a launcher that confines
     /// writes has to grant the state of the CLI it actually spawns, and a renamed
     /// executable must not leave that grant pointing at another provider's
-    /// state. `sakana-ai` runs `codex-fugu`, whose state is `~/.codex-fugu`, so
-    /// it never shares Codex's rollouts. AGY is deliberately narrower: auth is
+    /// state. `sakana-ai` runs `codex-fugu`, which is not a second Codex
+    /// installation but the `fugu` profile *inside* Codex's own home: the
+    /// wrapper defaults `CODEX_HOME` to `~/.codex` and execs `codex --profile
+    /// fugu`, so the Sakana model provider, the model catalog, the API-key
+    /// `.env` the provider reads, and the wrapper's own state under
+    /// `$CODEX_HOME/.fugu` all live there. Granting `~/.codex-fugu` left a
+    /// managed launch unable to write the home it actually uses, so the two
+    /// Codex profiles deliberately share one grant. AGY is deliberately narrower: auth is
     /// held by the OS keyring and only conversation databases need persistent
     /// writes. Keeping the rest of `~/.gemini` outside the grant prevents a
     /// managed tool from replacing global rules, skills, plugins, or scripts
@@ -373,8 +379,7 @@ impl DefaultModel {
         match self {
             Self::Claude => ".claude",
             Self::Agy => ".gemini/antigravity-cli/conversations",
-            Self::OpenAi => ".codex",
-            Self::SakanaAi => ".codex-fugu",
+            Self::OpenAi | Self::SakanaAi => ".codex",
         }
     }
 
@@ -411,12 +416,23 @@ impl DefaultModel {
     /// The non-secret status probe a launcher runs before spawning this
     /// provider's CLI.
     ///
-    /// Codex and the Codex-compatible `codex-fugu` share the same CLI grammar,
-    /// so both prove readiness with `login status`; Claude uses `auth status`,
-    /// and Antigravity uses its authenticated model listing.
+    /// Codex proves readiness with `login status`, Claude with `auth status`,
+    /// and Antigravity with its authenticated model listing.
     /// The probe deliberately reuses [`command`](Self::command) rather than
     /// naming an executable again, so a renamed executable cannot leave the
     /// probe pointing at the old one.
+    ///
+    /// `sakana-ai` shares Codex's grammar but not its login: `codex-fugu` is a
+    /// wrapper that execs `codex --profile fugu`, and Codex accepts
+    /// `--profile` only for runtime subcommands, so `codex-fugu login status`
+    /// exits nonzero however healthy the install is. The profile authenticates
+    /// with the model provider's API key from the environment rather than a
+    /// login session, so there is no login state to prove either. What a
+    /// launcher can prove is that the wrapper runs and finds the Codex it
+    /// delegates to — it exits nonzero when it cannot — which is what
+    /// `--version` asks. A launcher still treats this as readiness, not as the
+    /// install check Doctor makes: the two ask the same question of this one
+    /// product only because this product has no other answer.
     #[must_use]
     pub const fn readiness_command(self) -> AgentReadinessCommand {
         AgentReadinessCommand {
@@ -424,7 +440,8 @@ impl DefaultModel {
             arguments: match self {
                 Self::Claude => &["auth", "status"],
                 Self::Agy => &["models"],
-                Self::OpenAi | Self::SakanaAi => &["login", "status"],
+                Self::OpenAi => &["login", "status"],
+                Self::SakanaAi => &["--version"],
             },
             timeout: match self {
                 Self::Agy => ANTIGRAVITY_READINESS_TIMEOUT,

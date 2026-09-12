@@ -36,7 +36,9 @@
 //! credential へ fallback して認証エラー（401）で起動できなくなる。
 //!
 //! agent state は `~/.claude` 固定ではなく、[`agent_state_directory`] が **exec する program**
-//! から決める（Claude なら `~/.claude`、Codex なら `~/.codex`、sakana.ai なら `~/.codex-fugu`）。
+//! から決める（Claude なら `~/.claude`、Codex と sakana.ai なら `~/.codex`）。sakana.ai の
+//! `codex-fugu` は Codex の別 install ではなく `CODEX_HOME`（既定 `~/.codex`）の中の `fugu`
+//! profile を起動する wrapper なので、grant も同じ home を指す。
 //! 固定していた間、root の Codex は自分の state DB（`~/.codex/state_5.sqlite`）へ書けず
 //! 「attempt to write a readonly database」で起動できなかった。
 //!
@@ -781,7 +783,9 @@ mod tests {
         for (program, state) in [
             ("claude", ".claude"),
             ("codex", ".codex"),
-            ("codex-fugu", ".codex-fugu"),
+            // `codex-fugu` は `CODEX_HOME`（既定 `~/.codex`）の `fugu` profile を起動する
+            // wrapper であり、Codex と同じ home を書く。
+            ("codex-fugu", ".codex"),
             ("agy", ".gemini/antigravity-cli/conversations"),
             // PATH 解決済みの絶対 path でも basename で判定する。
             ("/opt/homebrew/bin/codex", ".codex"),
@@ -818,7 +822,7 @@ mod tests {
                 .any(|root| root.starts_with("/home/dev"))
         );
         // 判定は closed vocabulary（`DefaultModel`）で、未知 token は None を返す。
-        assert_eq!(agent_state_directory("sakana.ai"), Some(".codex-fugu"));
+        assert_eq!(agent_state_directory("sakana.ai"), Some(".codex"));
         assert_eq!(
             agent_state_directory("agy"),
             Some(".gemini/antigravity-cli/conversations")

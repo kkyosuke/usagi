@@ -1631,14 +1631,19 @@ workspace へ引き継ぐ。workspace を証明できない legacy root Agent �
 root は Codex を既定 profile とし、launch する executable 自身の status command を bounded preflight として
 Agent owner lock の外で実行する。どの product にどの status command を対応させるかは、profile・executable と同じ
 [agent CLI の closed vocabulary](03-tui.md#settings-scope-と-workspace-entry)（core domain settings）が持つ単一の決定関数が答える。
-Codex 互換の `sakana-ai` は launch する `codex-fugu` の `login status` で判定され、Codex は `codex login status`、
-Claude は `claude auth status`、Antigravity は `agy models` を使う。vocabulary に無い product は probe を得られず fail closed で `unavailable` になる。
+Codex は `codex login status`、Claude は `claude auth status`、Antigravity は `agy models` を使う。
+Codex 互換の `sakana-ai` は launch する `codex-fugu` の `--version` で判定する。この wrapper は
+`codex --profile fugu` を exec するが、Codex は `--profile` を runtime subcommand にしか許さないため
+`codex-fugu login status` は健全な install でも nonzero で終わる。profile の認証は login session ではなく
+model provider の API key（環境）であり、そもそも問う login state が無い。判定できるのは「wrapper が動き、
+委譲先の Codex を解決できる」ことで、解決できなければ wrapper 自身が nonzero で終わる。
+vocabulary に無い product は probe を得られず fail closed で `unavailable` になる。
 probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
 credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
 差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。
 
 status command の deadline と capture 上限は、status command 自体と同じ vocabulary が product ごとに持つ。
-credential を読んで終わる Claude / Codex / `codex-fugu` は 2 秒・各 16 KiB、language server を起動して認証済み
+Claude / Codex / `codex-fugu` は 2 秒・各 16 KiB、language server を起動して認証済み
 account の model を列挙する Antigravity は 15 秒・各 256 KiB である。全 product で 1 つの budget を共有すると、
 probe が遅い・出力が多いという product 固有の性質だけで、install 済みかつ認証済みの CLI が `unavailable` になる。
 root が持つのは product に依らない部分（terminate grace と coalescing）だけである。
