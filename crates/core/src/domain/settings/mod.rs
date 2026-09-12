@@ -445,9 +445,9 @@ impl DefaultModel {
 
     /// The `$HOME`-relative path prefix of the global config this provider's CLI
     /// writes next to its state directory, when it keeps that config outside the
-    /// directory itself (Claude writes `~/.claude.json`). Codex and `codex-fugu`
-    /// keep their config inside [`state_directory`](Self::state_directory), so
-    /// they have no separate prefix. `sakana-ai` has none either: Claude Code
+    /// directory itself (Claude writes `~/.claude.json`). Codex keeps its config
+    /// inside [`state_directory`](Self::state_directory), so it has no separate
+    /// prefix. `sakana-ai` has none either: Claude Code
     /// writes `.claude.json` *inside* the directory
     /// [`state_directory_env`](Self::state_directory_env) names, so the whole
     /// config already lives under that one grant.
@@ -517,10 +517,12 @@ impl DefaultModel {
     /// The single decision a launcher makes about readiness: resolve a product
     /// token to the status probe that proves that CLI usable, or refuse.
     ///
-    /// The token is resolved with [`from_selector`](Self::from_selector), so an
-    /// executable (`codex-fugu`), a profile ID (`sakana-ai`), and a selector
-    /// (`sakana.ai`) all reach the same probe. An unknown token yields `None`,
-    /// which keeps a launcher fail-closed on a product it does not model.
+    /// The token is resolved with [`from_selector`](Self::from_selector), so a
+    /// profile ID (`sakana-ai`) and a selector (`sakana.ai`) both reach the same
+    /// probe. An executable is not a provider identity — `claude` names Claude,
+    /// never the Fugu profile that runs the same binary — and an unknown token
+    /// yields `None`, which keeps a launcher fail-closed on a product it does
+    /// not model.
     #[must_use]
     pub fn readiness_command_for(token: &str) -> Option<AgentReadinessCommand> {
         Self::from_selector(token).map(Self::readiness_command)

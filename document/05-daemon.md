@@ -1580,6 +1580,12 @@ producer `OperationId` と target 全体を semantic key にして dedupe する
 `superseded_by` の replacement outcome を replay し、failed / in-flight / live / completed のいずれも最初の final から
 分岐させない。resume request は daemon が発行した exact target を必須とし、「最新」や provider 種別で選ばない。
 
+retained conversation が名乗る provider 種別は、**その profile を実際に serve する adapter** が決める。
+`sakana-ai` は Claude CLI を起動する profile なので、その conversation は Claude の provider metadata として
+capture・resume される（製品名ではなく adapter が根拠である）。この profile が Sakana の Codex wrapper を
+起動していた頃の record は別 revision を持つため、revision 照合で resume 対象から外れ、Codex の argv が
+再生されることはない。
+
 daemon restart reconciliation は unfinished record の provider status を `interrupted` にするが、自動 resume は行わない。TUI 起動、pane inventory 復元、daemon / macOS 再起動も同様である。schema v1/v2/v3 record は provider metadata または public lineage が欠けたまま schema v4 として読めるが、ID を推測して補完せず resume 不可のままにする。fixture は continuation の restart stability / non-reuse、root と複数 session、同一 scope の複数 history、Claude / Codex の structured `SessionStart` と Antigravity の structured `PreInvocation` capture、scope/revision/incarnation mismatch、ID の public plan argv / snapshot / IPC 非露出、source relation、operation restart replay と exact source の一度だけの spawn を確認する。
 
 ### daemon restart による Agent integration 更新

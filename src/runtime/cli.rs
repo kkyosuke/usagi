@@ -480,10 +480,13 @@ fn claude_sandbox(
         writeln!(err, "claude-sandbox: {reason:?}")?;
         return Ok(ExitCode::FAILURE);
     }
+    // Whether a HOME inventory is needed is exactly "does this launch get a
+    // `~/.<config>` prefix", so it must be decided by the same resolution the
+    // grant itself uses. Reading it off the program would demand an inventory
+    // for `sakana-ai` (whose config lives inside `CLAUDE_CONFIG_DIR`) and refuse
+    // the launch when `$HOME` is unknown, for a prefix it never receives.
     let linux_home_entries = if platform == Platform::Linux
-        && command
-            .first()
-            .and_then(|program| claude_sandbox::agent_config_prefix(program))
+        && claude_sandbox::granted_config_prefix(agent, command.first().map_or("", String::as_str))
             .is_some()
     {
         let Some(home) = policy.home.as_deref() else {
@@ -544,13 +547,13 @@ fn linux_home_entry_inventory(home: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(entries)
 }
 
-/// launcher が exec 直前に検証する policy path 一式。同じ `Option<PathBuf>` が並ぶため、
-/// 位置引数ではなく名前付きで渡す（順序を取り違えても型では気づけない）。
 /// selector を provider へ解決する。closed vocabulary に無い token は拒否する。
 fn resolve_launch_agent(token: &str) -> Result<usagi_core::domain::settings::DefaultModel, ()> {
     usagi_core::domain::settings::DefaultModel::from_selector(token).ok_or(())
 }
 
+/// launcher が exec 直前に検証する policy path 一式。同じ `Option<PathBuf>` が並ぶため、
+/// 位置引数ではなく名前付きで渡す（順序を取り違えても型では気づけない）。
 #[derive(Default)]
 struct LauncherPolicyInputs {
     protected_root: Option<PathBuf>,

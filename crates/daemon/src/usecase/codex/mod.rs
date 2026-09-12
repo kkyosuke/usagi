@@ -104,7 +104,7 @@ pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
     arguments
 }
 
-/// An [`AgentAdapter`] for the code-defined `codex` and `sakana-ai` profiles.
+/// An [`AgentAdapter`] for the code-defined `codex` profile.
 ///
 /// One instance serves exactly one profile: `program` is the executable that
 /// profile launches, so the rendered plan never depends on a product-name

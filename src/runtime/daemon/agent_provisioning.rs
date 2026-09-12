@@ -205,7 +205,6 @@ impl CodexProvisioner for RootCodexProvisioner {
         .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
-            program: self.agent.command(),
             agent: self.agent,
             workspace_root: &workspace_root,
             launch_roots: &sandbox_roots,
@@ -279,11 +278,6 @@ pub(super) fn agent_writable_roots(
     roots.dedup();
     Ok(roots)
 }
-
-/// The Claude provisioner's product program: what the readiness probe proves,
-/// what the launcher execs, and whose `$HOME` state root the sandbox grants.
-/// The Codex provisioner carries the same value per profile (`RootCodexProvisioner::program`).
-pub(super) const CLAUDE_PROGRAM: &str = "claude";
 
 /// Ensure the launched agent's private state directory exists before a root
 /// sandbox starts. Linux `--bind-try` cannot make a missing bind source writable,
@@ -492,7 +486,6 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         let paths = self.launcher_paths();
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
-            program: CLAUDE_PROGRAM,
             agent: self.agent,
             workspace_root: &workspace_root,
             launch_roots: &launch_roots,
@@ -831,8 +824,6 @@ impl From<InvalidOwnedDirectory> for ClaudeSandboxPolicyError {
 /// daemon が確定した、1 回の launch 分の sandbox policy 入力。
 pub(super) struct SandboxPolicyInputs<'a> {
     pub(super) mode: SandboxMode,
-    /// sandbox の中で exec する agent CLI（`claude` / `codex` / `agy`）。
-    pub(super) program: &'a str,
     /// 起動する provider。root mode で launcher が足す `$HOME` 配下の state root
     /// （`~/.claude` / `~/.codex` / `~/.claude-sakana` / …）はこれで決まる。`claude` を
     /// 2 provider が共有するため、program だけでは検証対象が一意に決まらない。
@@ -859,7 +850,6 @@ pub(super) fn validate_claude_sandbox_policy(
 ) -> Result<(), ClaudeSandboxPolicyError> {
     let SandboxPolicyInputs {
         mode,
-        program,
         agent,
         workspace_root,
         launch_roots,
@@ -909,8 +899,14 @@ pub(super) fn validate_claude_sandbox_policy(
         validate_owned_directory(home)?;
         // State is a path subtree, whereas the global config is a lexical file
         // family (`~/.claude.json*`). Keep those overlap rules distinct.
-        if let Some(state) = claude_sandbox::agent_state_directory(program) {
-            let granted = home.join(state);
+        //
+        // Both are resolved from the **provider**, exactly as the launcher
+        // resolves the grant it will hand out. Reading them off `program` would
+        // judge `sakana-ai` against Claude's `~/.claude` while the launcher
+        // grants `~/.claude-sakana`, so a workspace inside the directory that is
+        // actually made writable would pass this gate.
+        {
+            let granted = home.join(agent.state_directory());
             let granted = granted.canonicalize().unwrap_or(granted);
             if protected_workspace.starts_with(&granted)
                 || (mode == SandboxMode::Root && granted.starts_with(&protected_workspace))
@@ -918,7 +914,7 @@ pub(super) fn validate_claude_sandbox_policy(
                 return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
             }
         }
-        if claude_sandbox::agent_config_prefix(program).is_some_and(|prefix| {
+        if agent.global_config_prefix().is_some_and(|prefix| {
             let granted = home.join(prefix);
             let protected_in_family = lexical_prefix_overlaps_path(&granted, &protected_workspace);
             protected_in_family
@@ -990,7 +986,9 @@ pub(super) fn validate_isolated_sandbox_root(
         cache_dir: policy.cache_dir.map(Path::to_path_buf),
         passthrough: false,
         agent: Some(policy.agent),
-        command: vec![policy.program.to_owned()],
+        // The provider decides the grant; the program it execs follows from it,
+        // so the two cannot be given different answers here.
+        command: vec![policy.agent.command().to_owned()],
     };
     if claude_sandbox::writable_surface_overlaps(&request, target) {
         Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)

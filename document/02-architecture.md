@@ -1084,17 +1084,17 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
 
 #### agent state の writable root
 
-launcher は、**exec する program 自身の state directory** を `$HOME` 配下の writable root に
+launcher は、**起動する provider 自身の state directory** を `$HOME` 配下の writable root に
 足す。agent CLI は自分の state / 認証キャッシュを `$HOME` 配下へ書くため（Codex は state DB
-`~/.codex/state_5.sqlite`）、これが無いと sandbox の中で起動そのものができない。grant は起動する CLI に
+`~/.codex/state_5.sqlite`）、これが無いと sandbox の中で起動そのものができない。grant は起動する provider に
 追従し、他 provider の state へは広がらない。
 
-| program | writable にする state root |
+| provider（exec する program） | writable にする state root |
 |---|---|
-| `claude` | `~/.claude` |
-| `codex` | `~/.codex` |
-| `claude`（sakana.ai の Fugu） | `~/.claude-sakana`（`CLAUDE_CONFIG_DIR` で CLI に指示する） |
-| `agy`（Antigravity CLI） | `~/.gemini/antigravity-cli/conversations`（加えて同じ state 直下の conversation summary DB 3 ファイルだけ） |
+| `claude`（`claude`） | `~/.claude` |
+| `codex`（`codex`） | `~/.codex` |
+| `sakana-ai`（`claude`） | `~/.claude-sakana`（`CLAUDE_CONFIG_DIR` で CLI に指示する） |
+| `agy`（`agy`。Antigravity CLI） | `~/.gemini/antigravity-cli/conversations`（加えて同じ state 直下の conversation summary DB 3 ファイルだけ） |
 
 - 判定の正本は `usagi-core` の `domain::settings::DefaultModel::state_directory` である（provider と state の
   置き場所を 1 つの事実として持つ）。**根拠は exec する program ではなく provider** で、daemon は launcher へ
@@ -1102,8 +1102,9 @@ launcher は、**exec する program 自身の state directory** を `$HOME` 配
   Fugu）が共有するため、argv だけでは両者を区別できず、片方の launch がもう片方の home を書けてしまう。
   `--agent` を伴わない launch は従来どおり program の basename から決め、usagi が launch しない未知 program には
   state root を与えない（fail-closed）。
-- daemon 側の policy 検証も同じ program から state root を決め、保護対象 workspace（および linked worktree の
-  Git common dir）と重なる構成を拒否する。
+- daemon 側の policy 検証も同じ provider から state root と config prefix を決め、保護対象 workspace（および
+  linked worktree の Git common dir）と重なる構成を拒否する。検証が program を根拠にすると、launcher が実際に
+  writable にする directory の中にある workspace を通してしまう。
 - grant は両 mode に効く。session の agent CLI も利用者本人の state directory をそのまま使うため、
   onboarding・theme・permission mode・MCP 承認・認証は session をまたいで持続する。
 - `agy` は auth token を OS keyring から読み、永続書き込みを conversation subtree と summary DB に限定する。
@@ -1118,11 +1119,12 @@ agent CLI の設定は state directory の中だけにあるとは限らない�
 MCP 承認**を `~/.claude` の中ではなく隣の `~/.claude.json` に置き、保存を lock file と temp file 経由で行う。
 したがって launcher は、この **path prefix** も両 mode の writable 領域に足す。
 
-| program | writable にする config prefix | prefix が覆う path |
+| provider（exec する program） | writable にする config prefix | prefix が覆う path |
 |---|---|---|
-| `claude` | `~/.claude.json` | `~/.claude.json` 本体 / `~/.claude.json.lock` / `~/.claude.json.tmp.<pid>.<random>` / `~/.claude.json.backup.<ms>` |
-| `codex` | なし（config は state directory の中） | — |
-| `claude`（sakana.ai の Fugu） | なし（config は `CLAUDE_CONFIG_DIR` の中） | — |
+| `claude`（`claude`） | `~/.claude.json` | `~/.claude.json` 本体 / `~/.claude.json.lock` / `~/.claude.json.tmp.<pid>.<random>` / `~/.claude.json.backup.<ms>` |
+| `codex`（`codex`） | なし（config は state directory の中） | — |
+| `sakana-ai`（`claude`） | なし（config は `CLAUDE_CONFIG_DIR` が指す state directory の中） | — |
+| `agy`（`agy`） | なし | — |
 
 - **1 ファイルの grant では足りない**。Claude は `~/.claude.json.lock` を取り、
   `~/.claude.json.tmp.<pid>.<random>` を書いて rename で本体に被せる。file 単位で許可すると temp と lock が

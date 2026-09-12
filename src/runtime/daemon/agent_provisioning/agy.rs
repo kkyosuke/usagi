@@ -82,7 +82,6 @@ impl AgyProvisioner for RootAgyProvisioner {
         let mut read_only_roots = Vec::new();
         let policy = SandboxPolicyInputs {
             mode,
-            program: DefaultModel::Agy.command(),
             agent: DefaultModel::Agy,
             workspace_root: &workspace_root,
             launch_roots: &sandbox_roots,

@@ -359,6 +359,14 @@ mod tests {
         // a shared revision would let it validate against this profile.
         assert_ne!(sakana.profile().revision, claude.profile().revision);
         assert_eq!(sakana.profile().revision, SAKANA_PROFILE_REVISION);
+        // The snapshots that must not validate are the Codex adapter's, so the
+        // revision has to differ from *that* constant too. A resume reference
+        // is admitted on `adapter_revision` equality, and this is the whole
+        // fence that keeps a Codex-era `sakana-ai` record from being replayed.
+        assert_ne!(
+            SAKANA_PROFILE_REVISION,
+            crate::usecase::codex::PROFILE_REVISION
+        );
 
         // A launch for the other profile is refused rather than answered with
         // the wrong identity.

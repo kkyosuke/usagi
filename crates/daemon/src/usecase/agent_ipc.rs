@@ -4544,16 +4544,22 @@ const fn runtime_inventory_state(
     }
 }
 
-/// `sakana-ai` is a Codex-compatible CLI, so its retained conversations carry
-/// [`ProviderKind::Codex`] and resume through the same provider metadata.
+/// The provider metadata a profile's retained conversations carry.
+///
+/// `sakana-ai` is the **Claude** CLI pointed at Sakana's Anthropic-compatible
+/// endpoint, so its conversations are captured and resumed through Claude's
+/// provider metadata — the adapter that serves the profile is what decides this,
+/// never the product name. It was Codex-shaped while the profile ran Sakana's
+/// Codex wrapper; records from that era carry the old adapter revision and stop
+/// matching on the revision check instead of replaying Codex argv.
 fn provider_matches_profile(provider: ProviderKind, profile: &AgentProfileId) -> bool {
     provider_for_profile(profile) == Some(provider)
 }
 
 fn provider_for_profile(profile: &AgentProfileId) -> Option<ProviderKind> {
     match profile.as_str() {
-        "claude" => Some(ProviderKind::Claude),
-        "codex" | "sakana-ai" => Some(ProviderKind::Codex),
+        "claude" | "sakana-ai" => Some(ProviderKind::Claude),
+        "codex" => Some(ProviderKind::Codex),
         "agy" => Some(ProviderKind::Agy),
         _ => None,
     }
@@ -10318,15 +10324,18 @@ mod tests {
 
     #[test]
     fn provider_metadata_matches_only_its_compatible_profiles() {
-        // `sakana-ai` runs the Codex-compatible CLI, so its retained
-        // conversations carry `ProviderKind::Codex` and stay resumable. Claude
-        // metadata must never authorize a Codex-grammar profile, or vice versa.
+        // `sakana-ai` runs the Claude CLI, so the Claude adapter is what
+        // captures and resumes its conversations: its retained metadata is
+        // `ProviderKind::Claude`. Codex metadata — including a record written
+        // while this profile still ran Sakana's Codex wrapper — must never
+        // authorize it, or the daemon would hand Codex resume data to a Claude
+        // adapter.
         for (provider, profile, expected) in [
             (ProviderKind::Claude, "claude", true),
             (ProviderKind::Codex, "codex", true),
-            (ProviderKind::Codex, "sakana-ai", true),
+            (ProviderKind::Claude, "sakana-ai", true),
             (ProviderKind::Agy, "agy", true),
-            (ProviderKind::Claude, "sakana-ai", false),
+            (ProviderKind::Codex, "sakana-ai", false),
             (ProviderKind::Claude, "codex", false),
             (ProviderKind::Codex, "claude", false),
             (ProviderKind::Agy, "codex", false),

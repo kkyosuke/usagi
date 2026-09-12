@@ -35,8 +35,9 @@
 //! error has occurred." で失敗し、agent CLI は Keychain の credential を読めないまま古い file 側の
 //! credential へ fallback して認証エラー（401）で起動できなくなる。
 //!
-//! agent state は `~/.claude` 固定ではなく、[`agent_state_directory`] が **exec する program**
-//! から決める（Claude なら `~/.claude`、Codex なら `~/.codex`、sakana.ai なら `~/.codex-fugu`）。
+//! agent state は `~/.claude` 固定ではなく、[`granted_state_directory`] が **起動する provider**
+//! から決める（Claude なら `~/.claude`、Codex なら `~/.codex`、sakana.ai なら `~/.claude-sakana`）。
+//! provider が渡されない launch だけが [`agent_state_directory`] で program の basename に落ちる。
 //! 固定していた間、root の Codex は自分の state DB（`~/.codex/state_5.sqlite`）へ書けず
 //! 「attempt to write a readonly database」で起動できなかった。
 //!
@@ -282,11 +283,13 @@ fn reject_backend(backend: &str) -> SandboxPlan {
     }
 }
 
-/// exec する program が managed launch 中に書ける `$HOME` 配下の directory 名。
+/// exec する program だけから決める `$HOME` 配下の directory 名。provider を伴わない launch
+/// のための **fallback** であり、通常の経路は [`granted_state_directory`] を使う。
 ///
-/// 根拠は launcher が実際に exec する program（`command` の先頭）だけで、値の単一情報源は
-/// [`DefaultModel::state_directory`] である。したがって grant は起動する CLI と必ず一致し、
-/// provider を増やしても sandbox 側に写し漏れが起きない。AGY は自動ロードされる global
+/// 値の単一情報源は [`DefaultModel::state_directory`] で、provider を増やしても sandbox 側に
+/// 写し漏れが起きない。ただし executable は provider の identity ではないため（`claude` は
+/// Claude と `sakana-ai` が共有する）、program だけを根拠にできるのは selector が無いときに
+/// 限る。AGY は自動ロードされる global
 /// customization と runtime state が同じ `~/.gemini` に同居するため、conversation subtree
 /// だけを返す。usagi が launch しない未知 program には state root を与えない（fail-closed）。
 #[must_use]
@@ -295,15 +298,16 @@ pub fn agent_state_directory(program: &str) -> Option<&'static str> {
     DefaultModel::from_selector(&name.to_string_lossy()).map(DefaultModel::state_directory)
 }
 
-/// exec する program が `$HOME` 直下へ書く global config の path **prefix**。
+/// exec する program だけから決める、`$HOME` 直下の global config の path **prefix**。
+/// [`agent_state_directory`] と同じく provider を伴わない launch のための fallback である。
 ///
-/// 値の単一情報源は [`DefaultModel::global_config_prefix`] で、[`agent_state_directory`] と同じく
-/// 起動する CLI からだけ決まる。Claude の global config は state directory（`~/.claude`）の中では
+/// 値の単一情報源は [`DefaultModel::global_config_prefix`] である。Claude の global config は state directory（`~/.claude`）の中では
 /// なく `~/.claude.json` にあり、保存は `~/.claude.json.lock` を取って
 /// `~/.claude.json.tmp.<pid>.<random>` を書き、それを rename で被せる形で行う（`.backup.<ms>` も
 /// 隣に置く）。したがって grant は「その 1 ファイル」ではなく **prefix** でなければならず、
 /// prefix が無いと onboarding・folder trust・MCP 承認が毎起動やり直しになる。
-/// 自分の state directory の中に config を持つ provider（Codex / `codex-fugu`）は `None`。
+/// 自分の state directory の中に config を持つ provider（Codex）と、`CLAUDE_CONFIG_DIR` が指す
+/// directory の中に config を置く provider（`sakana-ai`）は `None`。
 #[must_use]
 pub fn agent_config_prefix(program: &str) -> Option<&'static str> {
     let name = Path::new(program).file_name()?;
@@ -1248,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn the_global_config_grant_follows_the_program_that_is_actually_exec_ed() {
+    fn the_global_config_grant_follows_the_provider_that_is_actually_launched() {
         // config を自分の state directory の中に持つ provider には prefix を配らない。
         assert_eq!(agent_config_prefix("claude"), Some(".claude.json"));
         assert_eq!(
@@ -1256,10 +1260,22 @@ mod tests {
             Some(".claude.json")
         );
         assert_eq!(agent_config_prefix("codex"), None);
-        assert_eq!(agent_config_prefix("codex-fugu"), None);
         assert_eq!(agent_config_prefix("gemini"), None);
         assert_eq!(agent_config_prefix(""), None);
         assert_eq!(agent_config_prefix("/"), None);
+        // 同じ `claude` を exec しても、prefix を得るのは Claude だけである。
+        // `sakana-ai` の config は `CLAUDE_CONFIG_DIR` が指す state directory の中にある。
+        assert_eq!(
+            granted_config_prefix(Some(DefaultModel::Claude), "claude"),
+            Some(".claude.json")
+        );
+        assert_eq!(
+            granted_config_prefix(Some(DefaultModel::SakanaAi), "claude"),
+            None
+        );
+        // provider が無い launch だけが program の basename に落ちる。
+        assert_eq!(granted_config_prefix(None, "claude"), Some(".claude.json"));
+        assert_eq!(granted_config_prefix(None, "gemini"), None);
 
         let mut codex = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
         codex.command = vec!["codex".to_owned()];

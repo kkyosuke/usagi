@@ -56,8 +56,10 @@ impl AdapterRegistry {
     /// port. Product-specific behavior remains behind each adapter; callers
     /// select it solely by the typed profile ID in a launch request.
     ///
-    /// `sakana` is a second Codex-grammar profile (`sakana-ai`) with its own
-    /// executable, so it registers through the same adapter type.
+    /// `sakana` is a second **Claude**-grammar profile (`sakana-ai`): Fugu is the
+    /// Claude CLI pointed at Sakana's Anthropic-compatible endpoint by its
+    /// provisioner's environment, so it registers through that adapter type and
+    /// differs from `claude` only in identity and revision.
     pub fn register_supported<
         C: CodexProvisioner + Send + 'static,
         S: ClaudeProvisioner + Send + 'static,

@@ -69,7 +69,7 @@ impl From<EnvLimitError> for UserEnvironmentError {
 /// repository chose. usagi owns them per provider
 /// ([`DefaultModel::gateway_environment`]), so a workspace binding could only
 /// ever be an override of that decision.
-const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 13] = [
+const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 15] = [
     "PATH",
     "TMPDIR",
     "HOME",
@@ -81,6 +81,8 @@ const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 13] = [
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
     // The provider API key usagi injects. Reserving it keeps one machine-level
     // value behind the readiness probe and the launch: the probe has no
     // workspace, so a workspace-scoped key would let a launch be admitted — or
@@ -216,7 +218,9 @@ pub fn typed(values: &BTreeMap<String, String>) -> Vec<(EnvironmentVariableName,
 
 #[cfg(test)]
 mod tests {
-    use super::{UserEnvironment, UserEnvironmentError, allowlist, typed};
+    use super::{
+        UserEnvironment, UserEnvironmentError, WORKSPACE_AGENT_CONTROL_VARIABLES, allowlist, typed,
+    };
     use std::collections::BTreeMap;
     use std::path::Path;
     use std::sync::Mutex;
@@ -501,6 +505,8 @@ mod tests {
             ("ANTHROPIC_DEFAULT_OPUS_MODEL", "attacker-model"),
             ("ANTHROPIC_DEFAULT_SONNET_MODEL", "attacker-model"),
             ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "attacker-model"),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL", "attacker-model"),
+            ("CLAUDE_CODE_SUBAGENT_MODEL", "attacker-model"),
             // Nor at another provider's state directory.
             ("CLAUDE_CONFIG_DIR", "/workspace/.claude"),
             // The provider key is machine-level so the probe and the launch
@@ -530,6 +536,35 @@ mod tests {
         }
         #[cfg(unix)]
         std::fs::remove_file(symlink).unwrap();
+    }
+
+    /// Every name usagi itself injects to *define* a provider has to be reserved
+    /// from workspace bindings, and the set is derived from the vocabulary
+    /// rather than retyped here: adding a gateway variable without reserving it
+    /// would otherwise ship a name a checked-in `.usagi/settings.json` can
+    /// override, silently changing which model — or which account — a managed
+    /// launch uses.
+    #[test]
+    fn every_variable_usagi_injects_for_a_provider_is_reserved_from_workspaces() {
+        for model in usagi_core::domain::settings::DefaultModel::ALL {
+            let injected = model
+                .gateway_environment()
+                .iter()
+                .map(|(name, _)| *name)
+                .chain(model.state_directory_env())
+                .chain(
+                    model
+                        .credential_binding()
+                        .into_iter()
+                        .flat_map(|(source, target)| [source, target]),
+                );
+            for name in injected {
+                assert!(
+                    WORKSPACE_AGENT_CONTROL_VARIABLES.contains(&name),
+                    "{model:?} injects {name}, so a workspace must not be able to bind it"
+                );
+            }
+        }
     }
 
     #[test]
