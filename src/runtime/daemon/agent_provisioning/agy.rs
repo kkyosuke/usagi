@@ -71,7 +71,7 @@ impl AgyProvisioner for RootAgyProvisioner {
             &working_directory,
             session_git.as_ref(),
             self.sandbox_home.as_deref(),
-            DefaultModel::Agy.command(),
+            DefaultModel::Agy,
             &self.data_home,
             context.scope.workspace_id,
         )
@@ -83,6 +83,7 @@ impl AgyProvisioner for RootAgyProvisioner {
         let policy = SandboxPolicyInputs {
             mode,
             program: DefaultModel::Agy.command(),
+            agent: DefaultModel::Agy,
             workspace_root: &workspace_root,
             launch_roots: &sandbox_roots,
             tmpdir: self.sandbox_tmpdir.as_deref(),
@@ -118,6 +119,7 @@ impl AgyProvisioner for RootAgyProvisioner {
         let launcher = claude_sandbox_launcher(
             &self.mcp_command,
             mode,
+            DefaultModel::Agy,
             &protected_root,
             &SandboxLauncherPaths {
                 backend: self.sandbox_backend.as_deref(),

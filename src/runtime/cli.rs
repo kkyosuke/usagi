@@ -326,6 +326,7 @@ mod action_io {
                 Action::ClaudeSandbox,
                 RunOutcome::ClaudeSandbox {
                     mode,
+                    agent,
                     protected_root,
                     backend,
                     tmpdir,
@@ -337,6 +338,7 @@ mod action_io {
                 },
             ) => claude_sandbox(
                 mode,
+                agent,
                 LauncherPolicyInputs {
                     protected_root,
                     backend,
@@ -452,10 +454,21 @@ fn guard_workspace(out: &mut dyn Write) -> std::io::Result<ExitCode> {
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=macos_wraps_claude_with_a_write_confining_profile
 fn claude_sandbox(
     mode: SandboxMode,
+    agent: Option<String>,
     policy: LauncherPolicyInputs,
     command: Vec<String>,
     err: &mut dyn Write,
 ) -> std::io::Result<ExitCode> {
+    // 未知の selector で起動を通さない。grant の根拠が失われた launch は、
+    // program 名から別 provider の state を貰ってしまうため fail closed にする。
+    let agent = match agent.as_deref().map(resolve_launch_agent) {
+        Some(Ok(agent)) => Some(agent),
+        Some(Err(())) => {
+            writeln!(err, "claude-sandbox: 未知の agent selector です")?;
+            return Ok(ExitCode::FAILURE);
+        }
+        None => None,
+    };
     let platform = if cfg!(target_os = "macos") {
         Platform::MacOs
     } else if cfg!(target_os = "linux") {
@@ -503,6 +516,7 @@ fn claude_sandbox(
         home: policy.home,
         linux_home_entries,
         cache_dir: policy.cache_dir,
+        agent,
         // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
         // 配布バイナリはこの環境変数を見ても拘束を外さない。
         passthrough: claude_sandbox::passthrough_requested(
@@ -532,6 +546,11 @@ fn linux_home_entry_inventory(home: &Path) -> std::io::Result<Vec<PathBuf>> {
 
 /// launcher が exec 直前に検証する policy path 一式。同じ `Option<PathBuf>` が並ぶため、
 /// 位置引数ではなく名前付きで渡す（順序を取り違えても型では気づけない）。
+/// selector を provider へ解決する。closed vocabulary に無い token は拒否する。
+fn resolve_launch_agent(token: &str) -> Result<usagi_core::domain::settings::DefaultModel, ()> {
+    usagi_core::domain::settings::DefaultModel::from_selector(token).ok_or(())
+}
+
 #[derive(Default)]
 struct LauncherPolicyInputs {
     protected_root: Option<PathBuf>,
@@ -1068,6 +1087,7 @@ mod tests {
         assert_route(
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Session,
+                agent: Some("claude".to_owned()),
                 protected_root: None,
                 backend: None,
                 tmpdir: None,

@@ -316,8 +316,9 @@ pub enum DefaultModel {
     Claude,
     /// Google Antigravity CLI, launched through the `agy` profile.
     Agy,
-    /// Sakana AI's Codex-compatible CLI. Presented as `sakana.ai` and launched
-    /// through the `sakana-ai` profile, whose executable is `codex-fugu`.
+    /// Sakana AI's Fugu models. Presented as `sakana.ai` and launched through
+    /// the `sakana-ai` profile, which runs the **Claude CLI** against Sakana's
+    /// Anthropic-compatible endpoint rather than a CLI of its own.
     #[serde(alias = "codex_fugu", alias = "sakana.ai")]
     SakanaAi,
     /// `OpenAI`, launched through the Codex `codex` profile.
@@ -344,14 +345,75 @@ impl DefaultModel {
 
     /// The executable whose availability decides whether this provider can be
     /// selected. It is deliberately distinct from
-    /// [`profile_id`](Self::profile_id): `sakana-ai` runs `codex-fugu`.
+    /// [`profile_id`](Self::profile_id), and it is **not unique**: `sakana-ai`
+    /// serves Fugu models through the same Claude CLI, pointed at Sakana's
+    /// Anthropic-compatible endpoint by [`gateway_environment`](Self::gateway_environment).
+    /// Anything that has to tell those two apart — the writable state grant,
+    /// the launch environment — must therefore be keyed by the provider, never
+    /// by the program it execs.
     #[must_use]
     pub const fn command(self) -> &'static str {
         match self {
-            Self::Claude => "claude",
+            Self::Claude | Self::SakanaAi => "claude",
             Self::Agy => "agy",
             Self::OpenAi => "codex",
-            Self::SakanaAi => "codex-fugu",
+        }
+    }
+
+    /// The fixed, non-secret variables that make this provider's CLI talk to
+    /// this provider. Empty for a CLI that is already its own product.
+    ///
+    /// Fugu is not a separate CLI: it is Claude Code pointed at Sakana's
+    /// Anthropic-compatible endpoint, with each Anthropic model slot bound to a
+    /// Fugu model. Those bindings are what make the provider *be* Fugu, so they
+    /// belong to the closed vocabulary beside the executable rather than to a
+    /// user's environment — a launch that lost them would silently run as
+    /// Anthropic Claude while the picker said `sakana.ai`.
+    #[must_use]
+    pub const fn gateway_environment(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::SakanaAi => &[
+                ("ANTHROPIC_BASE_URL", "https://api.sakana.ai"),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", "fugu-max[1m]"),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", "fugu[1m]"),
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "fugu[1m]"),
+                ("ANTHROPIC_DEFAULT_FABLE_MODEL", "fugu-ultra[1m]"),
+                ("CLAUDE_CODE_SUBAGENT_MODEL", "fugu[1m]"),
+            ],
+            Self::Claude | Self::OpenAi | Self::Agy => &[],
+        }
+    }
+
+    /// The variable that must name [`state_directory`](Self::state_directory),
+    /// for a CLI that finds its state through the environment instead of a
+    /// fixed path.
+    ///
+    /// Two providers run the same `claude` executable, and a CLI that resolves
+    /// its own state would give both the same home. `CLAUDE_CONFIG_DIR` is what
+    /// keeps the Fugu profile's conversations, settings, and MCP approvals out
+    /// of the Claude profile's.
+    #[must_use]
+    pub const fn state_directory_env(self) -> Option<&'static str> {
+        match self {
+            Self::SakanaAi => Some("CLAUDE_CONFIG_DIR"),
+            Self::Claude | Self::OpenAi | Self::Agy => None,
+        }
+    }
+
+    /// How this provider's API key reaches its CLI: the name usagi stores it
+    /// under, and the variable the CLI reads it from.
+    ///
+    /// The two names differ on purpose. `ANTHROPIC_AUTH_TOKEN` is Claude Code's
+    /// own credential variable, so storing a Sakana key under that name would
+    /// hand it to the Anthropic Claude profile as well — and point that profile
+    /// at whatever endpoint happened to be set. Storing it under the product's
+    /// own `SAKANA_API_KEY` keeps one key with one meaning, and this mapping is
+    /// the only place it becomes Claude's credential.
+    #[must_use]
+    pub const fn credential_binding(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::SakanaAi => Some(("SAKANA_API_KEY", "ANTHROPIC_AUTH_TOKEN")),
+            Self::Claude | Self::OpenAi | Self::Agy => None,
         }
     }
 
@@ -362,8 +424,11 @@ impl DefaultModel {
     /// the writable state directory are one fact: a launcher that confines
     /// writes has to grant the state of the CLI it actually spawns, and a renamed
     /// executable must not leave that grant pointing at another provider's
-    /// state. `sakana-ai` runs `codex-fugu`, whose state is `~/.codex-fugu`, so
-    /// it never shares Codex's rollouts. AGY is deliberately narrower: auth is
+    /// state. `sakana-ai` runs the same `claude` executable as Claude, so its
+    /// grant is resolved from the provider rather than that shared program and
+    /// names its own `~/.claude-sakana`, which
+    /// [`state_directory_env`](Self::state_directory_env) points the CLI at.
+    /// AGY is deliberately narrower: auth is
     /// held by the OS keyring and only conversation databases need persistent
     /// writes. Keeping the rest of `~/.gemini` outside the grant prevents a
     /// managed tool from replacing global rules, skills, plugins, or scripts
@@ -374,7 +439,7 @@ impl DefaultModel {
             Self::Claude => ".claude",
             Self::Agy => ".gemini/antigravity-cli/conversations",
             Self::OpenAi => ".codex",
-            Self::SakanaAi => ".codex-fugu",
+            Self::SakanaAi => ".claude-sakana",
         }
     }
 
@@ -382,7 +447,10 @@ impl DefaultModel {
     /// writes next to its state directory, when it keeps that config outside the
     /// directory itself (Claude writes `~/.claude.json`). Codex and `codex-fugu`
     /// keep their config inside [`state_directory`](Self::state_directory), so
-    /// they have no separate prefix.
+    /// they have no separate prefix. `sakana-ai` has none either: Claude Code
+    /// writes `.claude.json` *inside* the directory
+    /// [`state_directory_env`](Self::state_directory_env) names, so the whole
+    /// config already lives under that one grant.
     ///
     /// It is a **prefix**, not one file: Claude saves the config by writing
     /// `~/.claude.json.tmp.<pid>.<random>` under the `~/.claude.json.lock` lock and
@@ -393,7 +461,7 @@ impl DefaultModel {
     pub const fn global_config_prefix(self) -> Option<&'static str> {
         match self {
             Self::Claude => Some(".claude.json"),
-            Self::Agy | Self::OpenAi | Self::SakanaAi => None,
+            Self::Agy | Self::OpenAi | Self::SakanaAi => None, // sakana-ai: inside CLAUDE_CONFIG_DIR
         }
     }
 
@@ -411,20 +479,29 @@ impl DefaultModel {
     /// The non-secret status probe a launcher runs before spawning this
     /// provider's CLI.
     ///
-    /// Codex and the Codex-compatible `codex-fugu` share the same CLI grammar,
-    /// so both prove readiness with `login status`; Claude uses `auth status`,
-    /// and Antigravity uses its authenticated model listing.
+    /// Codex proves readiness with `login status`, Claude and `sakana-ai` with
+    /// `auth status`, and Antigravity with its authenticated model listing.
     /// The probe deliberately reuses [`command`](Self::command) rather than
     /// naming an executable again, so a renamed executable cannot leave the
     /// probe pointing at the old one.
+    ///
+    /// `sakana-ai` asks the same question of the same executable as Claude, but
+    /// it is not the same probe: run under this provider's
+    /// [`gateway_environment`](Self::gateway_environment),
+    /// [`state_directory_env`](Self::state_directory_env) and resolved
+    /// [`credential_binding`](Self::credential_binding), `claude auth status`
+    /// answers for the Fugu credential in the Fugu config directory. Run
+    /// without them it answers for the user's own Anthropic login, which is a
+    /// different fact about a different account. A launcher must therefore give
+    /// the probe the same environment it would give the launch.
     #[must_use]
     pub const fn readiness_command(self) -> AgentReadinessCommand {
         AgentReadinessCommand {
             program: self.command(),
             arguments: match self {
-                Self::Claude => &["auth", "status"],
+                Self::Claude | Self::SakanaAi => &["auth", "status"],
                 Self::Agy => &["models"],
-                Self::OpenAi | Self::SakanaAi => &["login", "status"],
+                Self::OpenAi => &["login", "status"],
             },
             timeout: match self {
                 Self::Agy => ANTIGRAVITY_READINESS_TIMEOUT,

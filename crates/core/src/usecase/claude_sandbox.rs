@@ -127,6 +127,11 @@ pub struct SandboxRequest {
     /// テスト専用 seam。true なら backend で包まず command をそのまま exec する。合成ルートは
     /// [`passthrough_requested`] の結果だけをここへ入れる（release ビルドでは常に false）。
     pub passthrough: bool,
+    /// 起動する agent provider。`$HOME` 配下の state grant と config prefix は、
+    /// これがあるときは **provider** から決まり、無いときだけ command の basename から
+    /// 決まる。Claude と `sakana-ai` は同じ `claude` を exec するため、program 名だけでは
+    /// 両者を区別できず、Fugu の launch が Claude 本体の home を書けてしまう。
+    pub agent: Option<DefaultModel>,
     /// sandbox の中で exec する program と引数（先頭が program、以降が引数）。
     pub command: Vec<String>,
 }
@@ -317,6 +322,34 @@ pub fn macos_mds_cache_root(cache_dir: &Path) -> PathBuf {
 }
 
 /// 起動固有の root（provisioner 由来）と普遍領域を結合し、重複を除いた決定的な writable root 集合。
+/// この launch の `$HOME` 配下 state directory。
+///
+/// provider が渡されていればそれが権威で、無いときだけ exec する program から決める。
+/// `claude` executable は Claude と `sakana-ai` が共有するので、program だけを根拠にすると
+/// Fugu の launch が Claude 本体の `~/.claude` を writable に得てしまう。daemon 側の policy
+/// 検証も同じ関数を使い、launcher が実際に配る grant と検証対象を分岐させない。
+#[must_use]
+pub fn granted_state_directory(agent: Option<DefaultModel>, program: &str) -> Option<&'static str> {
+    agent.map_or_else(
+        || agent_state_directory(program),
+        |agent| Some(agent.state_directory()),
+    )
+}
+
+/// 同じ根拠で決める global config の path prefix。
+#[must_use]
+pub fn granted_config_prefix(agent: Option<DefaultModel>, program: &str) -> Option<&'static str> {
+    agent.map_or_else(
+        || agent_config_prefix(program),
+        DefaultModel::global_config_prefix,
+    )
+}
+
+/// request が exec する program。空 command は grant を得られない。
+fn request_program(request: &SandboxRequest) -> &str {
+    request.command.first().map_or("", String::as_str)
+}
+
 fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
     let mut roots: BTreeSet<PathBuf> = request.launch_roots.iter().cloned().collect();
     roots.insert(PathBuf::from("/tmp"));
@@ -327,11 +360,7 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
     if let Some(home) = &request.home {
         // 起動する agent CLI 自身の writable state。AGY は global customization と
         // state が同居するため、conversation subtree だけを返す。
-        if let Some(state) = request
-            .command
-            .first()
-            .and_then(|program| agent_state_directory(program))
-        {
+        if let Some(state) = granted_state_directory(request.agent, request_program(request)) {
             roots.insert(home.join(state));
         }
         if request.platform == Platform::MacOs {
@@ -359,10 +388,7 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
 fn writable_prefixes(request: &SandboxRequest) -> Vec<PathBuf> {
     let mut prefixes: BTreeSet<PathBuf> = BTreeSet::new();
     if let Some(home) = &request.home
-        && let Some(prefix) = request
-            .command
-            .first()
-            .and_then(|program| agent_config_prefix(program))
+        && let Some(prefix) = granted_config_prefix(request.agent, request_program(request))
     {
         prefixes.insert(home.join(prefix));
     }
@@ -615,6 +641,7 @@ mod tests {
             read_only_roots: Vec::new(),
             tmpdir: Some(PathBuf::from("/tmp/user")),
             home: Some(PathBuf::from("/home/dev")),
+            agent: None,
             linux_home_entries: Some(vec![
                 PathBuf::from("/home/dev/.claude"),
                 PathBuf::from("/home/dev/.claude.json"),
@@ -778,17 +805,21 @@ mod tests {
         // 固定の `~/.claude` を配っていた間、root の Codex は自分の state DB へ書けずに
         // 「attempt to write a readonly database」で起動できなかった。grant は exec する
         // program に追従する。
-        for (program, state) in [
-            ("claude", ".claude"),
-            ("codex", ".codex"),
-            ("codex-fugu", ".codex-fugu"),
-            ("agy", ".gemini/antigravity-cli/conversations"),
+        for (agent, program, state) in [
+            (None, "claude", ".claude"),
+            (None, "codex", ".codex"),
+            (None, "agy", ".gemini/antigravity-cli/conversations"),
             // PATH 解決済みの絶対 path でも basename で判定する。
-            ("/opt/homebrew/bin/codex", ".codex"),
+            (None, "/opt/homebrew/bin/codex", ".codex"),
+            // provider が渡されればそれが権威。`sakana-ai` は Claude と同じ
+            // `claude` を exec するため、program からは区別できない。
+            (Some(DefaultModel::SakanaAi), "claude", ".claude-sakana"),
+            (Some(DefaultModel::Claude), "claude", ".claude"),
         ] {
             let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
             request.mode = SandboxMode::Root;
             request.launch_roots.clear();
+            request.agent = agent;
             request.command = vec![program.to_owned()];
             let roots = writable_roots(&request);
             assert!(
@@ -818,7 +849,7 @@ mod tests {
                 .any(|root| root.starts_with("/home/dev"))
         );
         // 判定は closed vocabulary（`DefaultModel`）で、未知 token は None を返す。
-        assert_eq!(agent_state_directory("sakana.ai"), Some(".codex-fugu"));
+        assert_eq!(agent_state_directory("sakana.ai"), Some(".claude-sakana"));
         assert_eq!(
             agent_state_directory("agy"),
             Some(".gemini/antigravity-cli/conversations")

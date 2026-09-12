@@ -3767,7 +3767,7 @@ fn open_agent_runtime(
             workspaces: Arc::clone(&workspaces),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: DefaultModel::OpenAi.command(),
+            agent: DefaultModel::OpenAi,
             environment: Some(Arc::clone(&environment)),
             sandbox_backend: sandbox_backend.clone(),
             sandbox_tmpdir: sandbox_tmpdir.clone(),
@@ -3775,22 +3775,27 @@ fn open_agent_runtime(
             sandbox_cache_dir: sandbox_cache_dir.clone(),
             sandbox_passthrough,
         }),
-        CodexAdapter::sakana(RootCodexProvisioner {
+        // Fugu is the same Claude CLI pointed at Sakana's Anthropic-compatible
+        // endpoint, so it reuses this adapter and differs only in the provider
+        // its provisioner carries: gateway variables, its own config directory,
+        // and its own API key.
+        ClaudeAdapter::sakana(RootClaudeProvisioner {
             workspaces: Arc::clone(&workspaces),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: DefaultModel::SakanaAi.command(),
-            environment: Some(Arc::clone(&environment)),
+            agent: DefaultModel::SakanaAi,
             sandbox_backend: sandbox_backend.clone(),
             sandbox_tmpdir: sandbox_tmpdir.clone(),
             sandbox_home: sandbox_home.clone(),
             sandbox_cache_dir: sandbox_cache_dir.clone(),
+            environment: Some(Arc::clone(&environment)),
             sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             workspaces: Arc::clone(&workspaces),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
+            agent: DefaultModel::Claude,
             sandbox_backend: sandbox_backend.clone(),
             sandbox_tmpdir: sandbox_tmpdir.clone(),
             sandbox_home: sandbox_home.clone(),
@@ -18721,11 +18726,22 @@ instructions = "{instructions}"
         let home = fixture.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
 
-        let roots = root_agent_writable_roots(Some(&home), "codex").unwrap();
+        let roots = root_agent_writable_roots(Some(&home), DefaultModel::OpenAi).unwrap();
         assert_eq!(roots, [home.join(".codex").canonicalize().unwrap()]);
         assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
 
-        let roots = root_agent_writable_roots(Some(&home), "agy").unwrap();
+        // Two providers exec the same `claude`, and each still gets only its own
+        // state: the grant is keyed by provider, never by that shared program.
+        let claude = root_agent_writable_roots(Some(&home), DefaultModel::Claude).unwrap();
+        let sakana = root_agent_writable_roots(Some(&home), DefaultModel::SakanaAi).unwrap();
+        assert_eq!(claude, [home.join(".claude").canonicalize().unwrap()]);
+        assert_eq!(
+            sakana,
+            [home.join(".claude-sakana").canonicalize().unwrap()]
+        );
+        assert_ne!(claude, sakana);
+
+        let roots = root_agent_writable_roots(Some(&home), DefaultModel::Agy).unwrap();
         assert_eq!(
             roots,
             [home
@@ -18745,13 +18761,13 @@ instructions = "{instructions}"
             std::fs::create_dir_all(&outside).unwrap();
             symlink(&outside, hostile_home.join(".gemini")).unwrap();
             assert_eq!(
-                root_agent_writable_roots(Some(&hostile_home), "agy"),
+                root_agent_writable_roots(Some(&hostile_home), DefaultModel::Agy),
                 Err(ClaudeSandboxPolicyError::InvalidWritableRoot)
             );
             assert!(!outside.join("antigravity-cli").exists());
         }
 
-        let roots = root_agent_writable_roots(None, "/bin/sh").unwrap();
+        let roots = root_agent_writable_roots(None, DefaultModel::Claude).unwrap();
         assert!(roots.is_empty());
     }
 
@@ -18823,7 +18839,7 @@ instructions = "{instructions}"
             Path::new("/workspace"),
             None,
             Some(&sandbox_home),
-            DefaultModel::Agy.command(),
+            DefaultModel::Agy,
             &data_home,
             workspace,
         )
@@ -18842,6 +18858,7 @@ instructions = "{instructions}"
         let policy = SandboxPolicyInputs {
             mode: SandboxMode::Root,
             program: DefaultModel::Agy.command(),
+            agent: DefaultModel::Agy,
             workspace_root: Path::new("/workspace"),
             launch_roots: &[],
             tmpdir: None,
@@ -18910,6 +18927,7 @@ instructions = "{instructions}"
         let policy = SandboxPolicyInputs {
             mode: SandboxMode::Root,
             program: DefaultModel::Agy.command(),
+            agent: DefaultModel::Agy,
             workspace_root: Path::new("/workspace"),
             launch_roots: &[],
             tmpdir: None,
@@ -18982,6 +19000,7 @@ instructions = "{instructions}"
         let policy = SandboxPolicyInputs {
             mode: SandboxMode::Session,
             program: DefaultModel::Agy.command(),
+            agent: DefaultModel::Agy,
             workspace_root: Path::new("/repo"),
             launch_roots: &roots,
             tmpdir: Some(Path::new("/custom/tmpdir")),
@@ -19540,7 +19559,7 @@ instructions = "{instructions}"
         assert!(
             validate_root_git_common_dir_policy(
                 safe.path(),
-                CLAUDE_PROGRAM,
+                DefaultModel::Claude,
                 Some(Path::new("/tmp")),
                 None,
                 None
@@ -19569,7 +19588,7 @@ instructions = "{instructions}"
         assert!(
             validate_root_git_common_dir_policy(
                 linked.path(),
-                CLAUDE_PROGRAM,
+                DefaultModel::Claude,
                 Some(Path::new("/tmp")),
                 None,
                 None
@@ -19582,7 +19601,9 @@ instructions = "{instructions}"
 
         // The `$HOME` state root covered by this check is the launched agent's own
         // (`~/.codex` for Codex), so a Git common directory under it is refused for
-        // that provider while an unknown program contributes no home-derived area.
+        // that provider while every other provider's own root is unaffected —
+        // including `sakana-ai`, which execs the same `claude` as Claude but is
+        // checked against its own `~/.claude-sakana`.
         let home = tempfile::tempdir_in("target").unwrap();
         let state = home.path().join(".codex");
         std::fs::create_dir_all(state.join("worktrees/linked")).unwrap();
@@ -19593,23 +19614,23 @@ instructions = "{instructions}"
         )
         .unwrap();
         std::fs::write(state.join("worktrees/linked/commondir"), "../..\n").unwrap();
-        for (program, allowed) in [
-            ("codex", false),
-            ("claude", true),
-            ("agy", true),
-            ("/bin/sh", true),
+        for (agent, allowed) in [
+            (DefaultModel::OpenAi, false),
+            (DefaultModel::Claude, true),
+            (DefaultModel::SakanaAi, true),
+            (DefaultModel::Agy, true),
         ] {
             assert_eq!(
                 validate_root_git_common_dir_policy(
                     under_state.path(),
-                    program,
+                    agent,
                     None,
                     Some(&home.path().canonicalize().unwrap()),
                     None,
                 )
                 .is_ok(),
                 allowed,
-                "{program} must {} a Git common directory under ~/.codex",
+                "{agent:?} must {} a Git common directory under ~/.codex",
                 if allowed { "accept" } else { "refuse" }
             );
         }
@@ -19765,6 +19786,7 @@ instructions = "{instructions}"
         let launcher = claude_sandbox_launcher(
             usagi,
             mode,
+            DefaultModel::Claude,
             Path::new("/repo"),
             &SandboxLauncherPaths::default(),
             &roots,
@@ -19795,6 +19817,7 @@ instructions = "{instructions}"
         let universal = claude_sandbox_launcher(
             usagi,
             mode,
+            DefaultModel::Claude,
             Path::new("/repo"),
             &SandboxLauncherPaths {
                 backend: Some(Path::new("/usr/bin/sandbox-exec")),
@@ -19854,6 +19877,7 @@ instructions = "{instructions}"
         let launcher = claude_sandbox_launcher(
             usagi,
             SandboxMode::Root,
+            DefaultModel::Claude,
             Path::new("/repo"),
             &SandboxLauncherPaths {
                 cache_dir: Some(Path::new("/private/var/folders/ab/cd/C")),
@@ -19892,6 +19916,7 @@ instructions = "{instructions}"
             validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode: SandboxMode::Root,
                 program: CLAUDE_PROGRAM,
+                agent: DefaultModel::Claude,
                 workspace_root: &workspace_root,
                 launch_roots: &[],
                 tmpdir: None,
@@ -19913,6 +19938,7 @@ instructions = "{instructions}"
             validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode: SandboxMode::Root,
                 program: CLAUDE_PROGRAM,
+                agent: DefaultModel::Claude,
                 workspace_root: &nested_workspace,
                 launch_roots: &[],
                 tmpdir: None,
@@ -19960,6 +19986,7 @@ instructions = "{instructions}"
             validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode: SandboxMode::Session,
                 program: CLAUDE_PROGRAM,
+                agent: DefaultModel::Claude,
                 workspace_root: &workspace_root,
                 launch_roots: roots,
                 tmpdir,
@@ -20016,20 +20043,22 @@ instructions = "{instructions}"
         let workspace_root = home.join(".codex/repo");
         std::fs::create_dir_all(workspace_root.join(".git")).unwrap();
 
-        for (program, expected) in [
+        for (agent, expected) in [
             (
-                "codex",
+                DefaultModel::OpenAi,
                 Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
             ),
-            ("codex-fugu", Ok(())),
-            ("claude", Ok(())),
-            ("agy", Ok(())),
-            ("/bin/sh", Ok(())),
+            (DefaultModel::Claude, Ok(())),
+            // `sakana-ai` execs the same `claude`, and is still judged against
+            // its own `~/.claude-sakana` rather than that shared program.
+            (DefaultModel::SakanaAi, Ok(())),
+            (DefaultModel::Agy, Ok(())),
         ] {
             assert_eq!(
                 validate_claude_sandbox_policy(&SandboxPolicyInputs {
                     mode: SandboxMode::Root,
-                    program,
+                    program: agent.command(),
+                    agent,
                     workspace_root: &workspace_root,
                     launch_roots: &[],
                     tmpdir: None,
@@ -20040,7 +20069,7 @@ instructions = "{instructions}"
                     read_only_roots: &[],
                 }),
                 expected,
-                "{program} state root against a workspace inside ~/.codex"
+                "{agent:?} state root against a workspace inside ~/.codex"
             );
         }
 
@@ -20051,6 +20080,7 @@ instructions = "{instructions}"
                 validate_claude_sandbox_policy(&SandboxPolicyInputs {
                     mode,
                     program: CLAUDE_PROGRAM,
+                    agent: DefaultModel::Claude,
                     workspace_root: &prefix_workspace,
                     launch_roots: &[],
                     tmpdir: None,
@@ -20087,6 +20117,7 @@ instructions = "{instructions}"
         let launcher = claude_sandbox_launcher(
             usagi,
             mode,
+            DefaultModel::Claude,
             Path::new("/repo"),
             &SandboxLauncherPaths::default(),
             &roots,

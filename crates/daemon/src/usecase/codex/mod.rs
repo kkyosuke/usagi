@@ -122,13 +122,6 @@ impl<P> CodexAdapter<P> {
         Self::with_revision(provisioner, PROFILE_REVISION)
     }
 
-    /// Builds the `sakana-ai` profile over the same Codex CLI grammar, launching
-    /// `codex-fugu`.
-    #[must_use]
-    pub fn sakana(provisioner: P) -> Self {
-        Self::sakana_with_revision(provisioner, PROFILE_REVISION)
-    }
-
     /// # Panics
     ///
     /// Panics only if the hard-coded `codex` profile ID stops satisfying the
@@ -141,21 +134,6 @@ impl<P> CodexAdapter<P> {
             DefaultModel::OpenAi.profile_id(),
             "Codex",
             DefaultModel::OpenAi.command(),
-        )
-    }
-
-    /// # Panics
-    ///
-    /// Panics only if the hard-coded `sakana-ai` profile ID stops satisfying the
-    /// core contract, which is a programmer error.
-    #[must_use]
-    pub fn sakana_with_revision(provisioner: P, revision: u32) -> Self {
-        Self::build(
-            provisioner,
-            revision,
-            DefaultModel::SakanaAi.profile_id(),
-            "sakana.ai",
-            DefaultModel::SakanaAi.command(),
         )
     }
 

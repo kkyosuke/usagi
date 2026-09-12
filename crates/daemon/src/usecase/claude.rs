@@ -25,6 +25,15 @@ use super::runtime::{
 /// instead of assigning `--session-id` before spawn.
 pub const PROFILE_REVISION: u32 = 5;
 
+/// The `sakana-ai` profile's revision, deliberately distinct from
+/// [`PROFILE_REVISION`].
+///
+/// Until this revision the same profile ID was launched by the Codex adapter at
+/// *its* revision 5. A durable snapshot from that era describes Codex argv and a
+/// Codex provider resume, so it must not validate against this Claude-shaped
+/// profile — and it would, byte for byte, if both carried revision 5.
+pub const SAKANA_PROFILE_REVISION: u32 = 6;
+
 /// Claude's product-private provisioning result.
 ///
 /// Only the public plan inputs and common ephemeral [`SpawnProvision`] cross
@@ -87,7 +96,26 @@ pub struct ClaudeAdapter<P> {
 impl<P> ClaudeAdapter<P> {
     #[must_use]
     pub fn new(provisioner: P) -> Self {
-        Self::with_revision(provisioner, PROFILE_REVISION)
+        Self::build(
+            provisioner,
+            PROFILE_REVISION,
+            DefaultModel::Claude.profile_id(),
+            "Claude",
+        )
+    }
+
+    /// The `sakana-ai` profile: the same Claude CLI grammar, pointed at Sakana's
+    /// Anthropic-compatible endpoint by the provisioner's launch environment.
+    /// Only the identity differs here; the argv, hooks, and resume contract are
+    /// Claude's, which is exactly why it reuses this adapter.
+    #[must_use]
+    pub fn sakana(provisioner: P) -> Self {
+        Self::build(
+            provisioner,
+            SAKANA_PROFILE_REVISION,
+            DefaultModel::SakanaAi.profile_id(),
+            "sakana.ai",
+        )
     }
 
     /// # Panics
@@ -96,12 +124,25 @@ impl<P> ClaudeAdapter<P> {
     /// core canonical-ID contract.
     #[must_use]
     pub fn with_revision(provisioner: P, revision: u32) -> Self {
+        Self::build(
+            provisioner,
+            revision,
+            DefaultModel::Claude.profile_id(),
+            "Claude",
+        )
+    }
+
+    /// # Panics
+    ///
+    /// Panics only if a hard-coded catalog profile ID stops satisfying the core
+    /// canonical-ID contract.
+    #[must_use]
+    fn build(provisioner: P, revision: u32, profile_id: &str, display_name: &str) -> Self {
         Self {
             provisioner,
             profile: AgentProfile::new(
-                AgentProfileId::new(DefaultModel::Claude.profile_id())
-                    .expect("catalog profile ID is canonical"),
-                "Claude",
+                AgentProfileId::new(profile_id).expect("catalog profile ID is canonical"),
+                display_name,
                 revision,
                 [
                     AgentCapability::Resume,

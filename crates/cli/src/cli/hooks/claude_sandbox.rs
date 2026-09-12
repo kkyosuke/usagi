@@ -1,4 +1,4 @@
-//! `usagi claude-sandbox --mode <session|root> [--writable-root <path>]… [--read-only-root <path>]… -- <program> <args…>`
+//! `usagi claude-sandbox --mode <session|root> [--agent <selector>] [--writable-root <path>]… [--read-only-root <path>]… -- <program> <args…>`
 //! — OS sandbox の中で Agent CLI を fail-closed 起動する内部コマンド。
 //!
 //! usagi の Agent provisioner が起動 program をこの launcher で包む。人手で叩くものではない
@@ -20,6 +20,9 @@ use crate::cli::{Run, RunOutcome};
 pub struct ClaudeSandbox {
     /// 起動モード（session / root）。
     pub mode: SandboxMode,
+    /// 起動する agent provider の selector。`claude` executable は Claude と
+    /// `sakana-ai` が共有するため、state grant は program 名では決められない。
+    pub agent: Option<String>,
     /// session workspace の保護対象 root。
     pub protected_root: Option<PathBuf>,
     /// daemon bootstrap が確定した backend。launcher 自身は PATH を探索しない。
@@ -42,6 +45,7 @@ impl Run for ClaudeSandbox {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         Ok(RunOutcome::ClaudeSandbox {
             mode: self.mode,
+            agent: self.agent.clone(),
             protected_root: self.protected_root.clone(),
             backend: self.backend.clone(),
             tmpdir: self.tmpdir.clone(),
@@ -87,6 +91,8 @@ mod tests {
             "/repo/.git",
             "--read-only-root",
             "/home/dev/.gemini/config",
+            "--agent",
+            "sakana-ai",
             "--",
             "claude",
             "--print",
@@ -95,6 +101,9 @@ mod tests {
             outcome,
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Session,
+                // 同じ `claude` を exec する provider が 2 つあるため、どちらの state を
+                // 書けるかは argv ではなくこの selector が決める。
+                agent: Some("sakana-ai".to_owned()),
                 protected_root: None,
                 backend: None,
                 tmpdir: None,
@@ -129,6 +138,8 @@ mod tests {
             outcome,
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Root,
+                // 省略した launch は program の basename で決まる従来の grant に落ちる。
+                agent: None,
                 protected_root: None,
                 backend: None,
                 tmpdir: None,

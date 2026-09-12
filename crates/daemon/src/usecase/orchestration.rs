@@ -60,13 +60,13 @@ impl AdapterRegistry {
     /// executable, so it registers through the same adapter type.
     pub fn register_supported<
         C: CodexProvisioner + Send + 'static,
-        S: CodexProvisioner + Send + 'static,
+        S: ClaudeProvisioner + Send + 'static,
         L: ClaudeProvisioner + Send + 'static,
         A: AgyProvisioner + Send + 'static,
     >(
         &mut self,
         codex: CodexAdapter<C>,
-        sakana: CodexAdapter<S>,
+        sakana: ClaudeAdapter<S>,
         claude: ClaudeAdapter<L>,
         agy: AgyAdapter<A>,
     ) -> Result<(), RegistryError> {
@@ -658,7 +658,7 @@ mod tests {
         registry
             .register_supported(
                 CodexAdapter::new(CodexNever),
-                CodexAdapter::sakana(CodexNever),
+                ClaudeAdapter::sakana(ClaudeNever),
                 ClaudeAdapter::new(ClaudeNever),
                 AgyAdapter::new(AgyNever),
             )
@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(
             registry_with_extra_profile.register_supported(
                 CodexAdapter::new(CodexNever),
-                CodexAdapter::sakana(CodexNever),
+                ClaudeAdapter::sakana(ClaudeNever),
                 ClaudeAdapter::new(ClaudeNever),
                 AgyAdapter::new(AgyNever),
             ),
