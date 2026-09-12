@@ -5078,12 +5078,10 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 direction: TabDirection::Previous,
             }]
         }
-        // Ctrl-X removes only the cursor's session. A diagnosed integrity orphan
-        // is the sole direct purge target; every other row keeps the safe removal
-        // path. Keep this unavailable while an overlay owns input, and never turn
-        // the workspace root, the new-session row, or an ineligible lifecycle into
-        // a deletion target. A rejected safe removal opens the existing explicit
-        // force confirmation.
+        // Ctrl-X force-removes only the cursor's session, discarding a dirty
+        // worktree and an unmerged branch. Keep this unavailable while an overlay
+        // owns input, and never turn the workspace root, the new-session row, or
+        // an ineligible lifecycle into a deletion target.
         AppKey::CtrlX
             if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
         {
@@ -5260,10 +5258,16 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
 /// stable identity while the presentation turns the row into a loading skeleton.
 /// Snapshot reconciliation moves it only after the daemon removes the row.
 ///
-/// A diagnosed integrity orphan is already an unusable recovery row, so Ctrl-X
-/// acknowledges the whole destructive removal for that exact identity. Every
-/// other removable row stays on the safe path; ordinary force removal still
-/// requires the failed-delete confirmation or an explicit command.
+/// Ctrl-X is a force removal: it discards an uncommitted worktree and an
+/// unmerged branch for the exact selected identity. The safe variant it
+/// replaced refused nearly every real session — Git rejects `worktree remove`
+/// while the tree carries untracked build output, and rejects `branch -d`
+/// while the branch is not merged into the local base, which a squash-merged
+/// PR never is — so the only reachable outcome was a `failed/delete` row that
+/// then needed a second, forced attempt anyway.
+///
+/// `purge_orphan` stays reserved for a daemon-diagnosed integrity orphan: the
+/// daemon rejects that acknowledgement for any other row.
 fn remove_selected_session(state: &AppState) -> Vec<Effect> {
     let Selection::Target(Target::Session(session)) = state.selected else {
         return Vec::new();
@@ -5284,8 +5288,8 @@ fn remove_selected_session(state: &AppState) -> Vec<Effect> {
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
-        force: integrity_orphan,
-        force_delete_branch: integrity_orphan,
+        force: true,
+        force_delete_branch: true,
         purge_orphan: integrity_orphan,
     }]
 }

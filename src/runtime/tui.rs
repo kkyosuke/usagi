@@ -8210,8 +8210,8 @@ mod tests {
             vec![Effect::RemoveSession {
                 workspace,
                 session,
-                force: false,
-                force_delete_branch: false,
+                force: true,
+                force_delete_branch: true,
                 purge_orphan: false,
             }]
         );

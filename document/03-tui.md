@@ -502,13 +502,16 @@ ANSI span の reset 後にも dim を再適用するため、Git の色 span が
 描き、選択対象の Git 状態を非アクティブ行と区別する。Closeup の補足行は相対時刻を含めて通常輝度で描く。
 
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。session 行を
-選択中の `Ctrl-X` は safe な `session remove` を実行する。plain `x` / `X` は session を削除しない。`+ new session`
+選択中の `Ctrl-X` は force な `session remove` を実行する。plain `x` / `X` は session を削除しない。`+ new session`
 行では削除しない。削除要求後は対象の `deleting` 行に cursor を表示したままにし、削除完了で行が消えた時点で
 隣の surviving session（無ければ `+ new session`）へ移す。`deleting` 行での `Ctrl-X` は削除を再送しない。
-`Ctrl-X` は通常、未コミット worktree と未マージ branch のどちらも破棄しない安全側で、daemon が拒否した場合は
-session を `failed` として残す。force は delete failure の確認 modal、または明示的な `close --force` command だけが所有する。
-例外として、選択中の row が daemon 診断済みの `failed/integrity` orphan である場合だけ、同じ `Ctrl-X` が
-`force: true, purge_orphan: true` を含む exact-target remove を直接送る。その他の lifecycle / failure stage、または overlay
+`Ctrl-X` は `force: true, force_delete_branch: true` を送り、未コミット worktree と未マージ branch の両方を破棄する。
+確認は挟まないため、この 1 打鍵は取り消せない。safe remove を送らないのは、実作業をした session ではほぼ常に
+Git が拒否するためである。worktree には未追跡のビルド生成物が残るので `git worktree remove` が通らず、branch も
+ローカル基点へ merge されていない（squash merge された PR はローカルでは merge にならない）ので `git branch -d` が
+通らない。到達できる結果が `failed/delete` 行と、その後の強制再試行だけになる。
+選択中の row が daemon 診断済みの `failed/integrity` orphan である場合は、同じ `Ctrl-X` が
+`purge_orphan: true` も加えた exact-target remove を送る。その他の lifecycle / failure stage、または overlay
 表示中は purge を送らない。
 `Ctrl-Q` は exit prompt を開く（離脱と終了の区別は
 [workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の generic terminal では、leader が
@@ -520,10 +523,9 @@ Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない�
 modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
 
 daemon 未登録の `.usagi/sessions/<name>` が見つかった場合は、attach 不能・remove 可能な `failed` recovery row として
-sidebar に現れ、failure detail に actual branch、dirty、未統合 commit 件数を表示する。clean かつ基点へ統合済みなら `Ctrl-X` で
-安全に回収できる。dirty、未統合、detached、`usagi/` 外 branch、診断不能な entry は safe remove では削除せず、
-commit/stash または PR の作成・merge を促す。内容を破棄すると確認できた exact orphan は `Ctrl-X` で
-`--force --purge-orphan` 相当の回収を要求できる。
+sidebar に現れ、failure detail に actual branch、dirty、未統合 commit 件数を表示する。この exact orphan は `Ctrl-X` で
+`--force --purge-orphan` 相当の回収を要求できる。daemon は診断済みの integrity orphan にだけこの acknowledgement を
+受理し、それ以外の row の `purge_orphan` は拒否する。
 
 左 sidebar は、実 session・`+ new session` の左クリックで cursor だけを移し、active session や mode を
 変更しない。実 session は、同じ stable `SessionId` を 400ms 以内（境界を含む）にもう一度左クリックした場合だけ、
@@ -1072,14 +1074,14 @@ scope/revision 不一致は安全な error として収束し、provider の las
 `sleeping` は明示的に中断された resumable history と同じ再開導線へ入り、resume 成功時は新しい PTY と runtime identity を得る。
 sidebar は daemon snapshot の `available` session に加えて、名前を占有し続ける `failed` session も
 失敗 stage に応じた状態付きで表示する。`failed` 行は使用不可（`can_use=false`）なので新しい pane の launch を提示せず、
-削除可能（`can_remove=true`）なので `Ctrl-X` の safe remove を受け付ける。ただし、その session に daemon 所有の
+削除可能（`can_remove=true`）なので `Ctrl-X` の force remove を受け付ける。ただし、その session に daemon 所有の
 既存 pane tab が残っている場合だけ Enter で Closeup を開ける。これは Agent へ `Ctrl-D` を送り global slot を解放する
 回収経路であり、session の scope や checkout を再び使用可能にはしない。各行の可否は snapshot の lifecycle
 から client 側で導出する（`SessionLifecycle::capabilities` が正本）。ただし delete stage の `failed` 行を Enter で選択した場合は
 既存 pane より先に「強制削除しますか？」の Yes/No modal を開く。Yes は同じ stable session identity の
 worktree 強制削除と未マージ branch の破棄を許可した remove を送信し、No / Esc は何も削除せず閉じる。
-単一キーで force は送らない。Closeup の `close -f` は command 上で force を明示する別経路であり、
-キーボード操作ではこの modal の Yes だけが branch 破棄を許可する。未マージ branch を保護した safe remove は `Ctrl-X` である。`deleting` session も表示し、削除中の行
+これは Enter が attach ではなく破壊的操作になる行での確認であり、`Ctrl-X` が送る force remove と同じ内容を送る。
+Closeup の `close -f` は command 上で force を明示する別経路である。`deleting` session も表示し、削除中の行
 （Danger の `✂` と wave）として描く。daemon は remove を受理した時点で応答し、worktree の撤去は daemon 所有の
 worker が続けるため（[5. daemon の session teardown worker](05-daemon.md#session-teardown-worker)）、この行は
 撤去が終わるまで（巨大な `target/` では分オーダー）残り、完了で消える。`deleting` は使用不可かつ削除不可
