@@ -34,6 +34,11 @@ pub struct WorkflowRecord {
     /// it notifies once instead of every sweep.
     #[serde(default)]
     pub announced: Option<crate::domain::workflow::Phase>,
+    /// The backlog issue this intent was rendered from, if any. Held from
+    /// admission so a retry, a resumed pending start, and the launch itself all
+    /// agree on which issue the run implements.
+    #[serde(default)]
+    pub issue: Option<u32>,
 }
 
 impl DispatchStore {
@@ -227,6 +232,7 @@ mod tests {
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
                     announced: None,
+                    issue: None,
                 });
                 Ok(())
             })
@@ -319,6 +325,7 @@ mod tests {
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
                     announced: None,
+                    issue: None,
                 });
                 if fail {
                     std::fs::rename(parent, directory.path().join("saved-parent"))?;
@@ -361,6 +368,7 @@ mod tests {
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
                     announced: None,
+                    issue: None,
                 });
                 Ok(())
             });
@@ -403,6 +411,7 @@ mod tests {
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
                     announced: None,
+                    issue: None,
                 });
                 Ok(())
             })
@@ -464,6 +473,7 @@ mod tests {
                     implementation_operation: None,
                     authorized_operations: Vec::new(),
                     announced: None,
+                    issue: None,
                 });
                 Ok(())
             })

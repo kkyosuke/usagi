@@ -304,6 +304,10 @@ pub struct WorkflowPendingStart {
     pub operation_id: OperationId,
     pub goal: String,
     pub error: Option<String>,
+    /// The backlog issue the goal was rendered from, so a retried start keeps
+    /// implementing the same issue.
+    #[serde(default)]
+    pub issue: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
