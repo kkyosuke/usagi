@@ -455,6 +455,10 @@ fn production_workflow_tools_observe_a_session_and_refuse_a_self_directed_start(
 }
 
 #[test]
+// One run's whole life — launch, instruct, finish, restart — shares a single
+// daemon and fixture Agent. Splitting it would spin up a second heavy E2E, and
+// those are deliberately serialized because contention makes them fail falsely.
+#[allow(clippy::too_many_lines)]
 fn production_workflow_start_launches_the_remembered_participants() {
     let mut mcp = McpHarness::start();
     // Claude proves readiness with `auth status`; the implementer then stays
@@ -528,6 +532,15 @@ sleep 30
     let implementer = started["run"]["implementer"].clone();
     let worktree = mcp.workspace().join(".usagi/sessions/workflow-run");
     assert!(worktree.join(".git").exists());
+    let status_of = |mcp: &mut McpHarness| {
+        tool_text(&mcp.tool("agent_list", &json!({})))["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["agent_id"] == implementer)
+            .map(|agent| agent["status"].clone())
+    };
+    let before = status_of(&mut mcp).expect("the implementer is listed while it carries the run");
     let finished = mcp.tool("workflow_finish", &json!({"name":"workflow-run"}));
     assert!(finished.get("error").is_none(), "{finished}");
     let finished = tool_text(&finished);
@@ -539,19 +552,16 @@ sleep 30
 
     // The run's Agent is untouched and so is the worktree: finishing is a
     // change to the workflow record and nothing else.
-    // Its *status* is the assertion, not its presence: an Agent that is killed
-    // stays in the registry as `exited`, so checking only that the id is still
-    // listed would pass even if finishing started stopping Agents.
-    let agents = tool_text(&mcp.tool("agent_list", &json!({})));
-    let carried = agents["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|agent| agent["agent_id"] == implementer)
-        .unwrap_or_else(|| panic!("the implementer is still listed: {agents}"));
-    assert!(
-        carried["status"] != "exited" && carried["status"] != "failed",
-        "the implementer outlives the run it carried: {agents}"
+    // The status has to be *unchanged*, not merely non-terminal. A killed Agent
+    // stays in the registry as `exited`, so checking presence alone would pass
+    // through the regression; checking `!= exited` alone would instead fail on a
+    // slow machine where the fixture's own sleep had already elapsed. Comparing
+    // the two readings is true regardless of how long the run took.
+    let after = status_of(&mut mcp);
+    assert_eq!(
+        after,
+        Some(before),
+        "finishing a run leaves the Agent that carried it exactly as it was"
     );
     assert!(
         worktree.join(".git").exists(),

@@ -115,10 +115,6 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
         if let Some(issue) = run.issue {
             header.push(format!("Issue: #{issue} (PR must mark it done)"));
         }
-        // Offered in every phase, not only the two that are already the person's
-        // turn: the run that most needs ending is the one still insisting it is
-        // working.
-        header.push("Closeup `workflow finish` ends this run".into());
         if let Some(reason) = &run.waiting_reason {
             header.push(reason.clone());
         }
@@ -146,6 +142,13 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
     }
     if let Some(error) = &panel.error {
         header.push(format!("Error: {error}"));
+    }
+    // Offered in every phase, not only the two that are already the person's
+    // turn: the run that most needs ending is the one still insisting it is
+    // working. It goes last because a short pane keeps the header's first rows,
+    // and a standing hint is worth less than an error or a waiting reason.
+    if panel.run.is_some() {
+        header.push("Closeup `workflow finish` ends this run".into());
     }
     header
 }
@@ -217,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn ended_runs_stay_visible_and_the_way_to_end_one_is_offered_where_it_helps() {
+    fn ended_runs_stay_visible_and_every_phase_offers_the_way_out() {
         use usagi_core::domain::workflow::{FinishedRun, Outcome, Phase};
         let run = crate::usecase::application::workflow::fixture_run(
             usagi_core::domain::id::SessionId::new(),
@@ -267,6 +270,15 @@ mod tests {
                 .join("\n")
                 .contains("[completed] Ship login")
         );
+
+        // A short pane keeps the header's first rows, so the standing hint is
+        // what gets dropped — never the reason the run is waiting.
+        let run = panel.run.as_mut().unwrap();
+        run.phase = Phase::Waiting;
+        run.waiting_reason = Some("Revision limit reached".into());
+        let short = render(7, 100, &panel).join("\n");
+        assert!(short.contains("Revision limit reached"));
+        assert!(!short.contains("workflow finish"));
     }
 
     #[test]
