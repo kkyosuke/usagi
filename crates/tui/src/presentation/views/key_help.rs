@@ -191,7 +191,7 @@ impl Context {
                 ("Ctrl-A / Home", "new session"),
                 (":", "Overview commands"),
                 ("?", "keyboard shortcuts"),
-                ("Ctrl-X", "remove session / purge orphan"),
+                ("Ctrl-X", "force remove session"),
                 ("Ctrl-Q", "leave / quit prompt"),
             ],
             Self::Closeup => &[
@@ -605,7 +605,7 @@ mod tests {
         assert!(rendered.contains("Ctrl-X"));
         assert!(rendered.contains("dismiss selected"));
         assert!(rendered.contains("Ctrl-? / Ctrl-/ or Esc"));
-        assert!(!rendered.contains("safe-remove session"));
+        assert!(!rendered.contains("force remove session"));
     }
 
     #[test]
