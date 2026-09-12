@@ -617,8 +617,11 @@ run・pending_start は受理時の担当を固定し、snapshot の agents は�
 TUI を再起動しても同じ開始操作を再試行できる。
 
 daemon は開始 intent と指示を永続化し、認証済み handoff と peer journal の相関から進捗を投影する。
-snapshot の取得時に進捗を再照合し、未通知の queued 指示を再試行する。独立した常駐 Workflow
-scheduler は持たない。PTY 通知の成功と Agent による処理完了は別であり、処理済み ACK は推定しない。
+進捗の再照合と未通知の queued 指示の再試行を所有するのは daemon の常駐 lane であり、client の
+request はその進行を必要としない（[workflow lane](05-daemon.md#workflow-lane)が正本）。snapshot request は
+lane と同じ pass を通るため開いている画面は常に最新の進捗を受け取り、control request は reconcile の
+直後に受理して PR 検証を挟まない。
+PTY 通知の成功と Agent による処理完了は別であり、処理済み ACK は推定しない。
 
 ## Codex structured capture request
 
