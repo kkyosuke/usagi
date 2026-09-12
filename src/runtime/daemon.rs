@@ -23390,9 +23390,16 @@ instructions = "{instructions}"
                     .any(|(_, bytes)| String::from_utf8_lossy(bytes).contains("Keep going"))
             );
             // A record whose session this daemon cannot resolve is skipped, not
-            // fatal: the sweep still counts the run it could advance.
+            // fatal: the sweep still counts the run it could advance. The sweep
+            // visits records in identity order, so this one is given an identity
+            // that sorts after the fixture's: the assertions below then describe
+            // one fixed order instead of whichever one the random identities
+            // happened to produce.
+            let unresolvable = std::iter::repeat_with(SessionId::new)
+                .find(|candidate| candidate.as_str() > fixture.session.as_str())
+                .expect("identities are unbounded");
             store
-                .update_workflow(fixture.workspace, SessionId::new(), |record| {
+                .update_workflow(fixture.workspace, unresolvable, |record| {
                     *record = store.workflow(fixture.workspace, fixture.session).unwrap();
                     Ok(())
                 })
@@ -23408,7 +23415,9 @@ instructions = "{instructions}"
                 1
             );
             // A daemon that starts stopping mid-sweep leaves the rest for its
-            // next start: the first record is advanced, the second is not.
+            // next start. The fixture's record sorts first, so the stop lands
+            // between the two: the first is advanced, the second is never
+            // visited.
             let calls = std::cell::Cell::new(0);
             assert_eq!(
                 workflow::sweep(
@@ -23423,9 +23432,12 @@ instructions = "{instructions}"
                 .unwrap(),
                 1
             );
+            assert_eq!(calls.get(), 2);
             // A launch that never bound its Agent waits for the human. The sweep
-            // skips it and leaves its record byte-identical.
-            let pending_session = SessionId::new();
+            // skips it, so it never joins the advanced count.
+            let pending_session = std::iter::repeat_with(SessionId::new)
+                .find(|candidate| candidate.as_str() > fixture.session.as_str())
+                .expect("identities are unbounded");
             store
                 .update_workflow(fixture.workspace, pending_session, |record| {
                     *record = Some(
