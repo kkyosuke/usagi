@@ -43,6 +43,7 @@ pub fn admit(
                         suspended_phase: None,
                         implementation_operation: None,
                         authorized_operations: Vec::new(),
+                        announced: None,
                     });
                 }
             }
@@ -96,6 +97,7 @@ pub fn bind(
             revisions: 0,
             review: None,
             waiting_reason: None,
+            pr_url: None,
             instructions: Vec::new(),
             history: Vec::new(),
         });
@@ -314,7 +316,7 @@ pub fn verify_pr(
     directory: &std::path::Path,
     target: &usagi_core::domain::agent_message::ReviewTarget,
     entries: &[usagi_core::domain::pr_inventory::PrEntry],
-) -> Result<(), &'static str> {
+) -> Result<String, &'static str> {
     let head = git
         .run(directory, &["rev-parse", "--verify", "HEAD"])
         .map_err(|_| "Could not read worktree HEAD")?;
@@ -372,7 +374,7 @@ pub fn verify_pr(
     if !current.success || current.stdout.trim() != target.head_sha {
         return Err("Worktree HEAD changed during verification");
     }
-    Ok(())
+    Ok(entry.url().to_owned())
 }
 
 #[cfg(test)]
@@ -468,6 +470,7 @@ mod tests {
             revisions: 0,
             review: None,
             waiting_reason: None,
+            pr_url: None,
             instructions: Vec::new(),
             history: Vec::new(),
         };

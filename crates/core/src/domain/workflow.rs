@@ -101,6 +101,9 @@ pub struct WorkflowRun {
     pub revisions: u8,
     pub review: Option<Review>,
     pub waiting_reason: Option<String>,
+    /// The PR the approved HEAD was verified against, once it is `Ready`.
+    #[serde(default)]
+    pub pr_url: Option<String>,
     pub instructions: Vec<Instruction>,
     #[serde(default)]
     pub history: Vec<WorkflowHistoryEntry>,
@@ -228,6 +231,30 @@ impl WorkflowRun {
         Ok(())
     }
 
+    /// What a human is being waited on for, if anything.
+    ///
+    /// Only the two phases nobody else can move produce a notice: a run that
+    /// needs a decision, and one whose PR is ready. Everything else is an Agent's
+    /// turn, and announcing it would train the reader to ignore the channel.
+    #[must_use]
+    pub fn attention(&self) -> Option<(Phase, String)> {
+        match self.phase {
+            Phase::Waiting => Some((
+                Phase::Waiting,
+                self.waiting_reason
+                    .clone()
+                    .unwrap_or_else(|| "Workflow needs a decision".to_owned()),
+            )),
+            Phase::Ready => Some((
+                Phase::Ready,
+                self.pr_url
+                    .clone()
+                    .unwrap_or_else(|| "PR is ready for review".to_owned()),
+            )),
+            _ => None,
+        }
+    }
+
     /// PR preparation needs independent evidence for the approved HEAD.
     ///
     /// # Errors
@@ -307,6 +334,7 @@ mod tests {
             revisions: 0,
             review: None,
             waiting_reason: None,
+            pr_url: None,
             instructions: Vec::new(),
             history: Vec::new(),
         }

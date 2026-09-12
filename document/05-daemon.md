@@ -1169,6 +1169,18 @@ PR を tick ごとに GitHub へ照会し続け、ブランチが動いた瞬間
 
 1 件の失敗は他の run の進行を止めない。daemon の停止要求は sweep の途中でも観測し、残りは次の起動へ残す。
 
+進めた run が**人を待つ状態**になったとき、lane は desktop 通知を 1 回出す。対象は次の 2 つだけで、
+Agent の手番は通知しない。
+
+| 状態 | 通知 |
+|---|---|
+| 判断待ち | `usagi: workflow needs you` と待ち理由 |
+| PR 準備完了 | `usagi: PR ready` と検証した PR の URL |
+
+record は「どの状態を通知済みか」を保持するため、同じ状態に留まっている間は再通知しない。復帰して
+再び同じ状態になった場合は改めて通知する。通知は best-effort で、失敗しても run の進行には影響しない。
+TUI の起動有無に依存しないのは、daemon が利用者と同じ権限で動いているためである。
+
 Workflow request のうち snapshot はこの pass をそのまま通り、control（開始・指示）は reconcile の直後に
 受理して PR 検証を挟まない。GitHub が一時的に読めないことが指示の拒否理由にならないようにするためで、
 検証は次の sweep か次の snapshot が行う。
