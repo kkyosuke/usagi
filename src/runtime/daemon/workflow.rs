@@ -431,37 +431,43 @@ fn announce(
     store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
     workspace: WorkspaceId,
     session: SessionId,
+    run: Option<&WorkflowRun>,
     notifier: &dyn AttentionNotifier,
 ) {
-    let Ok(Some(record)) = store.workflow(workspace, session) else {
+    let announced = store
+        .workflow(workspace, session)
+        .ok()
+        .flatten()
+        .and_then(|record| record.announced);
+    let remember = |phase: Option<usagi_core::domain::workflow::Phase>| {
+        let _ = store.update_workflow(workspace, session, |value| {
+            if let Some(record) = value {
+                record.announced = phase;
+            }
+            Ok(())
+        });
+    };
+    let Some((phase, detail)) = run.and_then(WorkflowRun::attention) else {
+        // The run moved on; the next call for a human is a new event.
+        if announced.is_some() {
+            remember(None);
+        }
         return;
     };
-    let attention = record.run.as_ref().and_then(WorkflowRun::attention);
-    // Nothing to say, and nothing to write unless the record still claims an
-    // announcement that no longer applies.
-    if attention.as_ref().map(|(phase, _)| *phase) == record.announced {
+    if announced == Some(phase) {
         return;
     }
-    let announcement = store.update_workflow(workspace, session, |value| {
-        let record = value.as_mut().context("workflow disappeared")?;
-        let attention = record.run.as_ref().and_then(WorkflowRun::attention);
-        let Some((phase, detail)) = attention else {
-            record.announced = None;
-            return Ok(None);
-        };
-        if record.announced == Some(phase) {
-            return Ok(None);
-        }
-        record.announced = Some(phase);
-        Ok(Some((phase, record.goal.clone(), detail)))
-    });
-    if let Ok(Some((phase, goal, detail))) = announcement {
-        let title = match phase {
-            usagi_core::domain::workflow::Phase::Ready => "usagi: PR ready",
-            _ => "usagi: workflow needs you",
-        };
-        notifier.notify(title, &format!("{}\n{detail}", first_line(&goal)));
-    }
+    // Remember before announcing: a duplicate notice is worse than a missed one,
+    // and the run's progress does not depend on either.
+    remember(Some(phase));
+    let title = match phase {
+        usagi_core::domain::workflow::Phase::Ready => "usagi: PR ready",
+        _ => "usagi: workflow needs you",
+    };
+    notifier.notify(
+        title,
+        &format!("{}\n{detail}", first_line(run.map_or("", |run| &run.goal))),
+    );
 }
 
 /// Desktop notices are one line of context, not the whole goal.
@@ -509,22 +515,19 @@ pub(super) fn sweep(
         if !advanceable(&store, workspace, session) {
             continue;
         }
-        if advance(
+        if let Ok(snapshot) = advance(
             agent,
             inventory,
             scope,
             workspace,
             session,
             Attention::Unattended,
-        )
-        .is_ok()
-        {
+        ) {
             advanced += 1;
-            // Announce after advancing, so the notice describes where the run
-            // ended up rather than where it started. A notice is never worth
-            // stopping the sweep for: the next tick announces what this one
-            // could not.
-            announce(&store, workspace, session, notifier);
+            // Announce where the run ended up, not where it started. A notice is
+            // never worth stopping the sweep for: the next tick announces what
+            // this one could not.
+            announce(&store, workspace, session, snapshot.run.as_ref(), notifier);
         }
     }
     Ok(advanced)
