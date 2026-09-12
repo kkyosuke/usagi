@@ -8460,7 +8460,12 @@ impl workflow::AttentionNotifier for PlatformWorkflowNotifier {
             command
         } else if cfg!(target_os = "linux") {
             let mut command = std::process::Command::new("notify-send");
-            command.arg("--app-name=usagi").arg(title).arg(body);
+            // `--` first: a goal line that starts with `-` is text, not a flag.
+            command
+                .arg("--app-name=usagi")
+                .arg("--")
+                .arg(title)
+                .arg(body);
             command
         } else {
             return;

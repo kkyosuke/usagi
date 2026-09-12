@@ -879,15 +879,17 @@ mod tests {
         entry.head_oid = Some(target.head_sha.clone());
         let mut value = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"});
         let directory = std::path::Path::new("/fixture");
-        assert!(
+        // Verification names the PR it matched, so the notice a human reads can
+        // link to it.
+        assert_eq!(
             verify_pr(
                 &Git,
                 &mut Gh(value.to_string()),
                 directory,
                 &target,
                 std::slice::from_ref(&entry)
-            )
-            .is_ok()
+            ),
+            Ok(entry.url().to_owned())
         );
         assert!(verify_pr(&Git, &mut Gh(value.to_string()), directory, &target, &[]).is_err());
         assert!(

@@ -421,6 +421,9 @@ pub(super) trait AttentionNotifier {
 
 /// Announce a run that started waiting for a human, once per entry.
 ///
+/// Best-effort in both directions: a store failure leaves the announcement for
+/// the next tick, and the notice itself is never required for progress.
+///
 /// The record remembers which phase was announced, so a run that sits in
 /// `Waiting` for an hour produces one notice rather than one every tick, and a
 /// run that recovers and waits again is announced afresh.
@@ -429,30 +432,36 @@ fn announce(
     workspace: WorkspaceId,
     session: SessionId,
     notifier: &dyn AttentionNotifier,
-) -> Result<(), ProtocolError> {
-    let announcement = store
-        .update_workflow(workspace, session, |value| {
-            let record = value.as_mut().context("workflow disappeared")?;
-            let attention = record.run.as_ref().and_then(WorkflowRun::attention);
-            let Some((phase, detail)) = attention else {
-                record.announced = None;
-                return Ok(None);
-            };
-            if record.announced == Some(phase) {
-                return Ok(None);
-            }
-            record.announced = Some(phase);
-            Ok(Some((phase, record.goal.clone(), detail)))
-        })
-        .map_err(unavailable)?;
-    if let Some((phase, goal, detail)) = announcement {
+) {
+    let Ok(Some(record)) = store.workflow(workspace, session) else {
+        return;
+    };
+    let attention = record.run.as_ref().and_then(WorkflowRun::attention);
+    // Nothing to say, and nothing to write unless the record still claims an
+    // announcement that no longer applies.
+    if attention.as_ref().map(|(phase, _)| *phase) == record.announced {
+        return;
+    }
+    let announcement = store.update_workflow(workspace, session, |value| {
+        let record = value.as_mut().context("workflow disappeared")?;
+        let attention = record.run.as_ref().and_then(WorkflowRun::attention);
+        let Some((phase, detail)) = attention else {
+            record.announced = None;
+            return Ok(None);
+        };
+        if record.announced == Some(phase) {
+            return Ok(None);
+        }
+        record.announced = Some(phase);
+        Ok(Some((phase, record.goal.clone(), detail)))
+    });
+    if let Ok(Some((phase, goal, detail))) = announcement {
         let title = match phase {
             usagi_core::domain::workflow::Phase::Ready => "usagi: PR ready",
             _ => "usagi: workflow needs you",
         };
         notifier.notify(title, &format!("{}\n{detail}", first_line(&goal)));
     }
-    Ok(())
 }
 
 /// Desktop notices are one line of context, not the whole goal.
@@ -512,8 +521,10 @@ pub(super) fn sweep(
         {
             advanced += 1;
             // Announce after advancing, so the notice describes where the run
-            // ended up rather than where it started.
-            announce(&store, workspace, session, notifier)?;
+            // ended up rather than where it started. A notice is never worth
+            // stopping the sweep for: the next tick announces what this one
+            // could not.
+            announce(&store, workspace, session, notifier);
         }
     }
     Ok(advanced)

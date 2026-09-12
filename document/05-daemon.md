@@ -1174,11 +1174,13 @@ Agent の手番は通知しない。
 
 | 状態 | 通知 |
 |---|---|
-| 判断待ち | `usagi: workflow needs you` と待ち理由 |
-| PR 準備完了 | `usagi: PR ready` と検証した PR の URL |
+| 判断待ち | `usagi: workflow needs you` と、goal の 1 行目・待ち理由 |
+| PR 準備完了 | `usagi: PR ready` と、goal の 1 行目・検証した PR の URL |
 
 record は「どの状態を通知済みか」を保持するため、同じ状態に留まっている間は再通知しない。復帰して
-再び同じ状態になった場合は改めて通知する。通知は best-effort で、失敗しても run の進行には影響しない。
+再び同じ状態になった場合は改めて通知する。通知すべき状態が変わらない tick では record を書き換えない。
+通知は best-effort で、通知にも記録にも失敗した場合はその tick を諦め、run の進行と他の run の sweep は
+止めない。
 TUI の起動有無に依存しないのは、daemon が利用者と同じ権限で動いているためである。
 
 Workflow request のうち snapshot はこの pass をそのまま通り、control（開始・指示）は reconcile の直後に

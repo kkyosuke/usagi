@@ -321,6 +321,43 @@ pub enum WorkflowCommand {
 mod tests {
     use super::*;
 
+    #[test]
+    fn attention_names_only_the_states_a_human_has_to_move() {
+        let mut run = run();
+        for phase in [
+            Phase::Starting,
+            Phase::Implementing,
+            Phase::Reviewing,
+            Phase::Revising,
+            Phase::Verifying,
+        ] {
+            run.phase = phase;
+            assert_eq!(run.attention(), None, "{phase:?} is an Agent's turn");
+        }
+        run.phase = Phase::Waiting;
+        run.waiting_reason = Some("Revision limit reached".into());
+        assert_eq!(
+            run.attention(),
+            Some((Phase::Waiting, "Revision limit reached".to_owned()))
+        );
+        // A phase that carries no explanation still has to be announceable.
+        run.waiting_reason = None;
+        assert_eq!(
+            run.attention(),
+            Some((Phase::Waiting, "Workflow needs a decision".to_owned()))
+        );
+        run.phase = Phase::Ready;
+        assert_eq!(
+            run.attention(),
+            Some((Phase::Ready, "PR is ready for review".to_owned()))
+        );
+        run.pr_url = Some("https://github.com/o/r/pull/3".into());
+        assert_eq!(
+            run.attention(),
+            Some((Phase::Ready, "https://github.com/o/r/pull/3".to_owned()))
+        );
+    }
+
     fn run() -> WorkflowRun {
         WorkflowRun {
             agents: crate::domain::workflow::WorkflowAgents::default(),
