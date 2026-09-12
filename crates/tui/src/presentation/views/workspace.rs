@@ -699,7 +699,12 @@ impl HomeProjection {
                 crate::usecase::application::controller::Route::Home(HomeMode::Closeup)
             ) && state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Closeup),
-            decision_overlay: state.decision_overlay().cloned(),
+            // Same rule as the modals above. The reducer keeps this one's draft
+            // across a foreground change, so only the projection hides it.
+            decision_overlay: state
+                .decision_overlay()
+                .filter(|_| state.overlay() == Some(Overlay::Decisions))
+                .cloned(),
             decisions: state.decisions().to_vec(),
             unread_decision_ids: state.unread_decision_ids().clone(),
             // The foreground overlay is the single source of truth for what a
@@ -3557,9 +3562,9 @@ mod tests {
     use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, BranchChoice, Feedback, GARDEN_IDLE_THRESHOLD,
-        GardenClick, HomeMode, PreviewFileFilter, RoleChoice, Route, SafeError, SafeMessage,
-        Selection, SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection, Target,
-        TargetPhase, update,
+        GardenClick, HomeMode, Overlay, PreviewFileFilter, RoleChoice, Route, SafeError,
+        SafeMessage, Selection, SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection,
+        Target, TargetPhase, update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
@@ -6428,6 +6433,66 @@ mod tests {
         )));
         assert!(frame.contains("Lifecycle actions (non-force)"));
         assert!(frame.contains("Restart"));
+    }
+
+    #[test]
+    fn a_modal_that_lost_the_foreground_is_not_drawn_over_the_surface_that_took_it() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let decision = usagi_core::domain::user_decision::UserDecision {
+            decision_id: UserDecisionId::new(),
+            owner: usagi_core::domain::user_decision::UserDecisionOwner {
+                workspace_id: workspace,
+                session_id: Some(session),
+                caller: usagi_core::domain::agent::CallerRef {
+                    session_id: Some(session),
+                    agent_id: usagi_core::domain::id::AgentId::new(),
+                },
+                run_id: OperationId::new(),
+            },
+            title: "confirm".to_owned(),
+            prompt: "continue the deploy?".to_owned(),
+            options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                id: "ok".to_owned(),
+                label: "OK".to_owned(),
+                description: None,
+            }],
+            allow_freeform: false,
+            expires_at: None,
+            idempotency_key: None,
+            status: usagi_core::domain::user_decision::UserDecisionStatus::Pending,
+            answer: None,
+            created_at: now(),
+            resolved_at: None,
+        };
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![decision],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+        assert_eq!(state.overlay(), Some(Overlay::Decisions));
+        let rows = [projected_session(session, "session", "/work/session")];
+        assert!(
+            joined_home(&HomeProjection::from_state(&state, "work", &rows))
+                .contains("continue the deploy?")
+        );
+
+        // A pane going live releases the Closeup foreground, so every key now
+        // reaches Home. The decision modal keeps its draft in the reducer but
+        // must stop being drawn: a box nothing can answer is worse than none.
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        assert_eq!(state.overlay(), None);
+        assert!(state.decision_overlay().is_some());
+        assert!(
+            !joined_home(&HomeProjection::from_state(&state, "work", &rows))
+                .contains("continue the deploy?")
+        );
     }
 
     #[test]

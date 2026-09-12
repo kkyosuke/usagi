@@ -95,11 +95,12 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │           ├── usecase/         # TUI に閉じた application ロジック（画面グラフの遷移・イベント状態機械）
 │           │   ├── application        # 起動画面 EntryScreen と ScreenRunner への dispatch、Home controller
 │           │   │   ├── controller/    # Entry / New / Home の純粋 reducer（bounded context と tests を分離）
-│           │   │   │   ├── entry      # Welcome / Open の typed attach flow
-│           │   │   │   ├── new        # workspace clone / register の validation と retry flow
-│           │   │   │   ├── preview    # Preview overlay の finder / document 状態と reducer
+│           │   │   │   ├── decision  # user decision overlay の選択・freeform 回答 reducer
+│           │   │   │   ├── entry     # Welcome / Open の typed attach flow
+│           │   │   │   ├── new       # workspace clone / register の validation と retry flow
+│           │   │   │   ├── preview   # Preview overlay の finder / document 状態と reducer
 │           │   │   │   ├── pull_requests # PR modal の状態と daemon snapshot reducer（target 別 inventory）
-│           │   │   │   └── tests      # controller module unit contracts と fake backend
+│           │   │   │   └── tests     # controller module unit contracts と fake backend
 │           │   │   ├── observation_lane # background observation の single-flight / cadence policy
 │           │   │   ├── pane/          # Closeup tab / placeholder の純粋 reducer
 │           │   │   └── pane_runtime/  # daemon inventory / stream を pane へ結合する client state

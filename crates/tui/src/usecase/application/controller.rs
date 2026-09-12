@@ -2780,8 +2780,8 @@ pub enum Effect {
 /// the foreground overlay.
 #[must_use]
 pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
-    let effects = update_event(state, event);
-    reconcile_modal_surfaces(state);
+    let mut effects = update_event(state, event);
+    effects.extend(reconcile_modal_surfaces(state));
     effects
 }
 
@@ -2795,17 +2795,23 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
 /// any key, because input is routed by the foreground overlay alone.
 ///
 /// A pending PR request is not a modal and survives on Home, but any surface
-/// the user opens after asking supersedes it.
-fn reconcile_modal_surfaces(state: &mut AppState) {
+/// the user opens after asking supersedes it. Editors whose draft must outlive
+/// the foreground (notes, environment) are deliberately left alone; the
+/// projection is what stops drawing them.
+fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
     if state.overlay != Some(Overlay::Prs) {
         state.pr_overlay = None;
-    }
-    if state.overlay != Some(Overlay::Preview) {
-        state.preview_overlay = None;
     }
     if state.overlay.is_some() {
         state.pr_request = None;
     }
+    // Dropping the preview also ends the scan behind it, like every other way
+    // the overlay closes. `take` keeps this to the drop that happens here: the
+    // Escape paths have already cleared the overlay and cancelled their own.
+    if state.overlay != Some(Overlay::Preview) && state.preview_overlay.take().is_some() {
+        return vec![Effect::CancelPreview];
+    }
+    Vec::new()
 }
 
 #[must_use]

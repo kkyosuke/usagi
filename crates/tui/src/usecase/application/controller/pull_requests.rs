@@ -64,7 +64,7 @@ pub enum PrFilter {
 }
 
 impl PrFilter {
-    pub(super) fn next(self) -> Self {
+    fn next(self) -> Self {
         match self {
             Self::All => Self::Open,
             Self::Open => Self::Closed,

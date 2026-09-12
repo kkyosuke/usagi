@@ -6988,7 +6988,11 @@ fn a_live_pane_that_releases_the_foreground_takes_its_modal_state_with_it() {
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
     assert_eq!(state.overlay(), Some(Overlay::Preview));
     assert!(state.preview_overlay().is_some());
-    let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+    assert_eq!(
+        update(&mut state, AppEvent::LivePaneAvailability(true)),
+        vec![Effect::CancelPreview],
+        "closing the preview this way also ends the scan behind it"
+    );
     assert_eq!(state.overlay(), None);
     assert!(state.preview_overlay().is_none());
 }
