@@ -29,6 +29,9 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | issue 委譲 | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う |
 | ブリーフ委譲 | `session_delegate_brief` | session 作成と authenticated worker の即時 dispatch を不可分に行う |
 | PR 観測 | `session_pr` | `name` 省略時は呼び出し元自身、指定時は対象 session の daemon-owned PR inventory と merged 集約を返す |
+| workflow 開始 | `workflow_start` | 自身が作成した session で実装＋レビューの workflow を開始する。以後の進行は daemon が所有する |
+| workflow 観測 | `workflow_status` | 工程・担当・修正回数・待ち理由・PR を返す。`Needs attention` と `PR ready` は人の判断が要る |
+| workflow 追加指示 | `workflow_instruct` | 進行中の workflow の担当へ durable な指示を送る |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
 | session 破棄 | `session_remove` | 自身が作成した session の worktree を daemon が破棄し、lifecycle store を更新する |

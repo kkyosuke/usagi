@@ -31,6 +31,9 @@ pub fn tools() -> Vec<ToolDescriptor> {
         ToolDescriptor::session(SessionDecisionLog, SessionAction::DecisionLog),
         ToolDescriptor::session(SessionDelegateIssue, SessionAction::DelegateIssue),
         ToolDescriptor::session(SessionDelegateBrief, SessionAction::DelegateBrief),
+        ToolDescriptor::session(WorkflowStart, SessionAction::WorkflowStart),
+        ToolDescriptor::session(WorkflowStatus, SessionAction::WorkflowStatus),
+        ToolDescriptor::session(WorkflowInstruct, SessionAction::WorkflowInstruct),
         ToolDescriptor::dispatch(SessionDispatch, DispatchToolAction::Dispatch),
         ToolDescriptor::dispatch(AgentHandoff, DispatchToolAction::AgentHandoff),
         ToolDescriptor::dispatch(AgentPeers, DispatchToolAction::AgentPeers),
@@ -237,6 +240,22 @@ impl Tool for UserDecisionResolve {
             .to_string()
         })
     }
+}
+
+/// Goal and instruction text share the daemon's bound for durable workflow text.
+const WORKFLOW_TEXT_MAX_BYTES: usize = 16 * 1024;
+
+/// The participants a workflow can be started with, spelled the way the rest of
+/// the product spells them. Publishing the closed set lets a caller discover the
+/// vocabulary from `tools/list` instead of guessing and being refused.
+fn participant_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": usagi_core::domain::settings::DefaultModel::ALL
+            .iter()
+            .map(|model| model.selector())
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn bounded_string_schema(maximum: usize, nonempty: bool) -> serde_json::Value {
@@ -475,6 +494,86 @@ impl Tool for SessionComplete {
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}"#
+    }
+}
+
+/// `workflow_start` — セッションの実装＋レビュー workflow を開始する。
+pub struct WorkflowStart;
+
+impl Tool for WorkflowStart {
+    fn name(&self) -> &'static str {
+        "workflow_start"
+    }
+    fn description(&self) -> &'static str {
+        "認証済み caller が作成したセッションで、実装＋レビューの workflow を開始するときに使う。name と goal は必須。実装担当が計画担当とレビュー担当を同じセッション内で起動し、レビュー承認と PR の独立検証まで daemon が進行を所有する。進行状況は workflow_status で観測する。自分自身が動いているセッションに対しては呼べない。planner / implementer / reviewer は省略時に workspace が最後に開始できた組合せを使い、未知の綴りは拒否する。"
+    }
+    fn input_schema(&self) -> &'static str {
+        static SCHEMA: OnceLock<String> = OnceLock::new();
+        SCHEMA
+            .get_or_init(|| {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "goal": bounded_string_schema(WORKFLOW_TEXT_MAX_BYTES, true),
+                        "planner": participant_schema(),
+                        "implementer": participant_schema(),
+                        "reviewer": participant_schema(),
+                    },
+                    "required": ["name", "goal"],
+                    "additionalProperties": false,
+                })
+                .to_string()
+            })
+            .as_str()
+    }
+}
+
+/// `workflow_status` — セッションの workflow の進捗を取得する。
+pub struct WorkflowStatus;
+
+impl Tool for WorkflowStatus {
+    fn name(&self) -> &'static str {
+        "workflow_status"
+    }
+    fn description(&self) -> &'static str {
+        "認証済み caller が作成したセッションの workflow の進捗（工程・担当・修正回数・待ち理由・PR）を観測するときに使う。name 必須。工程が Needs attention（判断待ち）か PR ready（完了）なら人の判断が要る。1 回ごとに PR の実検証（git と gh）を伴うため、密なポーリングはしない。"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
+    }
+}
+
+/// `workflow_instruct` — 進行中の workflow へ追加指示を送る。
+pub struct WorkflowInstruct;
+
+impl Tool for WorkflowInstruct {
+    fn name(&self) -> &'static str {
+        "workflow_instruct"
+    }
+    fn description(&self) -> &'static str {
+        "進行中の workflow へ追加指示を送るときに使う。name と body は必須。recipient は automatic（既定、現在の担当）/ implementer / reviewer。指示は受理時点の担当に固定され、工程が変わっても付け替えない。応答を得られなかった場合に呼び直すと別の指示として積まれるため、同じ内容を繰り返さない。"
+    }
+    fn input_schema(&self) -> &'static str {
+        static SCHEMA: OnceLock<String> = OnceLock::new();
+        SCHEMA
+            .get_or_init(|| {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "body": bounded_string_schema(WORKFLOW_TEXT_MAX_BYTES, true),
+                        "recipient": {
+                            "type": "string",
+                            "enum": ["automatic", "implementer", "reviewer"],
+                        },
+                    },
+                    "required": ["name", "body"],
+                    "additionalProperties": false,
+                })
+                .to_string()
+            })
+            .as_str()
     }
 }
 

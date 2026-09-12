@@ -23575,6 +23575,45 @@ instructions = "{instructions}"
         }
 
         #[test]
+        fn remembered_participants_seed_a_start_that_names_nobody() {
+            use usagi_core::domain::settings::DefaultModel;
+            use usagi_core::domain::workflow::WorkflowAgents;
+            let fixture = Fixture::new();
+            // Nothing launched yet: the product defaults stand in.
+            assert_eq!(
+                workflow::remembered_agents(&fixture.agent, fixture.workspace),
+                WorkflowAgents::default()
+            );
+            let remembered = WorkflowAgents {
+                planner: DefaultModel::Agy,
+                implementer: DefaultModel::Claude,
+                reviewer: DefaultModel::OpenAi,
+            };
+            fixture
+                .agent
+                .lock()
+                .unwrap()
+                .dispatch_store()
+                .remember_workflow_agents(fixture.workspace, remembered)
+                .unwrap();
+            // A caller that names nobody gets what this workspace already works
+            // with, which is the same seed the start form shows.
+            assert_eq!(
+                workflow::remembered_agents(&fixture.agent, fixture.workspace),
+                remembered
+            );
+            assert_eq!(
+                workflow::requested_agents(&serde_json::json!({}), remembered),
+                Some(remembered)
+            );
+            // Another workspace keeps its own answer.
+            assert_eq!(
+                workflow::remembered_agents(&fixture.agent, WorkspaceId::new()),
+                WorkflowAgents::default()
+            );
+        }
+
+        #[test]
         fn the_lane_announces_each_call_for_a_human_once() {
             use usagi_core::domain::id::OperationId;
             use usagi_core::domain::workflow::Phase;
