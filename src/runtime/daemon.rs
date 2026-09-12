@@ -924,7 +924,13 @@ impl SystemAgentReadiness {
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect();
         if let Some(name) = agent.state_directory_env() {
-            let home = self.home.as_deref().ok_or(())?;
+            let Some(home) = self.home.as_deref() else {
+                ErrorLog::record(&format!(
+                    "agent readiness: {} needs its own config directory but $HOME is unknown",
+                    agent.selector()
+                ));
+                return Err(());
+            };
             let directory = home.join(agent.state_directory());
             environment.push((name.to_owned(), directory.to_str().ok_or(())?.to_owned()));
         }
@@ -935,7 +941,15 @@ impl SystemAgentReadiness {
                 .ok_or(())?
                 .resolved(&self.workspace)
                 .map_err(|_| ())?;
-            let value = resolved.get(source).ok_or(())?;
+            let Some(value) = resolved.get(source) else {
+                // The recovery a user needs, named once where an operator can
+                // find it. The wire answer stays the generic safe refusal.
+                ErrorLog::record(&format!(
+                    "agent readiness: {} is unavailable because {source} is not configured",
+                    agent.selector()
+                ));
+                return Err(());
+            };
             environment.push((target.to_owned(), value.clone()));
         }
         Ok(environment)
