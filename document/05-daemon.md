@@ -1628,19 +1628,26 @@ workspace へ引き継ぐ。workspace を証明できない legacy root Agent �
 
 新規 worker の runtime/model は MCP schema snapshot を信頼せず、spawn の直前に resolved managed-session worktree の current `.usagi/config.toml` allowlist と current executable locator で再検証する。allowlist 外・不完全な runtime/model は safe `invalid_argument`、CLI 不在は safe `unavailable` となり、reservation や spawn を行わない。既存 `agent.id` はこの再選択を通らず、保存済み agent の session ownership と lifecycle scope をそのまま用いる。allowlist、executable、または MCP wire / durable registry に path、argv、environment、credential、raw CLI output、provider model list は保存しない。
 
-root は Codex を既定 profile とし、launch する executable 自身の status command を bounded preflight として
-Agent owner lock の外で実行する。どの product にどの status command を対応させるかは、profile・executable と同じ
+root は Codex を既定 profile とし、launch する executable 自身の公開 readiness command を bounded preflight として
+Agent owner lock の外で実行する。どの product にどの readiness command を対応させるかは、profile・executable と同じ
 [agent CLI の closed vocabulary](03-tui.md#settings-scope-と-workspace-entry)（core domain settings）が持つ単一の決定関数が答える。
-Codex 互換の `sakana-ai` は launch する `codex-fugu` の `login status` で判定され、Codex は `codex login status`、
-Claude は `claude auth status`、Antigravity は `agy models` を使う。vocabulary に無い product は probe を得られず fail closed で `unavailable` になる。
+Codex は `codex login status`、Claude は `claude auth status`、Antigravity は `agy models` を使う。
+Codex 互換の `sakana-ai` は CLI grammar を Codex と共有するが probe は共有せず、launch する `codex-fugu` の
+`--version` で判定する。出荷される `codex-fugu` は常に `codex --profile fugu <args>` へ exec する wrapper であり、
+実 Codex は `--profile` を runtime command にしか許さないため、`codex-fugu login status` は install 済み・
+sign-in 済みの環境でも nonzero で終わり、その provider を恒久的に `unavailable` にしてしまう。`--version` は
+wrapper の profile 前置と共存できる唯一の公開 probe であり、実 Codex binary を解決できない wrapper は
+nonzero で終わるため、PATH 上の存在確認より強い判定を保つ。vocabulary に無い product は probe を得られず
+fail closed で `unavailable` になる。
 probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
 credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
 差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。
 
-status command の deadline と capture 上限は、status command 自体と同じ vocabulary が product ごとに持つ。
-credential を読んで終わる Claude / Codex / `codex-fugu` は 2 秒・各 16 KiB、language server を起動して認証済み
-account の model を列挙する Antigravity は 15 秒・各 256 KiB である。全 product で 1 つの budget を共有すると、
-probe が遅い・出力が多いという product 固有の性質だけで、install 済みかつ認証済みの CLI が `unavailable` になる。
+readiness command の deadline と capture 上限は、readiness command 自体と同じ vocabulary が product ごとに持つ。
+credential を読んで終わる Claude / Codex と、version を印字して終わる `codex-fugu` は 2 秒・各 16 KiB、
+language server を起動して認証済み account の model を列挙する Antigravity は 15 秒・各 256 KiB である。
+全 product で 1 つの budget を共有すると、probe が遅い・出力が多いという product 固有の性質だけで、
+install 済みかつ認証済みの CLI が `unavailable` になる。
 root が持つのは product に依らない部分（terminate grace と coalescing）だけである。
 
 同じ provider の同時 probe は 1 child に coalesce する。timeout 時はその exact child を TERM、bounded grace、KILL の順で停止して reap し、
@@ -1648,8 +1655,8 @@ nonzero exit、timeout、不正 UTF-8、上限超過をいずれも credential �
 含まない `unavailable` に正規化する。共通の bounded child runner は独立 process group を TERM、bounded grace、KILL の
 順で停止して reap し、pipe reader も join する。preflight 後に owner lock を取り直し、operation idempotency、generation、
 scope、profile revision、current executable、config、concurrency を再検証してから reservation と spawn を行う。Doctor の
-`--version` は readiness とは別の typed probe であり、1 秒の deadline と各 16 KiB の output bound を自分で持ち、
-child lifecycle だけを同じ bounded child runner に従わせる。
+`--version` は argv が `sakana-ai` の readiness probe と重なっても別の typed probe であり、1 秒の deadline と
+各 16 KiB の output bound を自分で持ち、child lifecycle だけを同じ bounded child runner に従わせる。
 
 ### Agent phase の投影
 

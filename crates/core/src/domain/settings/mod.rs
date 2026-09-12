@@ -257,8 +257,8 @@ const ANTIGRAVITY_READINESS_OUTPUT_LIMIT: usize = 256 * 1024;
 /// It travels with the rest of the agent CLI vocabulary
 /// ([`DefaultModel::readiness_command`]) so a provider cannot be added to the
 /// picker without also declaring how a launcher proves that CLI is usable. The
-/// arguments are literal, product-documented status subcommands: they carry no
-/// credential, configuration path, or user input.
+/// arguments are literal, product-documented status or version invocations: they
+/// carry no credential, configuration path, or user input.
 ///
 /// The bounds travel with the invocation for the same reason: how long a status
 /// command may take, and how much it may print while taking it, is a property of
@@ -411,9 +411,18 @@ impl DefaultModel {
     /// The non-secret status probe a launcher runs before spawning this
     /// provider's CLI.
     ///
-    /// Codex and the Codex-compatible `codex-fugu` share the same CLI grammar,
-    /// so both prove readiness with `login status`; Claude uses `auth status`,
-    /// and Antigravity uses its authenticated model listing.
+    /// Codex proves readiness with `login status`, Claude with `auth status`,
+    /// and Antigravity with its authenticated model listing.
+    ///
+    /// `sakana-ai` shares the Codex grammar but not the Codex probe. Its shipped
+    /// `codex-fugu` is a wrapper that always execs `codex --profile fugu <args>`,
+    /// and the real Codex CLI accepts `--profile` only on runtime commands, so
+    /// `codex-fugu login status` exits nonzero even on an installed, signed-in
+    /// machine and would report that provider permanently unavailable.
+    /// `--version` is the strongest public probe the wrapper leaves reachable,
+    /// and it still proves more than PATH presence: a wrapper that cannot resolve
+    /// a real Codex binary exits nonzero instead of printing a version.
+    ///
     /// The probe deliberately reuses [`command`](Self::command) rather than
     /// naming an executable again, so a renamed executable cannot leave the
     /// probe pointing at the old one.
@@ -424,7 +433,8 @@ impl DefaultModel {
             arguments: match self {
                 Self::Claude => &["auth", "status"],
                 Self::Agy => &["models"],
-                Self::OpenAi | Self::SakanaAi => &["login", "status"],
+                Self::OpenAi => &["login", "status"],
+                Self::SakanaAi => &["--version"],
             },
             timeout: match self {
                 Self::Agy => ANTIGRAVITY_READINESS_TIMEOUT,

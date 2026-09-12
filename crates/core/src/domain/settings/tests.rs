@@ -224,14 +224,18 @@ fn every_model_provider_maps_a_selector_profile_and_executable() {
 
 #[test]
 fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
-    // Codex and the Codex-compatible `codex-fugu` share the CLI grammar, so both
-    // prove readiness with `login status`; Claude uses `auth status`. Without
+    // Claude uses `auth status` and Codex uses `login status`. Without
     // `codex-fugu` here an installed sakana.ai stays permanently unavailable
     // (#609).
     for (model, program, arguments) in [
-        (DefaultModel::Claude, "claude", ["auth", "status"]),
-        (DefaultModel::OpenAi, "codex", ["login", "status"]),
-        (DefaultModel::SakanaAi, "codex-fugu", ["login", "status"]),
+        (DefaultModel::Claude, "claude", &["auth", "status"][..]),
+        (DefaultModel::OpenAi, "codex", &["login", "status"][..]),
+        // sakana.ai shares the Codex grammar but not the Codex probe: the shipped
+        // `codex-fugu` wrapper always execs `codex --profile fugu <args>`, and the
+        // real CLI rejects `--profile` on `login status`. Sharing Codex's probe
+        // therefore made every installed, signed-in sakana.ai report nonzero and
+        // stay permanently unavailable.
+        (DefaultModel::SakanaAi, "codex-fugu", &["--version"][..]),
     ] {
         let probe = model.readiness_command();
         assert_eq!(probe.program(), program, "{model:?}");
@@ -239,6 +243,12 @@ fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
         // The probe cannot drift away from the executable a launch spawns.
         assert_eq!(probe.program(), model.command(), "{model:?}");
     }
+    // The split is the point of the fix: the two Codex-grammar providers must not
+    // silently collapse back onto one shared probe.
+    assert_ne!(
+        DefaultModel::SakanaAi.readiness_command().arguments(),
+        DefaultModel::OpenAi.readiness_command().arguments()
+    );
     let agy = DefaultModel::Agy.readiness_command();
     assert_eq!(agy.program(), "agy");
     assert_eq!(agy.arguments(), ["models"]);
