@@ -1639,7 +1639,8 @@ sign-in 済みの環境でも nonzero で終わり、その provider を恒久�
 wrapper の profile 前置と共存でき、実 Codex binary を解決できない wrapper は nonzero で終わるため、
 PATH 上の存在確認より強い判定を保つ。vocabulary に無い product は probe を得られず fail closed で
 `unavailable` になる。
-probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
+probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し（判定範囲は
+product により異なる。後述）、
 credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
 差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。
 

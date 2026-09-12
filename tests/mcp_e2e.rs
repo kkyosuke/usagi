@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use serde_json::json;
-use support::mcp::{FixtureArgv, McpHarness};
+use support::mcp::{FixtureArgv, McpHarness, readiness_condition};
 use usagi_core::domain::{
     agent::{AgentProfileId, AgentResumeTarget, CallerRef, ModelSelector},
     id::{
@@ -1636,7 +1636,7 @@ fn production_user_decision_round_trip_reaches_the_original_caller() {
         "codex",
         &format!(
             r#"#!/bin/sh
-if [ "$1 $2" = "login status" ]; then exit 0; fi
+if {readiness}; then exit 0; fi
 credential_excluded=false
 approval_disabled=false
 usagi_required=false
@@ -1663,6 +1663,7 @@ fi
   printf '%s\n' '{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"user_decision_list","arguments":{{}}}}}}'
 }} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_RUNTIME_MODE="$USAGI_RUNTIME_MODE" USAGI_WORKSPACE_ROOT="$USAGI_WORKSPACE_ROOT" "{executable_placeholder}" mcp >> "$USAGI_MCP_FIXTURE_LOG" 2>&1
 "#,
+            readiness = readiness_condition(),
         ),
     );
 

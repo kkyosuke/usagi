@@ -139,8 +139,9 @@ fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
 fn write_restartable_codex(bin: &Path, count: &Path) {
     fs::create_dir_all(bin).unwrap();
     let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let guard = readiness_guard("codex", 0);
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        "#!/bin/sh\n{guard}if [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         count.display(),
     );
     let path = bin.join("codex");
@@ -153,8 +154,9 @@ fn write_restartable_codex(bin: &Path, count: &Path) {
 fn write_restartable_agy(bin: &Path, count: &Path, argv: &Path) {
     fs::create_dir_all(bin).unwrap();
     let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let guard = readiness_guard("agy", 0);
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = models ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nplugin_workspace=\nconversation_id=\nprevious=\nfor argument in \"$@\"; do\n  if [ \"$previous\" = --add-dir ]; then plugin_workspace=\"$argument\"; fi\n  if [ \"$previous\" = --conversation ]; then conversation_id=\"$argument\"; fi\n  previous=\"$argument\"\ndone\n[ -n \"$plugin_workspace\" ] || exit 10\nplugin=\"$plugin_workspace/.agents/plugins/usagi-runtime\"\n[ -f \"$plugin/plugin.json\" ] || exit 11\n[ -f \"$plugin/mcp_config.json\" ] || exit 12\n[ -f \"$plugin/hooks.json\" ] || exit 13\ngrep -q '\"PreInvocation\"' \"$plugin/hooks.json\" || exit 14\nresuming=true\nif [ -z \"$conversation_id\" ]; then conversation_id=fixture-agy-conversation; resuming=false; fi\nresponse=$(printf '%s' '{{\"conversationId\":\"'\"$conversation_id\"'\",\"workspacePaths\":[\"/fixture\"]}}' | {usagi} agent-phase running --hook-event PreInvocation) || exit 15\n[ \"$response\" = '{{}}' ] || exit 16\nprintf '%s\\0' \"$@\" > \"{}\"\nprintf 'spawn\\n' >> \"{}\"\nprintf 'agy-ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        "#!/bin/sh\n{guard}if [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nplugin_workspace=\nconversation_id=\nprevious=\nfor argument in \"$@\"; do\n  if [ \"$previous\" = --add-dir ]; then plugin_workspace=\"$argument\"; fi\n  if [ \"$previous\" = --conversation ]; then conversation_id=\"$argument\"; fi\n  previous=\"$argument\"\ndone\n[ -n \"$plugin_workspace\" ] || exit 10\nplugin=\"$plugin_workspace/.agents/plugins/usagi-runtime\"\n[ -f \"$plugin/plugin.json\" ] || exit 11\n[ -f \"$plugin/mcp_config.json\" ] || exit 12\n[ -f \"$plugin/hooks.json\" ] || exit 13\ngrep -q '\"PreInvocation\"' \"$plugin/hooks.json\" || exit 14\nresuming=true\nif [ -z \"$conversation_id\" ]; then conversation_id=fixture-agy-conversation; resuming=false; fi\nresponse=$(printf '%s' '{{\"conversationId\":\"'\"$conversation_id\"'\",\"workspacePaths\":[\"/fixture\"]}}' | {usagi} agent-phase running --hook-event PreInvocation) || exit 15\n[ \"$response\" = '{{}}' ] || exit 16\nprintf '%s\\0' \"$@\" > \"{}\"\nprintf 'spawn\\n' >> \"{}\"\nprintf 'agy-ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         argv.display(),
         count.display(),
     );
@@ -184,8 +186,9 @@ fn write_recovery_gated_codex(
 ) {
     fs::create_dir_all(bin).unwrap();
     let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let readiness = readiness_condition("codex");
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then\n  if [ -f '{}' ]; then : > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; fi\n  exit 0\nfi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        "#!/bin/sh\nif {readiness}; then\n  if [ -f '{}' ]; then : > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; fi\n  exit 0\nfi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         block.display(),
         probed.display(),
         release.display(),
@@ -205,8 +208,9 @@ fn shell_quote(value: &str) -> String {
 
 fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &Path) {
     fs::create_dir_all(bin).unwrap();
+    let readiness = readiness_condition("codex");
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then\n  if [ -f '{}' ]; then echo $$ >> '{}'; trap '' TERM; while :; do :; done; fi\n  exit 0\nfi\nprintf '%s\\n' spawn >> '{}'\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        "#!/bin/sh\nif {readiness}; then\n  if [ -f '{}' ]; then echo $$ >> '{}'; trap '' TERM; while :; do :; done; fi\n  exit 0\nfi\nprintf '%s\\n' spawn >> '{}'\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         hang.display(),
         probes.display(),
         count.display(),
@@ -224,17 +228,23 @@ fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &P
 /// `--version`. A fixture that hard-codes one spelling answers the other probe
 /// by running its launch body, so an authenticated fixture reports whatever that
 /// body exits with instead of the readiness the test is fixing.
-fn readiness_guard(program: &str, ready_status: i32) -> String {
-    let probe = DefaultModel::readiness_command_for(program)
-        .expect("a fixture CLI is a modelled agent product");
-    let condition = probe
+fn readiness_condition(program: &str) -> String {
+    DefaultModel::readiness_command_for(program)
+        .expect("a fixture CLI is a modelled agent product")
         .arguments()
         .iter()
         .enumerate()
-        .map(|(index, argument)| format!("[ \"${}\" = '{argument}' ]", index + 1))
+        .map(|(index, argument)| format!("[ \"${{{}}}\" = '{argument}' ]", index + 1))
         .collect::<Vec<_>>()
-        .join(" && ");
-    format!("if {condition}; then exit {ready_status}; fi\n")
+        .join(" && ")
+}
+
+/// The whole guard for a fixture that answers a probe by exiting.
+fn readiness_guard(program: &str, ready_status: i32) -> String {
+    format!(
+        "if {}; then exit {ready_status}; fi\n",
+        readiness_condition(program)
+    )
 }
 
 /// Install a fixture Codex-grammar CLI under `program`.
@@ -1450,15 +1460,16 @@ fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
 }
 
 /// #609 product E2E: the `sakana-ai` profile launches the Codex-compatible
-/// `codex-fugu`, so its admission has to follow *that* executable's status
+/// `codex-fugu`, so its admission has to follow *that* executable's readiness
 /// probe.
 ///
 /// The root used to accept only `codex` / `claude` as readiness products, which
-/// made an installed and authenticated `codex-fugu` permanently unavailable —
-/// the profile the picker offers could never be launched. This drives the
-/// shipping binary over the real socket for all three states: not installed and
-/// installed-but-unauthenticated must refuse safely without spawning a PTY, and
-/// an authenticated fixture must reach a live conversation.
+/// made an installed `codex-fugu` permanently unavailable — the profile the
+/// picker offers could never be launched. This drives the shipping binary over
+/// the real socket for all three states: a missing executable and a probe that
+/// answers nonzero (the shipped wrapper's own exit when it cannot resolve a real
+/// Codex binary) must refuse safely without spawning a PTY, and a usable fixture
+/// must reach a live conversation.
 #[test]
 fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
     let _serial = serial();

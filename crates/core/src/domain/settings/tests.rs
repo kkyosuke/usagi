@@ -261,8 +261,8 @@ fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
 
 #[test]
 fn each_probe_carries_the_bounds_its_own_product_needs() {
-    // A credential read answers immediately and prints almost nothing, so the
-    // providers that only read a token share one small budget.
+    // A credential read answers immediately and prints almost nothing, and so
+    // does a version print, so those providers share one small budget.
     for model in [
         DefaultModel::Claude,
         DefaultModel::OpenAi,

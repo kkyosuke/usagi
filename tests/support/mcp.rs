@@ -730,7 +730,7 @@ fn shell_double_quote_content(value: &str) -> String {
 /// Codex-compatible `codex-fugu` uses `--version`), so deriving the condition
 /// from the agent CLI vocabulary keeps a fixture from spawning, capturing argv,
 /// and racing for the relay lock on a probe a hard-coded union has not heard of.
-fn readiness_condition() -> String {
+pub fn readiness_condition() -> String {
     let mut clauses: Vec<String> = Vec::new();
     for model in DefaultModel::ALL {
         let clause = model
@@ -738,7 +738,7 @@ fn readiness_condition() -> String {
             .arguments()
             .iter()
             .enumerate()
-            .map(|(index, argument)| format!("[ \"${}\" = '{argument}' ]", index + 1))
+            .map(|(index, argument)| format!("[ \"${{{}}}\" = '{argument}' ]", index + 1))
             .collect::<Vec<_>>()
             .join(" && ");
         let clause = format!("{{ {clause}; }}");

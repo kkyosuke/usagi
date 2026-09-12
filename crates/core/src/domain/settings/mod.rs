@@ -414,16 +414,12 @@ impl DefaultModel {
     /// Codex proves readiness with `login status`, Claude with `auth status`,
     /// and Antigravity with its authenticated model listing.
     ///
-    /// `sakana-ai` shares the Codex grammar but not the Codex probe. Its shipped
-    /// `codex-fugu` is a wrapper that always execs `codex --profile fugu <args>`,
-    /// and the real Codex CLI accepts `--profile` only on runtime commands, so
-    /// `codex-fugu login status` exits nonzero even on an installed, signed-in
-    /// machine and would report that provider permanently unavailable.
-    /// `--version` survives that profile injection and still proves more than
-    /// PATH presence: a wrapper that cannot resolve a real Codex binary exits
-    /// nonzero instead of printing a version. It does not prove authentication,
-    /// so an unauthenticated `codex-fugu` reaches its pane and prompts for
-    /// sign-in there rather than being refused before the spawn.
+    /// `sakana-ai` shares the Codex grammar but not the Codex probe: its shipped
+    /// `codex-fugu` wrapper always execs `codex --profile fugu <args>`, which the
+    /// real CLI rejects for `login status`, so Codex's probe would report an
+    /// installed and signed-in provider permanently unavailable. `--version`
+    /// survives that injection. What each probe does and does not prove is
+    /// specified in `document/05-daemon.md` (Agent launch preflight).
     ///
     /// The probe deliberately reuses [`command`](Self::command) rather than
     /// naming an executable again, so a renamed executable cannot leave the
