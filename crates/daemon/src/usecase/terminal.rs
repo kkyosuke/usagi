@@ -1415,6 +1415,20 @@ impl TerminalRegistry {
         self.entries.remove(&key(reference)).is_some()
     }
 
+    /// Cells this registry is holding, independent of the process aggregate.
+    ///
+    /// A test that asserts "this operation allocated nothing" has to read the
+    /// registry rather than the process counter: libtest runs every test in one
+    /// process, so a neighbouring fixture registering a screen moves the process
+    /// number under the assertion and fails a test that did nothing wrong.
+    #[must_use]
+    pub fn retained_screen_cells(&self) -> u64 {
+        self.entries
+            .values()
+            .map(|entry| counted(entry.screen_cells))
+            .sum()
+    }
+
     fn screen_budgets(&self) -> ScreenBudgets {
         ScreenBudgets {
             per_terminal: self.screen_cells_limit,
@@ -1422,10 +1436,7 @@ impl TerminalRegistry {
             retained_cells: if self.screen_cells_process_shared {
                 RETAINED_SCREEN_CELLS.load(Ordering::Relaxed)
             } else {
-                self.entries
-                    .values()
-                    .map(|entry| counted(entry.screen_cells))
-                    .sum()
+                self.retained_screen_cells()
             },
         }
     }
@@ -2176,15 +2187,18 @@ mod tests {
     #[test]
     fn visible_grids_are_refused_before_allocation_or_pty_resize() {
         let terminal = reference();
-        let before = output_pipeline_counters().retained_screen_cells;
         let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
             .with_screen_cell_budgets(16, usize::MAX);
+        // This registry accounts for itself (the budget override already says
+        // so), and so does the assertion: the process counter moves whenever a
+        // test running beside this one registers a screen.
+        assert_eq!(registry.retained_screen_cells(), 0);
 
         assert_eq!(
             registry.register(terminal.clone(), Geometry { cols: 5, rows: 4 }),
             Err(RegistryError::ScreenBudgetExceeded)
         );
-        assert_eq!(output_pipeline_counters().retained_screen_cells, before);
+        assert_eq!(registry.retained_screen_cells(), 0);
 
         let initial = Geometry { cols: 4, rows: 4 };
         registry.register(terminal.clone(), initial).unwrap();
@@ -2207,6 +2221,12 @@ mod tests {
             .unwrap();
         assert!(writer.resized.is_empty());
         assert_eq!(registry.snapshot(&terminal).unwrap().geometry, initial);
+        // The refused resize left the accepted grid in place, not the one it
+        // asked for.
+        assert_eq!(
+            registry.retained_screen_cells(),
+            counted(usize::from(initial.cols) * usize::from(initial.rows))
+        );
     }
 
     #[test]
