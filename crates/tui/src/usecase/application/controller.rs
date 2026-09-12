@@ -26,7 +26,7 @@ use usagi_core::domain::id::{
     UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
-use usagi_core::domain::pr_inventory::{PrEntry, PrState};
+use usagi_core::domain::pr_inventory::{PrEntry, PrIdentity, PrState};
 use usagi_core::domain::presentation_text::{
     presentation_character_is_safe, presentation_text_is_safe, sanitize_presentation_line,
 };
@@ -768,30 +768,173 @@ impl PrFilter {
             Self::Merged => "merged",
         }
     }
+
+    /// Whether this status tab shows a PR in `state`. Visibility is a separate
+    /// question: a dismissed PR is in no tab at all.
+    const fn admits(self, state: PrState) -> bool {
+        match self {
+            Self::All => true,
+            Self::Open => matches!(state, PrState::Open),
+            Self::Closed => matches!(state, PrState::Closed),
+            Self::Merged => matches!(state, PrState::Merged),
+        }
+    }
 }
 
+/// Cache one daemon snapshot and report the PR whose first appearance the user
+/// is waiting for.
+///
+/// A snapshot is authoritative only while it is newer than the cached revision
+/// and its target is still tracked; anything else leaves the inventory alone.
+/// The first snapshot of a target establishes the baseline, so only a URL added
+/// by a later revision counts as a live discovery.
+fn absorb_pr_snapshot(
+    state: &mut AppState,
+    target: Target,
+    revision: u64,
+    prs: &[PrEntry],
+) -> Option<PrIdentity> {
+    let known = state.prs.get(&target);
+    if !is_tracked(&state.sessions, target)
+        || known.is_some_and(|(current, _)| revision <= *current)
+    {
+        return None;
+    }
+    let detected = known
+        .and_then(|(_, known)| {
+            prs.iter().find(|pr| {
+                pr.is_visible()
+                    && pr.auto_open
+                    && known.iter().all(|known| known.identity != pr.identity)
+            })
+        })
+        .map(|pr| pr.identity.clone());
+    let newly_merged = known.is_some_and(|(_, known)| {
+        prs.iter().any(|pr| {
+            pr.state == PrState::Merged
+                && known
+                    .iter()
+                    .any(|known| known.identity == pr.identity && known.state != PrState::Merged)
+        })
+    });
+    if let (true, Some(session)) = (newly_merged, target.session_id()) {
+        state
+            .pr_merge_celebrations
+            .insert(session, state.mascot_tick.saturating_add(24));
+    }
+    state.prs.insert(target, (revision, prs.to_vec()));
+    state.session_pr_revision = state.session_pr_revision.saturating_add(1);
+    detected
+}
+
+/// Rebuild the open modal from the refreshed inventory of its own target.
+///
+/// An inventory with no visible PR at all closes the modal. A status tab with
+/// no matches keeps it open, so the user can move to another tab instead of
+/// reopening the inventory.
+fn refresh_pr_modal(state: &mut AppState, target: Target, detected: Option<&PrIdentity>) {
+    let Some((filter, previous)) = state
+        .pr_overlay
+        .as_ref()
+        .filter(|overlay| overlay.target == target)
+        .map(|overlay| (overlay.filter, overlay.selected))
+    else {
+        return;
+    };
+    let inventory = state.prs_for(target).unwrap_or_default();
+    if !inventory.iter().any(PrEntry::is_visible) {
+        state.close_pr_modal();
+        return;
+    }
+    let rows = filtered_prs(inventory, filter);
+    let selected = detected
+        .and_then(|identity| rows.iter().position(|pr| &pr.identity == identity))
+        .unwrap_or(previous)
+        .min(rows.len().saturating_sub(1));
+    if let Some(overlay) = state.pr_overlay.as_mut() {
+        overlay.prs = rows;
+        overlay.selected = selected;
+        overlay.error = None;
+    }
+}
+
+/// Answer the explicit `p` request for `target` with the snapshot it asked for.
+///
+/// The modal appears only when the inventory has something to show and nothing
+/// else has taken the foreground meanwhile; a delayed answer never displaces a
+/// newer interaction. Either way the request is spent.
+fn settle_pr_request(state: &mut AppState, target: Target, detected: Option<&PrIdentity>) {
+    if state.pr_request != Some(target) {
+        return;
+    }
+    state.pr_request = None;
+    let visible = state.visible_prs(target);
+    if visible.is_empty() || !state.can_surface_pr_modal() {
+        return;
+    }
+    state.open_pr_modal(PrOverlay::showing(target, visible, detected));
+}
+
+/// Surface a PR the user has not seen before: it is the completion of work they
+/// are waiting for. Metadata-only refreshes, duplicate snapshots, and deliberate
+/// dismissals stay quiet, and an open modal or Director interaction remains the
+/// input owner.
+fn announce_detected_pr(state: &mut AppState, target: Target, detected: Option<&PrIdentity>) {
+    let Some(identity) = detected else {
+        return;
+    };
+    let may_open = match state.pr_auto_open {
+        PrAutoOpen::Always => true,
+        PrAutoOpen::SwitchOnly => matches!(state.route, Route::Home(HomeMode::Switch)),
+        PrAutoOpen::NotifyOnly | PrAutoOpen::Never => false,
+    };
+    if may_open && state.can_surface_pr_modal() {
+        let visible = state.visible_prs(target);
+        state.open_pr_modal(PrOverlay::showing(target, visible, Some(identity)));
+    } else if state.pr_auto_open == PrAutoOpen::NotifyOnly {
+        state.notice = Some(Notice::new(format!("PR detected: {}", identity.as_url())));
+    }
+}
+
+/// Whether the workspace snapshot still contains this target. The workspace
+/// root outlives every session, so only a session can stop being tracked.
+fn is_tracked(sessions: &[SessionId], target: Target) -> bool {
+    target
+        .session_id()
+        .is_none_or(|session| sessions.contains(&session))
+}
+
+/// The rows one status tab shows, in inventory order.
 fn filtered_prs(prs: &[PrEntry], filter: PrFilter) -> Vec<PrEntry> {
     prs.iter()
-        .filter(|pr| {
-            pr.state != PrState::Dismissed
-                && match filter {
-                    PrFilter::All => true,
-                    PrFilter::Open => pr.state == PrState::Open,
-                    PrFilter::Closed => pr.state == PrState::Closed,
-                    PrFilter::Merged => pr.state == PrState::Merged,
-                }
-        })
+        .filter(|pr| pr.is_visible() && filter.admits(pr.state))
         .cloned()
         .collect()
 }
 
 impl PrOverlay {
-    fn loading(target: Target) -> Self {
+    /// Modal listing `prs` on the unfiltered status tab, with the cursor on
+    /// `detected` when that row is present and on the first row otherwise.
+    fn showing(target: Target, prs: Vec<PrEntry>, detected: Option<&PrIdentity>) -> Self {
+        let selected = detected
+            .and_then(|identity| prs.iter().position(|pr| &pr.identity == identity))
+            .unwrap_or(0);
+        Self {
+            target,
+            prs,
+            selected,
+            error: None,
+            filter: PrFilter::All,
+        }
+    }
+
+    /// Modal reporting why the inventory could not be read.
+    fn failed(target: Target, error: SafeError) -> Self {
         Self {
             target,
             prs: Vec::new(),
             selected: 0,
-            error: None,
+            error: Some(error),
             filter: PrFilter::All,
         }
     }
@@ -886,7 +1029,9 @@ impl EnvironmentEditor {
 }
 
 /// daemon wire と独立した TUI の target projection。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `Ord` は [`AppState`] の PR inventory を target 単位で決定的に並べるために持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Target {
     /// workspace root。
     Root(WorkspaceId),
@@ -1260,7 +1405,16 @@ pub struct AppState {
     decisions: Vec<UserDecision>,
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
     decision_overlay: Option<DecisionOverlayState>,
+    /// The visible Pull Request modal. It exists exactly while
+    /// [`Overlay::Prs`] is the foreground overlay; an inventory request that has
+    /// not produced a modal yet lives in [`pr_request`](Self::pr_request).
     pr_overlay: Option<PrOverlay>,
+    /// Target of an explicit `p` request whose snapshot has not arrived yet.
+    ///
+    /// A request is not an overlay: nothing is drawn and no input is routed to
+    /// it. The reducer keeps it only so the returning snapshot can open the
+    /// modal on the target the user actually asked for.
+    pr_request: Option<Target>,
     cleanup_queue: Option<CleanupQueueState>,
     remove_queue: Option<RemoveQueueState>,
     preview_overlay: Option<PreviewOverlay>,
@@ -1279,9 +1433,11 @@ pub struct AppState {
     session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
     /// Non-persistent daemon role assignment projection by stable identity.
     session_roles: BTreeMap<SessionId, SessionRoleProjection>,
-    /// Daemon-authoritative PR rows by stable session identity. The sidebar and
-    /// modal deliberately read this same projection.
-    session_prs: BTreeMap<SessionId, (u64, Vec<PrEntry>)>,
+    /// Daemon-authoritative PR rows by target. The workspace root and every
+    /// session share this one projection, so the sidebar badge, the modal, and
+    /// the modal's status tabs all read the same rows through
+    /// [`prs_for`](Self::prs_for).
+    prs: BTreeMap<Target, (u64, Vec<PrEntry>)>,
     session_pr_revision: u64,
     pr_auto_open: PrAutoOpen,
     pr_merge_celebrations: BTreeMap<SessionId, u64>,
@@ -1486,6 +1642,7 @@ impl AppState {
             unread_decisions: std::collections::BTreeSet::new(),
             decision_overlay: None,
             pr_overlay: None,
+            pr_request: None,
             cleanup_queue: None,
             remove_queue: None,
             preview_overlay: None,
@@ -1498,7 +1655,7 @@ impl AppState {
             session_names: Vec::new(),
             session_lifecycles: BTreeMap::new(),
             session_roles: BTreeMap::new(),
-            session_prs: BTreeMap::new(),
+            prs: BTreeMap::new(),
             session_pr_revision: 0,
             pr_auto_open: PrAutoOpen::default(),
             pr_merge_celebrations: BTreeMap::new(),
@@ -1657,6 +1814,13 @@ impl AppState {
     pub fn pr_overlay(&self) -> Option<&PrOverlay> {
         self.pr_overlay.as_ref()
     }
+    /// Target of the PR inventory request that has not produced a modal yet.
+    /// A request is invisible and owns no input; the modal appears only once
+    /// the daemon's snapshot proves there is something to show.
+    #[must_use]
+    pub const fn pr_request(&self) -> Option<Target> {
+        self.pr_request
+    }
     /// Open merge-confirmed cleanup queue, including its stable selection.
     #[must_use]
     pub fn cleanup_queue(&self) -> Option<&CleanupQueueState> {
@@ -1706,12 +1870,44 @@ impl AppState {
     pub fn session_roles(&self) -> &BTreeMap<SessionId, SessionRoleProjection> {
         &self.session_roles
     }
+    /// Latest daemon PR rows for one target (workspace root or session).
+    #[must_use]
+    pub fn prs_for(&self, target: Target) -> Option<&[PrEntry]> {
+        self.prs.get(&target).map(|(_, prs)| prs.as_slice())
+    }
     /// Latest daemon PR rows for one stable session identity.
     #[must_use]
     pub fn session_prs(&self, session: SessionId) -> Option<&[PrEntry]> {
-        self.session_prs
-            .get(&session)
-            .map(|(_, prs)| prs.as_slice())
+        self.prs_for(Target::Session(session))
+    }
+    /// Rows of one target that the modal may show, in inventory order.
+    /// Dismissed rows are never visible, whatever the active status tab is.
+    fn visible_prs(&self, target: Target) -> Vec<PrEntry> {
+        self.prs_for(target)
+            .map(|prs| filtered_prs(prs, PrFilter::All))
+            .unwrap_or_default()
+    }
+    /// Whether a PR modal may take the foreground without displacing something
+    /// the user is already looking at.
+    fn can_surface_pr_modal(&self) -> bool {
+        self.overlay.is_none() && !self.workspace_drawer_open()
+    }
+    /// Show `overlay` as the foreground PR modal. Opening one always resolves
+    /// the pending request, so the two never describe the same target at once.
+    fn open_pr_modal(&mut self, overlay: PrOverlay) {
+        self.overlay = Some(Overlay::Prs);
+        self.pr_overlay = Some(overlay);
+        self.pr_request = None;
+        self.preview_overlay = None;
+    }
+    /// Drop the PR modal and any request behind it, releasing the foreground
+    /// only when the modal actually owns it.
+    fn close_pr_modal(&mut self) {
+        self.pr_overlay = None;
+        self.pr_request = None;
+        if self.overlay == Some(Overlay::Prs) {
+            self.overlay = None;
+        }
     }
     /// Local generation for change-driven sidebar row reconstruction.
     #[must_use]
@@ -3266,20 +3462,25 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                         .session_id
                         .is_none_or(|session| state.sessions.contains(&session))
                 });
-            let before = state.session_prs.len();
+            let before = state.prs.len();
             state
-                .session_prs
-                .retain(|session, _| state.sessions.contains(session));
-            if state.session_prs.len() != before {
+                .prs
+                .retain(|target, _| is_tracked(&state.sessions, *target));
+            if state.prs.len() != before {
                 state.session_pr_revision = state.session_pr_revision.saturating_add(1);
             }
-            if state.pr_overlay.as_ref().is_some_and(|overlay| {
-                matches!(overlay.target, Target::Session(session) if !state.sessions.contains(&session))
-            }) {
-                state.pr_overlay = None;
-                if state.overlay == Some(Overlay::Prs) {
-                    state.overlay = None;
-                }
+            if state
+                .pr_overlay
+                .as_ref()
+                .is_some_and(|overlay| !is_tracked(&state.sessions, overlay.target))
+            {
+                state.close_pr_modal();
+            }
+            if state
+                .pr_request
+                .is_some_and(|target| !is_tracked(&state.sessions, target))
+            {
+                state.pr_request = None;
             }
             state.reconcile_sessions(&previous_sessions);
             reconcile_force_remove_confirmation(state);
@@ -3626,144 +3827,23 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             revision,
             prs,
         } => {
-            let mut newly_detected = None;
-            let accepted = match target {
-                Target::Root(_) => true,
-                Target::Session(session) => {
-                    let current = state.session_prs.get(session);
-                    let accepted = state.sessions.contains(session)
-                        && current.is_none_or(|(current, _)| *revision > *current);
-                    if accepted {
-                        // The first authoritative snapshot establishes the
-                        // baseline. Only a URL added by a later revision is a
-                        // live discovery that should interrupt Home.
-                        newly_detected = current.and_then(|(_, current)| {
-                            prs.iter().position(|pr| {
-                                pr.state != PrState::Dismissed
-                                    && pr.auto_open
-                                    && current.iter().all(|known| known.identity != pr.identity)
-                            })
-                        });
-                        let newly_merged = current.is_some_and(|(_, current)| {
-                            prs.iter().any(|pr| {
-                                pr.state == PrState::Merged
-                                    && current.iter().any(|known| {
-                                        known.identity == pr.identity
-                                            && known.state != PrState::Merged
-                                    })
-                            })
-                        });
-                        if newly_merged {
-                            state
-                                .pr_merge_celebrations
-                                .insert(*session, state.mascot_tick.saturating_add(24));
-                        }
-                        state.session_prs.insert(*session, (*revision, prs.clone()));
-                        state.session_pr_revision = state.session_pr_revision.saturating_add(1);
-                    }
-                    accepted
-                }
-            };
-            if let Some(overlay) = state
-                .pr_overlay
-                .as_mut()
-                .filter(|overlay| accepted && overlay.target == *target)
-            {
-                overlay.prs = filtered_prs(prs, overlay.filter);
-                let detected_selection = newly_detected.and_then(|index| {
-                    prs.get(index).and_then(|detected| {
-                        overlay
-                            .prs
-                            .iter()
-                            .position(|pr| pr.identity == detected.identity)
-                    })
-                });
-                overlay.selected = detected_selection
-                    .unwrap_or(overlay.selected)
-                    .min(overlay.prs.len().saturating_sub(1));
-                overlay.error = None;
-            }
-            // An explicit `p` request is kept as a hidden pending overlay until
-            // its snapshot arrives. Only an inventory with no visible PR at all
-            // closes the modal. A status tab with no matches remains open so the
-            // user can navigate to another tab without reopening the inventory.
-            if state
-                .pr_overlay
-                .as_ref()
-                .is_some_and(|overlay| overlay.target == *target)
-            {
-                let has_visible_prs = match target {
-                    Target::Root(_) => !filtered_prs(prs, PrFilter::All).is_empty(),
-                    Target::Session(session) => state
-                        .session_prs(*session)
-                        .is_some_and(|prs| !filtered_prs(prs, PrFilter::All).is_empty()),
-                };
-                if !has_visible_prs {
-                    state.pr_overlay = None;
-                    if state.overlay == Some(Overlay::Prs) {
-                        state.overlay = None;
-                    }
-                } else if state.overlay.is_none() && !state.workspace_drawer_open() {
-                    state.overlay = Some(Overlay::Prs);
-                } else if state.overlay != Some(Overlay::Prs) {
-                    // Do not let a delayed explicit request steal a newer
-                    // foreground interaction.
-                    state.pr_overlay = None;
-                }
-            }
-            // A freshly discovered PR is the completion of work the user is
-            // waiting for, so surface it immediately. Metadata-only refreshes,
-            // duplicate snapshots, and deliberate dismissals stay quiet. An
-            // existing modal or Director interaction remains the input owner.
-            let may_auto_open = match state.pr_auto_open {
-                PrAutoOpen::Always => true,
-                PrAutoOpen::SwitchOnly => {
-                    matches!(state.route, Route::Home(HomeMode::Switch))
-                }
-                PrAutoOpen::NotifyOnly | PrAutoOpen::Never => false,
-            };
-            if accepted
-                && let Some(selected) = newly_detected
-                && may_auto_open
-                && state.overlay.is_none()
-                && !state.workspace_drawer_open()
-            {
-                let detected_identity = prs.get(selected).map(|pr| &pr.identity);
-                let visible = filtered_prs(prs, PrFilter::All);
-                let visible_selected = detected_identity
-                    .and_then(|identity| visible.iter().position(|pr| &pr.identity == identity))
-                    .unwrap_or(0);
-                state.overlay = Some(Overlay::Prs);
-                state.pr_overlay = Some(PrOverlay {
-                    target: *target,
-                    prs: visible,
-                    selected: visible_selected,
-                    error: None,
-                    filter: PrFilter::All,
-                });
-                state.preview_overlay = None;
-            } else if accepted
-                && let Some(selected) = newly_detected
-                && state.pr_auto_open == PrAutoOpen::NotifyOnly
-                && let Some(pr) = prs.get(selected)
-            {
-                state.notice = Some(Notice::new(format!("PR detected: {}", pr.url())));
-            }
+            let detected = absorb_pr_snapshot(state, *target, *revision, prs);
+            refresh_pr_modal(state, *target, detected.as_ref());
+            settle_pr_request(state, *target, detected.as_ref());
+            announce_detected_pr(state, *target, detected.as_ref());
             reconcile_cleanup_queue(state);
         }
         BackendEvent::PullRequestsError { target, error } => {
-            let matching_request = state
+            if let Some(overlay) = state
                 .pr_overlay
-                .as_ref()
-                .is_some_and(|overlay| overlay.target == *target);
-            if matching_request {
-                if state.overlay.is_none() && !state.workspace_drawer_open() {
-                    state.overlay = Some(Overlay::Prs);
-                } else if state.overlay != Some(Overlay::Prs) {
-                    state.pr_overlay = None;
-                }
-                if let Some(overlay) = state.pr_overlay.as_mut() {
-                    overlay.error = Some(error.clone());
+                .as_mut()
+                .filter(|overlay| overlay.target == *target)
+            {
+                overlay.error = Some(error.clone());
+            } else if state.pr_request == Some(*target) {
+                state.pr_request = None;
+                if state.can_surface_pr_modal() {
+                    state.open_pr_modal(PrOverlay::failed(*target, error.clone()));
                 }
             }
         }
@@ -5506,18 +5586,24 @@ fn open_prs(state: &mut AppState) -> Vec<Effect> {
     open_prs_for_target(state, target)
 }
 
+/// Open the PR modal for `target` on what the cache already knows, and always
+/// ask the daemon for a fresh inventory.
+///
+/// With nothing cached there is nothing to show, so the request is recorded
+/// instead of a modal: an empty box that answers no key is worse than no box.
+/// [`settle_pr_request`] opens it when the snapshot proves there is something
+/// in it.
 fn open_prs_for_target(state: &mut AppState, target: Target) -> Vec<Effect> {
-    let mut overlay = PrOverlay::loading(target);
-    if let Target::Session(session) = target
-        && let Some(prs) = state.session_prs(session)
-    {
-        overlay.prs = filtered_prs(prs, PrFilter::All);
+    let visible = state.visible_prs(target);
+    // The request dismisses the surface it was asked from: the answer belongs in
+    // the foreground the user just released, and anything opened after this
+    // point is newer than the request and keeps it.
+    state.overlay = None;
+    if visible.is_empty() {
+        state.pr_request = Some(target);
+    } else {
+        state.open_pr_modal(PrOverlay::showing(target, visible, None));
     }
-    // Keep the request state so a newly returned PR can still open immediately,
-    // but do not render an empty loading/empty-state modal.
-    state.overlay = (!overlay.prs.is_empty()).then_some(Overlay::Prs);
-    state.pr_overlay = Some(overlay);
-    state.preview_overlay = None;
     vec![Effect::LoadPullRequests { target }]
 }
 
@@ -5553,11 +5639,7 @@ fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
         }) else {
             return Vec::new();
         };
-        let all = target
-            .session_id()
-            .and_then(|session| state.session_prs(session))
-            .unwrap_or_default()
-            .to_vec();
+        let all = state.prs_for(target).unwrap_or_default().to_vec();
         if let Some(overlay) = state.pr_overlay.as_mut() {
             overlay.filter = filter;
             overlay.prs = filtered_prs(&all, filter);
@@ -5571,8 +5653,7 @@ fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
     };
     match key {
         AppKey::Escape => {
-            state.overlay = None;
-            state.pr_overlay = None;
+            state.close_pr_modal();
             Vec::new()
         }
         AppKey::Up => {

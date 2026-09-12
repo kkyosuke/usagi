@@ -52,7 +52,7 @@ use crate::presentation::views::work_run::{WorkRunFreshness, WorkRunProgress, Wo
 use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
-    AppState, CreateSessionForm, Feedback, GardenClick, HomeMode, Notice, PrOverlay,
+    AppState, CreateSessionForm, Feedback, GardenClick, HomeMode, Notice, Overlay, PrOverlay,
     PreviewOverlay, Selection, SessionRoleProjection, Target, TargetPhase,
 };
 use crate::usecase::application::metrics::GitDiff;
@@ -702,7 +702,13 @@ impl HomeProjection {
             decision_overlay: state.decision_overlay().cloned(),
             decisions: state.decisions().to_vec(),
             unread_decision_ids: state.unread_decision_ids().clone(),
-            pr_overlay: state.pr_overlay().cloned(),
+            // The foreground overlay is the single source of truth for what a
+            // modal owns, so a PR modal that is not the foreground is not drawn
+            // and can never cover the surface holding the keyboard.
+            pr_overlay: state
+                .pr_overlay()
+                .filter(|_| state.overlay() == Some(Overlay::Prs))
+                .cloned(),
             preview_overlay: state.preview_overlay().cloned(),
             cleanup_queue,
             remove_queue,
@@ -6419,6 +6425,40 @@ mod tests {
         )));
         assert!(frame.contains("Lifecycle actions (non-force)"));
         assert!(frame.contains("Restart"));
+    }
+
+    #[test]
+    fn a_pending_pr_request_draws_no_modal_until_its_inventory_arrives() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let rows = [projected_session(session, "session", "/work/session")];
+
+        // `p` on a cold inventory only asks the daemon. Drawing the modal here
+        // would put an empty box on screen that answers no key, because the
+        // foreground overlay — and with it the input routing — is still Home.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let pending = joined_home(&HomeProjection::from_state(&state, "work", &rows));
+        assert!(!pending.contains("Pull Request"));
+        assert!(!pending.contains("no pull requests"));
+
+        let mut pr = PrEntry::new(
+            usagi_core::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/7")
+                .unwrap(),
+        );
+        pr.title = Some("add feature".into());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![pr],
+            }),
+        );
+        let answered = joined_home(&HomeProjection::from_state(&state, "work", &rows));
+        assert!(answered.contains("Pull Request"));
+        assert!(answered.contains("add feature"));
     }
 
     #[test]

@@ -478,7 +478,8 @@ fn closeup_live_pr_action_requests_the_active_sessions_prs_without_an_empty_moda
         vec![Effect::LoadPullRequests { target }]
     );
     assert_eq!(state.overlay(), None);
-    assert_eq!(state.pr_overlay().unwrap().target(), target);
+    assert!(state.pr_overlay().is_none());
+    assert_eq!(state.pr_request(), Some(target));
 }
 
 #[test]

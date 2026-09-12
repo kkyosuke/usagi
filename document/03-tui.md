@@ -1369,7 +1369,11 @@ current project を保ったまま project switcher に安全な理由を表示�
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない PR の件数を
 sidebar の右端に Icons 設定に応じた PR icon または `PR` label とともに固定列で投影する。
 `Ctrl-O p`、または PR 表示＋件数のクリックは、対象 `SessionId` について resident PR lane を wake する。
-dismissed でない PR がある場合だけ同じ PR modal を表示し、snapshot が空なら modal は閉じたままにする。modal の枠タイトルは `Pull Request` の 1 か所だけに置く。repository は連続する PR 群の見出しとして 1 回表示し、その下の各行へ状態・番号・title・CI / review を
+dismissed でない PR がある場合だけ同じ PR modal を表示し、snapshot が空なら modal は閉じたままにする。
+snapshot が届くまでの間、TUI が持つのは request だけで modal は描かない。前面の overlay が modal を持たない
+request を描くと、キー入力を受け取らない空の枠が残るためである。cache に PR があればその内容で即座に開き、
+届いた snapshot で中身を更新する。request が届く前に別の surface が前面を取っていた場合、遅れて届いた
+snapshot はその操作を奪わずに request を捨てる。modal の枠タイトルは `Pull Request` の 1 か所だけに置く。repository は連続する PR 群の見出しとして 1 回表示し、その下の各行へ状態・番号・title・CI / review を
 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。modal の枠外をクリックすると閉じ、枠内と枠外のクリックはいずれも背後の project bar・header・pane・sidebar へ伝播しない。sidebar projection は新しい revision だけで進み、
 開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
 保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、
@@ -1392,7 +1396,7 @@ window 内の成功、`backing_off` は last-known title/state を表示した�
 独自 timer、`gh` 呼び出し、失敗時の空 snapshot への置換を行わない。refresh の間隔、dedupe、backoff、restart、
 shutdown の正本は [daemon の PR refresh scheduler](05-daemon.md#pr-refresh-scheduler) とする。
 
-modal 上部は All / Open / Closed / Merged の status tab を横に並べ、`←→` で tab、`↑↓` で表示中の PR を循環する。選択した tab に一致する PR がなくても modal は閉じず、空表示のまま別の tab へ移動できる。dismissed でない PR が inventory 全体からなくなった場合だけ modal を閉じる。
+modal 上部は All / Open / Closed / Merged の status tab を横に並べ、`←→` で tab、`↑↓` で表示中の PR を循環する。tab の絞り込みは対象 target の同じ inventory を読み直すため、tab を往復しても一覧は失われない。選択した tab に一致する PR がなくても modal は閉じず、空表示のまま別の tab へ移動できる。dismissed でない PR が inventory 全体からなくなった場合だけ modal を閉じる。
 `c` は canonical URL の clipboard copy、`Ctrl-X` は daemon に dismissed tombstone を保存する。Enter は選択中の canonical HTTPS PR URL を browser effect に 1 回渡す。合成ルートは macOS では
 `open`、Linux では `xdg-open`、Windows では `cmd /C start "" <url>`（空文字は `start` が消費する
 window title 引数）を argv として実行する。URL を shell command に補間せず、検証失敗、
