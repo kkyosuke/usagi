@@ -2844,7 +2844,8 @@ fn every_existing_modal_blocks_director_drawer_entry() {
                 state.create_session = Some(CreateSessionForm::new(Vec::new()));
             }
             Overlay::Prs => {
-                state.pr_overlay = Some(PrOverlay::loading(Target::Session(first)));
+                state.pr_overlay =
+                    Some(PrOverlay::showing(Target::Session(first), Vec::new(), None));
             }
             Overlay::Preview => {
                 state.preview_overlay = Some(PreviewOverlay::loading(Target::Session(first)));
@@ -6873,7 +6874,8 @@ fn pr_overlay_opens_reflows_material_navigates_opens_and_closes() {
         vec![Effect::LoadPullRequests { target }]
     );
     assert_eq!(state.overlay(), None);
-    assert!(state.pr_overlay().unwrap().prs().is_empty());
+    assert!(state.pr_overlay().is_none());
+    assert_eq!(state.pr_request(), Some(target));
 
     // A list for another target is ignored; the matching one fills the overlay.
     let _ = update(
@@ -6884,7 +6886,8 @@ fn pr_overlay_opens_reflows_material_navigates_opens_and_closes() {
             prs: vec![pr_link(9)],
         }),
     );
-    assert!(state.pr_overlay().unwrap().prs().is_empty());
+    assert!(state.pr_overlay().is_none());
+    assert_eq!(state.pr_request(), Some(target));
     let prs = vec![pr_link(1), pr_link(2)];
     let _ = update(
         &mut state,
@@ -6973,6 +6976,104 @@ fn pr_overlay_opens_reflows_material_navigates_opens_and_closes() {
 }
 
 #[test]
+fn a_live_pane_that_releases_the_foreground_takes_its_modal_state_with_it() {
+    let (workspace, session, _) = ids();
+    let mut state = AppState::home(workspace, vec![session]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+
+    // A pane going live releases the Closeup foreground. Whatever modal held it
+    // must go with it: input is routed by the foreground alone, so a surviving
+    // modal would be drawn while every key reached Home instead.
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+    assert_eq!(state.overlay(), Some(Overlay::Preview));
+    assert!(state.preview_overlay().is_some());
+    assert_eq!(
+        update(&mut state, AppEvent::LivePaneAvailability(true)),
+        vec![Effect::CancelPreview],
+        "closing the preview this way also ends the scan behind it"
+    );
+    assert_eq!(state.overlay(), None);
+    assert!(state.preview_overlay().is_none());
+}
+
+#[test]
+fn a_pending_pr_request_is_forgotten_when_its_session_leaves_the_workspace() {
+    let (workspace, session, _) = ids();
+    let mut state = AppState::home(workspace, vec![session]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+    assert_eq!(state.pr_request(), Some(Target::Session(session)));
+
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(Vec::new())),
+    );
+    assert_eq!(state.pr_request(), None);
+}
+
+#[test]
+fn an_error_on_an_open_pr_modal_stays_in_it_and_a_stale_snapshot_keeps_it() {
+    let (workspace, session, _) = ids();
+    let target = Target::Session(session);
+    let mut state = AppState::home(workspace, vec![session]);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![pr_link(1)],
+        }),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+    assert_eq!(state.overlay(), Some(Overlay::Prs));
+
+    // A failed refresh keeps the rows the last real answer left and says why
+    // they may be stale, instead of replacing the modal.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsError {
+            target,
+            error: safe_error("gh unavailable"),
+        }),
+    );
+    assert_eq!(state.overlay(), Some(Overlay::Prs));
+    assert_eq!(state.pr_overlay().unwrap().prs().len(), 1);
+    assert_eq!(
+        state
+            .pr_overlay()
+            .unwrap()
+            .error()
+            .map(|error| error.message.as_str()),
+        Some("gh unavailable")
+    );
+
+    // A snapshot the reducer rejects proves nothing, so it must not present the
+    // unchanged rows as freshly confirmed.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![pr_link(1), pr_link(2)],
+        }),
+    );
+    assert_eq!(state.pr_overlay().unwrap().prs().len(), 1);
+    assert!(state.pr_overlay().unwrap().error().is_some());
+
+    // The next authoritative snapshot clears it.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 2,
+            prs: vec![pr_link(1), pr_link(2)],
+        }),
+    );
+    assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
+    assert!(state.pr_overlay().unwrap().error().is_none());
+}
+
+#[test]
 fn pr_overlay_stays_hidden_without_prs_and_reports_loading_errors() {
     let (workspace, session, _) = ids();
     let target = Target::Session(session);
@@ -7015,7 +7116,8 @@ fn pr_overlay_stays_hidden_without_prs_and_reports_loading_errors() {
     // request instead of leaving it to misclassify a future discovery.
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
     assert_eq!(state.overlay(), None);
-    assert!(state.pr_overlay().is_some());
+    assert!(state.pr_overlay().is_none(), "a request draws nothing");
+    assert_eq!(state.pr_request(), Some(target));
     let _ = update(
         &mut state,
         AppEvent::Backend(BackendEvent::PullRequestsLoaded {
@@ -7029,11 +7131,53 @@ fn pr_overlay_stays_hidden_without_prs_and_reports_loading_errors() {
 }
 
 #[test]
+fn root_pr_modal_keeps_its_inventory_across_status_tabs() {
+    let (workspace, _, _) = ids();
+    let target = Target::Root(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    state.set_pr_auto_open(PrAutoOpen::Always);
+    let mut merged = pr_link(2);
+    merged.state = PrState::Merged;
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![pr_link(1)],
+        }),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 2,
+            prs: vec![pr_link(1), merged],
+        }),
+    );
+    assert_eq!(state.overlay(), Some(Overlay::Prs));
+    assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
+
+    // The workspace root reads the same inventory as a session, so its status
+    // tabs filter the cached rows instead of emptying the modal for good.
+    for (filter, expected) in [
+        (PrFilter::Open, 1),
+        (PrFilter::Closed, 0),
+        (PrFilter::Merged, 1),
+        (PrFilter::All, 2),
+    ] {
+        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
+        assert_eq!(state.pr_overlay().unwrap().filter(), filter);
+        assert_eq!(state.pr_overlay().unwrap().prs().len(), expected);
+    }
+}
+
+#[test]
 fn root_pr_overlay_uses_the_unfiltered_inventory_to_decide_visibility() {
     let (workspace, _, _) = ids();
     let target = Target::Root(workspace);
     let mut state = AppState::home(workspace, Vec::new());
-    state.pr_overlay = Some(PrOverlay::loading(target));
+    state.pr_request = Some(target);
+    assert_eq!(state.pr_request(), Some(target));
 
     let _ = update(
         &mut state,
@@ -7749,17 +7893,20 @@ fn opening_one_overlay_discards_the_other_state() {
     let mut state = AppState::home(workspace, vec![session]);
     // Open PRs, dismiss, then open preview: the PR state must not linger.
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
-    assert!(state.pr_overlay().is_some());
+    assert!(state.pr_request().is_some());
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
     assert_eq!(state.overlay(), Some(Overlay::Preview));
     assert!(state.pr_overlay().is_none());
+    // The preview supersedes the request, so its late snapshot cannot open a
+    // modal the user is no longer asking for.
+    assert_eq!(state.pr_request(), None);
     assert!(state.preview_overlay().is_some());
     // And the reverse: opening PRs discards the preview state.
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
     assert_eq!(state.overlay(), None);
-    assert!(state.pr_overlay().is_some());
+    assert!(state.pr_request().is_some());
     assert!(state.preview_overlay().is_none());
 }
 
@@ -7783,7 +7930,7 @@ fn coverage_contract_exposes_every_typed_overlay_and_entry_accessor() {
     };
     assert_eq!(overlay.selected(), 0);
 
-    let prs = PrOverlay::loading(root);
+    let prs = PrOverlay::showing(root, Vec::new(), None);
     assert_eq!(prs.target(), root);
     let preview = PreviewOverlay::loading(root);
     assert_eq!(preview.target(), root);
@@ -7971,7 +8118,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
 
     state.overlay = Some(Overlay::Prs);
     state.pr_overlay = None;
-    assert!(update_prs_overlay(&mut state, &AppKey::Enter).is_empty());
+    assert!(pull_requests::update_key(&mut state, &AppKey::Enter).is_empty());
     state.overlay = Some(Overlay::Preview);
     state.preview_overlay = None;
     assert_eq!(
@@ -8068,9 +8215,13 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     }
 
     state.overlay = Some(Overlay::Prs);
-    state.pr_overlay = Some(PrOverlay::loading(Target::Session(session)));
+    state.pr_overlay = Some(PrOverlay::showing(
+        Target::Session(session),
+        Vec::new(),
+        None,
+    ));
     for key in [AppKey::Up, AppKey::Down, AppKey::Home] {
-        let _ = update_prs_overlay(&mut state, &key);
+        let _ = pull_requests::update_key(&mut state, &key);
     }
 
     state.decision_overlay = None;

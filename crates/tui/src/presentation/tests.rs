@@ -5,13 +5,13 @@ use super::{
     ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
     DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort, FixedBackendFactory,
     FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort, Geometry, GitDiff, IdleWatch,
-    LaunchAgentRequest, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory,
-    MissingWorkspacePrompt, NewStep, NoDesktopNotifications, NoMetrics, OpenStep, PROJECT_BAR_ROWS,
-    PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
-    SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
-    SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
-    SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
-    TerminalInputOutcome, TerminalInputResolution, TerminalSubscription, TerminalViewProjection,
+    MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, MissingWorkspacePrompt,
+    NewStep, NoDesktopNotifications, NoMetrics, OpenStep, PROJECT_BAR_ROWS, PaneLaunch,
+    PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession, SerializedPaneLaunchPort,
+    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
+    SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint, SessionWorktreeScanPort,
+    Start, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
+    TerminalInputResolution, TerminalSubscription, TerminalViewProjection,
     UnavailableAgentCommandPort, UnavailableBackendPort, UnavailableBrowserOpener,
     UnavailableDecisionCommandPort, UnavailableEnvironmentStore, UnavailableExternalTerminalPort,
     UnavailableGardenInventoryPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
@@ -70,7 +70,8 @@ use crate::usecase::application::controller::{
     Target,
 };
 use crate::usecase::application::daemon_backend::{
-    Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
+    Completions, DaemonBackend, DecisionPort as BackendDecisionPort, LaunchAgentRequest,
+    ReopenAgentRequest,
 };
 use crate::usecase::application::pane::{LivePane, PaneKind, PaneSelection, PaneTab, TabSelection};
 use crate::usecase::application::pr::PrSnapshotPort;
@@ -478,7 +479,8 @@ fn closeup_live_pr_action_requests_the_active_sessions_prs_without_an_empty_moda
         vec![Effect::LoadPullRequests { target }]
     );
     assert_eq!(state.overlay(), None);
-    assert_eq!(state.pr_overlay().unwrap().target(), target);
+    assert!(state.pr_overlay().is_none());
+    assert_eq!(state.pr_request(), Some(target));
 }
 
 #[test]
@@ -9782,7 +9784,7 @@ fn root_generic_host_request_is_admitted_and_untracked_resume_completion_is_iner
     let mut pending = std::collections::HashMap::new();
     let (mut host, actions) = ControllerHost::channel();
     let operation = OperationId::new();
-    super::BackendAgentPort::open_terminal(
+    crate::usecase::application::daemon_backend::AgentPort::open_terminal(
         &mut host,
         crate::usecase::application::daemon_backend::OpenTerminalRequest {
             target: Target::Root(workspace),
@@ -13385,6 +13387,75 @@ fn closing_selected_agent_keeps_it_visible_without_focus_drift() {
     )));
     assert_eq!(*durable.lock().unwrap(), before);
     assert_eq!(ui.closed_generic_terminals, BTreeSet::from([generic]));
+}
+
+#[test]
+fn workflow_menu_selection_reaches_host_and_displays_loading_and_error() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+    let (host, actions) = ControllerHost::channel();
+    let mut backend = DaemonBackend::new(
+        Box::new(host.clone()),
+        Box::new(host),
+        Box::new(UnavailableBackendPort),
+        Box::new(UnavailableBackendPort),
+    );
+    let mut pending = std::collections::HashMap::new();
+    let frame = |runtime: &WorkspaceRuntime| {
+        render_controller_frame(
+            30,
+            140,
+            runtime,
+            "demo",
+            &[],
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+        )
+        .join("\n")
+    };
+    let _ = runtime.handle_key(Key::Enter);
+    for _ in 0..2 {
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenCloseupOverlay));
+        // Up wraps the action picker to its final entry, workflow.
+        let _ = runtime.handle_key(Key::Up);
+        assert_eq!(
+            runtime.closeup_modal().unwrap().selected_action().name,
+            "workflow"
+        );
+        for effect in runtime.handle_key(Key::Enter) {
+            backend.dispatch(effect);
+        }
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(
+            matches!(runtime.active_pane().tabs(), [PaneTab::Ready(tab)] if tab.kind == PaneKind::Workflow)
+        );
+        assert!(runtime.focused_terminal().is_none());
+        assert!(frame(&runtime).contains("Loading workflow"));
+        // Completion is deliberately delayed until after the tab is visible.
+        for event in backend.drain_events() {
+            let _ = runtime.apply_event(event);
+        }
+        assert!(frame(&runtime).contains("Workflow backend is unavailable"));
+    }
+    let _ = runtime.handle_key(Key::Char('x'));
+    assert_eq!(
+        runtime
+            .state()
+            .workflow_panel(session)
+            .unwrap()
+            .draft
+            .value(),
+        "x"
+    );
+    assert!(pending.is_empty());
+    assert!(ui.pane_launches.is_empty());
 }
 
 #[test]

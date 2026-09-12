@@ -539,7 +539,7 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
 }
 
 #[test]
-fn tui_controller_keeps_entry_new_and_tests_in_their_bounded_contexts() {
+fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer() {
     let root = workspace_root();
     let controller =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/controller.rs"))
@@ -552,13 +552,26 @@ fn tui_controller_keeps_entry_new_and_tests_in_their_bounded_contexts() {
     let tests =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/tests.rs"))
             .expect("TUI controller tests are readable");
+    let pull_requests = fs::read_to_string(
+        root.join("crates/tui/src/usecase/application/controller/pull_requests.rs"),
+    )
+    .expect("TUI pull request controller is readable");
 
-    for module in ["mod entry;", "mod new;", "mod tests;"] {
+    for module in [
+        "mod entry;",
+        "mod new;",
+        "mod preview;",
+        "mod pull_requests;",
+        "mod tests;",
+    ] {
         assert!(controller.contains(module));
     }
     assert!(!controller.contains("mod tests {"));
     assert!(!controller.contains("pub struct EntryState"));
     assert!(!controller.contains("pub struct NewState"));
+    assert!(!controller.contains("pub struct PrOverlay"));
+    assert!(!controller.contains("pub struct PreviewOverlay"));
+    assert!(pull_requests.contains("pub struct PrOverlay"));
     assert!(entry.contains("pub fn update_entry("));
     assert!(new.contains("pub fn update_new("));
     assert!(tests.contains("#![coverage(off)]"));

@@ -44,8 +44,9 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex、Sakana AI です。通常の shell も同じ画面で利用できます。
-Closeup の [Workflow タブ](document/03-tui.md#session-workflow-タブ)では計画・実行・レビューの Agent を個別に選択でき、
-前回の選択を初期候補として使えます。進捗の確認と追加指示も同じタブで行えます。
+Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](document/03-tui.md#session-workflow-タブ)では、
+計画・実行・レビューの Agent を個別に選択でき、前回の選択を初期候補として使えます。
+進捗の確認と追加指示も同じタブで行えます。
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。
 

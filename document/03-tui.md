@@ -1372,12 +1372,18 @@ current project を保ったまま project switcher に安全な理由を表示�
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない PR の件数を
 sidebar の右端に Icons 設定に応じた PR icon または `PR` label とともに固定列で投影する。
 `Ctrl-O p`、または PR 表示＋件数のクリックは、対象 `SessionId` について resident PR lane を wake する。
-dismissed でない PR がある場合だけ同じ PR modal を表示し、snapshot が空なら modal は閉じたままにする。modal の枠タイトルは `Pull Request` の 1 か所だけに置く。repository は連続する PR 群の見出しとして 1 回表示し、その下の各行へ状態・番号・title・CI / review を
+dismissed でない PR がある場合だけ同じ PR modal を表示し、snapshot が空なら modal は閉じたままにする。
+snapshot が届くまでの間、TUI が持つのは request だけで modal は描かない。前面の overlay が modal を持たない
+request を描くと、キー入力を受け取らない空の枠が残るためである。cache に PR があればその内容で即座に開き、
+届いた snapshot で中身を更新する。request が届く前に別の surface が前面を取っていた場合、遅れて届いた
+snapshot はその操作を奪わずに request を捨てる。modal の枠タイトルは `Pull Request` の 1 か所だけに置く。repository は連続する PR 群の見出しとして 1 回表示し、その下の各行へ状態・番号・title・CI / review を
 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。modal の枠外をクリックすると閉じ、枠内と枠外のクリックはいずれも背後の project bar・header・pane・sidebar へ伝播しない。sidebar projection は新しい revision だけで進み、
-開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
-保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、
-その session の PR modal を検知した行を選択して自動で開く。ただし行全体が PR URL の出力だけを自動表示候補とし、文章中の参考リンクは一覧に追加しても自動表示しない。title / state だけの更新、重複・古い revision、
-dismissed PR は自動表示せず、前面の操作を奪わない。別 session の値は対象 session の cache にだけ反映する。
+開き直した modal は同じ cache を即時利用する。表示用 cache は target（workspace root と各 session）ごとに
+1 つで、sidebar badge・modal・status tab はすべてこの同じ行を読む。target ごとの初回 snapshot は baseline として
+cache にだけ保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面に
+ない場合に、その target の PR modal を検知した行を選択して自動で開く。ただし行全体が PR URL の出力だけを自動表示候補とし、文章中の参考リンクは一覧に追加しても自動表示しない。title / state だけの更新、重複・古い revision、
+dismissed PR は自動表示せず、前面の操作を奪わない。古い revision の snapshot は modal の行も error 表示も
+書き換えない。別 target の値は対象 target の cache にだけ反映する。
 
 Global Config の `PR auto-open` は `always` / `switch only` / `notify only` / `never` を選ぶ。既定の
 `switch only` は live terminal の入力を奪わず Switch だけで自動表示する。`notify only` は modal の代わりに notice、
@@ -1395,7 +1401,7 @@ window 内の成功、`backing_off` は last-known title/state を表示した�
 独自 timer、`gh` 呼び出し、失敗時の空 snapshot への置換を行わない。refresh の間隔、dedupe、backoff、restart、
 shutdown の正本は [daemon の PR refresh scheduler](05-daemon.md#pr-refresh-scheduler) とする。
 
-modal 上部は All / Open / Closed / Merged の status tab を横に並べ、`←→` で tab、`↑↓` で表示中の PR を循環する。選択した tab に一致する PR がなくても modal は閉じず、空表示のまま別の tab へ移動できる。dismissed でない PR が inventory 全体からなくなった場合だけ modal を閉じる。
+modal 上部は All / Open / Closed / Merged の status tab を横に並べ、`←→` で tab、`↑↓` で表示中の PR を循環する。tab の絞り込みは対象 target の同じ inventory を読み直すため、tab を往復しても一覧は失われない。選択した tab に一致する PR がなくても modal は閉じず、空表示のまま別の tab へ移動できる。dismissed でない PR が inventory 全体からなくなった場合だけ modal を閉じる。
 `c` は canonical URL の clipboard copy、`Ctrl-X` は daemon に dismissed tombstone を保存する。Enter は選択中の canonical HTTPS PR URL を browser effect に 1 回渡す。合成ルートは macOS では
 `open`、Linux では `xdg-open`、Windows では `cmd /C start "" <url>`（空文字は `start` が消費する
 window title 引数）を argv として実行する。URL を shell command に補間せず、検証失敗、
@@ -2088,7 +2094,8 @@ tab-less Closeup の action modal に戻る。TUI の Agent / terminal daemon �
 session creator、worktree は変更しない。単独実行には既存の `agent` を使う。
 
 Closeup action の `workflow` は、その session の非端末 Workflow タブを開く。既に開いている場合は
-同じタブを選択し、重複して作らない。タブを開くだけでは Agent を起動しない。
+同じタブを選択し、重複して作らない。進捗の取得を待たずにタブを表示し、取得中や取得失敗もタブ内に表示する。
+タブを開くだけでは Agent を起動しない。
 
 このタブは daemon operation を持たない TUI-local な pane である。terminal や Agent のように
 起動完了がタブを確定させる経路が無いため、pane registry への反映は Home runtime が reducer の
