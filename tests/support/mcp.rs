@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
-use usagi_core::domain::{agent::AgentProfileId, settings::Settings};
+use usagi_core::domain::{
+    agent::AgentProfileId,
+    settings::{DefaultModel, Settings},
+};
 use usagi_core::infrastructure::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
     SessionAction,
@@ -720,6 +723,32 @@ fn shell_double_quote_content(value: &str) -> String {
         .replace('`', r"\`")
 }
 
+/// The shell condition matching any readiness probe the product may send.
+///
+/// Fixture agents must answer a preflight by exiting, never by running their
+/// launch body. The probe argv is per-product (`codex` uses `login status`, the
+/// Codex-compatible `codex-fugu` uses `--version`), so deriving the condition
+/// from the agent CLI vocabulary keeps a fixture from spawning, capturing argv,
+/// and racing for the relay lock on a probe a hard-coded union has not heard of.
+fn readiness_condition() -> String {
+    let mut clauses: Vec<String> = Vec::new();
+    for model in DefaultModel::ALL {
+        let clause = model
+            .readiness_command()
+            .arguments()
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| format!("[ \"${}\" = '{argument}' ]", index + 1))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        let clause = format!("{{ {clause}; }}");
+        if !clauses.contains(&clause) {
+            clauses.push(clause);
+        }
+    }
+    clauses.join(" || ")
+}
+
 fn materialize_fixture_script(script: &str, log: &Path, argv: &Path) -> String {
     let script = script
         .replace(
@@ -731,8 +760,9 @@ fn materialize_fixture_script(script: &str, log: &Path, argv: &Path) -> String {
             &shell_double_quote_content(env!("CARGO_BIN_EXE_usagi")),
         );
     let capture = format!(
-        "if ! {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} && ! {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} && ! [ \"$1\" = models ]; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; fi\n",
-        argv.display()
+        "if ! {{ {readiness}; }}; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; fi\n",
+        argv.display(),
+        readiness = readiness_condition(),
     );
     script.strip_prefix("#!/bin/sh\n").map_or_else(
         || format!("{capture}{script}"),
@@ -787,10 +817,11 @@ printf 'agy-plugin-ready\n' >> "$USAGI_MCP_FIXTURE_LOG"
         ""
     };
     let script = format!(
-        "#!/bin/sh\nif {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} || {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} || [ \"$1\" = models ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n{agy_plugin_probe}\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
+        "#!/bin/sh\nif {readiness}; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n{agy_plugin_probe}\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
         relay_lock.display(),
         input.display(),
-        output.display()
+        output.display(),
+        readiness = readiness_condition(),
     );
     let executable = bin.join(name);
     fs::write(&executable, materialize_fixture_script(&script, log, argv)).unwrap();

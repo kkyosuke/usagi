@@ -1636,9 +1636,9 @@ Codex 互換の `sakana-ai` は CLI grammar を Codex と共有するが probe �
 `--version` で判定する。出荷される `codex-fugu` は常に `codex --profile fugu <args>` へ exec する wrapper であり、
 実 Codex は `--profile` を runtime command にしか許さないため、`codex-fugu login status` は install 済み・
 sign-in 済みの環境でも nonzero で終わり、その provider を恒久的に `unavailable` にしてしまう。`--version` は
-wrapper の profile 前置と共存できる唯一の公開 probe であり、実 Codex binary を解決できない wrapper は
-nonzero で終わるため、PATH 上の存在確認より強い判定を保つ。vocabulary に無い product は probe を得られず
-fail closed で `unavailable` になる。
+wrapper の profile 前置と共存でき、実 Codex binary を解決できない wrapper は nonzero で終わるため、
+PATH 上の存在確認より強い判定を保つ。vocabulary に無い product は probe を得られず fail closed で
+`unavailable` になる。
 probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
 credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
 差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。
@@ -1657,6 +1657,11 @@ nonzero exit、timeout、不正 UTF-8、上限超過をいずれも credential �
 scope、profile revision、current executable、config、concurrency を再検証してから reservation と spawn を行う。Doctor の
 `--version` は argv が `sakana-ai` の readiness probe と重なっても別の typed probe であり、1 秒の deadline と
 各 16 KiB の output bound を自分で持ち、child lifecycle だけを同じ bounded child runner に従わせる。
+
+probe が判定する範囲は product ごとに異なる。`codex` / `claude` / `agy` の probe は認証状態まで判定するため、
+未認証の CLI は PTY を spawn せず safe `unavailable` で止まる。`sakana-ai` の `--version` は CLI が起動できることまでを
+判定し、認証状態は判定しない。したがって未認証の `codex-fugu` は preflight を通過して PTY を spawn し、sign-in の
+案内は CLI 自身が pane 内で行う。wrapper が `login status` を実 CLI へ届けない以上、これが到達可能な判定範囲である。
 
 ### Agent phase の投影
 

@@ -224,9 +224,9 @@ fn every_model_provider_maps_a_selector_profile_and_executable() {
 
 #[test]
 fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
-    // Claude uses `auth status` and Codex uses `login status`. Without
-    // `codex-fugu` here an installed sakana.ai stays permanently unavailable
-    // (#609).
+    // Every provider the picker offers declares a probe whose program is the
+    // executable a launch spawns. A provider missing from this table — or
+    // carrying a probe its CLI rejects — stays permanently unavailable (#609).
     for (model, program, arguments) in [
         (DefaultModel::Claude, "claude", &["auth", "status"][..]),
         (DefaultModel::OpenAi, "codex", &["login", "status"][..]),

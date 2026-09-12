@@ -419,9 +419,11 @@ impl DefaultModel {
     /// and the real Codex CLI accepts `--profile` only on runtime commands, so
     /// `codex-fugu login status` exits nonzero even on an installed, signed-in
     /// machine and would report that provider permanently unavailable.
-    /// `--version` is the strongest public probe the wrapper leaves reachable,
-    /// and it still proves more than PATH presence: a wrapper that cannot resolve
-    /// a real Codex binary exits nonzero instead of printing a version.
+    /// `--version` survives that profile injection and still proves more than
+    /// PATH presence: a wrapper that cannot resolve a real Codex binary exits
+    /// nonzero instead of printing a version. It does not prove authentication,
+    /// so an unauthenticated `codex-fugu` reaches its pane and prompts for
+    /// sign-in there rather than being refused before the spawn.
     ///
     /// The probe deliberately reuses [`command`](Self::command) rather than
     /// naming an executable again, so a renamed executable cannot leave the

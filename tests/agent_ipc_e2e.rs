@@ -21,7 +21,7 @@ use usagi_core::domain::agent::{
 };
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::session_lifecycle::AgentPhase;
-use usagi_core::domain::settings::Settings;
+use usagi_core::domain::settings::{DefaultModel, Settings};
 use usagi_core::domain::supervisor::{
     SupervisorRunId, SupervisorRunQuery, SupervisorRunState, SupervisorWorkspaceSnapshot, TaskState,
 };
@@ -216,17 +216,39 @@ fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &P
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// The readiness guard a fixture CLI answers, derived from the product's own
+/// agent CLI vocabulary.
+///
+/// The probe argv is per-product, not per-grammar: `codex` proves readiness with
+/// `login status` while the Codex-compatible `codex-fugu` proves it with
+/// `--version`. A fixture that hard-codes one spelling answers the other probe
+/// by running its launch body, so an authenticated fixture reports whatever that
+/// body exits with instead of the readiness the test is fixing.
+fn readiness_guard(program: &str, ready_status: i32) -> String {
+    let probe = DefaultModel::readiness_command_for(program)
+        .expect("a fixture CLI is a modelled agent product");
+    let condition = probe
+        .arguments()
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| format!("[ \"${}\" = '{argument}' ]", index + 1))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    format!("if {condition}; then exit {ready_status}; fi\n")
+}
+
 /// Install a fixture Codex-grammar CLI under `program`.
 ///
 /// `sakana-ai` launches the Codex-compatible `codex-fugu`, so the two profiles
-/// differ only in the executable name and are exercised with the same script:
-/// the same `login status` readiness contract, the same session capture, and the
-/// same one-line conversation.
+/// differ only in the executable name and its readiness probe
+/// ([`readiness_guard`]); the session capture and the one-line conversation are
+/// the same script.
 fn write_codex_cli(bin: &Path, program: &str, count: &Path, ready_status: i32) {
     fs::create_dir_all(bin).unwrap();
     let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let guard = readiness_guard(program, ready_status);
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        "#!/bin/sh\n{guard}if [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         count.display(),
     );
     let path = bin.join(program);
@@ -921,16 +943,24 @@ fn safe_readiness_error(error: ClientError) {
     };
     assert_eq!(error.code, ErrorCode::Unavailable);
     assert!(error.message.contains("install it and sign in"));
+    // The safe refusal never names the probe it ran. Deriving the forbidden
+    // spellings from the vocabulary keeps this assertion checking the probes the
+    // product actually sends rather than a stale copy of them.
+    let probes = DefaultModel::ALL.into_iter().map(|model| {
+        let probe = model.readiness_command();
+        format!("{} {}", probe.program(), probe.arguments().join(" "))
+    });
     for private in [
-        "PATH",
-        "codex login status",
-        "codex-fugu login status",
-        "credential",
-        "token",
-        "argv",
-    ] {
+        "PATH".to_owned(),
+        "credential".to_owned(),
+        "token".to_owned(),
+        "argv".to_owned(),
+    ]
+    .into_iter()
+    .chain(probes)
+    {
         assert!(
-            !error.message.contains(private),
+            !error.message.contains(&private),
             "leaked {private}: {error:?}"
         );
     }
