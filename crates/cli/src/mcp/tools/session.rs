@@ -31,6 +31,9 @@ pub fn tools() -> Vec<ToolDescriptor> {
         ToolDescriptor::session(SessionDecisionLog, SessionAction::DecisionLog),
         ToolDescriptor::session(SessionDelegateIssue, SessionAction::DelegateIssue),
         ToolDescriptor::session(SessionDelegateBrief, SessionAction::DelegateBrief),
+        ToolDescriptor::session(WorkflowStart, SessionAction::WorkflowStart),
+        ToolDescriptor::session(WorkflowStatus, SessionAction::WorkflowStatus),
+        ToolDescriptor::session(WorkflowInstruct, SessionAction::WorkflowInstruct),
         ToolDescriptor::dispatch(SessionDispatch, DispatchToolAction::Dispatch),
         ToolDescriptor::dispatch(AgentHandoff, DispatchToolAction::AgentHandoff),
         ToolDescriptor::dispatch(AgentPeers, DispatchToolAction::AgentPeers),
@@ -475,6 +478,51 @@ impl Tool for SessionComplete {
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}"#
+    }
+}
+
+/// `workflow_start` — セッションの実装＋レビュー workflow を開始する。
+pub struct WorkflowStart;
+
+impl Tool for WorkflowStart {
+    fn name(&self) -> &'static str {
+        "workflow_start"
+    }
+    fn description(&self) -> &'static str {
+        "認証済み caller が作成したセッションで、実装＋レビューの workflow を開始するときに使う。name と goal は必須。実装担当が計画担当とレビュー担当を同じセッション内で起動し、レビュー承認と PR の独立検証まで daemon が進行を所有する。進行状況は workflow_status で観測する。自分自身が動いているセッションに対しては呼べない。planner / implementer / reviewer は省略時に workspace の既定を使う。"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"name":{"type":"string"},"goal":{"type":"string"},"planner":{"type":"string"},"implementer":{"type":"string"},"reviewer":{"type":"string"}},"required":["name","goal"],"additionalProperties":false}"#
+    }
+}
+
+/// `workflow_status` — セッションの workflow の進捗を取得する。
+pub struct WorkflowStatus;
+
+impl Tool for WorkflowStatus {
+    fn name(&self) -> &'static str {
+        "workflow_status"
+    }
+    fn description(&self) -> &'static str {
+        "認証済み caller が作成したセッションの workflow の進捗（工程・担当・修正回数・待ち理由・PR）を観測するときに使う。name 必須。工程が Needs attention（判断待ち）か PR ready（完了）なら人の判断が要る。"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
+    }
+}
+
+/// `workflow_instruct` — 進行中の workflow へ追加指示を送る。
+pub struct WorkflowInstruct;
+
+impl Tool for WorkflowInstruct {
+    fn name(&self) -> &'static str {
+        "workflow_instruct"
+    }
+    fn description(&self) -> &'static str {
+        "進行中の workflow へ追加指示を送るときに使う。name と body は必須。recipient は automatic（既定、現在の担当）/ implementer / reviewer。指示は受理時点の担当に固定され、工程が変わっても付け替えない。"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"name":{"type":"string"},"body":{"type":"string"},"recipient":{"type":"string","enum":["automatic","implementer","reviewer"]}},"required":["name","body"],"additionalProperties":false}"#
     }
 }
 

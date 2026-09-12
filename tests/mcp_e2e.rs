@@ -424,6 +424,37 @@ fn production_session_pr_resolves_the_authenticated_caller_when_name_is_omitted(
 }
 
 #[test]
+fn production_workflow_tools_observe_a_session_and_refuse_a_self_directed_start() {
+    let mut mcp = McpHarness::start();
+    assert!(mcp.tool("session_create", &json!({"name":"workflow-target"}))["error"].is_null());
+
+    // A workflow that has not started reports no run rather than an error, so a
+    // coordinator can poll before and after starting one.
+    let status = mcp.tool("workflow_status", &json!({"name":"workflow-target"}));
+    assert!(status.get("error").is_none(), "{status}");
+    let status = tool_text(&status);
+    assert!(status["run"].is_null(), "{status}");
+    assert!(status["agents"]["implementer"].is_string(), "{status}");
+
+    // An unknown session is refused before any workflow record is created.
+    let missing = mcp.tool("workflow_status", &json!({"name":"no-such-session"}));
+    assert!(missing.get("error").is_some(), "{missing}");
+
+    // The control plane belongs to the human: an Agent may drive a session it
+    // created, but never the one it is running inside.
+    drop(mcp.launch_caller());
+    let own = mcp.tool(
+        "workflow_start",
+        &json!({"name":"mcp-caller","goal":"drive myself"}),
+    );
+    assert!(has_permission_denied(&own), "{own}");
+    // The refusal is the caller's own session, not the tool: a session this
+    // Agent did not create is refused by the same ownership rule.
+    let foreign = mcp.tool("workflow_status", &json!({"name":"workflow-target"}));
+    assert!(has_permission_denied(&foreign), "{foreign}");
+}
+
+#[test]
 fn production_delegate_brief_immediately_dispatches_an_isolated_triage_worker() {
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();

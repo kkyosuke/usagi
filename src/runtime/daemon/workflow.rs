@@ -94,38 +94,10 @@ fn handle(
     scope
         .resolve_available_scope(workspace, Some(session))
         .map_err(unavailable_scope)?;
-    let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
     if let Some((operation, command)) = control {
-        // Reconcile immediately before admission so the command is judged
-        // against current evidence, and keep PR verification out of its way: a
-        // GitHub read that is momentarily unavailable must not refuse an
-        // instruction.
-        reconcile(agent, workspace, session)?;
-        workflow::admit(&store, workspace, session, operation, &command)
-            .map_err(|error| admission_error(&error))?;
-        match command {
-            WorkflowCommand::Start { goal, agents } => {
-                if let Err(error) =
-                    start(agent, bound, workspace, session, operation, &goal, agents)
-                {
-                    store
-                        .update_workflow(workspace, session, |record| {
-                            if let Some(record) = record {
-                                record.start_error = Some(error.message.clone());
-                            }
-                            Ok(())
-                        })
-                        .map_err(unavailable)?;
-                    return Err(error);
-                }
-            }
-            WorkflowCommand::Instruct { .. } => deliver(agent, workspace, session, operation)?,
-        }
-        // The command changed the record, not the peer journal, so the answer
-        // is a stored projection rather than a second replay.
-        return serde_json::to_value(
-            workflow::projection(&store, workspace, session).map_err(unavailable)?,
-        )
+        return serde_json::to_value(control_workflow(
+            agent, bound, workspace, session, operation, command,
+        )?)
         .map_err(unavailable);
     }
     // One reconcile pass per request. The resident lane owns progress; an open
@@ -139,6 +111,47 @@ fn handle(
         Attention::Requested,
     )?)
     .map_err(unavailable)
+}
+
+/// Apply one human workflow command and answer with the stored projection.
+///
+/// The IPC control request and the MCP session tool share this: both are a
+/// person asking for the same thing, and neither may reach a different
+/// admission rule than the other.
+pub(super) fn control_workflow(
+    agent: &SharedAgentRuntime,
+    bound: &ConnectionWorkspace,
+    workspace: WorkspaceId,
+    session: SessionId,
+    operation: OperationId,
+    command: WorkflowCommand,
+) -> Result<usagi_core::domain::workflow::WorkflowSnapshot, ProtocolError> {
+    let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
+    // Reconcile immediately before admission so the command is judged against
+    // current evidence, and keep PR verification out of its way: a GitHub read
+    // that is momentarily unavailable must not refuse an instruction.
+    reconcile(agent, workspace, session)?;
+    workflow::admit(&store, workspace, session, operation, &command)
+        .map_err(|error| admission_error(&error))?;
+    match command {
+        WorkflowCommand::Start { goal, agents } => {
+            if let Err(error) = start(agent, bound, workspace, session, operation, &goal, agents) {
+                store
+                    .update_workflow(workspace, session, |record| {
+                        if let Some(record) = record {
+                            record.start_error = Some(error.message.clone());
+                        }
+                        Ok(())
+                    })
+                    .map_err(unavailable)?;
+                return Err(error);
+            }
+        }
+        WorkflowCommand::Instruct { .. } => deliver(agent, workspace, session, operation)?,
+    }
+    // The command changed the record, not the peer journal, so the answer is a
+    // stored projection rather than a second replay.
+    workflow::projection(&store, workspace, session).map_err(unavailable)
 }
 
 /// Reflect observed evidence in the stored run: replay the peer journal, then

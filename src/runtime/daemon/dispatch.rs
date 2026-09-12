@@ -3113,7 +3113,10 @@ pub(super) fn session_response_envelope(
                 | SessionAction::DecisionList
                 | SessionAction::DecisionLog
                 | SessionAction::DelegateIssue
-                | SessionAction::DelegateBrief => None,
+                | SessionAction::DelegateBrief
+                | SessionAction::WorkflowStart
+                | SessionAction::WorkflowStatus
+                | SessionAction::WorkflowInstruct => None,
             } && let Some(object) = body.as_object_mut()
             {
                 object.insert(
@@ -3420,8 +3423,52 @@ fn session_organization(
     (parent_name, lineage.len(), path)
 }
 
+/// A workflow command is admitted by the producer's operation identity, so the
+/// request's own operation ID is what makes a retry idempotent.
+fn workflow_operation(
+    operation_id: &str,
+) -> Result<usagi_core::domain::id::OperationId, SessionRuntimeError> {
+    usagi_core::domain::id::OperationId::parse(operation_id)
+        .map_err(|_| SessionRuntimeError::InvalidRequest)
+}
+
+/// The three participants, defaulted to the workspace's remembered choices when
+/// the caller does not name them.
+fn workflow_agents(
+    payload: &serde_json::Value,
+) -> Result<usagi_core::domain::workflow::WorkflowAgents, SessionRuntimeError> {
+    let selector = |key: &str, fallback: usagi_core::domain::settings::DefaultModel| {
+        payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map_or(Ok(fallback), |value| {
+                usagi_core::domain::settings::DefaultModel::from_selector(value)
+                    .ok_or(SessionRuntimeError::InvalidRequest)
+            })
+    };
+    let defaults = usagi_core::domain::workflow::WorkflowAgents::default();
+    Ok(usagi_core::domain::workflow::WorkflowAgents {
+        planner: selector("planner", defaults.planner)?,
+        implementer: selector("implementer", defaults.implementer)?,
+        reviewer: selector("reviewer", defaults.reviewer)?,
+    })
+}
+
+/// Who an instruction is for. Omitting it means the participant whose turn it is.
+fn workflow_recipient(
+    payload: &serde_json::Value,
+) -> Result<usagi_core::domain::workflow::Recipient, SessionRuntimeError> {
+    match payload.get("recipient").and_then(serde_json::Value::as_str) {
+        None | Some("automatic") => Ok(usagi_core::domain::workflow::Recipient::Automatic),
+        Some("implementer") => Ok(usagi_core::domain::workflow::Recipient::Implementer),
+        Some("reviewer") => Ok(usagi_core::domain::workflow::Recipient::Reviewer),
+        Some(_) => Err(SessionRuntimeError::InvalidRequest),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 pub(super) fn dispatch_session_action(
     context: &SessionDispatchContext<'_>,
     action: usagi_core::infrastructure::client::SessionAction,
@@ -3692,6 +3739,60 @@ pub(super) fn dispatch_session_action(
                 "reported_to": delivery.delivered_to,
                 "delivered_to": "inbox"
             }))
+        }
+        // The workflow control plane is the human's, so these tools carry the
+        // same ownership rule as the rest: a caller reaches a session it
+        // created, never the one it is running inside. That is what keeps a
+        // workflow's own Agents from driving their own workflow.
+        SessionAction::WorkflowStatus
+        | SessionAction::WorkflowStart
+        | SessionAction::WorkflowInstruct => {
+            let name = string("name")?;
+            let session = target_session(name)?;
+            let workspace = bound_workspace()?;
+            if caller.is_some_and(|caller| caller.session_id == Some(session)) {
+                return Err(SessionRuntimeError::PermissionDenied);
+            }
+            let snapshot = match action {
+                SessionAction::WorkflowStatus => super::workflow::advance(
+                    agent,
+                    pr_inventory,
+                    &bound.scope_resolver(),
+                    workspace,
+                    session,
+                    super::workflow::Attention::Requested,
+                ),
+                SessionAction::WorkflowStart => {
+                    let goal = string("goal")?;
+                    super::workflow::control_workflow(
+                        agent,
+                        bound,
+                        workspace,
+                        session,
+                        workflow_operation(operation_id)?,
+                        usagi_core::domain::workflow::WorkflowCommand::Start {
+                            goal: goal.to_owned(),
+                            agents: workflow_agents(payload)?,
+                        },
+                    )
+                }
+                _ => {
+                    let body = string("body")?;
+                    super::workflow::control_workflow(
+                        agent,
+                        bound,
+                        workspace,
+                        session,
+                        workflow_operation(operation_id)?,
+                        usagi_core::domain::workflow::WorkflowCommand::Instruct {
+                            recipient: workflow_recipient(payload)?,
+                            body: body.to_owned(),
+                        },
+                    )
+                }
+            }
+            .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            reply(serde_json::to_value(snapshot).map_err(|_| SessionRuntimeError::Storage)?)
         }
         SessionAction::Pr => {
             let (name, id) = if payload.get("name").is_some() {
