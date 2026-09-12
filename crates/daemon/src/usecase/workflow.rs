@@ -1134,6 +1134,21 @@ mod tests {
             ),
             Ok(entry.url().to_owned())
         );
+        // An issue-backed run has to satisfy the repository conventions too, and
+        // this PR body names no issue.
+        let mut without_marker = value.clone();
+        without_marker["body"] = serde_json::json!("no marker here");
+        assert_eq!(
+            verify_pr(
+                &Git,
+                &mut Gh(without_marker.to_string()),
+                directory,
+                &target,
+                std::slice::from_ref(&entry),
+                Some(742),
+            ),
+            Err("PR body needs exactly one Internal-Issue line")
+        );
         assert!(
             verify_pr(
                 &Git,
