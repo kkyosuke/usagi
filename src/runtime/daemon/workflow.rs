@@ -95,12 +95,10 @@ fn handle(
         .resolve_available_scope(workspace, Some(session))
         .map_err(unavailable_scope)?;
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
-    synchronized_snapshot(agent, workspace, session)?;
-    reconcile_runtime(agent, workspace, session)?;
+    // One reconcile pass per request. The resident lane (#736) owns progress;
+    // a request only has to observe it, then apply its own command on top.
+    let snapshot = advance(agent, inventory, &scope, workspace, session)?;
     if let Some((operation, command)) = control {
-        if matches!(command, WorkflowCommand::Instruct { .. }) {
-            synchronized_snapshot(agent, workspace, session)?;
-        }
         workflow::admit(&store, workspace, session, operation, &command)
             .map_err(|error| admission_error(&error))?;
         match command {
@@ -121,8 +119,32 @@ fn handle(
             }
             WorkflowCommand::Instruct { .. } => deliver(agent, workspace, session, operation)?,
         }
+        // The command changed the record, not the peer journal, so the answer
+        // is a stored projection rather than a second replay.
+        return serde_json::to_value(
+            workflow::projection(&store, workspace, session).map_err(unavailable)?,
+        )
+        .map_err(unavailable);
     }
-    let snapshot = synchronized_snapshot(agent, workspace, session)?;
+    serde_json::to_value(snapshot).map_err(unavailable)
+}
+
+/// Carry one run as far as observed evidence allows: reconcile the peer journal,
+/// re-deliver queued instructions and verify an approved PR.
+///
+/// The resident lane and every request share this one pass, so a workflow makes
+/// the same progress whether or not its tab is open.
+pub(super) fn advance(
+    agent: &SharedAgentRuntime,
+    inventory: &SharedPrInventory,
+    scope: &dyn SessionScopeResolver,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> Result<usagi_core::domain::workflow::WorkflowSnapshot, ProtocolError> {
+    let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
+    synchronized_snapshot(agent, workspace, session)?;
+    reconcile_runtime(agent, workspace, session)?;
+    let snapshot = workflow::projection(&store, workspace, session).map_err(unavailable)?;
     if let Some(run) = &snapshot.run {
         for instruction in &run.instructions {
             if instruction.delivery == Delivery::Queued {
@@ -132,15 +154,16 @@ fn handle(
         verify_progress(
             &store,
             inventory,
-            bound,
+            scope,
             workspace,
             session,
             run,
             &super::SystemGit,
             &mut super::GhProcess,
         )?;
+        return workflow::projection(&store, workspace, session).map_err(unavailable);
     }
-    serde_json::to_value(synchronized_snapshot(agent, workspace, session)?).map_err(unavailable)
+    Ok(snapshot)
 }
 
 fn synchronized_snapshot(
@@ -271,14 +294,13 @@ pub(super) fn reconcile_runtime(
 pub(super) fn verify_progress(
     store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
     inventory: &SharedPrInventory,
-    bound: &ConnectionWorkspace,
+    scope: &dyn SessionScopeResolver,
     workspace: WorkspaceId,
     session: SessionId,
     run: &usagi_core::domain::workflow::WorkflowRun,
     git: &dyn usagi_core::infrastructure::git::GitRunner,
     gh: &mut dyn usagi_daemon::usecase::pr_inventory::GhProcessPort<Error = std::io::Error>,
 ) -> Result<(), ProtocolError> {
-    let scope = bound.scope_resolver();
     if matches!(
         run.phase,
         usagi_core::domain::workflow::Phase::Verifying | usagi_core::domain::workflow::Phase::Ready
@@ -336,6 +358,39 @@ fn publish_verification(
             Ok(())
         })
         .map_err(unavailable)
+}
+
+/// Advance every stored run once, independent of any client connection.
+///
+/// Progress used to happen only inside a Workflow request, so a run stopped
+/// moving whenever its tab was not the active one — and never reached
+/// `PR ready` with the TUI closed. This sweep is what makes a workflow a
+/// background activity rather than a foreground animation.
+///
+/// One unreadable or unresolvable session is skipped, never fatal: the other
+/// runs in the same sweep must still advance.
+pub(super) fn sweep(
+    agent: &SharedAgentRuntime,
+    inventory: &SharedPrInventory,
+    scope: &dyn SessionScopeResolver,
+) -> Result<usize, ProtocolError> {
+    let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
+    let sessions = store.workflow_sessions().map_err(unavailable)?;
+    let mut advanced = 0;
+    for (workspace, session) in sessions {
+        // A session whose worktree is gone (removed, or owned by a workspace this
+        // daemon no longer holds) keeps its record but has nothing to advance.
+        if scope
+            .resolve_available_scope(workspace, Some(session))
+            .is_err()
+        {
+            continue;
+        }
+        if advance(agent, inventory, scope, workspace, session).is_ok() {
+            advanced += 1;
+        }
+    }
+    Ok(advanced)
 }
 
 fn admission_error(error: &anyhow::Error) -> ProtocolError {

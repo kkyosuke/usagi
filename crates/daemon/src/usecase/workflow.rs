@@ -104,6 +104,44 @@ pub fn bind(
     })
 }
 
+/// Read the stored projection without replaying the peer journal.
+///
+/// A control request answers with this after its own reconcile pass, so the
+/// response reflects the command it just applied without paying for a second
+/// replay of the same journal.
+/// # Errors
+/// Returns store read failures.
+pub fn projection(
+    store: &DispatchStore,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> Result<WorkflowSnapshot> {
+    let Some(record) = store.workflow(workspace, session)? else {
+        return Ok(WorkflowSnapshot {
+            agents: store.workflow_agents(workspace)?,
+            session,
+            run: None,
+            pending_start: None,
+        });
+    };
+    let pending_start =
+        record
+            .run
+            .is_none()
+            .then(|| usagi_core::domain::workflow::WorkflowPendingStart {
+                agents: record.agents,
+                operation_id: record.operation,
+                goal: record.goal.clone(),
+                error: record.start_error.clone(),
+            });
+    Ok(WorkflowSnapshot {
+        agents: record.agents,
+        session,
+        run: record.run,
+        pending_start,
+    })
+}
+
 /// Reconcile replayable peer evidence without consuming either Agent's inbox.
 /// # Errors
 /// Returns journal read/write failures rather than inventing progress.

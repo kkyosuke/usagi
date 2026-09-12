@@ -20,6 +20,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [failure logging](#failure-logging)
 - [durable operation](#durable-operation)
 - [background worker の待ち方](#background-worker-の待ち方)
+- [workflow lane](#workflow-lane)
 - [session teardown worker](#session-teardown-worker)
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
@@ -1132,12 +1133,33 @@ tick の長さに依存しない。
 | session teardown | 1 s | finalization に失敗している間だけ teardown を再試行する間隔。受理は即座に worker を起こす（[session teardown worker](#session-teardown-worker)） |
 | decision maintenance | 250 ms | 期限切れの decision が `Pending` として読める残り時間 |
 | retention GC | 30 s | idle 時に age budget と最小可視 TTL を反映するまでの遅れ（[final retention と aggregate GC](#final-retention-と-aggregate-gc)） |
+| workflow lane | 10 s | workflow の進行（peer 証拠の反映・queued 指示の再配送・PR 検証）が次に進むまでの遅れ（[workflow lane](#workflow-lane)） |
 
 IPC accept は tick を持たない。listener の readiness descriptor と、shutdown 要求を写した descriptor を
 `poll(2)` で同時に待つため、接続が来るまで wakeup は発生しない。lifecycle owner も同じく park し、
 **signal 由来の shutdown と accept worker の異常終了由来の shutdown の両方**で起きる。signal handler は
 flag を直接書くだけ（async-signal-safe だが condvar を notify できない）なので、delivery を要求へ変換する
 専用の待ち手が signal を blocking で受ける。
+
+## workflow lane
+
+session workflow の進行を所有するのはこの常駐 lane である。client の要求は進行の条件ではない。
+
+lane は tick ごとに保存済み workflow record を列挙し、各 run について次を 1 回行う。
+
+| 段階 | 内容 |
+|---|---|
+| reconcile | peer message journal を cursor から読み、証拠に一致する phase / review だけを進める |
+| 担当の生存確認 | 担当 Agent が停止していれば判断待ちへ落とし、復帰を確認できれば元の phase へ戻す |
+| 配送 | `queued` の指示を、受理時点の exact な担当とその認可済み実行系統にだけ再配送する |
+| 検証 | 承認済み HEAD に対する PR の独立検証（レビュー承認後の phase のみ。worktree HEAD 一致・未コミット変更なし・承認 HEAD に対する PR の checks 成功を要求する） |
+
+worktree を解決できない session（削除済み、またはこの daemon が保持していない workspace）は読み飛ばす。
+1 件の失敗は他の run の進行を止めない。
+
+Workflow request（snapshot / control）も同じ 1 回の pass を通るため、開いている画面は常に最新の
+進行を受け取る。control は自分が適用した記録変更を保存済み projection として返し、journal を二重に
+replay しない。
 
 decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
 atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。

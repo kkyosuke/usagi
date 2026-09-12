@@ -2140,10 +2140,12 @@ Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Ag
 みなさず、既存の Agent 回復操作で同じ実行系統が再開したことを照合する。
 
 タブを閉じても daemon の作業は中止しない。再度 `workflow` を開くと保存済みの進捗を取得する。
+進行そのものは daemon の常駐 lane が所有するため、タブを閉じていても、別の session を見ていても、
+TUI を終了していても進む（[workflow lane](05-daemon.md#workflow-lane)が正本）。画面の polling は
+表示の更新だけを担う。
 Workflow は PR の自動マージや session/worktree の削除を行わない。
 実装・レビューの進行は起動時の固定指示と同一 session の handoff に従う。修正は最大 3 回を
-指示するが、プロセスを強制停止する上限ではない。進捗の再照合と queued 指示の再通知は
-[snapshot の取得時](04-ipc.md#session-workflow-request)に行う。
+指示するが、プロセスを強制停止する上限ではない。
 
 ## Closeup の agent CLI 選択
 

@@ -2049,6 +2049,10 @@ const CLIENT_NOFILE_TARGET: u64 =
 /// actually changed.
 const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
 const SUPERVISOR_RECOVERY_TICK: Duration = Duration::from_secs(1);
+/// Workflow progress is measured in Agent turns, so the resident lane sweeps
+/// slowly: often enough that a finished review reaches the human in seconds,
+/// rarely enough that an idle run costs one journal read per sweep.
+const WORKFLOW_LANE_TICK: Duration = Duration::from_secs(10);
 struct ProductionRefreshClock {
     started: Instant,
 }
@@ -2635,6 +2639,13 @@ fn spawn_ipc_server(
         Arc::clone(&pr_inventory),
         Arc::clone(&projection),
         Arc::clone(&shutdown),
+    )?);
+    background_workers.push(start_workflow_lane(
+        Arc::clone(&agent),
+        Arc::clone(&pr_inventory),
+        Arc::clone(&workspaces),
+        Arc::clone(&shutdown),
+        WORKFLOW_LANE_TICK,
     )?);
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
     background_workers.push(start_decision_maintenance(
@@ -8422,6 +8433,42 @@ fn start_daemon_agent_restart_recovery(
                     break;
                 }
             }
+        })
+}
+
+/// Starts the resident lane that carries stored workflow runs forward without a
+/// client connection.
+///
+/// Reconcile, queued-instruction delivery and PR verification used to run only
+/// inside a Workflow request, which made progress a property of what the user
+/// happened to be looking at. This lane owns that progress instead; the request
+/// path keeps the same pass so an open tab still answers with fresh state.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_resident_workflow_lane_advances_a_run_without_any_client_request
+fn start_workflow_lane(
+    agent: SharedAgentRuntime,
+    pr_inventory: SharedPrInventory,
+    workspaces: Workspaces,
+    shutdown: Arc<ShutdownRequest>,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("usagi-workflow-lane".to_owned())
+        .spawn(move || {
+            let worker_health = shutdown.monitor_background_worker(BackgroundWorker::WorkflowLane);
+            let mut sweep_log = FailureTransitionLog::default();
+            while !shutdown.is_requested() {
+                let scope = SharedScopeResolver(Arc::clone(&workspaces));
+                let failure = workflow::sweep(&agent, &pr_inventory, &scope)
+                    .err()
+                    .map(|error| format!("workflow lane sweep deferred: {}", error.message));
+                if let Some(entry) = sweep_log.changed(failure) {
+                    ErrorLog::record(&entry);
+                }
+                if shutdown.wait_for_tick(tick) {
+                    break;
+                }
+            }
+            worker_health.finish_planned();
         })
 }
 
@@ -23225,6 +23272,86 @@ instructions = "{instructions}"
         }
 
         #[test]
+        fn the_resident_workflow_lane_advances_a_run_without_any_client_request() {
+            use usagi_core::domain::id::{OperationId, SessionId};
+            use usagi_core::domain::workflow::Recipient;
+            let fixture = Fixture::new();
+            fixture
+                .control(
+                    OperationId::new(),
+                    WorkflowCommand::Start {
+                        goal: "lane progress".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    },
+                )
+                .unwrap();
+            let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+            // Enqueue straight into the record: no Workflow request is made from
+            // here on, which is exactly the situation the lane exists for (a
+            // closed TUI, or a session the user is not looking at).
+            let instruction = OperationId::new();
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    record
+                        .as_mut()
+                        .unwrap()
+                        .run
+                        .as_mut()
+                        .unwrap()
+                        .enqueue(instruction, Recipient::Implementer, "Keep going".into())
+                        .map_err(anyhow::Error::msg)
+                })
+                .unwrap();
+            assert!(fixture.writes.lock().unwrap().entries.is_empty());
+
+            let advanced = workflow::sweep(
+                &fixture.agent,
+                &fixture.inventory,
+                &fixture.bound.scope_resolver(),
+            )
+            .unwrap();
+
+            assert_eq!(advanced, 1);
+            assert_eq!(
+                store
+                    .workflow(fixture.workspace, fixture.session)
+                    .unwrap()
+                    .unwrap()
+                    .run
+                    .unwrap()
+                    .instructions[0]
+                    .delivery,
+                Delivery::Notified
+            );
+            assert!(
+                fixture
+                    .writes
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .any(|(_, bytes)| String::from_utf8_lossy(bytes).contains("Keep going"))
+            );
+            // A record whose session this daemon cannot resolve is skipped, not
+            // fatal: the sweep still counts the run it could advance.
+            store
+                .update_workflow(fixture.workspace, SessionId::new(), |record| {
+                    *record = store.workflow(fixture.workspace, fixture.session).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                workflow::sweep(
+                    &fixture.agent,
+                    &fixture.inventory,
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap(),
+                1
+            );
+        }
+
+        #[test]
         fn workflow_verification_inventory_failure_is_reported_without_external_io() {
             use usagi_core::domain::id::OperationId;
             use usagi_core::domain::workflow::{Phase, Review};
@@ -23386,7 +23513,7 @@ instructions = "{instructions}"
             workflow::verify_progress(
                 &store,
                 &fixture.inventory,
-                &fixture.bound,
+                &fixture.bound.scope_resolver(),
                 fixture.workspace,
                 fixture.session,
                 &run,
@@ -23408,7 +23535,7 @@ instructions = "{instructions}"
             workflow::verify_progress(
                 &store,
                 &fixture.inventory,
-                &fixture.bound,
+                &fixture.bound.scope_resolver(),
                 fixture.workspace,
                 fixture.session,
                 &run,
