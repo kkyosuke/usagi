@@ -95,10 +95,12 @@ fn handle(
         .resolve_available_scope(workspace, Some(session))
         .map_err(unavailable_scope)?;
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
-    // One reconcile pass per request. The resident lane (#736) owns progress;
-    // a request only has to observe it, then apply its own command on top.
-    let snapshot = advance(agent, inventory, &scope, workspace, session)?;
     if let Some((operation, command)) = control {
+        // Reconcile immediately before admission so the command is judged
+        // against current evidence, and keep PR verification out of its way: a
+        // GitHub read that is momentarily unavailable must not refuse an
+        // instruction.
+        reconcile(agent, workspace, session)?;
         workflow::admit(&store, workspace, session, operation, &command)
             .map_err(|error| admission_error(&error))?;
         match command {
@@ -126,7 +128,21 @@ fn handle(
         )
         .map_err(unavailable);
     }
-    serde_json::to_value(snapshot).map_err(unavailable)
+    // One reconcile pass per request. The resident lane owns progress; an open
+    // tab only has to observe it.
+    serde_json::to_value(advance(agent, inventory, &scope, workspace, session)?)
+        .map_err(unavailable)
+}
+
+/// Reflect observed evidence in the stored run: replay the peer journal, then
+/// decide whether the assigned participant is still running.
+fn reconcile(
+    agent: &SharedAgentRuntime,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> Result<(), ProtocolError> {
+    synchronized_snapshot(agent, workspace, session)?;
+    reconcile_runtime(agent, workspace, session)
 }
 
 /// Carry one run as far as observed evidence allows: reconcile the peer journal,
@@ -142,8 +158,7 @@ pub(super) fn advance(
     session: SessionId,
 ) -> Result<usagi_core::domain::workflow::WorkflowSnapshot, ProtocolError> {
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
-    synchronized_snapshot(agent, workspace, session)?;
-    reconcile_runtime(agent, workspace, session)?;
+    reconcile(agent, workspace, session)?;
     let snapshot = workflow::projection(&store, workspace, session).map_err(unavailable)?;
     if let Some(run) = &snapshot.run {
         for instruction in &run.instructions {
@@ -338,6 +353,9 @@ fn publish_verification(
             if let Some(current) = record.as_mut().and_then(|record| record.run.as_mut())
                 && current.id == run.id
                 && current.review == run.review
+                // The lane and an open tab verify the same run concurrently, so
+                // publish only onto the phase this verification was started from.
+                && current.phase == run.phase
             {
                 current.phase = usagi_core::domain::workflow::Phase::Verifying;
                 match verified {
@@ -373,11 +391,16 @@ pub(super) fn sweep(
     agent: &SharedAgentRuntime,
     inventory: &SharedPrInventory,
     scope: &dyn SessionScopeResolver,
+    stopping: &dyn Fn() -> bool,
 ) -> Result<usize, ProtocolError> {
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
-    let sessions = store.workflow_sessions().map_err(unavailable)?;
     let mut advanced = 0;
-    for (workspace, session) in sessions {
+    for (workspace, session) in store.workflow_sessions() {
+        // Verification shells out to git and GitHub, so a long sweep must not
+        // become a long shutdown.
+        if stopping() {
+            break;
+        }
         // A session whose worktree is gone (removed, or owned by a workspace this
         // daemon no longer holds) keeps its record but has nothing to advance.
         if scope
@@ -386,11 +409,35 @@ pub(super) fn sweep(
         {
             continue;
         }
+        if !advanceable(&store, workspace, session) {
+            continue;
+        }
         if advance(agent, inventory, scope, workspace, session).is_ok() {
             advanced += 1;
         }
     }
     Ok(advanced)
+}
+
+/// Whether an unattended sweep has anything to do for this record.
+///
+/// A launch that never bound its Agent waits for the human to retry it, and a
+/// run that reached `PR ready` has no further transition. Sweeping either would
+/// rewrite the record every tick — and re-verify a finished PR against GitHub
+/// forever, demoting it whenever the branch moves on — for no progress. An open
+/// tab still refreshes both on request.
+fn advanceable(
+    store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> bool {
+    store.workflow(workspace, session).is_ok_and(|record| {
+        record.is_some_and(|record| {
+            record
+                .run
+                .is_some_and(|run| run.phase != usagi_core::domain::workflow::Phase::Ready)
+        })
+    })
 }
 
 fn admission_error(error: &anyhow::Error) -> ProtocolError {
@@ -534,7 +581,7 @@ mod tests {
     use super::*;
     use usagi_core::domain::agent_message::ReviewTarget;
     use usagi_core::domain::id::AgentId;
-    use usagi_core::domain::workflow::{Phase, Review};
+    use usagi_core::domain::workflow::{Phase, Review, WorkflowRun};
     use usagi_core::infrastructure::store::dispatch::DispatchStore;
 
     #[test]
@@ -633,27 +680,42 @@ mod tests {
                 .phase,
             Phase::Ready
         );
-        publish_verification(&store, workspace, session, &run, Err("checks pending")).unwrap();
-        let pending = store
-            .workflow(workspace, session)
-            .unwrap()
-            .unwrap()
-            .run
-            .unwrap();
-        assert_eq!(pending.phase, Phase::Verifying);
-        assert_eq!(pending.waiting_reason.as_deref(), Some("checks pending"));
-        publish_verification(&store, workspace, session, &run, Err("HEAD changed")).unwrap();
-        assert_eq!(
-            store
+        // Each verification starts from the run as it is stored now, exactly as
+        // the lane and a request both do; a publication onto a phase that moved
+        // in between is refused below.
+        let stored = |phase: Phase| {
+            let run: WorkflowRun = store
                 .workflow(workspace, session)
                 .unwrap()
                 .unwrap()
                 .run
-                .unwrap()
-                .phase,
-            Phase::Revising
-        );
-        let mut stale = run.clone();
+                .unwrap();
+            assert_eq!(run.phase, phase);
+            run
+        };
+        let ready = stored(Phase::Ready);
+        publish_verification(&store, workspace, session, &ready, Err("checks pending")).unwrap();
+        let pending = stored(Phase::Verifying);
+        assert_eq!(pending.waiting_reason.as_deref(), Some("checks pending"));
+        publish_verification(&store, workspace, session, &pending, Err("HEAD changed")).unwrap();
+        let revising = stored(Phase::Revising);
+        // A phase that changed under a running verification is not overwritten:
+        // the concurrent decision (here, a stopped participant) stands.
+        store
+            .update_workflow(workspace, session, |record| {
+                record.as_mut().unwrap().run.as_mut().unwrap().phase = Phase::Waiting;
+                Ok(())
+            })
+            .unwrap();
+        publish_verification(&store, workspace, session, &revising, Ok(())).unwrap();
+        let _ = stored(Phase::Waiting);
+        store
+            .update_workflow(workspace, session, |record| {
+                record.as_mut().unwrap().run.as_mut().unwrap().phase = Phase::Revising;
+                Ok(())
+            })
+            .unwrap();
+        let mut stale = revising.clone();
         stale.id = OperationId::new();
         publish_verification(&store, workspace, session, &stale, Ok(())).unwrap();
         stale = run.clone();

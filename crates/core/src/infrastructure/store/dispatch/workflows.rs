@@ -113,35 +113,26 @@ impl DispatchStore {
 
     /// Enumerate every session that holds a durable workflow record.
     ///
-    /// The resident workflow lane sweeps this list, so one unreadable or
-    /// unrelated directory entry must not stop every other run from advancing:
-    /// names that are not typed identities (including `defaults.json`) are
-    /// skipped rather than failing the sweep. A missing `workflows` directory is
-    /// an empty list, not an error.
-    ///
-    /// # Errors
-    /// Returns directory read failures other than a missing root.
-    pub fn workflow_sessions(&self) -> Result<Vec<(WorkspaceId, SessionId)>> {
+    /// The resident workflow lane sweeps this list every tick, so enumeration is
+    /// best-effort by design: a missing root, an unreadable entry, a file where a
+    /// workspace directory belongs, and names that are not typed identities
+    /// (including `defaults.json`) all mean "nothing to advance here" rather than
+    /// an error that would stop every other run. A transient read failure costs
+    /// one tick, because the next sweep enumerates again.
+    #[must_use]
+    pub fn workflow_sessions(&self) -> Vec<(WorkspaceId, SessionId)> {
         let root = self.dir.join("workflows");
-        let workspaces = match std::fs::read_dir(&root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error).context("workflow directory is unreadable"),
-        };
         let mut found = Vec::new();
-        for workspace_entry in workspaces {
-            let workspace_entry = workspace_entry.context("workflow workspace is unreadable")?;
+        for workspace_entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
             let Ok(workspace) = WorkspaceId::parse(&workspace_entry.file_name().to_string_lossy())
             else {
                 continue;
             };
-            let sessions = match std::fs::read_dir(workspace_entry.path()) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error).context("workflow records are unreadable"),
-            };
-            for session_entry in sessions {
-                let session_entry = session_entry.context("workflow record is unreadable")?;
+            for session_entry in std::fs::read_dir(workspace_entry.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
                 let name = session_entry.file_name().to_string_lossy().into_owned();
                 let Some(identity) = name.strip_suffix(".json") else {
                     continue;
@@ -151,10 +142,10 @@ impl DispatchStore {
                 }
             }
         }
-        found.sort_by_key(|(workspace, session)| {
-            (workspace.as_str().to_owned(), session.as_str().to_owned())
+        found.sort_by(|left, right| {
+            (left.0.as_str(), left.1.as_str()).cmp(&(right.0.as_str(), right.1.as_str()))
         });
-        Ok(found)
+        found
     }
 
     /// Atomically validate and replace a bounded workflow record.
@@ -213,7 +204,7 @@ mod tests {
     fn workflow_sessions_lists_records_and_skips_everything_that_is_not_one() {
         let dir = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(dir.path());
-        assert!(store.workflow_sessions().unwrap().is_empty());
+        assert!(store.workflow_sessions().is_empty());
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         store
@@ -245,12 +236,19 @@ mod tests {
         std::fs::write(workspace_dir.join("notes.txt"), "unrelated").unwrap();
         std::fs::write(workspace_dir.join("not-an-identity.json"), "{}").unwrap();
         std::fs::create_dir_all(dir.path().join("workflows").join("not-a-workspace")).unwrap();
-        // `defaults.json`, unrelated files and a non-identity directory are all
-        // skipped: the sweep must not stop on someone else's file.
-        assert_eq!(
-            store.workflow_sessions().unwrap(),
-            vec![(workspace, session)]
-        );
+        // A *file* named like a workspace is the case that used to abort the whole
+        // sweep: reading it as a directory fails with something other than NotFound.
+        std::fs::write(
+            dir.path()
+                .join("workflows")
+                .join(WorkspaceId::new().as_str()),
+            "not a directory",
+        )
+        .unwrap();
+        // `defaults.json`, unrelated files, a non-identity directory and an
+        // unreadable entry are all skipped: the sweep must not stop on someone
+        // else's file.
+        assert_eq!(store.workflow_sessions(), vec![(workspace, session)]);
     }
 
     #[test]

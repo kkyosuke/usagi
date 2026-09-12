@@ -40,7 +40,7 @@ watchdog（#738）も通知（#739）も、この pull 駆動のままでは作�
 
 - [x] TUI を閉じた状態でも active run の reconcile・queued 指示の配送・PR 検証が進む。
 - [x] 非 active session の run も同じ間隔で進む。
-- [x] run が無い間の 1 tick のコストは workflow record の列挙だけで、Agent 観測も durable write も行わない。daemon 停止時に worker を残さない。
+- [x] 進める対象が無い間の 1 tick のコストは workflow record の列挙だけで、Agent 観測も durable write も行わない（開始待ち・`PR ready` の record は読み飛ばす）。daemon 停止時に worker を残さない。
 - [x] 1 回の workflow request で reconcile が複数回走らない。
 - [x] TUI の polling を止めても進行が続くことを示す test がある。
 - [x] `document/05-daemon.md` と `document/03-tui.md` の「進行は snapshot 取得時に行う」記述を更新する。

@@ -1154,8 +1154,15 @@ lane は tick ごとに保存済み workflow record を列挙し、各 run に�
 | 配送 | `queued` の指示を、受理時点の exact な担当とその認可済み実行系統にだけ再配送する |
 | 検証 | 承認済み HEAD に対する PR の独立検証（レビュー承認後の phase のみ。worktree HEAD 一致・未コミット変更なし・承認 HEAD に対する PR の checks 成功を要求する） |
 
-worktree を解決できない session（削除済み、またはこの daemon が保持していない workspace）は読み飛ばす。
-1 件の失敗は他の run の進行を止めない。
+次の record は読み飛ばす。読み飛ばした record は書き換えないため、idle のコストも生じない。
+
+| 読み飛ばす record | 理由 |
+|---|---|
+| worktree を解決できない session（削除済み、この daemon が保持していない workspace） | 進める対象が無い |
+| Agent を束ねられないまま開始に失敗した intent（`run` が無い） | 人間の再試行を待つ |
+| `PR ready` に到達した run | 後続の遷移が無い。無人の再検証は完了した PR を無限に照会し、ブランチが動けば降格させてしまう |
+
+1 件の失敗は他の run の進行を止めない。daemon の停止要求は sweep の途中でも観測し、残りは次の起動へ残す。
 
 Workflow request（snapshot / control）も同じ 1 回の pass を通るため、開いている画面は常に最新の
 進行を受け取る。control は自分が適用した記録変更を保存済み projection として返し、journal を二重に

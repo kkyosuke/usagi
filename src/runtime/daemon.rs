@@ -8443,7 +8443,7 @@ fn start_daemon_agent_restart_recovery(
 /// inside a Workflow request, which made progress a property of what the user
 /// happened to be looking at. This lane owns that progress instead; the request
 /// path keeps the same pass so an open tab still answers with fresh state.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_resident_workflow_lane_advances_a_run_without_any_client_request
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_workflow_lane_ticks_until_shutdown_and_stops_mid_sweep
 fn start_workflow_lane(
     agent: SharedAgentRuntime,
     pr_inventory: SharedPrInventory,
@@ -8451,19 +8451,41 @@ fn start_workflow_lane(
     shutdown: Arc<ShutdownRequest>,
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let sweeping = Arc::clone(&shutdown);
+    let mut failures = FailureTransitionLog::default();
+    spawn_workflow_lane(
+        move || {
+            let scope = SharedScopeResolver(Arc::clone(&workspaces));
+            let failure =
+                workflow::sweep(&agent, &pr_inventory, &scope, &|| sweeping.is_requested())
+                    .err()
+                    .map(|error| format!("workflow lane sweep deferred: {}", error.message));
+            if let Some(entry) = failures.changed(failure) {
+                ErrorLog::record(&entry);
+            }
+        },
+        shutdown,
+        tick,
+    )
+}
+
+/// The lane loop, with the sweep injected so a test can drive it without a
+/// daemon, a PTY, or a store.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=the_workflow_lane_ticks_until_shutdown_and_stops_mid_sweep
+fn spawn_workflow_lane<S>(
+    mut sweep: S,
+    shutdown: Arc<ShutdownRequest>,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    S: FnMut() + Send + 'static,
+{
     std::thread::Builder::new()
         .name("usagi-workflow-lane".to_owned())
         .spawn(move || {
             let worker_health = shutdown.monitor_background_worker(BackgroundWorker::WorkflowLane);
-            let mut sweep_log = FailureTransitionLog::default();
             while !shutdown.is_requested() {
-                let scope = SharedScopeResolver(Arc::clone(&workspaces));
-                let failure = workflow::sweep(&agent, &pr_inventory, &scope)
-                    .err()
-                    .map(|error| format!("workflow lane sweep deferred: {}", error.message));
-                if let Some(entry) = sweep_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
+                sweep();
                 if shutdown.wait_for_tick(tick) {
                     break;
                 }
@@ -17260,6 +17282,43 @@ mod tests {
     }
 
     #[test]
+    fn the_workflow_lane_ticks_until_shutdown_and_stops_mid_sweep() {
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ticking = Arc::clone(&calls);
+        let stopper = Arc::clone(&shutdown);
+        let handle = spawn_workflow_lane(
+            move || {
+                if ticking.fetch_add(1, Ordering::AcqRel) >= 1 {
+                    stopper.request();
+                }
+            },
+            Arc::clone(&shutdown),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        handle.join().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+
+        // A daemon already shutting down never sweeps.
+        let cancelled = Arc::new(ShutdownRequest::new());
+        cancelled.request();
+        let skipped = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&skipped);
+        spawn_workflow_lane(
+            move || {
+                counter.fetch_add(1, Ordering::AcqRel);
+            },
+            cancelled,
+            Duration::from_millis(1),
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(skipped.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn the_retention_collector_ticks_until_shutdown_and_stops_when_already_down() {
         let shutdown = Arc::new(ShutdownRequest::new());
         let calls = Arc::new(AtomicUsize::new(0));
@@ -23308,6 +23367,7 @@ instructions = "{instructions}"
                 &fixture.agent,
                 &fixture.inventory,
                 &fixture.bound.scope_resolver(),
+                &|| false,
             )
             .unwrap();
 
@@ -23345,9 +23405,40 @@ instructions = "{instructions}"
                     &fixture.agent,
                     &fixture.inventory,
                     &fixture.bound.scope_resolver(),
+                    &|| false,
                 )
                 .unwrap(),
                 1
+            );
+            // A stopping daemon leaves the remaining records for the next start.
+            assert_eq!(
+                workflow::sweep(
+                    &fixture.agent,
+                    &fixture.inventory,
+                    &fixture.bound.scope_resolver(),
+                    &|| true,
+                )
+                .unwrap(),
+                0
+            );
+            // `PR ready` is terminal: an unattended sweep must not re-verify it
+            // against GitHub forever, or demote it when the branch moves on.
+            store
+                .update_workflow(fixture.workspace, fixture.session, |record| {
+                    record.as_mut().unwrap().run.as_mut().unwrap().phase =
+                        usagi_core::domain::workflow::Phase::Ready;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                workflow::sweep(
+                    &fixture.agent,
+                    &fixture.inventory,
+                    &fixture.bound.scope_resolver(),
+                    &|| false,
+                )
+                .unwrap(),
+                0
             );
         }
 
@@ -23532,13 +23623,21 @@ instructions = "{instructions}"
                 Phase::Ready
             );
             output["isDraft"] = serde_json::json!(true);
+            // Production re-reads the run before each verification, and the
+            // publication only lands on the phase it was started from.
+            let ready = store
+                .workflow(fixture.workspace, fixture.session)
+                .unwrap()
+                .unwrap()
+                .run
+                .unwrap();
             workflow::verify_progress(
                 &store,
                 &fixture.inventory,
                 &fixture.bound.scope_resolver(),
                 fixture.workspace,
                 fixture.session,
-                &run,
+                &ready,
                 &VerificationGit("a".repeat(40)),
                 &mut VerificationGh(output.to_string()),
             )
