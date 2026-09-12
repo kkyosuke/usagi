@@ -909,6 +909,15 @@ impl WorkspaceRuntime {
             self.material_revision = self.material_revision.saturating_add(1);
         }
         let mut effects = update(&mut self.state, event);
+        // The Workflow tab is shell-local: it owns no daemon operation, so no
+        // port answers `OpenWorkflow` and no completion comes back to promote
+        // it. The registry therefore takes that intent here, where the reducer
+        // produced it; the effect executor accepts the same effect as a no-op.
+        for effect in &effects {
+            if matches!(effect, Effect::OpenWorkflow { .. }) {
+                self.on_effect(effect);
+            }
+        }
         self.remember_root_surface_selection(previous_drawer_focus);
         self.follow_active_target();
         // A restored root terminal already names the exact tab the user last
@@ -2390,13 +2399,13 @@ mod tests {
         assert!(
             matches!(effects.as_slice(), [Effect::OpenWorkflow { session: opened }, Effect::Workflow(_)] if *opened == session)
         );
-        for effect in &effects {
-            runtime.on_effect(effect);
-        }
+        // The tab is open from the key alone: nothing in the shell replays the
+        // effect, so a registry that waited for the executor would stay empty.
         assert!(runtime.focused_terminal().is_none());
         assert!(
             matches!(runtime.panes.active_pane().tabs(), [PaneTab::Ready(ready)] if ready.kind == PaneKind::Workflow)
         );
+        assert_eq!(runtime.selected_workflow_session(), Some(session));
         type_str(&mut runtime, "Check login");
         let _ = runtime.handle_key(Key::Enter);
         type_str(&mut runtime, "and errors");

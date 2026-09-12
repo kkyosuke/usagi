@@ -494,6 +494,9 @@ impl DaemonBackend {
                     ));
                 }
             }
+            // The Workflow tab is shell-local and owns no daemon operation, so
+            // this executor has nothing to run: the pane registry takes the
+            // intent when the reducer produces it (`WorkspaceRuntime`).
             Effect::OpenWorkflow { .. } => {}
             Effect::CreateSession {
                 workspace,
