@@ -23575,6 +23575,47 @@ instructions = "{instructions}"
         }
 
         #[test]
+        fn a_named_issue_becomes_the_goal_or_is_refused_by_number() {
+            let fixture = Fixture::new();
+            // The backlog entry is read from the repository root, where a merged
+            // PR leaves it.
+            let root = fixture
+                .bound
+                .sessions()
+                .lock()
+                .unwrap()
+                .repository_root()
+                .to_path_buf();
+            let issues = root.join(".usagi/issues");
+            std::fs::create_dir_all(&issues).unwrap();
+            std::fs::write(
+                issues.join("742-close-the-loop.md"),
+                "---\nnumber: 742\ntitle: fix(daemon): close the loop\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-09-12T00:00:00+00:00\nupdated_at: 2026-09-12T00:00:00+00:00\n---\n\nreproduce and fix\n",
+            )
+            .unwrap();
+            let goal = workflow::issue_goal(&fixture.bound, 742).unwrap();
+            assert!(goal.contains("fix(daemon): close the loop"), "{goal}");
+            assert!(goal.contains("reproduce and fix"), "{goal}");
+            // An issue this workspace does not have is named in the refusal, so
+            // the caller can tell it from an unavailable dependency.
+            let refused = workflow::issue_goal(&fixture.bound, 743).unwrap_err();
+            assert_eq!(refused.code, ErrorCode::InvalidArgument);
+            assert!(refused.message.contains("#743"), "{}", refused.message);
+            // A backlog that answers ambiguously is not a goal: two files
+            // claiming the same number leave the store unable to say which
+            // issue this run would implement.
+            std::fs::write(
+                issues.join("742-duplicate.md"),
+                "---\nnumber: 742\ntitle: fix(daemon): duplicate\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-09-12T00:00:00+00:00\nupdated_at: 2026-09-12T00:00:00+00:00\n---\n\nsecond claim\n",
+            )
+            .unwrap();
+            assert_eq!(
+                workflow::issue_goal(&fixture.bound, 742).unwrap_err().code,
+                ErrorCode::Unavailable
+            );
+        }
+
+        #[test]
         fn remembered_participants_seed_a_start_that_names_nobody() {
             use usagi_core::domain::settings::DefaultModel;
             use usagi_core::domain::workflow::WorkflowAgents;

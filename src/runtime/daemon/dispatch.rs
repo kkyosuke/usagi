@@ -3709,11 +3709,20 @@ pub(super) fn dispatch_session_action(
             if caller.is_some_and(|caller| caller.session_id == Some(session)) {
                 return Err(SessionRuntimeError::PermissionDenied);
             }
+            // A start may name a backlog issue instead of spelling the goal.
+            // The issue body becomes the goal, and the run keeps the reference
+            // the PR will have to name.
+            let issue = super::workflow::requested_issue(payload)?;
             let command = match action {
                 SessionAction::WorkflowStatus => None,
                 SessionAction::WorkflowStart => {
+                    let goal = match issue {
+                        Some(number) => super::workflow::issue_goal(bound, number)
+                            .map_err(super::workflow::refusal)?,
+                        None => string("goal")?.to_owned(),
+                    };
                     Some(usagi_core::domain::workflow::WorkflowCommand::Start {
-                        goal: string("goal")?.to_owned(),
+                        goal,
                         agents: super::workflow::requested_agents(
                             payload,
                             super::workflow::remembered_agents(agent, workspace),
@@ -3744,15 +3753,10 @@ pub(super) fn dispatch_session_action(
                     usagi_core::domain::id::OperationId::parse(operation_id)
                         .map_err(|_| SessionRuntimeError::InvalidRequest)?,
                     command,
+                    issue,
                 ),
             }
-            // Keep the daemon's own refusal visible: an admission conflict and a
-            // momentarily unavailable dependency are different answers, and the
-            // IPC control path already tells them apart.
-            .map_err(|error| SessionRuntimeError::AgentFailure {
-                code: error.code,
-                message: error.message,
-            })?;
+            .map_err(super::workflow::refusal)?;
             reply(serde_json::to_value(snapshot).map_err(|_| SessionRuntimeError::Storage)?)
         }
         SessionAction::Pr => {

@@ -46,6 +46,7 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
             operation_id: operation,
             goal: "Build login".into(),
             error: Some("Sign in to retry".into()),
+            issue: None,
         }),
     };
     let _ = update(

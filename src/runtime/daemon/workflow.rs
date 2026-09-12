@@ -100,8 +100,10 @@ fn handle(
         .resolve_available_scope(workspace, Some(session))
         .map_err(unavailable_scope)?;
     if let Some((operation, command)) = control {
+        // The TUI names its own goal, so an issue reference only arrives through
+        // the MCP tool that rendered one.
         return serde_json::to_value(control_workflow(
-            agent, bound, workspace, session, operation, command,
+            agent, bound, workspace, session, operation, command, None,
         )?)
         .map_err(unavailable);
     }
@@ -116,6 +118,69 @@ fn handle(
         Attention::Requested,
     )?)
     .map_err(unavailable)
+}
+
+/// Carry a workflow refusal through the session-tool boundary with its code.
+///
+/// An admission conflict and a momentarily unavailable dependency are different
+/// answers, and the IPC control path already tells them apart.
+pub(super) fn refusal(
+    error: ProtocolError,
+) -> usagi_daemon::usecase::session_runtime::SessionRuntimeError {
+    usagi_daemon::usecase::session_runtime::SessionRuntimeError::AgentFailure {
+        code: error.code,
+        message: error.message,
+    }
+}
+
+/// The backlog issue a start named, if any.
+///
+/// A present but non-numeric `issue` is refused rather than read as "no issue
+/// named": a start that silently drops its reference would produce a run whose
+/// PR is never checked against the issue.
+///
+/// # Errors
+/// Returns an invalid-request refusal for a present value that is not an issue
+/// number.
+pub(super) fn requested_issue(
+    payload: &serde_json::Value,
+) -> Result<Option<u32>, usagi_daemon::usecase::session_runtime::SessionRuntimeError> {
+    match payload.get("issue") {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|number| u32::try_from(number).ok())
+            .map(Some)
+            .ok_or(usagi_daemon::usecase::session_runtime::SessionRuntimeError::InvalidRequest),
+    }
+}
+
+/// Render a backlog issue as the goal of a workflow run.
+///
+/// The same rendering `session_delegate_issue` queues, so a workflow started
+/// from an issue reads exactly what a delegated Agent would have read.
+pub(super) fn issue_goal(
+    bound: &ConnectionWorkspace,
+    number: u32,
+) -> Result<String, ProtocolError> {
+    let root = bound
+        .sessions()
+        .lock()
+        .map_err(unavailable)?
+        .repository_root()
+        .to_path_buf();
+    let issue = usagi_core::usecase::issue::get(
+        &usagi_core::infrastructure::store::issue::IssueStore::new(root),
+        number,
+    )
+    .map_err(|_| unavailable("issue is unreadable"))?
+    .ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            format!("Workflow: issue #{number} is not in this workspace"),
+        )
+    })?;
+    Ok(usagi_core::usecase::issue::to_prompt(&issue))
 }
 
 /// The participants this workspace last launched successfully.
@@ -181,17 +246,29 @@ pub(super) fn control_workflow(
     session: SessionId,
     operation: OperationId,
     command: WorkflowCommand,
+    issue: Option<u32>,
 ) -> Result<usagi_core::domain::workflow::WorkflowSnapshot, ProtocolError> {
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
     // Reconcile immediately before admission so the command is judged against
     // current evidence, and keep PR verification out of its way: a GitHub read
     // that is momentarily unavailable must not refuse an instruction.
     reconcile(agent, workspace, session)?;
-    workflow::admit(&store, workspace, session, operation, &command)
+    workflow::admit(&store, workspace, session, operation, &command, issue)
         .map_err(|error| admission_error(&error))?;
     match command {
         WorkflowCommand::Start { goal, agents } => {
-            if let Err(error) = start(agent, bound, workspace, session, operation, &goal, agents) {
+            if let Err(error) = start(
+                agent,
+                bound,
+                workspace,
+                session,
+                &StartIntent {
+                    operation,
+                    goal: &goal,
+                    agents,
+                    issue,
+                },
+            ) {
                 store
                     .update_workflow(workspace, session, |record| {
                         if let Some(record) = record {
@@ -429,7 +506,8 @@ pub(super) fn verify_progress(
             .resolve_available_scope(workspace, Some(session))
             .map_err(unavailable_scope)?
             .working_directory;
-        let verified = workflow::verify_pr(git, gh, &directory, &review.target, &entries);
+        let verified =
+            workflow::verify_pr(git, gh, &directory, &review.target, &entries, run.issue);
         publish_verification(store, workspace, session, run, verified)?;
     }
     Ok(())
@@ -635,21 +713,37 @@ fn admission_error(error: &anyhow::Error) -> ProtocolError {
     ProtocolError::new(code, message)
 }
 
+/// Everything one launch is admitted with, so the launch reads as one intent
+/// rather than a list of positional arguments.
+struct StartIntent<'a> {
+    operation: OperationId,
+    goal: &'a str,
+    agents: usagi_core::domain::workflow::WorkflowAgents,
+    issue: Option<u32>,
+}
+
 fn start(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     workspace: WorkspaceId,
     session: SessionId,
-    operation: OperationId,
-    goal: &str,
-    agents: usagi_core::domain::workflow::WorkflowAgents,
+    intent: &StartIntent<'_>,
 ) -> Result<(), ProtocolError> {
+    let StartIntent {
+        operation,
+        goal,
+        agents,
+        issue,
+    } = *intent;
     let intent = AgentLaunchIntent {
         workspace,
         session: Some(session),
         profile: Some(AgentProfileId::new(agents.implementer.profile_id()).map_err(unavailable)?),
     };
-    let prompt = workflow::initial_prompt(goal, agents);
+    let mut prompt = workflow::initial_prompt(goal, agents);
+    if let Some(issue) = issue {
+        prompt.push_str(&workflow::issue_conventions(issue));
+    }
     let preflight = agent
         .lock()
         .map_err(unavailable)?
@@ -807,6 +901,23 @@ mod tests {
     }
 
     #[test]
+    fn a_named_issue_is_numeric_or_refused() {
+        assert_eq!(requested_issue(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            requested_issue(&serde_json::json!({"issue": 742})).unwrap(),
+            Some(742)
+        );
+        // Present but unusable is a refusal, not a start without an issue.
+        for unusable in [
+            serde_json::json!({"issue": "742"}),
+            serde_json::json!({"issue": -1}),
+            serde_json::json!({"issue": u64::from(u32::MAX) + 1}),
+        ] {
+            assert!(requested_issue(&unusable).is_err(), "{unusable}");
+        }
+    }
+
+    #[test]
     fn requested_participants_default_per_field_and_refuse_unknown_spellings() {
         use usagi_core::domain::settings::DefaultModel;
         use usagi_core::domain::workflow::{Recipient, WorkflowAgents};
@@ -881,6 +992,7 @@ mod tests {
                 goal: "task".into(),
                 agents: usagi_core::domain::workflow::WorkflowAgents::default(),
             },
+            None,
         )
         .unwrap();
         workflow::bind(&store, workspace, session, operation, AgentId::new()).unwrap();
