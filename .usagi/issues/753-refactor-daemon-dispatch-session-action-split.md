@@ -1,13 +1,13 @@
 ---
 number: 753
 title: refactor(daemon): session action の dispatch を分割して行数上限の余裕を作る
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, architecture, maintainability]
 dependson: []
 related: []
 created_at: 2026-09-13T00:00:00+00:00
-updated_at: 2026-09-13T00:00:00+00:00
+updated_at: 2026-09-13T04:00:00+00:00
 ---
 
 ## 問題
@@ -32,7 +32,7 @@ updated_at: 2026-09-13T00:00:00+00:00
 
 ## 受入条件
 
-- [ ] `dispatch.rs` が上限に対して十分な余裕（目安 20% 以上）を持つ。
-- [ ] 分割後のファイルにも architecture test の行数上限がある。
-- [ ] 既存テストがすべて緑で、`coverage(off)` の件数と帰属が変わらない。
-- [ ] 判定順序・エラー種別・caller 検証が分割前と同じであることを、既存の E2E で確認する。
+- [x] `dispatch.rs` が上限に対して十分な余裕（目安 20% 以上）を持つ。
+- [x] 分割後のファイルにも architecture test の行数上限がある。
+- [x] 既存テストがすべて緑で、`coverage(off)` の件数と帰属が変わらない。
+- [x] 判定順序・エラー種別・caller 検証が分割前と同じであることを、既存の E2E で確認する。

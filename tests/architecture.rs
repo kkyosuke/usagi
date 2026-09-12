@@ -666,8 +666,28 @@ fn daemon_request_dispatch_stays_out_of_the_socket_and_lifecycle_composition_mod
         "moving dispatch must not exclude the module from coverage"
     );
     assert!(
-        dispatch.lines().count() <= 6_000,
+        dispatch.lines().count() <= 5_000,
         "daemon request dispatch grew beyond its reviewable boundary"
+    );
+    // The session family is the one that grows — every new session tool lands in
+    // it — so it carries its own boundary instead of spending the table's.
+    let session = fs::read_to_string(root.join("src/runtime/daemon/dispatch/session.rs"))
+        .expect("session dispatch source is readable");
+    assert!(
+        session.lines().count() <= 1_500,
+        "session dispatch grew beyond its reviewable boundary"
+    );
+    let scratchpad = fs::read_to_string(root.join("src/runtime/daemon/dispatch/scratchpad.rs"))
+        .expect("scratchpad dispatch source is readable");
+    assert!(
+        scratchpad.lines().count() <= 300,
+        "scratchpad dispatch grew beyond its reviewable boundary"
+    );
+    // The table keeps the families apart: the session action bodies live in
+    // their own module, not inline.
+    assert!(
+        dispatch.contains("pub(super) mod session;") && dispatch.contains("mod scratchpad;"),
+        "the dispatch table must delegate the session family to its own module"
     );
 }
 
