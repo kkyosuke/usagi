@@ -605,7 +605,7 @@ mod tests {
         assert!(rendered.contains("Ctrl-X"));
         assert!(rendered.contains("dismiss selected"));
         assert!(rendered.contains("Ctrl-? / Ctrl-/ or Esc"));
-        assert!(!rendered.contains("safe-remove session"));
+        assert!(!rendered.contains("force remove session"));
     }
 
     #[test]

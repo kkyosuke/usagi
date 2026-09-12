@@ -502,14 +502,14 @@ ANSI span の reset 後にも dim を再適用するため、Git の色 span が
 描き、選択対象の Git 状態を非アクティブ行と区別する。Closeup の補足行は相対時刻を含めて通常輝度で描く。
 
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。session 行を
-選択中の `Ctrl-X` は force な `session remove` を実行する。plain `x` / `X` は session を削除しない。`+ new session`
+選択中の `Ctrl-X` は `force: true, force_delete_branch: true` の `session remove` を送り、未コミット worktree と
+未マージ branch の両方を破棄する（daemon 側の branch 削除は
+[5. daemon の session teardown worker](05-daemon.md#session-teardown-worker)）。確認は挟まないため、この 1 打鍵は
+取り消せない。safe remove を送らないのは、未追跡のビルド生成物と未マージ branch を持つ実作業後の session では
+Git がほぼ常に拒否し、到達できる結果が `failed/delete` 行とその後の強制再試行だけになるためである。
+plain `x` / `X` は session を削除しない。`+ new session`
 行では削除しない。削除要求後は対象の `deleting` 行に cursor を表示したままにし、削除完了で行が消えた時点で
 隣の surviving session（無ければ `+ new session`）へ移す。`deleting` 行での `Ctrl-X` は削除を再送しない。
-`Ctrl-X` は `force: true, force_delete_branch: true` を送り、未コミット worktree と未マージ branch の両方を破棄する。
-確認は挟まないため、この 1 打鍵は取り消せない。safe remove を送らないのは、実作業をした session ではほぼ常に
-Git が拒否するためである。worktree には未追跡のビルド生成物が残るので `git worktree remove` が通らず、branch も
-ローカル基点へ merge されていない（squash merge された PR はローカルでは merge にならない）ので `git branch -d` が
-通らない。到達できる結果が `failed/delete` 行と、その後の強制再試行だけになる。
 選択中の row が daemon 診断済みの `failed/integrity` orphan である場合は、同じ `Ctrl-X` が
 `purge_orphan: true` も加えた exact-target remove を送る。その他の lifecycle / failure stage、または overlay
 表示中は purge を送らない。

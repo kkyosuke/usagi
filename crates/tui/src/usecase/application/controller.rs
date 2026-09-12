@@ -5967,7 +5967,8 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         closeup::Command::Close { arguments } => {
             if let Some(force) = parse_close_force(&arguments) {
                 // One meaning of "force" across every TUI removal: `-f` drops a
-                // dirty worktree *and* an unmerged branch, exactly like `X`.
+                // dirty worktree *and* an unmerged branch, exactly like Switch's
+                // `Ctrl-X`.
                 Some(Effect::RemoveSession {
                     workspace: state.workspace,
                     session: active_session,
