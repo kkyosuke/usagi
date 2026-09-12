@@ -2096,6 +2096,7 @@ session creator、worktree は変更しない。単独実行には既存の `age
 
 Closeup action の `workflow` は、その session の非端末 Workflow タブを開く。既に開いている場合は
 同じタブを選択し、重複して作らない。進捗の取得を待たずにタブを表示し、取得中や取得失敗もタブ内に表示する。
+取得中の表示は最初の 1 回だけで、以降の定期取得は取得済みの工程表示をそのまま保つ。
 タブを開くだけでは Agent を起動しない。
 
 このタブは daemon operation を持たない TUI-local な pane である。terminal や Agent のように
@@ -2123,6 +2124,8 @@ Team
 | 宛先 | 自動（現在の担当）・選択した実行者・レビュー担当。Tab で切り替える |
 
 Enter は改行、Ctrl-S は開始／送信、矢印・Home / End・Delete / Backspace は入力編集である。
+Ctrl-S は背景の定期取得を待たない。送信を止めるのは配送中の送信だけである。
+担当欄は Planner・Implementer・Reviewer の `< 担当 >` を同じ桁から並べ、選択中の欄だけカーソルを付ける。
 入力下書きは session ごとに保持し、配送中に追記した内容は先行する送信の完了で消さない。
 Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Agent 出力は各 Agent タブで確認する。
 
@@ -2158,6 +2161,8 @@ Closeup action の `workflow finish` は、その session の run を終了す�
 新しい run を始めるには、その Agent を閉じてからにする。
 終了した run は goal・終了時の工程・結果・issue・PR を最大 5 件まで保持し、古いものから捨てる。
 履歴欄の先頭に `[completed] <goal> (PR ready)` の形で表示し、run がある間は上段の末尾でこの操作を案内する。
+起動できないまま開始待ちになった intent がエラーを抱えている間も同じ末尾で案内する。この状態の Ctrl-S は
+同じ操作 ID の再送にしかならないため、案内が無いと畳む手段が画面から消える。
 案内は上段で最も低い優先度を持ち、pane が狭いときは待ち理由・レビュー対象 SHA・エラーより先に落ちる。
 応答を失った終了は同じ操作 ID で再送し、二重に終了しない。終了済みの run への追加指示と、
 別の操作 ID による 2 度目の終了は拒否する。
@@ -2165,7 +2170,9 @@ Closeup action の `workflow finish` は、その session の run を終了す�
 タブを閉じても daemon の作業は中止しない。再度 `workflow` を開くと保存済みの進捗を取得する。
 進行そのものは daemon の常駐 lane が所有するため、タブを閉じていても、別の session を見ていても、
 TUI を終了していても進む（[workflow lane](05-daemon.md#workflow-lane)が正本）。開いている画面の
-polling は同じ進行の pass を通して最新の状態を受け取る。
+polling は同じ進行の pass を通して最新の状態を受け取る。polling の間隔は直前の取得が終わってから数え、
+frame の更新回数ではなく 1 秒程度の一定間隔に保つ（常駐 lane と同じ帯域に収め、pane を開いている間に
+daemon の read を frame ごとに積まない）。
 Workflow は PR の自動マージや session/worktree の削除を行わない。
 実装・レビューの進行は起動時の固定指示と同一 session の handoff に従う。修正は最大 3 回を
 指示するが、プロセスを強制停止する上限ではない。

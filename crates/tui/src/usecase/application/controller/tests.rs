@@ -420,12 +420,76 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
             .value()
             .is_empty()
     );
-    // Periodic observation is non-blocking and does not start work.
-    state.mascot_tick = 9;
+    // Periodic observation is non-blocking and does not start work. It is
+    // spaced from the previous read rather than run on a frame counter, so the
+    // pane cannot put the daemon under a per-frame read flood.
+    let due = state.workflow_panel(session).unwrap().snapshot_due_tick;
+    assert!(due >= 60, "a read schedules the next one a second out");
+    state.mascot_tick = due - 2;
+    assert!(update(&mut state, AppEvent::Tick).is_empty());
     assert_eq!(
         update(&mut state, AppEvent::Tick),
         vec![Effect::Workflow(job)]
     );
+}
+
+#[test]
+fn a_background_read_never_swallows_the_person_s_submission() {
+    use crate::usecase::application::workflow::WorkflowJob;
+    use usagi_core::domain::workflow::{WorkflowCommand, WorkflowSnapshot};
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    let _ = submit_closeup_workflow(&mut state, session, "");
+    // Opening the tab leaves a read in flight. The pane re-reads on a steady
+    // cadence, so a person who waits for it to clear waits forever.
+    assert!(state.workflow_panel(session).unwrap().loading);
+    assert!(!state.workflow_panel(session).unwrap().loaded);
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::Paste("Build login".into()),
+        },
+    );
+    let effects = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::SaveRoles,
+        },
+    );
+    let [Effect::Workflow(start)] = effects.as_slice() else {
+        panic!("the submission is dispatched, got {effects:?}");
+    };
+    assert!(
+        matches!(&start.control, Some((_, WorkflowCommand::Start { goal, .. })) if goal == "Build login")
+    );
+
+    // The read it overlapped lands without disturbing the submission.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: WorkflowJob {
+                workspace,
+                session,
+                control: None,
+            },
+            result: Ok(Box::new(WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                session,
+                run: None,
+                pending_start: None,
+                finished: Vec::new(),
+            })),
+        }),
+    );
+    let panel = state.workflow_panel(session).unwrap();
+    assert!(!panel.loading && panel.loaded);
+    assert!(panel.submitting);
+    assert!(panel.pending.is_some());
 }
 
 #[test]

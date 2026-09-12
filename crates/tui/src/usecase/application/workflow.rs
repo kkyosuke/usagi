@@ -18,6 +18,14 @@ pub struct WorkflowPanel {
     pub recipient: Option<Recipient>,
     pub error: Option<String>,
     pub loading: bool,
+    /// Set once any snapshot has been applied. Only the first read is announced
+    /// as loading; the steady background refresh must not replace the status it
+    /// just fetched.
+    pub loaded: bool,
+    /// Frame tick the next background snapshot read may start on. Spacing the
+    /// reads from the completion of the previous one keeps this lane
+    /// single-flight and off the frame rate.
+    pub snapshot_due_tick: u64,
     pub submitting: bool,
     pub history_offset: usize,
     pub pending: Option<(OperationId, WorkflowCommand)>,

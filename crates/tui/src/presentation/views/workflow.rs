@@ -1,8 +1,13 @@
 //! Fixed progress header and instruction composer around a scrollable history.
 
+use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{clip_to_width, pad_to_width};
 use crate::usecase::application::workflow::WorkflowPanel;
-use usagi_core::domain::workflow::Delivery;
+use usagi_core::domain::workflow::{Delivery, Outcome};
+
+/// Column the agent selectors open in, so `Planner` and `Implementer` put their
+/// `< value >` under each other instead of stepping right with the label.
+const AGENT_LABEL_WIDTH: usize = "Implementer:".len();
 
 /// Render within the pane's content rectangle, never over its tab strip.
 #[must_use]
@@ -11,42 +16,54 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
         return vec![String::new(); height];
     }
     let header = header(panel);
-    let mut composer = vec![if panel.run.is_some() {
+    let mut composer = vec![Role::Accent.style().bold().paint(&if panel.run.is_some() {
         format!("Instruction to: {}", panel.recipient_label())
     } else {
-        "Goal".into()
-    }];
+        "Goal".to_owned()
+    })];
     composer.extend(input_rows(panel, width));
     composer.push(if panel.submitting {
-        "Submitting... (draft retained)".into()
+        Role::Warning
+            .style()
+            .paint("Submitting... (draft retained)")
     } else if panel.pending.is_some() {
-        "Ctrl+S: retry previous request (same operation ID)".into()
+        Role::Warning
+            .style()
+            .paint("Ctrl+S: retry previous request (same operation ID)")
     } else if panel.run.is_some() {
-        "Enter: newline | Tab: recipient | Ctrl+S: submit".into()
+        Style::new()
+            .dim()
+            .paint("Enter: newline | Tab: recipient | Ctrl+S: submit")
     } else {
-        "Tab: goal/agents | Left/Right: choose | Ctrl+S: start".into()
+        Style::new()
+            .dim()
+            .paint("Tab: goal/agents | Left/Right: choose | Ctrl+S: start")
     });
 
     // Even a short terminal keeps one status row and the end of the composer.
     let composer_height = composer.len().min(height.saturating_sub(1));
     let header_height = header.len().min(height - composer_height);
     let history_height = height - composer_height - header_height;
-    let mut rows = header
-        .into_iter()
-        .take(header_height)
-        .map(|line| safe_line(&line))
-        .collect::<Vec<_>>();
+    // `header` and the history rows below already sanitized every untrusted
+    // fragment before painting it, so nothing re-sanitizes them here: that pass
+    // would strip the SGR this pane is drawn with.
+    let mut rows = header.into_iter().take(header_height).collect::<Vec<_>>();
     // Ended runs come first: they are the oldest thing that happened here, and
     // a restarted session should still show what it already tried.
     let mut history = panel
         .finished
         .iter()
         .map(|ended| {
+            let tag = format!("[{}]", ended.outcome.label());
             format!(
-                "[{}] {} ({})",
-                ended.outcome.label(),
-                ended.goal.replace('\n', " / "),
-                ended.phase.label()
+                "{} {} ({})",
+                if ended.outcome == Outcome::Completed {
+                    Role::Success.style().paint(&tag)
+                } else {
+                    Style::new().dim().paint(&tag)
+                },
+                safe_line(&ended.goal.replace('\n', " / ")),
+                Style::new().dim().paint(ended.phase.label())
             )
         })
         .collect::<Vec<_>>();
@@ -54,7 +71,13 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
         let mut rows = run
             .history
             .iter()
-            .map(|entry| format!("{}: {}", entry.actor, entry.body.replace('\n', " / ")))
+            .map(|entry| {
+                format!(
+                    "{}: {}",
+                    Role::Accent.style().paint(&safe_line(&entry.actor)),
+                    safe_line(&entry.body.replace('\n', " / "))
+                )
+            })
             .collect::<Vec<_>>();
         rows.extend(
             run.instructions
@@ -66,7 +89,16 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
                         Delivery::Acknowledged => "processed",
                         Delivery::Unconfirmed => "delivery unconfirmed",
                     };
-                    format!("[{delivery}] {}", instruction.body.replace('\n', " / "))
+                    let tag = format!("[{delivery}]");
+                    format!(
+                        "{} {}",
+                        if instruction.delivery == Delivery::Unconfirmed {
+                            Role::Warning.style().paint(&tag)
+                        } else {
+                            Style::new().dim().paint(&tag)
+                        },
+                        safe_line(&instruction.body.replace('\n', " / "))
+                    )
                 })
                 .collect::<Vec<_>>(),
         );
@@ -74,7 +106,7 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
     }));
     let end = history.len().saturating_sub(panel.history_offset);
     let start = end.saturating_sub(history_height);
-    rows.extend(history[start..end].iter().map(|line| safe_line(line)));
+    rows.extend(history[start..end].iter().cloned());
     rows.resize(header_height + history_height, String::new());
     rows.extend(
         composer
@@ -91,13 +123,20 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
 }
 
 fn header(panel: &WorkflowPanel) -> Vec<String> {
-    let status = if panel.loading && panel.run.is_none() {
-        "Loading workflow".to_owned()
+    // Only the very first read announces itself. The pane re-reads the daemon
+    // on a steady cadence, and replacing the status it just fetched with
+    // "Loading" on every one of those made the header flicker between two
+    // strings for as long as the tab stayed open.
+    let status = if panel.loading && !panel.loaded {
+        Role::Warning.style().bold().paint("Loading workflow")
     } else {
-        panel.run.as_ref().map_or_else(
-            || "Implementation + Review / Not started".to_owned(),
-            |run| format!("Implementation + Review / {}", run.phase.label()),
-        )
+        Role::Accent
+            .style()
+            .bold()
+            .paint(&panel.run.as_ref().map_or_else(
+                || "Implementation + Review / Not started".to_owned(),
+                |run| format!("Implementation + Review / {}", run.phase.label()),
+            ))
     };
     let mut header = vec![status];
     if let Some(run) = &panel.run {
@@ -107,19 +146,30 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
             usagi_core::domain::workflow::Phase::Ready => "None (complete)",
             _ => run.agents.implementer.selector(),
         };
-        header.push(format!("Current owner: {owner}"));
         header.push(format!(
+            "Current owner: {}",
+            Role::Accent.style().paint(owner)
+        ));
+        header.push(Style::new().dim().paint(&format!(
             "Implement -> Review -> PR ready | revisions {}/{}",
             run.revisions, run.revision_limit
-        ));
+        )));
         if let Some(issue) = run.issue {
-            header.push(format!("Issue: #{issue} (PR must mark it done)"));
+            header.push(format!(
+                "Issue: {} (PR must mark it done)",
+                Role::Info.style().paint(&format!("#{issue}"))
+            ));
         }
         if let Some(reason) = &run.waiting_reason {
-            header.push(reason.clone());
+            header.push(Role::Warning.style().paint(&safe_line(reason)));
         }
         if let Some(review) = &run.review {
-            header.push(format!("Review HEAD: {}", review.target.head_sha));
+            header.push(format!(
+                "Review HEAD: {}",
+                Style::new()
+                    .dim()
+                    .paint(&safe_line(&review.target.head_sha))
+            ));
         }
     } else {
         for (index, label, provider) in [
@@ -127,28 +177,63 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
             (1, "Implementer", panel.agents.implementer),
             (2, "Reviewer", panel.agents.reviewer),
         ] {
-            let focus = if panel.agent_field == Some(index) {
-                ">"
+            let focused = panel.agent_field == Some(index);
+            let marker = if focused {
+                Role::Danger.style().bold().paint(">")
             } else {
-                " "
+                " ".to_owned()
             };
             let name = if provider == usagi_core::domain::settings::DefaultModel::Agy {
                 "Gemini (agy)"
             } else {
                 provider.selector()
             };
-            header.push(format!("{focus} {label}: < {name} >"));
+            let value = if focused {
+                Role::Accent.style().bold()
+            } else {
+                Role::Accent.style()
+            };
+            let arrow = if focused {
+                Role::Accent.style().bold()
+            } else {
+                Style::new().dim()
+            };
+            header.push(format!(
+                "{marker} {:<width$} {} {} {}",
+                format!("{label}:"),
+                arrow.paint("<"),
+                value.paint(name),
+                arrow.paint(">"),
+                width = AGENT_LABEL_WIDTH,
+            ));
         }
     }
     if let Some(error) = &panel.error {
-        header.push(format!("Error: {error}"));
+        header.push(
+            Role::Danger
+                .style()
+                .paint(&format!("Error: {}", safe_line(error))),
+        );
     }
     // Offered in every phase, not only the two that are already the person's
     // turn: the run that most needs ending is the one still insisting it is
-    // working. It goes last because a short pane keeps the header's first rows,
-    // and a standing hint is worth less than an error or a waiting reason.
+    // working. A start the daemon refused needs it just as badly — every
+    // Ctrl+S there resends the same rejected request, so without this line the
+    // pane tells the person to retry and nothing else. It goes last because a
+    // short pane keeps the header's first rows, and a standing hint is worth
+    // less than an error or a waiting reason.
     if panel.run.is_some() {
-        header.push("Closeup `workflow finish` ends this run".into());
+        header.push(
+            Style::new()
+                .dim()
+                .paint("Closeup `workflow finish` ends this run"),
+        );
+    } else if panel.pending.is_some() && panel.error.is_some() {
+        header.push(
+            Style::new()
+                .dim()
+                .paint("Closeup `workflow finish` abandons this start"),
+        );
     }
     header
 }
@@ -179,8 +264,9 @@ fn input_rows(panel: &WorkflowPanel, width: usize) -> Vec<String> {
         .take(3)
         .map(|(index, line)| {
             let safe = safe_line(line);
+            let marker = Style::new().dim().paint(">");
             if index != current {
-                return format!("> {safe}");
+                return format!("{marker} {}", Role::Accent.style().paint(&safe));
             }
             let caret = safe_line(&line[..cursor - line_start]).len();
             let mut start = 0;
@@ -191,11 +277,11 @@ fn input_rows(panel: &WorkflowPanel, width: usize) -> Vec<String> {
                 start += safe[start..].chars().next().map_or(0, char::len_utf8);
             }
             format!(
-                "> {}",
+                "{marker} {}",
                 crate::presentation::widgets::block_caret(
                     &safe[start..],
                     caret - start,
-                    &crate::presentation::theme::Style::new()
+                    &Role::Accent.style()
                 )
             )
         })
@@ -205,6 +291,31 @@ fn input_rows(panel: &WorkflowPanel, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pane is drawn with SGR, so assertions read the text a person sees.
+    fn strip(line: &str) -> String {
+        let mut out = String::new();
+        let mut chars = line.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    fn plain(rows: Vec<String>) -> String {
+        rows.iter()
+            .map(|row| strip(row))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn a_run_started_from_an_issue_names_it() {
@@ -216,7 +327,7 @@ mod tests {
             run: Some(run),
             ..WorkflowPanel::default()
         };
-        assert!(render(20, 100, &panel).join("\n").contains("Issue: #742"));
+        assert!(plain(render(20, 100, &panel)).contains("Issue: #742"));
     }
 
     #[test]
@@ -243,7 +354,7 @@ mod tests {
 
         // Ended runs are readable before anything new starts, and a multi-line
         // goal stays on one row.
-        let rendered = render(20, 100, &panel).join("\n");
+        let rendered = plain(render(20, 100, &panel));
         assert!(rendered.contains("[completed] Ship login (PR ready)"));
         assert!(rendered.contains("[stopped] Rewrite / the parser (Revising)"));
 
@@ -258,18 +369,12 @@ mod tests {
         ] {
             panel.run.as_mut().unwrap().phase = phase;
             assert!(
-                render(20, 100, &panel)
-                    .join("\n")
-                    .contains("Closeup `workflow finish` ends this run"),
+                plain(render(20, 100, &panel)).contains("Closeup `workflow finish` ends this run"),
                 "{phase:?} still offers the way out"
             );
         }
         // The archive survives alongside a new run.
-        assert!(
-            render(20, 100, &panel)
-                .join("\n")
-                .contains("[completed] Ship login")
-        );
+        assert!(plain(render(20, 100, &panel)).contains("[completed] Ship login"));
 
         // A short pane keeps the header's first rows, so the standing hint has to
         // sit after everything it must not displace. Assert the order itself,
@@ -293,28 +398,81 @@ mod tests {
         let mut panel = WorkflowPanel::default();
         panel.agents.planner = DefaultModel::Agy;
         panel.agents.implementer = DefaultModel::Claude;
-        panel.agents.reviewer = DefaultModel::OpenAi;
         panel.agent_field = Some(1);
-        let rendered = render(20, 100, &panel).join("\n");
-        assert!(rendered.contains("Planner: < Gemini (agy) >"));
-        assert!(rendered.contains("> Implementer: < claude >"));
-        assert!(rendered.contains("Reviewer: < codex >"));
+        panel.agents.reviewer = DefaultModel::OpenAi;
+        let rows = render(20, 100, &panel)
+            .into_iter()
+            .map(|row| strip(&row))
+            .collect::<Vec<_>>();
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} is drawn"))
+                .clone()
+        };
+        let planner = row("Planner:");
+        let implementer = row("Implementer:");
+        let reviewer = row("Reviewer:");
+        assert!(planner.contains("< Gemini (agy) >"));
+        assert!(implementer.contains("< claude >"));
+        assert!(reviewer.contains("< codex >"));
+        // The three selectors open in the same column, so the longest label
+        // cannot push its own value out of the column the others use.
+        let opens_at = |row: &str| row.find('<').expect("the selector opens");
+        assert_eq!(opens_at(&planner), opens_at(&implementer));
+        assert_eq!(opens_at(&planner), opens_at(&reviewer));
+        // Only the focused row carries the cursor.
+        assert!(implementer.starts_with('>'));
+        assert!(planner.starts_with(' ') && reviewer.starts_with(' '));
+
         let mut run = crate::usecase::application::workflow::fixture_run(
             usagi_core::domain::id::SessionId::new(),
         );
         run.agents = panel.agents;
         panel.run = Some(run);
-        assert!(
-            render(20, 100, &panel)
-                .join("\n")
-                .contains("Current owner: claude")
-        );
+        assert!(plain(render(20, 100, &panel)).contains("Current owner: claude"));
         panel.run.as_mut().unwrap().phase = usagi_core::domain::workflow::Phase::Reviewing;
-        assert!(
-            render(20, 100, &panel)
-                .join("\n")
-                .contains("Current owner: codex")
-        );
+        assert!(plain(render(20, 100, &panel)).contains("Current owner: codex"));
+    }
+
+    #[test]
+    fn a_refresh_after_the_first_snapshot_keeps_the_status_it_fetched() {
+        let mut panel = WorkflowPanel {
+            loading: true,
+            ..WorkflowPanel::default()
+        };
+        // The first read is the only one worth announcing.
+        assert!(plain(render(20, 90, &panel)).contains("Loading workflow"));
+        panel.loaded = true;
+        let steady = plain(render(20, 90, &panel));
+        assert!(!steady.contains("Loading workflow"));
+        assert!(steady.contains("Implementation + Review / Not started"));
+    }
+
+    #[test]
+    fn a_refused_start_is_told_how_to_be_abandoned() {
+        use usagi_core::domain::workflow::WorkflowCommand;
+        let mut panel = WorkflowPanel {
+            pending: Some((
+                usagi_core::domain::id::OperationId::new(),
+                WorkflowCommand::Start {
+                    goal: "task".into(),
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                },
+            )),
+            ..WorkflowPanel::default()
+        };
+        // A start still waiting on its own answer is not stuck, so nothing is
+        // offered yet.
+        assert!(!plain(render(20, 90, &panel)).contains("workflow finish"));
+        // Once the daemon has refused it, every Ctrl+S resends the same
+        // rejected request: the way out has to be on screen.
+        panel.error = Some("stop the session's existing Agent".into());
+        let refused = plain(render(20, 90, &panel));
+        assert!(refused.contains("Closeup `workflow finish` abandons this start"));
+        // It stays the lowest-priority row, below the error it explains.
+        let position = |needle: &str| refused.lines().position(|row| row.contains(needle));
+        assert!(position("Error:") < position("abandons this start"));
     }
 
     #[test]

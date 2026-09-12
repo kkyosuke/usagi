@@ -173,6 +173,18 @@ pub enum RoleEditorScope {
 
 pub const ROLE_EDITOR_VIEWPORT_LINES: usize = 14;
 
+/// Frame ticks between two background Workflow snapshot reads.
+///
+/// The composition root wakes this reducer every 16ms, so gating the read on
+/// `mascot_tick % 10` ran a daemon round trip roughly six times a second for as
+/// long as a Workflow tab stayed selected — the per-frame inventory flood #551
+/// removed from the session and decision lanes, left behind on this one. It
+/// also kept `loading` set most of the time, which is what made the header
+/// flicker and, until the guard moved, swallowed Ctrl+S. Counting from the
+/// *completion* of the previous read keeps the lane single-flight and puts its
+/// steady cadence in the same one-second band as the resident lanes.
+const WORKFLOW_SNAPSHOT_TICKS: u64 = 60;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleEditor {
     scope: RoleEditorScope,
@@ -2843,6 +2855,7 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             if job.workspace != state.workspace || !state.sessions.contains(&job.session) {
                 return Vec::new();
             }
+            let tick = state.mascot_tick;
             let Some(panel) = state.workflows.get_mut(&job.session) else {
                 return Vec::new();
             };
@@ -2853,9 +2866,11 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 panel.submitting = false;
             } else {
                 panel.loading = false;
+                panel.snapshot_due_tick = tick.saturating_add(WORKFLOW_SNAPSHOT_TICKS);
             }
             match result {
                 Ok(snapshot) if snapshot.session == job.session => {
+                    panel.loaded = true;
                     if !panel.agents_edited && panel.pending.is_none() {
                         panel.agents = snapshot.agents;
                     }
@@ -2997,7 +3012,10 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 AppKey::PageUp => panel.history_offset = panel.history_offset.saturating_add(5),
                 AppKey::PageDown => panel.history_offset = panel.history_offset.saturating_sub(5),
                 AppKey::SaveRoles => {
-                    if panel.loading || panel.submitting {
+                    // A background snapshot read is not the person's request,
+                    // so it must not swallow this one. Only a submission still
+                    // in flight owns the panel.
+                    if panel.submitting {
                         return Vec::new();
                     }
                     if panel.pending.is_none() {
@@ -3166,12 +3184,13 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state
                 .pr_merge_celebrations
                 .retain(|_, until| state.mascot_tick <= *until);
-            if state.mascot_tick.is_multiple_of(10)
-                && let Some(session) = state.active
+            let tick = state.mascot_tick;
+            if let Some(session) = state.active
                 && state.session_can_use(session)
                 && let Some(panel) = state.workflows.get_mut(&session)
                 && !panel.loading
                 && !panel.submitting
+                && tick >= panel.snapshot_due_tick
             {
                 panel.loading = true;
                 vec![Effect::Workflow(super::workflow::WorkflowJob {
