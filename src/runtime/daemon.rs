@@ -85,7 +85,7 @@ use usagi_core::domain::id::{
     AgentRuntimeRef, ConnectionId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
-use usagi_core::domain::settings::DefaultModel;
+use usagi_core::domain::settings::{AgentReadinessCommand, DefaultModel};
 use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
 use usagi_core::infrastructure::client::{
     ClientError, ClientPolicy, DaemonClient, DaemonRestartAgents, DeadlineConnection,
@@ -814,6 +814,20 @@ struct ReadinessBounds {
     output_limit: usize,
 }
 
+impl ReadinessBounds {
+    /// Reads the bounds off the same value that names the status command, so a
+    /// launcher cannot run one product's command under another product's
+    /// budget. Keeping the resolution here — rather than inline in the real-IO
+    /// probe — lets a test prove the root still carries the per-product budget
+    /// without spawning a child.
+    fn for_probe(probe: AgentReadinessCommand) -> Self {
+        Self {
+            timeout: probe.timeout(),
+            output_limit: probe.output_limit(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ReadinessSlot {
     running: bool,
@@ -863,10 +877,7 @@ impl AgentReadinessProbe for SystemAgentReadiness {
             product,
             probe.program(),
             probe.arguments(),
-            ReadinessBounds {
-                timeout: probe.timeout(),
-                output_limit: probe.output_limit(),
-            },
+            ReadinessBounds::for_probe(probe),
         )
     }
 }
@@ -12890,9 +12901,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn readiness_bounds_come_from_the_probed_product_not_a_shared_constant() {
+        let agy = ReadinessBounds::for_probe(
+            DefaultModel::readiness_command_for("agy").expect("Antigravity is a modelled product"),
+        );
+        let codex = ReadinessBounds::for_probe(
+            DefaultModel::readiness_command_for("codex").expect("Codex is a modelled product"),
+        );
+        // The root carries whatever the vocabulary declares for that product
+        // instead of re-imposing a budget of its own.
+        assert_eq!(agy.timeout, DefaultModel::Agy.readiness_command().timeout());
+        assert_eq!(
+            agy.output_limit,
+            DefaultModel::Agy.readiness_command().output_limit()
+        );
+        // `agy models` starts a language server and logs while it works, so its
+        // budget is the larger one. A root that kept one shared constant — the
+        // regression that reported an installed, authenticated CLI as
+        // unavailable — would answer identically for both products here.
+        assert!(agy.timeout > codex.timeout, "{agy:?} vs {codex:?}");
+        assert!(
+            agy.output_limit > codex.output_limit,
+            "{agy:?} vs {codex:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn a_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
+    fn readiness_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let fixture = tempfile::tempdir().unwrap();

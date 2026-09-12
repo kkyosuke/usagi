@@ -1648,7 +1648,8 @@ nonzero exit、timeout、不正 UTF-8、上限超過をいずれも credential �
 含まない `unavailable` に正規化する。共通の bounded child runner は独立 process group を TERM、bounded grace、KILL の
 順で停止して reap し、pipe reader も join する。preflight 後に owner lock を取り直し、operation idempotency、generation、
 scope、profile revision、current executable、config、concurrency を再検証してから reservation と spawn を行う。Doctor の
-`--version` は readiness とは別の typed probe であり、1 秒の deadline と同じ child lifecycle / output bound を使う。
+`--version` は readiness とは別の typed probe であり、1 秒の deadline と各 16 KiB の output bound を自分で持ち、
+child lifecycle だけを同じ bounded child runner に従わせる。
 
 ### Agent phase の投影
 
