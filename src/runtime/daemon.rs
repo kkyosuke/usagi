@@ -6,6 +6,7 @@ mod secure_path;
 mod tenant_control;
 mod workflow;
 
+use dispatch::session::reconcile_orphan_delegations;
 use dispatch::{
     DispatchToolContext, SessionDispatchContext, authenticated_supervisor_caller,
     clean_orphan_session_resources, daemon_request_surface, dispatch_agent,
@@ -13,26 +14,25 @@ use dispatch::{
     dispatch_dispatch_tool, dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot,
     dispatch_rollover, dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
     dispatch_supervisor_tool, dispatch_user_decision, envelope, expected_client_disconnect,
-    reconcile_aborted_supervisor_workers, reconcile_orphan_delegations,
-    reconcile_pending_goal_artifacts, reconcile_pending_supervisor_promotions,
-    reconcile_startup_supervisor_promotions, reconcile_startup_supervisor_workers,
-    request_mcp_credential, run_agent_readiness, unexpected_daemon_response_entry,
+    reconcile_aborted_supervisor_workers, reconcile_pending_goal_artifacts,
+    reconcile_pending_supervisor_promotions, reconcile_startup_supervisor_promotions,
+    reconcile_startup_supervisor_workers, request_mcp_credential, run_agent_readiness,
+    unexpected_daemon_response_entry,
 };
 
 #[cfg(test)]
 use dispatch::{
     AuthenticatedSupervisorCaller, PendingPromotionCandidate, PendingPromotionKind,
-    best_effort_merged_pr_head, compensate_delegation, compensate_failed_delegated_initialize,
-    exact_merged_pr_head, finish_supervisor_promotion_reconciliation, goal_supervisor_caller,
-    lock_agent_runtime, lock_supervisor_runtime, map_inbox_query_error, project_reported_pr,
-    promotion_admission_matches, prompt_supervisor_retry, reconcile_supervisor_promotion,
-    reconcile_supervisor_promotion_outcome, reconcile_supervisor_promotions,
-    reconcile_supervisor_run_workers, record_supervisor_promotion_result,
-    require_stable_supervisor_fence, require_supervisor_reservation_presence,
-    required_payload_string, reserve_goal_supervisor_run, resolve_goal_artifact_repository,
-    safe_log_token, session_response_envelope, start_goal_supervisor_run,
-    supervisor_caller_descriptor, supervisor_control_error, supervisor_control_unconfirmed,
-    supervisor_error,
+    best_effort_merged_pr_head, exact_merged_pr_head, finish_supervisor_promotion_reconciliation,
+    goal_supervisor_caller, lock_agent_runtime, lock_supervisor_runtime, map_inbox_query_error,
+    project_reported_pr, promotion_admission_matches, prompt_supervisor_retry,
+    reconcile_supervisor_promotion, reconcile_supervisor_promotion_outcome,
+    reconcile_supervisor_promotions, reconcile_supervisor_run_workers,
+    record_supervisor_promotion_result, require_stable_supervisor_fence,
+    require_supervisor_reservation_presence, reserve_goal_supervisor_run,
+    resolve_goal_artifact_repository, safe_log_token, session_response_envelope,
+    start_goal_supervisor_run, supervisor_caller_descriptor, supervisor_control_error,
+    supervisor_control_unconfirmed, supervisor_error,
 };
 
 #[cfg(test)]
@@ -18320,12 +18320,12 @@ instructions = "{instructions}"
 
         let payload = serde_json::json!({"value": "  present  ", "blank": " ", "number": 1});
         assert_eq!(
-            required_payload_string(&payload, "value").unwrap(),
+            dispatch::session::required_payload_string(&payload, "value").unwrap(),
             "present"
         );
-        assert!(required_payload_string(&payload, "missing").is_err());
-        assert!(required_payload_string(&payload, "blank").is_err());
-        assert!(required_payload_string(&payload, "number").is_err());
+        assert!(dispatch::session::required_payload_string(&payload, "missing").is_err());
+        assert!(dispatch::session::required_payload_string(&payload, "blank").is_err());
+        assert!(dispatch::session::required_payload_string(&payload, "number").is_err());
 
         for (mode, expected) in [
             (paths::RuntimeMode::Production, "production"),
@@ -21249,7 +21249,7 @@ instructions = "{instructions}"
         .unwrap_err();
         let teardown = TeardownSignal::new();
 
-        let compensated = compensate_failed_delegated_initialize(
+        let compensated = dispatch::session::compensate_failed_delegated_initialize(
             &sessions,
             &teardown,
             &caller,
@@ -21291,7 +21291,7 @@ instructions = "{instructions}"
         .unwrap();
         let pre_effect = SessionRuntimeError::InvalidRole("refused".into());
         assert_eq!(
-            compensate_failed_delegated_initialize(
+            dispatch::session::compensate_failed_delegated_initialize(
                 &sessions,
                 &teardown,
                 &caller,
@@ -21345,7 +21345,7 @@ instructions = "{instructions}"
             sessions.lock().unwrap().session_id(name).unwrap()
         };
         let compensate = |name: &str, id, code| {
-            compensate_delegation(
+            dispatch::session::compensate_delegation(
                 &sessions,
                 &teardown,
                 id,
