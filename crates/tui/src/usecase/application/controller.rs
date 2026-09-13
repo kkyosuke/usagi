@@ -2876,20 +2876,24 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                         panel.error = start.error;
                     }
                     panel.run = snapshot.run;
+                    panel.finished = snapshot.finished;
                     if panel.pending.is_none() {
                         panel.error = None;
                     }
                     if let Some((_, command)) = job.control {
+                        // Finishing carries no draft, so nothing it submitted
+                        // could have consumed one.
                         let body = match command {
                             usagi_core::domain::workflow::WorkflowCommand::Start {
                                 goal, ..
-                            } => goal,
+                            } => Some(goal),
                             usagi_core::domain::workflow::WorkflowCommand::Instruct {
                                 body,
                                 ..
-                            } => body,
+                            } => Some(body),
+                            usagi_core::domain::workflow::WorkflowCommand::Finish => None,
                         };
-                        panel.submitted(&body);
+                        panel.submitted(body.as_deref());
                         panel.pending = None;
                     }
                 }
@@ -5691,25 +5695,58 @@ fn submit_empty_closeup_shortcut(state: &mut AppState, input: &str) -> Vec<Effec
     submit_closeup(state, input)
 }
 
+/// `workflow` opens the tab; `workflow finish` also ends the run it shows.
+///
+/// Finishing always opens the tab first: the daemon owns the decision, so its
+/// refusal — nothing to finish, or already finished — has to land somewhere the
+/// person is looking.
 fn submit_closeup_workflow(
     state: &mut AppState,
     session: SessionId,
     arguments: &str,
 ) -> Vec<Effect> {
-    if !arguments.is_empty() {
-        state.notice = Some(Notice::new("workflow takes no arguments"));
-        return Vec::new();
-    }
+    let finish = match arguments.trim() {
+        "" => false,
+        "finish" => true,
+        _ => {
+            state.notice = Some(Notice::new("workflow accepts only `finish`"));
+            return Vec::new();
+        }
+    };
+    let workspace = state.workspace;
     let panel = state.workflows.entry(session).or_default();
-    let load = !panel.loading && !panel.submitting;
-    panel.loading |= load;
+    let mut control = None;
+    let mut dispatch = false;
+    if finish {
+        // A request already in flight owns the panel. Otherwise resend a finish
+        // whose answer was lost rather than minting a second one, exactly as a
+        // resent instruction does.
+        if !panel.submitting {
+            if !matches!(
+                panel.pending,
+                Some((_, usagi_core::domain::workflow::WorkflowCommand::Finish))
+            ) {
+                panel.pending = Some((
+                    OperationId::new(),
+                    usagi_core::domain::workflow::WorkflowCommand::Finish,
+                ));
+            }
+            panel.submitting = true;
+            panel.error = None;
+            control.clone_from(&panel.pending);
+            dispatch = true;
+        }
+    } else if !panel.loading && !panel.submitting {
+        panel.loading = true;
+        dispatch = true;
+    }
     dismiss_closeup_action_modal(state);
     let mut effects = vec![Effect::OpenWorkflow { session }];
-    if load {
+    if dispatch {
         effects.push(Effect::Workflow(super::workflow::WorkflowJob {
-            workspace: state.workspace,
+            workspace,
             session,
-            control: None,
+            control,
         }));
     }
     effects

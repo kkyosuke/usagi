@@ -281,6 +281,10 @@ pub(super) fn control_workflow(
             }
         }
         WorkflowCommand::Instruct { .. } => deliver(agent, workspace, session, operation)?,
+        // Finishing is a change to the record and nothing else. The run's Agents
+        // keep their terminals, the worktree stays, and the person closes them
+        // the way they close any other Agent.
+        WorkflowCommand::Finish => {}
     }
     // The command changed the record, not the peer journal, so the answer is a
     // stored projection rather than a second replay.

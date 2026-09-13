@@ -32,6 +32,7 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | workflow 開始 | `workflow_start` | 自身が作成した session で実装＋レビューの workflow を開始する。以後の進行は daemon が所有する |
 | workflow 観測 | `workflow_status` | 工程・担当・修正回数・待ち理由・PR を返す。`Needs attention` と `PR ready` は人の判断が要る |
 | workflow 追加指示 | `workflow_instruct` | 進行中の workflow の担当へ durable な指示を送る |
+| workflow 終了 | `workflow_finish` | run を終了して次の開始を受け付ける。Agent は殺さず worktree も消さない |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
 | session 破棄 | `session_remove` | 自身が作成した session の worktree を daemon が破棄し、lifecycle store を更新する |

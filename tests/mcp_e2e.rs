@@ -108,7 +108,7 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 59);
+    assert_eq!(tools.len(), 60);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -131,7 +131,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 48);
+    assert_eq!(names.len(), 49);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -455,6 +455,10 @@ fn production_workflow_tools_observe_a_session_and_refuse_a_self_directed_start(
 }
 
 #[test]
+// One run's whole life — launch, instruct, finish, restart — shares a single
+// daemon and fixture Agent. Splitting it would spin up a second heavy E2E, and
+// those are deliberately serialized because contention makes them fail falsely.
+#[allow(clippy::too_many_lines)]
 fn production_workflow_start_launches_the_remembered_participants() {
     let mut mcp = McpHarness::start();
     // Claude proves readiness with `auth status`; the implementer then stays
@@ -522,6 +526,95 @@ sleep 30
         .get("error")
         .is_some()
     );
+
+    // Finishing ends the run. It is not `Ready`, so it is recorded as stopped
+    // with the phase it was abandoned in, and the session keeps its worktree.
+    let worktree = mcp.workspace().join(".usagi/sessions/workflow-run");
+    assert!(worktree.join(".git").exists());
+    // `session_status` is the one view of Agent liveness a human caller can
+    // read: `agent_list` needs Agent provenance, which this caller has not got.
+    let status_of = |mcp: &mut McpHarness| {
+        tool_text(&mcp.tool("session_status", &json!({})))["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["name"] == "workflow-run")
+            .map(|session| session["agent_status"].clone())
+    };
+    let before = status_of(&mut mcp).expect("the session is listed while it carries the run");
+    // Comparing before and after would also hold if the fixture's own sleep had
+    // already elapsed — and would then hide the very regression this checks for.
+    // A run that gets this far with a dead Agent is a fixture that is too short
+    // for this machine, and saying so is better than passing vacuously.
+    assert!(
+        before != "exited" && before != "failed" && !before.is_null(),
+        "the fixture Agent has to outlive the run's setup, but was {before}"
+    );
+    let finished = mcp.tool("workflow_finish", &json!({"name":"workflow-run"}));
+    assert!(finished.get("error").is_none(), "{finished}");
+    let finished = tool_text(&finished);
+    assert!(finished["run"].is_null(), "{finished}");
+    assert!(finished["pending_start"].is_null(), "{finished}");
+    assert_eq!(finished["finished"][0]["outcome"], "stopped");
+    assert_eq!(finished["finished"][0]["goal"], "add a login form");
+    assert_eq!(finished["finished"][0]["phase"], "implementing");
+
+    // The run's Agent is untouched and so is the worktree: finishing is a
+    // change to the workflow record and nothing else.
+    // The status has to be *unchanged*, not merely non-terminal: a killed Agent
+    // is still reported, as `exited`, so presence alone would pass through the
+    // regression. Comparing two readings around the one call is true regardless
+    // of how long the run took to reach here.
+    let after = status_of(&mut mcp);
+    assert_eq!(
+        after,
+        Some(before),
+        "finishing a run leaves the Agent that carried it exactly as it was"
+    );
+    assert!(
+        worktree.join(".git").exists(),
+        "finishing a run never removes the session worktree"
+    );
+
+    // Finishing again is refused, and so is instructing a run that is over.
+    assert!(
+        mcp.tool("workflow_finish", &json!({"name":"workflow-run"}))
+            .get("error")
+            .is_some()
+    );
+    assert!(
+        mcp.tool(
+            "workflow_instruct",
+            &json!({"name":"workflow-run","body":"one more thing"}),
+        )
+        .get("error")
+        .is_some()
+    );
+
+    // The workflow record no longer holds the session: a new start gets past
+    // "session already has another workflow" and is stopped only by the
+    // separate, pre-existing rule that one session runs one Agent at a time.
+    // Finishing deliberately leaves that Agent alive, so closing it stays the
+    // person's move — but the run that was wedging the session is gone.
+    let restarted = mcp.tool(
+        "workflow_start",
+        &json!({"name":"workflow-run","goal":"add a logout form"}),
+    );
+    let refusal = restarted["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        refusal.contains("existing Agent"),
+        "the record is free and only the live Agent refuses: {restarted}"
+    );
+    assert!(
+        !refusal.contains("another workflow"),
+        "the finished run must not still own the session: {restarted}"
+    );
+
+    // And the archive is what the session reports while it waits.
+    let idle = tool_text(&mcp.tool("workflow_status", &json!({"name":"workflow-run"})));
+    assert!(idle["run"].is_null(), "{idle}");
+    assert_eq!(idle["finished"][0]["goal"], "add a login form");
+    assert_eq!(idle["finished"].as_array().unwrap().len(), 1);
 }
 
 #[test]

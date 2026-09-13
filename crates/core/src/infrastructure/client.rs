@@ -676,6 +676,8 @@ pub enum SessionAction {
     WorkflowStatus,
     /// Send one durable instruction to a running workflow.
     WorkflowInstruct,
+    /// End one session's workflow so the session can start another.
+    WorkflowFinish,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1964,6 +1966,7 @@ const fn session_action_is_durable_operation(action: SessionAction) -> bool {
             // a second one.
             | SessionAction::WorkflowStart
             | SessionAction::WorkflowInstruct
+            | SessionAction::WorkflowFinish
     )
 }
 
@@ -3378,6 +3381,11 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::Session {
                 action: SessionAction::WorkflowInstruct,
+                operation_id: "op".into(),
+                payload: session_payload(),
+            },
+            DaemonRequest::Session {
+                action: SessionAction::WorkflowFinish,
                 operation_id: "op".into(),
                 payload: session_payload(),
             },

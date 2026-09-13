@@ -953,7 +953,8 @@ impl SessionRuntime {
             | SessionAction::DelegateBrief
             | SessionAction::WorkflowStart
             | SessionAction::WorkflowStatus
-            | SessionAction::WorkflowInstruct => Err(SessionRuntimeError::InvalidRequest),
+            | SessionAction::WorkflowInstruct
+            | SessionAction::WorkflowFinish => Err(SessionRuntimeError::InvalidRequest),
         }
     }
 

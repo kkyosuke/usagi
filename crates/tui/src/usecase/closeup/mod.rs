@@ -84,7 +84,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         info: CommandInfo {
             name: "workflow",
             description: "Open this session's implementation/review workflow",
-            usage: "workflow",
+            usage: "workflow [finish]",
         },
         factory: |arguments| Command::Workflow { arguments },
     },

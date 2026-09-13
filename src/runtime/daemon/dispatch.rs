@@ -3121,7 +3121,8 @@ pub(super) fn session_response_envelope(
                 | SessionAction::DelegateBrief
                 | SessionAction::WorkflowStart
                 | SessionAction::WorkflowStatus
-                | SessionAction::WorkflowInstruct => None,
+                | SessionAction::WorkflowInstruct
+                | SessionAction::WorkflowFinish => None,
             } && let Some(object) = body.as_object_mut()
             {
                 object.insert(

@@ -1,7 +1,7 @@
 ---
 number: 745
 title: feat(workflow): run の中止・完了・再開始を操作できるようにする
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, tui, workflow]
 dependson: []
@@ -30,8 +30,19 @@ updated_at: 2026-09-12T00:00:00+00:00
 
 ## 受入条件
 
-- [ ] 中止・完了・再開始が durable な operation として受理され、retry で二重実行しない。
-- [ ] 中止は Agent を殺さず、worktree も削除しない。
-- [ ] 完了後に同じ session で新しい `Start` が通る。
-- [ ] 終了した run の履歴が保持され、上限を超えない。
-- [ ] `document/03-tui.md` と `document/04-ipc.md` を更新する。
+- [x] 中止・完了・再開始が durable な operation として受理され、retry で二重実行しない。
+- [x] 中止は Agent を殺さず、worktree も削除しない。
+- [x] 完了後に同じ session で新しい `Start` が通る（workflow の記録は解放される。
+  なお終了は Agent を残すため、前の run の Agent が生きている間は既存の
+  「1 session に 1 Agent」規則が先に効く。これは #745 が挙げた
+  `session already has another workflow` の詰みとは別の、意図された規則である）。
+- [x] 終了した run の履歴が保持され、上限を超えない。
+- [x] `document/03-tui.md` と `document/04-ipc.md` を更新する。
+
+## 実装で変えた方針
+
+中止と完了を別の command にせず、`Finish` 1 つにした。終了時の工程が完了か中止かを
+すでに記録しているため、どちらだったかを人に尋ねる必要がない（`PR ready` なら完了、
+それ以外なら中止）。再開始も専用 command を置かず、`Finish` のあとの `Start` とした。
+どちらも durable な operation として独立に受理・再送でき、2 つを 1 つの command に
+畳むと片方だけ失敗したときの再送が表現できなくなる。

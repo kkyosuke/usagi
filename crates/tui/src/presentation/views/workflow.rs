@@ -36,7 +36,21 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
         .take(header_height)
         .map(|line| safe_line(&line))
         .collect::<Vec<_>>();
-    let history = panel.run.as_ref().map_or_else(Vec::new, |run| {
+    // Ended runs come first: they are the oldest thing that happened here, and
+    // a restarted session should still show what it already tried.
+    let mut history = panel
+        .finished
+        .iter()
+        .map(|ended| {
+            format!(
+                "[{}] {} ({})",
+                ended.outcome.label(),
+                ended.goal.replace('\n', " / "),
+                ended.phase.label()
+            )
+        })
+        .collect::<Vec<_>>();
+    history.extend(panel.run.as_ref().map_or_else(Vec::new, |run| {
         let mut rows = run
             .history
             .iter()
@@ -57,7 +71,7 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
                 .collect::<Vec<_>>(),
         );
         rows
-    });
+    }));
     let end = history.len().saturating_sub(panel.history_offset);
     let start = end.saturating_sub(history_height);
     rows.extend(history[start..end].iter().map(|line| safe_line(line)));
@@ -129,6 +143,13 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
     if let Some(error) = &panel.error {
         header.push(format!("Error: {error}"));
     }
+    // Offered in every phase, not only the two that are already the person's
+    // turn: the run that most needs ending is the one still insisting it is
+    // working. It goes last because a short pane keeps the header's first rows,
+    // and a standing hint is worth less than an error or a waiting reason.
+    if panel.run.is_some() {
+        header.push("Closeup `workflow finish` ends this run".into());
+    }
     header
 }
 
@@ -196,6 +217,74 @@ mod tests {
             ..WorkflowPanel::default()
         };
         assert!(render(20, 100, &panel).join("\n").contains("Issue: #742"));
+    }
+
+    #[test]
+    fn ended_runs_stay_visible_and_every_phase_offers_the_way_out() {
+        use usagi_core::domain::workflow::{FinishedRun, Outcome, Phase};
+        let run = crate::usecase::application::workflow::fixture_run(
+            usagi_core::domain::id::SessionId::new(),
+        );
+        let ended = |outcome, phase, goal: &str| FinishedRun {
+            id: usagi_core::domain::id::OperationId::new(),
+            outcome,
+            goal: goal.to_owned(),
+            phase,
+            issue: None,
+            pr_url: None,
+        };
+        let mut panel = WorkflowPanel {
+            finished: vec![
+                ended(Outcome::Completed, Phase::Ready, "Ship login"),
+                ended(Outcome::Stopped, Phase::Revising, "Rewrite\nthe parser"),
+            ],
+            ..WorkflowPanel::default()
+        };
+
+        // Ended runs are readable before anything new starts, and a multi-line
+        // goal stays on one row.
+        let rendered = render(20, 100, &panel).join("\n");
+        assert!(rendered.contains("[completed] Ship login (PR ready)"));
+        assert!(rendered.contains("[stopped] Rewrite / the parser (Revising)"));
+
+        // A run the person wants to abandon is usually one that still claims to
+        // be working, so the way out is offered in every phase.
+        panel.run = Some(run);
+        for phase in [
+            Phase::Implementing,
+            Phase::Reviewing,
+            Phase::Ready,
+            Phase::Waiting,
+        ] {
+            panel.run.as_mut().unwrap().phase = phase;
+            assert!(
+                render(20, 100, &panel)
+                    .join("\n")
+                    .contains("Closeup `workflow finish` ends this run"),
+                "{phase:?} still offers the way out"
+            );
+        }
+        // The archive survives alongside a new run.
+        assert!(
+            render(20, 100, &panel)
+                .join("\n")
+                .contains("[completed] Ship login")
+        );
+
+        // A short pane keeps the header's first rows, so the standing hint has to
+        // sit after everything it must not displace. Assert the order itself,
+        // which holds at any size, and then the one height where the two
+        // actually compete.
+        let run = panel.run.as_mut().unwrap();
+        run.phase = Phase::Waiting;
+        run.waiting_reason = Some("Revision limit reached".into());
+        let position =
+            |rows: &[String], needle: &str| rows.iter().position(|row| row.contains(needle));
+        let full = render(20, 100, &panel);
+        assert!(position(&full, "Revision limit reached") < position(&full, "workflow finish"));
+        let short = render(7, 100, &panel);
+        assert!(position(&short, "Revision limit reached").is_some());
+        assert!(position(&short, "workflow finish").is_none());
     }
 
     #[test]
