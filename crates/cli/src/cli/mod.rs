@@ -123,6 +123,9 @@ pub enum RunOutcome {
     ClaudeSandbox {
         /// session（worktree 隔離）か root（コーディネータ）か。
         mode: SandboxMode,
+        /// 起動する agent provider の selector。同じ executable を複数 provider が
+        /// 共有するため、`$HOME` 配下の state grant は program 名ではなくこれで決まる。
+        agent: Option<String>,
         /// session workspace の保護対象 root。
         protected_root: Option<PathBuf>,
         /// daemon bootstrap が確定した canonical sandbox backend。
@@ -265,6 +268,9 @@ pub enum Command {
         /// 起動モード（session / root）
         #[arg(long)]
         mode: SandboxModeArg,
+        /// 起動する agent provider の selector（state grant の決定に使う）
+        #[arg(long)]
+        agent: Option<String>,
         /// session workspace の保護対象 root
         #[arg(long)]
         protected_root: Option<PathBuf>,
@@ -453,6 +459,7 @@ impl Command {
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
             Command::ClaudeSandbox {
                 mode,
+                agent,
                 protected_root,
                 backend,
                 tmpdir,
@@ -463,6 +470,7 @@ impl Command {
                 command,
             } => Box::new(hooks::ClaudeSandbox {
                 mode: mode.into(),
+                agent,
                 protected_root,
                 backend,
                 tmpdir,

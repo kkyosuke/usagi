@@ -1466,10 +1466,7 @@ fn shipping_system_prompt(capture: &FixtureArgv) -> String {
                 |(contract, _)| contract.to_owned(),
             )
     } else {
-        assert!(
-            matches!(capture.runtime.as_str(), "codex" | "codex-fugu"),
-            "unexpected fixture runtime"
-        );
+        assert_eq!(capture.runtime, "codex", "unexpected fixture runtime");
         let assignments = capture
             .arguments
             .iter()
@@ -1707,12 +1704,7 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
 
     let cases = [
         ("agy", "fixture-agy", "agy", "check Antigravity argv"),
-        (
-            "sakana-ai",
-            "fixture-sakana",
-            "codex-fugu",
-            "check Sakana argv",
-        ),
+        ("sakana-ai", "fixture-sakana", "claude", "check Sakana argv"),
         ("claude", "fixture-claude", "claude", "check Claude argv"),
         ("codex", "fixture-codex", "codex", "check Codex argv"),
     ];

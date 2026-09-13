@@ -35,8 +35,9 @@
 //! error has occurred." で失敗し、agent CLI は Keychain の credential を読めないまま古い file 側の
 //! credential へ fallback して認証エラー（401）で起動できなくなる。
 //!
-//! agent state は `~/.claude` 固定ではなく、[`agent_state_directory`] が **exec する program**
-//! から決める（Claude なら `~/.claude`、Codex なら `~/.codex`、sakana.ai なら `~/.codex-fugu`）。
+//! agent state は `~/.claude` 固定ではなく、[`granted_state_directory`] が **起動する provider**
+//! から決める（Claude なら `~/.claude`、Codex なら `~/.codex`、sakana.ai なら `~/.claude-sakana`）。
+//! provider が渡されない launch だけが [`agent_state_directory`] で program の basename に落ちる。
 //! 固定していた間、root の Codex は自分の state DB（`~/.codex/state_5.sqlite`）へ書けず
 //! 「attempt to write a readonly database」で起動できなかった。
 //!
@@ -127,6 +128,11 @@ pub struct SandboxRequest {
     /// テスト専用 seam。true なら backend で包まず command をそのまま exec する。合成ルートは
     /// [`passthrough_requested`] の結果だけをここへ入れる（release ビルドでは常に false）。
     pub passthrough: bool,
+    /// 起動する agent provider。`$HOME` 配下の state grant と config prefix は、
+    /// これがあるときは **provider** から決まり、無いときだけ command の basename から
+    /// 決まる。Claude と `sakana-ai` は同じ `claude` を exec するため、program 名だけでは
+    /// 両者を区別できず、Fugu の launch が Claude 本体の home を書けてしまう。
+    pub agent: Option<DefaultModel>,
     /// sandbox の中で exec する program と引数（先頭が program、以降が引数）。
     pub command: Vec<String>,
 }
@@ -277,11 +283,13 @@ fn reject_backend(backend: &str) -> SandboxPlan {
     }
 }
 
-/// exec する program が managed launch 中に書ける `$HOME` 配下の directory 名。
+/// exec する program だけから決める `$HOME` 配下の directory 名。provider を伴わない launch
+/// のための **fallback** であり、通常の経路は [`granted_state_directory`] を使う。
 ///
-/// 根拠は launcher が実際に exec する program（`command` の先頭）だけで、値の単一情報源は
-/// [`DefaultModel::state_directory`] である。したがって grant は起動する CLI と必ず一致し、
-/// provider を増やしても sandbox 側に写し漏れが起きない。AGY は自動ロードされる global
+/// 値の単一情報源は [`DefaultModel::state_directory`] で、provider を増やしても sandbox 側に
+/// 写し漏れが起きない。ただし executable は provider の identity ではないため（`claude` は
+/// Claude と `sakana-ai` が共有する）、program だけを根拠にできるのは selector が無いときに
+/// 限る。AGY は自動ロードされる global
 /// customization と runtime state が同じ `~/.gemini` に同居するため、conversation subtree
 /// だけを返す。usagi が launch しない未知 program には state root を与えない（fail-closed）。
 #[must_use]
@@ -290,15 +298,16 @@ pub fn agent_state_directory(program: &str) -> Option<&'static str> {
     DefaultModel::from_selector(&name.to_string_lossy()).map(DefaultModel::state_directory)
 }
 
-/// exec する program が `$HOME` 直下へ書く global config の path **prefix**。
+/// exec する program だけから決める、`$HOME` 直下の global config の path **prefix**。
+/// [`agent_state_directory`] と同じく provider を伴わない launch のための fallback である。
 ///
-/// 値の単一情報源は [`DefaultModel::global_config_prefix`] で、[`agent_state_directory`] と同じく
-/// 起動する CLI からだけ決まる。Claude の global config は state directory（`~/.claude`）の中では
+/// 値の単一情報源は [`DefaultModel::global_config_prefix`] である。Claude の global config は state directory（`~/.claude`）の中では
 /// なく `~/.claude.json` にあり、保存は `~/.claude.json.lock` を取って
 /// `~/.claude.json.tmp.<pid>.<random>` を書き、それを rename で被せる形で行う（`.backup.<ms>` も
 /// 隣に置く）。したがって grant は「その 1 ファイル」ではなく **prefix** でなければならず、
 /// prefix が無いと onboarding・folder trust・MCP 承認が毎起動やり直しになる。
-/// 自分の state directory の中に config を持つ provider（Codex / `codex-fugu`）は `None`。
+/// 自分の state directory の中に config を持つ provider（Codex）と、`CLAUDE_CONFIG_DIR` が指す
+/// directory の中に config を置く provider（`sakana-ai`）は `None`。
 #[must_use]
 pub fn agent_config_prefix(program: &str) -> Option<&'static str> {
     let name = Path::new(program).file_name()?;
@@ -317,6 +326,34 @@ pub fn macos_mds_cache_root(cache_dir: &Path) -> PathBuf {
 }
 
 /// 起動固有の root（provisioner 由来）と普遍領域を結合し、重複を除いた決定的な writable root 集合。
+/// この launch の `$HOME` 配下 state directory。
+///
+/// provider が渡されていればそれが権威で、無いときだけ exec する program から決める。
+/// `claude` executable は Claude と `sakana-ai` が共有するので、program だけを根拠にすると
+/// Fugu の launch が Claude 本体の `~/.claude` を writable に得てしまう。daemon 側の policy
+/// 検証も同じ関数を使い、launcher が実際に配る grant と検証対象を分岐させない。
+#[must_use]
+pub fn granted_state_directory(agent: Option<DefaultModel>, program: &str) -> Option<&'static str> {
+    agent.map_or_else(
+        || agent_state_directory(program),
+        |agent| Some(agent.state_directory()),
+    )
+}
+
+/// 同じ根拠で決める global config の path prefix。
+#[must_use]
+pub fn granted_config_prefix(agent: Option<DefaultModel>, program: &str) -> Option<&'static str> {
+    agent.map_or_else(
+        || agent_config_prefix(program),
+        DefaultModel::global_config_prefix,
+    )
+}
+
+/// request が exec する program。空 command は grant を得られない。
+fn request_program(request: &SandboxRequest) -> &str {
+    request.command.first().map_or("", String::as_str)
+}
+
 fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
     let mut roots: BTreeSet<PathBuf> = request.launch_roots.iter().cloned().collect();
     roots.insert(PathBuf::from("/tmp"));
@@ -327,11 +364,7 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
     if let Some(home) = &request.home {
         // 起動する agent CLI 自身の writable state。AGY は global customization と
         // state が同居するため、conversation subtree だけを返す。
-        if let Some(state) = request
-            .command
-            .first()
-            .and_then(|program| agent_state_directory(program))
-        {
+        if let Some(state) = granted_state_directory(request.agent, request_program(request)) {
             roots.insert(home.join(state));
         }
         if request.platform == Platform::MacOs {
@@ -359,10 +392,7 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
 fn writable_prefixes(request: &SandboxRequest) -> Vec<PathBuf> {
     let mut prefixes: BTreeSet<PathBuf> = BTreeSet::new();
     if let Some(home) = &request.home
-        && let Some(prefix) = request
-            .command
-            .first()
-            .and_then(|program| agent_config_prefix(program))
+        && let Some(prefix) = granted_config_prefix(request.agent, request_program(request))
     {
         prefixes.insert(home.join(prefix));
     }
@@ -615,6 +645,7 @@ mod tests {
             read_only_roots: Vec::new(),
             tmpdir: Some(PathBuf::from("/tmp/user")),
             home: Some(PathBuf::from("/home/dev")),
+            agent: None,
             linux_home_entries: Some(vec![
                 PathBuf::from("/home/dev/.claude"),
                 PathBuf::from("/home/dev/.claude.json"),
@@ -778,17 +809,21 @@ mod tests {
         // 固定の `~/.claude` を配っていた間、root の Codex は自分の state DB へ書けずに
         // 「attempt to write a readonly database」で起動できなかった。grant は exec する
         // program に追従する。
-        for (program, state) in [
-            ("claude", ".claude"),
-            ("codex", ".codex"),
-            ("codex-fugu", ".codex-fugu"),
-            ("agy", ".gemini/antigravity-cli/conversations"),
+        for (agent, program, state) in [
+            (None, "claude", ".claude"),
+            (None, "codex", ".codex"),
+            (None, "agy", ".gemini/antigravity-cli/conversations"),
             // PATH 解決済みの絶対 path でも basename で判定する。
-            ("/opt/homebrew/bin/codex", ".codex"),
+            (None, "/opt/homebrew/bin/codex", ".codex"),
+            // provider が渡されればそれが権威。`sakana-ai` は Claude と同じ
+            // `claude` を exec するため、program からは区別できない。
+            (Some(DefaultModel::SakanaAi), "claude", ".claude-sakana"),
+            (Some(DefaultModel::Claude), "claude", ".claude"),
         ] {
             let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
             request.mode = SandboxMode::Root;
             request.launch_roots.clear();
+            request.agent = agent;
             request.command = vec![program.to_owned()];
             let roots = writable_roots(&request);
             assert!(
@@ -818,7 +853,7 @@ mod tests {
                 .any(|root| root.starts_with("/home/dev"))
         );
         // 判定は closed vocabulary（`DefaultModel`）で、未知 token は None を返す。
-        assert_eq!(agent_state_directory("sakana.ai"), Some(".codex-fugu"));
+        assert_eq!(agent_state_directory("sakana.ai"), Some(".claude-sakana"));
         assert_eq!(
             agent_state_directory("agy"),
             Some(".gemini/antigravity-cli/conversations")
@@ -1217,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn the_global_config_grant_follows_the_program_that_is_actually_exec_ed() {
+    fn the_global_config_grant_follows_the_provider_that_is_actually_launched() {
         // config を自分の state directory の中に持つ provider には prefix を配らない。
         assert_eq!(agent_config_prefix("claude"), Some(".claude.json"));
         assert_eq!(
@@ -1225,10 +1260,22 @@ mod tests {
             Some(".claude.json")
         );
         assert_eq!(agent_config_prefix("codex"), None);
-        assert_eq!(agent_config_prefix("codex-fugu"), None);
         assert_eq!(agent_config_prefix("gemini"), None);
         assert_eq!(agent_config_prefix(""), None);
         assert_eq!(agent_config_prefix("/"), None);
+        // 同じ `claude` を exec しても、prefix を得るのは Claude だけである。
+        // `sakana-ai` の config は `CLAUDE_CONFIG_DIR` が指す state directory の中にある。
+        assert_eq!(
+            granted_config_prefix(Some(DefaultModel::Claude), "claude"),
+            Some(".claude.json")
+        );
+        assert_eq!(
+            granted_config_prefix(Some(DefaultModel::SakanaAi), "claude"),
+            None
+        );
+        // provider が無い launch だけが program の basename に落ちる。
+        assert_eq!(granted_config_prefix(None, "claude"), Some(".claude.json"));
+        assert_eq!(granted_config_prefix(None, "gemini"), None);
 
         let mut codex = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
         codex.command = vec!["codex".to_owned()];

@@ -431,7 +431,7 @@ mod tests {
             vec![
                 ("claude", "claude"),
                 ("codex", "codex"),
-                ("sakana-ai", "codex-fugu"),
+                ("sakana-ai", "claude"),
                 ("agy", "agy"),
             ]
         );
@@ -455,9 +455,12 @@ mod tests {
             available.iter().collect::<Vec<_>>(),
             vec![DefaultModel::OpenAi]
         );
+        // `sakana-ai` is Fugu served through the same Claude CLI, so the
+        // snapshot asks about `claude` once per provider rather than once per
+        // distinct executable — availability is per provider.
         assert_eq!(
             *locator.0.lock().unwrap(),
-            ["claude", "codex", "codex-fugu", "agy"]
+            ["claude", "codex", "claude", "agy"]
         );
     }
 

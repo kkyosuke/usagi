@@ -915,6 +915,43 @@ fn wait_for_resume_completion(
     }
 }
 
+/// A fixture Claude CLI.
+///
+/// `auth status` answers the way the real one does for this profile: a token in
+/// the environment is what "logged in" means, so the probe is only satisfied
+/// when usagi injected the configured key. A launch records the environment it
+/// received, then behaves like the Codex fixture: one line of output, one line
+/// echoed back.
+fn write_claude_cli(bin: &Path, count: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let record = bin.parent().unwrap().join("launch-environment");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then\n  [ -n \"${{ANTHROPIC_AUTH_TOKEN:-}}\" ] || exit 1\n  printf 'logged in\\n'\n  exit 0\nfi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nenv | grep -E '^(ANTHROPIC_|CLAUDE_)' > '{record}'\nprintf '%s\\n' spawn >> '{count}'\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        record = record.display(),
+        count = count.display(),
+    );
+    let path = bin.join("claude");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Write the machine-level bindings a gateway provider's credential comes from.
+fn write_global_env(home: &Path, bindings: &[(&str, &str)]) {
+    let settings = serde_json::json!({
+        "env": bindings
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), serde_json::json!(value)))
+            .collect::<serde_json::Map<_, _>>(),
+    });
+    let data_dir = channel_data_dir(home);
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(
+        data_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+}
+
 fn safe_readiness_error(error: ClientError) {
     let ClientError::Protocol(error) = error else {
         panic!("readiness failure must be a daemon protocol error");
@@ -1419,32 +1456,36 @@ fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
     );
 }
 
-/// #609 product E2E: the `sakana-ai` profile launches the Codex-compatible
-/// `codex-fugu`, so its admission has to follow *that* executable's status
-/// probe.
+/// Product E2E: the `sakana-ai` profile is the Claude CLI made into Fugu by its
+/// environment, so its admission has to follow *that* CLI under *that*
+/// environment.
 ///
-/// The root used to accept only `codex` / `claude` as readiness products, which
-/// made an installed and authenticated `codex-fugu` permanently unavailable —
-/// the profile the picker offers could never be launched. This drives the
-/// shipping binary over the real socket for all three states: not installed and
-/// installed-but-unauthenticated must refuse safely without spawning a PTY, and
-/// an authenticated fixture must reach a live conversation.
+/// Two things can only be observed end to end. A readiness probe run without the
+/// provider's environment answers for the user's own Anthropic login, which
+/// admits a launch that has no Sakana key and refuses one that does. And a
+/// launch that loses the gateway variables still starts Claude — against
+/// Anthropic, silently, while the picker says `sakana.ai`. This drives the
+/// shipping binary over the real socket for both: not installed and installed
+/// without a configured key must refuse safely without spawning a PTY, and a
+/// configured launch must reach a live conversation whose child received the
+/// endpoint, the isolated config directory, and the key.
 #[test]
-fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
+fn root_ipc_sakana_ai_admission_and_launch_carry_the_fugu_environment() {
     let _serial = serial();
-    for ready_status in [None, Some(1)] {
+    // Not installed, and installed-but-unconfigured, are both refused before any
+    // PTY exists.
+    for installed in [false, true] {
         let repo = fixture_repo();
         let home = short_dir("usagi-");
         let bin = home.path().join("bin");
         let count = home.path().join("spawn-count");
         fs::create_dir(&bin).unwrap();
-        // Codex stays installed and authenticated throughout, so a refusal can
-        // only come from `codex-fugu`'s own probe rather than a shared one.
-        write_codex(&bin, &count, 0);
-        if let Some(status) = ready_status {
-            write_codex_cli(&bin, "codex-fugu", &count, status);
+        if installed {
+            // The CLI is present and usable; only the Sakana key is missing, so
+            // no settings file configures one.
+            write_claude_cli(&bin, &count);
         }
-        let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+        let _daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
         let mut client = client(&channel_data_dir(home.path()));
         let (workspace, session, _) = available_scope(&mut client);
         let operation = OperationId::new().to_string();
@@ -1461,8 +1502,12 @@ fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
     let count = home.path().join("spawn-count");
-    write_codex_cli(&bin, "codex-fugu", &count, 0);
-    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    fs::create_dir(&bin).unwrap();
+    write_claude_cli(&bin, &count);
+    let _daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
+    // The credential is machine-level, so it is read from the data directory the
+    // daemon just published rather than from any workspace.
+    write_global_env(home.path(), &[("SAKANA_API_KEY", "fish-fixture-key")]);
     let mut client = client(&channel_data_dir(home.path()));
     let (workspace, session, _) = available_scope(&mut client);
 
@@ -1507,7 +1552,28 @@ fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
     assert_eq!(
         fs::read_to_string(&count).unwrap().lines().count(),
         1,
-        "the authenticated fixture spawns exactly one `codex-fugu` child"
+        "the configured fixture spawns exactly one Claude child"
+    );
+
+    // What the launched child actually received. Without these the same binary
+    // would have talked to Anthropic with the user's own account and written the
+    // Claude profile's home.
+    let launched = fs::read_to_string(home.path().join("launch-environment")).unwrap();
+    for expected in [
+        "ANTHROPIC_BASE_URL=https://api.sakana.ai",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL=fugu-max[1m]",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL=fugu[1m]",
+        "CLAUDE_CODE_SUBAGENT_MODEL=fugu[1m]",
+        "ANTHROPIC_AUTH_TOKEN=fish-fixture-key",
+    ] {
+        assert!(launched.contains(expected), "{expected} in {launched}");
+    }
+    // The daemon resolves `$HOME` canonically, which on macOS means the
+    // `/private` side of the firmlink.
+    let config_directory = home.path().canonicalize().unwrap().join(".claude-sakana");
+    assert!(
+        launched.contains(&format!("CLAUDE_CONFIG_DIR={}", config_directory.display())),
+        "the Fugu profile keeps its own Claude config directory: {launched}"
     );
 }
 

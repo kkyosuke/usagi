@@ -74,7 +74,12 @@ struct ToolSpec {
     required: bool,
 }
 
-const TOOLS: [ToolSpec; 5] = [
+/// Doctor reports the **CLIs** a machine has, not the providers usagi can
+/// select. `sakana.ai` deliberately has no row: it is the Claude CLI pointed at
+/// another endpoint, so a second row would probe the same executable and report
+/// the same version twice — and an absent Sakana key would still read as a
+/// healthy "Sakana AI CLI".
+const TOOLS: [ToolSpec; 4] = [
     ToolSpec {
         name: "Git",
         executable: "git",
@@ -88,11 +93,6 @@ const TOOLS: [ToolSpec; 5] = [
     ToolSpec {
         name: "OpenAI CLI",
         executable: DefaultModel::OpenAi.command(),
-        required: false,
-    },
-    ToolSpec {
-        name: "Sakana AI CLI",
-        executable: DefaultModel::SakanaAi.command(),
         required: false,
     },
     ToolSpec {
@@ -173,7 +173,6 @@ mod tests {
         git: Result<&str, &str>,
         claude: Result<&str, &str>,
         openai: Result<&str, &str>,
-        sakana_ai: Result<&str, &str>,
         agy: Result<&str, &str>,
         settings: Result<&str, &str>,
         daemon: Result<&str, &str>,
@@ -191,10 +190,6 @@ mod tests {
                 (
                     "codex".to_owned(),
                     openai.map(str::to_owned).map_err(str::to_owned),
-                ),
-                (
-                    "codex-fugu".to_owned(),
-                    sakana_ai.map(str::to_owned).map_err(str::to_owned),
                 ),
                 (
                     "agy".to_owned(),
@@ -215,7 +210,6 @@ mod tests {
             Ok("git version 2.50"),
             Ok("claude 2.0"),
             Ok("codex-cli 1.0"),
-            Ok("codex-fugu 1.0"),
             Ok("agy 1.2.0"),
             Ok("settings.json is readable"),
             Ok("daemon is reachable"),
@@ -223,19 +217,13 @@ mod tests {
         let report = diagnose(&mut port);
 
         assert!(report.is_healthy());
+        // One row per CLI. `sakana.ai` is the Claude CLI with another endpoint,
+        // so probing `claude` twice would only report the same version twice.
         assert_eq!(
             port.calls,
-            [
-                "git",
-                "claude",
-                "codex",
-                "codex-fugu",
-                "agy",
-                "settings",
-                "daemon"
-            ]
+            ["git", "claude", "codex", "agy", "settings", "daemon"]
         );
-        assert_eq!(report.checks.len(), 7);
+        assert_eq!(report.checks.len(), 6);
         assert!(
             report
                 .checks
@@ -254,7 +242,6 @@ mod tests {
             Ok("claude 2.0"),
             Err("not found"),
             Err("not found"),
-            Err("not found"),
             Err("invalid JSON"),
             Err("connection refused"),
         );
@@ -265,9 +252,8 @@ mod tests {
         assert_eq!(report.checks[1].status, CheckStatus::Pass);
         assert_eq!(report.checks[2].status, CheckStatus::Warning);
         assert_eq!(report.checks[3].status, CheckStatus::Warning);
-        assert_eq!(report.checks[4].status, CheckStatus::Warning);
+        assert_eq!(report.checks[4].status, CheckStatus::Fail);
         assert_eq!(report.checks[5].status, CheckStatus::Fail);
-        assert_eq!(report.checks[6].status, CheckStatus::Fail);
         assert!(format!("{:?}", CheckStatus::Warning).contains("Warning"));
     }
 }

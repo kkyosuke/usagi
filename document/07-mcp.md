@@ -326,7 +326,9 @@ allowlist を読み、session worktree の cwd に machine-local config がな�
 daemon の spawn 直前の再検証も同じ workspace root を権威とし、session worktree は worker の cwd としてだけ使う。
 workspace config 自体が未作成なら `claude/default` を安全な provider-default として使う。config が存在するのに
 読めない、または runtime/model 設定が不正な場合は空へ fail closed し、暗黙の fallback は行わない。
-`sakana-ai` の実行コマンドは `codex-fugu`、`agy` の実行コマンドは `agy` である。Antigravity では daemon が
+`sakana-ai` の実行コマンドは `claude` で、Sakana の Anthropic 互換 endpoint と Fugu の model 束縛、専用の
+`CLAUDE_CONFIG_DIR`、`SAKANA_API_KEY` から注入する `ANTHROPIC_AUTH_TOKEN` を daemon が与える（正本は
+[5. daemon](05-daemon.md#agent-cli-の-readiness-preflight)）。`agy` の実行コマンドは `agy` である。Antigravity では daemon が
 daemon の selected data directory に
 `agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を materialize し、その synthetic workspace を
 managed launch の private `--add-dir` にだけ渡す。plugin の `mcp_config.json` から同じ `usagi mcp` child を起動し、

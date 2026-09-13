@@ -326,6 +326,7 @@ mod action_io {
                 Action::ClaudeSandbox,
                 RunOutcome::ClaudeSandbox {
                     mode,
+                    agent,
                     protected_root,
                     backend,
                     tmpdir,
@@ -337,6 +338,7 @@ mod action_io {
                 },
             ) => claude_sandbox(
                 mode,
+                agent.as_deref(),
                 LauncherPolicyInputs {
                     protected_root,
                     backend,
@@ -452,10 +454,21 @@ fn guard_workspace(out: &mut dyn Write) -> std::io::Result<ExitCode> {
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=macos_wraps_claude_with_a_write_confining_profile
 fn claude_sandbox(
     mode: SandboxMode,
+    agent: Option<&str>,
     policy: LauncherPolicyInputs,
     command: Vec<String>,
     err: &mut dyn Write,
 ) -> std::io::Result<ExitCode> {
+    // 未知の selector で起動を通さない。grant の根拠が失われた launch は、
+    // program 名から別 provider の state を貰ってしまうため fail closed にする。
+    let agent = match agent.map(resolve_launch_agent) {
+        Some(Ok(agent)) => Some(agent),
+        Some(Err(())) => {
+            writeln!(err, "claude-sandbox: 未知の agent selector です")?;
+            return Ok(ExitCode::FAILURE);
+        }
+        None => None,
+    };
     let platform = if cfg!(target_os = "macos") {
         Platform::MacOs
     } else if cfg!(target_os = "linux") {
@@ -467,10 +480,13 @@ fn claude_sandbox(
         writeln!(err, "claude-sandbox: {reason:?}")?;
         return Ok(ExitCode::FAILURE);
     }
+    // Whether a HOME inventory is needed is exactly "does this launch get a
+    // `~/.<config>` prefix", so it must be decided by the same resolution the
+    // grant itself uses. Reading it off the program would demand an inventory
+    // for `sakana-ai` (whose config lives inside `CLAUDE_CONFIG_DIR`) and refuse
+    // the launch when `$HOME` is unknown, for a prefix it never receives.
     let linux_home_entries = if platform == Platform::Linux
-        && command
-            .first()
-            .and_then(|program| claude_sandbox::agent_config_prefix(program))
+        && claude_sandbox::granted_config_prefix(agent, command.first().map_or("", String::as_str))
             .is_some()
     {
         let Some(home) = policy.home.as_deref() else {
@@ -503,6 +519,7 @@ fn claude_sandbox(
         home: policy.home,
         linux_home_entries,
         cache_dir: policy.cache_dir,
+        agent,
         // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
         // 配布バイナリはこの環境変数を見ても拘束を外さない。
         passthrough: claude_sandbox::passthrough_requested(
@@ -528,6 +545,11 @@ fn linux_home_entry_inventory(home: &Path) -> std::io::Result<Vec<PathBuf>> {
         .collect::<std::io::Result<Vec<_>>>()?;
     entries.sort();
     Ok(entries)
+}
+
+/// selector を provider へ解決する。closed vocabulary に無い token は拒否する。
+fn resolve_launch_agent(token: &str) -> Result<usagi_core::domain::settings::DefaultModel, ()> {
+    usagi_core::domain::settings::DefaultModel::from_selector(token).ok_or(())
 }
 
 /// launcher が exec 直前に検証する policy path 一式。同じ `Option<PathBuf>` が並ぶため、
@@ -795,11 +817,30 @@ mod tests {
     use super::{
         Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
         execute_self_update_with, exit_code, linux_home_entry_inventory, mcp_daemon_route,
-        process_outcome, update_installer_command, validate_launcher_policy_inputs,
-        write_client_error, write_daemon_outcome,
+        process_outcome, resolve_launch_agent, update_installer_command,
+        validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
+
+    #[test]
+    fn the_launch_agent_selector_resolves_a_provider_or_fails_closed() {
+        use usagi_core::domain::settings::DefaultModel;
+
+        // The selector decides which provider's `$HOME` state this launch may
+        // write, so it is resolved through the closed vocabulary rather than
+        // trusted as text.
+        assert_eq!(
+            resolve_launch_agent("sakana-ai"),
+            Ok(DefaultModel::SakanaAi)
+        );
+        assert_eq!(resolve_launch_agent("claude"), Ok(DefaultModel::Claude));
+        // An unmodelled token yields no provider, and the caller refuses the
+        // launch rather than falling back to a grant decided by the program.
+        for token in ["", "codex-fugu", "gemini"] {
+            assert_eq!(resolve_launch_agent(token), Err(()), "{token}");
+        }
+    }
 
     #[test]
     fn daemon_provisioned_mcp_attaches_while_manual_mcp_keeps_bootstrap_authority() {
@@ -1068,6 +1109,7 @@ mod tests {
         assert_route(
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Session,
+                agent: Some("claude".to_owned()),
                 protected_root: None,
                 backend: None,
                 tmpdir: None,

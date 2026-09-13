@@ -163,14 +163,8 @@ impl McpHarness {
             &fixture_mcp_output,
         );
         if all_agents {
-            install_fixture_agent(
-                &fixture_bin,
-                "codex-fugu",
-                &fixture_log,
-                &fixture_argv,
-                &fixture_mcp_input,
-                &fixture_mcp_output,
-            );
+            // `sakana-ai` runs the `claude` fixture installed above; only the
+            // environment tells the two profiles apart.
             install_fixture_agent(
                 &fixture_bin,
                 "agy",
@@ -386,9 +380,13 @@ impl McpHarness {
     pub fn write_legacy_local_llm_settings(&self) {
         let data_dir = self.data_dir();
         fs::create_dir_all(&data_dir).unwrap();
+        // The stale field sits beside a live binding, the way an upgraded user's
+        // file does. The Fugu profile's readiness is that binding, so dropping
+        // it here would make this migration fixture fail for an unrelated
+        // reason.
         fs::write(
             data_dir.join("settings.json"),
-            r#"{"local_llm":{"enabled":true,"model":"qwen2.5-coder:7b"}}"#,
+            r#"{"local_llm":{"enabled":true,"model":"qwen2.5-coder:7b"},"env":{"SAKANA_API_KEY":"fixture-sakana-key"}}"#,
         )
         .unwrap();
     }
@@ -657,17 +655,28 @@ impl McpHarness {
 }
 
 fn configure_tool_availability(channel: Channel, home: &Path, availability: Option<(bool, bool)>) {
-    if let Some((issue_enabled, memory_enabled)) = availability {
-        let data_dir = channel.data_dir(home);
-        ensure_private_dir_all(&data_dir).unwrap();
-        Storage::new(data_dir)
-            .save_settings(&Settings {
-                issue_enabled,
-                memory_enabled,
-                ..Settings::default()
-            })
-            .unwrap();
-    }
+    let data_dir = channel.data_dir(home);
+    ensure_private_dir_all(&data_dir).unwrap();
+    let (issue_enabled, memory_enabled) = availability.unwrap_or((
+        Settings::default().issue_enabled,
+        Settings::default().memory_enabled,
+    ));
+    Storage::new(data_dir)
+        .save_settings(&Settings {
+            issue_enabled,
+            memory_enabled,
+            // `sakana-ai` is the Claude CLI pointed at Sakana, and its readiness
+            // is whether that key is configured. Without it the fixture could
+            // not dispatch that runtime at all.
+            env: sakana_fixture_key(),
+            ..Settings::default()
+        })
+        .unwrap();
+}
+
+/// The machine-level binding that makes the Fugu profile launchable in fixtures.
+fn sakana_fixture_key() -> usagi_core::domain::settings::EnvBindings {
+    usagi_core::domain::settings::parse_env_bindings("SAKANA_API_KEY=fixture-sakana-key")
 }
 
 impl Drop for McpHarness {
