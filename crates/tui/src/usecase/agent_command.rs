@@ -179,11 +179,11 @@ mod tests {
             ("-m claude", DefaultModel::Claude),
             ("--model codex", DefaultModel::OpenAi),
             ("-m sakana.ai", DefaultModel::SakanaAi),
-            // The vocabulary accepts the profile ID, the executable name, and
-            // separator-insensitive spellings.
+            // The vocabulary accepts the profile ID and separator-insensitive
+            // spellings. It does not accept the executable here: `claude` is
+            // shared with the Claude provider and names that one.
             ("-m sakana-ai", DefaultModel::SakanaAi),
             ("-m sakana_ai", DefaultModel::SakanaAi),
-            ("-m codex-fugu", DefaultModel::SakanaAi),
             ("-m SAKANA.AI", DefaultModel::SakanaAi),
             ("codex", DefaultModel::OpenAi),
             ("  claude  ", DefaultModel::Claude),

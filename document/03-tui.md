@@ -277,8 +277,9 @@ Global / Workspace の field 欠落と Global の未知値は `classic`、Worksp
 upgrade や typo だけで自律実行へ移らない。
 Base branch の `current checkout` は `default_branch` を空にし、session 作成時点の checkout branch を使う。保存した ref が現在の branch inventory にあれば session 作成 picker の初期値にし、削除済みなどで見つからなければ current checkout へ安全に戻す。
 `default_model` は選択可能な agent CLI の closed vocabulary（`claude` / `codex` / `sakana.ai` / `agy`）であり、Config 画面の
-Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`sakana.ai` は Codex 互換 CLI で、
-実行するのは `codex-fugu`（daemon profile は `sakana-ai`）である。`agy` は Antigravity CLI を表す。
+Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`sakana.ai` は Sakana の Fugu で、
+実行するのは **Claude CLI** を Sakana の Anthropic 互換 endpoint に向けたもの（daemon profile は `sakana-ai`）である。
+`agy` は Antigravity CLI を表す。
 Issue と Memory の Global 初期値はどちらも `true` である。Workspace ファイルに残る旧 Theme / Modal mode field は読み飛ばし、
 全体設定を上書きしない。Global ファイルに残る旧 `local_llm` field も読み飛ばし、次の保存時に除去する。
 Workspace の Agent・Workflow・Team・Issue・Memory は個別値を持つ。Team の選択肢と catalog 合成は [session role](10-session-roles.md#catalog)を正本とする。
@@ -2172,7 +2173,7 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
 | `agent` | config の `default_model` | 解決した CLI の profile |
 | `agent -m claude` | Claude Code | `claude` |
 | `agent -m codex` | Codex | `codex` |
-| `agent -m sakana.ai` | sakana.ai（Codex 互換、実行は `codex-fugu`） | `sakana-ai` |
+| `agent -m sakana.ai` | sakana.ai（Fugu。実行は `claude` を Sakana の endpoint に向けたもの） | `sakana-ai` |
 | `agent -m agy` | Google Antigravity CLI | `agy` |
 
 - **候補は install 済みの CLI だけ**である。合成ルートは起動時に provider CLI を実行せず PATH lookup だけで
@@ -2194,7 +2195,8 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
 - 位置引数（`agent codex`）も同じ語彙・同じ install 判定で受け付ける。`-m` の重複、値の欠落、複数選択、未知の flag は
   安全な文言で拒否し、modal を閉じない（拒否の文言は [Closeup 入力の拒否表示](#closeup-入力の拒否表示) が正本）。
 - CLI 名の解決は大文字小文字を区別せず、`-` / `_` / `.` を同じ区切りとして扱う（`sakana.ai` / `sakana_ai` /
-  `sakana-ai` / `codex-fugu` はすべて同じ CLI）。`agy` は Antigravity CLI の executable と profile ID の両方を表す。
+  `sakana-ai` は同じ provider）。executable は provider の identity ではない: `claude` は Claude 本体を指し、
+  同じ executable を使う `sakana.ai` には解決しない。`agy` は Antigravity CLI の executable と profile ID の両方を表す。
 
 ## Closeup 入力の拒否表示
 

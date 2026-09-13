@@ -37,19 +37,19 @@ use dispatch::{
 
 #[cfg(test)]
 use agent_provisioning::{
-    CLAUDE_PROGRAM, ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs,
-    agent_writable_roots, agy_arguments_for_integration, agy_plugin_arguments,
-    agy_plugin_documents, claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
+    ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs, agent_writable_roots,
+    agy_arguments_for_integration, agy_plugin_arguments, agy_plugin_documents,
+    claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
     claude_settings_arguments, claude_system_prompt_arguments, claude_writable_roots,
     codex_developer_instructions_arguments, codex_integration_arguments,
     codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
     effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
     lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
-    mcp_environment_allowlist, prompt_scope, repair_codex_arg0_permissions,
-    repair_codex_arg0_permissions_with_limit, root_agent_writable_roots, root_memory_store_root,
-    sandbox_mode, session_git_common_dir, session_git_policy, shell_quote, toml_basic_string,
-    validate_claude_sandbox_policy, validate_isolated_sandbox_root,
-    validate_root_git_common_dir_policy,
+    mcp_environment_allowlist, prompt_scope, provider_gateway_environment,
+    repair_codex_arg0_permissions, repair_codex_arg0_permissions_with_limit,
+    root_agent_writable_roots, root_memory_store_root, sandbox_mode, session_git_common_dir,
+    session_git_policy, shell_quote, toml_basic_string, validate_claude_sandbox_policy,
+    validate_isolated_sandbox_root, validate_root_git_common_dir_policy,
 };
 use agent_provisioning::{
     DiscardJournal, RootClaudeProvisioner, RootCodexProvisioner,
@@ -86,7 +86,9 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::{AgentReadinessCommand, DefaultModel};
-use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
+use usagi_core::infrastructure::bounded_process::{
+    ChildObservation, ChildPolicy, observe, observe_with_environment,
+};
 use usagi_core::infrastructure::client::{
     ClientError, ClientPolicy, DaemonClient, DaemonRestartAgents, DeadlineConnection,
     DeadlineStream, IpcClient, MonotonicClock, PolicyClient, TerminalLaneBudget,
@@ -846,6 +848,21 @@ struct SystemAgentReadiness {
     state: Mutex<ReadinessState>,
     completed: Condvar,
     terminate_grace: Duration,
+    /// `$HOME`, for the provider state directory a gateway provider's CLI must
+    /// be pointed at. A provider that needs one and has no home is unavailable:
+    /// probing it in the shared CLI's default home would answer for the other
+    /// provider that lives there.
+    home: Option<PathBuf>,
+    /// Where a provider's configured API key comes from. The probe resolves it
+    /// the same way a launch does, because "is this provider usable" is mostly
+    /// "is its credential configured" — and a probe run without the key refuses
+    /// a provider that would have launched.
+    environment: Option<Arc<SharedUserEnvironment>>,
+    /// The workspace whose settings the credential is read from. Gateway and
+    /// credential names are reserved from workspace bindings, so this resolves
+    /// the same value for every workspace; the daemon's own root is simply the
+    /// one that always exists.
+    workspace: PathBuf,
 }
 
 impl Default for SystemAgentReadiness {
@@ -854,6 +871,9 @@ impl Default for SystemAgentReadiness {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
             terminate_grace: AGENT_READINESS_TERMINATE_GRACE,
+            home: None,
+            environment: None,
+            workspace: PathBuf::new(),
         }
     }
 }
@@ -863,14 +883,20 @@ impl AgentReadinessProbe for SystemAgentReadiness {
     fn observe(&self, product: &str) -> AgentReadiness {
         // Which products exist, and which status command proves each one usable,
         // is the shared agent CLI vocabulary owned by core domain settings. This
-        // root only runs the resolved probe, so the Codex-compatible
-        // `codex-fugu` behind the `sakana-ai` profile is recognised without a
-        // second table here (#609). An unmodelled product still fails closed.
+        // root only runs the resolved probe, so a provider is recognised without
+        // a second table here (#609). An unmodelled product still fails closed.
         // The budget travels with the probe for the same reason: how long
         // `agy models` may take is a fact about Antigravity, not about this
         // root, and a single shared deadline reported an installed and
         // authenticated CLI as unavailable.
-        let Some(probe) = DefaultModel::readiness_command_for(product) else {
+        let Some(agent) = DefaultModel::from_selector(product) else {
+            return AgentReadiness::Unavailable;
+        };
+        let probe = agent.readiness_command();
+        // A provider that is a shared CLI plus an environment is only probed
+        // honestly under that environment: `claude auth status` run bare answers
+        // for the user's own Anthropic account, not for this profile.
+        let Ok(environment) = self.provider_environment(agent) else {
             return AgentReadiness::Unavailable;
         };
         self.ready_command(
@@ -878,11 +904,62 @@ impl AgentReadinessProbe for SystemAgentReadiness {
             probe.program(),
             probe.arguments(),
             ReadinessBounds::for_probe(probe),
+            &environment,
         )
     }
 }
 
 impl SystemAgentReadiness {
+    /// The environment that makes this probe answer for `agent` rather than for
+    /// whichever provider shares its executable. `Err` means the provider cannot
+    /// be probed honestly — a missing home for a provider that needs its own
+    /// config directory, or a credential it declares but nothing supplies — and
+    /// the caller reports it unavailable rather than asking a question whose
+    /// answer would be about something else.
+    ///
+    /// The gateway itself is assembled by the **same** function the launch uses
+    /// (`agent_provisioning::provider_gateway_environment`), so "the probe
+    /// answers for the product that would launch" is structural rather than two
+    /// separate tables kept in step by hand. Only the credential rule differs,
+    /// and in the stricter direction: provisioning tolerates a missing key
+    /// because this probe is what refuses the launch first, with a reason an
+    /// operator can act on.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
+    fn provider_environment(&self, agent: DefaultModel) -> Result<Vec<(String, String)>, ()> {
+        let user = match agent.credential_binding() {
+            Some(_) => self
+                .environment
+                .as_ref()
+                .ok_or(())?
+                .resolved(&self.workspace)
+                .map_err(|_| ())?,
+            None => BTreeMap::new(),
+        };
+        let environment =
+            agent_provisioning::provider_gateway_environment(agent, self.home.as_deref(), &user)
+                .map_err(|()| {
+                    ErrorLog::record(&format!(
+                        "agent readiness: {} cannot be probed without a resolved $HOME",
+                        agent.selector()
+                    ));
+                })?;
+        if let Some((source, target)) = agent.credential_binding()
+            && !environment.iter().any(|(name, _)| name.as_str() == target)
+        {
+            // The recovery a user needs, named once where an operator can
+            // find it. The wire answer stays the generic safe refusal.
+            ErrorLog::record(&format!(
+                "agent readiness: {} is unavailable because {source} is not configured",
+                agent.selector()
+            ));
+            return Err(());
+        }
+        Ok(environment
+            .into_iter()
+            .map(|(name, value)| (name.as_str().to_owned(), value))
+            .collect())
+    }
+
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
     fn ready_command(
         &self,
@@ -890,6 +967,7 @@ impl SystemAgentReadiness {
         program: &str,
         arguments: &[&str],
         bounds: ReadinessBounds,
+        environment: &[(String, String)],
     ) -> AgentReadiness {
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
@@ -921,7 +999,13 @@ impl SystemAgentReadiness {
         slot.result = None;
         drop(state);
 
-        let result = bounded_readiness_command(program, arguments, bounds, self.terminate_grace);
+        let result = bounded_readiness_command(
+            program,
+            arguments,
+            environment,
+            bounds,
+            self.terminate_grace,
+        );
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
         };
@@ -939,12 +1023,14 @@ impl SystemAgentReadiness {
 fn bounded_readiness_command(
     program: &str,
     arguments: &[&str],
+    environment: &[(String, String)],
     bounds: ReadinessBounds,
     terminate_grace: Duration,
 ) -> AgentReadiness {
-    readiness_from_observation(&observe(
+    readiness_from_observation(&observe_with_environment(
         program,
         arguments,
+        environment,
         ChildPolicy {
             timeout: bounds.timeout,
             terminate_grace,
@@ -3730,7 +3816,22 @@ fn open_agent_runtime(
     };
     let store = ShardedAgentStore::new(state);
     let mut registry = AdapterRegistry::new();
-    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness::default());
+    // The `$HOME` a managed launch resolves. The readiness probe takes the same
+    // value rather than resolving it again: a provider whose config directory is
+    // named relative to a *different* home would be probed somewhere it will
+    // never run.
+    let sandbox_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|path| path.canonicalize().ok());
+    // The readiness probe needs the same home and configured credential the
+    // launch will use; a probe that lacks them answers about a different
+    // provider or a missing key it would in fact have had.
+    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness {
+        home: sandbox_home.clone(),
+        environment: Some(Arc::clone(&environment)),
+        workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        ..SystemAgentReadiness::default()
+    });
     // Agent MCP children receive the mode-neutral base. They apply the same
     // selected runtime mode themselves, so every mode reaches the daemon's
     // already-selected directory without adding that child twice. Production
@@ -3746,9 +3847,6 @@ fn open_agent_runtime(
     };
     let sandbox_backend = super::cli::resolve_sandbox_backend(sandbox_platform);
     let sandbox_tmpdir = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .and_then(|path| path.canonicalize().ok());
-    let sandbox_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|path| path.canonicalize().ok());
     let sandbox_cache_dir = resolve_sandbox_cache_dir();
@@ -3767,7 +3865,7 @@ fn open_agent_runtime(
             workspaces: Arc::clone(&workspaces),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: DefaultModel::OpenAi.command(),
+            agent: DefaultModel::OpenAi,
             environment: Some(Arc::clone(&environment)),
             sandbox_backend: sandbox_backend.clone(),
             sandbox_tmpdir: sandbox_tmpdir.clone(),
@@ -3775,22 +3873,27 @@ fn open_agent_runtime(
             sandbox_cache_dir: sandbox_cache_dir.clone(),
             sandbox_passthrough,
         }),
-        CodexAdapter::sakana(RootCodexProvisioner {
+        // Fugu is the same Claude CLI pointed at Sakana's Anthropic-compatible
+        // endpoint, so it reuses this adapter and differs only in the provider
+        // its provisioner carries: gateway variables, its own config directory,
+        // and its own API key.
+        ClaudeAdapter::sakana(RootClaudeProvisioner {
             workspaces: Arc::clone(&workspaces),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: DefaultModel::SakanaAi.command(),
-            environment: Some(Arc::clone(&environment)),
+            agent: DefaultModel::SakanaAi,
             sandbox_backend: sandbox_backend.clone(),
             sandbox_tmpdir: sandbox_tmpdir.clone(),
             sandbox_home: sandbox_home.clone(),
             sandbox_cache_dir: sandbox_cache_dir.clone(),
+            environment: Some(Arc::clone(&environment)),
             sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             workspaces: Arc::clone(&workspaces),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
+            agent: DefaultModel::Claude,
             sandbox_backend: sandbox_backend.clone(),
             sandbox_tmpdir: sandbox_tmpdir.clone(),
             sandbox_home: sandbox_home.clone(),
@@ -12969,6 +13072,7 @@ mod tests {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
             terminate_grace: Duration::from_millis(50),
+            ..SystemAgentReadiness::default()
         });
         let bounds = ReadinessBounds {
             timeout: Duration::from_millis(150),
@@ -12978,7 +13082,7 @@ mod tests {
             let readiness = Arc::clone(&readiness);
             let script = script.clone();
             std::thread::spawn(move || {
-                readiness.ready_command("codex", "/bin/sh", &[&script], bounds)
+                readiness.ready_command("codex", "/bin/sh", &[&script], bounds, &[])
             })
         };
         let started = Instant::now();
@@ -12989,7 +13093,7 @@ mod tests {
         let second = {
             let readiness = Arc::clone(&readiness);
             std::thread::spawn(move || {
-                readiness.ready_command("codex", "/bin/sh", &[&script], bounds)
+                readiness.ready_command("codex", "/bin/sh", &[&script], bounds, &[])
             })
         };
         assert_eq!(first.join().unwrap(), AgentReadiness::Unavailable);
@@ -13006,6 +13110,78 @@ mod tests {
             Some(libc::ESRCH),
             "timed-out readiness child was reaped"
         );
+    }
+
+    #[test]
+    fn a_gateway_provider_is_made_of_environment_and_fails_closed_without_it() {
+        let home = PathBuf::from("/home/dev");
+        let user = BTreeMap::from([
+            ("SAKANA_API_KEY".to_owned(), "fish-secret".to_owned()),
+            ("UNRELATED".to_owned(), "value".to_owned()),
+        ]);
+        let environment = provider_gateway_environment(DefaultModel::SakanaAi, Some(&home), &user)
+            .expect("a configured key and a home are all this provider needs");
+        let pairs = environment
+            .iter()
+            .map(|(name, value)| (name.as_str().to_owned(), value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        // The endpoint and every model slot come from the vocabulary, so a
+        // launch cannot lose one and quietly run as Anthropic Claude.
+        assert_eq!(
+            pairs.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://api.sakana.ai")
+        );
+        assert_eq!(
+            pairs
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .map(String::as_str),
+            Some("fugu-max[1m]")
+        );
+        // The CLI is pointed at this provider's own state, not the home the
+        // Claude profile uses.
+        assert_eq!(
+            pairs.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/home/dev/.claude-sakana")
+        );
+        // The key is stored under the product's name and delivered under
+        // Claude's, so the Claude profile never receives it.
+        assert_eq!(
+            pairs.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
+            Some("fish-secret")
+        );
+        assert!(!pairs.contains_key("SAKANA_API_KEY"));
+        assert!(!pairs.contains_key("UNRELATED"));
+
+        // Without a home there is no isolated config directory to name, and the
+        // CLI would fall back to the Claude profile's `~/.claude`.
+        assert_eq!(
+            provider_gateway_environment(DefaultModel::SakanaAi, None, &user),
+            Err(())
+        );
+        // A missing key is not a provisioning failure: readiness refuses the
+        // launch first, with a reason the user can act on. The rest of the
+        // gateway is still assembled.
+        let without_key =
+            provider_gateway_environment(DefaultModel::SakanaAi, Some(&home), &BTreeMap::new())
+                .expect("a missing credential does not fail provisioning");
+        assert!(
+            !without_key
+                .iter()
+                .any(|(name, _)| name.as_str() == "ANTHROPIC_AUTH_TOKEN")
+        );
+        assert_eq!(without_key.len(), environment.len() - 1);
+        // A product that is its own CLI carries no gateway at all.
+        for agent in [
+            DefaultModel::Claude,
+            DefaultModel::OpenAi,
+            DefaultModel::Agy,
+        ] {
+            assert_eq!(
+                provider_gateway_environment(agent, Some(&home), &user),
+                Ok(Vec::new()),
+                "{agent:?}"
+            );
+        }
     }
 
     #[test]
@@ -13058,6 +13234,7 @@ mod tests {
             bounded_readiness_command(
                 &program,
                 &[],
+                &[],
                 ReadinessBounds {
                     timeout: Duration::from_secs(10),
                     output_limit: 256 * 1024,
@@ -13072,6 +13249,7 @@ mod tests {
             bounded_readiness_command(
                 &program,
                 &[],
+                &[],
                 ReadinessBounds {
                     timeout: Duration::from_millis(50),
                     output_limit: 256 * 1024,
@@ -13084,6 +13262,7 @@ mod tests {
         assert_eq!(
             bounded_readiness_command(
                 &program,
+                &[],
                 &[],
                 ReadinessBounds {
                     timeout: Duration::from_secs(10),
@@ -18721,11 +18900,22 @@ instructions = "{instructions}"
         let home = fixture.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
 
-        let roots = root_agent_writable_roots(Some(&home), "codex").unwrap();
+        let roots = root_agent_writable_roots(Some(&home), DefaultModel::OpenAi).unwrap();
         assert_eq!(roots, [home.join(".codex").canonicalize().unwrap()]);
         assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
 
-        let roots = root_agent_writable_roots(Some(&home), "agy").unwrap();
+        // Two providers exec the same `claude`, and each still gets only its own
+        // state: the grant is keyed by provider, never by that shared program.
+        let claude = root_agent_writable_roots(Some(&home), DefaultModel::Claude).unwrap();
+        let sakana = root_agent_writable_roots(Some(&home), DefaultModel::SakanaAi).unwrap();
+        assert_eq!(claude, [home.join(".claude").canonicalize().unwrap()]);
+        assert_eq!(
+            sakana,
+            [home.join(".claude-sakana").canonicalize().unwrap()]
+        );
+        assert_ne!(claude, sakana);
+
+        let roots = root_agent_writable_roots(Some(&home), DefaultModel::Agy).unwrap();
         assert_eq!(
             roots,
             [home
@@ -18745,13 +18935,13 @@ instructions = "{instructions}"
             std::fs::create_dir_all(&outside).unwrap();
             symlink(&outside, hostile_home.join(".gemini")).unwrap();
             assert_eq!(
-                root_agent_writable_roots(Some(&hostile_home), "agy"),
+                root_agent_writable_roots(Some(&hostile_home), DefaultModel::Agy),
                 Err(ClaudeSandboxPolicyError::InvalidWritableRoot)
             );
             assert!(!outside.join("antigravity-cli").exists());
         }
 
-        let roots = root_agent_writable_roots(None, "/bin/sh").unwrap();
+        let roots = root_agent_writable_roots(None, DefaultModel::Claude).unwrap();
         assert!(roots.is_empty());
     }
 
@@ -18823,7 +19013,7 @@ instructions = "{instructions}"
             Path::new("/workspace"),
             None,
             Some(&sandbox_home),
-            DefaultModel::Agy.command(),
+            DefaultModel::Agy,
             &data_home,
             workspace,
         )
@@ -18841,7 +19031,7 @@ instructions = "{instructions}"
         let workspace = WorkspaceId::new();
         let policy = SandboxPolicyInputs {
             mode: SandboxMode::Root,
-            program: DefaultModel::Agy.command(),
+            agent: DefaultModel::Agy,
             workspace_root: Path::new("/workspace"),
             launch_roots: &[],
             tmpdir: None,
@@ -18909,7 +19099,7 @@ instructions = "{instructions}"
         let workspace = WorkspaceId::new();
         let policy = SandboxPolicyInputs {
             mode: SandboxMode::Root,
-            program: DefaultModel::Agy.command(),
+            agent: DefaultModel::Agy,
             workspace_root: Path::new("/workspace"),
             launch_roots: &[],
             tmpdir: None,
@@ -18981,7 +19171,7 @@ instructions = "{instructions}"
         let roots = [PathBuf::from("/repo/.usagi/sessions/agy")];
         let policy = SandboxPolicyInputs {
             mode: SandboxMode::Session,
-            program: DefaultModel::Agy.command(),
+            agent: DefaultModel::Agy,
             workspace_root: Path::new("/repo"),
             launch_roots: &roots,
             tmpdir: Some(Path::new("/custom/tmpdir")),
@@ -19540,7 +19730,7 @@ instructions = "{instructions}"
         assert!(
             validate_root_git_common_dir_policy(
                 safe.path(),
-                CLAUDE_PROGRAM,
+                DefaultModel::Claude,
                 Some(Path::new("/tmp")),
                 None,
                 None
@@ -19569,7 +19759,7 @@ instructions = "{instructions}"
         assert!(
             validate_root_git_common_dir_policy(
                 linked.path(),
-                CLAUDE_PROGRAM,
+                DefaultModel::Claude,
                 Some(Path::new("/tmp")),
                 None,
                 None
@@ -19582,7 +19772,9 @@ instructions = "{instructions}"
 
         // The `$HOME` state root covered by this check is the launched agent's own
         // (`~/.codex` for Codex), so a Git common directory under it is refused for
-        // that provider while an unknown program contributes no home-derived area.
+        // that provider while every other provider's own root is unaffected —
+        // including `sakana-ai`, which execs the same `claude` as Claude but is
+        // checked against its own `~/.claude-sakana`.
         let home = tempfile::tempdir_in("target").unwrap();
         let state = home.path().join(".codex");
         std::fs::create_dir_all(state.join("worktrees/linked")).unwrap();
@@ -19593,23 +19785,23 @@ instructions = "{instructions}"
         )
         .unwrap();
         std::fs::write(state.join("worktrees/linked/commondir"), "../..\n").unwrap();
-        for (program, allowed) in [
-            ("codex", false),
-            ("claude", true),
-            ("agy", true),
-            ("/bin/sh", true),
+        for (agent, allowed) in [
+            (DefaultModel::OpenAi, false),
+            (DefaultModel::Claude, true),
+            (DefaultModel::SakanaAi, true),
+            (DefaultModel::Agy, true),
         ] {
             assert_eq!(
                 validate_root_git_common_dir_policy(
                     under_state.path(),
-                    program,
+                    agent,
                     None,
                     Some(&home.path().canonicalize().unwrap()),
                     None,
                 )
                 .is_ok(),
                 allowed,
-                "{program} must {} a Git common directory under ~/.codex",
+                "{agent:?} must {} a Git common directory under ~/.codex",
                 if allowed { "accept" } else { "refuse" }
             );
         }
@@ -19765,6 +19957,7 @@ instructions = "{instructions}"
         let launcher = claude_sandbox_launcher(
             usagi,
             mode,
+            DefaultModel::Claude,
             Path::new("/repo"),
             &SandboxLauncherPaths::default(),
             &roots,
@@ -19778,6 +19971,10 @@ instructions = "{instructions}"
                 "claude-sandbox",
                 "--mode",
                 "session",
+                // Which provider's `$HOME` state the launcher grants cannot be
+                // read off the program: Claude and `sakana-ai` share `claude`.
+                "--agent",
+                "claude",
                 "--protected-root",
                 "/repo",
                 "--writable-root",
@@ -19795,6 +19992,7 @@ instructions = "{instructions}"
         let universal = claude_sandbox_launcher(
             usagi,
             mode,
+            DefaultModel::Claude,
             Path::new("/repo"),
             &SandboxLauncherPaths {
                 backend: Some(Path::new("/usr/bin/sandbox-exec")),
@@ -19812,6 +20010,8 @@ instructions = "{instructions}"
                 "claude-sandbox",
                 "--mode",
                 "session",
+                "--agent",
+                "claude",
                 "--protected-root",
                 "/repo",
                 "--backend",
@@ -19854,6 +20054,7 @@ instructions = "{instructions}"
         let launcher = claude_sandbox_launcher(
             usagi,
             SandboxMode::Root,
+            DefaultModel::Claude,
             Path::new("/repo"),
             &SandboxLauncherPaths {
                 cache_dir: Some(Path::new("/private/var/folders/ab/cd/C")),
@@ -19891,7 +20092,7 @@ instructions = "{instructions}"
         let validate = |cache_dir: Option<&Path>| {
             validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode: SandboxMode::Root,
-                program: CLAUDE_PROGRAM,
+                agent: DefaultModel::Claude,
                 workspace_root: &workspace_root,
                 launch_roots: &[],
                 tmpdir: None,
@@ -19912,7 +20113,7 @@ instructions = "{instructions}"
         assert_eq!(
             validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode: SandboxMode::Root,
-                program: CLAUDE_PROGRAM,
+                agent: DefaultModel::Claude,
                 workspace_root: &nested_workspace,
                 launch_roots: &[],
                 tmpdir: None,
@@ -19959,7 +20160,7 @@ instructions = "{instructions}"
         let validate = |roots: &[PathBuf], tmpdir: Option<&Path>| {
             validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode: SandboxMode::Session,
-                program: CLAUDE_PROGRAM,
+                agent: DefaultModel::Claude,
                 workspace_root: &workspace_root,
                 launch_roots: roots,
                 tmpdir,
@@ -20016,20 +20217,21 @@ instructions = "{instructions}"
         let workspace_root = home.join(".codex/repo");
         std::fs::create_dir_all(workspace_root.join(".git")).unwrap();
 
-        for (program, expected) in [
+        for (agent, expected) in [
             (
-                "codex",
+                DefaultModel::OpenAi,
                 Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
             ),
-            ("codex-fugu", Ok(())),
-            ("claude", Ok(())),
-            ("agy", Ok(())),
-            ("/bin/sh", Ok(())),
+            (DefaultModel::Claude, Ok(())),
+            // `sakana-ai` execs the same `claude`, and is still judged against
+            // its own `~/.claude-sakana` rather than that shared program.
+            (DefaultModel::SakanaAi, Ok(())),
+            (DefaultModel::Agy, Ok(())),
         ] {
             assert_eq!(
                 validate_claude_sandbox_policy(&SandboxPolicyInputs {
                     mode: SandboxMode::Root,
-                    program,
+                    agent,
                     workspace_root: &workspace_root,
                     launch_roots: &[],
                     tmpdir: None,
@@ -20040,8 +20242,43 @@ instructions = "{instructions}"
                     read_only_roots: &[],
                 }),
                 expected,
-                "{program} state root against a workspace inside ~/.codex"
+                "{agent:?} state root against a workspace inside ~/.codex"
             );
+        }
+
+        // This gate exists to mirror the grant the launcher will actually hand
+        // out, and that grant is keyed by provider. Both launches below name the
+        // same `claude` program, so a gate that read the state root off the argv
+        // would accept a workspace sitting inside the very directory it is about
+        // to make writable — and refuse the harmless one.
+        for (state, refused) in [
+            (".claude", DefaultModel::Claude),
+            (".claude-sakana", DefaultModel::SakanaAi),
+        ] {
+            let shared_workspace = home.join(state).join("repo");
+            std::fs::create_dir_all(shared_workspace.join(".git")).unwrap();
+            for agent in [DefaultModel::Claude, DefaultModel::SakanaAi] {
+                assert_eq!(
+                    validate_claude_sandbox_policy(&SandboxPolicyInputs {
+                        mode: SandboxMode::Root,
+                        agent,
+                        workspace_root: &shared_workspace,
+                        launch_roots: &[],
+                        tmpdir: None,
+                        home: Some(&home),
+                        cache_dir: None,
+                        backend: Some(&backend),
+                        passthrough: false,
+                        read_only_roots: &[],
+                    }),
+                    if agent == refused {
+                        Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)
+                    } else {
+                        Ok(())
+                    },
+                    "{agent:?} against a workspace inside ~/{state}"
+                );
+            }
         }
 
         let prefix_workspace = home.join(".claude.json-repository");
@@ -20050,7 +20287,7 @@ instructions = "{instructions}"
             assert_eq!(
                 validate_claude_sandbox_policy(&SandboxPolicyInputs {
                     mode,
-                    program: CLAUDE_PROGRAM,
+                    agent: DefaultModel::Claude,
                     workspace_root: &prefix_workspace,
                     launch_roots: &[],
                     tmpdir: None,
@@ -20087,6 +20324,7 @@ instructions = "{instructions}"
         let launcher = claude_sandbox_launcher(
             usagi,
             mode,
+            DefaultModel::Claude,
             Path::new("/repo"),
             &SandboxLauncherPaths::default(),
             &roots,

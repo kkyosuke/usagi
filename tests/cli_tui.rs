@@ -2411,7 +2411,11 @@ fn doctor_reports_real_diagnostics() {
     assert!(out.contains("[ok] Git: git version"));
     assert!(out.contains("Claude CLI:"));
     assert!(out.contains("OpenAI CLI:"));
-    assert!(out.contains("Sakana AI CLI:"));
+    assert!(out.contains("Antigravity CLI:"));
+    // Doctor reports CLIs, not providers. `sakana.ai` is the Claude CLI with
+    // another endpoint, so a row of its own would probe the same executable
+    // twice and still say nothing about the Sakana key.
+    assert!(!out.contains("Sakana AI CLI:"));
     assert!(out.contains("[ok] Settings: settings storage is readable"));
     assert!(out.contains("[ok] Daemon: daemon is reachable"));
     assert!(out.contains("result: healthy"));

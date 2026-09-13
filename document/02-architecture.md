@@ -1084,23 +1084,27 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
 
 #### agent state の writable root
 
-launcher は、**exec する program 自身の state directory** を `$HOME` 配下の writable root に
+launcher は、**起動する provider 自身の state directory** を `$HOME` 配下の writable root に
 足す。agent CLI は自分の state / 認証キャッシュを `$HOME` 配下へ書くため（Codex は state DB
-`~/.codex/state_5.sqlite`）、これが無いと sandbox の中で起動そのものができない。grant は起動する CLI に
+`~/.codex/state_5.sqlite`）、これが無いと sandbox の中で起動そのものができない。grant は起動する provider に
 追従し、他 provider の state へは広がらない。
 
-| program | writable にする state root |
+| provider（exec する program） | writable にする state root |
 |---|---|
-| `claude` | `~/.claude` |
-| `codex` | `~/.codex` |
-| `codex-fugu`（sakana.ai） | `~/.codex-fugu` |
-| `agy`（Antigravity CLI） | `~/.gemini/antigravity-cli/conversations`（加えて同じ state 直下の conversation summary DB 3 ファイルだけ） |
+| `claude`（`claude`） | `~/.claude` |
+| `codex`（`codex`） | `~/.codex` |
+| `sakana-ai`（`claude`） | `~/.claude-sakana`（`CLAUDE_CONFIG_DIR` で CLI に指示する） |
+| `agy`（`agy`。Antigravity CLI） | `~/.gemini/antigravity-cli/conversations`（加えて同じ state 直下の conversation summary DB 3 ファイルだけ） |
 
-- 判定は launcher が exec する program（`--` の先頭）の basename だけを根拠にし、値の正本は
-  `usagi-core` の `domain::settings::DefaultModel::state_directory` である（executable と state の置き場所を
-  1 つの事実として持つ）。usagi が launch しない未知 program には state root を与えない（fail-closed）。
-- daemon 側の policy 検証も同じ program から state root を決め、保護対象 workspace（および linked worktree の
-  Git common dir）と重なる構成を拒否する。
+- 判定の正本は `usagi-core` の `domain::settings::DefaultModel::state_directory` である（provider と state の
+  置き場所を 1 つの事実として持つ）。**根拠は exec する program ではなく provider** で、daemon は launcher へ
+  `--agent <selector>` を渡す。`claude` executable は Claude と `sakana-ai`（Sakana の Anthropic 互換 endpoint 上の
+  Fugu）が共有するため、argv だけでは両者を区別できず、片方の launch がもう片方の home を書けてしまう。
+  `--agent` を伴わない launch は従来どおり program の basename から決め、usagi が launch しない未知 program には
+  state root を与えない（fail-closed）。
+- daemon 側の policy 検証も同じ provider から state root と config prefix を決め、保護対象 workspace（および
+  linked worktree の Git common dir）と重なる構成を拒否する。検証が program を根拠にすると、launcher が実際に
+  writable にする directory の中にある workspace を通してしまう。
 - grant は両 mode に効く。session の agent CLI も利用者本人の state directory をそのまま使うため、
   onboarding・theme・permission mode・MCP 承認・認証は session をまたいで持続する。
 - `agy` は auth token を OS keyring から読み、永続書き込みを conversation subtree と summary DB に限定する。
@@ -1115,10 +1119,12 @@ agent CLI の設定は state directory の中だけにあるとは限らない�
 MCP 承認**を `~/.claude` の中ではなく隣の `~/.claude.json` に置き、保存を lock file と temp file 経由で行う。
 したがって launcher は、この **path prefix** も両 mode の writable 領域に足す。
 
-| program | writable にする config prefix | prefix が覆う path |
+| provider（exec する program） | writable にする config prefix | prefix が覆う path |
 |---|---|---|
-| `claude` | `~/.claude.json` | `~/.claude.json` 本体 / `~/.claude.json.lock` / `~/.claude.json.tmp.<pid>.<random>` / `~/.claude.json.backup.<ms>` |
-| `codex` / `codex-fugu`（sakana.ai） | なし（config は state directory の中） | — |
+| `claude`（`claude`） | `~/.claude.json` | `~/.claude.json` 本体 / `~/.claude.json.lock` / `~/.claude.json.tmp.<pid>.<random>` / `~/.claude.json.backup.<ms>` |
+| `codex`（`codex`） | なし（config は state directory の中） | — |
+| `sakana-ai`（`claude`） | なし（config は `CLAUDE_CONFIG_DIR` が指す state directory の中） | — |
+| `agy`（`agy`） | なし | — |
 
 - **1 ファイルの grant では足りない**。Claude は `~/.claude.json.lock` を取り、
   `~/.claude.json.tmp.<pid>.<random>` を書いて rename で本体に被せる。file 単位で許可すると temp と lock が
@@ -1166,7 +1172,7 @@ allowlist が丸ごと使えなくなるためである。Linux の `bwrap` は 
 動かす shell の `> /dev/stdout` や `> /dev/fd/1` が `Operation not permitted` になる。そこで path は
 `(subpath "/dev")` のまま、許可する操作を `file-write-data` だけに絞る。`/dev` への node 作成・削除・
 属性変更は deny のまま残る。
-Codex と Codex 互換の sakana.ai は同じ合成済み system prompt を TOML basic string として escape し、
+Codex は合成済み system prompt を TOML basic string として escape し、
 既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
 resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
 root 起動は daemon-owned OS sandbox launcher で checkout を read-only にする。外側 launcher がある場合、Codex
@@ -1197,7 +1203,7 @@ store と caller inbox を一つの durable 経路として compose する。cre
 
 `session_dispatch` の新規 agent は workspace の `.usagi/config.toml` にある
 `[agents.claude].models` / `[agents.codex].models` / `[agents.sakana-ai].models` / `[agents.agy].models` allowlist だけから選ぶ。MCP server は起動時に
-allowlist と PATH 上の `claude` / `codex` / `codex-fugu` / `agy` の存在を snapshot し、非空 allowlist と executable の
+allowlist と PATH 上の executable（`claude` / `codex` / `agy`。`sakana-ai` は Claude CLI を使うため `claude`）の存在を snapshot し、非空 allowlist と executable の
 両方を持つ runtime だけを `tools/list` の `agent.runtime` / `agent.model` enum に載せる。既存 agent は
 `agent.id` branch を使い、runtime/model branch とは JSON Schema `oneOf` で排他的である。snapshot は
 server lifetime 中は変わらないため、設定、PATH、CLI install/uninstall の変更を反映するには MCP server の

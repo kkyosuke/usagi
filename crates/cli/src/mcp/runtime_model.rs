@@ -248,13 +248,15 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_exposes_sakana_when_codex_fugu_is_configured_and_available() {
+    fn snapshot_exposes_sakana_when_its_cli_is_configured_and_available() {
         let config = WorkspaceAgentConfig::from_runtime_allowlists([(
             "sakana-ai",
             vec!["fugu-model".into()],
         )]);
+        // Fugu is served through the Claude CLI, so that executable is what
+        // makes this runtime available.
         let schema =
-            RuntimeModelSnapshot::capture(&config, &FakeLocator(&["codex-fugu"])).agent_schema();
+            RuntimeModelSnapshot::capture(&config, &FakeLocator(&["claude"])).agent_schema();
         assert_eq!(
             schema["oneOf"][1]["properties"]["runtime"]["const"],
             "sakana-ai"
