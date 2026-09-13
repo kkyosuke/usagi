@@ -1,13 +1,13 @@
 ---
 number: 754
 title: fix(daemon): 端末カウンタのテストが並列実行で干渉するのを止める
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, terminal, test, flaky]
 dependson: []
 related: []
 created_at: 2026-09-13T00:00:00+00:00
-updated_at: 2026-09-13T00:00:00+00:00
+updated_at: 2026-09-13T02:00:00+00:00
 ---
 
 ## 問題
@@ -39,6 +39,6 @@ assert_eq!(output_pipeline_counters().retained_screen_cells, before);
 
 ## 受入条件
 
-- [ ] グローバルカウンタを読む全テストが、並列実行でも他テストの登録・解放に影響されない。
-- [ ] 対象テストを繰り返し実行しても安定する。
-- [ ] 干渉が起きる形の assert が新しく増えないよう、契約をテストかコメントで固定する。
+- [x] グローバルカウンタを読む全テストが、並列実行でも他テストの登録・解放に影響されない。
+- [x] 対象テストを繰り返し実行しても安定する。
+- [x] 干渉が起きる形の assert が新しく増えないよう、契約をテストかコメントで固定する。
