@@ -2870,7 +2870,7 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             match result {
                 Ok(snapshot) if snapshot.session == job.session => {
-                    panel.loaded = true;
+                    panel.freshness = super::workflow::WorkflowFreshness::Observed;
                     if !panel.agents_edited && panel.pending.is_none() {
                         panel.agents = snapshot.agents;
                     }

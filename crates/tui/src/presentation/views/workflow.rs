@@ -2,7 +2,7 @@
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{clip_to_width, pad_to_width};
-use crate::usecase::application::workflow::WorkflowPanel;
+use crate::usecase::application::workflow::{WorkflowFreshness, WorkflowPanel};
 use usagi_core::domain::workflow::{Delivery, Outcome};
 
 /// Column the agent selectors open in, so `Planner` and `Implementer` put their
@@ -16,6 +16,38 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
         return vec![String::new(); height];
     }
     let header = header(panel);
+    let composer = composer(panel, width);
+
+    // Even a short terminal keeps one status row and the end of the composer.
+    let composer_height = composer.len().min(height.saturating_sub(1));
+    let header_height = header.len().min(height - composer_height);
+    let history_height = height - composer_height - header_height;
+    // `header` and the history rows below already sanitized every untrusted
+    // fragment before painting it, so nothing re-sanitizes them here: that pass
+    // would strip the SGR this pane is drawn with.
+    let mut rows = header.into_iter().take(header_height).collect::<Vec<_>>();
+    let history = history(panel);
+    let end = history.len().saturating_sub(panel.history_offset);
+    let start = end.saturating_sub(history_height);
+    rows.extend(history[start..end].iter().cloned());
+    rows.resize(header_height + history_height, String::new());
+    rows.extend(
+        composer
+            .into_iter()
+            .rev()
+            .take(composer_height)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev(),
+    );
+    rows.into_iter()
+        .map(|line| pad_to_width(&clip_to_width(&line, width), width))
+        .collect()
+}
+
+/// The fixed bottom block: what the draft is addressed to, the draft itself,
+/// and the one line that says what a key does right now.
+fn composer(panel: &WorkflowPanel, width: usize) -> Vec<String> {
     let mut composer = vec![Role::Accent.style().bold().paint(&if panel.run.is_some() {
         format!("Instruction to: {}", panel.recipient_label())
     } else {
@@ -39,17 +71,12 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
             .dim()
             .paint("Tab: goal/agents | Left/Right: choose | Ctrl+S: start")
     });
+    composer
+}
 
-    // Even a short terminal keeps one status row and the end of the composer.
-    let composer_height = composer.len().min(height.saturating_sub(1));
-    let header_height = header.len().min(height - composer_height);
-    let history_height = height - composer_height - header_height;
-    // `header` and the history rows below already sanitized every untrusted
-    // fragment before painting it, so nothing re-sanitizes them here: that pass
-    // would strip the SGR this pane is drawn with.
-    let mut rows = header.into_iter().take(header_height).collect::<Vec<_>>();
-    // Ended runs come first: they are the oldest thing that happened here, and
-    // a restarted session should still show what it already tried.
+/// Ended runs come first: they are the oldest thing that happened here, and a
+/// restarted session should still show what it already tried.
+fn history(panel: &WorkflowPanel) -> Vec<String> {
     let mut history = panel
         .finished
         .iter()
@@ -79,47 +106,105 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
                 )
             })
             .collect::<Vec<_>>();
-        rows.extend(
-            run.instructions
-                .iter()
-                .map(|instruction| {
-                    let delivery = match instruction.delivery {
-                        Delivery::Queued => "queued",
-                        Delivery::Notified => "notified",
-                        Delivery::Acknowledged => "processed",
-                        Delivery::Unconfirmed => "delivery unconfirmed",
-                    };
-                    let tag = format!("[{delivery}]");
-                    format!(
-                        "{} {}",
-                        if instruction.delivery == Delivery::Unconfirmed {
-                            Role::Warning.style().paint(&tag)
-                        } else {
-                            Style::new().dim().paint(&tag)
-                        },
-                        safe_line(&instruction.body.replace('\n', " / "))
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
+        rows.extend(run.instructions.iter().map(|instruction| {
+            let delivery = match instruction.delivery {
+                Delivery::Queued => "queued",
+                Delivery::Notified => "notified",
+                Delivery::Acknowledged => "processed",
+                Delivery::Unconfirmed => "delivery unconfirmed",
+            };
+            let tag = format!("[{delivery}]");
+            format!(
+                "{} {}",
+                if instruction.delivery == Delivery::Unconfirmed {
+                    Role::Warning.style().paint(&tag)
+                } else {
+                    Style::new().dim().paint(&tag)
+                },
+                safe_line(&instruction.body.replace('\n', " / "))
+            )
+        }));
         rows
     }));
-    let end = history.len().saturating_sub(panel.history_offset);
-    let start = end.saturating_sub(history_height);
-    rows.extend(history[start..end].iter().cloned());
-    rows.resize(header_height + history_height, String::new());
-    rows.extend(
-        composer
-            .into_iter()
-            .rev()
-            .take(composer_height)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev(),
-    );
-    rows.into_iter()
-        .map(|line| pad_to_width(&clip_to_width(&line, width), width))
-        .collect()
+    history
+}
+
+/// The three provider choices, each opening its `< value >` in the same column
+/// so the longest label cannot push its own value out of line.
+fn agent_rows(panel: &WorkflowPanel) -> Vec<String> {
+    [
+        (0, "Planner", panel.agents.planner),
+        (1, "Implementer", panel.agents.implementer),
+        (2, "Reviewer", panel.agents.reviewer),
+    ]
+    .into_iter()
+    .map(|(index, label, provider)| {
+        let focused = panel.agent_field == Some(index);
+        let marker = if focused {
+            Role::Danger.style().bold().paint(">")
+        } else {
+            " ".to_owned()
+        };
+        let name = if provider == usagi_core::domain::settings::DefaultModel::Agy {
+            "Gemini (agy)"
+        } else {
+            provider.selector()
+        };
+        let value = if focused {
+            Role::Accent.style().bold()
+        } else {
+            Role::Accent.style()
+        };
+        let arrow = if focused {
+            Role::Accent.style().bold()
+        } else {
+            Style::new().dim()
+        };
+        format!(
+            "{marker} {:<width$} {} {} {}",
+            format!("{label}:"),
+            arrow.paint("<"),
+            value.paint(name),
+            arrow.paint(">"),
+            width = AGENT_LABEL_WIDTH,
+        )
+    })
+    .collect()
+}
+
+/// What a started run is doing, and what it is waiting on.
+fn run_rows(run: &usagi_core::domain::workflow::WorkflowRun) -> Vec<String> {
+    let owner = match run.phase {
+        usagi_core::domain::workflow::Phase::Reviewing => run.agents.reviewer.selector(),
+        usagi_core::domain::workflow::Phase::Waiting => "Human decision",
+        usagi_core::domain::workflow::Phase::Ready => "None (complete)",
+        _ => run.agents.implementer.selector(),
+    };
+    let mut rows = vec![
+        format!("Current owner: {}", Role::Accent.style().paint(owner)),
+        Style::new().dim().paint(&format!(
+            "Implement -> Review -> PR ready | revisions {}/{}",
+            run.revisions, run.revision_limit
+        )),
+    ];
+    if let Some(issue) = run.issue {
+        rows.push(format!(
+            "Issue: {} (PR must mark it done)",
+            Role::Info.style().paint(&format!("#{issue}"))
+        ));
+    }
+    if let Some(reason) = &run.waiting_reason {
+        rows.push(Role::Warning.style().paint(&safe_line(reason)));
+    }
+    if let Some(review) = &run.review {
+        rows.push(format!(
+            "Review HEAD: {}",
+            Style::new()
+                .dim()
+                .paint(&safe_line(&review.target.head_sha))
+        ));
+    }
+    rows
 }
 
 fn header(panel: &WorkflowPanel) -> Vec<String> {
@@ -127,7 +212,7 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
     // on a steady cadence, and replacing the status it just fetched with
     // "Loading" on every one of those made the header flicker between two
     // strings for as long as the tab stayed open.
-    let status = if panel.loading && !panel.loaded {
+    let status = if panel.loading && panel.freshness == WorkflowFreshness::Pending {
         Role::Warning.style().bold().paint("Loading workflow")
     } else {
         Role::Accent
@@ -140,73 +225,9 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
     };
     let mut header = vec![status];
     if let Some(run) = &panel.run {
-        let owner = match run.phase {
-            usagi_core::domain::workflow::Phase::Reviewing => run.agents.reviewer.selector(),
-            usagi_core::domain::workflow::Phase::Waiting => "Human decision",
-            usagi_core::domain::workflow::Phase::Ready => "None (complete)",
-            _ => run.agents.implementer.selector(),
-        };
-        header.push(format!(
-            "Current owner: {}",
-            Role::Accent.style().paint(owner)
-        ));
-        header.push(Style::new().dim().paint(&format!(
-            "Implement -> Review -> PR ready | revisions {}/{}",
-            run.revisions, run.revision_limit
-        )));
-        if let Some(issue) = run.issue {
-            header.push(format!(
-                "Issue: {} (PR must mark it done)",
-                Role::Info.style().paint(&format!("#{issue}"))
-            ));
-        }
-        if let Some(reason) = &run.waiting_reason {
-            header.push(Role::Warning.style().paint(&safe_line(reason)));
-        }
-        if let Some(review) = &run.review {
-            header.push(format!(
-                "Review HEAD: {}",
-                Style::new()
-                    .dim()
-                    .paint(&safe_line(&review.target.head_sha))
-            ));
-        }
+        header.extend(run_rows(run));
     } else {
-        for (index, label, provider) in [
-            (0, "Planner", panel.agents.planner),
-            (1, "Implementer", panel.agents.implementer),
-            (2, "Reviewer", panel.agents.reviewer),
-        ] {
-            let focused = panel.agent_field == Some(index);
-            let marker = if focused {
-                Role::Danger.style().bold().paint(">")
-            } else {
-                " ".to_owned()
-            };
-            let name = if provider == usagi_core::domain::settings::DefaultModel::Agy {
-                "Gemini (agy)"
-            } else {
-                provider.selector()
-            };
-            let value = if focused {
-                Role::Accent.style().bold()
-            } else {
-                Role::Accent.style()
-            };
-            let arrow = if focused {
-                Role::Accent.style().bold()
-            } else {
-                Style::new().dim()
-            };
-            header.push(format!(
-                "{marker} {:<width$} {} {} {}",
-                format!("{label}:"),
-                arrow.paint("<"),
-                value.paint(name),
-                arrow.paint(">"),
-                width = AGENT_LABEL_WIDTH,
-            ));
-        }
+        header.extend(agent_rows(panel));
     }
     if let Some(error) = &panel.error {
         header.push(
@@ -310,7 +331,7 @@ mod tests {
         out
     }
 
-    fn plain(rows: Vec<String>) -> String {
+    fn plain(rows: &[String]) -> String {
         rows.iter()
             .map(|row| strip(row))
             .collect::<Vec<_>>()
@@ -327,7 +348,7 @@ mod tests {
             run: Some(run),
             ..WorkflowPanel::default()
         };
-        assert!(plain(render(20, 100, &panel)).contains("Issue: #742"));
+        assert!(plain(&render(20, 100, &panel)).contains("Issue: #742"));
     }
 
     #[test]
@@ -354,7 +375,7 @@ mod tests {
 
         // Ended runs are readable before anything new starts, and a multi-line
         // goal stays on one row.
-        let rendered = plain(render(20, 100, &panel));
+        let rendered = plain(&render(20, 100, &panel));
         assert!(rendered.contains("[completed] Ship login (PR ready)"));
         assert!(rendered.contains("[stopped] Rewrite / the parser (Revising)"));
 
@@ -369,12 +390,12 @@ mod tests {
         ] {
             panel.run.as_mut().unwrap().phase = phase;
             assert!(
-                plain(render(20, 100, &panel)).contains("Closeup `workflow finish` ends this run"),
+                plain(&render(20, 100, &panel)).contains("Closeup `workflow finish` ends this run"),
                 "{phase:?} still offers the way out"
             );
         }
         // The archive survives alongside a new run.
-        assert!(plain(render(20, 100, &panel)).contains("[completed] Ship login"));
+        assert!(plain(&render(20, 100, &panel)).contains("[completed] Ship login"));
 
         // A short pane keeps the header's first rows, so the standing hint has to
         // sit after everything it must not displace. Assert the order itself,
@@ -430,9 +451,9 @@ mod tests {
         );
         run.agents = panel.agents;
         panel.run = Some(run);
-        assert!(plain(render(20, 100, &panel)).contains("Current owner: claude"));
+        assert!(plain(&render(20, 100, &panel)).contains("Current owner: claude"));
         panel.run.as_mut().unwrap().phase = usagi_core::domain::workflow::Phase::Reviewing;
-        assert!(plain(render(20, 100, &panel)).contains("Current owner: codex"));
+        assert!(plain(&render(20, 100, &panel)).contains("Current owner: codex"));
     }
 
     #[test]
@@ -442,9 +463,9 @@ mod tests {
             ..WorkflowPanel::default()
         };
         // The first read is the only one worth announcing.
-        assert!(plain(render(20, 90, &panel)).contains("Loading workflow"));
-        panel.loaded = true;
-        let steady = plain(render(20, 90, &panel));
+        assert!(plain(&render(20, 90, &panel)).contains("Loading workflow"));
+        panel.freshness = WorkflowFreshness::Observed;
+        let steady = plain(&render(20, 90, &panel));
         assert!(!steady.contains("Loading workflow"));
         assert!(steady.contains("Implementation + Review / Not started"));
     }
@@ -464,11 +485,11 @@ mod tests {
         };
         // A start still waiting on its own answer is not stuck, so nothing is
         // offered yet.
-        assert!(!plain(render(20, 90, &panel)).contains("workflow finish"));
+        assert!(!plain(&render(20, 90, &panel)).contains("workflow finish"));
         // Once the daemon has refused it, every Ctrl+S resends the same
         // rejected request: the way out has to be on screen.
         panel.error = Some("stop the session's existing Agent".into());
-        let refused = plain(render(20, 90, &panel));
+        let refused = plain(&render(20, 90, &panel));
         assert!(refused.contains("Closeup `workflow finish` abandons this start"));
         // It stays the lowest-priority row, below the error it explains.
         let position = |needle: &str| refused.lines().position(|row| row.contains(needle));

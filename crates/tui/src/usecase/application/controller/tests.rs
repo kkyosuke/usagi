@@ -446,7 +446,10 @@ fn a_background_read_never_swallows_the_person_s_submission() {
     // Opening the tab leaves a read in flight. The pane re-reads on a steady
     // cadence, so a person who waits for it to clear waits forever.
     assert!(state.workflow_panel(session).unwrap().loading);
-    assert!(!state.workflow_panel(session).unwrap().loaded);
+    assert_eq!(
+        state.workflow_panel(session).unwrap().freshness,
+        crate::usecase::application::workflow::WorkflowFreshness::Pending
+    );
     let _ = update(
         &mut state,
         AppEvent::WorkflowInput {
@@ -487,7 +490,11 @@ fn a_background_read_never_swallows_the_person_s_submission() {
         }),
     );
     let panel = state.workflow_panel(session).unwrap();
-    assert!(!panel.loading && panel.loaded);
+    assert!(!panel.loading);
+    assert_eq!(
+        panel.freshness,
+        crate::usecase::application::workflow::WorkflowFreshness::Observed
+    );
     assert!(panel.submitting);
     assert!(panel.pending.is_some());
 }

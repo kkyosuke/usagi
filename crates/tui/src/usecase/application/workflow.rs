@@ -5,6 +5,20 @@ use usagi_core::domain::workflow::{FinishedRun, Recipient, WorkflowCommand, Work
 
 use super::environment_source::EnvironmentSourceEditor;
 
+/// Whether the pane has ever received daemon-owned progress.
+///
+/// Only the first read is announced. The pane re-reads on a steady cadence, and
+/// letting every one of those replace the status it just fetched made the
+/// header flicker between two strings for as long as the tab stayed open.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WorkflowFreshness {
+    /// No snapshot has landed yet.
+    #[default]
+    Pending,
+    /// At least one snapshot has landed.
+    Observed,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkflowPanel {
     pub agents: usagi_core::domain::workflow::WorkflowAgents,
@@ -18,10 +32,8 @@ pub struct WorkflowPanel {
     pub recipient: Option<Recipient>,
     pub error: Option<String>,
     pub loading: bool,
-    /// Set once any snapshot has been applied. Only the first read is announced
-    /// as loading; the steady background refresh must not replace the status it
-    /// just fetched.
-    pub loaded: bool,
+    /// Set to `Observed` once any snapshot has been applied.
+    pub freshness: WorkflowFreshness,
     /// Frame tick the next background snapshot read may start on. Spacing the
     /// reads from the completion of the previous one keeps this lane
     /// single-flight and off the frame rate.
