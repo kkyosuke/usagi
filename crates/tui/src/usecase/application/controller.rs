@@ -2875,7 +2875,15 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                         panel.agents = snapshot.agents;
                     }
                     if let Some(start) = snapshot.pending_start {
-                        panel.agents = start.agents;
+                        // A background read can now land while the person's own
+                        // submission is in flight, so the saved intent must not
+                        // repaint the agents they just chose or bring back the
+                        // error that submission already cleared. A control
+                        // response has set `submitting` false above, so this
+                        // only holds back the overlapping read.
+                        if !panel.submitting {
+                            panel.agents = start.agents;
+                        }
                         if panel.pending.is_none() {
                             if panel.draft.value().is_empty() {
                                 panel.draft.paste(&start.goal);
@@ -2888,7 +2896,9 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                                 },
                             ));
                         }
-                        panel.error = start.error;
+                        if !panel.submitting {
+                            panel.error = start.error;
+                        }
                     }
                     panel.run = snapshot.run;
                     panel.finished = snapshot.finished;

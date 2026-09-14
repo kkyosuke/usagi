@@ -249,7 +249,15 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
                 .dim()
                 .paint("Closeup `workflow finish` ends this run"),
         );
-    } else if panel.pending.is_some() && panel.error.is_some() {
+    } else if panel.error.is_some()
+        && matches!(
+            panel.pending,
+            Some((
+                _,
+                usagi_core::domain::workflow::WorkflowCommand::Start { .. }
+            ))
+        )
+    {
         header.push(
             Style::new()
                 .dim()
@@ -505,20 +513,27 @@ mod tests {
         use usagi_core::domain::workflow::{
             Instruction, Phase, Recipient, Review, WorkflowCommand, WorkflowHistoryEntry,
         };
+        // `render` paints these rows and no longer sanitizes them afterwards,
+        // so every fragment has to be sanitized where it is built. Poison all
+        // of them, not just the error: this test is the backstop that keeps the
+        // per-fragment discipline honest. `clip_to_width` drops the bidi and
+        // control characters on its own but deliberately passes ESC through as
+        // styling, so ESC is the class that rests entirely on `safe_line`.
+        let poison = "\u{1b}[2Junsafe\u{202e}";
         let mut run = crate::usecase::application::workflow::fixture_run(SessionId::new());
-        run.waiting_reason = Some("Check results pending".into());
+        run.waiting_reason = Some(format!("Check results pending {poison}"));
         run.review = Some(Review {
             request: OperationId::new(),
             target: usagi_core::domain::agent_message::ReviewTarget {
                 base_sha: "a".repeat(40),
-                head_sha: "b".repeat(40),
+                head_sha: format!("{poison}{}", "b".repeat(40)),
             },
             approved: true,
         });
         run.history.push(WorkflowHistoryEntry {
             id: OperationId::new(),
-            actor: "Claude".into(),
-            body: "Review completed".into(),
+            actor: format!("Claude{poison}"),
+            body: format!("Review completed {poison}"),
         });
         for delivery in [
             Delivery::Queued,
@@ -530,13 +545,21 @@ mod tests {
                 id: OperationId::new(),
                 requested_recipient: Recipient::Automatic,
                 recipient: run.implementer,
-                body: "Check\nerrors".into(),
+                body: format!("Check\nerrors {poison}"),
                 delivery,
             });
         }
         let mut panel = WorkflowPanel {
             run: Some(run),
-            error: Some("\u{1b}[2Junsafe\u{202e}".into()),
+            error: Some(poison.to_owned()),
+            finished: vec![usagi_core::domain::workflow::FinishedRun {
+                id: OperationId::new(),
+                outcome: usagi_core::domain::workflow::Outcome::Completed,
+                goal: format!("Ship login {poison}"),
+                phase: Phase::Ready,
+                issue: None,
+                pr_url: None,
+            }],
             ..WorkflowPanel::default()
         };
         panel
