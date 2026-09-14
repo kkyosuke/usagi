@@ -11,7 +11,7 @@ mod world;
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 
-use crate::presentation::theme::{Role, Style, garden_rabbit_style};
+use crate::presentation::theme::{GardenTone, Role, Style, garden_rabbit_style};
 
 use super::agent_status;
 use super::{clip_to_width, display_width, pad_to_width};
@@ -873,7 +873,7 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
         .iter()
         .filter(|session| needs_attention(session))
         .count();
-    let left = Role::Feature.style().bold().paint(&format!(
+    let left = GardenTone::Grass.style().bold().paint(&format!(
         " ✦ garden / {}",
         clip_to_width(workspace_name, width / 2)
     ));
@@ -935,7 +935,7 @@ fn sky_line(width: usize, workspace_name: &str, tick: u64, reduced_motion: bool)
 fn footer_line(width: usize) -> String {
     let left = " Garden Action Center · click a usagi";
     let right = "any key · wake ";
-    let left = Role::Feature.style().paint(left);
+    let left = GardenTone::Grass.style().paint(left);
     let right = Style::new().dim().paint(right);
     let gap = width.saturating_sub(display_width(&left) + display_width(&right));
     pad_to_width(&format!("{left}{}{right}", " ".repeat(gap)), width)
@@ -1101,13 +1101,9 @@ fn ground_rows(layout: GardenLayout, tick: u64, reduced_motion: bool) -> [String
         .flat_map(|tile| tile.chars())
         .take(layout.content_width)
         .collect::<String>();
-    [grass, soil].map(|layer| {
+    [(grass, GardenTone::Grass), (soil, GardenTone::Earth)].map(|(layer, tone)| {
         pad_to_width(
-            &format!(
-                "{}{}",
-                " ".repeat(SIDE_PADDING),
-                Style::new().dim().paint(&layer)
-            ),
+            &format!("{}{}", " ".repeat(SIDE_PADDING), tone.style().paint(&layer)),
             layout.content_width + SIDE_PADDING * 2,
         )
     })
