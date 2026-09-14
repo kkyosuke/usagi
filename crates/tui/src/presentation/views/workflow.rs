@@ -425,10 +425,13 @@ mod tests {
             .into_iter()
             .map(|row| strip(&row))
             .collect::<Vec<_>>();
+        // `expect` rather than `unwrap_or_else(|| panic!(..))`: a panic closure
+        // that never runs is an uncovered function, and this crate's gate is
+        // 100%.
         let row = |needle: &str| {
             rows.iter()
                 .find(|row| row.contains(needle))
-                .unwrap_or_else(|| panic!("{needle} is drawn"))
+                .expect("the agent row is drawn")
                 .clone()
         };
         let planner = row("Planner:");
