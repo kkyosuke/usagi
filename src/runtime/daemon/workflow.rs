@@ -288,21 +288,9 @@ pub(super) fn control_workflow(
                 // after a successful launch is reported as `Unavailable`, so a
                 // run whose Agent did start is never rolled back here.
                 if error.retry_mode == RetryMode::Never {
-                    store
-                        .update_workflow(workspace, session, |record| {
-                            record.clone_from(&before);
-                            Ok(())
-                        })
-                        .map_err(unavailable)?;
+                    rollback_admission(&store, workspace, session, before.as_ref())?;
                 } else {
-                    store
-                        .update_workflow(workspace, session, |record| {
-                            if let Some(record) = record {
-                                record.start_error = Some(error.message.clone());
-                            }
-                            Ok(())
-                        })
-                        .map_err(unavailable)?;
+                    remember_start_error(&store, workspace, session, &error.message)?;
                 }
                 return Err(error);
             }
@@ -744,6 +732,58 @@ fn admission_error(error: &anyhow::Error) -> ProtocolError {
     ProtocolError::new(code, message)
 }
 
+/// Undo an admission whose start can never succeed as it stands.
+///
+/// `before` is the record as it was immediately before `admit` ran. Reusing a
+/// previously finished record restores exactly that, archive intact.
+///
+/// A start that *created* the record cannot be taken back to nothing, because
+/// the store keeps every workflow record it has ever written (`update_workflow`
+/// requires one to remain). Retiring the record is the same thing everywhere it
+/// is read: the workflow projection reports no run and no pending start for a
+/// finished record, and the next `admit` resets it from scratch. It is
+/// deliberately not pushed onto `finished` — that archive is bounded, and a
+/// start that never launched is not a run worth evicting real history for.
+fn rollback_admission(
+    store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
+    workspace: WorkspaceId,
+    session: SessionId,
+    before: Option<&usagi_core::infrastructure::store::dispatch::workflows::WorkflowRecord>,
+) -> Result<(), ProtocolError> {
+    store
+        .update_workflow(workspace, session, |value| {
+            if let Some(before) = before {
+                *value = Some(before.clone());
+            } else if let Some(record) = value.as_mut() {
+                record.run = None;
+                record.start_error = None;
+                record.finish = Some(record.operation);
+            }
+            Ok(())
+        })
+        .map_err(unavailable)
+}
+
+/// Keep a start the person can retry as it stands, with the reason it failed.
+///
+/// This is what restores the original request and its retry operation after an
+/// authentication failure, so the record deliberately stays put.
+fn remember_start_error(
+    store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
+    workspace: WorkspaceId,
+    session: SessionId,
+    message: &str,
+) -> Result<(), ProtocolError> {
+    store
+        .update_workflow(workspace, session, |record| {
+            if let Some(record) = record {
+                record.start_error = Some(message.to_owned());
+            }
+            Ok(())
+        })
+        .map_err(unavailable)
+}
+
 /// Everything one launch is admitted with, so the launch reads as one intent
 /// rather than a list of positional arguments.
 struct StartIntent<'a> {
@@ -929,6 +969,98 @@ mod tests {
             ErrorCode::Unavailable
         );
         assert!(unavailable("storage failed").message.contains("Workflow:"));
+    }
+
+    #[test]
+    fn a_refused_start_is_undone_and_a_retryable_one_keeps_its_intent() {
+        use usagi_core::domain::settings::DefaultModel;
+        use usagi_core::domain::workflow::WorkflowAgents;
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let agents = WorkflowAgents {
+            planner: DefaultModel::Agy,
+            implementer: DefaultModel::Claude,
+            reviewer: DefaultModel::OpenAi,
+        };
+        let start = |goal: &str| WorkflowCommand::Start {
+            goal: goal.to_owned(),
+            agents,
+        };
+        let admit = |session, operation, command: &WorkflowCommand| {
+            workflow::admit(&store, workspace, session, operation, command, None).unwrap();
+        };
+
+        // A failure the person can retry as it stands keeps the record, so
+        // reopening the pane restores the request and its retry operation.
+        let retryable = SessionId::new();
+        let first = OperationId::new();
+        admit(retryable, first, &start("add a login form"));
+        let before = store.workflow(workspace, retryable).unwrap();
+        remember_start_error(&store, workspace, retryable, "authentication needed").unwrap();
+        let kept = store.workflow(workspace, retryable).unwrap().unwrap();
+        assert_eq!(kept.operation, first);
+        assert_eq!(kept.start_error.as_deref(), Some("authentication needed"));
+        assert!(
+            workflow::projection(&store, workspace, retryable)
+                .unwrap()
+                .pending_start
+                .is_some()
+        );
+
+        // Undoing that same admission restores exactly what preceded it: the
+        // intent is back to the shape `admit` left, without the error.
+        rollback_admission(&store, workspace, retryable, before.as_ref()).unwrap();
+        let restored = store.workflow(workspace, retryable).unwrap().unwrap();
+        let expected = before.as_ref().unwrap();
+        assert_eq!(restored.operation, expected.operation);
+        assert_eq!(restored.goal, expected.goal);
+        assert_eq!(restored.start_error, expected.start_error);
+        assert!(restored.start_error.is_none());
+
+        // A refused first start leaves no trace anyone can read: the session
+        // projects exactly as it did before, and accepts a new start.
+        let fresh = SessionId::new();
+        let before = store.workflow(workspace, fresh).unwrap();
+        assert!(before.is_none(), "nothing preceded this start");
+        let empty = workflow::projection(&store, workspace, fresh).unwrap();
+        admit(fresh, OperationId::new(), &start("add a logout form"));
+        rollback_admission(&store, workspace, fresh, before.as_ref()).unwrap();
+        let after = workflow::projection(&store, workspace, fresh).unwrap();
+        assert_eq!(after.run, empty.run);
+        assert_eq!(after.pending_start, empty.pending_start);
+        assert_eq!(after.finished, empty.finished);
+        let again = OperationId::new();
+        admit(fresh, again, &start("add a logout form"));
+        assert_eq!(
+            workflow::projection(&store, workspace, fresh)
+                .unwrap()
+                .pending_start
+                .unwrap()
+                .operation_id,
+            again
+        );
+
+        // And an admission that reused a finished record hands the archive back
+        // untouched rather than dropping the history with it.
+        let reused = SessionId::new();
+        let ended = OperationId::new();
+        admit(reused, ended, &start("ship it"));
+        admit(reused, OperationId::new(), &WorkflowCommand::Finish);
+        let before = store.workflow(workspace, reused).unwrap();
+        assert_eq!(before.as_ref().unwrap().finished.len(), 1);
+        admit(reused, OperationId::new(), &start("try again"));
+        rollback_admission(&store, workspace, reused, before.as_ref()).unwrap();
+        let restored = store.workflow(workspace, reused).unwrap().unwrap();
+        assert_eq!(restored.finished.len(), 1);
+        assert_eq!(restored.finished[0].id, ended);
+        assert!(
+            workflow::projection(&store, workspace, reused)
+                .unwrap()
+                .pending_start
+                .is_none(),
+            "the session is free again"
+        );
     }
 
     #[test]
