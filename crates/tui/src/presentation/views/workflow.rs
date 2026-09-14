@@ -562,9 +562,14 @@ mod tests {
             }],
             ..WorkflowPanel::default()
         };
-        panel
-            .draft
-            .replace("line one\nline two\nline three\nline four");
+        // The draft is the last untrusted path: the daemon's saved start goal is
+        // pasted straight into it, and the editor does not sanitize on the way
+        // in, so `input_rows` is the only thing standing between it and the
+        // screen.
+        let poisoned_draft = format!(
+            "line one {poison}\nline two {poison}\nline three {poison}\nline four {poison}"
+        );
+        panel.draft.replace(&poisoned_draft);
         for phase in [
             Phase::Starting,
             Phase::Implementing,
@@ -577,8 +582,15 @@ mod tests {
             panel.run.as_mut().unwrap().phase = phase;
             let view = render(25, 90, &panel).join("\n");
             assert!(view.contains(phase.label()));
+            // Assert each poisoned row is actually on screen. Without this the
+            // ESC assertion below goes quietly vacuous the day the header grows
+            // past the pane and pushes a row out of the window.
             assert!(view.contains("Review completed"));
             assert!(view.contains("delivery unconfirmed"));
+            assert!(view.contains("Ship login"));
+            assert!(view.contains("Review HEAD"));
+            assert!(view.contains("Check results pending"));
+            assert!(view.contains("line four"));
             assert!(!view.contains("\u{1b}[2J"));
             assert!(!view.contains('\u{202e}'));
         }
