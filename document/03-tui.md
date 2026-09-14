@@ -2170,9 +2170,8 @@ Closeup action の `workflow finish` は、その session の run を終了す�
 タブを閉じても daemon の作業は中止しない。再度 `workflow` を開くと保存済みの進捗を取得する。
 進行そのものは daemon の常駐 lane が所有するため、タブを閉じていても、別の session を見ていても、
 TUI を終了していても進む（[workflow lane](05-daemon.md#workflow-lane)が正本）。開いている画面の
-polling は同じ進行の pass を通して最新の状態を受け取る。polling の間隔は直前の取得が終わってから数え、
-frame の更新回数ではなく 1 秒程度の一定間隔に保つ（常駐 lane と同じ帯域に収め、pane を開いている間に
-daemon の read を frame ごとに積まない）。
+polling は同じ進行の pass を通して最新の状態を受け取る。polling は直前の取得が完了してから次を出し、
+その間隔は 1 秒程度を上限とする（pane を開いている間 daemon の read を frame ごとに積まない）。
 Workflow は PR の自動マージや session/worktree の削除を行わない。
 実装・レビューの進行は起動時の固定指示と同一 session の handoff に従う。修正は最大 3 回を
 指示するが、プロセスを強制停止する上限ではない。
