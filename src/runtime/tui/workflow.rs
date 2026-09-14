@@ -7,7 +7,7 @@ use usagi_core::domain::workflow::WorkflowSnapshot;
 use usagi_core::infrastructure::client::{
     ClientError, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest,
 };
-use usagi_core::infrastructure::ipc::ErrorCode;
+use usagi_core::infrastructure::ipc::RetryMode;
 use usagi_tui::usecase::application::controller::{AppEvent, BackendEvent};
 use usagi_tui::usecase::application::daemon_backend::Completions;
 use usagi_tui::usecase::application::workflow::{WorkflowError, WorkflowJob, WorkflowPort};
@@ -125,11 +125,23 @@ fn execute(
     Ok(snapshot)
 }
 
+/// Classify a failed request as "may have taken effect" or not.
+///
+/// The daemon already says this on every protocol error: `RetryMode::Never`
+/// means resending the same operation cannot succeed, which is only reported
+/// for a request that did nothing. Reading that instead of matching an
+/// allowlist of error codes keeps the retry contract in one place — the code
+/// list silently classified every new code as unconfirmed, which is how a
+/// refused start stayed pending in the pane forever.
+///
+/// Anything that is not a protocol error is a transport failure: the request
+/// may have been applied before the answer was lost, so it must be retried
+/// under the same operation ID rather than minted again.
 fn failure(error: ClientError) -> WorkflowError {
     let message =
         usagi_core::domain::presentation_text::sanitize_presentation_line(&error.to_string());
     let unconfirmed = !matches!(error, ClientError::Protocol(error)
-        if matches!(error.code, ErrorCode::InvalidArgument | ErrorCode::PermissionDenied | ErrorCode::OwnershipUnknown | ErrorCode::IdempotencyConflict));
+        if error.retry_mode == RetryMode::Never);
     WorkflowError {
         message,
         unconfirmed,
@@ -141,6 +153,7 @@ mod tests {
     use super::*;
     use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
     use usagi_core::domain::workflow::WorkflowCommand;
+    use usagi_core::infrastructure::ipc::ErrorCode;
 
     struct Fake {
         requests: Vec<DaemonRequest>,
@@ -225,18 +238,30 @@ mod tests {
             body: serde_json::Value::Null,
         }));
         assert!(execute(&job, &mut fake).unwrap_err().unconfirmed);
+        // `Busy` is what a session that already runs an Agent answers a start
+        // with. It has to read as confirmed, or the pane keeps a pending start
+        // nothing can ever complete.
         for code in [
             ErrorCode::InvalidArgument,
             ErrorCode::PermissionDenied,
             ErrorCode::OwnershipUnknown,
             ErrorCode::IdempotencyConflict,
+            ErrorCode::Busy,
             ErrorCode::Unavailable,
+            ErrorCode::DeadlineExceeded,
+            ErrorCode::ResyncRequired,
         ] {
-            let error = failure(ClientError::Protocol(
-                usagi_core::infrastructure::ipc::ProtocolError::new(code, "rejected"),
-            ));
-            assert_eq!(error.unconfirmed, code == ErrorCode::Unavailable);
+            let protocol = usagi_core::infrastructure::ipc::ProtocolError::new(code, "rejected");
+            let retryable = protocol.retry_mode != RetryMode::Never;
+            let error = failure(ClientError::Protocol(protocol));
+            assert_eq!(error.unconfirmed, retryable, "{code:?} keeps its pending");
         }
+        // A transport failure is always unconfirmed: the request may have been
+        // applied before its answer was lost.
+        assert!(
+            failure(ClientError::Unavailable("socket closed".into())).unconfirmed,
+            "a lost answer must retry the same operation"
+        );
     }
     fn fake_run(job: &WorkflowJob) -> Result<WorkflowSnapshot, WorkflowError> {
         if job.control.is_some() {

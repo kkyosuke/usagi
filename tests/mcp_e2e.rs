@@ -610,9 +610,16 @@ sleep 30
         "the finished run must not still own the session: {restarted}"
     );
 
-    // And the archive is what the session reports while it waits.
+    // And the archive is what the session reports while it waits. The refused
+    // start left no trace at all: no pending intent to freeze the pane on, and
+    // no archived row, so retrying cannot push real history out of the bounded
+    // archive.
     let idle = tool_text(&mcp.tool("workflow_status", &json!({"name":"workflow-run"})));
     assert!(idle["run"].is_null(), "{idle}");
+    assert!(
+        idle["pending_start"].is_null(),
+        "a refused start must not keep holding the session: {idle}"
+    );
     assert_eq!(idle["finished"][0]["goal"], "add a login form");
     assert_eq!(idle["finished"].as_array().unwrap().len(), 1);
 }

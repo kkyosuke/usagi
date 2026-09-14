@@ -467,8 +467,12 @@ impl AgentRuntime {
                     && matches!(worker.status, AgentStatus::Starting | AgentStatus::Running)
             })
         {
+            // `Busy`, not `Unavailable`: nothing was launched and resending the
+            // same operation cannot succeed until the person stops that Agent.
+            // `Unavailable` means "reconnect and retry the same operation",
+            // which is what left a refused start wedged in the pane.
             return Err(ProtocolError::new(
-                ErrorCode::Unavailable,
+                ErrorCode::Busy,
                 "stop the session's existing Agent before starting a Workflow",
             ));
         }

@@ -12,7 +12,7 @@ use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
 use usagi_core::domain::workflow::{Delivery, WorkflowCommand, WorkflowRun};
 use usagi_core::infrastructure::client::AgentLaunchIntent;
 use usagi_core::infrastructure::ipc::{
-    Envelope, ErrorCode, ProtocolError, RequestId, ResponseOutcome, ServerHello,
+    Envelope, ErrorCode, ProtocolError, RequestId, ResponseOutcome, RetryMode, ServerHello,
 };
 use usagi_daemon::usecase::agent_ipc::SessionScopeResolver;
 use usagi_daemon::usecase::workflow;
@@ -253,6 +253,10 @@ pub(super) fn control_workflow(
     // current evidence, and keep PR verification out of its way: a GitHub read
     // that is momentarily unavailable must not refuse an instruction.
     reconcile(agent, workspace, session)?;
+    // Admission persists the record before the launch is attempted, so a start
+    // that is refused outright has to be able to undo it. Keep what the session
+    // looked like before.
+    let before = store.workflow(workspace, session).map_err(unavailable)?;
     workflow::admit(&store, workspace, session, operation, &command, issue)
         .map_err(|error| admission_error(&error))?;
     match command {
@@ -269,14 +273,37 @@ pub(super) fn control_workflow(
                     issue,
                 },
             ) {
-                store
-                    .update_workflow(workspace, session, |record| {
-                        if let Some(record) = record {
-                            record.start_error = Some(error.message.clone());
-                        }
-                        Ok(())
-                    })
-                    .map_err(unavailable)?;
+                // A start that can never succeed as it stands must not keep
+                // holding the session. Leaving its record pending refuses every
+                // new start ("session already has another workflow") and
+                // freezes the pane on an intent whose only honest answer is
+                // "change something first". Undo the admission instead: the
+                // start never happened, so it leaves no trace — not even an
+                // archived "stopped" row, which would push real run history out
+                // of the bounded archive every time someone retried.
+                //
+                // Anything the daemon reports as retryable keeps its record:
+                // that is what restores the original request and its retry
+                // operation after an authentication failure. Every failure
+                // after a successful launch is reported as `Unavailable`, so a
+                // run whose Agent did start is never rolled back here.
+                if error.retry_mode == RetryMode::Never {
+                    store
+                        .update_workflow(workspace, session, |record| {
+                            record.clone_from(&before);
+                            Ok(())
+                        })
+                        .map_err(unavailable)?;
+                } else {
+                    store
+                        .update_workflow(workspace, session, |record| {
+                            if let Some(record) = record {
+                                record.start_error = Some(error.message.clone());
+                            }
+                            Ok(())
+                        })
+                        .map_err(unavailable)?;
+                }
                 return Err(error);
             }
         }
