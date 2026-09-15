@@ -24072,6 +24072,77 @@ instructions = "{instructions}"
             assert_eq!(recovered.run.unwrap().id, operation);
         }
 
+        /// The refusal reported from the pane: an Agent the person opened
+        /// themselves already owns the session, so no start can be launched
+        /// until they stop it. Resending cannot change that, so the admission
+        /// is undone rather than left holding the session.
+        #[test]
+        fn a_start_refused_outright_leaves_the_session_free_of_the_intent() {
+            let fixture = Fixture::new();
+            fixture
+                .agent
+                .lock()
+                .unwrap()
+                .launch(
+                    &usagi_core::domain::id::OperationId::new().to_string(),
+                    &usagi_core::infrastructure::client::AgentLaunchIntent {
+                        workspace: fixture.workspace,
+                        session: Some(fixture.session),
+                        profile: Some(AgentProfileId::new("claude").unwrap()),
+                    },
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+            let refused = fixture
+                .control(
+                    usagi_core::domain::id::OperationId::new(),
+                    WorkflowCommand::Start {
+                        goal: "start anyway".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(refused.code, ErrorCode::Busy);
+            assert_eq!(
+                refused.retry_mode,
+                usagi_core::infrastructure::ipc::RetryMode::Never
+            );
+            // Nothing is left holding the session: no pending start for the
+            // pane to keep retrying, no run, and the bounded archive did not
+            // spend one of its slots on a start that never launched.
+            let after = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap();
+            assert!(after.pending_start.is_none());
+            assert!(after.run.is_none());
+            assert!(after.finished.is_empty());
+            // This is the wedge itself: the record left behind used to refuse
+            // the next start as "session already has another workflow", hiding
+            // the one reason the person could act on. It stays the honest one,
+            // and that refusal is undone in turn.
+            let again = fixture
+                .control(
+                    usagi_core::domain::id::OperationId::new(),
+                    WorkflowCommand::Start {
+                        goal: "start anyway".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(again.code, ErrorCode::Busy);
+            let after = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap();
+            assert!(after.pending_start.is_none());
+            assert!(after.finished.is_empty());
+        }
+
         struct VerificationGit(String);
         impl usagi_core::infrastructure::git::GitRunner for VerificationGit {
             fn run(
