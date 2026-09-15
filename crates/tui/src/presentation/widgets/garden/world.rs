@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthChar;
 
 const SCENERY_HEIGHT: usize = 4;
 const RABBIT_HEIGHT: usize = 4;
-const LIFESTYLE_CYCLE_TICKS: u64 = 100;
+const LIFESTYLE_CYCLE_TICKS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Point {
@@ -40,6 +40,7 @@ enum Facing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Activity {
     Walking,
+    Looking,
     Drinking,
     Eating,
     Sleeping,
@@ -286,25 +287,30 @@ fn agent_motion(
 
 fn lifestyle_motion(places: Places, tick: u64) -> Motion {
     match tick {
-        0..=14 => walking(places.home, places.water, tick, 15),
-        15..=24 => Motion {
+        0..=29 | 290..=299 => Motion {
+            point: places.home,
+            facing: Facing::Right,
+            activity: Activity::Looking,
+        },
+        30..=59 => walking(places.home, places.water, tick - 30, 30),
+        60..=99 => Motion {
             point: places.water,
             facing: Facing::Right,
             activity: Activity::Drinking,
         },
-        25..=44 => walking(places.water, places.food, tick - 25, 20),
-        45..=54 => Motion {
+        100..=139 => walking(places.water, places.food, tick - 100, 40),
+        140..=179 => Motion {
             point: places.food,
             facing: Facing::Right,
             activity: Activity::Eating,
         },
-        55..=69 => walking(places.food, places.shade, tick - 55, 15),
-        70..=79 => Motion {
+        180..=209 => walking(places.food, places.shade, tick - 180, 30),
+        210..=249 => Motion {
             point: places.shade,
             facing: Facing::Right,
             activity: Activity::Sleeping,
         },
-        80..=99 => walking(places.shade, places.home, tick - 80, 20),
+        250..=289 => walking(places.shade, places.home, tick - 250, 40),
         _ => unreachable!("lifestyle tick is reduced modulo its cycle"),
     }
 }
@@ -333,12 +339,14 @@ fn lerp(from: i64, to: i64, elapsed: u64, duration: u64) -> i64 {
 
 fn rabbit_sprite(motion: Motion, tick: u64) -> [&'static str; RABBIT_HEIGHT] {
     match motion.activity {
-        Activity::Walking => match (motion.facing, tick.is_multiple_of(2)) {
+        Activity::Walking => match (motion.facing, (tick / 4).is_multiple_of(2)) {
             (Facing::Right, true) => ["", " /)/)  >", "( o.o)/", " /  \\"],
             (Facing::Right, false) => [" /)/) __", "( o.o)/", "  /  >", ""],
-            (Facing::Left, true) => ["", "< (\\(\\", "\\(.o )", " /  \\"],
-            (Facing::Left, false) => ["__(\\(\\", " \\(.o )", " <  \\ ", ""],
+            (Facing::Left, true) => ["", "<(\\(\\", "\\(.o )", " /  \\"],
+            (Facing::Left, false) => ["_(\\(\\", " \\(.o )", " <  \\ ", ""],
         },
+        Activity::Looking if tick / 8 % 3 == 2 => ["", " /)(/", "( o.o)", "c(\")(\")"],
+        Activity::Looking => ["", " /)/)", "( o.o)", "c(\")(\")"],
         Activity::Drinking => ["", " /)/)", "( . .)__", " /   \\~~"],
         Activity::Eating => [" Y", " /)/)", "( o.o)<Y", "c(\")(\")"],
         Activity::Sleeping => [" z", " /)/)", "( -.-)", "c(\")(\")"],
@@ -347,16 +355,38 @@ fn rabbit_sprite(motion: Motion, tick: u64) -> [&'static str; RABBIT_HEIGHT] {
         Activity::Interrupted => [" !", " /)/)", "( -.-)!", "c(\")(\")"],
         Activity::Working => ["", " /)/)", "( o.o)", " / > <"],
         Activity::Celebrating if tick.is_multiple_of(2) => {
-            [" *  . *", "  /)/)", " \\(^o^)/", " c(\")(\")"]
+            [" *  . *", "   /)/)", " \\(^o^)/", " c(\")(\")"]
         }
-        Activity::Celebrating => ["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"],
+        Activity::Celebrating => ["  \\ /", "   /)/)", " \\(^.^)/", " c(\")(\")"],
     }
+}
+
+fn draw_scenery(canvas: &mut Canvas) {
+    draw_pond(
+        canvas,
+        Point {
+            x: coordinate((canvas.width - 16) / 2),
+            y: 1,
+        },
+    );
+    draw_food_bed(canvas, Point { x: 3, y: 1 });
+    let tree_x = coordinate(canvas.width - 10);
+    draw_tree(canvas, Point { x: tree_x, y: 0 });
+    canvas.lines(
+        Point {
+            x: tree_x - 7,
+            y: 1,
+        },
+        [" &&", "&&&&"],
+        GardenTone::Foliage.style(),
+    );
+    canvas.text(tree_x - 6, 3, "|", GardenTone::Earth.style().dim());
 }
 
 fn draw_pond(canvas: &mut Canvas, origin: Point) {
     canvas.lines(
         origin,
-        ["  ~~~~~~~~~~~~~~", " ~  ~~~~~~~~  ~", "  ~~~~~~~~~~~~"],
+        ["    .--------.", " .-~  ~~~~~   `.", "  `---~~~~~---'"],
         GardenTone::Water.style(),
     );
 }
@@ -364,19 +394,23 @@ fn draw_pond(canvas: &mut Canvas, origin: Point) {
 fn draw_food_bed(canvas: &mut Canvas, origin: Point) {
     canvas.lines(
         origin,
-        ["+--------------+", "| Y  v  Y  v   |", "+--------------+"],
+        ["   v    Y   v", " Y   v    Y", "  .  . .   . ."],
         GardenTone::Grass.style(),
     );
 }
 
 fn draw_tree(canvas: &mut Canvas, origin: Point) {
-    canvas.lines(origin, ["  &&&", " &&&&&"], GardenTone::Foliage.style());
+    canvas.lines(
+        origin,
+        ["    &&&", "  &&&&&&&", " &&&  &&&"],
+        GardenTone::Foliage.style(),
+    );
     canvas.lines(
         Point {
             x: origin.x,
-            y: origin.y + 2,
+            y: origin.y + 3,
         },
-        ["   ||", "   ||"],
+        ["   /|"],
         GardenTone::Earth.style().dim(),
     );
 }
@@ -560,16 +594,7 @@ fn render_with_session_homes(
     let home_budget = show_session_homes
         .then(|| (canvas.height / 3).min(canvas.height - SCENERY_HEIGHT - agent_rows));
     draw_meadow(&mut canvas, workspace_name, tick);
-    draw_pond(
-        &mut canvas,
-        Point {
-            x: coordinate((width - 20) / 2),
-            y: 1,
-        },
-    );
-    draw_food_bed(&mut canvas, Point { x: 3, y: 1 });
-    let tree_x = coordinate(canvas.width - 10);
-    draw_tree(&mut canvas, Point { x: tree_x, y: 0 });
+    draw_scenery(&mut canvas);
 
     let (home_areas, home_height) = home_budget.map_or_else(
         || (Vec::new(), 0),
@@ -675,6 +700,20 @@ fn draw_agent(
                 sprite
             };
             canvas.lines(motion.point, sprite, style);
+            if motion.activity == Activity::Celebrating && !overridden {
+                let sparkle = if reduced_motion {
+                    "  . * ."
+                } else {
+                    ["  . * .", " *  . *", "  * .  "]
+                        [usize::try_from(tick / 4 % 3).expect("sparkle phase fits usize")]
+                };
+                canvas.text(
+                    motion.point.x,
+                    motion.point.y,
+                    sparkle,
+                    GardenTone::Flower.style(),
+                );
+            }
             (
                 sprite
                     .iter()

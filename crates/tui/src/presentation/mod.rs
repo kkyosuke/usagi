@@ -812,6 +812,19 @@ fn route_garden_input(
         }
         return Some(GardenInputRoute::Local(Vec::new()));
     }
+    if let Key::Pointer(PointerEvent {
+        kind: PointerKind::Move,
+        column,
+        row,
+    }) = key
+    {
+        return Some(GardenInputRoute::Local(runtime.apply_event(
+            AppEvent::GardenHover {
+                column: *column,
+                row: *row,
+            },
+        )));
+    }
     if runtime.state().overlay() != Some(Overlay::Garden) || !is_user_activity(key) {
         return None;
     }
@@ -904,7 +917,10 @@ fn garden_shell_owned_wake(key: &Key) -> bool {
     // a narrow Garden. Leave it for route_garden_input, just like hit-tested clicks.
     !matches!(
         key,
-        Key::Click { .. }
+        Key::Pointer(PointerEvent {
+            kind: PointerKind::Move,
+            ..
+        }) | Key::Click { .. }
             | Key::Up
             | Key::Down
             | Key::PageUp
@@ -5146,6 +5162,7 @@ fn handle_terminal_pointer(
         }
     };
     match pointer.kind {
+        PointerKind::Move => return true,
         PointerKind::Down => {
             if !runtime.wants_live_input() {
                 return false;

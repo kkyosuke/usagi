@@ -26,6 +26,8 @@ pub struct ViewOptions {
     pub tick: u64,
     pub reduced_motion: bool,
     pub scroll: usize,
+    /// Garden-relative terminal cell; hit testing is repeated against each drawn frame.
+    pub pointer: Option<(u16, u16)>,
 }
 
 /// Geometry and bounded scroll position of the list actually drawn this frame.
@@ -98,6 +100,15 @@ pub fn render(
             sidebar: None,
         });
     }
+    let hovered = options.pointer.and_then(|(column, row)| {
+        frame
+            .hitboxes
+            .iter()
+            .find(|hitbox| {
+                hitbox.agent.is_some() && hitbox.contains(usize::from(column), usize::from(row))
+            })
+            .copied()
+    });
     let column = left_width + 1;
     let panel_width = width - column;
     let content = content_rows(sessions, scope, panel_width);
@@ -122,11 +133,11 @@ pub fn render(
     );
     for row in CONTENT_TOP..height - 1 {
         let item = content.get(scroll + row - CONTENT_TOP);
-        let text = item.map_or("", |item| item.text.as_str());
+        let text = hovered_row_text(item, hovered);
         frame.rows[row] = format!(
             "{}{divider}{}",
             frame.rows[row],
-            pad_to_width(text, panel_width),
+            pad_to_width(&text, panel_width),
         );
         if let Some(target) = item.and_then(|item| item.target) {
             frame.hitboxes.push(GardenHitbox {
@@ -146,7 +157,7 @@ pub fn render(
         pad_to_width(
             &Style::new()
                 .dim()
-                .paint(" Garden Action Center · click a usagi · ↑/↓ list · Esc wake"),
+                .paint(" Garden Action Center · hover/click · ↑/↓ list · Esc wake"),
             left_width
         ),
         Role::Accent.style().paint(&pad_to_width(previous, half)),
@@ -186,8 +197,32 @@ pub fn canonical_tick(
 }
 
 struct ListRow {
+    emphasize_on_hover: bool,
     text: String,
     target: Option<GardenHitbox>,
+}
+
+fn hovered_row_text(
+    item: Option<&ListRow>,
+    hovered: Option<GardenHitbox>,
+) -> std::borrow::Cow<'_, str> {
+    let text = item.map_or("", |item| item.text.as_str());
+    let highlighted = item
+        .filter(|item| item.emphasize_on_hover)
+        .and_then(|item| item.target)
+        .zip(hovered)
+        .filter(|(target, hovered)| {
+            target.session_id == hovered.session_id
+                && (target.agent.is_none() || target.agent == hovered.agent)
+        })
+        // Inner foreground resets must retain the hover underline without
+        // losing the status colours. The outer paint closes it at row end.
+        .map(|_| {
+            Style::new()
+                .underline()
+                .paint(&text.replace("\u{1b}[0m", "\u{1b}[0;4m"))
+        });
+    highlighted.map_or_else(|| std::borrow::Cow::Borrowed(text), std::borrow::Cow::Owned)
 }
 
 fn content_rows(sessions: &[GardenSession], scope: &str, width: usize) -> Vec<ListRow> {
@@ -209,6 +244,7 @@ fn content_rows(sessions: &[GardenSession], scope: &str, width: usize) -> Vec<Li
     for group in groups {
         if !rows.is_empty() {
             rows.push(ListRow {
+                emphasize_on_hover: false,
                 text: String::new(),
                 target: None,
             });
@@ -220,6 +256,7 @@ fn content_rows(sessions: &[GardenSession], scope: &str, width: usize) -> Vec<Li
             .map_or(scope, |(_, name)| name);
         let count = format!("  {}", group.len());
         rows.push(ListRow {
+            emphasize_on_hover: false,
             text: format!(
                 " {} {}{}",
                 GardenTone::Grass.style().paint("▱"),
@@ -237,6 +274,7 @@ fn content_rows(sessions: &[GardenSession], scope: &str, width: usize) -> Vec<Li
     }
     if sessions.is_empty() {
         rows.push(ListRow {
+            emphasize_on_hover: false,
             text: Style::new().dim().paint(" No sessions"),
             target: None,
         });
@@ -269,6 +307,7 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession) {
         (style, "○")
     };
     rows.push(ListRow {
+        emphasize_on_hover: true,
         text: format!(
             "  {} {}",
             style.paint(glyph),
@@ -278,12 +317,14 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession) {
     });
     if !session.sidebar.branch.is_empty() {
         rows.push(ListRow {
+            emphasize_on_hover: false,
             text: format!("    {}", Style::new().dim().paint(&session.sidebar.branch)),
             target: Some(target),
         });
     }
     let summary = session_row_summary(session, agents.len());
     rows.push(ListRow {
+        emphasize_on_hover: false,
         text: format!("    {}", Style::new().dim().paint(&summary)),
         target: Some(target),
     });
@@ -291,6 +332,7 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession) {
         let (style, glyph, status, _) = super::dense_agent_appearance(session, agent);
         let runtime = agent.runtime_id.to_string();
         rows.push(ListRow {
+            emphasize_on_hover: true,
             text: format!(
                 "      {} {}  {}",
                 style.paint(glyph),
@@ -304,6 +346,7 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession) {
         });
     }
     rows.push(ListRow {
+        emphasize_on_hover: false,
         text: String::new(),
         target: None,
     });

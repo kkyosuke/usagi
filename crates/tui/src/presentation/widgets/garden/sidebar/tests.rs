@@ -367,6 +367,7 @@ fn list_uses_attention_order_and_reduced_motion_is_deterministic() {
             tick: 77,
             reduced_motion: true,
             scroll: 0,
+            pointer: None,
         },
     )
     .unwrap();
@@ -415,4 +416,73 @@ fn status_columns_align_and_project_spacing_has_no_click_target() {
         rows.iter()
             .all(|row| crate::presentation::widgets::display_width(&row.text) <= 34)
     );
+}
+
+#[test]
+fn hovering_a_rabbit_underlines_its_session_without_changing_targets_or_status_colours() {
+    let mut values = vec![session(0), session(1)];
+    values[0].agents.push(session(2).agents[0]);
+    for width in [99, 160] {
+        let normal = render(32, width, "repo", &values, ViewOptions::default()).unwrap();
+        let rabbit = normal
+            .hitboxes
+            .iter()
+            .find(|hitbox| hitbox.agent == Some(values[0].agents[0].runtime_id))
+            .unwrap();
+        let hovered = render(
+            32,
+            width,
+            "repo",
+            &values,
+            ViewOptions {
+                pointer: Some((
+                    u16::try_from(rabbit.column).unwrap(),
+                    u16::try_from(rabbit.row).unwrap(),
+                )),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(normal.hitboxes, hovered.hitboxes);
+        assert_eq!(plain(&normal), plain(&hovered));
+        let sidebar = hovered.sidebar.unwrap();
+        for hitbox in hovered
+            .hitboxes
+            .iter()
+            .filter(|hitbox| hitbox.column == sidebar.column)
+        {
+            let expected = hitbox.session_id == values[0].id
+                && (hitbox.agent == rabbit.agent
+                    || strip_ansi(&hovered.rows[hitbox.row]).contains("● session-0"));
+            assert_eq!(hovered.rows[hitbox.row].contains("\u{1b}[4m"), expected);
+        }
+        for row in &hovered.rows {
+            assert_eq!(crate::presentation::widgets::display_width(row), width);
+        }
+        let outside = render(
+            32,
+            width,
+            "repo",
+            &values,
+            ViewOptions {
+                pointer: Some((0, 0)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(normal, outside);
+        let scrolled = render(
+            13,
+            width,
+            "repo",
+            &values,
+            ViewOptions {
+                scroll: usize::MAX,
+                pointer: Some((0, 0)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!scrolled.rows.iter().any(|row| row.contains("\u{1b}[4m")));
+    }
 }
