@@ -54,7 +54,7 @@ fn grouped_list_keeps_project_identity_and_exact_session_agent_targets() {
     assert!(!text.contains('›'), "{text}");
     assert!(!text.contains('╰'), "{text}");
     assert!(!text.contains("││"), "{text}");
-    assert!(text.contains("running  00000001"), "{text}");
+    assert!(text.contains("running      00000001"), "{text}");
     assert!(
         !text.contains("acme-web / session-0"),
         "the meadow must not repeat session labels already shown in the sidebar: {text}"
@@ -283,12 +283,12 @@ fn inactive_empty_and_dispatch_states_are_explicit() {
     value.agent_status = Some(usagi_core::domain::agent::AgentStatus::Idle);
     assert!(
         plain(&render(24, 120, "repo", &[value.clone()], ViewOptions::default()).unwrap())
-            .contains("completed  00000000")
+            .contains("completed    00000000")
     );
     value.agent_status = Some(usagi_core::domain::agent::AgentStatus::Failed);
     assert!(
         plain(&render(24, 120, "repo", &[value], ViewOptions::default()).unwrap())
-            .contains("failed  00000000")
+            .contains("failed       00000000")
     );
     let mut failed = session(0);
     failed.lifecycle = SessionLifecycle::Failed;
@@ -372,6 +372,47 @@ fn list_uses_attention_order_and_reduced_motion_is_deterministic() {
     .unwrap();
     assert_eq!(first, next);
     let text = plain(&first);
-    assert!(text.find("waiting  00000001").unwrap() < text.find("running  00000000").unwrap());
+    assert!(
+        text.find("waiting      00000001").unwrap() < text.find("running      00000000").unwrap()
+    );
     assert!(text.contains("2 agents"));
+}
+
+#[test]
+fn status_columns_align_and_project_spacing_has_no_click_target() {
+    let mut values = vec![session(0), session(1)];
+    let runtime_id = values[1].agents[0].runtime_id;
+    values[0].agents.push(super::super::GardenAgent {
+        runtime_id,
+        phase: AgentPhase::Interrupted,
+    });
+    values[1].sidebar.project.as_mut().unwrap().0 = WorkspaceId::new();
+    let rows = content_rows(&values, "repo", 34);
+    let agent_rows = rows
+        .iter()
+        .filter(|row| row.target.is_some_and(|target| target.agent.is_some()))
+        .collect::<Vec<_>>();
+    let columns = agent_rows
+        .iter()
+        .map(|row| {
+            let id = row.target.unwrap().agent.unwrap().to_string();
+            let text = strip_ansi(&row.text);
+            crate::presentation::widgets::display_width(&text[..text.find(&id[..8]).unwrap()])
+        })
+        .collect::<Vec<_>>();
+    assert!(columns.iter().all(|column| *column == columns[0]));
+    let headers = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| strip_ansi(&row.text).contains("▱"))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let second = headers[1];
+    assert!(rows[second - 1].text.is_empty());
+    assert!(rows[second - 2].text.is_empty());
+    assert!(rows[second - 1].target.is_none());
+    assert!(
+        rows.iter()
+            .all(|row| crate::presentation::widgets::display_width(&row.text) <= 34)
+    );
 }

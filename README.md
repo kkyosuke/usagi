@@ -85,7 +85,7 @@ session 作成直後の環境構築は、開いた workspace の Overview から
 
 次回からは `usagi` を起動し、Open / Recent から workspace を選べます。
 サイドバーでは、委譲して作成した子 session を親の直下にまとめて表示します。
-Session Garden では庭と右側の session 一覧から作業状況を確認し、各 Agent を開けます。
+[Session Garden](document/assets/session-garden.svg) では淡い配色と草花の余白を持つ庭、project ごとに整理した右側の session 一覧から作業状況を確認し、各 Agent を開けます。
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は
 [キーバインド](document/11-keybindings.md) を参照してください。
 

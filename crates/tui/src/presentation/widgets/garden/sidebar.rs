@@ -6,8 +6,8 @@ use std::ops::Deref;
 use usagi_core::domain::{id::WorkspaceId, session_lifecycle::SessionLifecycle};
 
 use super::{GardenFrame, GardenHitbox, GardenSession, agent_status};
-use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::{clip_to_width, pad_to_width};
+use crate::presentation::theme::{GardenTone, Role, Style};
+use crate::presentation::widgets::pad_to_width;
 
 const MIN_PANEL_WIDTH: usize = 34;
 const MAX_PANEL_WIDTH: usize = 48;
@@ -207,6 +207,12 @@ fn content_rows(sessions: &[GardenSession], scope: &str, width: usize) -> Vec<Li
         }
     }
     for group in groups {
+        if !rows.is_empty() {
+            rows.push(ListRow {
+                text: String::new(),
+                target: None,
+            });
+        }
         let project = group[0]
             .sidebar
             .project
@@ -216,8 +222,8 @@ fn content_rows(sessions: &[GardenSession], scope: &str, width: usize) -> Vec<Li
         rows.push(ListRow {
             text: format!(
                 " {} {}{}",
-                Role::Warning.style().paint("▱"),
-                Style::new().bold().paint(&clip_to_width(
+                GardenTone::Grass.style().paint("▱"),
+                GardenTone::Grass.style().paint(&pad_to_width(
                     project,
                     width.saturating_sub(4 + count.len())
                 )),
@@ -288,7 +294,7 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession) {
             text: format!(
                 "      {} {}  {}",
                 style.paint(glyph),
-                style.paint(status),
+                style.paint(&pad_to_width(status, 11)),
                 Style::new().dim().paint(&runtime[..8]),
             ),
             target: Some(GardenHitbox {
