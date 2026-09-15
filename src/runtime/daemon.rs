@@ -24072,6 +24072,133 @@ instructions = "{instructions}"
             assert_eq!(recovered.run.unwrap().id, operation);
         }
 
+        /// The refusal reported from the pane: an Agent the person opened
+        /// themselves already owns the session, so no start can be launched
+        /// until they stop it. Resending cannot change that, so the admission
+        /// is undone rather than left holding the session.
+        /// A start that names a backlog issue, and the finish that ends it.
+        /// Both are ordinary session commands: neither reaches the daemon only
+        /// through the MCP tool, so both are held here rather than resting on
+        /// the shipping-binary E2E.
+        #[test]
+        fn an_issue_backed_start_is_archived_with_its_reference_when_it_finishes() {
+            let fixture = Fixture::new();
+            let root = fixture
+                .bound
+                .sessions()
+                .lock()
+                .unwrap()
+                .repository_root()
+                .to_path_buf();
+            let issues = root.join(".usagi/issues");
+            std::fs::create_dir_all(&issues).unwrap();
+            std::fs::write(
+                issues.join("742-close-the-loop.md"),
+                "---\nnumber: 742\ntitle: fix(daemon): close the loop\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-09-12T00:00:00+00:00\nupdated_at: 2026-09-12T00:00:00+00:00\n---\n\nreproduce and fix\n",
+            )
+            .unwrap();
+            let goal = workflow::issue_goal(&fixture.bound, 742).unwrap();
+            let operation = usagi_core::domain::id::OperationId::new();
+            let started = workflow::control_workflow(
+                &fixture.agent,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                operation,
+                WorkflowCommand::Start {
+                    goal,
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                },
+                Some(742),
+            )
+            .unwrap();
+            assert_eq!(started.run.unwrap().id, operation);
+            // Finishing changes the stored record and nothing else: the run
+            // leaves the live slot for the bounded archive, still carrying the
+            // issue it was started to implement.
+            let ended = workflow::control_workflow(
+                &fixture.agent,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                usagi_core::domain::id::OperationId::new(),
+                WorkflowCommand::Finish,
+                None,
+            )
+            .unwrap();
+            assert!(ended.run.is_none());
+            assert_eq!(ended.finished.len(), 1);
+            assert_eq!(ended.finished[0].id, operation);
+            assert_eq!(ended.finished[0].issue, Some(742));
+        }
+
+        #[test]
+        fn a_start_refused_outright_leaves_the_session_free_of_the_intent() {
+            let fixture = Fixture::new();
+            fixture
+                .agent
+                .lock()
+                .unwrap()
+                .launch(
+                    &usagi_core::domain::id::OperationId::new().to_string(),
+                    &usagi_core::infrastructure::client::AgentLaunchIntent {
+                        workspace: fixture.workspace,
+                        session: Some(fixture.session),
+                        profile: Some(AgentProfileId::new("claude").unwrap()),
+                    },
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+            let refused = fixture
+                .control(
+                    usagi_core::domain::id::OperationId::new(),
+                    WorkflowCommand::Start {
+                        goal: "start anyway".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(refused.code, ErrorCode::Busy);
+            assert_eq!(
+                refused.retry_mode,
+                usagi_core::infrastructure::ipc::RetryMode::Never
+            );
+            // Nothing is left holding the session: no pending start for the
+            // pane to keep retrying, no run, and the bounded archive did not
+            // spend one of its slots on a start that never launched.
+            let after = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap();
+            assert!(after.pending_start.is_none());
+            assert!(after.run.is_none());
+            assert!(after.finished.is_empty());
+            // This is the wedge itself: the record left behind used to refuse
+            // the next start as "session already has another workflow", hiding
+            // the one reason the person could act on. It stays the honest one,
+            // and that refusal is undone in turn.
+            let again = fixture
+                .control(
+                    usagi_core::domain::id::OperationId::new(),
+                    WorkflowCommand::Start {
+                        goal: "start anyway".into(),
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(again.code, ErrorCode::Busy);
+            let after = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap();
+            assert!(after.pending_start.is_none());
+            assert!(after.finished.is_empty());
+        }
+
         struct VerificationGit(String);
         impl usagi_core::infrastructure::git::GitRunner for VerificationGit {
             fn run(
