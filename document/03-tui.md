@@ -660,7 +660,8 @@ stable tab identity で選び、`Enter` は選択 Conversation の root Agent Co
 Organization、Work Run progress、追加の command editor は混ぜない。
 
 drawer の開閉状態にかかわらず `Ctrl-O n`（または `Ctrl-O Ctrl-N`）、または `[ New ]` / `[ Start ]` の mouse-down hit で
-classic の `New Conversation` または goal-driven の `Start Work Run` を開く。合成ルートから注入された install 済み CLI だけを
+classic の `New Conversation` または goal-driven の `Start Work Run` を開く。合成ルートから注入された起動できる CLI
+（[正本](#closeup-の-agent-cli-選択)）だけを
 `claude`、`codex`、`sakana.ai`、`agy` の順で picker に表示する。
 設定済み default が候補ならそこを、なければ先頭候補を highlight するが、自動確定はしない。`↑↓` は循環選択し、
 `Enter` は選択した CLI の explicit profile を確定する。`Esc` は保存済み Director route / selection と drawer open
@@ -697,7 +698,7 @@ conversation だけで、managed Closeup の tab count・identity・selection �
 ### goal-driven workflow
 
 実効 Workspace 設定の Workflow が `goal-driven` の場合、Start Work Run は CLI だけの picker ではなく Goal Composer を開く。
-Composer は必須の `Goal` と install 済み provider の選択を同じ drawer に表示し、通常文字、Backspace、bracketed paste を
+Composer は必須の `Goal` と起動できる provider の選択を同じ drawer に表示し、通常文字、Backspace、bracketed paste を
 Goal が所有する。paste 内の改行・tabを含む区切り whitespace は単一 field の可視 space へ正規化し、その他の terminal control と bidi control は
 保存しない。`↑` / `↓` は provider だけを循環し、`Esc` は draft を破棄して開始前の exact Director route へ戻る。空または空白だけの
 Goal、または選択中 provider を描けない高さは launch を発行せず、footer に `Terminal too short to choose provider` を出す。
@@ -2142,9 +2143,12 @@ Ctrl-S は背景の定期取得を待たない。送信を止めるのは配送�
 入力下書きは session ごとに保持し、配送中に追記した内容は先行する送信の完了で消さない。
 Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Agent 出力は各 Agent タブで確認する。
 
-担当候補は Claude、Codex、Sakana AI、Gemini（`agy`）である。初回は計画・実行が Codex、レビューが Claude。
-開始できた担当の組合せをワークスペース単位で保存し、次の session や再起動後の初期候補に使う。
-開始後と結果未確定の再試行中は担当を変更しない。
+担当候補は Claude、Codex、Sakana AI、Gemini（`agy`）のうち、この環境で起動できるものだけである
+（判定は [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)が正本）。初回は計画・実行が Codex、レビューが Claude
+だが、その provider を起動できない環境では起動できる provider へ置き換えて表示・送信する。候補が 0 件なら担当は変更できない。
+開始できた担当の組合せをワークスペース単位で保存し、次の session や再起動後の初期候補に使う。保存された組合せが
+起動できない provider を含む場合も同じ置き換えを行うため、開始前の担当欄が起動できない provider を示すことはない。
+開始後と結果未確定の再試行中は担当を変更せず、実行中の run は開始した組合せをそのまま表示する。
 
 開始は daemon に依頼し、選択した実行者の実行環境・認証の確認を経て起動する。既に別の Agent が
 動いている session では開始を拒否し、既存 Agent を勝手に使い回さない。
@@ -2208,10 +2212,21 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
 | `agent -m sakana.ai` | sakana.ai（Fugu。実行は `claude` を Sakana の endpoint に向けたもの） | `sakana-ai` |
 | `agent -m agy` | Google Antigravity CLI | `agy` |
 
-- **候補は install 済みの CLI だけ**である。合成ルートは起動時に provider CLI を実行せず PATH lookup だけで
-  `AvailableModels` snapshot を一度作り、process lifetime を通して Config、Closeup、Director に同じ値を注入する。Action menu の
-  展開行・Tab 補完・submit 時の検証はすべて同じ集合を使う。install されていない CLI は表示・補完せず、直接入力しても
+- **候補は起動できる CLI だけ**である。合成ルートは起動時に provider CLI を実行せず、PATH lookup と
+  global 設定の環境 binding 名だけで `AvailableModels` snapshot を一度作り、process lifetime を通して
+  Config、Closeup、Director、[Session Workflow タブ](#session-workflow-タブ)の担当欄に同じ値を注入する。Action menu の
+  展開行・Tab 補完・submit 時の検証はすべて同じ集合を使う。候補にならない CLI は表示・補完せず、直接入力しても
   `that agent CLI is not installed` として拒否する（daemon へ request を送らない）。
+  - 候補の条件は 2 つある。**executable が PATH 上にあること**と、**provider が要求する credential が global 設定に
+    bind されていること**である。後者は provider が executable を共有しうるために必要である: `sakana.ai` は
+    `claude` を Sakana の endpoint へ向けたものなので、PATH だけを見ると Claude Code が入っている全ての環境で
+    install 済みに見え、`SAKANA_API_KEY` が無いまま候補に並んで daemon の
+    [readiness preflight](05-daemon.md#agent-cli-の-readiness-preflight)に拒否される。判定に使うのは binding の
+    **名前**だけで、値（`op://` 参照を含む）は launch まで解決しない。
+  - snapshot は process lifetime を通して固定である。CLI の install や credential の設定（Config の環境
+    binding を含む）を反映するには TUI を起動し直す。候補外の CLI を直接入力したときの拒否文言は
+    `that agent CLI is not installed` の 1 種類で、install されていないのか credential が未設定なのかを
+    区別しない。
 - **default は config の `default_model`** である。Action menu の展開行は default の行に `(default)` を付ける。
   default の CLI が install されていない場合は `the configured agent CLI is not installed` として拒否する。
 - daemon が CLI の未認証・readiness 不成立などで起動を拒否した場合は、daemon が返した安全な復旧理由を error modal に

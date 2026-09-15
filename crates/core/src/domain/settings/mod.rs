@@ -343,8 +343,10 @@ impl DefaultModel {
         }
     }
 
-    /// The executable whose availability decides whether this provider can be
-    /// selected. It is deliberately distinct from
+    /// The executable this provider runs. Its presence on `PATH` is one of the
+    /// two conditions for offering the provider (the other is the credential of
+    /// [`credential_binding`](Self::credential_binding); see
+    /// [`AvailableModels`]). It is deliberately distinct from
     /// [`profile_id`](Self::profile_id), and it is **not unique**: `sakana-ai`
     /// serves Fugu models through the same Claude CLI, pointed at Sakana's
     /// Anthropic-compatible endpoint by [`gateway_environment`](Self::gateway_environment).
@@ -546,12 +548,17 @@ impl DefaultModel {
     }
 }
 
-/// The model providers whose CLI is installed on this machine.
+/// The model providers this machine can actually launch.
 ///
-/// Availability is observed by the composition root as one PATH lookup snapshot
-/// (without executing provider CLIs) and injected, so every surface that offers
-/// a provider — the Config screen and the Closeup `agent -m` picker and
-/// completion — offers exactly the providers that can actually run.
+/// Availability is observed by the composition root as one snapshot (without
+/// executing provider CLIs) and injected, so every surface that offers a
+/// provider — the Config screen, the Closeup `agent -m` picker and completion,
+/// the Director launch picker, and the Session Workflow tab's participants —
+/// offers exactly the same set. A provider qualifies when its
+/// [`command`](DefaultModel::command) is on `PATH` **and** the credential it
+/// declares through [`credential_binding`](DefaultModel::credential_binding) is
+/// configured; `usagi_core::infrastructure::runtime_model::observe_available_models`
+/// is the one place that decides it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 // Closed provider availability flags remain a small Copy value with stable Debug output.
 #[allow(clippy::struct_excessive_bools)]
