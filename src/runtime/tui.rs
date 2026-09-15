@@ -4868,14 +4868,14 @@ fn launch_screen_graph(
     notice: Option<String>,
 ) -> std::io::Result<()> {
     let now = Utc::now();
-    let mut settings = PersistentSettingsPort::open()?;
-    // Capture once before raw mode and retain it across Config reopens and
-    // workspace leave/entry transitions for this process.
-    let available_models = available_agent_models(&mut settings);
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let storage = Storage::open_default().map_err(io_error)?;
         let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
         let mut loader = FsWorkspaceLoader::new(storage);
+        let mut settings = PersistentSettingsPort::open()?;
+        // Capture once before raw mode and retain it across Config reopens and
+        // workspace leave/entry transitions for this process.
+        let available_models = available_agent_models(&mut settings);
         let mut backend_factory = ProductionBackendFactory::default();
         let mut splash = presentation::StartupSplash::new();
         run_in_terminal(|terminal| {
@@ -4912,11 +4912,17 @@ fn launch_screen_graph(
                     now,
                 )
             }
-            Start::Config => config::render(
-                0,
-                0,
-                &Config::load_with_available_models(&mut settings, available_models),
-            ),
+            Start::Config => {
+                // Only this frame needs settings, so a Welcome printed to a
+                // pipe keeps working without preparing the private data dir.
+                let mut settings = PersistentSettingsPort::open()?;
+                let available_models = available_agent_models(&mut settings);
+                config::render(
+                    0,
+                    0,
+                    &Config::load_with_available_models(&mut settings, available_models),
+                )
+            }
         };
         for line in frame {
             writeln!(out, "{line}")?;
@@ -5049,10 +5055,10 @@ impl BrowserOpener for PlatformBrowserOpener {
 
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=direct_workspace_production_composition_contract
 fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
+    let mut loader = FsWorkspaceLoader::open_default()?;
     let mut settings = PersistentSettingsPort::open()?;
     // Direct entry and its later Welcome graph share one immutable snapshot.
     let available_models = available_agent_models(&mut settings);
-    let mut loader = FsWorkspaceLoader::open_default()?;
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     if interactive {
         let mut backend_factory = ProductionBackendFactory::default();

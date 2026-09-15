@@ -131,8 +131,10 @@ impl WorkflowPanel {
     ///
     /// A started run — or a start already submitted — keeps what it was started
     /// with: the pane then reports what is running, not what could be picked.
+    /// The guard matches [`cycle_agent`](Self::cycle_agent) rather than relying
+    /// on every submitting panel also holding its `pending` command.
     pub fn restrict_agents(&mut self, available: AvailableModels) {
-        if self.run.is_some() || self.pending.is_some() {
+        if self.run.is_some() || self.pending.is_some() || self.submitting {
             return;
         }
         self.agents = self.agents.restricted_to(available);
@@ -255,6 +257,10 @@ mod tests {
         assert_eq!(panel.agents, started);
         panel.run = None;
         panel.pending = Some((OperationId::new(), WorkflowCommand::Finish));
+        panel.restrict_agents(claude_only);
+        assert_eq!(panel.agents, started);
+        panel.pending = None;
+        panel.submitting = true;
         panel.restrict_agents(claude_only);
         assert_eq!(panel.agents, started);
     }
