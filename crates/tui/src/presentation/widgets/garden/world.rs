@@ -10,6 +10,7 @@ use super::{
     clip_to_width, dense_agent_appearance, display_width, footer_line, garden_rabbit_style,
     header_line, pad_to_width, stable_hash,
 };
+use crate::presentation::theme::GardenTone;
 use unicode_width::UnicodeWidthChar;
 
 const SCENERY_HEIGHT: usize = 4;
@@ -356,7 +357,7 @@ fn draw_pond(canvas: &mut Canvas, origin: Point) {
     canvas.lines(
         origin,
         ["  ~~~~~~~~~~~~~~", " ~  ~~~~~~~~  ~", "  ~~~~~~~~~~~~"],
-        Role::Info.style(),
+        GardenTone::Water.style(),
     );
 }
 
@@ -364,15 +365,19 @@ fn draw_food_bed(canvas: &mut Canvas, origin: Point) {
     canvas.lines(
         origin,
         ["+--------------+", "| Y  v  Y  v   |", "+--------------+"],
-        Role::Success.style().dim(),
+        GardenTone::Grass.style(),
     );
 }
 
 fn draw_tree(canvas: &mut Canvas, origin: Point) {
+    canvas.lines(origin, ["  &&&", " &&&&&"], GardenTone::Foliage.style());
     canvas.lines(
-        origin,
-        ["  &&&", " &&&&&", "   ||", "   ||"],
-        Role::Success.style().dim(),
+        Point {
+            x: origin.x,
+            y: origin.y + 2,
+        },
+        ["   ||", "   ||"],
+        GardenTone::Earth.style().dim(),
     );
 }
 
@@ -836,26 +841,38 @@ fn home_status(session: &GardenSession) -> (String, Style) {
 fn draw_meadow(canvas: &mut Canvas, workspace_name: &str, tick: u64) {
     let seed = stable_hash(workspace_name);
     let phase = usize::try_from(tick / 4 % 6).expect("ambient phase fits usize");
-    for x in 0..canvas.width {
-        for y in 0..canvas.height {
-            let mixed = seed
-                ^ u64::try_from(x)
-                    .expect("x fits u64")
-                    .wrapping_mul(0x9e37_79b9)
-                ^ u64::try_from(y).expect("y fits u64").rotate_left(17);
-            if mixed.is_multiple_of(97) {
+    // Sparse three-cell tufts leave open ground between planting pockets.
+    // Keep roots fixed across animation frames and redraw behind every target.
+    for y in (SCENERY_HEIGHT..canvas.height).step_by(3) {
+        for pocket in 0..canvas.width.div_ceil(18) {
+            let mixed = seed.wrapping_add(
+                u64::try_from(pocket)
+                    .expect("pocket fits u64")
+                    .wrapping_mul(0x9e37_79b9),
+            ) ^ u64::try_from(y).expect("y fits u64").rotate_left(17);
+            let mixed = mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            let mixed = mixed ^ (mixed >> 31);
+            if !mixed.is_multiple_of(3) {
+                continue;
+            }
+            let x = pocket * 18 + usize::try_from(mixed % 12).expect("offset fits usize");
+            for (offset, glyph) in ['v', ' ', ['v', '\\', '|', '/'][(phase + pocket) % 4]]
+                .into_iter()
+                .enumerate()
+            {
                 canvas.put_if_empty(
-                    coordinate(x),
+                    coordinate(x + offset),
                     coordinate(y),
-                    super::TWINKLE[(phase + x + y) % 6],
-                    Style::new().dim(),
+                    glyph,
+                    GardenTone::Grass.style(),
                 );
-            } else if mixed.is_multiple_of(53) {
+            }
+            if mixed.is_multiple_of(5) {
                 canvas.put_if_empty(
-                    coordinate(x),
-                    coordinate(y),
-                    ['v', '\\', '|', '/'][(phase + x) % 4],
-                    Role::Success.style().dim(),
+                    coordinate(x + 1),
+                    coordinate(y.saturating_sub(1)),
+                    '.',
+                    GardenTone::Flower.style(),
                 );
             }
         }

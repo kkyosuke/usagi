@@ -17,8 +17,8 @@ const INFO_256: u8 = 75;
 /// `feature` 役割（マスコット）の ANSI-256 インデックス。うさぎを表すはっきりしたピンク
 /// （`#ff87af` 相当）。16 色の magenta より柔らかく、ピンクとして読める。
 const FEATURE_PINK_256: u8 = 211;
-/// Garden のうさぎに使う、暗い背景でも区別しやすい pastel palette。
-const GARDEN_RABBIT_256: [u8; 5] = [211, 117, 150, 222, 183];
+/// Garden のうさぎに使う、クリームを中心にした、明るさを揃えた pastel palette。
+const GARDEN_RABBIT_256: [u8; 5] = [230, 223, 224, 189, 195];
 const GARDEN_RABBIT_VARIANTS: u64 = 5;
 /// Editable textarea surfaces use a quiet dark background distinct from the modal body.
 const EDITOR_SURFACE_256: u8 = 236;
@@ -185,6 +185,36 @@ pub fn editor_surface_style() -> Style {
 pub fn garden_rabbit_style(variant: u64) -> Style {
     let index = usize::from(u8::try_from(variant % GARDEN_RABBIT_VARIANTS).unwrap_or_default());
     Style::new().fg(Color::Ansi256(GARDEN_RABBIT_256[index]))
+}
+
+/// Garden の景観専用色。状態表示の success / warning / danger と分離する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GardenTone {
+    /// 草、餌場、project 見出しの落ち着いたセージ。
+    Grass,
+    /// 奥の木立。
+    Foliage,
+    /// 池の淡い青。
+    Water,
+    /// 土と木の幹。
+    Earth,
+    /// 小さな草花。
+    Flower,
+}
+
+impl GardenTone {
+    /// 端末の背景色を保った景観スタイル。
+    #[must_use]
+    pub fn style(self) -> Style {
+        let index = match self {
+            Self::Grass => 108,
+            Self::Foliage => 65,
+            Self::Water => 110,
+            Self::Earth => 137,
+            Self::Flower => 180,
+        };
+        Style::new().fg(Color::Ansi256(index))
+    }
 }
 
 /// ANSI パレット上に写した意味的な色役割。UI は役割で色を要求し、[`Role::color`] /

@@ -1214,9 +1214,10 @@ terminal output、provider-native ID を受け取らない。
 
 ### 右の session 一覧
 
-project 見出しに session 件数を添え、各 session の状態記号・表示名・managed branch・Agent 件数を並べる。
+project 見出しの右端に session 件数を揃え、project 間は session 間より広い余白で区切る。
+各 session の状態記号・太字の表示名・淡い managed branch・Agent 件数を並べる。
 branch は canonical session name から得た `usagi/<name>` で、変更可能な表示名や project 名から推測しない。
-Agent は注目順に 1 runtime 1 行で表示し、状態の文言と短い runtime ID を添える。未観測の project は lifecycle が
+Agent は注目順に 1 runtime 1 行で表示し、状態の文言と短い runtime ID を固定の列に揃える。未観測の project は lifecycle が
 `Available` なら `project inactive`、遷移中または失敗済みなら `cached · creating` / `cached · deleting` /
 `cached · failed` と表示する。Home 側の選択状態は Garden の一覧に表示しない。
 
@@ -1276,7 +1277,7 @@ session 選択状態は Garden に投影せず、右の一覧が無い庭の立�
 
 compact 詳細区画の `Running` は hop・bound・sniff・dig・look の 5 動作を繰り返す。各 runtime の stable `AgentRuntimeId` から
 動作順と開始位置をずらすため、同じ phase のうさぎも一斉に同じ動きをしない。うさぎ本体の色は ID から 5 色の palette の
-1 色を選び、同じ ID・tick・size なら同じ色と pose になって refresh で見た目が飛ばない。compact の dense 表示ではうさぎを静止させ、
+1 色（クリーム・ピーチ・淡いピンク・ラベンダー・アイスブルー）を選び、同じ ID・tick・size なら同じ色と pose になって refresh で見た目が飛ばない。compact の dense 表示ではうさぎを静止させ、
 背景だけをゆっくり動かして大量の Agent がいる画面のちらつきを抑える。
 `Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
 土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は相対時刻ラベルの分単位の壁時計から
@@ -1286,8 +1287,10 @@ key に入れないため、通常 Home は Garden のために毎秒再構築�
 composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
 うさぎ・空・草の全 pose を静止姿勢に固定する。
 
-背景は workspace 名から決定的に配置した `.` / `*` の空と草で構成する。共通の庭は以前の池・餌場・木の
-イラストを使い、右の一覧が無い場合だけ巣穴も描く。compact 詳細区画は草地・薄い土の 2 層を使う。
+背景は端末の背景色を保ち、workspace 名から決定的に配置した `.` / `*` の空と、余白を挟んだ小さな草花の群れで構成する。
+共通の庭は淡い青の池、セージの餌場と草、奥の落ち着いた木立、土色の幹を使う。
+草花はうさぎの背面に描き、クリック範囲を持たない。右の一覧が無い場合だけ巣穴も描く。
+compact 詳細区画も同じ草色・土色の 2 層を使う。景観の装飾色は状態表示の色と分離する。
 星は同じ cell で明滅し、草は同じ根元で小さく向きを変えるため、Agent の稼働状態を偽らず背景だけに ambient motion を足す。
 うさぎの各行は pose 全体で耳と顔の中心軸を揃え、左向き・右向き・各 lifecycle を切り替えても耳だけ横へずれない。
 詳細区画は `Ready` に足元の草、`Done` に `z`、`Failed` に枯れ草を小さく添える。通常動作は action caption を
