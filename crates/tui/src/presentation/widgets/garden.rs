@@ -1390,7 +1390,7 @@ fn agent_appearance(
             let rabbit = if reduced_motion {
                 ["", " /)/)", "( o.o)", "c(\")(\")"]
             } else {
-                let (action, progress) = running_action(tick, stable_id);
+                let (action, progress) = running_action(tick / 3, stable_id);
                 running_pose(action, progress)
             };
             ("running", Role::Success.style().bold(), feature, rabbit)
@@ -1609,7 +1609,7 @@ mod tests {
         let text = plain(&frame).join("\n");
         assert!(text.contains("click a usagi"));
         assert!(text.contains("world"));
-        assert!(text.contains("~~~~~~~~"));
+        assert!(text.contains("~~~~~"));
         assert!(text.contains("&&&"));
         assert!(!text.contains("scroll"));
     }
@@ -2232,8 +2232,13 @@ mod tests {
     fn running_motion_changes_pose_while_reduced_motion_stays_still() {
         let sessions = fixtures();
         let moving_a = render(24, 100, "x", &sessions, 0, false).expect("fits");
-        let moving_b = render(24, 100, "x", &sessions, 1, false).expect("fits");
+        let moving_b = render(24, 100, "x", &sessions, 3, false).expect("fits");
         assert_ne!(moving_a.rows, moving_b.rows);
+
+        let pose = |tick| super::agent_appearance(AgentPhase::Running, tick, false, STEADY_ID).3;
+        assert_eq!(pose(0), pose(1));
+        assert_eq!(pose(0), pose(2));
+        assert!((3..75).any(|tick| pose(tick) != pose(0)));
 
         let still_a = render(24, 100, "x", &sessions, 0, true).expect("fits");
         let still_b = render(24, 100, "x", &sessions, 5, true).expect("fits");

@@ -15846,6 +15846,24 @@ fn pointer_classifier_covers_inert_scroll_drag_and_click_boundaries() {
     let mut controls = LiveTerminalControls::default();
     let mut term = FakeTerminal::default();
     let mut browser = UnavailableBrowserOpener;
+    assert!(handle_terminal_pointer(
+        &ui,
+        &runtime,
+        &mut controls,
+        &mut term,
+        &mut browser,
+        20,
+        80,
+        1,
+        0,
+        PointerEvent {
+            kind: PointerKind::Move,
+            column: 40,
+            row: 5
+        },
+    ));
+    assert!(!controls.has_selection());
+    assert!(!controls.is_dragging());
     let inactive = WorkspaceRuntime::new(workspace, vec![session]);
     assert!(!forward_live_terminal_input(
         &mut ui,
@@ -23414,4 +23432,38 @@ fn welcome_starts_correctly_after_an_interrupted_splash() {
     assert!(welcome.contains("Menu"), "{welcome}");
     assert!(welcome.contains("first"), "{welcome}");
     assert_eq!(loader.opened, vec![PathBuf::from("/tmp/first")]);
+}
+
+#[test]
+fn garden_hover_never_wakes_activates_or_leaks_to_the_covered_terminal() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let key = Key::Pointer(PointerEvent {
+        kind: PointerKind::Move,
+        column: 10,
+        row: 8,
+    });
+    let mut gesture = false;
+    assert!(!garden_shell_owned_wake(&key));
+    assert_eq!(
+        route_garden_input(&mut ui, &mut runtime, None, &key, &mut gesture),
+        Some(GardenInputRoute::Local(Vec::new()))
+    );
+    assert_eq!(runtime.state().garden_pointer(), None);
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenGarden));
+    let active = runtime.state().active();
+    assert_eq!(
+        route_garden_input(&mut ui, &mut runtime, None, &key, &mut gesture),
+        Some(GardenInputRoute::Local(Vec::new()))
+    );
+    assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+    assert_eq!(runtime.state().garden_pointer(), Some((10, 8)));
+    assert_eq!(runtime.state().active(), active);
+    assert!(!gesture);
+    let _ = runtime.apply_event(AppEvent::GardenClick(GardenClick::Dismiss));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenGarden));
+    assert_eq!(runtime.state().garden_pointer(), None);
 }

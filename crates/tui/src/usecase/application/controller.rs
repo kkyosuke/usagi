@@ -1209,6 +1209,7 @@ pub struct AppState {
     /// reducer uses it to admit both automatic and manual opening consistently.
     garden_available: bool,
     garden_sidebar_scroll: usize,
+    garden_pointer: Option<(u16, u16)>,
     /// Last session press eligible to become the first half of a double click.
     /// The controller owns this stable identity after hit-testing; the shell
     /// supplies only coordinates and a monotonic timestamp.
@@ -1421,6 +1422,7 @@ impl AppState {
             size: None,
             garden_available: true,
             garden_sidebar_scroll: 0,
+            garden_pointer: None,
             pending_session_click: None,
             has_live_pane: false,
             has_pane_tab: false,
@@ -1439,6 +1441,12 @@ impl AppState {
     pub const fn route(&self) -> Route {
         self.route
     }
+    /// The pointer is display-only; stable click targets still come from the drawn frame.
+    #[must_use]
+    pub const fn garden_pointer(&self) -> Option<(u16, u16)> {
+        self.garden_pointer
+    }
+
     /// Requested scroll offset in the Garden session list.
     #[must_use]
     pub const fn garden_sidebar_scroll(&self) -> usize {
@@ -2392,6 +2400,8 @@ pub enum AppEvent {
     /// terminal capacity, so CJK labels and resize cannot
     /// move a rabbit away from the session it draws.
     GardenClick(GardenClick),
+    /// Passive motion over the Garden, without activating a session.
+    GardenHover { column: u16, row: u16 },
     /// Focus one stable session row without activating its Closeup. The process
     /// deck uses this when returning to a workspace whose controller was torn
     /// down during a project switch.
@@ -3170,6 +3180,12 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
         AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
         AppEvent::GardenClick(click) => update_garden_click(state, click),
+        AppEvent::GardenHover { column, row } => {
+            if state.overlay == Some(Overlay::Garden) {
+                state.garden_pointer = Some((column, row));
+            }
+            Vec::new()
+        }
         AppEvent::FocusSession(session) => focus_session(state, session),
         AppEvent::VisitSession(session) => visit_session(state, session),
         AppEvent::GardenUnavailable => {
@@ -4843,6 +4859,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             Vec::new()
         }
         AppKey::OpenGarden => {
+            state.garden_pointer = None;
             state.overlay = Some(Overlay::Garden);
             state.notice = None;
             Vec::new()
@@ -5418,6 +5435,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         Ok(overview::Command::Garden { arguments }) => {
             if arguments.trim().is_empty() {
                 if state.garden_available {
+                    state.garden_pointer = None;
                     state.overlay = Some(Overlay::Garden);
                     state.notice = None;
                 } else {
@@ -5865,6 +5883,7 @@ fn update_pointer(
 /// stays a pure comparison and needs no clock to test.
 fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect> {
     if elapsed >= GARDEN_IDLE_THRESHOLD && garden_may_auto_open(state) {
+        state.garden_pointer = None;
         state.overlay = Some(Overlay::Garden);
     }
     Vec::new()

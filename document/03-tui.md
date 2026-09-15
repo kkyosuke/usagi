@@ -1195,7 +1195,9 @@ inactive project の pending decision は resident controller がなく観測し
 池・餌場・木を持つ共通の庭を表示する。この共通の庭では session 名と状態を右の一覧だけに置き、
 庭の下側には重複する巣穴や立札を描かず、
 その領域もうさぎの移動に使う。
-うさぎは画面内の互いに重ならない範囲で歩行・飲水・食事・休息を繰り返す。端末寸法と総 Agent 数から歩ける範囲を
+うさぎは画面内の互いに重ならない範囲で歩行・飲水・食事・休息を繰り返す。
+周期の半分以上は立ち止まり、周囲を見る間に耳を小さく動かす。歩行の姿勢も数 frame 保持してゆったり切り替える。
+端末寸法と総 Agent 数から歩ける範囲を
 均等に割り当て、全羽が収まる最大の姿（従来の 4 行のうさぎ、2 行の小さなうさぎ、2 桁の `兎`）を選ぶ。
 Agent が増えても池・餌場・木を残す。session 内の羽数による上限は設けない。
 
@@ -1220,6 +1222,11 @@ branch は canonical session name から得た `usagi/<name>` で、変更可能
 Agent は注目順に 1 runtime 1 行で表示し、状態の文言と短い runtime ID を固定の列に揃える。未観測の project は lifecycle が
 `Available` なら `project inactive`、遷移中または失敗済みなら `cached · creating` / `cached · deleting` /
 `cached · failed` と表示する。Home 側の選択状態は Garden の一覧に表示しない。
+
+庭のうさぎへマウスを重ねると、右一覧の同じ session 名と該当 Agent 行に状態色を保った下線を付ける。
+判定は毎 frame のうさぎのクリック範囲を使い、うさぎが移動してポインターから離れると下線も外れる。
+マウス移動は Garden を閉じず、session の選択や背面の端末入力・テキスト選択を発生させない。
+Garden を開き直すと前回の hover は消える。右一覧がない小さい端末では下線を表示しない。
 
 | 操作 | 動作 |
 |---|---|
@@ -1275,7 +1282,7 @@ controller が runtime の `Ended` / `Exited` を観測した runtime（tab は�
 session 選択状態は Garden に投影せず、右の一覧が無い庭の立札もすべて同じ dim で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
-compact 詳細区画の `Running` は hop・bound・sniff・dig・look の 5 動作を繰り返す。各 runtime の stable `AgentRuntimeId` から
+compact 詳細区画の `Running` は hop・bound・sniff・dig・look の 5 動作を繰り返し、各姿勢を 3 frame 保持する。各 runtime の stable `AgentRuntimeId` から
 動作順と開始位置をずらすため、同じ phase のうさぎも一斉に同じ動きをしない。うさぎ本体の色は ID から 5 色の palette の
 1 色（クリーム・ピーチ・淡いピンク・ラベンダー・アイスブルー）を選び、同じ ID・tick・size なら同じ色と pose になって refresh で見た目が飛ばない。compact の dense 表示ではうさぎを静止させ、
 背景だけをゆっくり動かして大量の Agent がいる画面のちらつきを抑える。
@@ -1288,10 +1295,13 @@ composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を
 うさぎ・空・草の全 pose を静止姿勢に固定する。
 
 背景は端末の背景色を保ち、workspace 名から決定的に配置した `.` / `*` の空と、余白を挟んだ小さな草花の群れで構成する。
-共通の庭は淡い青の池、セージの餌場と草、奥の落ち着いた木立、土色の幹を使う。
+共通の庭は丸みのある淡い青の池、苗をずらして植えたセージの小さな畑、高さと枝ぶりの異なる木立、土色の幹を使う。
 草花はうさぎの背面に描き、クリック範囲を持たない。右の一覧が無い場合だけ巣穴も描く。
 compact 詳細区画も同じ草色・土色の 2 層を使う。景観の装飾色は状態表示の色と分離する。
 星は同じ cell で明滅し、草は同じ根元で小さく向きを変えるため、Agent の稼働状態を偽らず背景だけに ambient motion を足す。
+PR が未マージからマージ済みに変わったことを観測すると約 3 秒だけお祝いを表示する。
+共通の庭の大きなうさぎには、クリック範囲内に花色の小さな光を添える。操作を遮る overlay は開かない。
+動きを減らす設定では光と姿勢を静止させる。
 うさぎの各行は pose 全体で耳と顔の中心軸を揃え、左向き・右向き・各 lifecycle を切り替えても耳だけ横へずれない。
 詳細区画は `Ready` に足元の草、`Done` に `z`、`Failed` に枯れ草を小さく添える。通常動作は action caption を
 反復せず pose・顔・phase glyph で伝える。footer は左にうさぎの click 操作、右に任意キーで起こす操作を分けて表示する。

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="634" viewBox="0 0 1440 634" role="img" aria-labelledby="title desc">
-<title id="title">Session Garden</title>
-<desc id="desc">160 by 32 cell Garden sample, using an illustrative dark terminal palette. Sage planting, pastel rabbits, and grouped session details.</desc>
+<title id="title">Session Garden: motion, hover, and PR merge celebration</title>
+<desc id="desc">Actual 160 by 32 cell garden_sample renderer output, with a sample pointer and PR merge transition. Background and ANSI basic colours illustrate a dark terminal theme.</desc>
 <rect width="1440" height="634" rx="12" fill="#18201e"/>
 <g font-family="Menlo, monospace" font-size="14" xml:space="preserve">
 <text x="16.0" y="29.0" textLength="237.6" lengthAdjust="spacingAndGlyphs" fill="#87af87" font-weight="700"> ✦ garden / 2 open projects</text>
@@ -9,45 +9,61 @@
 <text x="1177.6" y="29.0" textLength="149.6" lengthAdjust="spacingAndGlyphs" fill="#d8bb79" font-weight="700">1 needs attention</text>
 <text x="1327.2" y="29.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5"> · </text>
 <text x="1353.6" y="29.0" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">7 usagi</text>
-<text x="33.6" y="47.5" textLength="941.6" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">  .          .                          .+                         +                                       </text>
+<text x="33.6" y="47.5" textLength="941.6" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">  +          .                          ..                         .                                       </text>
 <text x="992.8" y="47.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1001.6" y="47.5" textLength="79.2" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" font-weight="700"> Sessions</text>
-<text x="887.2" y="66.0" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#5f875f">  &amp;&amp;&amp;</text>
+<text x="887.2" y="66.0" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#5f875f">    &amp;&amp;&amp;</text>
 <text x="992.8" y="66.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1010.4" y="66.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#87af87">▱</text>
 <text x="1028.0" y="66.0" textLength="360.8" lengthAdjust="spacingAndGlyphs" fill="#87af87">acme-web                                 </text>
 <text x="1388.8" y="66.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">  2</text>
-<text x="60.0" y="84.5" textLength="140.8" lengthAdjust="spacingAndGlyphs" fill="#87af87">+--------------+</text>
-<text x="429.6" y="84.5" textLength="140.8" lengthAdjust="spacingAndGlyphs" fill="#87afd7">  ~~~~~~~~~~~~~~</text>
-<text x="887.2" y="84.5" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#5f875f"> &amp;&amp;&amp;&amp;&amp;</text>
+<text x="60.0" y="84.5" textLength="114.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">   v    Y   v</text>
+<text x="429.6" y="84.5" textLength="123.2" lengthAdjust="spacingAndGlyphs" fill="#87afd7">    .--------.</text>
+<text x="825.6" y="84.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#5f875f"> &amp;&amp;</text>
+<text x="887.2" y="84.5" textLength="79.2" lengthAdjust="spacingAndGlyphs" fill="#5f875f">  &amp;&amp;&amp;&amp;&amp;&amp;&amp;</text>
 <text x="992.8" y="84.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
-<text x="1019.2" y="84.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8bb79">◆</text>
-<text x="1036.8" y="84.5" textLength="140.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" font-weight="700">checkout-flow-v2</text>
-<text x="60.0" y="103.0" textLength="140.8" lengthAdjust="spacingAndGlyphs" fill="#87af87">| Y  v  Y  v   |</text>
-<text x="429.6" y="103.0" textLength="132.0" lengthAdjust="spacingAndGlyphs" fill="#87afd7"> ~  ~~~~~~~~  ~</text>
-<text x="887.2" y="103.0" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#af875f" opacity="0.6">   ||</text>
+<line x1="1001.6" x2="1019.2" y1="87.5" y2="87.5" stroke="#d8ddd5" stroke-width="1" opacity="1"/>
+<text x="1019.2" y="84.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8bb79" text-decoration="underline">◆</text>
+<line x1="1019.2" x2="1028.0" y1="87.5" y2="87.5" stroke="#d8bb79" stroke-width="1" opacity="1"/>
+<line x1="1028.0" x2="1036.8" y1="87.5" y2="87.5" stroke="#d8ddd5" stroke-width="1" opacity="1"/>
+<text x="1036.8" y="84.5" textLength="140.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" font-weight="700" text-decoration="underline">checkout-flow-v2</text>
+<line x1="1036.8" x2="1177.6" y1="87.5" y2="87.5" stroke="#d8ddd5" stroke-width="1" opacity="1"/>
+<text x="60.0" y="103.0" textLength="96.8" lengthAdjust="spacingAndGlyphs" fill="#87af87"> Y   v    Y</text>
+<text x="429.6" y="103.0" textLength="140.8" lengthAdjust="spacingAndGlyphs" fill="#87afd7"> .-~  ~~~~~   `.</text>
+<text x="825.6" y="103.0" textLength="35.2" lengthAdjust="spacingAndGlyphs" fill="#5f875f">&amp;&amp;&amp;&amp;</text>
+<text x="887.2" y="103.0" textLength="79.2" lengthAdjust="spacingAndGlyphs" fill="#5f875f"> &amp;&amp;&amp;  &amp;&amp;&amp;</text>
 <text x="992.8" y="103.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1036.8" y="103.0" textLength="211.2" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">feature/checkout-flow-v2</text>
-<text x="60.0" y="121.5" textLength="140.8" lengthAdjust="spacingAndGlyphs" fill="#87af87">+--------------+</text>
-<text x="429.6" y="121.5" textLength="123.2" lengthAdjust="spacingAndGlyphs" fill="#87afd7">  ~~~~~~~~~~~~</text>
-<text x="887.2" y="121.5" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#af875f" opacity="0.6">   ||</text>
+<text x="60.0" y="121.5" textLength="123.2" lengthAdjust="spacingAndGlyphs" fill="#87af87">  .  . .   . .</text>
+<text x="429.6" y="121.5" textLength="132.0" lengthAdjust="spacingAndGlyphs" fill="#87afd7">  `---~~~~~---&#x27;</text>
+<text x="834.4" y="121.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#af875f" opacity="0.6">|</text>
+<text x="887.2" y="121.5" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#af875f" opacity="0.6">   /|</text>
 <text x="992.8" y="121.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1036.8" y="121.5" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">3 agents</text>
-<text x="218.4" y="140.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
-<text x="825.6" y="140.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
+<text x="218.4" y="140.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
+<text x="570.4" y="140.0" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700"> /)/) __</text>
+<text x="825.6" y="140.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
 <text x="992.8" y="140.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1054.4" y="140.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8bb79" font-weight="700">◆</text>
 <text x="1072.0" y="140.0" textLength="96.8" lengthAdjust="spacingAndGlyphs" fill="#d8bb79" font-weight="700">waiting    </text>
 <text x="1186.4" y="140.0" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">12000000</text>
+<text x="570.4" y="158.5" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700">( o.o)/</text>
 <text x="992.8" y="158.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
-<text x="1054.4" y="158.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#81a778" font-weight="700">●</text>
-<text x="1072.0" y="158.5" textLength="96.8" lengthAdjust="spacingAndGlyphs" fill="#81a778" font-weight="700">running    </text>
-<text x="1186.4" y="158.5" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">10000000</text>
+<line x1="1001.6" x2="1054.4" y1="161.5" y2="161.5" stroke="#d8ddd5" stroke-width="1" opacity="1"/>
+<text x="1054.4" y="158.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#81a778" font-weight="700" text-decoration="underline">●</text>
+<line x1="1054.4" x2="1063.2" y1="161.5" y2="161.5" stroke="#81a778" stroke-width="1" opacity="1"/>
+<line x1="1063.2" x2="1072.0" y1="161.5" y2="161.5" stroke="#d8ddd5" stroke-width="1" opacity="1"/>
+<text x="1072.0" y="158.5" textLength="96.8" lengthAdjust="spacingAndGlyphs" fill="#81a778" font-weight="700" text-decoration="underline">running    </text>
+<line x1="1072.0" x2="1168.8" y1="161.5" y2="161.5" stroke="#81a778" stroke-width="1" opacity="1"/>
+<line x1="1168.8" x2="1186.4" y1="161.5" y2="161.5" stroke="#d8ddd5" stroke-width="1" opacity="1"/>
+<text x="1186.4" y="158.5" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6" text-decoration="underline">10000000</text>
+<line x1="1186.4" x2="1256.8" y1="161.5" y2="161.5" stroke="#d8ddd5" stroke-width="1" opacity="0.6"/>
+<text x="570.4" y="177.0" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700">  /  &gt;</text>
 <text x="992.8" y="177.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1054.4" y="177.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#81a778" font-weight="700">●</text>
 <text x="1072.0" y="177.0" textLength="96.8" lengthAdjust="spacingAndGlyphs" fill="#81a778" font-weight="700">running    </text>
 <text x="1186.4" y="177.0" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">11000000</text>
-<text x="244.8" y="195.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
+<text x="244.8" y="195.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
 <text x="992.8" y="195.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="992.8" y="214.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1019.2" y="214.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">○</text>
@@ -56,40 +72,37 @@
 <text x="596.8" y="232.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d7af87">.</text>
 <text x="992.8" y="232.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1036.8" y="232.5" textLength="220.0" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">feature/checkout-baseline</text>
-<text x="403.2" y="251.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
-<text x="588.0" y="251.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v /</text>
+<text x="403.2" y="251.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v /</text>
+<text x="588.0" y="251.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v v</text>
 <text x="992.8" y="251.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1036.8" y="251.0" textLength="158.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">No agent activity.</text>
 <text x="992.8" y="269.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="42.4" y="288.0" textLength="17.6" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700"> ?</text>
-<text x="385.6" y="288.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d7af87">.</text>
+<text x="315.2" y="288.0" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700">__(\(\</text>
+<text x="728.8" y="288.0" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#d7af87">  * .  </text>
 <text x="992.8" y="288.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="42.4" y="306.5" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700"> /)/)</text>
-<text x="271.2" y="306.5" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> /)/)</text>
-<text x="376.8" y="306.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
-<text x="500.0" y="306.5" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700"> /)/)</text>
-<text x="728.8" y="306.5" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> /)/)</text>
+<text x="315.2" y="306.5" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> \(.o )</text>
+<text x="394.4" y="306.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#87af87">/</text>
+<text x="728.8" y="306.5" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700">  /)/)</text>
 <text x="992.8" y="306.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1010.4" y="306.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#87af87">▱</text>
 <text x="1028.0" y="306.5" textLength="360.8" lengthAdjust="spacingAndGlyphs" fill="#87af87">acme-internal                            </text>
 <text x="1388.8" y="306.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">  1</text>
 <text x="42.4" y="325.0" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700">( o.o)?</text>
-<text x="271.2" y="325.0" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700">( o.o)</text>
-<text x="500.0" y="325.0" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700">( o.o)</text>
-<text x="728.8" y="325.0" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700">( o.o)</text>
+<text x="315.2" y="325.0" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> &lt;  \ </text>
+<text x="728.8" y="325.0" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> \(^o^)/</text>
 <text x="992.8" y="325.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1019.2" y="325.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#81a778" font-weight="700">●</text>
 <text x="1036.8" y="325.0" textLength="255.2" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" font-weight="700">Improve agent handoff summary</text>
 <text x="42.4" y="343.5" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700">c(&quot;)(&quot;)</text>
-<text x="271.2" y="343.5" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> / &gt; &lt;</text>
-<text x="500.0" y="343.5" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700"> / &gt; &lt;</text>
-<text x="728.8" y="343.5" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> / &gt; &lt;</text>
+<text x="728.8" y="343.5" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> c(&quot;)(&quot;)</text>
 <text x="992.8" y="343.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1036.8" y="343.5" textLength="255.2" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">feature/agent-handoff-summary</text>
-<text x="60.0" y="362.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v v</text>
-<text x="218.4" y="362.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
+<text x="60.0" y="362.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
+<text x="218.4" y="362.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
 <text x="992.8" y="362.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
-<text x="1036.8" y="362.0" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">4 agents</text>
+<text x="1036.8" y="362.0" textLength="88.0" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">PR merged!</text>
 <text x="992.8" y="380.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1054.4" y="380.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#81a778" font-weight="700">●</text>
 <text x="1072.0" y="380.5" textLength="96.8" lengthAdjust="spacingAndGlyphs" fill="#81a778" font-weight="700">running    </text>
@@ -98,8 +111,8 @@
 <text x="1054.4" y="399.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">◦</text>
 <text x="1072.0" y="399.0" textLength="96.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">completed  </text>
 <text x="1186.4" y="399.0" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">00000001</text>
-<text x="350.4" y="417.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
-<text x="878.4" y="417.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
+<text x="350.4" y="417.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v /</text>
+<text x="878.4" y="417.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
 <text x="992.8" y="417.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="1054.4" y="417.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">◦</text>
 <text x="1072.0" y="417.5" textLength="96.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">completed  </text>
@@ -111,31 +124,31 @@
 <text x="992.8" y="454.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="992.8" y="473.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 <text x="992.8" y="491.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
-<text x="262.4" y="510.0" textLength="17.6" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> z</text>
-<text x="491.2" y="510.0" textLength="17.6" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700"> z</text>
-<text x="720.0" y="510.0" textLength="17.6" lengthAdjust="spacingAndGlyphs" fill="#ffd7d7" font-weight="700"> z</text>
+<text x="156.8" y="510.0" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#d7af87">  * .  </text>
+<text x="385.6" y="510.0" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#d7af87">  * .  </text>
+<text x="614.4" y="510.0" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#d7af87">  * .  </text>
 <text x="992.8" y="510.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
-<text x="262.4" y="528.5" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> /)/)</text>
-<text x="350.4" y="528.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
-<text x="491.2" y="528.5" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700"> /)/)</text>
-<text x="720.0" y="528.5" textLength="44.0" lengthAdjust="spacingAndGlyphs" fill="#ffd7d7" font-weight="700"> /)/)</text>
-<text x="825.6" y="528.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
+<text x="156.8" y="528.5" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700">  /)/)</text>
+<text x="350.4" y="528.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v /</text>
+<text x="385.6" y="528.5" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700">  /)/)</text>
+<text x="614.4" y="528.5" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffd7d7" font-weight="700">  /)/)</text>
+<text x="825.6" y="528.5" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
 <text x="992.8" y="528.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
-<text x="262.4" y="547.0" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700">( -.-)</text>
-<text x="491.2" y="547.0" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700">( -.-)</text>
-<text x="720.0" y="547.0" textLength="52.8" lengthAdjust="spacingAndGlyphs" fill="#ffd7d7" font-weight="700">( -.-)</text>
+<text x="156.8" y="547.0" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> \(^o^)/</text>
+<text x="385.6" y="547.0" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700"> \(^o^)/</text>
+<text x="614.4" y="547.0" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#ffd7d7" font-weight="700"> \(^o^)/</text>
 <text x="992.8" y="547.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
-<text x="262.4" y="565.5" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700">c(&quot;)(&quot;)</text>
-<text x="491.2" y="565.5" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700">c(&quot;)(&quot;)</text>
+<text x="156.8" y="565.5" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#ffffd7" font-weight="700"> c(&quot;)(&quot;)</text>
+<text x="385.6" y="565.5" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#d7d7ff" font-weight="700"> c(&quot;)(&quot;)</text>
 <text x="596.8" y="565.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d7af87">.</text>
-<text x="720.0" y="565.5" textLength="61.6" lengthAdjust="spacingAndGlyphs" fill="#ffd7d7" font-weight="700">c(&quot;)(&quot;)</text>
+<text x="614.4" y="565.5" textLength="70.4" lengthAdjust="spacingAndGlyphs" fill="#ffd7d7" font-weight="700"> c(&quot;)(&quot;)</text>
 <text x="992.8" y="565.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
-<text x="60.0" y="584.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v v</text>
-<text x="218.4" y="584.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
-<text x="588.0" y="584.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v /</text>
-<text x="878.4" y="584.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
+<text x="60.0" y="584.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v \</text>
+<text x="218.4" y="584.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
+<text x="588.0" y="584.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v v</text>
+<text x="878.4" y="584.0" textLength="26.4" lengthAdjust="spacingAndGlyphs" fill="#87af87">v |</text>
 <text x="992.8" y="584.0" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
-<text x="16.0" y="602.5" textLength="519.2" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6"> Garden Action Center · click a usagi · ↑/↓ list · Esc wake</text>
+<text x="16.0" y="602.5" textLength="501.6" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6"> Garden Action Center · hover/click · ↑/↓ list · Esc wake</text>
 <text x="992.8" y="602.5" textLength="8.8" lengthAdjust="spacingAndGlyphs" fill="#d8ddd5" opacity="0.6">│</text>
 </g>
 </svg>
