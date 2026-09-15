@@ -4928,15 +4928,13 @@ fn launch_screen_graph(
 /// Observe every selectable model provider without executing a provider CLI:
 /// the CLI is on PATH, and any credential the provider declares is configured.
 ///
-/// Settings that cannot be read leave the credential set empty, which hides the
-/// providers that need one rather than offering a launch the daemon refuses.
+/// Settings that cannot be read fall back to the defaults, whose empty
+/// environment hides the providers that need a credential rather than offering
+/// a launch the daemon refuses.
 fn available_agent_models(settings: &mut dyn SettingsPort) -> AvailableAgentModels {
-    let credentials = match settings.read(SettingsScope::Global) {
-        Ok(settings) => {
-            usagi_core::infrastructure::runtime_model::BoundCredentials::from_settings(&settings)
-        }
-        Err(_) => usagi_core::infrastructure::runtime_model::BoundCredentials::default(),
-    };
+    let settings = settings.read(SettingsScope::Global).unwrap_or_default();
+    let credentials =
+        usagi_core::infrastructure::runtime_model::BoundCredentials::from_settings(&settings);
     usagi_core::infrastructure::runtime_model::observe_available_models(
         &usagi_core::infrastructure::runtime_model::PathExecutableLocator,
         &credentials,
