@@ -342,8 +342,8 @@ fn rabbit_sprite(motion: Motion, tick: u64) -> [&'static str; RABBIT_HEIGHT] {
         Activity::Walking => match (motion.facing, (tick / 4).is_multiple_of(2)) {
             (Facing::Right, true) => ["", " /)/)  >", "( o.o)/", " /  \\"],
             (Facing::Right, false) => [" /)/) __", "( o.o)/", "  /  >", ""],
-            (Facing::Left, true) => ["", "< (\\(\\", "\\(.o )", " /  \\"],
-            (Facing::Left, false) => ["__(\\(\\", " \\(.o )", " <  \\ ", ""],
+            (Facing::Left, true) => ["", "<(\\(\\", "\\(.o )", " /  \\"],
+            (Facing::Left, false) => ["_(\\(\\", " \\(.o )", " <  \\ ", ""],
         },
         Activity::Looking if tick / 8 % 3 == 2 => ["", " /)(/", "( o.o)", "c(\")(\")"],
         Activity::Looking => ["", " /)/)", "( o.o)", "c(\")(\")"],
@@ -355,9 +355,9 @@ fn rabbit_sprite(motion: Motion, tick: u64) -> [&'static str; RABBIT_HEIGHT] {
         Activity::Interrupted => [" !", " /)/)", "( -.-)!", "c(\")(\")"],
         Activity::Working => ["", " /)/)", "( o.o)", " / > <"],
         Activity::Celebrating if tick.is_multiple_of(2) => {
-            [" *  . *", "  /)/)", " \\(^o^)/", " c(\")(\")"]
+            [" *  . *", "   /)/)", " \\(^o^)/", " c(\")(\")"]
         }
-        Activity::Celebrating => ["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"],
+        Activity::Celebrating => ["  \\ /", "   /)/)", " \\(^.^)/", " c(\")(\")"],
     }
 }
 
