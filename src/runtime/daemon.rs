@@ -24076,6 +24076,62 @@ instructions = "{instructions}"
         /// themselves already owns the session, so no start can be launched
         /// until they stop it. Resending cannot change that, so the admission
         /// is undone rather than left holding the session.
+        /// A start that names a backlog issue, and the finish that ends it.
+        /// Both are ordinary session commands: neither reaches the daemon only
+        /// through the MCP tool, so both are held here rather than resting on
+        /// the shipping-binary E2E.
+        #[test]
+        fn an_issue_backed_start_is_archived_with_its_reference_when_it_finishes() {
+            let fixture = Fixture::new();
+            let root = fixture
+                .bound
+                .sessions()
+                .lock()
+                .unwrap()
+                .repository_root()
+                .to_path_buf();
+            let issues = root.join(".usagi/issues");
+            std::fs::create_dir_all(&issues).unwrap();
+            std::fs::write(
+                issues.join("742-close-the-loop.md"),
+                "---\nnumber: 742\ntitle: fix(daemon): close the loop\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-09-12T00:00:00+00:00\nupdated_at: 2026-09-12T00:00:00+00:00\n---\n\nreproduce and fix\n",
+            )
+            .unwrap();
+            let goal = workflow::issue_goal(&fixture.bound, 742).unwrap();
+            let operation = usagi_core::domain::id::OperationId::new();
+            let started = workflow::control_workflow(
+                &fixture.agent,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                operation,
+                WorkflowCommand::Start {
+                    goal,
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                },
+                Some(742),
+            )
+            .unwrap();
+            assert_eq!(started.run.unwrap().id, operation);
+            // Finishing changes the stored record and nothing else: the run
+            // leaves the live slot for the bounded archive, still carrying the
+            // issue it was started to implement.
+            let ended = workflow::control_workflow(
+                &fixture.agent,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                usagi_core::domain::id::OperationId::new(),
+                WorkflowCommand::Finish,
+                None,
+            )
+            .unwrap();
+            assert!(ended.run.is_none());
+            assert_eq!(ended.finished.len(), 1);
+            assert_eq!(ended.finished[0].id, operation);
+            assert_eq!(ended.finished[0].issue, Some(742));
+        }
+
         #[test]
         fn a_start_refused_outright_leaves_the_session_free_of_the_intent() {
             let fixture = Fixture::new();
