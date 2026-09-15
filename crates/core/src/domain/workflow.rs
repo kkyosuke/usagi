@@ -24,6 +24,36 @@ impl Default for WorkflowAgents {
     }
 }
 
+impl WorkflowAgents {
+    /// The same choices with every provider this machine cannot launch replaced
+    /// by one it can.
+    ///
+    /// The defaults name Codex and Claude, and a run reuses the previous run's
+    /// choices, so an editable selection can otherwise offer a provider that is
+    /// not installed — or, for a provider that shares another's CLI, one whose
+    /// credential is not configured. Availability that is empty leaves the
+    /// choices alone: there is nothing to replace them with, and the start is
+    /// refused on its own.
+    #[must_use]
+    pub fn restricted_to(self, available: super::settings::AvailableModels) -> Self {
+        let Some(fallback) = available.first() else {
+            return self;
+        };
+        let keep = |model: super::settings::DefaultModel| {
+            if available.contains(model) {
+                model
+            } else {
+                fallback
+            }
+        };
+        Self {
+            planner: keep(self.planner),
+            implementer: keep(self.implementer),
+            reviewer: keep(self.reviewer),
+        }
+    }
+}
+
 /// The participant chosen for an instruction. Automatic is resolved on admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -392,6 +422,29 @@ pub enum WorkflowCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricting_the_choices_replaces_only_what_cannot_be_launched() {
+        use crate::domain::settings::{AvailableModels, DefaultModel};
+
+        let agents = WorkflowAgents::default();
+        // Nothing installed: the choices stand, and the start is refused.
+        assert_eq!(
+            agents.restricted_to(AvailableModels::default()),
+            WorkflowAgents::default()
+        );
+        assert_eq!(agents.restricted_to(AvailableModels::all()), agents);
+        // Codex is gone, so both of its slots fall back to the first installed
+        // provider while the reviewer keeps the Claude it can still launch.
+        assert_eq!(
+            agents.restricted_to(AvailableModels::new([DefaultModel::Claude])),
+            WorkflowAgents {
+                planner: DefaultModel::Claude,
+                implementer: DefaultModel::Claude,
+                reviewer: DefaultModel::Claude,
+            }
+        );
+    }
 
     #[test]
     fn attention_names_only_the_states_a_human_has_to_move() {

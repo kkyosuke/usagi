@@ -2856,6 +2856,7 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 return Vec::new();
             }
             let tick = state.mascot_tick;
+            let available = state.available_models;
             let Some(panel) = state.workflows.get_mut(&job.session) else {
                 return Vec::new();
             };
@@ -2930,6 +2931,10 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                     panel.error = Some(error.message);
                 }
             }
+            // The daemon keeps the previous run's choices as the next start's
+            // defaults, and a machine that lost a CLI (or never configured a
+            // provider's credential) must not be offered them again.
+            panel.restrict_agents(available);
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Decisions {
@@ -2994,15 +2999,17 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             {
                 return Vec::new();
             }
+            let available = state.available_models;
             let panel = state.workflows.entry(session).or_default();
+            panel.restrict_agents(available);
             if panel.run.is_none() && panel.agent_field.is_some() {
                 match key {
                     AppKey::Left => {
-                        panel.cycle_agent(false);
+                        panel.cycle_agent(false, available);
                         return Vec::new();
                     }
                     AppKey::Right => {
-                        panel.cycle_agent(true);
+                        panel.cycle_agent(true, available);
                         return Vec::new();
                     }
                     AppKey::Tab | AppKey::SaveRoles => {}
@@ -5743,7 +5750,9 @@ fn submit_closeup_workflow(
         }
     };
     let workspace = state.workspace;
+    let available = state.available_models;
     let panel = state.workflows.entry(session).or_default();
+    panel.restrict_agents(available);
     let mut control = None;
     let mut dispatch = false;
     if finish {
