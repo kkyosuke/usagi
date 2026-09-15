@@ -8636,6 +8636,87 @@ fn managed_navigation_defensive_boundaries_never_create_a_root_target() {
 }
 
 #[test]
+fn workflow_offers_and_submits_only_providers_this_machine_can_launch() {
+    use super::super::workflow::WorkflowJob;
+    use usagi_core::domain::{
+        settings::{AvailableModels, DefaultModel},
+        workflow::{WorkflowAgents, WorkflowCommand, WorkflowSnapshot},
+    };
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    // Claude Code is installed; Fugu shares its executable but has no key, and
+    // neither Codex nor AGY is installed.
+    state.set_agent_models(
+        AvailableModels::new([DefaultModel::Claude]),
+        DefaultModel::Claude,
+    );
+    submit_closeup_workflow(&mut state, session, "");
+    assert_eq!(
+        state.workflow_panel(session).unwrap().agents,
+        WorkflowAgents {
+            planner: DefaultModel::Claude,
+            implementer: DefaultModel::Claude,
+            reviewer: DefaultModel::Claude,
+        }
+    );
+    // The daemon keeps the previous run's choices, which may name a provider
+    // that has since stopped being launchable here.
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: WorkflowJob {
+                workspace,
+                session,
+                control: None,
+            },
+            result: Ok(Box::new(WorkflowSnapshot {
+                agents: WorkflowAgents {
+                    planner: DefaultModel::Agy,
+                    implementer: DefaultModel::OpenAi,
+                    reviewer: DefaultModel::SakanaAi,
+                },
+                session,
+                run: None,
+                pending_start: None,
+                finished: Vec::new(),
+            })),
+        }),
+    );
+    for key in [
+        AppKey::Paste("Task".into()),
+        AppKey::Tab,
+        AppKey::Right,
+        AppKey::Right,
+    ] {
+        let _ = update(&mut state, AppEvent::WorkflowInput { session, key });
+    }
+    let effects = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::SaveRoles,
+        },
+    );
+    let Effect::Workflow(job) = &effects[0] else {
+        panic!("workflow submission");
+    };
+    let Some((_, WorkflowCommand::Start { agents, .. })) = &job.control else {
+        panic!("workflow start");
+    };
+    assert_eq!(
+        *agents,
+        WorkflowAgents {
+            planner: DefaultModel::Claude,
+            implementer: DefaultModel::Claude,
+            reviewer: DefaultModel::Claude,
+        }
+    );
+}
+
+#[test]
 fn workflow_uses_saved_agents_without_overwriting_edits_and_submits_exact_choices() {
     use super::super::workflow::WorkflowJob;
     use usagi_core::domain::{

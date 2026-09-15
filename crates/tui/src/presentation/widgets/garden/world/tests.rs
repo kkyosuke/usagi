@@ -362,3 +362,33 @@ fn crowded_homes_never_displace_agents_and_physical_limits_do_not_overlap_target
     let frame = render(24, 120, "atlas", &fixtures, 0, false);
     assert_frame(&frame, 24, 120, &fixtures);
 }
+
+#[test]
+fn meadow_planting_leaves_open_ground_and_keeps_roots_fixed() {
+    for width in [60, 76, 116, 156] {
+        let mut roots = Vec::new();
+        for tick in [0, 4, 12, 23] {
+            let mut canvas = Canvas::new(width, 21);
+            draw_meadow(&mut canvas, "atlas", tick);
+            let rows = canvas.rows();
+            let rows = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>();
+            let planted = rows
+                .iter()
+                .flat_map(|row| row.chars())
+                .filter(|ch| !ch.is_whitespace())
+                .count();
+            assert!(planted > 0 && planted < width * 21 / 10);
+            let occupied = rows
+                .iter()
+                .enumerate()
+                .flat_map(|(y, row)| {
+                    row.chars()
+                        .enumerate()
+                        .filter_map(move |(x, ch)| (!ch.is_whitespace()).then_some((x, y)))
+                })
+                .collect::<Vec<_>>();
+            roots.push(occupied);
+        }
+        assert!(roots.iter().all(|root| *root == roots[0]));
+    }
+}

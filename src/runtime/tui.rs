@@ -4868,14 +4868,14 @@ fn launch_screen_graph(
     notice: Option<String>,
 ) -> std::io::Result<()> {
     let now = Utc::now();
-    // Capture once before raw mode and retain it across Config reopens and
-    // workspace leave/entry transitions for this process.
-    let available_models = available_agent_models();
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let storage = Storage::open_default().map_err(io_error)?;
         let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
         let mut loader = FsWorkspaceLoader::new(storage);
         let mut settings = PersistentSettingsPort::open()?;
+        // Capture once before raw mode and retain it across Config reopens and
+        // workspace leave/entry transitions for this process.
+        let available_models = available_agent_models(&mut settings);
         let mut backend_factory = ProductionBackendFactory::default();
         let mut splash = presentation::StartupSplash::new();
         run_in_terminal(|terminal| {
@@ -4913,7 +4913,10 @@ fn launch_screen_graph(
                 )
             }
             Start::Config => {
+                // Only this frame needs settings, so a Welcome printed to a
+                // pipe keeps working without preparing the private data dir.
                 let mut settings = PersistentSettingsPort::open()?;
+                let available_models = available_agent_models(&mut settings);
                 config::render(
                     0,
                     0,
@@ -4928,10 +4931,19 @@ fn launch_screen_graph(
     Ok(())
 }
 
-/// Observe every model provider from PATH without executing a provider CLI.
-fn available_agent_models() -> AvailableAgentModels {
+/// Observe every selectable model provider without executing a provider CLI:
+/// the CLI is on PATH, and any credential the provider declares is configured.
+///
+/// Settings that cannot be read fall back to the defaults, whose empty
+/// environment hides the providers that need a credential rather than offering
+/// a launch the daemon refuses.
+fn available_agent_models(settings: &mut dyn SettingsPort) -> AvailableAgentModels {
+    let settings = settings.read(SettingsScope::Global).unwrap_or_default();
+    let credentials =
+        usagi_core::infrastructure::runtime_model::BoundCredentials::from_settings(&settings);
     usagi_core::infrastructure::runtime_model::observe_available_models(
         &usagi_core::infrastructure::runtime_model::PathExecutableLocator,
+        &credentials,
     )
 }
 
@@ -5043,11 +5055,11 @@ impl BrowserOpener for PlatformBrowserOpener {
 
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=direct_workspace_production_composition_contract
 fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
-    // Direct entry and its later Welcome graph share one immutable snapshot.
-    let available_models = available_agent_models();
     let mut loader = FsWorkspaceLoader::open_default()?;
-    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let mut settings = PersistentSettingsPort::open()?;
+    // Direct entry and its later Welcome graph share one immutable snapshot.
+    let available_models = available_agent_models(&mut settings);
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     if interactive {
         let mut backend_factory = ProductionBackendFactory::default();
         run_in_terminal(|terminal| {
