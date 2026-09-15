@@ -777,6 +777,32 @@ mod tests {
     }
 
     #[test]
+    fn production_pointer_pump_preserves_hover_then_click() {
+        let mut pump = EventPump::new(
+            CrosstermSource::scripted([
+                wheel(MouseEventKind::Moved, 2, 3),
+                wheel(MouseEventKind::Moved, 9, 8),
+                wheel(MouseEventKind::Down(MouseButton::Left), 9, 8),
+            ]),
+            NoBackend::<()>::default(),
+            TICK,
+            T0,
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
+                kind: PointerKind::Move,
+                column: 9,
+                row: 8,
+            }))
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::Mouse { column: 9, row: 8 })
+        );
+    }
+
+    #[test]
     fn same_direction_wheel_burst_is_coalesced_before_the_next_frame() {
         let source = FakeSource::with([
             wheel(MouseEventKind::ScrollUp, 4, 7),
