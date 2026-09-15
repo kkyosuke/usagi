@@ -7605,7 +7605,11 @@ fn pr_reference_filter_copy_dismiss_and_safe_auto_open_modes() {
         }),
     );
     assert!(state.celebrates_pr_merge(session));
-    for _ in 0..25 {
+    for _ in 0..24 {
+        let _ = update(&mut state, AppEvent::Tick);
+    }
+    assert!(state.celebrates_pr_merge(session));
+    for _ in 24..=pull_requests::MERGE_CELEBRATION_TICKS {
         let _ = update(&mut state, AppEvent::Tick);
     }
     assert!(!state.celebrates_pr_merge(session));

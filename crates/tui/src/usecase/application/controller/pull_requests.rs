@@ -12,6 +12,9 @@ use usagi_core::domain::settings::PrAutoOpen;
 
 use super::{AppKey, AppState, Effect, HomeMode, Notice, Overlay, Route, SafeError, Target};
 
+/// About three seconds at the shell's 16 ms logical tick.
+pub(super) const MERGE_CELEBRATION_TICKS: u64 = 192;
+
 impl AppState {
     /// Latest daemon PR rows for one target (workspace root or session).
     #[must_use]
@@ -295,9 +298,10 @@ fn absorb_pr_snapshot(
         })
     });
     if let (true, Some(session)) = (newly_merged, target.session_id()) {
-        state
-            .pr_merge_celebrations
-            .insert(session, state.mascot_tick.saturating_add(24));
+        state.pr_merge_celebrations.insert(
+            session,
+            state.mascot_tick.saturating_add(MERGE_CELEBRATION_TICKS),
+        );
     }
     state.prs.insert(target, (revision, prs.to_vec()));
     state.session_pr_revision = state.session_pr_revision.saturating_add(1);
