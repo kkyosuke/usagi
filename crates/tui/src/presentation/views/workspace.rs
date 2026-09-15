@@ -385,6 +385,7 @@ pub struct HomeProjection {
     /// more open projects contribute cached plots.
     garden_scope: String,
     garden_sidebar_scroll: usize,
+    garden_pointer: Option<(u16, u16)>,
     garden_workspaces: BTreeMap<SessionId, WorkspaceId>,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
@@ -495,6 +496,32 @@ fn project_remove_queue(state: &AppState, sessions: &[ProjectedSession]) -> Opti
         force: queue.force(),
         feedback: queue.feedback().map(clone_notice_message),
     })
+}
+
+fn project_session_agents(
+    state: &AppState,
+    sessions: &[ProjectedSession],
+) -> BTreeMap<SessionId, Vec<widgets::agent_status::AgentStatus>> {
+    let mut session_agents: BTreeMap<SessionId, Vec<widgets::agent_status::AgentStatus>> =
+        BTreeMap::new();
+    for entry in state.runtimes() {
+        let Some(session_id) = entry.runtime.session_id else {
+            // workspace-root の runtime は session 行に属さない。
+            continue;
+        };
+        if !sessions.iter().any(|session| session.id == session_id) {
+            // 古い、あるいは他 workspace の runtime は行を作らない。
+            continue;
+        }
+        session_agents
+            .entry(session_id)
+            .or_default()
+            .push(widgets::agent_status::AgentStatus {
+                runtime_id: entry.runtime.agent_runtime_id,
+                phase: entry.phase,
+            });
+    }
+    session_agents
 }
 
 fn project_garden_sessions(
@@ -643,24 +670,7 @@ impl HomeProjection {
         let session_states = session_state_counts(state, &sessions);
         // Agent 群は sidebar の agent 行と Garden の plot が同じものを読む。runtime-local
         // phase を session ごとに 1 度だけ束ね、両 surface に同じ集合を配る。
-        let mut session_agents: BTreeMap<SessionId, Vec<widgets::agent_status::AgentStatus>> =
-            BTreeMap::new();
-        for entry in state.runtimes() {
-            let Some(session_id) = entry.runtime.session_id else {
-                // workspace-root の runtime は session 行に属さない。
-                continue;
-            };
-            if !sessions.iter().any(|session| session.id == session_id) {
-                // 古い、あるいは他 workspace の runtime は行を作らない。
-                continue;
-            }
-            session_agents.entry(session_id).or_default().push(
-                widgets::agent_status::AgentStatus {
-                    runtime_id: entry.runtime.agent_runtime_id,
-                    phase: entry.phase,
-                },
-            );
-        }
+        let session_agents = project_session_agents(state, &sessions);
         // Garden が開いている frame だけ庭の projection を作る。閉じている間は素材を
         // 持たないので、通常の Home frame は Garden 導入前と同じ経路で描かれる。
         let garden_sessions = project_garden_sessions(state, &sessions, &session_agents);
@@ -728,6 +738,7 @@ impl HomeProjection {
             garden_sessions,
             garden_scope: workspace_name.to_owned(),
             garden_sidebar_scroll: state.garden_sidebar_scroll(),
+            garden_pointer: state.garden_pointer(),
             garden_workspaces,
             garden_motion: GardenMotion::Full,
             garden_tick: None,
@@ -2232,6 +2243,7 @@ fn garden_frame(
             tick: home.garden_tick.unwrap_or_else(|| garden_tick(now)),
             reduced_motion: home.garden_motion.is_reduced(),
             scroll: home.garden_sidebar_scroll,
+            pointer: home.garden_pointer,
         },
     )
 }
