@@ -82,7 +82,9 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   │       ├── presentation/    # daemon サーバ入口（daemon verb と IPC request の dispatch・応答整形）
 │   │       │   └── ipc.rs       # handshake 後の IPC protocol handler
 │   │       ├── usecase/         # daemon 専用ロジック（lifecycle verb、terminal/runtime・orchestration）
-│   │       │   ├── authority/   # cross-process generation authority（registry・handoff・admission）
+│   │       │   ├── agent_ipc/   # Agent runtime の admission / delivery / dispatch / lifecycle と tests
+│       │   ├── authority/   # cross-process generation authority（registry・handoff・admission）
+│       │   ├── supervisor_runtime/ # supervisor の reservation / obligations と tests
 │   │       │   └── resources/   # owner generation ごとの runtime shard と global resource allocator
 │   │       └── infrastructure/  # daemon 専用の外部接続（Unix socket transport）
 │   │           ├── child_identity.rs # spawn した child の OS process-start / process-group identity 観測
@@ -668,6 +670,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | 表示専用 daemon metrics から診断専用 health（level と閉じた理由語彙）を作る判定 | `crates/tui/src/usecase/application/daemon_health.rs`。TUI-local な sample 列と現在時刻だけの純関数で、実時計は引数として受ける。port・polling・sample を畳む cache は同層の `metrics.rs`、表示文言と狭幅の縮退は `crates/tui/src/presentation/views/workspace.rs`（正本は [3. TUI](03-tui.md#daemon-health-indicator)） |
 | TUI background observation の single-flight / cadence / failure backoff 判定 | `crates/tui/src/usecase/application/observation_lane.rs`。presentation は Garden / Work Run 固有の cadence と worker 実行だけを所有し、共有 admission state machine を重複実装しない |
 | 環境変数 binding の語彙・2 層スコープの合成・子プロセス環境への解決方針 | `crates/core/src/domain/settings/env.rs` と `crates/core/src/usecase/env.rs`（`SecretResolver` port を注入）。並列解決と実 `op` subprocess は `crates/core/src/infrastructure/env_resolver.rs`、設定の読み出しと解決キャッシュは合成ルートの `src/runtime/user_env.rs`（正本は [9. 環境変数設定](09-env.md)） |
+| daemon usecase の巨大 module の内訳 | `agent_ipc`（受け入れ判定 `admission` / prompt・report の `delivery` / worker 計画の `dispatch` / 起動・再開の `lifecycle`）と `supervisor_runtime`（予約の `reservation` / worker stop・artifact・promotion の `obligations`）は bounded context ごとの子 module に分ける。各 module の test は同じ階層の `tests.rs` に置き、production と同居させない |
 | product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
 | Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
