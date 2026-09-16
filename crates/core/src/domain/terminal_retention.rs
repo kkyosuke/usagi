@@ -1450,7 +1450,7 @@ mod tests {
         assert!(matches!(ledger.lookup(&terminal), FinalLookup::Retained(_)));
         // A second import of the same key does not double-count its bytes.
         ledger.import_existing(RetainedFinal::new(
-            terminal.clone(),
+            terminal,
             TerminalKind::Terminal,
             8,
             at(200),
@@ -1678,7 +1678,7 @@ mod tests {
         assert!(ledger.lookup(&stranger).marker().is_none());
         assert!(ledger.lookup(&known).marker().is_none());
         // A different incarnation of the same workspace is still unknown.
-        let mut other_generation = known.clone();
+        let mut other_generation = known;
         other_generation.daemon_generation = DaemonGeneration::new();
         assert_eq!(ledger.lookup(&other_generation), FinalLookup::Unknown);
     }
@@ -1742,7 +1742,7 @@ mod tests {
         );
         // Debug and Clone participate in coverage through the ledger too.
         let ledger = RetentionLedger::new(small_budget());
-        assert!(format!("{:?}", ledger.clone()).contains("RetentionLedger"));
+        assert!(format!("{ledger:?}").contains("RetentionLedger"));
         assert_eq!(
             format!("{:?}", GcReport::default()),
             format!("{:?}", GcReport::default())

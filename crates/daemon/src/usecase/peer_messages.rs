@@ -301,7 +301,7 @@ mod tests {
             handoff_payload(
                 &CallerRef {
                     session_id: None,
-                    ..caller.clone()
+                    ..caller
                 },
                 &snapshot,
                 input.clone()

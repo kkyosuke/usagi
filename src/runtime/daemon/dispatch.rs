@@ -472,7 +472,7 @@ pub(super) fn dispatch_agent_tool(
                     ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
                 })?;
                 let created_body = if handoff {
-                    snapshot.clone()
+                    snapshot
                 } else {
                     perform_create(
                         bound.sessions(),
@@ -1326,6 +1326,7 @@ pub(super) struct AuthenticatedSupervisorCaller {
     pub(super) runtime: AgentRuntimeRef,
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 pub(super) fn dispatch_supervisor_tool(
@@ -3221,7 +3222,7 @@ pub(super) fn best_effort_merged_pr_head(
 /// resource that became linked after inventory cannot be removed.
 #[coverage(off)]
 // coverage: reason=composition owner=daemon expires=2027-01-31 tests=running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 pub(super) fn clean_orphan_session_resources(
     bound: &ConnectionWorkspace,
     agent: Option<&SharedAgentRuntime>,
@@ -3452,9 +3453,7 @@ fn admit_agent_dispatch_request(
                 operation_id,
                 intent,
                 resolve_goal_artifact_repository(supervisor, scope, operation_id, intent)?,
-                goal_worker_profile
-                    .clone()
-                    .expect("Goal request resolved its worker profile"),
+                goal_worker_profile.expect("Goal request resolved its worker profile"),
             )?
             .supervisor_run_id,
         ),

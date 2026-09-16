@@ -745,7 +745,7 @@ fn coverage_contract_exposes_every_typed_overlay_and_entry_accessor() {
 
     let mut decision = pending_decision(workspace);
     decision.allow_freeform = true;
-    let editor = DecisionEditor::new(decision.clone());
+    let editor = DecisionEditor::new(decision);
     assert_eq!(editor.selected_option(), 0);
     assert_eq!(editor.freeform(), "");
     assert!(editor.error().is_none());

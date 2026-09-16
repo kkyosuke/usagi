@@ -543,7 +543,7 @@ mod tests {
         assert!(!open.is_empty());
         assert_eq!(open.selected().unwrap().name, "alpha");
         // derive された Clone / Debug も計測対象なのでここで触れる。
-        assert!(format!("{:?}", open.clone()).contains("Open"));
+        assert!(format!("{open:?}").contains("Open"));
     }
 
     #[test]

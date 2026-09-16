@@ -841,7 +841,7 @@ mod tests {
         assert!(joined(&modal).contains("workflow"));
         assert!(joined(&modal).contains("↑↓: select"));
         // derive された Clone / Debug も触れる。
-        assert!(format!("{:?}", modal.clone()).contains("tui"));
+        assert!(format!("{modal:?}").contains("tui"));
         let action = modal.actions()[0];
         assert_eq!(action, action);
         assert!(format!("{action:?}").contains("agent"));

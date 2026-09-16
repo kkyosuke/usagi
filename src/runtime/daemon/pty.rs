@@ -306,7 +306,7 @@ impl PtySpawner for AgentPty {
         };
         let pty = Arc::new(Mutex::new(pty));
         self.terminals.insert(
-            terminal.terminal_id.as_str().clone(),
+            terminal.terminal_id.as_str(),
             OwnedPty {
                 terminal: terminal.clone(),
                 pty: Arc::clone(&pty),
@@ -380,7 +380,7 @@ impl PtySpawner for AgentPty {
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final
 impl PtyWriter for AgentPty {
     fn select_terminal(&mut self, terminal: &TerminalRef) {
-        self.selected = Some(terminal.terminal_id.as_str().clone());
+        self.selected = Some(terminal.terminal_id.as_str());
     }
     fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), PtyWriteError> {
         let Some(entry) = self
@@ -511,7 +511,7 @@ impl GenericPtySpawner for DaemonPty {
         };
         let pty = Arc::new(Mutex::new(pty));
         self.terminals.insert(
-            terminal.terminal_id.as_str().clone(),
+            terminal.terminal_id.as_str(),
             OwnedPty {
                 terminal: terminal.clone(),
                 pty: Arc::clone(&pty),
@@ -604,7 +604,7 @@ pub(super) fn send_pty_observation(
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 impl PtyWriter for DaemonPty {
     fn select_terminal(&mut self, terminal: &usagi_core::domain::id::TerminalRef) {
-        self.selected = Some(terminal.terminal_id.as_str().clone());
+        self.selected = Some(terminal.terminal_id.as_str());
     }
     fn resize(
         &mut self,

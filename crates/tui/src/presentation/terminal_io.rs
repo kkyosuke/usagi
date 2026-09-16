@@ -752,12 +752,13 @@ pub(super) fn close_focused_terminal_pane(
     }
 }
 
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 /// Drive the complete terminal-output pointer gesture in one place. Down records
 /// a snapshot and anchor without selecting, the first Drag promotes it to a text
 /// selection, and Up resolves to exactly one of copy or link-open. `rows_len` /
 /// `scroll` describe the frame's projected viewport so every phase maps back to
 /// the exact retained cell.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_terminal_pointer(
     ui: &WorkspaceIoRuntime,
     runtime: &WorkspaceRuntime,
@@ -914,11 +915,14 @@ pub(super) fn select_right_pane_tab(
     }
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
+#[allow(clippy::too_many_lines)]
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 /// Intercept the live-terminal view controls the Home reducer does not own —
 /// copy, scroll, tab close, and pointer drag — returning `true` when the key was
 /// consumed here so the shell loop skips reducer dispatch. `rows_len` / `scroll`
 /// describe the frame's projected viewport for pointer mapping.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn intercept_live_terminal_control(
     key: &Key,
     ui: &mut WorkspaceIoRuntime,

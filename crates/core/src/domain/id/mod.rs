@@ -66,8 +66,9 @@ macro_rules! resource_id {
         pub struct $name(Uuid);
 
         impl $name {
-            /// Issues a never-reused `UUIDv4` resource incarnation.
+            // 生成のたびに新しい識別子を作るため、`Default` は意味を持たない。
             #[allow(clippy::new_without_default)]
+            /// Issues a never-reused `UUIDv4` resource incarnation.
             #[must_use]
             pub fn new() -> Self {
                 Self(Uuid::new_v4())
@@ -145,8 +146,8 @@ resource_id!(
 pub struct OperationId(Uuid);
 
 impl OperationId {
+    #[allow(clippy::new_without_default)] // 生成のたびに新しい識別子を作るため、`Default` は意味を持たない。
     /// Issues a `UUIDv7` durable-operation identity.
-    #[allow(clippy::new_without_default)]
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())

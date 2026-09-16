@@ -637,8 +637,7 @@ fn doctor_refuses_invalid_revision_catalog_and_running_agent_without_force() {
     let selected = agent
         .coordinator
         .runtime_for_terminal(&admission.terminal)
-        .unwrap()
-        .clone();
+        .unwrap();
     let mut stale = selected.clone();
     stale.agent_runtime_id = AgentRuntimeId::new();
     assert_eq!(
@@ -1040,7 +1039,7 @@ fn agent_admissions_and_finals_carry_their_operation_and_semantic_digest() {
     assert_eq!(completed.terminal, admitted.terminal);
     assert_eq!(
         runtime.operation_outcome(&operation),
-        Some(Ok(completed.clone())),
+        Some(Ok(completed)),
         "a reconnecting client reads exactly the same final"
     );
 
@@ -1975,8 +1974,9 @@ fn concurrent_production_admission_uses_one_generation_transition_and_spawn() {
     );
 }
 
-#[test]
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
+#[test]
 fn queued_prompt_is_explicitly_consumed_by_launch_and_live_only_delivers_live() {
     let mut runtime = runtime();
     let launch_intent = intent(None);
@@ -2289,7 +2289,7 @@ fn workspace_root_agent_launches_and_attaches_without_a_session() {
     // The admitted terminal is a workspace-root terminal (no session), and
     // its live IO is attachable exactly like a session agent's.
     assert_eq!(admission.terminal.session_id, None);
-    let terminal = admission.terminal.clone();
+    let terminal = admission.terminal;
     runtime.output(&terminal, b"root-agent\n".to_vec()).unwrap();
     let attached = handled(runtime.handle_terminal(
         ConnectionId::new(),
@@ -2589,7 +2589,7 @@ fn peer_handoff_preserves_identity_and_targets_only_the_named_runtime() {
                 workspace,
                 &CallerRef {
                     session_id: None,
-                    ..caller.clone()
+                    ..caller
                 },
                 &selected
             )
@@ -2691,7 +2691,7 @@ fn peer_handoff_preserves_identity_and_targets_only_the_named_runtime() {
                 workspace,
                 &CallerRef {
                     agent_id: AgentId::new(),
-                    ..caller.clone()
+                    ..caller
                 },
                 &selected
             )
@@ -2948,9 +2948,7 @@ fn agent_resize_failure_does_not_commit_geometry() {
             ClientId::new(),
             RequestId::new(),
             TerminalAction::Attach,
-            TerminalRequest::Resync {
-                terminal: terminal.clone(),
-            },
+            TerminalRequest::Resync { terminal },
             SnapshotWire::RawTail,
         ))
         .unwrap_err()
@@ -3016,7 +3014,7 @@ fn dismissing_a_tombstone_makes_it_the_first_eviction_candidate() {
             &FakeScope(Ok(scope())),
         )
         .unwrap();
-    let terminal = admission.terminal.clone();
+    let terminal = admission.terminal;
     agent.exit(&terminal, 0).unwrap();
     assert_eq!(
         retention

@@ -881,7 +881,7 @@ fn phase_projection_isolated_per_runtime_and_uses_the_documented_rank() {
 
     for (runtime, phase) in [
         (first_a.clone(), AgentPhase::Running),
-        (first_b.clone(), AgentPhase::Waiting),
+        (first_b, AgentPhase::Waiting),
         (second_runtime.clone(), AgentPhase::Ready),
     ] {
         let _ = update(
@@ -2289,7 +2289,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
 
     let mut decision = pending_decision(workspace);
     decision.allow_freeform = true;
-    state.decisions = vec![decision.clone()];
+    state.decisions = vec![decision];
     state.overlay = Some(Overlay::Decisions);
     state.decision_overlay = Some(DecisionOverlayState {
         selected: 0,

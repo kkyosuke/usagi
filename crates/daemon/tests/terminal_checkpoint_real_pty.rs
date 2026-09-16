@@ -218,7 +218,7 @@ impl RealPty {
         let reader = pty.reader().expect("the PTY master can be read");
         let pty = Arc::new(Mutex::new(pty));
         self.ledger.record(SpawnRecord {
-            terminal_id: terminal.terminal_id.as_str().clone(),
+            terminal_id: terminal.terminal_id.as_str(),
             pid,
             pty: Arc::clone(&pty),
         });
@@ -309,7 +309,7 @@ impl GenericPtySpawner for RealPty {
 
 impl PtyWriter for RealPty {
     fn select_terminal(&mut self, terminal: &TerminalRef) {
-        self.selected = Some(terminal.terminal_id.as_str().clone());
+        self.selected = Some(terminal.terminal_id.as_str());
     }
 
     fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), PtyWriteError> {
@@ -626,7 +626,7 @@ fn agent_scenario() -> Scenario<AgentOwner> {
             geometry: GEOMETRY,
             selected: None,
         },
-        profile.id.clone(),
+        profile.id,
         GEOMETRY,
     );
     let admission = runtime
@@ -644,7 +644,7 @@ fn agent_scenario() -> Scenario<AgentOwner> {
         )
         .expect("the Agent owner admits the real PTY launch");
     Scenario {
-        terminal: admission.terminal.clone(),
+        terminal: admission.terminal,
         owner: AgentOwner(runtime),
         ledger,
         observations,

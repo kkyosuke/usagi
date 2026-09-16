@@ -573,7 +573,7 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         None,
         health(),
         &no_diffs,
-        Some(view.clone()),
+        Some(view),
         None,
         clock,
     );
@@ -967,7 +967,7 @@ fn visible_old_ref_can_close_latest_lineage_while_fresh_observation_is_pending()
         &mut runtime,
         &mut std::collections::HashMap::new(),
     );
-    assert_eq!(runtime.focused_terminal(), Some(old.clone()));
+    assert_eq!(runtime.focused_terminal(), Some(old));
     assert!(durable.lock().unwrap().dismissed.is_empty());
     assert!(
         durable.lock().unwrap().targets[0].tabs[0]
@@ -1071,7 +1071,7 @@ fn closing_selected_agent_keeps_it_visible_without_focus_drift() {
         &mut std::collections::HashMap::new(),
     );
 
-    assert_eq!(runtime.focused_terminal(), Some(closed_terminal.clone()));
+    assert_eq!(runtime.focused_terminal(), Some(closed_terminal));
     {
         let state = durable.lock().unwrap();
         assert!(state.dismissed.is_empty());

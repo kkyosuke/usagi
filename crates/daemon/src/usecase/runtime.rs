@@ -643,7 +643,6 @@ impl RuntimeCoordinator {
 
     /// Releases the pre-admission retention reservation on every failure: a
     /// launch that never reaches `Running` will never commit a final.
-    #[allow(clippy::too_many_arguments)]
     fn launch_with_semantic_superseding(
         &mut self,
         request: &LaunchRequest,

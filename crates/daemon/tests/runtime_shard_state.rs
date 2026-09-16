@@ -230,7 +230,7 @@ fn a_legacy_store_is_adopted_from_its_own_bytes_and_retired_by_rename() {
     write_legacy(
         dir.path(),
         "terminals.json",
-        &serde_json::to_string(&snapshot(vec![legacy.clone(), ended.clone()])).unwrap(),
+        &serde_json::to_string(&snapshot(vec![legacy.clone(), ended])).unwrap(),
     );
     let daemon = dir.path().join("daemon");
 

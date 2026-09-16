@@ -203,7 +203,7 @@ pub(super) fn live_generation_endpoints(data_dir: &Path) -> BTreeSet<String> {
                 && observe_generation_process(&entry.process)
                     == ProcessObservation::VerifiedAlive(entry.process.clone())
         })
-        .map(|entry| entry.generation.as_str().clone())
+        .map(|entry| entry.generation.as_str())
         .collect()
 }
 
@@ -388,7 +388,7 @@ impl StandbyEndpoint for StandbyIpc<'_> {
         );
         let protocol = usagi_daemon::presentation::ipc::standby_server_protocol(
             wire,
-            generation.as_str().clone(),
+            generation.as_str(),
             self.build.clone(),
             // The standby asserts its *own* process, which is the only process it
             // can speak for. It is not the data directory's owner record and is
@@ -1087,7 +1087,7 @@ pub(super) fn promote_standby_generation(
         path: data_dir.join("daemon/daemon.json"),
     })
     .save(&record)?;
-    let wire = usagi_core::infrastructure::ipc::DaemonGeneration(generation.as_str().clone());
+    let wire = usagi_core::infrastructure::ipc::DaemonGeneration(generation.as_str());
     let active = spawn_ipc_server(
         listener,
         &wire,

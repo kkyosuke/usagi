@@ -183,9 +183,10 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         )
     }
 
+    // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+    #[allow(clippy::too_many_arguments)]
     /// Restore a runtime with the configured generic Terminal PTY ceiling and
     /// the daemon-wide retention authority.
-    #[allow(clippy::too_many_arguments)]
     pub fn from_snapshot_with_retention_and_limit(
         generation: DaemonGeneration,
         resolver: R,
@@ -938,7 +939,7 @@ mod tests {
             Store::default(),
             Pty::default(),
             Scope {
-                scope: scope.clone(),
+                scope,
                 working_directory: PathBuf::from("/available-worktree"),
             },
         )
@@ -955,7 +956,7 @@ mod tests {
             Store::default(),
             Pty::default(),
             Scope {
-                scope: scope.clone(),
+                scope,
                 working_directory: PathBuf::from("/available-worktree"),
             },
             limit,

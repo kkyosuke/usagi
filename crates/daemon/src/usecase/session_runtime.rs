@@ -911,7 +911,6 @@ impl SessionRuntime {
     /// # Errors
     ///
     /// Returns a typed safe error when the request cannot be admitted or completed.
-    #[allow(clippy::single_match_else)]
     pub fn handle(
         &mut self,
         action: SessionAction,
@@ -1582,14 +1581,11 @@ impl SessionRuntime {
                 let workspace_exists = !branch_exists && error.contains("already exists");
                 let detail = worktree_failure_detail(&error);
                 let failure = if branch_exists {
-                    SessionRuntimeError::SessionBranchExists(name.clone())
+                    SessionRuntimeError::SessionBranchExists(name)
                 } else if workspace_exists {
-                    SessionRuntimeError::SessionWorkspaceExists(name.clone())
+                    SessionRuntimeError::SessionWorkspaceExists(name)
                 } else {
-                    SessionRuntimeError::SessionWorkspaceCreationFailed {
-                        name: name.clone(),
-                        detail,
-                    }
+                    SessionRuntimeError::SessionWorkspaceCreationFailed { name, detail }
                 };
                 let _ = self.store.apply(
                     self.generation,

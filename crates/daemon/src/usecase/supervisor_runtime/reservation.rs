@@ -49,13 +49,14 @@ impl SupervisorRuntime {
         })
     }
 
+    // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+    #[allow(clippy::too_many_arguments)]
     /// Goal reservation variant which also pins the selected Agent runtime
     /// family before any process can be spawned.
     ///
     /// # Errors
     /// Returns an error when the reservation conflicts with an existing
     /// operation or cannot be persisted.
-    #[allow(clippy::too_many_arguments)]
     pub fn reserve_goal_for_workspace_with_profile(
         &self,
         caller: &str,

@@ -1662,7 +1662,7 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
     let stale = launch(
         TerminalLaunchScope {
             worktree_id: WorktreeId::new(),
-            ..scope.clone()
+            ..scope
         },
         "login-shell",
     )
@@ -2207,7 +2207,7 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
     let replayed = client
         .request(DaemonRequest::ResumeAgent {
             operation_id: command.operation.to_string(),
-            target: command.target.clone(),
+            target: command.target,
             caller_context: None,
         })
         .expect("a replayed exact resume is idempotent");
@@ -2477,7 +2477,7 @@ fn root_restart_rolls_over_two_real_generic_ptys_without_a_readiness_retry() {
         .request(DaemonRequest::Terminal {
             action: TerminalAction::Launch,
             payload: serde_json::to_value(TerminalRequest::Launch {
-                intent: successor_intent.clone(),
+                intent: successor_intent,
             })
             .unwrap(),
         })

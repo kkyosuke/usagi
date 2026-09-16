@@ -438,7 +438,7 @@ fn terminal_resume_falls_back_for_missing_and_stale_inventory() {
 
     // An old TerminalRef (same terminal ID but another daemon incarnation) is
     // stale rather than a candidate for heuristic migration.
-    let mut old = saved.clone();
+    let mut old = saved;
     old.daemon_generation = DaemonGeneration::new();
     let mut stale = PaneRuntime::new(pane);
     let mut port = ResumeFixturePort {

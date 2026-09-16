@@ -1231,7 +1231,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         ControllerBackendComposition {
             backend,
             session_catalogs: Box::new(ProductionSessionCatalogPort {
-                data_home: data_dir.clone(),
+                data_home: data_dir,
             }),
             session_commands: Box::new(DaemonSessionCommandPort),
             // The resident session-inventory lane. It is a separate client from
@@ -6644,7 +6644,7 @@ mod tests {
             live: true,
         };
         assert_eq!(
-            decode_terminal_inventory(&json!({"terminals": [entry.clone()]})),
+            decode_terminal_inventory(&json!({"terminals": [entry]})),
             Ok(vec![entry.clone()])
         );
         assert_eq!(
@@ -8679,7 +8679,7 @@ mod tests {
             modal_selection_mode: ModalSelectionMode::Action,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
-            ..global.clone()
+            ..global
         };
 
         let mut reopened = PersistentSettingsPort {
@@ -8977,8 +8977,9 @@ mod tests {
         assert_eq!(global.clone().with_local(&local), global);
     }
 
-    #[test]
+    // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
     #[allow(clippy::too_many_lines)]
+    #[test]
     fn production_backend_factory_preserves_terminal_arguments_and_completes_store_routes() {
         let temporary = tempfile::tempdir().unwrap();
         let git = usagi_core::infrastructure::git::GitRunner::run(
@@ -9122,7 +9123,7 @@ mod tests {
 
         // Exercise the real Closeup path end to end: command -> load completion
         // -> Ctrl-S save effect -> production store completion -> modal close.
-        let mut state = AppState::home(workspace_id, session_ids.clone());
+        let mut state = AppState::home(workspace_id, session_ids);
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
         for effect in update(

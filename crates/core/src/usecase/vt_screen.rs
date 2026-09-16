@@ -1249,12 +1249,12 @@ struct StyleInterner {
 }
 
 impl StyleInterner {
+    #[allow(clippy::cast_possible_truncation)] // 値域は画面・バッファの上限で先に押さえてあり、この変換で失われる桁は無い。
     fn intern(&mut self, style: &str) -> u32 {
         if let Some(&id) = self.ids.get(style) {
             return id;
         }
         // Distinct styles are bounded by the cell count (well within `u32`).
-        #[allow(clippy::cast_possible_truncation)]
         let id = self.table.len() as u32;
         self.table.push(style.to_owned());
         self.ids.insert(style.to_owned(), id);
@@ -1291,7 +1291,7 @@ fn encode_row(row: &[Cell], styles: &mut StyleInterner) -> RowCheckpoint {
 /// Decodes a run-length row into exactly `cols` cells, validating the run
 /// repeats (arithmetic → budget) before allocating.
 // `cols` is already validated `<= COLS_MAX`, so it fits `u32` in the error.
-#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation)] // 値域は画面・バッファの上限で先に押さえてあり、この変換で失われる桁は無い。
 fn decode_row(
     row: &RowCheckpoint,
     cols: usize,
@@ -1340,6 +1340,7 @@ impl VtScreen {
     // Geometry and cursor/region coordinates are terminal dimensions bounded far
     // within `u32`; a screen larger than `u32` is not representable and would be
     // rejected on decode.
+    // 値域は画面・バッファの上限で先に押さえてあり、この変換で失われる桁は無い。
     #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn checkpoint(&self) -> ScreenCheckpoint {
@@ -1382,7 +1383,7 @@ impl VtScreen {
     /// Encodes the live parser buffer (grid / scrollback / cursor / region /
     /// pending style) into a [`BufferCheckpoint`].
     // Cursor/region coordinates are bounded terminal dimensions (see `checkpoint`).
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // 値域は画面・バッファの上限で先に押さえてあり、この変換で失われる桁は無い。
     fn live_buffer_checkpoint(&self, styles: &mut StyleInterner) -> BufferCheckpoint {
         BufferCheckpoint {
             grid: self
@@ -1492,7 +1493,7 @@ struct DecodedBuffer {
 
 /// Builds a [`BufferCheckpoint`] from a saved (background primary) screen.
 // Cursor/region coordinates are bounded terminal dimensions (see `checkpoint`).
-#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation)] // 値域は画面・バッファの上限で先に押さえてあり、この変換で失われる桁は無い。
 fn buffer_checkpoint_from(buffer: &ScreenBuffer, styles: &mut StyleInterner) -> BufferCheckpoint {
     BufferCheckpoint {
         grid: buffer
@@ -1518,7 +1519,7 @@ fn buffer_checkpoint_from(buffer: &ScreenBuffer, styles: &mut StyleInterner) -> 
 /// Decodes and bounds-checks one buffer against the validated `rows`/`cols`.
 // `rows`/`cols` are already validated `<= ROWS_MAX`/`COLS_MAX`, so the width
 // echoed back in error variants fits `u32`.
-#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation)] // 値域は画面・バッファの上限で先に押さえてあり、この変換で失われる桁は無い。
 fn decode_buffer(
     buffer: &BufferCheckpoint,
     rows: usize,

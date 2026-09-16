@@ -79,8 +79,9 @@ fn daemon_dispatch_store_requires_ownership_without_reparenting() {
     );
 }
 
-#[test]
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
+#[test]
 fn readiness_admission_wrappers_cover_launch_exact_and_dispatch() {
     let fixture = tempfile::tempdir().unwrap();
     std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
@@ -156,7 +157,7 @@ fn readiness_admission_wrappers_cover_launch_exact_and_dispatch() {
                 "invalid",
                 &repair_target,
                 2,
-                &FakeScope(Ok(resolved.clone())),
+                &FakeScope(Ok(resolved)),
                 None,
             )
             .unwrap_err()
@@ -918,7 +919,7 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         .unwrap()
         .operation
         .clone();
-    let mut wrong = fence.clone();
+    let mut wrong = fence;
     wrong.owner_daemon_generation = DaemonGeneration::new();
     runtime
         .report(
@@ -1358,7 +1359,7 @@ fn the_dispatch_preflight_refuses_before_anything_is_created() {
                 },
                 agent: DispatchAgentIntent::New {
                     runtime: claude.clone(),
-                    model: allowed.clone(),
+                    model: allowed,
                 },
                 prompt: "finish".into(),
             },
@@ -1433,7 +1434,7 @@ fn dispatch_rejects_invalid_unknown_and_foreign_requests_before_spawn() {
     let unknown = DispatchIntent {
         workspace: WorkspaceId::new(),
         session_name: "worker".into(),
-        caller: caller.clone(),
+        caller,
         agent: DispatchAgentIntent::Existing {
             agent_id: usagi_core::domain::id::AgentId::new(),
         },

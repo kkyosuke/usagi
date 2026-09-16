@@ -74,7 +74,7 @@ fn root_dispatch_binding_checks_reserved_identity_contract_and_planning_recovery
             &profile_operation.to_string(),
             goal("wrong profile"),
             AgentProfileId::new("codex").unwrap(),
-            semantic_digest.clone(),
+            semantic_digest,
             None,
             now(),
         )

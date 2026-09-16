@@ -1158,9 +1158,7 @@ fn bind_ipc_listener(
     usagi_core::infrastructure::ipc::DaemonGeneration,
 )> {
     let generation = usagi_core::infrastructure::ipc::DaemonGeneration(
-        usagi_core::domain::id::DaemonGeneration::new()
-            .as_str()
-            .clone(),
+        usagi_core::domain::id::DaemonGeneration::new().as_str(),
     );
     // Bound, not published: the endpoint has to be *accepting* before the
     // registry may name it, and it must not be *discoverable* until it does.

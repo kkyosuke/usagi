@@ -84,8 +84,7 @@ fn doctor_restarts_only_outdated_idle_integration_and_migrates_exact_resume() {
     let newcomer_runtime = agent
         .coordinator
         .runtime_for_terminal(&newcomer.terminal)
-        .unwrap()
-        .clone();
+        .unwrap();
     let mut snapshot = agent.coordinator.snapshot();
     let newcomer_record = snapshot
         .records

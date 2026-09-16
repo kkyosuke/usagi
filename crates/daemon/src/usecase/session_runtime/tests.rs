@@ -4271,8 +4271,9 @@ fn perform_remove_maps_a_poisoned_session_lock_to_storage() {
     ));
 }
 
-#[test]
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
+#[test]
 fn production_logic_coverage_contract() {
     let path = Path::new("/fake");
     let failing_io = FailingSessionWorktreeIo;
@@ -4454,8 +4455,9 @@ fn production_logic_coverage_contract() {
     );
 }
 
-#[test]
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
+#[test]
 fn status_projects_each_git_state_and_failure() {
     use ScriptedGitResult::Output;
 
@@ -4653,7 +4655,7 @@ fn unowned_reconcile_is_a_noop() {
     let repository = tmp.path().join("repository");
     let state_dir = tmp.path().join("daemon");
     let mut runtime = SessionRuntime::open(
-        repository.clone(),
+        repository,
         &state_dir,
         DaemonGeneration::new(),
         FakeSessionGit::ok(),

@@ -1985,7 +1985,7 @@ fi
         .unwrap();
     assert!(matches!(fetched, DaemonReply::Ok(ref body) if body["answer"]["option_id"] == "yes"));
 
-    let mut cancellable = decision.clone();
+    let mut cancellable = decision;
     cancellable.decision_id = UserDecisionId::new();
     cancellable.title = "Cancel me".into();
     cancellable.idempotency_key = None;

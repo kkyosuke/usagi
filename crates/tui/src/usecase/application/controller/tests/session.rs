@@ -130,7 +130,7 @@ fn another_session_and_scrolled_same_cell_do_not_activate() {
     let _ = click_at(&mut other, 5, 5, 1_100);
     assert!(matches!(other.route(), Route::Home(HomeMode::Switch)));
 
-    let mut scrolled = sized_home(workspace, sessions.clone(), 100, 14);
+    let mut scrolled = sized_home(workspace, sessions, 100, 14);
     let mut tail = scrolled.clone();
     tail.selected = Selection::NewSession;
     let (row, first, second) = (2_u16..14)

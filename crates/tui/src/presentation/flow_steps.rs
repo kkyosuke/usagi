@@ -122,7 +122,6 @@ pub(super) fn welcome_action(action: MenuAction) -> WelcomeStep {
 
 /// Config 画面のキー処理。Save は dirty な Save 行でのみ有効で、Enter は save フローを
 /// 開始（loading）する。保存中の再入力は `begin_save` が弾く。
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn step_config(
     config: &mut Config,
     key: Key,
@@ -225,8 +224,9 @@ pub(super) fn step_workspace_config(
     }
 }
 
-/// welcome 画面のキー処理。最上位画面なので Esc も終了として扱う。
+// 呼び手が所有権を手放す前提の API で、参照にすると呼び手側で clone が要る。
 #[allow(clippy::needless_pass_by_value)]
+/// welcome 画面のキー処理。最上位画面なので Esc も終了として扱う。
 pub(super) fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
     match key {
         Key::Up | Key::Char('k') => {
@@ -275,7 +275,6 @@ pub(super) fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
 /// New 画面のキー処理（純粋）。矢印キーでフィールドを移り、←→ でモード切替（モード選択時）または
 /// キャレット移動、文字入力・Backspace で編集、Esc で welcome へ戻り、`Ctrl-C` で終了する。
 /// フォームの確定（作成）は作成処理が入るまで留まる。
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn step_new(form: &mut New, key: Key) -> NewStep {
     if form.is_creating() {
         return match key {
@@ -412,8 +411,9 @@ pub(super) fn step_new_horizontal(form: &mut New, right: bool) {
     }
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
+#[allow(clippy::too_many_lines)]
 /// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub(super) fn step_open(open: &mut Open, key: Key) -> OpenStep {
     if open.unregistering_path().is_some() {
         return match key {
